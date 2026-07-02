@@ -1,5 +1,6 @@
 use crate::model::ReverseProxyDisabledHeaderConfig;
 use axum::http::{header, HeaderMap, HeaderValue};
+use std::collections::HashMap;
 
 /// Returns true when a header must never be forwarded by the live HLS cache proxy.
 pub fn should_remove_hls_origin_header(
@@ -33,6 +34,51 @@ pub fn sanitized_hls_origin_headers(
     headers
 }
 
+/// Extracts trusted provider session cookies from origin response headers.
+pub fn extract_hls_provider_session_header_map(headers: &HeaderMap) -> HeaderMap {
+    let cookies = headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.split(';').next().map(str::trim))
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    let mut session_headers = HeaderMap::new();
+    if let Some(cookie_header) = (!cookies.is_empty())
+        .then(|| cookies.join("; "))
+        .and_then(|value| HeaderValue::from_str(&value).ok())
+    {
+        session_headers.insert(header::COOKIE, cookie_header);
+    }
+    session_headers
+}
+
+/// Extracts provider session cookies for the legacy `ActiveUserManager` session store.
+pub fn extract_hls_provider_session_headers(headers: &HeaderMap) -> HashMap<String, String> {
+    extract_hls_provider_session_header_map(headers)
+        .iter()
+        .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str().to_string(), value.to_string())))
+        .collect()
+}
+
+/// Appends trusted provider session headers after client-header scrubbing.
+pub fn append_hls_provider_session_headers(headers: &mut HeaderMap, provider_session_headers: &HeaderMap) {
+    if let Some(cookie) = provider_session_headers.get(header::COOKIE).cloned() {
+        headers.insert(header::COOKIE, cookie);
+    }
+}
+
+pub fn hls_origin_headers_with_provider_session(
+    source_headers: &HeaderMap,
+    provider_session_headers: &HeaderMap,
+) -> HeaderMap {
+    let mut headers = source_headers.clone();
+    scrub_hls_origin_headers(&mut headers, None);
+    append_hls_provider_session_headers(&mut headers, provider_session_headers);
+    headers
+}
+
 pub fn force_identity_without_range(headers: &mut HeaderMap) {
     headers.remove(header::RANGE);
     headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
@@ -40,7 +86,11 @@ pub fn force_identity_without_range(headers: &mut HeaderMap) {
 
 #[cfg(test)]
 mod tests {
-    use super::{force_identity_without_range, scrub_hls_origin_headers, should_remove_hls_origin_header};
+    use super::{
+        append_hls_provider_session_headers, extract_hls_provider_session_header_map,
+        extract_hls_provider_session_headers, force_identity_without_range, scrub_hls_origin_headers,
+        should_remove_hls_origin_header,
+    };
     use crate::model::ReverseProxyDisabledHeaderConfig;
     use axum::http::{header, HeaderMap, HeaderName, HeaderValue};
 
@@ -103,5 +153,31 @@ mod tests {
 
         assert!(!headers.contains_key(header::RANGE));
         assert_eq!(headers.get(header::ACCEPT_ENCODING).expect("encoding"), "identity");
+    }
+
+    #[test]
+    fn extract_provider_session_headers_converts_set_cookie_to_cookie_header() {
+        let mut headers = HeaderMap::new();
+        headers.append(header::SET_COOKIE, HeaderValue::from_static("sid=abc; Path=/; HttpOnly"));
+        headers.append(header::SET_COOKIE, HeaderValue::from_static("pref=1; SameSite=Lax"));
+
+        let header_map = extract_hls_provider_session_header_map(&headers);
+        assert_eq!(header_map.get(header::COOKIE).expect("cookie"), "sid=abc; pref=1");
+
+        let legacy_headers = extract_hls_provider_session_headers(&headers);
+        assert_eq!(legacy_headers.get("cookie").map(String::as_str), Some("sid=abc; pref=1"));
+    }
+
+    #[test]
+    fn append_provider_session_headers_restores_trusted_cookie_after_scrub() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, HeaderValue::from_static("client=secret"));
+        scrub_hls_origin_headers(&mut headers, None);
+
+        let mut provider_headers = HeaderMap::new();
+        provider_headers.insert(header::COOKIE, HeaderValue::from_static("sid=abc"));
+        append_hls_provider_session_headers(&mut headers, &provider_headers);
+
+        assert_eq!(headers.get(header::COOKIE).expect("cookie"), "sid=abc");
     }
 }

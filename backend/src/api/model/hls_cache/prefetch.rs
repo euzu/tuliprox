@@ -203,14 +203,24 @@ impl HlsSession {
         let Some(tail_proxy_seq) = self.publishable_origin_tail_proxy_seq else {
             return report;
         };
-        let known_sequences =
-            self.segments.keys().copied().filter(|proxy_seq| *proxy_seq <= tail_proxy_seq).collect::<Vec<_>>();
+        let Some(head_proxy_seq) = self.publishable_origin_head_proxy_seq else {
+            return report;
+        };
+        if tail_proxy_seq < head_proxy_seq {
+            return report;
+        }
+        let known_sequences = self
+            .segments
+            .keys()
+            .copied()
+            .filter(|proxy_seq| *proxy_seq >= head_proxy_seq && *proxy_seq <= tail_proxy_seq)
+            .collect::<Vec<_>>();
         if known_sequences.is_empty() {
             return report;
         }
 
         let tail_index =
-            known_sequences.len().saturating_sub(1).saturating_sub(self.render_policy.initial_render_gap_segments);
+            known_sequences.len().saturating_sub(1).saturating_sub(self.initial_prefetch_gap_segments);
         let render_window_len = known_sequences.len().min(6).min(tail_index.saturating_add(1));
         let render_start_index = tail_index.saturating_add(1).saturating_sub(render_window_len);
 
@@ -253,7 +263,7 @@ impl HlsSession {
 mod tests {
     use super::{SegmentFetchPriority, SegmentPrefetchQueue};
     use crate::{
-        api::model::{HlsSession, HlsSessionKey, RenderPolicy, SegmentCacheStatus},
+        api::model::{HlsSession, HlsSessionKey, SegmentCacheStatus},
         processing::parser::hls::origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome},
     };
 
@@ -322,7 +332,7 @@ mod tests {
     fn manifest_fetch_candidates_skip_prefetch_when_backpressure_disallows_it() {
         let mut session = session();
         session.configure_segment_prefetch_queue(6);
-        session.render_policy = RenderPolicy::new(2);
+        session.initial_prefetch_gap_segments = 2;
         session
             .apply_origin_manifest(&normal_manifest(
                 "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4.0,\n100.ts\n#EXTINF:4.0,\n101.ts\n#EXTINF:4.0,\n102.ts\n#EXTINF:4.0,\n103.ts\n#EXTINF:4.0,\n104.ts\n#EXTINF:4.0,\n105.ts\n",
@@ -334,6 +344,7 @@ mod tests {
         assert_eq!(report.render_window_queued, 4);
         assert_eq!(report.prefetch_queued, 0);
         assert_eq!(report.prefetch_skipped, 2);
+        assert!(session.initial_manifest_commit_work_pending());
         assert!(session.segments.values().all(|segment| !matches!(
             segment.status,
             SegmentCacheStatus::Queued { priority: SegmentFetchPriority::Prefetch, .. }

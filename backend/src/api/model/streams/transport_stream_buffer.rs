@@ -451,6 +451,10 @@ impl TransportStreamBuffer {
 
     pub fn as_bytes(&self) -> &[u8] { self.buffer.as_slice() }
 
+    pub fn duration_ms(&self) -> Option<u64> {
+        (self.stream_duration_90khz > 0).then(|| self.stream_duration_90khz.saturating_mul(1_000) / 90_000)
+    }
+
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn estimated_bitrate_kbps(&self) -> Option<usize> {
         if self.buffer.is_empty() || self.stream_duration_90khz == 0 {

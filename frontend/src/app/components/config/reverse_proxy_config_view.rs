@@ -26,9 +26,10 @@ use crate::{
 use shared::{
     model::{
         ByteSizeDto, CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, HlsCacheConfigDto,
-        HlsCorruptSegmentWatchdogModeDto, HlsSegmentRepairConfigDto, HlsSegmentRepairModeDto, QosAggregationConfigDto,
-        RateLimitConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto,
-        StreamBufferConfigDto, StreamConfigDto, StreamHistoryConfigDto, StripConfigDto, StripModeDto,
+        HlsCorruptSegmentWatchdogModeDto, HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevelDto,
+        HlsSegmentRepairConfigDto, HlsSegmentRepairModeDto, QosAggregationConfigDto, RateLimitConfigDto,
+        ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, StreamBufferConfigDto,
+        StreamConfigDto, StreamHistoryConfigDto, StripConfigDto, StripModeDto,
     },
     utils::{default_secret, format_float_localized},
 };
@@ -69,6 +70,7 @@ const LABEL_MAX_SEGMENTS_PREFETCH: &str = "LABEL.MAX_SEGMENTS_PREFETCH";
 const LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION: &str = "LABEL.MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION";
 const LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL: &str = "LABEL.MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL";
 const LABEL_ORIGIN_MANIFEST_TIMEOUT_MS: &str = "LABEL.ORIGIN_MANIFEST_TIMEOUT_MS";
+const LABEL_MANIFEST_RECOVERY_BURST: &str = "LABEL.MANIFEST_RECOVERY_BURST";
 const LABEL_ORIGIN_SEGMENT_TIMEOUT_MS: &str = "LABEL.ORIGIN_SEGMENT_TIMEOUT_MS";
 const LABEL_SESSION_IDLE_TIMEOUT: &str = "LABEL.SESSION_IDLE_TIMEOUT";
 const LABEL_SEGMENT_REPAIR: &str = "LABEL.SEGMENT_REPAIR";
@@ -227,6 +229,7 @@ generate_form_reducer!(
         MaxConcurrentSegmentFetchesPerSession => max_concurrent_segment_fetches_per_session: usize,
         MaxConcurrentSegmentFetchesGlobal => max_concurrent_segment_fetches_global: usize,
         OriginManifestTimeoutMs => origin_manifest_timeout_ms: u64,
+        ManifestRecoveryBurst => manifest_recovery_burst: HlsManifestRecoveryBurstConfigDto,
         OriginSegmentTimeoutMs => origin_segment_timeout_ms: u64,
         SessionIdleTimeout => session_idle_timeout: u64,
         SegmentRepair => segment_repair: HlsSegmentRepairConfigDto,
@@ -296,6 +299,34 @@ fn hls_strip_mode_options(selected: StripModeDto) -> Rc<Vec<DropDownOption>> {
         DropDownOption::new("segments", html! { "segments" }, selected == StripModeDto::Segments),
         DropDownOption::new("seconds", html! { "seconds" }, selected == StripModeDto::Seconds),
     ])
+}
+
+fn hls_manifest_recovery_burst_options(selected: HlsManifestRecoveryBurstLevelDto) -> Rc<Vec<DropDownOption>> {
+    Rc::new(vec![
+        DropDownOption::new("off", html! { "OFF" }, selected == HlsManifestRecoveryBurstLevelDto::Off),
+        DropDownOption::new("friendly", html! { "FRIENDLY" }, selected == HlsManifestRecoveryBurstLevelDto::Friendly),
+        DropDownOption::new("cautious", html! { "CAUTIOUS" }, selected == HlsManifestRecoveryBurstLevelDto::Cautious),
+        DropDownOption::new("balanced", html! { "BALANCED" }, selected == HlsManifestRecoveryBurstLevelDto::Balanced),
+        DropDownOption::new("intense", html! { "INTENSE" }, selected == HlsManifestRecoveryBurstLevelDto::Intense),
+        DropDownOption::new(
+            "aggressive",
+            html! { "AGGRESSIVE" },
+            selected == HlsManifestRecoveryBurstLevelDto::Aggressive,
+        ),
+        DropDownOption::new("beast", html! { "BEAST" }, selected == HlsManifestRecoveryBurstLevelDto::Beast),
+    ])
+}
+
+fn hls_manifest_recovery_burst_label(level: HlsManifestRecoveryBurstLevelDto) -> &'static str {
+    match level {
+        HlsManifestRecoveryBurstLevelDto::Off => "OFF",
+        HlsManifestRecoveryBurstLevelDto::Friendly => "FRIENDLY",
+        HlsManifestRecoveryBurstLevelDto::Cautious => "CAUTIOUS",
+        HlsManifestRecoveryBurstLevelDto::Balanced => "BALANCED",
+        HlsManifestRecoveryBurstLevelDto::Intense => "INTENSE",
+        HlsManifestRecoveryBurstLevelDto::Aggressive => "AGGRESSIVE",
+        HlsManifestRecoveryBurstLevelDto::Beast => "BEAST",
+    }
 }
 
 fn hls_segment_repair_max_level_options(selected: HlsSegmentRepairModeDto) -> Rc<Vec<DropDownOption>> {
@@ -781,6 +812,9 @@ pub fn ReverseProxyConfigView() -> Html {
                 { config_field!(hls_cache_state.form, translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION), max_concurrent_segment_fetches_per_session) }
                 { config_field!(hls_cache_state.form, translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL), max_concurrent_segment_fetches_global) }
                 { config_field!(hls_cache_state.form, translate.t(LABEL_ORIGIN_MANIFEST_TIMEOUT_MS), origin_manifest_timeout_ms) }
+                { config_field_child!(translate.t(LABEL_MANIFEST_RECOVERY_BURST), "HLS_CACHE_CONFIG.MANIFEST_RECOVERY_BURST", {
+                    html! { <span class="tp__form-field__value">{hls_manifest_recovery_burst_label(hls_cache_state.form.manifest_recovery_burst.level)}</span> }
+                }) }
                 { config_field!(hls_cache_state.form, translate.t(LABEL_ORIGIN_SEGMENT_TIMEOUT_MS), origin_segment_timeout_ms) }
                 { config_field!(hls_cache_state.form, translate.t(LABEL_SESSION_IDLE_TIMEOUT), session_idle_timeout) }
             </Card>
@@ -872,6 +906,19 @@ pub fn ReverseProxyConfigView() -> Html {
                     </div>
                 }
             };
+        let selected_manifest_recovery_burst = hls_cache_state.form.manifest_recovery_burst.level;
+        let set_manifest_recovery_burst = {
+            let hls_cache_state = hls_cache_state.clone();
+            Callback::from(move |(_, selections): (String, DropDownSelection)| {
+                if let DropDownSelection::Single(selection) = selections {
+                    if let Ok(level) = HlsManifestRecoveryBurstLevelDto::from_str(selection.as_str()) {
+                        hls_cache_state.dispatch(HlsCacheConfigFormAction::ManifestRecoveryBurst(
+                            HlsManifestRecoveryBurstConfigDto { level },
+                        ));
+                    }
+                }
+            })
+        };
         html! {
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_HLS_CACHE_PROXY)}</h1>
@@ -921,6 +968,16 @@ pub fn ReverseProxyConfigView() -> Html {
                 { edit_hls_cache_usize_min(translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION), "max_concurrent_segment_fetches_per_session", hls_cache_state.form.max_concurrent_segment_fetches_per_session, HlsCacheConfigFormAction::MaxConcurrentSegmentFetchesPerSession) }
                 { edit_hls_cache_usize_min(translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL), "max_concurrent_segment_fetches_global", hls_cache_state.form.max_concurrent_segment_fetches_global, HlsCacheConfigFormAction::MaxConcurrentSegmentFetchesGlobal) }
                 { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_MANIFEST_TIMEOUT_MS), "origin_manifest_timeout_ms", hls_cache_state.form.origin_manifest_timeout_ms, HlsCacheConfigFormAction::OriginManifestTimeoutMs) }
+                { config_field_child!(translate.t(LABEL_MANIFEST_RECOVERY_BURST), "HLS_CACHE_CONFIG.MANIFEST_RECOVERY_BURST", {
+                    html! {
+                        <Select
+                            name="hls_manifest_recovery_burst"
+                            multi_select={false}
+                            options={hls_manifest_recovery_burst_options(selected_manifest_recovery_burst)}
+                            on_select={set_manifest_recovery_burst}
+                        />
+                    }
+                }) }
                 { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_SEGMENT_TIMEOUT_MS), "origin_segment_timeout_ms", hls_cache_state.form.origin_segment_timeout_ms, HlsCacheConfigFormAction::OriginSegmentTimeoutMs) }
                 { edit_hls_cache_u64_min(translate.t(LABEL_SESSION_IDLE_TIMEOUT), "session_idle_timeout", hls_cache_state.form.session_idle_timeout, HlsCacheConfigFormAction::SessionIdleTimeout) }
             </Card>

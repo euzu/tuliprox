@@ -4,6 +4,25 @@ This page documents the implemented runtime states for the Live HLS cache proxy.
 It focuses on the shared `HlsSession`, the user-specific `HlsAccessLease`,
 and the timing rules that connect them.
 
+## Contents
+
+- [High-Level Flow](#high-level-flow)
+- [HlsAccessLease State Machine](#hlsaccesslease-state-machine)
+  - [Access Lease Transitions](#access-lease-transitions)
+- [Access Lease Reuse](#access-lease-reuse)
+- [HlsSession State Model](#hlssession-state-model)
+- [Origin Account Protection](#origin-account-protection)
+  - [Soft-Overlap Candidate Selection](#soft-overlap-candidate-selection)
+- [Manifest Acceptance And Recovery](#manifest-acceptance-and-recovery)
+  - [Sequence Acceptance](#sequence-acceptance)
+  - [Host Acceptance](#host-acceptance)
+  - [Recovery Score](#recovery-score)
+- [Manifest Recovery Retry And Burst](#manifest-recovery-retry-and-burst)
+- [Transient Resource Delivery](#transient-resource-delivery)
+- [Timings](#timings)
+- [Request Effects](#request-effects)
+- [Cleanup Rules](#cleanup-rules)
+
 The HLS cache uses three different identifiers:
 
 | Identifier | Scope | Meaning |
@@ -38,10 +57,10 @@ flowchart TD
 The canonical routes are:
 
 ```text
-/proxy/hls/live/<proxy_session_id>/<hls_access_lease_id>/manifest.m3u8
-/proxy/hls/live/<proxy_session_id>/<hls_access_lease_id>/<proxy_seq>.<ext>
-/proxy/hls/live/<proxy_session_id>/<hls_access_lease_id>/map/<proxy_map_id>.<ext>
-/proxy/hls/live/<proxy_session_id>/<hls_access_lease_id>/r/<transient_resource_id>.<ext>
+/hls/shared/live/<proxy_session_id>/<hls_access_lease_id>/manifest.m3u8
+/hls/shared/live/<proxy_session_id>/<hls_access_lease_id>/<proxy_seq>.<ext>
+/hls/shared/live/<proxy_session_id>/<hls_access_lease_id>/map/<proxy_map_id>.<ext>
+/hls/shared/live/<proxy_session_id>/<hls_access_lease_id>/r/<transient_resource_id>.<ext>
 ```
 
 ## HlsAccessLease State Machine
@@ -176,6 +195,199 @@ Hard-active sessions are not candidates for speculative account overlap. Soft-ac
 sessions may be displaced speculatively, and the original owner may reclaim within
 the soft window.
 
+### Soft-Overlap Candidate Selection
+
+Soft-overlap is a controlled fallback when a new shared HLS session needs an origin
+account and no free account is available through the normal provider lineup path.
+It is not used for background-only origin work.
+
+A session can become a soft-overlap candidate only when all conditions hold:
+
+| Condition | Required value |
+| :--- | :--- |
+| Input | Same `input_name` as the new shared HLS session. |
+| Binding mode | Existing binding is `Active`, not already `Speculative` or detached. |
+| Protection state | `SoftActive`. `HardActive`, `NoMediaYet`, and `Expired` are excluded. |
+| Origin work | No active origin work is currently running for the candidate session. |
+| Account cooldown | The account is not inside the HLS overlap cooldown window. |
+| Existing speculative use | The same account is not already used by another speculative HLS session. |
+
+Eligible candidates are ordered by `last_authorized_media_at_ms`; the oldest
+soft-active media session is considered first.
+
+Before a soft-active session can be displaced, Tuliprox applies a dynamic delay.
+The delay is based on the pressure between Tuliprox user connection capacity for
+the target and origin account connection capacity for the input:
+
+| Capacity signal | Source |
+| :--- | :--- |
+| `tuliprox_target_user_connection_capacity` | Maximum configured Tuliprox user connection capacity of targets that contain this input, also bounded by the currently active streams for this input. |
+| `origin_input_account_connection_capacity` | Current provider lineup account connection capacity for this input. If the runtime lineup is not available, the input plus enabled aliases are used as a fallback. |
+
+The computed delay is clamped between `1 * target_duration` and
+`2 * target_duration`:
+
+| Pressure | Soft-overlap delay |
+| :--- | :--- |
+| Tuliprox capacity is less than or equal to origin capacity | `2 * target_duration` |
+| Tuliprox capacity is at least twice origin capacity | `1 * target_duration` |
+| Between those points | Linear integer-scaled delay between the two bounds |
+
+This means small account pools with many possible Tuliprox users can reclaim
+soft-active sessions sooner, while low-pressure setups keep the additional
+protection window.
+
+When a speculative session is reclaimed by the original owner, or when the
+speculative session survives the reclaim window and is promoted, Tuliprox starts
+an account cooldown for that `input_name + account_name`. The cooldown lasts one
+additional hard-active window from the transition time. During that cooldown, the
+same account is not selected again as a soft-overlap candidate. This cooldown is
+additive to the hard-active protection of the session that now owns the account.
+
+## Manifest Acceptance And Recovery
+
+After access-lease validation and admission, the canonical manifest path fetches
+an origin manifest and evaluates whether it can advance the shared HLS session.
+The same acceptance code is used by `NormalCacheTimeline` and
+`TransientPassthrough`.
+
+The policy tracks two independent signals:
+
+| Signal | Source | Purpose |
+| :--- | :--- | :--- |
+| Effective manifest host | Actual redirect host when a redirect happened; otherwise the resolved request URL host for plain HTTP(S). A `provider://` mirror index alone is not a host-switch signal. | Prefer the already pinned redirect host and delay controlled host switches. |
+| Origin highwater | `#EXT-X-MEDIA-SEQUENCE + visible origin segment count - 1`. | Detect forward progress, stalls, rollovers, and invalid jumps. |
+
+```mermaid
+flowchart LR
+    A["Origin manifest fetched"] --> B["Parse timeline"]
+    B --> C["Evaluate host and highwater"]
+    C --> D{"Initial, same host, or unknown host?"}
+    D -->|yes| E{"Sequence accepted?"}
+    E -->|yes| F["Commit manifest and reset recovery counters"]
+    E -->|no| G["Reject and enter HLS recovery retry"]
+    D -->|other host| H["Store best host-switch candidate"]
+    H --> I["Retry pinned host with HLS recovery policy"]
+    I --> J{"Pinned host recovered?"}
+    J -->|yes| F
+    J -->|no| K{"Host-switch threshold reached?"}
+    K -->|no| L["Keep candidate, retry pinned host later"]
+    K -->|yes| M["Allow held candidate if sequence is accepted"]
+    M --> F
+```
+
+### Sequence Acceptance
+
+The sequence policy is strict while the session is `HardActive` or `SoftActive`.
+It allows a rebase only when the session has no committed highwater yet, or when
+account protection reports `NoMediaYet` or `Expired`. Rebase relaxes only the
+sequence check; it does not bypass the host-switch policy.
+
+| Relation | Condition | Result |
+| :--- | :--- | :--- |
+| `Rebase` | Rebase mode is allowed and the fetched manifest has an origin highwater. | Accept as a fresh continuity base. |
+| `NoPreviousHighwater` | The session has no previous highwater. | Accept and initialize highwater. |
+| `Next` | `origin_highwater == previous_highwater + 1`. | Accept, best score on the same redirect host. |
+| `PlausibleForward` | `origin_highwater > previous_highwater` and the delta is within the forward window. | Accept. |
+| `Same` | `origin_highwater == previous_highwater`. | Accept but count as no progress. |
+| `RolloverCandidate` | `origin_highwater` moved backwards but is within the rollover window. | Accept and mark handoff discontinuity. |
+| `NoOriginHighwater` | A previous highwater exists but the fetched manifest has no origin highwater. | Reject. |
+| `ForwardTooFar` | Forward jump exceeds the allowed forward window. | Reject. |
+| `Backward` | Backward jump is outside the rollover window. | Reject. |
+
+The forward and rollover window is derived from the configured
+`session_idle_timeout` divided by the manifest target duration, rounded up. If no
+target duration is known, the same 15-second target-duration fallback as account
+protection is used.
+
+### Host Acceptance
+
+The current redirect host is sticky. A manifest from another redirect host is
+stored as a host-switch candidate, but the proxy first retries the pinned target
+URL. The retry chain failure counter increments once after a complete pinned-host
+recovery chain fails, not for every single manifest request inside that chain.
+
+The host-switch threshold is:
+
+```text
+floor((3 + effective_strip_segments) / 2), clamped to 1..5
+```
+
+For `strip.mode = segments`, `effective_strip_segments` is `strip.value`. For
+`strip.mode = seconds`, it is the current render gap in segments. Once the
+threshold is reached, the held host-switch candidate may be committed, but only
+if the same sequence-acceptance policy accepts it.
+
+### Recovery Score
+
+When more than one recovery candidate returns a manifest, candidates are sorted
+by score first, then by higher origin highwater, then by lower candidate number.
+
+| Score | Rank | Meaning |
+| :--- | :---: | :--- |
+| `same-host-next-sequence` | 100 | Same redirect host and exact next highwater. |
+| `same-host-plausible-forward` | 90 | Same redirect host and plausible forward progress. |
+| `same-host-rebase` | 85 | Same redirect host and rebase mode is active. |
+| `other-host-next-sequence` | 75 | Other redirect host and exact next highwater. |
+| `other-host-plausible-forward` | 65 | Other redirect host and plausible forward progress. |
+| `other-host-rebase-candidate` | 60 | Other redirect host and rebase mode is active. |
+| `same-host-rollover-candidate` | 50 | Same redirect host and plausible rollover. |
+| `other-host-rollover-candidate` | 35 | Other redirect host and plausible rollover. |
+| `same-host-unchanged` | 20 | Same redirect host but no highwater progress. |
+| `other-host-unchanged` | 10 | Other redirect host and no highwater progress. |
+| `rejected` | 0 | Candidate failed sequence acceptance or parsing. |
+
+## Manifest Recovery Retry And Burst
+
+The initial manifest download uses the global Tuliprox request, redirect, timeout,
+and provider URL failover helpers. Once a manifest body was loaded but rejected by
+HLS timeline acceptance, recovery switches to the HLS recovery policy. Recovery
+uses the concrete pinned or resolved target URL and does not restart the full
+`provider://` chain.
+
+The fixed HLS manifest recovery retry policy is:
+
+| Attempt | Base delay before attempt |
+| :--- | :--- |
+| 1 | `0ms` |
+| 2 | `100ms` |
+| 3 | `250ms` |
+| 4 | `500ms` |
+| 5 | `750ms` |
+
+Each delay adds jitter from `0ms` through `100ms`. Retryable fetch errors and
+manifest rejections both continue through this same five-attempt chain. A final
+rejection returns `RetryExhausted` to the caller.
+
+The optional `manifest_recovery_burst.level` affects only the first attempt of a
+recovery chain. Later attempts always run with one candidate. Burst candidates
+start against the same recovery target URL and are staggered by `100ms` per slot.
+
+| Level | Slots | Requests per slot | Total first-attempt candidates |
+| :--- | :---: | :---: | :---: |
+| `off` | 1 | 1 | 1 |
+| `friendly` | 2 | 1 | 2 |
+| `cautious` | 3 | 1 | 3 |
+| `balanced` | 4 | 1 | 4 |
+| `intense` | 5 | 1 | 5 |
+| `aggressive` | 6 | 1 | 6 |
+| `beast` | 6 | 2 | 12 |
+
+`beast` uses the same six time slots as `aggressive`, but launches two requests
+per slot. It does not change scoring, acceptance, provider URL failover, or later
+retry attempts.
+
+The recovery logs use compact manifest-scoped messages:
+
+```text
+Manifest '<session>' attempting URL attempt <n> of <max>: <target> reason=<reason>
+Manifest '<session>' attempting URL attempt <n> of <max> candidate <c> of <max>: <target> reason=<reason>
+Manifest '<session>' candidate <c> of <max> scored: host=<host> highwater=<value> score=<score>
+Manifest '<session>' candidate <c> of <max> rejected: host=<host> highwater=<value> reason=<reason>
+Manifest '<session>' burst selected candidate <c> of <max>: host=<host> highwater=<value> score=<score>
+Manifest '<session>' retry scheduled: status <reason> attempt <n> of <max> next_delay_ms=<delay>
+```
+
 ## Transient Resource Delivery
 
 Transient passthrough uses the same access lease lifecycle and admission checks as
@@ -218,6 +430,8 @@ passthrough applies it while reading upstream chunks.
 | Session idle timeout | `300s` | When a session may be collected after last authorized manifest/media access. |
 | Account hard-active window | `1 * target_duration` | Provider account is protected from speculative overlap. |
 | Account soft-active window | additional `2 * target_duration` | Provider account can be speculatively displaced and reclaimed. |
+| Soft-overlap eligibility delay | `1..2 * target_duration` | Dynamic delay before a soft-active session can be displaced, based on Tuliprox target user capacity versus origin account capacity. |
+| Soft-overlap account cooldown | `1 * target_duration` after reclaim or promotion | Prevents the same account from being repeatedly selected as a soft-overlap candidate immediately after ownership changes. |
 | Target-duration fallback | `15s` | Used before an origin manifest target duration has been parsed. |
 | Origin manifest timeout | `3000ms` | Manifest origin fetch attempt timeout. |
 | Manifest commit wait | `origin_manifest_timeout_ms + 250ms` | How long the canonical manifest path waits for a newly committed manifest. |

@@ -55,6 +55,9 @@ pub async fn validate_hls_access_lease(
     let Some(lease) = app_state.hls_proxy.access_lease(lease_id, path_proxy_session_id, now_ms).await else {
         return Err(HlsAccessLeaseValidationError::Expired);
     };
+    if lease.state == super::HlsAccessLeaseState::Denied {
+        return Err(HlsAccessLeaseValidationError::AdmissionDenied);
+    }
     validate_hls_access_lease_admission(app_state, fingerprint, lease, admission_mode).await
 }
 
@@ -98,7 +101,9 @@ async fn validate_hls_access_lease_admission(
         false,
     )
     .await;
-    if admission.permission == UserConnectionPermission::Exhausted {
+    if admission.permission == UserConnectionPermission::Exhausted
+        || (admission.permission == UserConnectionPermission::GracePeriod && admission.kind.is_none())
+    {
         app_state.hls_proxy.deny_access_lease(&lease.lease_id).await;
         warn!(
             "HLS access lease rejected: lease={} proxy_session={} session={} reason=admission_denied",
@@ -109,7 +114,7 @@ async fn validate_hls_access_lease_admission(
         return Err(HlsAccessLeaseValidationError::AdmissionDenied);
     }
 
-    let connection_kind = app_state
+    let Some(connection_kind) = app_state
         .active_users
         .refresh_session_connection_kind_for_origin_policy(
             &lease.username,
@@ -119,8 +124,16 @@ async fn validate_hls_access_lease_admission(
         )
         .await
         .or(admission.kind)
-        .or(user_session.connection_kind)
-        .unwrap_or(lease.origin_connection_kind);
+    else {
+        app_state.hls_proxy.deny_access_lease(&lease.lease_id).await;
+        warn!(
+            "HLS access lease rejected: lease={} proxy_session={} session={} reason=origin_policy_missing",
+            safe_hls_access_lease_id(&lease.lease_id),
+            safe_proxy_session_id(&lease.proxy_session_id),
+            safe_user_session_token(&lease.user_session_token)
+        );
+        return Err(HlsAccessLeaseValidationError::AdmissionDenied);
+    };
     let priority = connection_priority_for_kind(&user, connection_kind);
     let _ =
         app_state.hls_proxy.update_access_lease_origin_acquire_policy(&lease.lease_id, connection_kind, priority).await;

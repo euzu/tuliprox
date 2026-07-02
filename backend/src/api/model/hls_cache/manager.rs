@@ -1,20 +1,23 @@
 use super::{
-    build_rewrite_secret_fingerprint, safe_proxy_session_id, safe_session_key, AccessLeaseReuseResult,
-    GarbageCollectionPolicy, HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseId,
-    HlsAccessLeaseLifecycleSnapshot, HlsAccessLeaseSessionSnapshot, HlsAccessLeaseState, HlsAccessLeaseStore,
-    HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsCacheMetrics, HlsGarbageCollector, HlsLifecycleEvent,
-    HlsLifecycleEventKey, HlsLifecycleManager, HlsMapWorkerPool, HlsExpiredSessionMarker,
-    HlsExpiredSessionReason, HlsOriginSource, HlsPlaybackFamilyKey, HlsSegmentCache, HlsSegmentRepairManager,
-    HlsSegmentWorkerPool, HlsSessionHandle, HlsSessionKey, HlsSessionStore, HlsSessionStoreOutcome,
-    ProxySessionId, SegmentFetchPolicy, TransientResourceStore,
+    build_rewrite_secret_fingerprint, safe_proxy_session_id, safe_session_key, GarbageCollectionPolicy,
+    HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseId,
+    HlsAccessLeaseLifecycleSnapshot, HlsAccessLeasePendingDeadline, HlsAccessLeaseSessionSnapshot,
+    HlsAccessLeaseState, HlsAccessLeaseStore, HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsCacheMetrics,
+    HlsExpiredSessionMarker, HlsExpiredSessionReason, HlsGarbageCollector, HlsLifecycleEvent, HlsLifecycleEventKey,
+    HlsLifecycleManager, HlsMapWorkerPool,
+    HlsOriginSource, HlsQosRegistry, HlsSegmentCache, HlsSegmentRepairManager, HlsSegmentWorkerPool, HlsSessionHandle,
+    HlsSessionKey, HlsSessionStore, HlsSessionStoreOutcome, ProxySessionId, SegmentFetchPolicy,
+    TransientResourceStore,
 };
 use crate::{
     api::model::{ActiveProviderManager, ActiveUserManager, AppState},
     model::{AppConfig, HlsCacheConfig, StripConfig},
 };
+use crate::model::HlsManifestRecoveryBurstConfig;
 use arc_swap::ArcSwap;
 use log::{debug, error, info};
-use std::{io, path::PathBuf, sync::Arc};
+use shared::utils::sanitize_sensitive_info;
+use std::{collections::HashMap, io, path::PathBuf, sync::Arc};
 use tokio::sync::{RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -29,7 +32,9 @@ pub struct HlsProxyManager {
     transient_resources: Arc<TransientResourceStore>,
     access_leases: Arc<RwLock<HlsAccessLeaseStore>>,
     lifecycle: Arc<HlsLifecycleManager>,
+    account_overlap_cooldowns: Arc<RwLock<HashMap<HlsAccountOverlapCooldownKey, HlsAccountOverlapCooldown>>>,
     metrics: Arc<HlsCacheMetrics>,
+    qos: Arc<HlsQosRegistry>,
     gc: Arc<HlsGarbageCollector>,
 }
 
@@ -39,9 +44,50 @@ struct HlsProxyRuntimeConfig {
     cache_duration_seconds: u64,
     strip: StripConfig,
     origin_manifest_timeout_ms: u64,
+    manifest_recovery_burst: HlsManifestRecoveryBurstConfig,
     transient_resource_ttl_ms: u64,
     gc_policy: GarbageCollectionPolicy,
     rewrite_secret_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HlsAccountOverlapCooldownKey {
+    input_name: Arc<str>,
+    account_name: Arc<str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HlsAccountOverlapCooldown {
+    until_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HlsAccountOverlapCooldownReason {
+    ReclaimedByOriginalOwner,
+    SpeculativePromoted,
+}
+
+impl HlsAccountOverlapCooldownReason {
+    fn as_log_reason(self) -> &'static str {
+        match self {
+            Self::ReclaimedByOriginalOwner => "reclaimed-by-original-owner",
+            Self::SpeculativePromoted => "speculative-promoted",
+        }
+    }
+}
+
+fn hls_pending_manifest_follow_up_window_ms(target_duration: Option<u32>) -> u64 {
+    let target_duration_secs = u64::from(target_duration.unwrap_or(15)).max(1);
+    target_duration_secs.saturating_mul(2_000).max(10_000)
+}
+
+fn hls_pending_manifest_follow_up_deadline(
+    now_ms: u64,
+    target_duration: Option<u32>,
+) -> HlsAccessLeasePendingDeadline {
+    HlsAccessLeasePendingDeadline::FollowUp {
+        deadline_ms: now_ms.saturating_add(hls_pending_manifest_follow_up_window_ms(target_duration)),
+    }
 }
 
 impl HlsProxyRuntimeConfig {
@@ -51,6 +97,7 @@ impl HlsProxyRuntimeConfig {
             cache_duration_seconds: config.cache_duration,
             strip: config.strip.clone(),
             origin_manifest_timeout_ms: config.origin_manifest_timeout_ms,
+            manifest_recovery_burst: config.manifest_recovery_burst.clone(),
             transient_resource_ttl_ms: config.cache_duration.saturating_mul(1_000),
             gc_policy: GarbageCollectionPolicy::from_config(config),
             rewrite_secret_fingerprint: build_rewrite_secret_fingerprint(rewrite_secret),
@@ -67,6 +114,7 @@ struct HlsProxySessionCleanupStats {
     repair_object_metadata: usize,
     repair_watchdog_metadata: usize,
     repair_watchdog_locks: usize,
+    qos_access_leases: usize,
 }
 
 impl HlsProxySessionCleanupStats {
@@ -78,6 +126,7 @@ impl HlsProxySessionCleanupStats {
             || self.repair_object_metadata > 0
             || self.repair_watchdog_metadata > 0
             || self.repair_watchdog_locks > 0
+            || self.qos_access_leases > 0
     }
 }
 
@@ -115,8 +164,10 @@ impl HlsProxyManager {
         let segment_cache = Arc::new(HlsSegmentCache::with_cache_path(PathBuf::from(&default_config.cache_path)));
         let segment_repair = Arc::new(HlsSegmentRepairManager::new(default_config.segment_repair.clone()));
         let metrics = Arc::new(HlsCacheMetrics::default());
+        let qos = Arc::new(HlsQosRegistry::default());
         let access_leases = Arc::new(RwLock::new(HlsAccessLeaseStore::default()));
         let lifecycle = Arc::new(HlsLifecycleManager::new());
+        let account_overlap_cooldowns = Arc::new(RwLock::new(HashMap::new()));
         let gc_policy = GarbageCollectionPolicy::from_config(&default_config);
         let runtime_config = HlsProxyRuntimeConfig::from_config(&default_config, &[]);
         let gc = Arc::new(HlsGarbageCollector::new_with_metrics(
@@ -145,7 +196,9 @@ impl HlsProxyManager {
             transient_resources: Arc::new(TransientResourceStore::new()),
             access_leases,
             lifecycle,
+            account_overlap_cooldowns,
             metrics,
+            qos,
             gc,
         }
     }
@@ -161,8 +214,10 @@ impl HlsProxyManager {
         let segment_cache = Arc::new(HlsSegmentCache::with_cache_path(PathBuf::from(&config.cache_path)));
         let segment_repair = Arc::new(HlsSegmentRepairManager::new(config.segment_repair.clone()));
         let metrics = Arc::new(HlsCacheMetrics::default());
+        let qos = Arc::new(HlsQosRegistry::default());
         let access_leases = Arc::new(RwLock::new(HlsAccessLeaseStore::default()));
         let lifecycle = Arc::new(HlsLifecycleManager::new());
+        let account_overlap_cooldowns = Arc::new(RwLock::new(HashMap::new()));
         let gc_policy = GarbageCollectionPolicy::from_config(config);
         let runtime_config = HlsProxyRuntimeConfig::from_config(config, rewrite_secret);
         let gc = Arc::new(HlsGarbageCollector::new_with_metrics(
@@ -191,7 +246,9 @@ impl HlsProxyManager {
             transient_resources: Arc::new(TransientResourceStore::new()),
             access_leases,
             lifecycle,
+            account_overlap_cooldowns,
             metrics,
+            qos,
             gc,
         }
     }
@@ -216,6 +273,10 @@ impl HlsProxyManager {
 
     pub fn origin_manifest_timeout_ms(&self) -> u64 { self.runtime_config.load().origin_manifest_timeout_ms }
 
+    pub fn manifest_recovery_burst(&self) -> HlsManifestRecoveryBurstConfig {
+        self.runtime_config.load().manifest_recovery_burst.clone()
+    }
+
     pub fn transient_resource_ttl_ms(&self) -> u64 { self.runtime_config.load().transient_resource_ttl_ms }
 
     pub fn transient_resources(&self) -> &Arc<TransientResourceStore> { &self.transient_resources }
@@ -226,11 +287,94 @@ impl HlsProxyManager {
 
     pub fn metrics(&self) -> &Arc<HlsCacheMetrics> { &self.metrics }
 
+    pub fn qos(&self) -> &Arc<HlsQosRegistry> { &self.qos }
+
     pub fn garbage_collector(&self) -> &Arc<HlsGarbageCollector> { &self.gc }
 
     pub fn gc_policy(&self) -> GarbageCollectionPolicy { self.runtime_config.load().gc_policy.clone() }
 
     pub fn rewrite_secret_fingerprint(&self) -> String { self.runtime_config.load().rewrite_secret_fingerprint.clone() }
+
+    pub async fn is_account_overlap_cooling_down(
+        &self,
+        input_name: &Arc<str>,
+        account_name: &Arc<str>,
+        now_ms: u64,
+    ) -> bool {
+        let key = HlsAccountOverlapCooldownKey {
+            input_name: Arc::clone(input_name),
+            account_name: Arc::clone(account_name),
+        };
+        let mut cooldowns = self.account_overlap_cooldowns.write().await;
+        let Some(cooldown) = cooldowns.get(&key).copied() else {
+            return false;
+        };
+        if now_ms >= cooldown.until_ms {
+            cooldowns.remove(&key);
+            return false;
+        }
+        true
+    }
+
+    pub async fn mark_account_overlap_reclaimed_cooldown(
+        &self,
+        input_name: Arc<str>,
+        account_name: Arc<str>,
+        now_ms: u64,
+        hard_active_window_ms: u64,
+    ) {
+        self.mark_account_overlap_cooldown(
+            input_name,
+            account_name,
+            now_ms,
+            hard_active_window_ms,
+            HlsAccountOverlapCooldownReason::ReclaimedByOriginalOwner,
+        )
+        .await;
+    }
+
+    pub async fn mark_account_overlap_promoted_cooldown(
+        &self,
+        input_name: Arc<str>,
+        account_name: Arc<str>,
+        now_ms: u64,
+        hard_active_window_ms: u64,
+    ) {
+        self.mark_account_overlap_cooldown(
+            input_name,
+            account_name,
+            now_ms,
+            hard_active_window_ms,
+            HlsAccountOverlapCooldownReason::SpeculativePromoted,
+        )
+        .await;
+    }
+
+    async fn mark_account_overlap_cooldown(
+        &self,
+        input_name: Arc<str>,
+        account_name: Arc<str>,
+        now_ms: u64,
+        hard_active_window_ms: u64,
+        reason: HlsAccountOverlapCooldownReason,
+    ) {
+        let until_ms = now_ms.saturating_add(hard_active_window_ms);
+        if until_ms <= now_ms {
+            return;
+        }
+        let key = HlsAccountOverlapCooldownKey { input_name, account_name };
+        self.account_overlap_cooldowns
+            .write()
+            .await
+            .insert(key.clone(), HlsAccountOverlapCooldown { until_ms });
+        debug!(
+            "HLS account overlap cooldown set for input {} account {} until {} ms after {}",
+            sanitize_sensitive_info(key.input_name.as_ref()),
+            sanitize_sensitive_info(key.account_name.as_ref()),
+            until_ms,
+            reason.as_log_reason()
+        );
+    }
 
     pub async fn update_config(&self, app_config: &AppConfig) {
         let (hls_config, rewrite_secret) = {
@@ -271,22 +415,16 @@ impl HlsProxyManager {
     async fn clear_runtime_cache_state_for_cache_path_change(&self) {
         self.sessions.clear().await;
         let removed_leases = self.access_leases.write().await.clear();
+        let removed_qos = self.qos.clear().await;
         self.segment_repair.clear_runtime_state().await;
-        debug!("HLS cache runtime state cleared after cache path change: access_leases_removed={removed_leases}");
+        debug!(
+            "HLS cache runtime state cleared after cache path change: access_leases_removed={removed_leases} qos_access_leases_removed={removed_qos}"
+        );
     }
 
     pub async fn prepare_access_lease(&self, lease: HlsAccessLease) {
         self.schedule_access_lease_validity(&lease).await;
         self.access_leases.write().await.prepare_access_lease(lease);
-    }
-
-    pub async fn find_reusable_access_lease(
-        &self,
-        family_key: &HlsPlaybackFamilyKey,
-        proxy_session_id: &ProxySessionId,
-        now_ms: u64,
-    ) -> AccessLeaseReuseResult {
-        self.access_leases.write().await.find_reusable_access_lease(family_key, proxy_session_id, now_ms)
     }
 
     pub async fn access_lease(
@@ -303,6 +441,7 @@ impl HlsProxyManager {
         };
         if lease.is_none() && !still_stored {
             self.segment_repair.remove_access_lease_window(lease_id).await;
+            self.qos.remove_access_lease(lease_id).await;
         }
         lease
     }
@@ -314,6 +453,27 @@ impl HlsProxyManager {
         now_ms: u64,
     ) -> Option<HlsAccessLease> {
         self.access_leases.write().await.response_snapshot(lease_id, proxy_session_id, now_ms)
+    }
+
+    pub async fn mark_access_leases_channel_unavailable_for_session(
+        &self,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+        reason: HlsAccessLeaseChannelUnavailableReason,
+    ) -> usize {
+        self.access_leases
+            .write()
+            .await
+            .mark_channel_unavailable_for_session(proxy_session_id, now_ms, reason)
+    }
+
+    pub async fn mark_access_lease_channel_unavailable(
+        &self,
+        lease_id: &HlsAccessLeaseId,
+        now_ms: u64,
+        reason: HlsAccessLeaseChannelUnavailableReason,
+    ) -> bool {
+        self.access_leases.write().await.mark_channel_unavailable_for_lease(lease_id, now_ms, reason)
     }
 
     pub async fn update_access_lease_origin_acquire_policy(
@@ -350,6 +510,7 @@ impl HlsProxyManager {
         proxy_session_id: &ProxySessionId,
         now_ms: u64,
         active_timing: Option<HlsAccessLeaseTiming>,
+        pending_deadline: Option<HlsAccessLeasePendingDeadline>,
         ttl_ms: u64,
     ) -> HlsAccessLeaseTouch {
         let touch = self.access_leases.write().await.touch_manifest_access_lease(
@@ -357,6 +518,7 @@ impl HlsProxyManager {
             proxy_session_id,
             now_ms,
             active_timing,
+            pending_deadline,
             ttl_ms,
         );
         if let HlsAccessLeaseTouch::Touched { lease } = &touch {
@@ -366,6 +528,50 @@ impl HlsProxyManager {
             self.schedule_access_lease_validity(lease).await;
         }
         touch
+    }
+
+    pub async fn mark_pending_manifest_follow_up_for_lease(
+        &self,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+        target_duration: Option<u32>,
+    ) -> bool {
+        let deadline = hls_pending_manifest_follow_up_deadline(now_ms, target_duration);
+        let lease = self
+            .access_leases
+            .write()
+            .await
+            .mark_pending_manifest_follow_up_for_lease(lease_id, proxy_session_id, now_ms, deadline);
+        if let Some(lease) = lease {
+            self.schedule_access_lease_validity(&lease).await;
+            debug!(
+                "HLS pending manifest lease shortened after manifest response: lease={} proxy_session={}",
+                super::safe_hls_access_lease_id(lease_id),
+                safe_proxy_session_id(proxy_session_id)
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn mark_pending_manifest_follow_up_for_session(
+        &self,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+        target_duration: Option<u32>,
+    ) -> usize {
+        let deadline = hls_pending_manifest_follow_up_deadline(now_ms, target_duration);
+        let leases = self
+            .access_leases
+            .write()
+            .await
+            .mark_pending_manifest_follow_up_for_session(proxy_session_id, now_ms, deadline);
+        for lease in &leases {
+            self.schedule_access_lease_validity(lease).await;
+        }
+        leases.len()
     }
 
     pub async fn touch_access_lease(
@@ -411,6 +617,7 @@ impl HlsProxyManager {
     async fn remove_access_lease(&self, lease_id: &HlsAccessLeaseId) {
         self.access_leases.write().await.remove_access_lease(lease_id);
         self.segment_repair.remove_access_lease_window(lease_id).await;
+        self.qos.remove_access_lease(lease_id).await;
     }
 
     async fn cleanup_proxy_session_state(
@@ -424,6 +631,8 @@ impl HlsProxyManager {
         self.sessions.update_expired_session_marker_username(proxy_session_id, username).await;
         let removed_lease_ids = removed_leases.iter().map(|lease| lease.lease_id.clone()).collect::<Vec<_>>();
         self.segment_repair.remove_proxy_session_state(proxy_session_id, &removed_lease_ids).await;
+        let removed_qos = self.qos.remove_access_leases(&removed_lease_ids).await;
+        let removed_qos = removed_qos.saturating_add(self.qos.remove_proxy_session_state(proxy_session_id).await);
         let after = self.segment_repair.stats().await;
         let stats = HlsProxySessionCleanupStats {
             access_leases: removed_lease_ids.len(),
@@ -433,10 +642,11 @@ impl HlsProxyManager {
             repair_object_metadata: before.object_metadata.saturating_sub(after.object_metadata),
             repair_watchdog_metadata: before.watchdog_metadata.saturating_sub(after.watchdog_metadata),
             repair_watchdog_locks: before.watchdog_locks.saturating_sub(after.watchdog_locks),
+            qos_access_leases: removed_qos,
         };
         if stats.did_cleanup() {
             debug!(
-                "HLS proxy session state cleaned: session={} reason={} access_leases={} repair_windows={} repair_generations={} repair_candidates={} repair_object_metadata={} repair_watchdog_metadata={} repair_watchdog_locks={}",
+                "HLS proxy session state cleaned: session={} reason={} access_leases={} repair_windows={} repair_generations={} repair_candidates={} repair_object_metadata={} repair_watchdog_metadata={} repair_watchdog_locks={} qos_access_leases={}",
                 safe_proxy_session_id(proxy_session_id),
                 reason,
                 stats.access_leases,
@@ -445,7 +655,8 @@ impl HlsProxyManager {
                 stats.repair_candidates,
                 stats.repair_object_metadata,
                 stats.repair_watchdog_metadata,
-                stats.repair_watchdog_locks
+                stats.repair_watchdog_locks,
+                stats.qos_access_leases
             );
         }
         stats
@@ -467,6 +678,8 @@ impl HlsProxyManager {
 
     async fn cleanup_all_runtime_state(&self, reason: &'static str) {
         let removed_access_leases = self.access_leases.write().await.clear();
+        self.account_overlap_cooldowns.write().await.clear();
+        let removed_qos = self.qos.clear().await;
         let before = self.segment_repair.stats().await;
         self.segment_repair.clear_runtime_state().await;
         if removed_access_leases > 0
@@ -478,9 +691,10 @@ impl HlsProxyManager {
             || before.locks > 0
             || before.watchdog_metadata > 0
             || before.watchdog_locks > 0
+            || removed_qos > 0
         {
             debug!(
-                "HLS runtime state cleaned: reason={} access_leases={} repair_windows={} repair_generations={} repair_candidates={} repair_metadata={} repair_object_metadata={} repair_locks={} repair_watchdog_metadata={} repair_watchdog_locks={}",
+                "HLS runtime state cleaned: reason={} access_leases={} repair_windows={} repair_generations={} repair_candidates={} repair_metadata={} repair_object_metadata={} repair_locks={} repair_watchdog_metadata={} repair_watchdog_locks={} qos_access_leases={}",
                 reason,
                 removed_access_leases,
                 before.windows,
@@ -490,7 +704,8 @@ impl HlsProxyManager {
                 before.object_metadata,
                 before.locks,
                 before.watchdog_metadata,
-                before.watchdog_locks
+                before.watchdog_locks,
+                removed_qos
             );
         }
     }
@@ -520,13 +735,18 @@ impl HlsProxyManager {
     }
 
     async fn schedule_access_lease_validity(&self, lease: &HlsAccessLease) {
+        let due_at_ms = if lease.state == HlsAccessLeaseState::Pending {
+            lease.pending_deadline_ms().unwrap_or(lease.valid_until_ms)
+        } else {
+            lease.valid_until_ms
+        };
         self.lifecycle
             .schedule(
                 HlsLifecycleEventKey::AccessLeaseValidity {
                     lease_id: lease.lease_id.clone(),
                     proxy_session_id: lease.proxy_session_id.clone(),
                 },
-                lease.valid_until_ms,
+                due_at_ms,
             )
             .await;
     }
@@ -546,13 +766,20 @@ impl HlsProxyManager {
             }
         }
         if snapshot.state != HlsAccessLeaseState::Expired && snapshot.state != HlsAccessLeaseState::Denied {
+            let due_at_ms = if snapshot.state == HlsAccessLeaseState::Pending {
+                snapshot.pending_deadline
+                    .map(HlsAccessLeasePendingDeadline::deadline_ms)
+                    .unwrap_or(snapshot.valid_until_ms)
+            } else {
+                snapshot.valid_until_ms
+            };
             self.lifecycle
                 .schedule(
                     HlsLifecycleEventKey::AccessLeaseValidity {
                         lease_id: snapshot.lease_id.clone(),
                         proxy_session_id: snapshot.proxy_session_id.clone(),
                     },
-                    snapshot.valid_until_ms,
+                    due_at_ms,
                 )
                 .await;
         }
@@ -567,6 +794,11 @@ impl HlsProxyManager {
         self.lifecycle.schedule(HlsLifecycleEventKey::SessionIdle { proxy_session_id }, due_at_ms).await;
     }
 
+    pub async fn mark_authorized_media_access_for_session(&self, session: &HlsSessionHandle, now_ms: u64) {
+        session.write().await.mark_authorized_media_access(now_ms);
+        self.schedule_session_idle_for_handle(session).await;
+    }
+
     pub async fn handle_lifecycle_event(
         &self,
         active_users: &Arc<ActiveUserManager>,
@@ -577,17 +809,9 @@ impl HlsProxyManager {
         match event.key {
             HlsLifecycleEventKey::AccessLeaseActive { lease_id, proxy_session_id }
             | HlsLifecycleEventKey::AccessLeaseValidity { lease_id, proxy_session_id } => {
-                if let Some(session) = self.sessions.get_by_proxy_session_id(&proxy_session_id).await {
-                    self.sync_session_access_lease_count_and_detach_if_needed(
-                        active_users,
-                        active_provider,
-                        &session,
-                        &proxy_session_id,
-                        now_ms,
-                    )
-                    .await;
-                }
+                let mut should_sync_session = false;
                 if let Some(snapshot) = self.access_lease_lifecycle_snapshot(&lease_id, now_ms).await {
+                    should_sync_session = true;
                     if let Some(release) = &snapshot.idle_release {
                         active_users
                             .release_session_streams_and_counted_reservation(
@@ -616,6 +840,18 @@ impl HlsProxyManager {
                         );
                     } else {
                         self.schedule_access_lease_lifecycle_snapshot(&snapshot).await;
+                    }
+                }
+                if should_sync_session {
+                    if let Some(session) = self.sessions.get_by_proxy_session_id(&proxy_session_id).await {
+                        self.sync_session_access_lease_count_and_detach_if_needed(
+                            active_users,
+                            active_provider,
+                            &session,
+                            &proxy_session_id,
+                            now_ms,
+                        )
+                        .await;
                     }
                 }
             }
@@ -685,6 +921,7 @@ impl HlsProxyManager {
     pub async fn debug_state_summary(&self) -> String {
         let sessions = self.sessions.list_sessions().await;
         let access_leases = self.access_leases.read().await.len();
+        let qos_access_leases = self.qos.len().await;
         let repair = self.segment_repair.stats().await;
         let mut segments = 0_usize;
         let mut maps = 0_usize;
@@ -704,9 +941,10 @@ impl HlsProxyManager {
             active_map_fetches = active_map_fetches.saturating_add(session.active_map_fetches);
         }
         format!(
-            "sessions={} access_leases={} repair_windows={} repair_generations={} repair_candidates={} repair_metadata={} repair_object_metadata={} repair_locks={} repair_watchdog_metadata={} repair_watchdog_locks={} segments={} maps={} transient_resources={} transient_objects={} active_origin_work={} active_segment_fetches={} active_map_fetches={}",
+            "sessions={} access_leases={} qos_access_leases={} repair_windows={} repair_generations={} repair_candidates={} repair_metadata={} repair_object_metadata={} repair_locks={} repair_watchdog_metadata={} repair_watchdog_locks={} segments={} maps={} transient_resources={} transient_objects={} active_origin_work={} active_segment_fetches={} active_map_fetches={}",
             sessions.len(),
             access_leases,
+            qos_access_leases,
             repair.windows,
             repair.generations,
             repair.checked_candidates,
@@ -924,6 +1162,7 @@ mod tests {
         updated_dto.origin_segment_timeout_ms = 5_678;
         updated_dto.cache_duration = 99;
         updated_dto.session_idle_timeout = 55;
+        updated_dto.manifest_recovery_burst.level = shared::model::HlsManifestRecoveryBurstLevelDto::Balanced;
         updated_dto.strip = StripConfigDto { mode: StripModeDto::Seconds, value: 7 };
         let app_config = test_app_config(config_with_hls_cache(updated_dto));
 
@@ -937,6 +1176,10 @@ mod tests {
         assert_eq!(manager.cache_duration_seconds(), 99);
         assert_eq!(manager.transient_resource_ttl_ms(), 99_000);
         assert_eq!(manager.session_idle_timeout_ms(), 55_000);
+        assert_eq!(
+            manager.manifest_recovery_burst().level,
+            crate::model::HlsManifestRecoveryBurstLevel::Balanced
+        );
         assert_eq!(manager.strip().mode, crate::model::StripMode::Seconds);
         assert_eq!(manager.strip().value, 7);
         assert_eq!(session.read().await.segment_prefetch_queue.max_prefetch_depth(), 4);

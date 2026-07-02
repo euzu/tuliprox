@@ -1,11 +1,12 @@
 use super::{
     build_proxy_session_id, classify_account_binding_protection, HlsAccountBindingProtection, HlsAccountOverlapTiming,
-    HlsEffectiveOriginAcquirePolicy, HlsEffectiveOriginAcquirePolicyState, HlsOriginAccountBinding,
-    HlsOriginAccountIoLease, HlsOriginAccountRebindState, HlsOriginSource, HlsSessionKey, MapCacheStatus, MapEntry,
-    OriginMapKey, OriginRefreshState, OriginSegmentKey, ProxyMapId, ProxySessionId, RenderPolicy, RenderedManifest,
-    SegmentCacheStatus, SegmentEntry, SegmentPrefetchQueue, TransientPassthroughState,
+    HlsEffectiveOriginAcquirePolicy, HlsEffectiveOriginAcquirePolicyState, HlsFreshManifestRequiredReason,
+    HlsOriginAccountBinding, HlsOriginAccountIoLease, HlsOriginAccountRebindState, HlsOriginSource, HlsSessionKey,
+    HlsBoundAccountAcquireErrorKind, MapCacheStatus, MapEntry, OriginMapKey, OriginRefreshState, OriginSegmentKey,
+    ProxyMapId, ProxySessionId, RenderPolicy, RenderedManifest, SegmentCacheStatus, SegmentEntry,
+    SegmentFetchPriority, SegmentPrefetchQueue, TransientPassthroughState,
 };
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
@@ -26,6 +27,62 @@ pub enum TransientPassthroughReason {
     ExtXKey,
     UnsupportedTag { tag: String },
     ParserUnsupportedFeature { feature: String },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HlsSegmentFailureTracker {
+    pub consecutive_temporary_failures: u32,
+    pub last_failure_at_ms: Option<u64>,
+    pub last_failed_object: Option<HlsSegmentFailureObject>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HlsSegmentFailureObject {
+    Normal { proxy_seq: u64, origin_seq: u64 },
+    Transient { resource_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HlsSegmentFailureTransition {
+    StillRetryable { failures: u32, threshold: u32 },
+    BecamePermanentlyFailed { failures: u32, threshold: u32 },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HlsManifestTemporaryFailureTracker {
+    pub consecutive_temporary_failures: u32,
+    pub last_failure_at_ms: Option<u64>,
+    pub last_failure_kind: Option<HlsManifestTemporaryFailureKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HlsManifestTemporaryFailureKind {
+    Timeout,
+    RetryableStatus { status: StatusCode },
+    ProviderAcquire { kind: HlsBoundAccountAcquireErrorKind },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HlsManifestTemporaryFailureTransition {
+    StillRetryable { failures: u32, threshold: u32 },
+    BecameChannelUnavailable { failures: u32, threshold: u32 },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HlsManifestAcceptanceState {
+    pub same_host_retry_chain_failures: u32,
+    pub host_switch_candidate: Option<HlsManifestHostSwitchCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HlsManifestHostSwitchCandidate {
+    pub host: String,
+    pub target_url: String,
+    pub first_seen_at_ms: u64,
+    pub last_seen_at_ms: u64,
+    pub seen_count: u32,
+    pub highwater: Option<u64>,
+    pub quality_score: u16,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -49,33 +106,40 @@ pub struct HlsSession {
     pub mode: HlsSessionMode,
     pub transient: TransientPassthroughState,
     pub last_client_access_at_ms: u64,
-    pub last_redirect_host: Option<String>,
-    pub last_successful_manifest_target_url: Option<String>,
-    pub last_successful_manifest_provider_url_index: Option<usize>,
+    pub last_effective_manifest_host: Option<String>,
     pub origin_refresh: OriginRefreshState,
     pub render_policy: RenderPolicy,
     pub last_rendered_manifest: Option<RenderedManifest>,
     pub longest_rendered_playlist_duration_ms: u64,
+    pub initial_prefetch_gap_segments: usize,
     pub segment_prefetch_queue: SegmentPrefetchQueue,
     pub active_segment_fetches: usize,
     pub segment_fetch_notifiers: HashMap<u64, Arc<Notify>>,
     pub origin_request_headers: HeaderMap,
+    pub origin_provider_session_headers: HeaderMap,
     pub activity: HlsSessionActivity,
     pub origin_epoch: u64,
     pub origin_seq_highwater: Option<u64>,
     pub proxy_next_seq: Option<u64>,
     pub origin_to_proxy: HashMap<OriginSegmentKey, u64>,
     pub discontinuity_sequence: u64,
+    pub transient_discontinuity_sequence: Option<u64>,
     pub pending_handoff_discontinuity_sequence: Option<u64>,
+    pub pending_origin_epoch_handoff: bool,
     pub segments: BTreeMap<u64, SegmentEntry>,
     pub active_map_fetches: usize,
     pub maps: BTreeMap<ProxyMapId, MapEntry>,
     pub origin_map_to_proxy: HashMap<OriginMapKey, ProxyMapId>,
     pub next_proxy_map_id: u64,
+    pub publishable_origin_head_proxy_seq: Option<u64>,
     pub publishable_origin_tail_proxy_seq: Option<u64>,
     pub origin_version: Option<u16>,
     pub target_duration: Option<u32>,
     pub independent_segments: bool,
+    pub fresh_manifest_commit_required: Option<HlsFreshManifestRequiredReason>,
+    pub segment_failure_tracker: HlsSegmentFailureTracker,
+    pub manifest_temporary_failure_tracker: HlsManifestTemporaryFailureTracker,
+    pub manifest_acceptance: HlsManifestAcceptanceState,
     gc_marked_for_removal: bool,
 }
 
@@ -103,39 +167,53 @@ impl HlsSession {
             mode: HlsSessionMode::NormalCacheTimeline,
             transient: TransientPassthroughState::default(),
             last_client_access_at_ms: now_ms,
-            last_redirect_host: None,
-            last_successful_manifest_target_url: None,
-            last_successful_manifest_provider_url_index: None,
+            last_effective_manifest_host: None,
             origin_refresh: OriginRefreshState::default(),
             render_policy: RenderPolicy::default(),
             last_rendered_manifest: None,
             longest_rendered_playlist_duration_ms: 0,
+            initial_prefetch_gap_segments: 0,
             segment_prefetch_queue: SegmentPrefetchQueue::default(),
             active_segment_fetches: 0,
             segment_fetch_notifiers: HashMap::new(),
             origin_request_headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
             activity: HlsSessionActivity::default(),
             origin_epoch: 0,
             origin_seq_highwater: None,
             proxy_next_seq: None,
             origin_to_proxy: HashMap::new(),
             discontinuity_sequence: 0,
+            transient_discontinuity_sequence: None,
             pending_handoff_discontinuity_sequence: None,
+            pending_origin_epoch_handoff: false,
             active_map_fetches: 0,
             segments: BTreeMap::new(),
             maps: BTreeMap::new(),
             origin_map_to_proxy: HashMap::new(),
             next_proxy_map_id: 0,
+            publishable_origin_head_proxy_seq: None,
             publishable_origin_tail_proxy_seq: None,
             origin_version: None,
             target_duration: None,
             independent_segments: false,
+            fresh_manifest_commit_required: None,
+            segment_failure_tracker: HlsSegmentFailureTracker::default(),
+            manifest_temporary_failure_tracker: HlsManifestTemporaryFailureTracker::default(),
+            manifest_acceptance: HlsManifestAcceptanceState::default(),
             gc_marked_for_removal: false,
         }
     }
 
     pub fn mark_pending_handoff_discontinuity(&mut self, discontinuity_sequence: u64) {
         self.pending_handoff_discontinuity_sequence = Some(discontinuity_sequence);
+    }
+
+    pub fn mark_pending_origin_epoch_handoff_discontinuity(&mut self, discontinuity_sequence: u64) {
+        if self.pending_handoff_discontinuity_sequence.is_none() {
+            self.pending_handoff_discontinuity_sequence = Some(discontinuity_sequence);
+        }
+        self.pending_origin_epoch_handoff = true;
     }
 
     pub fn take_pending_handoff_discontinuity_sequence(&mut self) -> Option<u64> {
@@ -147,6 +225,88 @@ impl HlsSession {
     pub fn clear_gc_removal_mark(&mut self) { self.gc_marked_for_removal = false; }
 
     pub fn is_gc_marked_for_removal(&self) -> bool { self.gc_marked_for_removal }
+
+    pub fn replace_origin_account_binding(&mut self, binding: Option<HlsOriginAccountBinding>) {
+        let binding_changed = match (&self.origin_account_binding, &binding) {
+            (Some(current), Some(next)) => {
+                current.input_name != next.input_name
+                    || current.account_name != next.account_name
+                    || current.session_owner != next.session_owner
+                    || current.generation != next.generation
+            }
+            (None, None) => false,
+            _ => true,
+        };
+        if binding_changed {
+            self.origin_provider_session_headers.clear();
+        }
+        self.origin_account_binding = binding;
+    }
+
+    pub fn segment_temporary_failure_threshold(&self, fallback_threshold: u32) -> u32 {
+        let initial_prefetch_gap_segments =
+            u32::try_from(self.initial_prefetch_gap_segments).unwrap_or(u32::MAX.saturating_sub(3));
+        fallback_threshold.max(3_u32.saturating_add(initial_prefetch_gap_segments))
+    }
+
+    pub fn record_successful_segment_fetch(&mut self) -> Option<u32> {
+        if self.segment_failure_tracker.consecutive_temporary_failures == 0 {
+            return None;
+        }
+        let previous = self.segment_failure_tracker.consecutive_temporary_failures;
+        self.segment_failure_tracker = HlsSegmentFailureTracker::default();
+        Some(previous)
+    }
+
+    pub fn record_temporary_segment_fetch_failure(
+        &mut self,
+        now_ms: u64,
+        object: HlsSegmentFailureObject,
+        threshold: u32,
+    ) -> HlsSegmentFailureTransition {
+        let failures = self.segment_failure_tracker.consecutive_temporary_failures.saturating_add(1);
+        self.segment_failure_tracker.consecutive_temporary_failures = failures;
+        self.segment_failure_tracker.last_failure_at_ms = Some(now_ms);
+        self.segment_failure_tracker.last_failed_object = Some(object);
+
+        if failures >= threshold {
+            HlsSegmentFailureTransition::BecamePermanentlyFailed { failures, threshold }
+        } else {
+            HlsSegmentFailureTransition::StillRetryable { failures, threshold }
+        }
+    }
+
+    pub fn record_successful_manifest_fetch(&mut self) -> Option<u32> {
+        self.fresh_manifest_commit_required = None;
+        if self.manifest_temporary_failure_tracker.consecutive_temporary_failures == 0 {
+            return None;
+        }
+        let previous = self.manifest_temporary_failure_tracker.consecutive_temporary_failures;
+        self.manifest_temporary_failure_tracker = HlsManifestTemporaryFailureTracker::default();
+        Some(previous)
+    }
+
+    pub fn require_fresh_manifest_commit(&mut self, reason: HlsFreshManifestRequiredReason) {
+        self.fresh_manifest_commit_required = Some(reason);
+    }
+
+    pub fn record_temporary_manifest_fetch_failure(
+        &mut self,
+        now_ms: u64,
+        kind: HlsManifestTemporaryFailureKind,
+        threshold: u32,
+    ) -> HlsManifestTemporaryFailureTransition {
+        let failures = self.manifest_temporary_failure_tracker.consecutive_temporary_failures.saturating_add(1);
+        self.manifest_temporary_failure_tracker.consecutive_temporary_failures = failures;
+        self.manifest_temporary_failure_tracker.last_failure_at_ms = Some(now_ms);
+        self.manifest_temporary_failure_tracker.last_failure_kind = Some(kind);
+
+        if failures >= threshold {
+            HlsManifestTemporaryFailureTransition::BecameChannelUnavailable { failures, threshold }
+        } else {
+            HlsManifestTemporaryFailureTransition::StillRetryable { failures, threshold }
+        }
+    }
 
     pub fn account_overlap_timing(&self) -> HlsAccountOverlapTiming {
         HlsAccountOverlapTiming::from_target_duration_secs(self.target_duration.map(u64::from))
@@ -242,6 +402,28 @@ impl HlsSession {
             && !self.transient.has_active_resource_readers()
     }
 
+    pub fn initial_manifest_commit_work_pending(&self) -> bool {
+        self.origin_refresh.in_flight
+            || self.active_segment_fetches > 0
+            || self.active_map_fetches > 0
+            || self.segments.values().any(|segment| {
+                matches!(
+                    segment.status,
+                    SegmentCacheStatus::Queued {
+                        priority: SegmentFetchPriority::Demand | SegmentFetchPriority::RenderWindow,
+                        ..
+                    } | SegmentCacheStatus::Fetching {
+                        priority: SegmentFetchPriority::Demand | SegmentFetchPriority::RenderWindow,
+                        ..
+                    }
+                )
+            })
+            || self
+                .maps
+                .values()
+                .any(|map| matches!(map.status, MapCacheStatus::Queued { .. } | MapCacheStatus::Fetching { .. }))
+    }
+
     pub fn start_origin_work(&mut self) -> u64 {
         self.activity.active_origin_work_count = self.activity.active_origin_work_count.saturating_add(1);
         self.activity.origin_work_generation
@@ -291,36 +473,40 @@ impl fmt::Debug for HlsSession {
             .field("mode", &self.mode)
             .field("transient", &self.transient)
             .field("last_client_access_at_ms", &self.last_client_access_at_ms)
-            .field("last_redirect_host", &self.last_redirect_host)
-            .field(
-                "last_successful_manifest_target_url",
-                &self.last_successful_manifest_target_url.as_ref().map(|_| "<redacted>"),
-            )
-            .field("last_successful_manifest_provider_url_index", &self.last_successful_manifest_provider_url_index)
+            .field("last_effective_manifest_host", &self.last_effective_manifest_host)
             .field("origin_refresh", &self.origin_refresh)
             .field("render_policy", &self.render_policy)
             .field("last_rendered_manifest", &self.last_rendered_manifest)
             .field("longest_rendered_playlist_duration_ms", &self.longest_rendered_playlist_duration_ms)
+            .field("initial_prefetch_gap_segments", &self.initial_prefetch_gap_segments)
             .field("segment_prefetch_queue_len", &self.segment_prefetch_queue.len())
             .field("active_segment_fetches", &self.active_segment_fetches)
             .field("segment_fetch_notifiers_len", &self.segment_fetch_notifiers.len())
             .field("origin_request_headers_len", &self.origin_request_headers.len())
+            .field("origin_provider_session_headers_len", &self.origin_provider_session_headers.len())
             .field("activity", &self.activity)
             .field("origin_epoch", &self.origin_epoch)
             .field("origin_seq_highwater", &self.origin_seq_highwater)
             .field("proxy_next_seq", &self.proxy_next_seq)
             .field("origin_to_proxy_len", &self.origin_to_proxy.len())
             .field("discontinuity_sequence", &self.discontinuity_sequence)
+            .field("transient_discontinuity_sequence", &self.transient_discontinuity_sequence)
             .field("pending_handoff_discontinuity_sequence", &self.pending_handoff_discontinuity_sequence)
+            .field("pending_origin_epoch_handoff", &self.pending_origin_epoch_handoff)
             .field("active_map_fetches", &self.active_map_fetches)
             .field("segments_len", &self.segments.len())
             .field("maps_len", &self.maps.len())
             .field("origin_map_to_proxy_len", &self.origin_map_to_proxy.len())
             .field("next_proxy_map_id", &self.next_proxy_map_id)
+            .field("publishable_origin_head_proxy_seq", &self.publishable_origin_head_proxy_seq)
             .field("publishable_origin_tail_proxy_seq", &self.publishable_origin_tail_proxy_seq)
             .field("origin_version", &self.origin_version)
             .field("target_duration", &self.target_duration)
             .field("independent_segments", &self.independent_segments)
+            .field("fresh_manifest_commit_required", &self.fresh_manifest_commit_required)
+            .field("segment_failure_tracker", &self.segment_failure_tracker)
+            .field("manifest_temporary_failure_tracker", &self.manifest_temporary_failure_tracker)
+            .field("manifest_acceptance", &self.manifest_acceptance)
             .field("gc_marked_for_removal", &self.gc_marked_for_removal)
             .finish()
     }
@@ -330,8 +516,11 @@ impl fmt::Debug for HlsSession {
 mod tests {
     use super::HlsSession;
     use crate::api::model::{
-        ConnectionKind, HlsAccountBindingProtection, HlsEffectiveOriginAcquirePolicy, HlsSessionKey,
+        ConnectionKind, HlsAccountBindingProtection, HlsEffectiveOriginAcquirePolicy, HlsFreshManifestRequiredReason,
+        HlsManifestTemporaryFailureKind, HlsManifestTemporaryFailureTransition, HlsSegmentFailureObject,
+        HlsSegmentFailureTransition, HlsSessionKey,
     };
+    use axum::http::StatusCode;
 
     fn origin_policy(connection_kind: ConnectionKind, priority: i8) -> HlsEffectiveOriginAcquirePolicy {
         HlsEffectiveOriginAcquirePolicy::new(connection_kind, priority, 0)
@@ -406,6 +595,89 @@ mod tests {
         assert!(!session.finish_origin_work(started_generation));
         assert_eq!(session.activity.active_origin_work_count, 0);
         assert_eq!(session.activity.origin_work_generation, 1);
+    }
+
+    #[test]
+    fn temporary_segment_failures_reach_threshold() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+
+        assert_eq!(
+            session.record_temporary_segment_fetch_failure(
+                1_000,
+                HlsSegmentFailureObject::Normal { proxy_seq: 1, origin_seq: 10 },
+                2,
+            ),
+            HlsSegmentFailureTransition::StillRetryable { failures: 1, threshold: 2 }
+        );
+        assert_eq!(
+            session.record_temporary_segment_fetch_failure(
+                2_000,
+                HlsSegmentFailureObject::Normal { proxy_seq: 2, origin_seq: 11 },
+                2,
+            ),
+            HlsSegmentFailureTransition::BecamePermanentlyFailed { failures: 2, threshold: 2 }
+        );
+        assert_eq!(session.segment_failure_tracker.consecutive_temporary_failures, 2);
+        assert_eq!(session.segment_failure_tracker.last_failure_at_ms, Some(2_000));
+        assert_eq!(
+            session.segment_failure_tracker.last_failed_object,
+            Some(HlsSegmentFailureObject::Normal { proxy_seq: 2, origin_seq: 11 })
+        );
+    }
+
+    #[test]
+    fn successful_segment_fetch_resets_temporary_failure_counter() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+        let transition = session.record_temporary_segment_fetch_failure(
+            1_000,
+            HlsSegmentFailureObject::Transient { resource_id: "abc".to_string() },
+            3,
+        );
+
+        assert_eq!(transition, HlsSegmentFailureTransition::StillRetryable { failures: 1, threshold: 3 });
+        assert_eq!(session.record_successful_segment_fetch(), Some(1));
+        assert_eq!(session.segment_failure_tracker.consecutive_temporary_failures, 0);
+        assert!(session.segment_failure_tracker.last_failure_at_ms.is_none());
+        assert!(session.segment_failure_tracker.last_failed_object.is_none());
+    }
+
+    #[test]
+    fn temporary_manifest_failures_reach_threshold() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+
+        assert_eq!(
+            session.record_temporary_manifest_fetch_failure(1_000, HlsManifestTemporaryFailureKind::Timeout, 2),
+            HlsManifestTemporaryFailureTransition::StillRetryable { failures: 1, threshold: 2 }
+        );
+        assert_eq!(
+            session.record_temporary_manifest_fetch_failure(
+                2_000,
+                HlsManifestTemporaryFailureKind::RetryableStatus { status: StatusCode::TOO_MANY_REQUESTS },
+                2,
+            ),
+            HlsManifestTemporaryFailureTransition::BecameChannelUnavailable { failures: 2, threshold: 2 }
+        );
+        assert_eq!(session.manifest_temporary_failure_tracker.consecutive_temporary_failures, 2);
+        assert_eq!(session.manifest_temporary_failure_tracker.last_failure_at_ms, Some(2_000));
+        assert_eq!(
+            session.manifest_temporary_failure_tracker.last_failure_kind,
+            Some(HlsManifestTemporaryFailureKind::RetryableStatus { status: StatusCode::TOO_MANY_REQUESTS })
+        );
+    }
+
+    #[test]
+    fn successful_manifest_fetch_resets_temporary_failure_counter() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+        session.require_fresh_manifest_commit(HlsFreshManifestRequiredReason::PreviousHardManifestFailure);
+        let transition =
+            session.record_temporary_manifest_fetch_failure(1_000, HlsManifestTemporaryFailureKind::Timeout, 3);
+
+        assert_eq!(transition, HlsManifestTemporaryFailureTransition::StillRetryable { failures: 1, threshold: 3 });
+        assert_eq!(session.record_successful_manifest_fetch(), Some(1));
+        assert_eq!(session.fresh_manifest_commit_required, None);
+        assert_eq!(session.manifest_temporary_failure_tracker.consecutive_temporary_failures, 0);
+        assert!(session.manifest_temporary_failure_tracker.last_failure_at_ms.is_none());
+        assert!(session.manifest_temporary_failure_tracker.last_failure_kind.is_none());
     }
 
     #[test]

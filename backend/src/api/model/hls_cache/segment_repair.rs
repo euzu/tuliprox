@@ -58,7 +58,11 @@ pub struct HlsSegmentRepairObjectContext {
     pub rendered_object_id: HlsRepairRenderedObjectId,
     pub resource_id: String,
     pub file_ext: String,
-    pub normalized_origin_uri: String,
+    /// Concrete origin fetch URI retained for diagnostics and postprocess metadata.
+    ///
+    /// This may include a provider mirror or redirect/CDN host. It must not be used as HLS session identity, account
+    /// binding, provider-failover state, repair object identity, or repair-window candidate identity.
+    pub origin_fetch_uri_for_diagnostics: String,
     pub media_sequence: Option<u64>,
     pub discontinuity_sequence: Option<u64>,
     pub complete_object: bool,
@@ -96,6 +100,7 @@ struct HlsRepairWindowCandidateKey {
     proxy_session_id: ProxySessionId,
     hls_access_lease_id: HlsAccessLeaseId,
     activation_generation: u64,
+    /// Proxy-rendered object identity. Deliberately excludes the concrete origin fetch URI.
     object_id: HlsRepairRenderedObjectId,
     file_ext: String,
 }
@@ -119,6 +124,7 @@ struct RepairIdentity {
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct HlsRepairObjectMetadataKey {
     proxy_session_id: ProxySessionId,
+    /// Proxy-rendered object identity. Deliberately excludes the concrete origin fetch URI.
     rendered_object_id: HlsRepairRenderedObjectId,
     file_ext: String,
     repair_mode: HlsSegmentRepairMode,
@@ -789,6 +795,7 @@ impl HlsSegmentRepairManager {
         if !runtime.repair_enabled() {
             return None;
         }
+        context.hls_access_lease_id.as_ref()?;
         match self.windows.write().await.try_select_candidate(context) {
             RepairCandidateSelection::Selected(mode) => {
                 debug!(
@@ -894,6 +901,18 @@ impl HlsSegmentRepairManager {
                 return Ok(None);
             }
         };
+        let stream_selection = match select_repair_remux_streams(&raw_scan) {
+            Ok(selection) => selection,
+            Err(reason) => {
+                debug_repair_event(context, executed_level, "stream selection skipped", Some(&reason));
+                self.record_metadata(identity.clone(), RepairStatus::Unsupported, raw_size, raw_size, Some(reason))
+                    .await;
+                return Ok(None);
+            }
+        };
+        for dropped in &stream_selection.dropped_streams {
+            debug_repair_stream_dropped(context, dropped);
+        }
         let fixed_path = repair_output_path(raw_path);
         debug!(
             "HLS segment repair remux started: session={} source={} resource={} configured_max_level={} executed_level={}",
@@ -903,7 +922,7 @@ impl HlsSegmentRepairManager {
             identity.repair_mode.as_log_value(),
             executed_level.as_log_value()
         );
-        let remux = run_remux(raw_path, &fixed_path, executed_level, deadline).await;
+        let remux = run_remux(raw_path, &fixed_path, executed_level, &stream_selection, deadline).await;
         if let Err(reason) = remux {
             debug_repair_event(context, executed_level, "remux failed", Some(&reason));
             let status = if reason == "timeout" { RepairStatus::Timeout } else { RepairStatus::RemuxFailed };
@@ -927,7 +946,7 @@ impl HlsSegmentRepairManager {
                 return Ok(None);
             }
         };
-        let validation = validate_repair(&runtime.config, codec, &raw_scan, &fixed_scan, executed_level);
+        let validation = validate_repair(&runtime.config, codec, &raw_scan, &fixed_scan, executed_level, &stream_selection);
         if let Err(reason) = validation {
             debug_repair_event(context, executed_level, "validation failed", Some(&reason));
             let _ = fs::remove_file(&fixed_path).await;
@@ -981,7 +1000,7 @@ impl HlsSegmentRepairManager {
             .is_some_and(|metadata| metadata.committed_sha256 == committed_sha256);
         if matches {
             let (source, resource) = match &key.rendered_object_id {
-                HlsRepairRenderedObjectId::Normal { proxy_seq } => ("normal", proxy_seq.to_string()),
+                HlsRepairRenderedObjectId::Normal { proxy_seq } => ("normal", format!("{proxy_seq:06}")),
                 HlsRepairRenderedObjectId::Transient { resource_id } => ("transient", resource_id.clone()),
             };
             debug!(
@@ -1157,12 +1176,53 @@ struct SegmentProbe {
     duration_ms: Option<u64>,
     size: u64,
     stream_count: usize,
+    streams: Vec<SegmentProbeStream>,
     primary_video_codec: Option<String>,
     primary_audio_codec: Option<String>,
     primary_video_start_time_ms: Option<i64>,
     primary_audio_start_time_ms: Option<i64>,
     primary_video_extradata_size: Option<u64>,
     warnings: WarningCounters,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct SegmentProbeStream {
+    index: usize,
+    stream_type: SegmentProbeStreamType,
+    codec_name: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+    sample_rate: Option<u32>,
+    channels: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SegmentProbeStreamType {
+    Video,
+    Audio,
+    Other,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RepairRemuxStreamSelection {
+    mapped_streams: Vec<usize>,
+    dropped_streams: Vec<RepairRemuxDroppedStream>,
+}
+
+#[cfg(test)]
+impl RepairRemuxStreamSelection {
+    fn preserve_all(probe: &SegmentProbe) -> Self {
+        Self {
+            mapped_streams: probe.streams.iter().map(|stream| stream.index).collect(),
+            dropped_streams: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct RepairRemuxDroppedStream {
+    index: usize,
+    reason: &'static str,
 }
 
 pub fn parse_ffmpeg_warnings(stderr: &str) -> WarningCounters {
@@ -1612,6 +1672,17 @@ fn debug_repair_event(
     }
 }
 
+fn debug_repair_stream_dropped(context: &HlsSegmentRepairObjectContext, dropped: &RepairRemuxDroppedStream) {
+    debug!(
+        "HLS segment repair stream dropped: session={} source={} resource={} stream={} reason={}",
+        safe_proxy_session_id(&context.proxy_session_id),
+        context.source.as_log_value(),
+        context.resource_id,
+        dropped.index,
+        dropped.reason
+    );
+}
+
 async fn analyze_segment(path: &Path, deadline: &HlsPostProcessingDeadline) -> Result<SegmentProbe, String> {
     let probe_output = run_command_with_deadline(
         "ffprobe",
@@ -1657,18 +1728,35 @@ async fn run_remux(
     input_path: &Path,
     output_path: &Path,
     mode: HlsSegmentRepairMode,
+    stream_selection: &RepairRemuxStreamSelection,
     deadline: &HlsPostProcessingDeadline,
 ) -> Result<(), String> {
     let input = input_path.to_str().ok_or_else(|| "invalid_input_path".to_string())?;
     let output = output_path.to_str().ok_or_else(|| "invalid_output_path".to_string())?;
-    let mut args = vec!["-hide_banner", "-nostdin", "-y", "-copyts", "-i", input, "-map", "0", "-c", "copy"];
-    if matches!(mode, HlsSegmentRepairMode::Medium | HlsSegmentRepairMode::High) {
-        args.push("-bsf:v");
-        args.push("dump_extra=freq=keyframe");
+    let mut args = ["-hide_banner", "-nostdin", "-y", "-copyts", "-i", input]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    for stream_index in &stream_selection.mapped_streams {
+        args.push("-map".to_string());
+        args.push(format!("0:{stream_index}"));
     }
-    args.push("-mpegts_flags");
-    args.push(if mode == HlsSegmentRepairMode::High { "+resend_headers+pat_pmt_at_frames" } else { "+resend_headers" });
-    args.extend(["-mpegts_copyts", "1", "-muxpreload", "0", "-muxdelay", "0", "-f", "mpegts", output]);
+    args.extend(["-c", "copy"].into_iter().map(ToOwned::to_owned));
+    if matches!(mode, HlsSegmentRepairMode::Medium | HlsSegmentRepairMode::High) {
+        args.push("-bsf:v".to_string());
+        args.push("dump_extra=freq=keyframe".to_string());
+    }
+    args.push("-mpegts_flags".to_string());
+    args.push(
+        if mode == HlsSegmentRepairMode::High { "+resend_headers+pat_pmt_at_frames" } else { "+resend_headers" }
+            .to_string(),
+    );
+    args.extend(
+        ["-mpegts_copyts", "1", "-muxpreload", "0", "-muxdelay", "0", "-f", "mpegts", output]
+            .into_iter()
+            .map(ToOwned::to_owned),
+    );
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     run_command_with_deadline("ffmpeg", &args, deadline).await.map(|_| ())
 }
 
@@ -1722,6 +1810,23 @@ fn parse_probe(json: &str, warnings: WarningCounters) -> Result<SegmentProbe, St
             .get("extradata_size")
             .and_then(Value::as_u64)
             .or_else(|| stream.get("extradata_size").and_then(Value::as_str).and_then(|value| value.parse().ok()));
+        let stream_index = stream
+            .get("index")
+            .and_then(parse_u32_value)
+            .map_or(probe.streams.len(), |value| value as usize);
+        let probe_stream = SegmentProbeStream {
+            index: stream_index,
+            stream_type: match codec_type {
+                Some("video") => SegmentProbeStreamType::Video,
+                Some("audio") => SegmentProbeStreamType::Audio,
+                _ => SegmentProbeStreamType::Other,
+            },
+            codec_name: codec_name.clone(),
+            width: stream.get("width").and_then(parse_u32_value),
+            height: stream.get("height").and_then(parse_u32_value),
+            sample_rate: stream.get("sample_rate").and_then(parse_u32_value),
+            channels: stream.get("channels").and_then(parse_u32_value),
+        };
         match codec_type {
             Some("video") if probe.primary_video_codec.is_none() => {
                 probe.primary_video_codec = codec_name;
@@ -1734,8 +1839,19 @@ fn parse_probe(json: &str, warnings: WarningCounters) -> Result<SegmentProbe, St
             }
             _ => {}
         }
+        probe.streams.push(probe_stream);
     }
     Ok(probe)
+}
+
+fn parse_u32_value(value: &Value) -> Option<u32> {
+    value.as_u64().and_then(|value| u32::try_from(value).ok()).or_else(|| {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "N/A")
+            .and_then(|value| value.parse::<u32>().ok())
+    })
 }
 
 fn detect_video_codec(probe: &SegmentProbe) -> RepairVideoCodec {
@@ -1746,17 +1862,68 @@ fn detect_video_codec(probe: &SegmentProbe) -> RepairVideoCodec {
     }
 }
 
+fn select_repair_remux_streams(probe: &SegmentProbe) -> Result<RepairRemuxStreamSelection, String> {
+    let mut mapped_streams = Vec::new();
+    let mut dropped_streams = Vec::new();
+    let mut has_video = false;
+    for stream in &probe.streams {
+        match stream.stream_type {
+            SegmentProbeStreamType::Video if valid_video_stream(stream) => {
+                has_video = true;
+                mapped_streams.push(stream.index);
+            }
+            SegmentProbeStreamType::Audio if valid_audio_stream(stream) => {
+                mapped_streams.push(stream.index);
+            }
+            SegmentProbeStreamType::Video => dropped_streams.push(RepairRemuxDroppedStream {
+                index: stream.index,
+                reason: "invalid-video-parameters",
+            }),
+            SegmentProbeStreamType::Audio => dropped_streams.push(RepairRemuxDroppedStream {
+                index: stream.index,
+                reason: "invalid-audio-parameters",
+            }),
+            SegmentProbeStreamType::Other => dropped_streams.push(RepairRemuxDroppedStream {
+                index: stream.index,
+                reason: "unsupported-stream-type",
+            }),
+        }
+    }
+    if !has_video {
+        return Err("no_valid_video_stream".to_string());
+    }
+    Ok(RepairRemuxStreamSelection { mapped_streams, dropped_streams })
+}
+
+fn valid_video_stream(stream: &SegmentProbeStream) -> bool {
+    stream.codec_name.as_deref().is_some_and(|codec| !codec.is_empty())
+        && stream.width.unwrap_or_default() > 0
+        && stream.height.unwrap_or_default() > 0
+}
+
+fn valid_audio_stream(stream: &SegmentProbeStream) -> bool {
+    stream.codec_name.as_deref().is_some_and(|codec| !codec.is_empty())
+        && stream.sample_rate.unwrap_or_default() > 0
+        && stream.channels.unwrap_or_default() > 0
+}
+
 fn validate_repair(
     config: &HlsSegmentRepairConfig,
     codec: RepairVideoCodec,
     raw: &SegmentProbe,
     fixed: &SegmentProbe,
     executed_level: HlsSegmentRepairMode,
+    stream_selection: &RepairRemuxStreamSelection,
 ) -> Result<(), String> {
     if codec == RepairVideoCodec::Unsupported {
         return Err("unsupported_codec".to_string());
     }
-    if raw.stream_count != fixed.stream_count {
+    let expected_stream_count = if stream_selection.dropped_streams.is_empty() {
+        raw.stream_count
+    } else {
+        stream_selection.mapped_streams.len()
+    };
+    if expected_stream_count != fixed.stream_count {
         return Err("stream_count_changed".to_string());
     }
     if raw.primary_video_codec != fixed.primary_video_codec {
@@ -1870,10 +2037,10 @@ impl fmt::Display for RepairStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_video_codec, parse_ffmpeg_warnings, parse_probe, repair_object_metadata_key, sha256_file,
-        validate_repair, HlsRepairObjectMetadata, HlsRepairRenderedObjectId, HlsSegmentRepairManager,
-        HlsSegmentRepairObjectContext, HlsSegmentRepairSource, RepairIdentity, RepairStatus, RepairVideoCodec,
-        WarningCounters, REPAIR_METADATA_MAX_ENTRIES,
+        detect_video_codec, parse_ffmpeg_warnings, parse_probe, repair_object_metadata_key, select_repair_remux_streams,
+        sha256_file, validate_repair, HlsRepairObjectMetadata, HlsRepairRenderedObjectId, HlsSegmentRepairManager,
+        HlsSegmentRepairObjectContext, HlsSegmentRepairSource, RepairIdentity, RepairRemuxStreamSelection,
+        RepairStatus, RepairVideoCodec, WarningCounters, REPAIR_METADATA_MAX_ENTRIES,
     };
     use crate::{
         api::model::{
@@ -1905,7 +2072,7 @@ mod tests {
             rendered_object_id: HlsRepairRenderedObjectId::Normal { proxy_seq: resource_id.parse().unwrap_or(1) },
             resource_id: resource_id.to_string(),
             file_ext: "ts".to_string(),
-            normalized_origin_uri: format!("http://origin.example/{resource_id}.ts"),
+            origin_fetch_uri_for_diagnostics: format!("http://origin.example/{resource_id}.ts"),
             media_sequence: Some(1),
             discontinuity_sequence: Some(0),
             complete_object: true,
@@ -2070,6 +2237,86 @@ mod tests {
     }
 
     #[test]
+    fn repair_remux_selection_drops_invalid_audio_side_stream() {
+        let probe = parse_probe(
+            r#"{
+                "streams": [
+                    { "index": 0, "codec_type": "video", "codec_name": "hevc", "width": 1916, "height": 1080 },
+                    { "index": 1, "codec_type": "audio", "codec_name": "ac3", "sample_rate": "48000", "channels": 6 },
+                    { "index": 2, "codec_type": "audio", "codec_name": "ac3", "channels": 0 }
+                ],
+                "format": { "duration": "2.000000", "size": "1000" }
+            }"#,
+            WarningCounters::default(),
+        )
+        .expect("probe should parse");
+
+        let selection = select_repair_remux_streams(&probe).expect("valid video should allow remux");
+
+        assert_eq!(selection.mapped_streams, vec![0, 1]);
+        assert_eq!(selection.dropped_streams.len(), 1);
+        assert_eq!(selection.dropped_streams[0].index, 2);
+        assert_eq!(selection.dropped_streams[0].reason, "invalid-audio-parameters");
+    }
+
+    #[test]
+    fn repair_validation_allows_configured_stream_drop() {
+        let raw = parse_probe(
+            r#"{
+                "streams": [
+                    { "index": 0, "codec_type": "video", "codec_name": "hevc", "width": 1916, "height": 1080, "start_time": "0.000000" },
+                    { "index": 1, "codec_type": "audio", "codec_name": "ac3", "sample_rate": "48000", "channels": 6, "start_time": "0.000000" },
+                    { "index": 2, "codec_type": "audio", "codec_name": "ac3", "channels": 0, "start_time": "0.000000" }
+                ],
+                "format": { "duration": "2.000000", "size": "1000" }
+            }"#,
+            WarningCounters { codec_parameters_missing: 1, ..WarningCounters::default() },
+        )
+        .expect("raw probe should parse");
+        let fixed = parse_probe(
+            r#"{
+                "streams": [
+                    { "index": 0, "codec_type": "video", "codec_name": "hevc", "width": 1916, "height": 1080, "start_time": "0.000000" },
+                    { "index": 1, "codec_type": "audio", "codec_name": "ac3", "sample_rate": "48000", "channels": 6, "start_time": "0.000000" }
+                ],
+                "format": { "duration": "2.000000", "size": "1000" }
+            }"#,
+            WarningCounters::default(),
+        )
+        .expect("fixed probe should parse");
+        let selection = select_repair_remux_streams(&raw).expect("raw should select valid streams");
+
+        assert!(validate_repair(
+            &repair_config(HlsSegmentRepairMode::Low, 1),
+            RepairVideoCodec::Hevc,
+            &raw,
+            &fixed,
+            HlsSegmentRepairMode::Low,
+            &selection
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn repair_remux_selection_rejects_without_valid_video() {
+        let probe = parse_probe(
+            r#"{
+                "streams": [
+                    { "index": 0, "codec_type": "video", "codec_name": "hevc", "height": 1080 },
+                    { "index": 1, "codec_type": "audio", "codec_name": "ac3", "sample_rate": "48000", "channels": 6 }
+                ],
+                "format": { "duration": "2.000000", "size": "1000" }
+            }"#,
+            WarningCounters::default(),
+        )
+        .expect("probe should parse");
+
+        let err = select_repair_remux_streams(&probe).expect_err("missing width should reject video");
+
+        assert_eq!(err, "no_valid_video_stream");
+    }
+
+    #[test]
     fn hevc_validation_accepts_when_repair_triggers_are_removed() {
         let raw = parse_probe(
             r#"{
@@ -2105,7 +2352,8 @@ mod tests {
             RepairVideoCodec::Hevc,
             &raw,
             &fixed,
-            HlsSegmentRepairMode::Medium
+            HlsSegmentRepairMode::Medium,
+            &RepairRemuxStreamSelection::preserve_all(&raw)
         )
         .is_ok());
     }
@@ -2141,6 +2389,7 @@ mod tests {
             &raw,
             &fixed,
             HlsSegmentRepairMode::High,
+            &RepairRemuxStreamSelection::preserve_all(&raw),
         )
         .expect_err("remaining medium trigger should fail validation");
         assert_eq!(err, "repair_triggers_remaining");
@@ -2172,6 +2421,21 @@ mod tests {
         assert_eq!(selected_repair_mode(&manager, &first).await, Some(HlsSegmentRepairMode::Low));
         assert_eq!(selected_repair_mode(&manager, &first).await, None);
         assert_eq!(selected_repair_mode(&manager, &second).await, None);
+    }
+
+    #[tokio::test]
+    async fn background_candidate_without_access_lease_is_ignored_before_window_check() {
+        let manager = HlsSegmentRepairManager::new(repair_config(HlsSegmentRepairMode::Low, 1));
+        manager.start_access_lease_window(HlsAccessLeaseId("lease-a".to_string())).await;
+        let mut context = repair_context("lease-a", "000001");
+        context.hls_access_lease_id = None;
+
+        assert_eq!(selected_repair_mode(&manager, &context).await, None);
+
+        let stats = manager.stats().await;
+        assert_eq!(stats.windows, 1);
+        assert_eq!(stats.checked_candidates, 0);
+        assert_eq!(stats.object_metadata, 0);
     }
 
     #[tokio::test]
@@ -2295,6 +2559,38 @@ mod tests {
         assert!(!manager.object_metadata_matches(&object_key, "new-hash").await);
     }
 
+    #[test]
+    fn repair_object_metadata_key_ignores_origin_fetch_uri_for_diagnostics() {
+        let mut first = repair_context("lease-a", "1");
+        first.origin_fetch_uri_for_diagnostics = "http://mirror-a.example/live/1.ts".to_string();
+        let mut second = first.clone();
+        second.origin_fetch_uri_for_diagnostics = "http://redirect-b.example/cdn/path/1.ts".to_string();
+
+        assert_eq!(
+            repair_object_metadata_key(&first, HlsSegmentRepairMode::Low),
+            repair_object_metadata_key(&second, HlsSegmentRepairMode::Low)
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_window_candidate_key_ignores_origin_fetch_uri_for_diagnostics() {
+        let manager = HlsSegmentRepairManager::new(repair_config(HlsSegmentRepairMode::Low, 2));
+        manager.start_access_lease_window(HlsAccessLeaseId("lease-a".to_string())).await;
+        let mut first = repair_context("lease-a", "1");
+        first.origin_fetch_uri_for_diagnostics = "http://mirror-a.example/live/1.ts".to_string();
+        let mut same_rendered_object_other_fetch_uri = first.clone();
+        same_rendered_object_other_fetch_uri.origin_fetch_uri_for_diagnostics =
+            "http://redirect-b.example/cdn/path/1.ts".to_string();
+        let second_rendered_object = repair_context("lease-a", "2");
+
+        assert_eq!(selected_repair_mode(&manager, &first).await, Some(HlsSegmentRepairMode::Low));
+        assert_eq!(selected_repair_mode(&manager, &same_rendered_object_other_fetch_uri).await, None);
+        assert_eq!(
+            selected_repair_mode(&manager, &second_rendered_object).await,
+            Some(HlsSegmentRepairMode::Low)
+        );
+    }
+
     #[tokio::test]
     async fn repair_disabled_does_not_track_candidates() {
         let manager = HlsSegmentRepairManager::new(repair_config(HlsSegmentRepairMode::Off, 1));
@@ -2315,18 +2611,18 @@ mod tests {
         commit_context.rendered_object_id =
             HlsRepairRenderedObjectId::Transient { resource_id: "resource-a".to_string() };
         commit_context.resource_id = "resource-a".to_string();
-        commit_context.normalized_origin_uri = "http://origin.example/live/resource-a.ts".to_string();
+        commit_context.origin_fetch_uri_for_diagnostics = "http://origin.example/live/resource-a.ts".to_string();
         commit_context.media_sequence = None;
         commit_context.discontinuity_sequence = None;
 
         let mut cache_hit_context = commit_context.clone();
-        cache_hit_context.normalized_origin_uri = "resource-a".to_string();
+        cache_hit_context.origin_fetch_uri_for_diagnostics = "resource-a".to_string();
 
         let mut second_context = commit_context.clone();
         second_context.rendered_object_id =
             HlsRepairRenderedObjectId::Transient { resource_id: "resource-b".to_string() };
         second_context.resource_id = "resource-b".to_string();
-        second_context.normalized_origin_uri = "resource-b".to_string();
+        second_context.origin_fetch_uri_for_diagnostics = "resource-b".to_string();
 
         assert_eq!(selected_repair_mode(&manager, &commit_context).await, Some(HlsSegmentRepairMode::Low));
         assert_eq!(selected_repair_mode(&manager, &cache_hit_context).await, None);
@@ -2339,7 +2635,7 @@ mod tests {
         manager.start_access_lease_window(HlsAccessLeaseId("lease-a".to_string())).await;
         let commit_context = repair_context("lease-a", "1");
         let mut cache_hit_context = commit_context.clone();
-        cache_hit_context.normalized_origin_uri = "http://redirect.example/other-path.ts".to_string();
+        cache_hit_context.origin_fetch_uri_for_diagnostics = "http://redirect.example/other-path.ts".to_string();
         cache_hit_context.media_sequence = Some(99);
         cache_hit_context.discontinuity_sequence = Some(7);
         let second_context = repair_context("lease-a", "2");

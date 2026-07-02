@@ -861,7 +861,7 @@ pub async fn create_provider_stream(
             if let (Some(boxed_provider_stream), response_info) = create_channel_unavailable_stream(
                 &app_state.app_config,
                 &get_response_headers(stream_options.get_headers()),
-                status,
+                StatusCode::OK,
             ) {
                 return Some((boxed_provider_stream, response_info));
             }

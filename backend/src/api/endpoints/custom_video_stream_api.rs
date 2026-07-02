@@ -4,11 +4,11 @@ use crate::{
         endpoints::hls_api::{
             build_virtual_hls_entry_path, hls_panel_provisioning_poll_manifest_response,
             hls_shared_panel_provisioning_poll_manifest_response, resolve_hls_virtual_input_for_target,
-            validate_hls_shared_panel_provisioning_segment_access,
         },
         model::{
-            create_custom_video_stream_response, parse_hls_panel_provisioning_segment_route_name, AppState,
-            CustomVideoStreamType, TransportStreamBuffer,
+            create_custom_video_stream_response, hls_custom_video_manifest_response_with_virtual_id,
+            parse_hls_panel_provisioning_segment_route_name, AppState, CustomVideoStreamType,
+            TransportStreamBuffer,
         },
     },
     auth::{check_network_access_only, resolve_api_user_context, verify_access_token, Fingerprint},
@@ -28,6 +28,7 @@ use std::{str::FromStr, sync::Arc};
 use url::form_urlencoded;
 
 const HLS_CVS_CONTENT_TYPE: &str = "video/mp2t";
+const HLS_CVS_MEDIA_EXTENSIONS: &[&str] = &["ts", "mp4", "m4s", "m4v"];
 const ACCEPT_RANGES_VALUE: &str = "bytes";
 const HLS_CVS_CACHE_CONTROL: &str = "no-store";
 
@@ -98,6 +99,7 @@ async fn cvs_typed_api(
         String,
         String,
     )>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     headers: HeaderMap,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
@@ -113,7 +115,7 @@ async fn cvs_typed_api(
         stream_type: &stream_type,
         route_kind,
         request_headers: &headers,
-        raw_query: None,
+        raw_query: raw_query.as_deref(),
         app_state: &app_state,
     })
 }
@@ -158,7 +160,26 @@ fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
         }
     }
 
-    let cvs_type = stream_type.strip_suffix(".ts").unwrap_or(stream_type);
+    if route_kind == CvsRouteKind::Hls {
+        if let Some(cvs_type) = stream_type.strip_suffix(".m3u8") {
+            let Ok(custom_video_type) = CustomVideoStreamType::from_str(cvs_type) else {
+                return axum::http::StatusCode::NOT_FOUND.into_response();
+            };
+            let (user, _) = match resolve_hls_cvs_user_context(app_state, fingerprint, username, password) {
+                Ok(context) => context,
+                Err(response) => return *response,
+            };
+            return hls_custom_video_manifest_response_with_virtual_id(
+                app_state,
+                &user,
+                custom_video_type,
+                StatusCode::NOT_FOUND,
+                None,
+            );
+        }
+    }
+
+    let cvs_type = strip_hls_custom_video_media_extension(stream_type);
 
     let Ok(custom_video_type) = CustomVideoStreamType::from_str(cvs_type) else {
         return axum::http::StatusCode::NOT_FOUND.into_response();
@@ -194,6 +215,13 @@ fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
         CvsRouteKind::Ts => create_custom_video_stream_response(app_state, &fingerprint.addr, custom_video_type)
             .into_response(),
     }
+}
+
+fn strip_hls_custom_video_media_extension(stream_type: &str) -> &str {
+    stream_type
+        .rsplit_once('.')
+        .filter(|(_, extension)| HLS_CVS_MEDIA_EXTENSIONS.contains(extension))
+        .map_or(stream_type, |(raw, _)| raw)
 }
 
 fn hls_provisioning_segment_buffer(app_state: &Arc<AppState>, index: usize) -> Option<TransportStreamBuffer> {
@@ -416,25 +444,16 @@ async fn cvs_shared_provisioning_manifest_api(
 }
 
 async fn cvs_shared_provisioning_segment_api(
-    fingerprint: Fingerprint,
-    axum::extract::Path((proxy_session_id, access_lease_id, stream_type)): axum::extract::Path<(
+    _fingerprint: Fingerprint,
+    axum::extract::Path((_proxy_session_id, _access_lease_id, _stream_type)): axum::extract::Path<(
         String,
         String,
         String,
     )>,
-    headers: HeaderMap,
-    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    _headers: HeaderMap,
+    axum::extract::State(_app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
-    let Some(index) = parse_hls_panel_provisioning_segment_route_name(&stream_type) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    if let Err(response) =
-        validate_hls_shared_panel_provisioning_segment_access(&app_state, &fingerprint, &proxy_session_id, &access_lease_id)
-            .await
-    {
-        return response;
-    }
-    create_hls_provisioning_segment_response(&app_state, &headers, index)
+    StatusCode::NOT_FOUND.into_response()
 }
 
 pub fn cvs_api_register() -> axum::Router<Arc<AppState>> {
@@ -457,7 +476,10 @@ pub fn cvs_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod hls_cvs_tests {
-    use super::{build_hls_cvs_response_from_buffer, resolve_hls_cvs_range, HlsCvsRange};
+    use super::{
+        build_hls_cvs_response_from_buffer, resolve_hls_cvs_range, strip_hls_custom_video_media_extension,
+        HlsCvsRange,
+    };
     use crate::api::model::TransportStreamBuffer;
     use axum::{
         body::to_bytes,
@@ -507,6 +529,18 @@ mod hls_cvs_tests {
         let range = HeaderValue::from_static("bytes=0-1,4-5");
 
         assert_eq!(resolve_hls_cvs_range(Some(&range), 376), HlsCvsRange::Unsatisfiable);
+    }
+
+    #[test]
+    fn hls_cvs_media_extension_parser_accepts_supported_segment_types() {
+        for extension in ["ts", "mp4", "m4s", "m4v"] {
+            assert_eq!(
+                strip_hls_custom_video_media_extension(&format!("channel_unavailable.{extension}")),
+                "channel_unavailable"
+            );
+        }
+        assert_eq!(strip_hls_custom_video_media_extension("channel_unavailable.m4a"), "channel_unavailable.m4a");
+        assert_eq!(strip_hls_custom_video_media_extension("channel_unavailable.m3u8"), "channel_unavailable.m3u8");
     }
 
     #[tokio::test]
@@ -560,13 +594,18 @@ mod tests {
             SharedStreamManager, TransportStreamBuffer, UpdateGuard,
         },
         model::{
-            ApiProxyConfig, AppConfig, Config, ConfigInput, ConfigSource, ConfigTarget, CustomStreamResponse,
-            MediaToolCapabilities, ProxyUserCredentials, SourcesConfig, TargetOutput, TargetUser,
+            ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, ConfigSource, ConfigTarget,
+            CustomStreamResponse, MediaToolCapabilities, ProxyUserCredentials, SourcesConfig, TargetOutput, TargetUser,
             XtreamTargetFlagsSet, XtreamTargetOutput,
         },
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
-    use axum::{body::Body, http::{Request, StatusCode}, Router};
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+        response::IntoResponse,
+        Router,
+    };
     use crate::utils::{FileLockManager, GeoIp};
     use std::{collections::HashMap, sync::Arc};
     use tower::ServiceExt;
@@ -629,12 +668,25 @@ mod tests {
         expired_user.exp_date = Some(0);
         let expired_user = Arc::new(expired_user);
         let api_proxy = ApiProxyConfig {
+            server: vec![ApiProxyServerInfo {
+                name: "default".to_string(),
+                protocol: "https".to_string(),
+                host: "example.test".to_string(),
+                port: None,
+                timezone: "UTC".to_string(),
+                message: String::new(),
+                path: Some("iptv".to_string()),
+            }],
             user: vec![TargetUser { target: target.name.clone(), credentials: vec![expired_user] }],
             ..ApiProxyConfig::default()
         };
 
         let app_cfg = AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(Config { user_access_control: true, ..Config::default() })),
+            config: Arc::new(ArcSwap::from_pointee(Config {
+                user_access_control: true,
+                custom_stream_response_enabled: true,
+                ..Config::default()
+            })),
             sources: Arc::new(ArcSwap::from_pointee(sources)),
             hdhomerun: Arc::new(ArcSwapOption::default()),
             api_proxy: Arc::new(ArcSwapOption::from_pointee(api_proxy)),
@@ -733,19 +785,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cvs_api_internal_api_proxy_user_returns_bad_request_for_channel_unavailable() {
+    async fn custom_video_stream_response_returns_ok_for_channel_unavailable() {
         let app_state = create_test_app_state();
-        let router = cvs_api_register().with_state(app_state);
-        let token = crate::auth::create_access_token(&[0; 32], 30);
-        let request = Request::builder()
-            .method("GET")
-            .uri(format!("/cvs/api_user/api_user/channel_unavailable.ts?token={token}"))
-            .body(Body::empty())
-            .expect("request");
+        let response = crate::api::model::create_custom_video_stream_response(
+            &app_state,
+            &test_fingerprint().addr,
+            crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+        )
+        .into_response();
 
-        let response = Router::into_service(router).oneshot(request).await.expect("response");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp2t");
     }
 
     #[tokio::test]
@@ -769,11 +819,34 @@ mod tests {
         let headers = axum::http::HeaderMap::new();
         let fingerprint = test_fingerprint();
 
+        for extension in ["ts", "mp4", "m4s", "m4v"] {
+            let response = super::cvs_api_response(super::CvsApiResponseContext {
+                fingerprint: &fingerprint,
+                username: "viewer",
+                password: "secret",
+                stream_type: &format!("channel_unavailable.{extension}"),
+                route_kind: super::CvsRouteKind::Hls,
+                request_headers: &headers,
+                raw_query: None,
+                app_state: &app_state,
+            });
+
+            assert_eq!(response.status(), StatusCode::OK, "{extension} custom response should be served");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp2t");
+        }
+    }
+
+    #[tokio::test]
+    async fn hls_cvs_manifest_allows_expired_user_custom_response() {
+        let app_state = create_test_app_state();
+        let headers = axum::http::HeaderMap::new();
+        let fingerprint = test_fingerprint();
+
         let response = super::cvs_api_response(super::CvsApiResponseContext {
             fingerprint: &fingerprint,
             username: "viewer",
             password: "secret",
-            stream_type: "channel_unavailable.ts",
+            stream_type: "channel_unavailable.m3u8",
             route_kind: super::CvsRouteKind::Hls,
             request_headers: &headers,
             raw_query: None,
@@ -781,6 +854,10 @@ mod tests {
         });
 
         assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body should collect");
+        let body = String::from_utf8(body.to_vec()).expect("manifest is utf-8");
+        assert!(body.contains("#EXTM3U"));
+        assert!(body.contains("/cvs/hls/viewer/secret/channel_unavailable.ts"));
     }
 
     #[tokio::test]

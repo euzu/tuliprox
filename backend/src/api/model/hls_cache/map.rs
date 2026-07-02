@@ -18,6 +18,12 @@ impl From<u64> for ProxyMapId {
 #[derive(Clone, Eq, PartialEq)]
 pub struct OriginMapKey {
     pub origin_epoch: u64,
+    /// Concrete absolute MAP fetch URI resolved against the final manifest URL.
+    ///
+    /// This may intentionally contain a provider mirror, redirect target, or CDN
+    /// host. Do not normalize it back to `provider://` or the original manifest
+    /// host unless a separate semantic identity is introduced and refetch safety
+    /// for relative EXT-X-MAP URIs is proven.
     pub resolved_origin_uri: String,
     pub byte_range: Option<ParsedByteRange>,
 }
@@ -47,8 +53,16 @@ impl Hash for OriginMapKey {
     }
 }
 
+/// Volatile concrete origin URL for one EXT-X-MAP download.
+///
+/// The URL is resolved against the final fetched manifest URL and may include a redirect/CDN host. Use it only as a
+/// fetch target or sanitized diagnostics; stable proxy cache identity is `MapCacheKey`.
 #[derive(Clone, Eq, PartialEq)]
 pub struct OriginMapFetchRef {
+    /// Concrete URL used to refetch the MAP object.
+    ///
+    /// Keep this aligned with `OriginMapKey::resolved_origin_uri`; relative MAP
+    /// URIs must remain resolved against the final manifest URL after redirects.
     pub resolved_origin_url: String,
     pub byte_range: Option<ParsedByteRange>,
     pub valid_until_ms: Option<u64>,
@@ -114,6 +128,11 @@ impl fmt::Debug for MapEntry {
 impl MapEntry {
     pub fn default_content_type() -> &'static str { "video/mp4" }
 
+    /// Creates a proxy MAP entry from a concrete origin MAP key.
+    ///
+    /// `origin_fetch_ref` intentionally starts from `origin_key.resolved_origin_uri`.
+    /// Until a separate semantic MAP identity exists, this preserves the final
+    /// redirect/CDN fetch URL required to reload relative EXT-X-MAP resources.
     pub fn new(
         proxy_session_id: &ProxySessionId,
         proxy_map_id: ProxyMapId,
@@ -148,5 +167,27 @@ impl HlsSession {
                 map.status = MapCacheStatus::Queued { queued_at_ms: now_ms };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MapEntry, OriginMapKey, ParsedByteRange, ProxyMapId};
+    use crate::api::model::ProxySessionId;
+
+    #[test]
+    fn map_entry_preserves_concrete_fetch_url_and_byte_range() {
+        let key = OriginMapKey {
+            origin_epoch: 0,
+            resolved_origin_uri: "https://cdn.example.net/live/redirected/init.mp4".to_string(),
+            byte_range: Some(ParsedByteRange { length: 100, offset: 50 }),
+        };
+
+        let entry = MapEntry::new(&ProxySessionId("proxy".to_string()), ProxyMapId(7), key.clone(), "mp4".to_string());
+
+        assert_eq!(entry.origin_key, key);
+        let fetch_ref = entry.origin_fetch_ref.as_ref().expect("fetch ref");
+        assert_eq!(fetch_ref.resolved_origin_url, "https://cdn.example.net/live/redirected/init.mp4");
+        assert_eq!(fetch_ref.byte_range, Some(ParsedByteRange { length: 100, offset: 50 }));
     }
 }

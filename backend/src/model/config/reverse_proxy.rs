@@ -3,8 +3,9 @@ use crate::model::{macros, GeoIpConfig, QosAggregationConfig, RateLimitConfig, S
 use regex::Regex;
 use shared::model::{
     HlsCacheConfigDto, HlsCorruptSegmentWatchdogConfigDto, HlsCorruptSegmentWatchdogModeDto,
-    HlsSegmentRepairConfigDto, HlsSegmentRepairModeDto, HlsSegmentRepairSizeIncreaseConfigDto,
-    ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, StripModeDto, REGEX_CACHE,
+    HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevelDto, HlsSegmentRepairConfigDto,
+    HlsSegmentRepairModeDto, HlsSegmentRepairSizeIncreaseConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto,
+    ReverseProxyDisabledHeaderConfigDto, StripModeDto, REGEX_CACHE,
 };
 use shared::utils::{default_resource_retry_attempts, default_resource_retry_backoff_ms, default_resource_retry_backoff_multiplier, hex_to_u8_16, u8_16_to_hex};
 use std::cmp::max;
@@ -252,6 +253,105 @@ impl From<HlsCorruptSegmentWatchdogMode> for HlsCorruptSegmentWatchdogModeDto {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub enum HlsManifestRecoveryBurstLevel {
+    Off,
+    Friendly,
+    Cautious,
+    Balanced,
+    Intense,
+    Aggressive,
+    Beast,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct HlsManifestRecoveryBurstPlan {
+    pub slots: usize,
+    pub lanes_per_slot: usize,
+}
+
+impl HlsManifestRecoveryBurstLevel {
+    pub const fn plan(self) -> HlsManifestRecoveryBurstPlan {
+        match self {
+            Self::Off => HlsManifestRecoveryBurstPlan { slots: 1, lanes_per_slot: 1 },
+            Self::Friendly => HlsManifestRecoveryBurstPlan { slots: 2, lanes_per_slot: 1 },
+            Self::Cautious => HlsManifestRecoveryBurstPlan { slots: 3, lanes_per_slot: 1 },
+            Self::Balanced => HlsManifestRecoveryBurstPlan { slots: 4, lanes_per_slot: 1 },
+            Self::Intense => HlsManifestRecoveryBurstPlan { slots: 5, lanes_per_slot: 1 },
+            Self::Aggressive => HlsManifestRecoveryBurstPlan { slots: 6, lanes_per_slot: 1 },
+            Self::Beast => HlsManifestRecoveryBurstPlan { slots: 6, lanes_per_slot: 2 },
+        }
+    }
+
+    pub const fn extra_candidates(self) -> usize { self.plan().total_candidates().saturating_sub(1) }
+
+    pub const fn total_candidates(self) -> usize { self.plan().total_candidates() }
+}
+
+impl HlsManifestRecoveryBurstPlan {
+    pub const fn total_candidates(self) -> usize { self.slots.saturating_mul(self.lanes_per_slot) }
+
+    pub const fn slot_for_candidate(self, candidate_index: usize) -> usize {
+        match candidate_index.checked_div(self.lanes_per_slot) {
+            Some(slot) => slot,
+            None => 0,
+        }
+    }
+}
+
+impl From<HlsManifestRecoveryBurstLevelDto> for HlsManifestRecoveryBurstLevel {
+    fn from(level: HlsManifestRecoveryBurstLevelDto) -> Self {
+        match level {
+            HlsManifestRecoveryBurstLevelDto::Off => Self::Off,
+            HlsManifestRecoveryBurstLevelDto::Friendly => Self::Friendly,
+            HlsManifestRecoveryBurstLevelDto::Cautious => Self::Cautious,
+            HlsManifestRecoveryBurstLevelDto::Balanced => Self::Balanced,
+            HlsManifestRecoveryBurstLevelDto::Intense => Self::Intense,
+            HlsManifestRecoveryBurstLevelDto::Aggressive => Self::Aggressive,
+            HlsManifestRecoveryBurstLevelDto::Beast => Self::Beast,
+        }
+    }
+}
+
+impl From<HlsManifestRecoveryBurstLevel> for HlsManifestRecoveryBurstLevelDto {
+    fn from(level: HlsManifestRecoveryBurstLevel) -> Self {
+        match level {
+            HlsManifestRecoveryBurstLevel::Off => Self::Off,
+            HlsManifestRecoveryBurstLevel::Friendly => Self::Friendly,
+            HlsManifestRecoveryBurstLevel::Cautious => Self::Cautious,
+            HlsManifestRecoveryBurstLevel::Balanced => Self::Balanced,
+            HlsManifestRecoveryBurstLevel::Intense => Self::Intense,
+            HlsManifestRecoveryBurstLevel::Aggressive => Self::Aggressive,
+            HlsManifestRecoveryBurstLevel::Beast => Self::Beast,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct HlsManifestRecoveryBurstConfig {
+    pub level: HlsManifestRecoveryBurstLevel,
+}
+
+impl Default for HlsManifestRecoveryBurstConfig {
+    fn default() -> Self { Self::from(&HlsManifestRecoveryBurstConfigDto::default()) }
+}
+
+impl From<&HlsManifestRecoveryBurstConfigDto> for HlsManifestRecoveryBurstConfig {
+    fn from(dto: &HlsManifestRecoveryBurstConfigDto) -> Self {
+        Self {
+            level: HlsManifestRecoveryBurstLevel::from(dto.level),
+        }
+    }
+}
+
+impl From<&HlsManifestRecoveryBurstConfig> for HlsManifestRecoveryBurstConfigDto {
+    fn from(config: &HlsManifestRecoveryBurstConfig) -> Self {
+        Self {
+            level: HlsManifestRecoveryBurstLevelDto::from(config.level),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HlsSegmentRepairSizeIncreaseConfig {
     pub low_percent: u8,
@@ -366,6 +466,7 @@ pub struct HlsCacheConfig {
     pub origin_manifest_timeout_ms: u64,
     pub origin_segment_timeout_ms: u64,
     pub session_idle_timeout: u64,
+    pub manifest_recovery_burst: HlsManifestRecoveryBurstConfig,
     pub segment_repair: HlsSegmentRepairConfig,
 }
 
@@ -393,6 +494,7 @@ impl From<&HlsCacheConfigDto> for HlsCacheConfig {
             origin_manifest_timeout_ms: dto.origin_manifest_timeout_ms,
             origin_segment_timeout_ms: dto.origin_segment_timeout_ms,
             session_idle_timeout: dto.session_idle_timeout,
+            manifest_recovery_burst: HlsManifestRecoveryBurstConfig::from(&dto.manifest_recovery_burst),
             segment_repair: HlsSegmentRepairConfig::from(&dto.segment_repair),
         }
     }
@@ -412,6 +514,7 @@ impl From<&HlsCacheConfig> for HlsCacheConfigDto {
             origin_manifest_timeout_ms: config.origin_manifest_timeout_ms,
             origin_segment_timeout_ms: config.origin_segment_timeout_ms,
             session_idle_timeout: config.session_idle_timeout,
+            manifest_recovery_burst: HlsManifestRecoveryBurstConfigDto::from(&config.manifest_recovery_burst),
             segment_repair: HlsSegmentRepairConfigDto::from(&config.segment_repair),
         }
     }
@@ -485,7 +588,10 @@ impl From<&ReverseProxyConfig> for ReverseProxyConfigDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{HlsCacheConfig, HlsSegmentRepairConfig, HlsSegmentRepairMode, ReverseProxyConfig, StripMode};
+    use super::{
+        HlsCacheConfig, HlsManifestRecoveryBurstConfig, HlsManifestRecoveryBurstLevel, HlsSegmentRepairConfig,
+        HlsSegmentRepairMode, ReverseProxyConfig, StripMode,
+    };
     use shared::model::{ByteSizeDto, HlsCacheConfigDto, QosAggregationConfigDto, ReverseProxyConfigDto, StreamHistoryConfigDto};
 
     #[test]
@@ -532,6 +638,19 @@ mod tests {
     }
 
     #[test]
+    fn manifest_recovery_beast_burst_uses_two_lanes_per_aggressive_slot() {
+        let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
+
+        assert_eq!(plan.slots, 6);
+        assert_eq!(plan.lanes_per_slot, 2);
+        assert_eq!(plan.total_candidates(), 12);
+        assert_eq!(plan.slot_for_candidate(0), 0);
+        assert_eq!(plan.slot_for_candidate(1), 0);
+        assert_eq!(plan.slot_for_candidate(2), 1);
+        assert_eq!(plan.slot_for_candidate(11), 5);
+    }
+
+    #[test]
     fn reverse_proxy_config_preserves_default_hls_cache_settings() {
         let dto = ReverseProxyConfigDto {
             rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
@@ -561,6 +680,7 @@ mod tests {
                 origin_manifest_timeout_ms: 3_000,
                 origin_segment_timeout_ms: 10_000,
                 session_idle_timeout: 300,
+                manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
                 segment_repair: HlsSegmentRepairConfig {
                     max_level: HlsSegmentRepairMode::Off,
                     apply_to_first_segments: 1,

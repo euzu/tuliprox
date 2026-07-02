@@ -1,25 +1,21 @@
 use super::{
-    begin_hls_origin_account_io, classify_hls_resource_status, finish_hls_origin_account_io,
-    force_identity_without_range, hls_object_body_deadline, log_hls_resource_attempt_started,
-    log_hls_resource_attempt_succeeded, log_hls_resource_fetch_failed, log_hls_resource_retry_scheduled,
-    log_hls_resource_timeout, scrub_hls_origin_headers, CachedSegmentMetadata, HlsAccessLeaseStore,
-    HlsOriginAccountIoLeaseGuard, HlsOriginIoContext, HlsResourceFetchAttempt, HlsResourceFetchKind,
-    HlsResourceFetchLogContext, HlsResourceFetchLogStatus, HlsResourceStatusClass, HlsSegmentCache,
+    begin_hls_origin_account_io_bounded, build_hls_origin_resource_headers, finish_hls_origin_account_io,
+    hls_object_body_deadline, run_hls_origin_resource_retry_loop_with_attempt_prepare, CachedSegmentMetadata,
+    HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseStore, HlsBoundAccountAcquireErrorKind,
+    HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation, HlsOriginIoContext, HlsOriginResourceClients,
+    HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchKind, HlsResourceFetchSource,
+    HlsSegmentCache,
     HlsSessionHandle, MapCacheKey, MapCacheStatus, OriginMapFetchRef, ProxyMapId, SegmentFetchPolicy,
 };
 use crate::processing::parser::hls::origin_manifest::ParsedByteRange;
 use arc_swap::ArcSwap;
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
-use futures::TryStreamExt;
+use axum::http::HeaderMap;
+use futures::{FutureExt, TryStreamExt};
 use log::debug;
 use reqwest::Client;
-use shared::utils::sanitize_sensitive_info;
-use std::{fmt, io, sync::Arc, time::{Duration, Instant}};
+use std::{fmt, io, sync::Arc};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio_util::io::StreamReader;
-use url::Url;
-
-const MAX_MANUAL_REDIRECTS: usize = 10;
 
 /// Shared context required to schedule EXT-X-MAP origin fetches without holding session locks.
 #[derive(Clone)]
@@ -27,6 +23,7 @@ pub struct MapFetchContext {
     pub session: HlsSessionHandle,
     pub segment_cache: Arc<HlsSegmentCache>,
     pub headers: HeaderMap,
+    pub origin_provider_session_headers: HeaderMap,
     pub client: Client,
     pub no_redirect_client: Client,
     pub use_manual_redirects: bool,
@@ -63,43 +60,7 @@ impl fmt::Debug for MapFetchSnapshot {
     }
 }
 
-#[derive(Debug)]
-enum MapFetchError {
-    PermanentStatus(StatusCode),
-    RetryableStatus(StatusCode),
-    RetryExhausted,
-    NonRetryableStatus(StatusCode),
-    Request(String),
-    Redirect,
-    Timeout,
-    InvalidOriginUrl,
-    InvalidByteRange,
-    UnexpectedByteRangeStatus,
-    Cache,
-    ProviderUnavailable,
-}
-
-impl MapFetchError {
-    fn retryable_failure(&self) -> bool {
-        matches!(
-            self,
-            Self::RetryableStatus(_)
-                | Self::RetryExhausted
-                | Self::Request(_)
-                | Self::Redirect
-                | Self::Timeout
-                | Self::Cache
-                | Self::ProviderUnavailable
-        )
-    }
-
-    fn permanent_status(&self) -> Option<StatusCode> {
-        match self {
-            Self::PermanentStatus(status) | Self::NonRetryableStatus(status) => Some(*status),
-            _ => None,
-        }
-    }
-}
+type MapFetchError = HlsOriginResourceFetchError;
 
 #[derive(Clone)]
 struct MapWorkerRuntime {
@@ -206,11 +167,16 @@ impl HlsMapWorkerPool {
         let cache_key = entry.cache_key.clone();
         entry.status = MapCacheStatus::Fetching { started_at_ms: now_ms };
         session.active_map_fetches = session.active_map_fetches.saturating_add(1);
-        debug!("HLS map fetch started: proxy_map_id={}", proxy_map_id.0);
+        let proxy_map_id_log = format!("{:06}", proxy_map_id.0);
+        debug!(
+            "HLS map fetch started: session={} source=normal resource=map/{}",
+            super::safe_proxy_session_id(&session.proxy_session_id),
+            proxy_map_id_log
+        );
 
         Some(MapFetchSnapshot {
             proxy_map_id,
-            proxy_map_id_log: proxy_map_id.0.to_string(),
+            proxy_map_id_log,
             cache_key,
             fetch_ref,
         })
@@ -227,6 +193,7 @@ impl HlsMapWorkerPool {
         let finished_at_ms = current_time_millis();
         let generation_valid = result.as_ref().map_or(true, |commit| commit.generation_valid);
         let fetch_succeeded = result.is_ok();
+        let mut response_flag_reason = None;
         {
             let mut session = context.session.write().await;
             session.active_map_fetches = session.active_map_fetches.saturating_sub(1);
@@ -236,8 +203,9 @@ impl HlsMapWorkerPool {
                         let content_length = commit.content_length;
                         entry.status = MapCacheStatus::Ready { content_length, ready_at_ms: finished_at_ms };
                         debug!(
-                            "HLS map cached: proxy_map_id={} content_length={content_length}",
-                            snapshot.proxy_map_id.0
+                            "HLS map cached: session={} source=normal resource=map/{} content_length={content_length}",
+                            super::safe_proxy_session_id(&session.proxy_session_id),
+                            snapshot.proxy_map_id_log
                         );
                     }
                     Err(err) => {
@@ -245,6 +213,9 @@ impl HlsMapWorkerPool {
                             entry.status =
                                 MapCacheStatus::FailedRetryable { failed_at_ms: finished_at_ms, retry_after_ms: 1_000 };
                         } else {
+                            response_flag_reason = Some(HlsAccessLeaseChannelUnavailableReason::MapPermanentFailure {
+                                status: err.permanent_status(),
+                            });
                             entry.status =
                                 MapCacheStatus::FailedPermanent { failed_at_ms: finished_at_ms, status: err.permanent_status() };
                         }
@@ -255,10 +226,32 @@ impl HlsMapWorkerPool {
                 let _ = session.render_and_store_manifest(finished_at_ms);
             }
         }
+        if let Some(reason) = response_flag_reason {
+            let marked = self.mark_channel_unavailable_for_session(&context.session, finished_at_ms, reason).await;
+            if marked > 0 {
+                debug!(
+                    "HLS access leases marked channel unavailable: session={} marked={marked}",
+                    super::safe_proxy_session_id(&context.session.read().await.proxy_session_id)
+                );
+            }
+        }
         drop(permit);
         if generation_valid {
             self.schedule_wake(context, finished_at_ms);
         }
+    }
+
+    async fn mark_channel_unavailable_for_session(
+        &self,
+        session: &HlsSessionHandle,
+        now_ms: u64,
+        reason: HlsAccessLeaseChannelUnavailableReason,
+    ) -> usize {
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        self.access_leases
+            .write()
+            .await
+            .mark_channel_unavailable_for_session(&proxy_session_id, now_ms, reason)
     }
 
     fn schedule_wake(self: &Arc<Self>, context: MapFetchContext, now_ms: u64) {
@@ -278,34 +271,51 @@ async fn fetch_map_into_cache(
     snapshot: &MapFetchSnapshot,
     policy: &SegmentFetchPolicy,
 ) -> Result<MapFetchCommit, MapFetchError> {
-    let started_generation = start_map_origin_work(context).await;
+    fetch_map_with_retries_into_cache(context, snapshot, policy).await
+}
+
+struct MapOriginAttemptGuard {
+    started_generation: Option<u64>,
+    provider_lease: Option<(HlsOriginIoContext, HlsOriginAccountIoLeaseGuard)>,
+}
+
+async fn prepare_map_origin_attempt(
+    context: MapFetchContext,
+    policy: SegmentFetchPolicy,
+) -> Result<MapOriginAttemptGuard, MapFetchError> {
+    let started_generation = start_map_origin_work(&context).await;
     let binding =
         if context.origin_io.is_some() { context.session.read().await.origin_account_binding.clone() } else { None };
     let provider_lease = if let (Some(origin_io), Some(binding)) = (context.origin_io.as_ref(), binding.as_ref()) {
         if binding.is_detached() {
-            let _ = finish_map_origin_work(context, started_generation).await;
-            touch_map_origin_account_binding(context, false).await;
-            return Err(MapFetchError::ProviderUnavailable);
+            let _ = finish_map_origin_work(&context, started_generation).await;
+            touch_map_origin_account_binding(&context, false).await;
+            return Err(MapFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::Detached));
         }
-        let Ok(guard) = begin_hls_origin_account_io(origin_io, &context.session, binding).await else {
-            let _ = finish_map_origin_work(context, started_generation).await;
-            touch_map_origin_account_binding(context, false).await;
-            return Err(MapFetchError::ProviderUnavailable);
+        let guard = match begin_hls_origin_account_io_bounded(
+            origin_io,
+            &context.session,
+            binding,
+            hls_object_body_deadline(policy.origin_segment_timeout_ms),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(err) => {
+                let _ = finish_map_origin_work(&context, started_generation).await;
+                touch_map_origin_account_binding(&context, false).await;
+                return Err(MapFetchError::ProviderUnavailable(err));
+            }
         };
         Some((origin_io.clone(), guard))
     } else {
         None
     };
+    Ok(MapOriginAttemptGuard { started_generation, provider_lease })
+}
 
-    let metadata = match fetch_map_with_retries_into_cache(context, snapshot, policy).await {
-        Ok(metadata) => metadata,
-        Err(err) => {
-            finish_map_origin_io(context, started_generation, provider_lease).await;
-            return Err(err);
-        }
-    };
-    let origin_work = finish_map_origin_io(context, started_generation, provider_lease).await;
-    Ok(MapFetchCommit { content_length: metadata.size, generation_valid: origin_work.generation_valid })
+async fn finish_map_origin_attempt(context: MapFetchContext, guard: MapOriginAttemptGuard) -> MapOriginWorkFinish {
+    finish_map_origin_io(&context, guard.started_generation, guard.provider_lease).await
 }
 
 async fn finish_map_origin_io(
@@ -360,178 +370,77 @@ async fn fetch_map_with_retries_into_cache(
     context: &MapFetchContext,
     snapshot: &MapFetchSnapshot,
     policy: &SegmentFetchPolicy,
-) -> Result<CachedSegmentMetadata, MapFetchError> {
-    let attempts = policy.retry_delays_ms.len();
-    for attempt_index in 0..attempts {
-        let attempt = HlsResourceFetchAttempt { attempt_index, attempts };
-        let delay_ms = policy.retry_delay_ms(attempt_index);
-        if delay_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        }
-
-        log_hls_resource_attempt_started(map_retry_log_context(snapshot), attempt);
-        let attempt_started_at = Instant::now();
-        let fetch_result = fetch_map_attempt_into_cache(context, snapshot, policy).await;
-
-        match fetch_result {
-            Ok(metadata) => {
-                log_hls_resource_attempt_succeeded(map_retry_log_context(snapshot), attempt_started_at.elapsed());
-                return Ok(metadata);
-            }
-            Err(MapFetchError::PermanentStatus(status)) => {
-                log_hls_resource_fetch_failed(
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::Http(status),
-                );
-                return Err(MapFetchError::PermanentStatus(status));
-            }
-            Err(MapFetchError::NonRetryableStatus(status)) => {
-                log_hls_resource_fetch_failed(
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::Http(status),
-                );
-                return Err(MapFetchError::NonRetryableStatus(status));
-            }
-            Err(MapFetchError::RetryableStatus(status)) if attempt_index + 1 == attempts => {
-                log_hls_resource_fetch_failed(
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::Http(status),
-                );
-                return Err(MapFetchError::RetryableStatus(status));
-            }
-            Err(MapFetchError::RetryableStatus(status)) => {
-                log_hls_resource_retry_scheduled(
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::Http(status),
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default()
-                );
-            }
-            Err(MapFetchError::Request(err)) if attempt_index + 1 == attempts => {
-                log_hls_resource_fetch_failed(
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::TransportError,
-                );
-                return Err(MapFetchError::Request(err));
-            }
-            Err(MapFetchError::Request(_err)) => {
-                log_hls_resource_retry_scheduled(
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::TransportError,
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default(),
-                );
-            }
-            Err(err @ MapFetchError::Redirect) => {
-                if attempt_index + 1 == attempts {
-                    log_hls_resource_fetch_failed(
-                        map_retry_log_context(snapshot),
-                        attempt,
-                        HlsResourceFetchLogStatus::RedirectError,
-                    );
-                    return Err(err);
-                }
-                log_hls_resource_retry_scheduled(
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::RedirectError,
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default()
-                );
-            }
-            Err(err @ MapFetchError::Timeout) => {
-                let session_id = context.session.read().await.proxy_session_id.0.clone();
-                log_hls_resource_timeout(
-                    &session_id,
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    hls_object_body_deadline(policy.origin_segment_timeout_ms).as_millis(),
-                );
-                if attempt_index + 1 == attempts {
-                    log_hls_resource_fetch_failed(
-                        map_retry_log_context(snapshot),
-                        attempt,
-                        HlsResourceFetchLogStatus::Timeout,
-                    );
-                    return Err(err);
-                }
-                log_hls_resource_retry_scheduled(
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::Timeout,
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default()
-                );
-            }
-            Err(err @ (MapFetchError::InvalidOriginUrl | MapFetchError::InvalidByteRange)) => {
-                log_hls_resource_fetch_failed(
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::TransportError,
-                );
-                return Err(err);
-            }
-            Err(MapFetchError::ProviderUnavailable) => {
-                log_hls_resource_fetch_failed(
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::ProviderUnavailable,
-                );
-                return Err(MapFetchError::ProviderUnavailable);
-            }
-            Err(err @ MapFetchError::Cache) => {
-                if attempt_index + 1 == attempts {
-                    log_hls_resource_fetch_failed(
-                        map_retry_log_context(snapshot),
-                        attempt,
-                        HlsResourceFetchLogStatus::CacheCommitError,
-                    );
-                    return Err(err);
-                }
-                log_hls_resource_retry_scheduled(
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::CacheCommitError,
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default(),
-                );
-            }
-            Err(MapFetchError::UnexpectedByteRangeStatus) => {
-                log_hls_resource_fetch_failed(
-                    map_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::TransportError,
-                );
-                return Err(MapFetchError::UnexpectedByteRangeStatus);
-            }
-            Err(MapFetchError::RetryExhausted) => {}
-        }
-    }
-
-    Err(MapFetchError::RetryExhausted)
-}
-
-fn map_retry_log_context(snapshot: &MapFetchSnapshot) -> HlsResourceFetchLogContext<'_> {
-    HlsResourceFetchLogContext {
+) -> Result<MapFetchCommit, MapFetchError> {
+    let headers = build_map_origin_headers(
+        &context.headers,
+        &context.origin_provider_session_headers,
+        snapshot.fetch_ref.byte_range,
+    )?;
+    let target = HlsOriginResourceFetchTarget {
         kind: HlsResourceFetchKind::Map,
-        object_id: &snapshot.proxy_map_id_log,
-        origin_url: Some(&snapshot.fetch_ref.resolved_origin_url),
-    }
+        source: HlsResourceFetchSource::Normal,
+        object_id: snapshot.proxy_map_id_log.clone(),
+        origin_url: snapshot.fetch_ref.resolved_origin_url.clone(),
+        headers,
+        byte_range_expectation: if snapshot.fetch_ref.byte_range.is_some() {
+            HlsOriginByteRangeExpectation::PartialContent
+        } else {
+            HlsOriginByteRangeExpectation::FullObject
+        },
+    };
+    let clients = HlsOriginResourceClients {
+        client: context.client.clone(),
+        no_redirect_client: context.no_redirect_client.clone(),
+        use_manual_redirects: context.use_manual_redirects,
+    };
+    let session_log_id = context.session.read().await.proxy_session_id.0.clone();
+    let context = context.clone();
+    let snapshot = snapshot.clone();
+    let commit_policy = policy.clone();
+    let policy_for_prepare = policy.clone();
+    let prepare_context = context.clone();
+    let cleanup_context = context.clone();
+    run_hls_origin_resource_retry_loop_with_attempt_prepare(
+        target,
+        clients,
+        policy,
+        &session_log_id,
+        move |_attempt| {
+            let context = prepare_context.clone();
+            let policy = policy_for_prepare.clone();
+            async move { prepare_map_origin_attempt(context, policy).await }.boxed()
+        },
+        move |guard| {
+            let context = cleanup_context.clone();
+            async move {
+                finish_map_origin_attempt(context, guard).await;
+            }
+            .boxed()
+        },
+        move |response, _attempt, guard| {
+            let context = context.clone();
+            let snapshot = snapshot.clone();
+            let policy = commit_policy.clone();
+            async move {
+                let commit_result = commit_map_response_into_cache(&context, &snapshot, &policy, response).await;
+                let origin_work = finish_map_origin_attempt(context, guard).await;
+                commit_result.map(|metadata| MapFetchCommit {
+                    content_length: metadata.size,
+                    generation_valid: origin_work.generation_valid,
+                })
+            }
+            .boxed()
+        },
+    )
+    .await
 }
 
-async fn fetch_map_attempt_into_cache(
+async fn commit_map_response_into_cache(
     context: &MapFetchContext,
     snapshot: &MapFetchSnapshot,
     policy: &SegmentFetchPolicy,
+    response: reqwest::Response,
 ) -> Result<CachedSegmentMetadata, MapFetchError> {
-    let response = fetch_map_once(context, &snapshot.fetch_ref).await?;
-    if snapshot.fetch_ref.byte_range.is_some() && response.status() != StatusCode::PARTIAL_CONTENT {
-        return Err(MapFetchError::UnexpectedByteRangeStatus);
-    }
-    if snapshot.fetch_ref.byte_range.is_none() && response.status() == StatusCode::PARTIAL_CONTENT {
-        return Err(MapFetchError::UnexpectedByteRangeStatus);
-    }
     let deadline = hls_object_body_deadline(policy.origin_segment_timeout_ms);
     let stream_reader = StreamReader::new(response.bytes_stream().map_err(io::Error::other));
     context
@@ -543,108 +452,18 @@ async fn fetch_map_attempt_into_cache(
                 if err.kind() == io::ErrorKind::TimedOut {
                     MapFetchError::Timeout
                 } else {
-                    MapFetchError::Cache
+                    MapFetchError::cache_commit(&err)
                 }
             },
         )
 }
 
-async fn fetch_map_once(
-    context: &MapFetchContext,
-    fetch_ref: &OriginMapFetchRef,
-) -> Result<reqwest::Response, MapFetchError> {
-    let url = Url::parse(&fetch_ref.resolved_origin_url).map_err(|_| MapFetchError::InvalidOriginUrl)?;
-    let headers = build_map_origin_headers(&context.headers, fetch_ref.byte_range)?;
-    if context.use_manual_redirects {
-        fetch_map_with_manual_redirects(&url, headers, &context.no_redirect_client).await
-    } else {
-        let response = context
-            .client
-            .get(url)
-            .headers(headers)
-            .send()
-            .await
-            .map_err(|err| MapFetchError::Request(sanitize_sensitive_info(err.to_string().as_str()).to_string()))?;
-        classify_map_response(response)
-    }
-}
-
-async fn fetch_map_with_manual_redirects(
-    entry_url: &Url,
-    headers: HeaderMap,
-    client: &Client,
-) -> Result<reqwest::Response, MapFetchError> {
-    let mut current_url = entry_url.clone();
-    let mut current_headers = headers;
-    let mut remaining_redirects = MAX_MANUAL_REDIRECTS;
-
-    loop {
-        let response = client
-            .get(current_url.clone())
-            .headers(current_headers.clone())
-            .send()
-            .await
-            .map_err(|err| MapFetchError::Request(sanitize_sensitive_info(err.to_string().as_str()).to_string()))?;
-        if !response.status().is_redirection() {
-            return classify_map_response(response);
-        }
-        if remaining_redirects == 0 {
-            return Err(MapFetchError::Redirect);
-        }
-        let response_url = response.url().clone();
-        let location = response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or(MapFetchError::Redirect)?;
-        let next_url =
-            response_url.join(location).or_else(|_| Url::parse(location)).map_err(|_| MapFetchError::Redirect)?;
-        if !same_origin(&response_url, &next_url) {
-            strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
-        }
-        current_url = next_url;
-        remaining_redirects = remaining_redirects.saturating_sub(1);
-    }
-}
-
-fn classify_map_response(response: reqwest::Response) -> Result<reqwest::Response, MapFetchError> {
-    let status = response.status();
-    match classify_hls_resource_status(status) {
-        HlsResourceStatusClass::Success => Ok(response),
-        HlsResourceStatusClass::Retryable => Err(MapFetchError::RetryableStatus(status)),
-        HlsResourceStatusClass::Permanent => Err(MapFetchError::PermanentStatus(status)),
-        HlsResourceStatusClass::NonRetryable => Err(MapFetchError::NonRetryableStatus(status)),
-    }
-}
-
 fn build_map_origin_headers(
     source_headers: &HeaderMap,
+    provider_session_headers: &HeaderMap,
     byte_range: Option<ParsedByteRange>,
 ) -> Result<HeaderMap, MapFetchError> {
-    let mut headers = source_headers.clone();
-    scrub_hls_origin_headers(&mut headers, None);
-    force_identity_without_range(&mut headers);
-    if let Some(byte_range) = byte_range {
-        let end = byte_range
-            .offset
-            .checked_add(byte_range.length)
-            .and_then(|end_exclusive| end_exclusive.checked_sub(1))
-            .ok_or(MapFetchError::InvalidByteRange)?;
-        let range_value = format!("bytes={}-{}", byte_range.offset, end);
-        let range_value = HeaderValue::from_str(&range_value).map_err(|_| MapFetchError::InvalidByteRange)?;
-        headers.insert(header::RANGE, range_value);
-    }
-    Ok(headers)
-}
-
-fn same_origin(lhs: &Url, rhs: &Url) -> bool {
-    lhs.scheme().eq_ignore_ascii_case(rhs.scheme())
-        && lhs.host_str() == rhs.host_str()
-        && lhs.port_or_known_default() == rhs.port_or_known_default()
-}
-
-fn strip_sensitive_headers_for_cross_origin_redirect(headers: &mut HeaderMap) {
-    scrub_hls_origin_headers(headers, None);
+    build_hls_origin_resource_headers(source_headers, provider_session_headers, byte_range)
 }
 
 fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
@@ -702,7 +521,11 @@ mod tests {
         source_headers.insert(header::COOKIE, "sid=secret".parse().expect("header value"));
         source_headers.insert(header::HOST, "origin.example.com".parse().expect("header value"));
         source_headers.insert(header::RANGE, "bytes=0-".parse().expect("header value"));
-        let headers = build_map_origin_headers(&source_headers, Some(ParsedByteRange { offset: 10, length: 5 }))
+        let headers = build_map_origin_headers(
+            &source_headers,
+            &HeaderMap::new(),
+            Some(ParsedByteRange { offset: 10, length: 5 }),
+        )
             .expect("headers should build");
 
         assert_eq!(headers.get(header::RANGE).expect("range"), "bytes=10-14");
@@ -759,6 +582,7 @@ mod tests {
                     session: Arc::clone(&session),
                     segment_cache: Arc::clone(&cache),
                     headers: HeaderMap::new(),
+                    origin_provider_session_headers: HeaderMap::new(),
                     client: reqwest::Client::new(),
                     no_redirect_client: reqwest::Client::new(),
                     use_manual_redirects: false,
@@ -786,6 +610,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn map_fetch_snapshot_uses_concrete_final_map_fetch_url() {
+        let manifest = normal_manifest(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\",BYTERANGE=\"5@10\"\n#EXTINF:4.0,\n1.m4s\n",
+            "https://cdn.example.net/live/redirected/playlist.m3u8",
+        );
+        let store = HlsSessionStore::new();
+        let session = store.get_or_create_session(HlsSessionKey::new(1, "1"), b"secret", 0).await;
+        {
+            let mut session = session.write().await;
+            session.apply_origin_manifest(&manifest).expect("manifest maps");
+            session.queue_map_fetch_candidates(1);
+        }
+
+        let worker = Arc::new(HlsMapWorkerPool::new(SegmentFetchPolicy::default()));
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        grant_usable_map_access_lease(&worker, &proxy_session_id).await;
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let context = MapFetchContext {
+            session: Arc::clone(&session),
+            segment_cache: Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path().to_path_buf())),
+            headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
+            client: reqwest::Client::new(),
+            no_redirect_client: reqwest::Client::new(),
+            use_manual_redirects: false,
+            origin_io: None,
+        };
+
+        let snapshot = worker
+            .next_fetch_snapshot(&context, 2, &SegmentFetchPolicy::default())
+            .await
+            .expect("map snapshot");
+
+        assert_eq!(snapshot.fetch_ref.resolved_origin_url, "https://cdn.example.net/live/redirected/init.mp4");
+        assert_eq!(snapshot.fetch_ref.byte_range, Some(ParsedByteRange { length: 5, offset: 10 }));
+    }
+
+    #[tokio::test]
     async fn map_fetch_without_usable_access_lease_resets_queue_without_origin_request() {
         let base_url = "http://origin.example.com/live/index.m3u8";
         let manifest = normal_manifest("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\n1.m4s\n", base_url);
@@ -805,6 +667,7 @@ mod tests {
                     session: Arc::clone(&session),
                     segment_cache: Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path().to_path_buf())),
                     headers: HeaderMap::new(),
+                    origin_provider_session_headers: HeaderMap::new(),
                     client: reqwest::Client::new(),
                     no_redirect_client: reqwest::Client::new(),
                     use_manual_redirects: false,
@@ -840,6 +703,7 @@ mod tests {
                     session: Arc::clone(&session),
                     segment_cache: Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path().to_path_buf())),
                     headers: HeaderMap::new(),
+                    origin_provider_session_headers: HeaderMap::new(),
                     client: reqwest::Client::new(),
                     no_redirect_client: reqwest::Client::new(),
                     use_manual_redirects: false,

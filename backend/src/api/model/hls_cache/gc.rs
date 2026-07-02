@@ -1,6 +1,7 @@
 use super::{
-    renderer_candidate_window_proxy_seqs, CacheInvalidationOutcome, HlsCacheMetrics, HlsSegmentCache, HlsSession,
-    HlsExpiredSessionReason, HlsSessionHandle, HlsSessionStore, MapCacheKey, MapCacheStatus, ProxyMapId,
+    renderer_candidate_window_proxy_seqs, safe_proxy_session_id, CacheInvalidationOutcome, HlsCacheMetrics,
+    HlsSegmentCache, HlsSession, HlsExpiredSessionReason, HlsSessionHandle, HlsSessionStore, MapCacheKey,
+    MapCacheStatus, ProxyMapId,
     ProxySessionId, SegmentCacheKey, SegmentCacheStatus, TransientObjectCacheKey,
 };
 use crate::{api::model::AppState, model::HlsCacheConfig};
@@ -426,7 +427,11 @@ impl HlsGarbageCollector {
         for deletion in deletions {
             match deletion {
                 CacheObjectDeletion::Segment(key) => {
-                    info!("HLS segment removed: proxy_seq={}", key.proxy_seq());
+                    info!(
+                        "Segment '{:06}' removed: session={} source=normal",
+                        key.proxy_seq(),
+                        safe_proxy_session_id(key.proxy_session_id()),
+                    );
                     self.cache.delete(&key).await?;
                 }
                 CacheObjectDeletion::Map(key) => {
@@ -745,6 +750,11 @@ mod tests {
         )
     }
 
+    fn apply_six_segment_manifest_for_gc(session: &mut super::HlsSession) {
+        session.proxy_next_seq = Some(1);
+        session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+    }
+
     #[test]
     fn gc_report_is_quiet_when_nothing_changed() {
         let report = GarbageCollectionReport::default();
@@ -787,7 +797,7 @@ mod tests {
     ) {
         {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             for segment in session.segments.values_mut() {
                 gc.cache
                     .write_bytes_and_commit(&segment.cache_key, b"segment-body")
@@ -817,7 +827,7 @@ mod tests {
         let (gc, session) = gc_with_session(&temp_dir).await;
         {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             let segment = session.segments.get_mut(&1).expect("segment");
             gc.cache
                 .write_bytes_and_commit(&segment.cache_key, b"segment-body")
@@ -839,7 +849,7 @@ mod tests {
         let (gc, session) = gc_with_session(&temp_dir).await;
         {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             session.segments.get_mut(&1).expect("segment").status =
                 SegmentCacheStatus::Fetching { priority: SegmentFetchPriority::Prefetch, started_at_ms: 1 };
         }
@@ -856,7 +866,7 @@ mod tests {
         let (gc, session) = gc_with_session(&temp_dir).await;
         {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             let segment = session.segments.get_mut(&1).expect("segment");
             gc.cache
                 .write_bytes_and_commit(&segment.cache_key, b"segment-body")
@@ -877,7 +887,7 @@ mod tests {
         let (gc, session) = gc_with_session(&temp_dir).await;
         {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             for proxy_seq in [1, 2] {
                 let segment = session.segments.get_mut(&proxy_seq).expect("segment");
                 gc.cache
@@ -903,7 +913,7 @@ mod tests {
         let (gc, session) = gc_with_session(&temp_dir).await;
         {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             for (proxy_seq, ready_at_ms) in [(1, 9_950), (2, 0)] {
                 let segment = session.segments.get_mut(&proxy_seq).expect("segment");
                 gc.cache
@@ -929,7 +939,7 @@ mod tests {
         update_gc_policy(&gc, |policy| policy.cache_bytes_per_session = 20);
         {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             for proxy_seq in [1, 2, 3] {
                 let segment = session.segments.get_mut(&proxy_seq).expect("segment");
                 gc.cache
@@ -956,7 +966,7 @@ mod tests {
         update_gc_policy(&gc, |policy| policy.cache_bytes_per_session = 20);
         {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             for proxy_seq in [1, 2, 3] {
                 let segment = session.segments.get_mut(&proxy_seq).expect("segment");
                 gc.cache
@@ -1088,7 +1098,7 @@ mod tests {
             let resource_id = resource.id.clone();
             session.transient.upsert_resources([resource]);
             session.transient.replace_manifest(
-                format!("#EXTM3U\n#EXTINF:1,\n/proxy/hls/live/session/lease/r/{}.ts\n", resource_id.0),
+                format!("#EXTM3U\n#EXTINF:1,\n/hls/shared/live/session/lease/r/{}.ts\n", resource_id.0),
                 0,
             );
             resource_id
@@ -1112,7 +1122,7 @@ mod tests {
                 "ts",
             );
             gc.cache.write_bytes_and_commit(&key, b"transient-body").await.expect("object writes");
-            session.transient.mark_object_ready(&key, "video/MP2T".to_string(), 14, 0, 10);
+            session.transient.mark_object_ready(&key, "video/mp2t".to_string(), 14, 0, 10);
             key
         };
 
@@ -1130,7 +1140,7 @@ mod tests {
         update_gc_policy(&gc, |policy| policy.cache_bytes_per_session = 20);
         let cache_key = {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             let segment = session.segments.get_mut(&1).expect("segment");
             gc.cache.write_bytes_and_commit(&segment.cache_key, b"segment-body").await.expect("segment writes");
             segment.status = SegmentCacheStatus::Ready { content_length: 12, ready_at_ms: 100 };
@@ -1140,7 +1150,7 @@ mod tests {
                 "ts",
             );
             gc.cache.write_bytes_and_commit(&key, b"transient-body").await.expect("object writes");
-            session.transient.mark_object_ready(&key, "video/MP2T".to_string(), 14, 100, 10_000);
+            session.transient.mark_object_ready(&key, "video/mp2t".to_string(), 14, 100, 10_000);
             key
         };
 
@@ -1159,7 +1169,7 @@ mod tests {
         let (gc, session) = gc_with_session(&temp_dir).await;
         {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             let segment = session.segments.get_mut(&1).expect("segment");
             gc.cache
                 .write_bytes_and_commit(&segment.cache_key, b"segment-body")
@@ -1186,7 +1196,7 @@ mod tests {
         let (gc, session) = gc_with_session(&temp_dir).await;
         let cache_key = {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             session.segments.get(&1).expect("segment").cache_key.clone()
         };
         gc.cache.write_rewrite_secret_fingerprint("mismatch").await.expect("marker write");
@@ -1221,7 +1231,7 @@ mod tests {
         let (gc, session) = gc_with_session(&temp_dir).await;
         let cache_key = {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             session.segments.get(&1).expect("segment").cache_key.clone()
         };
         gc.cache.write_rewrite_secret_fingerprint("mismatch").await.expect("marker write");
@@ -1262,7 +1272,7 @@ mod tests {
 
         for session in [&first_session, &second_session] {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             for proxy_seq in [1, 2, 3] {
                 let segment = session.segments.get_mut(&proxy_seq).expect("segment");
                 gc.cache
@@ -1293,7 +1303,7 @@ mod tests {
 
         for session in [&first_session, &second_session] {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             for proxy_seq in [1, 2, 3] {
                 let segment = session.segments.get_mut(&proxy_seq).expect("segment");
                 gc.cache
@@ -1324,7 +1334,7 @@ mod tests {
         let (gc, session) = gc_with_session(&temp_dir).await;
         let temp_path = {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             let path = gc.cache.object_path(&session.segments.get(&1).expect("segment").cache_key);
             let parent = path.parent().expect("cache object has parent");
             tokio::fs::create_dir_all(parent).await.expect("parent dir");
@@ -1346,7 +1356,7 @@ mod tests {
         let (gc, session) = gc_with_session(&temp_dir).await;
         let (cache_key, proxy_session_id) = {
             let mut session = session.write().await;
-            session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+            apply_six_segment_manifest_for_gc(&mut session);
             (session.segments.get(&1).expect("segment").cache_key.clone(), session.proxy_session_id.clone())
         };
         let (mut writer, reader) = tokio::io::duplex(64);

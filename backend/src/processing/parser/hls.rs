@@ -6,6 +6,7 @@ use std::str;
 use url::Url;
 
 pub mod origin_manifest;
+pub mod initial_strip;
 pub mod transient_manifest;
 
 const TOKEN_SEPARATOR: char = '\x1F';

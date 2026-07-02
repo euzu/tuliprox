@@ -1,35 +1,33 @@
 #![allow(clippy::large_futures)]
 
 use super::{
-    begin_hls_origin_account_io, classify_hls_backpressure, classify_hls_resource_status, finish_hls_origin_account_io,
-    force_identity_without_range, hls_object_body_deadline, log_hls_resource_attempt_started,
-    log_hls_resource_attempt_succeeded, log_hls_resource_fetch_failed, log_hls_resource_retry_scheduled,
-    log_hls_resource_timeout, scrub_hls_origin_headers, CachedSegmentMetadata, HlsAccessLeaseId, HlsAccessLeaseStore,
-    HlsBackpressureState, HlsCacheMetrics, HlsOriginAccountIoLeaseGuard, HlsOriginIoContext,
-    HlsRepairRenderedObjectId, HlsResourceFetchAttempt, HlsResourceFetchKind, HlsResourceFetchLogContext,
-    HlsResourceFetchLogStatus, HlsResourceStatusClass, HlsSegmentCache, HlsSegmentFile, HlsSegmentRepairManager,
-    HlsSegmentRepairObjectContext, HlsSegmentRepairSource, HlsSessionHandle, OriginSegmentFetchRef, SegmentCacheKey,
-    SegmentCacheStatus, SegmentFetchPriority,
+    begin_hls_origin_account_io_bounded, build_hls_origin_resource_headers, classify_hls_backpressure,
+    finish_hls_origin_account_io, hls_object_body_deadline,
+    run_hls_origin_resource_retry_loop_with_attempt_prepare, CachedSegmentMetadata,
+    HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseId, HlsAccessLeaseStore, HlsBackpressureState,
+    HlsBoundAccountAcquireErrorKind, HlsCacheMetrics, HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation,
+    HlsOriginIoContext, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget,
+    HlsRepairRenderedObjectId, HlsResourceFetchKind, HlsResourceFetchSource, HlsSegmentCache, HlsSegmentFailureObject,
+    HlsSegmentFailureTransition, HlsSegmentFile, HlsSegmentRepairManager, HlsSegmentRepairObjectContext,
+    HlsSegmentRepairSource, HlsSessionHandle, OriginSegmentFetchRef, SegmentCacheKey, SegmentCacheStatus,
+    SegmentFetchPriority,
 };
 use crate::{
-    model::{HlsCacheConfig, HlsSegmentRepairMode},
+    model::{HlsCacheConfig, HlsSegmentRepairMode, StripMode},
     processing::parser::hls::origin_manifest::ParsedByteRange,
 };
 use arc_swap::ArcSwap;
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
-use futures::TryStreamExt;
+use axum::http::HeaderMap;
+use futures::{FutureExt, TryStreamExt};
 use log::{debug, warn};
 use reqwest::Client;
-use shared::utils::sanitize_sensitive_info;
-use std::{fmt, io, sync::Arc, time::{Duration, Instant}};
+use std::{fmt, io, sync::Arc, time::Duration};
 use tokio::{
     sync::{OwnedSemaphorePermit, RwLock, Semaphore},
     time::timeout,
 };
 use tokio_util::io::StreamReader;
-use url::Url;
 
-const MAX_MANUAL_REDIRECTS: usize = 10;
 const DEFAULT_MAX_GLOBAL_SEGMENT_FETCHES: usize = 64;
 const DEFAULT_MAX_SESSION_SEGMENT_FETCHES: usize = 2;
 const DEFAULT_MAX_PREFETCH_QUEUE_DEPTH: usize = 6;
@@ -45,6 +43,7 @@ pub struct SegmentFetchPolicy {
     pub effective_repair_postprocess_timeout_ms: u64,
     pub retry_delays_ms: [u64; 5],
     pub retry_jitter_max_ms: u64,
+    pub permanent_failure_segment_threshold: u32,
 }
 
 impl SegmentFetchPolicy {
@@ -62,6 +61,7 @@ impl SegmentFetchPolicy {
             } else {
                 0
             },
+            permanent_failure_segment_threshold: permanent_failure_segment_threshold_from_config(config),
             ..Self::default()
         }
     }
@@ -104,8 +104,17 @@ impl Default for SegmentFetchPolicy {
             effective_repair_postprocess_timeout_ms: 0,
             retry_delays_ms: [0, 100, 250, 500, 750],
             retry_jitter_max_ms: 100,
+            permanent_failure_segment_threshold: 3,
         }
     }
+}
+
+fn permanent_failure_segment_threshold_from_config(config: &HlsCacheConfig) -> u32 {
+    let configured_strip_segments = match config.strip.mode {
+        StripMode::Segments => u32::try_from(config.strip.value).unwrap_or(u32::MAX.saturating_sub(3)),
+        StripMode::Seconds => 0,
+    };
+    3_u32.saturating_add(configured_strip_segments)
 }
 
 /// Shared context required to schedule a segment fetch without holding session locks.
@@ -116,6 +125,7 @@ pub struct SegmentFetchContext {
     pub segment_repair: Arc<HlsSegmentRepairManager>,
     pub repair_access_lease_id: Option<HlsAccessLeaseId>,
     pub headers: HeaderMap,
+    pub origin_provider_session_headers: HeaderMap,
     pub client: Client,
     pub no_redirect_client: Client,
     pub use_manual_redirects: bool,
@@ -167,43 +177,7 @@ impl fmt::Debug for SegmentFetchSnapshot {
     }
 }
 
-#[derive(Debug)]
-enum SegmentFetchError {
-    PermanentStatus(StatusCode),
-    RetryableStatus(StatusCode),
-    RetryExhausted,
-    NonRetryableStatus(StatusCode),
-    Request(String),
-    Redirect,
-    Timeout,
-    InvalidOriginUrl,
-    InvalidByteRange,
-    UnexpectedByteRangeStatus,
-    Cache,
-    ProviderUnavailable,
-}
-
-impl SegmentFetchError {
-    fn retryable_failure(&self) -> bool {
-        matches!(
-            self,
-            Self::RetryableStatus(_)
-                | Self::RetryExhausted
-                | Self::Request(_)
-                | Self::Redirect
-                | Self::Timeout
-                | Self::Cache
-                | Self::ProviderUnavailable
-        )
-    }
-
-    fn permanent_status(&self) -> Option<StatusCode> {
-        match self {
-            Self::PermanentStatus(status) | Self::NonRetryableStatus(status) => Some(*status),
-            _ => None,
-        }
-    }
-}
+type SegmentFetchError = HlsOriginResourceFetchError;
 
 #[derive(Clone)]
 struct SegmentWorkerRuntime {
@@ -304,14 +278,19 @@ impl HlsSegmentWorkerPool {
                     let backpressure = self.classify_backpressure_for_session(&session);
                     if !backpressure.allows_new_demand_fetch() {
                         warn!(
-                            "HLS segment demand fetch started skipped by backpressure: proxy_seq={} state={backpressure:?}",
+                            "HLS segment demand fetch skipped by backpressure: session={} source=normal resource={:06} state={backpressure:?}",
+                            super::safe_proxy_session_id(&session.proxy_session_id),
                             segment_file.proxy_seq
                         );
                         return SegmentDemandFetchOutcome::Unavailable;
                     }
                     session.queue_segment_fetch_candidate(segment_file.proxy_seq, SegmentFetchPriority::Demand, now_ms);
                     self.metrics.record_demand_fetch_started();
-                    debug!("HLS segment demand fetch started: proxy_seq={}", segment_file.proxy_seq);
+                    debug!(
+                        "HLS segment demand fetch started: session={} source=normal resource={:06}",
+                        super::safe_proxy_session_id(&session.proxy_session_id),
+                        segment_file.proxy_seq
+                    );
                     session.segment_fetch_notifiers.entry(segment_file.proxy_seq).or_default().clone()
                 }
                 SegmentCacheStatus::FailedRetryable { .. } => {
@@ -414,10 +393,15 @@ impl HlsSegmentWorkerPool {
             let complete_object = entry.origin_byte_range.is_none();
             entry.status = SegmentCacheStatus::Fetching { priority, started_at_ms: now_ms };
             session.active_segment_fetches = session.active_segment_fetches.saturating_add(1);
-            debug!("HLS segment fetch started: proxy_seq={proxy_seq} priority={priority:?}");
+            let proxy_seq_log = format!("{proxy_seq:06}");
+            debug!(
+                "HLS segment fetch started: session={} source=normal resource={} priority={priority:?}",
+                super::safe_proxy_session_id(&session.proxy_session_id),
+                proxy_seq_log
+            );
             return Some(SegmentFetchSnapshot {
                 proxy_seq,
-                proxy_seq_log: proxy_seq.to_string(),
+                proxy_seq_log,
                 cache_key,
                 fetch_ref,
                 proxy_file_ext,
@@ -429,6 +413,7 @@ impl HlsSegmentWorkerPool {
         None
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn fetch_one_segment(
         self: Arc<Self>,
         context: SegmentFetchContext,
@@ -440,27 +425,92 @@ impl HlsSegmentWorkerPool {
         let finished_at_ms = current_time_millis();
         let generation_valid = result.as_ref().map_or(true, |commit| commit.generation_valid);
         let fetch_succeeded = result.is_ok();
-        let notifier = {
+        let (notifier, response_flag_reason) = {
             let mut session = context.session.write().await;
             session.active_segment_fetches = session.active_segment_fetches.saturating_sub(1);
-            if let Some(entry) = session.segments.get_mut(&snapshot.proxy_seq) {
-                match result {
-                    Ok(commit) => {
-                        let content_length = commit.content_length;
+            let mut response_flag_reason = None;
+            match result {
+                Ok(commit) => {
+                    let content_length = commit.content_length;
+                    if let Some(entry) = session.segments.get_mut(&snapshot.proxy_seq) {
                         entry.status = SegmentCacheStatus::Ready { content_length, ready_at_ms: finished_at_ms };
-                        self.metrics.record_segment_cached();
-                        debug!("HLS segment cached: proxy_seq={} content_length={content_length}", snapshot.proxy_seq);
                     }
-                    Err(err) => {
-                        if err.retryable_failure() {
-                            entry.status = SegmentCacheStatus::FailedRetryable {
-                                failed_at_ms: finished_at_ms,
-                                retry_after_ms: 1_000,
-                            };
-                        } else {
+                    let reset_failures = session.record_successful_segment_fetch();
+                    self.metrics.record_segment_cached();
+                    debug!(
+                        "HLS segment cached: session={} source=normal resource={} content_length={content_length}",
+                        super::safe_proxy_session_id(&session.proxy_session_id),
+                        snapshot.proxy_seq_log
+                    );
+                    if let Some(reset_failures) = reset_failures {
+                        debug!(
+                            "HLS segment temporary failure counter reset: session={} previous_failures={reset_failures}",
+                            super::safe_proxy_session_id(&session.proxy_session_id)
+                        );
+                    }
+                }
+                Err(err) => {
+                    let mut invalidate_queued_origin_work = false;
+                    let status = if err.retryable_failure() {
+                        let threshold =
+                            session.segment_temporary_failure_threshold(policy.permanent_failure_segment_threshold);
+                        match session.record_temporary_segment_fetch_failure(
+                            finished_at_ms,
+                            HlsSegmentFailureObject::Normal {
+                                proxy_seq: snapshot.proxy_seq,
+                                origin_seq: snapshot.origin_seq,
+                            },
+                            threshold,
+                        ) {
+                            HlsSegmentFailureTransition::StillRetryable { failures, threshold } => {
+                                debug!(
+                                    "HLS segment temporary failure counted: session={} object={} failures={} threshold={}",
+                                    super::safe_proxy_session_id(&session.proxy_session_id),
+                                    snapshot.proxy_seq_log,
+                                    failures,
+                                    threshold
+                                );
+                                SegmentCacheStatus::FailedRetryable {
+                                    failed_at_ms: finished_at_ms,
+                                    retry_after_ms: 1_000,
+                                }
+                            }
+                            HlsSegmentFailureTransition::BecamePermanentlyFailed { failures, threshold } => {
+                                warn!(
+                                    "HLS segment temporary failure threshold reached: session={} failures={} threshold={}",
+                                    super::safe_proxy_session_id(&session.proxy_session_id),
+                                    failures,
+                                    threshold
+                                );
+                                invalidate_queued_origin_work = true;
+                                response_flag_reason = Some(HlsAccessLeaseChannelUnavailableReason::SegmentTemporaryFailureThreshold {
+                                    failures,
+                                    threshold,
+                                });
+                                SegmentCacheStatus::FailedPermanent {
+                                    failed_at_ms: finished_at_ms,
+                                    status: None,
+                                }
+                            }
+                        }
+                    } else {
+                        response_flag_reason = Some(HlsAccessLeaseChannelUnavailableReason::SegmentPermanentFailure {
+                            status: err.permanent_status(),
+                        });
+                        SegmentCacheStatus::FailedPermanent {
+                            failed_at_ms: finished_at_ms,
+                            status: err.permanent_status(),
+                        }
+                    };
+                    if let Some(entry) = session.segments.get_mut(&snapshot.proxy_seq) {
+                        entry.status = status;
+                    }
+                    if invalidate_queued_origin_work {
+                        session.invalidate_queued_origin_work();
+                        if let Some(entry) = session.segments.get_mut(&snapshot.proxy_seq) {
                             entry.status = SegmentCacheStatus::FailedPermanent {
                                 failed_at_ms: finished_at_ms,
-                                status: err.permanent_status(),
+                                status: None,
                             };
                         }
                     }
@@ -469,8 +519,17 @@ impl HlsSegmentWorkerPool {
             if fetch_succeeded && generation_valid {
                 let _ = session.render_and_store_manifest(finished_at_ms);
             }
-            session.segment_fetch_notifiers.remove(&snapshot.proxy_seq)
+            (session.segment_fetch_notifiers.remove(&snapshot.proxy_seq), response_flag_reason)
         };
+        if let Some(reason) = response_flag_reason {
+            let marked = self.mark_channel_unavailable_for_session(&context.session, finished_at_ms, reason).await;
+            if marked > 0 {
+                debug!(
+                    "HLS access leases marked channel unavailable: session={} marked={marked}",
+                    super::safe_proxy_session_id(&context.session.read().await.proxy_session_id)
+                );
+            }
+        }
         if let Some(notifier) = notifier {
             notifier.notify_waiters();
         }
@@ -486,6 +545,19 @@ impl HlsSegmentWorkerPool {
             worker.wake_scheduler(context, now_ms).await;
         });
     }
+
+    async fn mark_channel_unavailable_for_session(
+        &self,
+        session: &HlsSessionHandle,
+        now_ms: u64,
+        reason: HlsAccessLeaseChannelUnavailableReason,
+    ) -> usize {
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        self.access_leases
+            .write()
+            .await
+            .mark_channel_unavailable_for_session(&proxy_session_id, now_ms, reason)
+    }
 }
 
 impl Default for HlsSegmentWorkerPool {
@@ -497,34 +569,54 @@ async fn fetch_segment_into_cache(
     snapshot: &SegmentFetchSnapshot,
     policy: &SegmentFetchPolicy,
 ) -> Result<SegmentFetchCommit, SegmentFetchError> {
-    let started_generation = start_segment_origin_work(context).await;
+    fetch_segment_with_retries_into_cache(context, snapshot, policy).await
+}
+
+struct SegmentOriginAttemptGuard {
+    started_generation: Option<u64>,
+    provider_lease: Option<(HlsOriginIoContext, HlsOriginAccountIoLeaseGuard)>,
+}
+
+async fn prepare_segment_origin_attempt(
+    context: SegmentFetchContext,
+    policy: SegmentFetchPolicy,
+) -> Result<SegmentOriginAttemptGuard, SegmentFetchError> {
+    let started_generation = start_segment_origin_work(&context).await;
     let binding =
         if context.origin_io.is_some() { context.session.read().await.origin_account_binding.clone() } else { None };
     let provider_lease = if let (Some(origin_io), Some(binding)) = (context.origin_io.as_ref(), binding.as_ref()) {
         if binding.is_detached() {
-            let _ = finish_segment_origin_work(context, started_generation).await;
-            touch_segment_origin_account_binding(context, false).await;
-            return Err(SegmentFetchError::ProviderUnavailable);
+            let _ = finish_segment_origin_work(&context, started_generation).await;
+            touch_segment_origin_account_binding(&context, false).await;
+            return Err(SegmentFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::Detached));
         }
-        let Ok(guard) = begin_hls_origin_account_io(origin_io, &context.session, binding).await else {
-            let _ = finish_segment_origin_work(context, started_generation).await;
-            touch_segment_origin_account_binding(context, false).await;
-            return Err(SegmentFetchError::ProviderUnavailable);
+        let guard = match begin_hls_origin_account_io_bounded(
+            origin_io,
+            &context.session,
+            binding,
+            hls_object_body_deadline(policy.origin_segment_timeout_ms),
+        )
+        .await
+        {
+            Ok(guard) => guard,
+            Err(err) => {
+                let _ = finish_segment_origin_work(&context, started_generation).await;
+                touch_segment_origin_account_binding(&context, false).await;
+                return Err(SegmentFetchError::ProviderUnavailable(err));
+            }
         };
         Some((origin_io.clone(), guard))
     } else {
         None
     };
+    Ok(SegmentOriginAttemptGuard { started_generation, provider_lease })
+}
 
-    let metadata = match fetch_segment_with_retries_into_cache(context, snapshot, policy).await {
-        Ok(metadata) => metadata,
-        Err(err) => {
-            finish_segment_origin_io(context, started_generation, provider_lease).await;
-            return Err(err);
-        }
-    };
-    let origin_work = finish_segment_origin_io(context, started_generation, provider_lease).await;
-    Ok(SegmentFetchCommit { content_length: metadata.size, generation_valid: origin_work.generation_valid })
+async fn finish_segment_origin_attempt(
+    context: SegmentFetchContext,
+    guard: SegmentOriginAttemptGuard,
+) -> SegmentOriginWorkFinish {
+    finish_segment_origin_io(&context, guard.started_generation, guard.provider_lease).await
 }
 
 async fn finish_segment_origin_io(
@@ -582,178 +674,77 @@ async fn fetch_segment_with_retries_into_cache(
     context: &SegmentFetchContext,
     snapshot: &SegmentFetchSnapshot,
     policy: &SegmentFetchPolicy,
-) -> Result<CachedSegmentMetadata, SegmentFetchError> {
-    let attempts = policy.retry_delays_ms.len();
-    for attempt_index in 0..attempts {
-        let attempt = HlsResourceFetchAttempt { attempt_index, attempts };
-        let delay_ms = policy.retry_delay_ms(attempt_index);
-        if delay_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        }
-
-        log_hls_resource_attempt_started(segment_retry_log_context(snapshot), attempt);
-        let attempt_started_at = Instant::now();
-        let fetch_result = fetch_segment_attempt_into_cache(context, snapshot, policy).await;
-
-        match fetch_result {
-            Ok(metadata) => {
-                log_hls_resource_attempt_succeeded(segment_retry_log_context(snapshot), attempt_started_at.elapsed());
-                return Ok(metadata);
-            }
-            Err(SegmentFetchError::PermanentStatus(status)) => {
-                log_hls_resource_fetch_failed(
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::Http(status),
-                );
-                return Err(SegmentFetchError::PermanentStatus(status));
-            }
-            Err(SegmentFetchError::NonRetryableStatus(status)) => {
-                log_hls_resource_fetch_failed(
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::Http(status),
-                );
-                return Err(SegmentFetchError::NonRetryableStatus(status));
-            }
-            Err(SegmentFetchError::RetryableStatus(status)) if attempt_index + 1 == attempts => {
-                log_hls_resource_fetch_failed(
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::Http(status),
-                );
-                return Err(SegmentFetchError::RetryableStatus(status));
-            }
-            Err(SegmentFetchError::RetryableStatus(status)) => {
-                log_hls_resource_retry_scheduled(
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::Http(status),
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default()
-                );
-            }
-            Err(SegmentFetchError::Request(_err)) if attempt_index + 1 == attempts => {
-                log_hls_resource_fetch_failed(
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::TransportError,
-                );
-                return Err(SegmentFetchError::Request(_err));
-            }
-            Err(SegmentFetchError::Request(_err)) => {
-                log_hls_resource_retry_scheduled(
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::TransportError,
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default(),
-                );
-            }
-            Err(err @ SegmentFetchError::Redirect) => {
-                if attempt_index + 1 == attempts {
-                    log_hls_resource_fetch_failed(
-                        segment_retry_log_context(snapshot),
-                        attempt,
-                        HlsResourceFetchLogStatus::RedirectError,
-                    );
-                    return Err(err);
-                }
-                log_hls_resource_retry_scheduled(
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::RedirectError,
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default()
-                );
-            }
-            Err(err @ SegmentFetchError::Timeout) => {
-                let session_id = context.session.read().await.proxy_session_id.0.clone();
-                log_hls_resource_timeout(
-                    &session_id,
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    hls_object_body_deadline(policy.origin_segment_timeout_ms).as_millis(),
-                );
-                if attempt_index + 1 == attempts {
-                    log_hls_resource_fetch_failed(
-                        segment_retry_log_context(snapshot),
-                        attempt,
-                        HlsResourceFetchLogStatus::Timeout,
-                    );
-                    return Err(err);
-                }
-                log_hls_resource_retry_scheduled(
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::Timeout,
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default()
-                );
-            }
-            Err(err @ (SegmentFetchError::InvalidOriginUrl | SegmentFetchError::InvalidByteRange)) => {
-                log_hls_resource_fetch_failed(
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::TransportError,
-                );
-                return Err(err);
-            }
-            Err(SegmentFetchError::ProviderUnavailable) => {
-                log_hls_resource_fetch_failed(
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::ProviderUnavailable,
-                );
-                return Err(SegmentFetchError::ProviderUnavailable);
-            }
-            Err(err @ SegmentFetchError::Cache) => {
-                if attempt_index + 1 == attempts {
-                    log_hls_resource_fetch_failed(
-                        segment_retry_log_context(snapshot),
-                        attempt,
-                        HlsResourceFetchLogStatus::CacheCommitError,
-                    );
-                    return Err(err);
-                }
-                log_hls_resource_retry_scheduled(
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::CacheCommitError,
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default(),
-                );
-            }
-            Err(SegmentFetchError::UnexpectedByteRangeStatus) => {
-                log_hls_resource_fetch_failed(
-                    segment_retry_log_context(snapshot),
-                    attempt,
-                    HlsResourceFetchLogStatus::TransportError,
-                );
-                return Err(SegmentFetchError::UnexpectedByteRangeStatus);
-            }
-            Err(SegmentFetchError::RetryExhausted) => {}
-        }
-    }
-
-    Err(SegmentFetchError::RetryExhausted)
-}
-
-fn segment_retry_log_context(snapshot: &SegmentFetchSnapshot) -> HlsResourceFetchLogContext<'_> {
-    HlsResourceFetchLogContext {
+) -> Result<SegmentFetchCommit, SegmentFetchError> {
+    let headers = build_segment_origin_headers(
+        &context.headers,
+        &context.origin_provider_session_headers,
+        snapshot.fetch_ref.byte_range,
+    )?;
+    let target = HlsOriginResourceFetchTarget {
         kind: HlsResourceFetchKind::Segment,
-        object_id: &snapshot.proxy_seq_log,
-        origin_url: Some(&snapshot.fetch_ref.resolved_origin_url),
-    }
+        source: HlsResourceFetchSource::Normal,
+        object_id: snapshot.proxy_seq_log.clone(),
+        origin_url: snapshot.fetch_ref.resolved_origin_url.clone(),
+        headers,
+        byte_range_expectation: if snapshot.fetch_ref.byte_range.is_some() {
+            HlsOriginByteRangeExpectation::PartialContent
+        } else {
+            HlsOriginByteRangeExpectation::FullObject
+        },
+    };
+    let clients = HlsOriginResourceClients {
+        client: context.client.clone(),
+        no_redirect_client: context.no_redirect_client.clone(),
+        use_manual_redirects: context.use_manual_redirects,
+    };
+    let session_log_id = context.session.read().await.proxy_session_id.0.clone();
+    let context = context.clone();
+    let snapshot = snapshot.clone();
+    let commit_policy = policy.clone();
+    let policy_for_prepare = policy.clone();
+    let prepare_context = context.clone();
+    let cleanup_context = context.clone();
+    run_hls_origin_resource_retry_loop_with_attempt_prepare(
+        target,
+        clients,
+        policy,
+        &session_log_id,
+        move |_attempt| {
+            let context = prepare_context.clone();
+            let policy = policy_for_prepare.clone();
+            async move { prepare_segment_origin_attempt(context, policy).await }.boxed()
+        },
+        move |guard| {
+            let context = cleanup_context.clone();
+            async move {
+                finish_segment_origin_attempt(context, guard).await;
+            }
+            .boxed()
+        },
+        move |response, _attempt, guard| {
+            let context = context.clone();
+            let snapshot = snapshot.clone();
+            let policy = commit_policy.clone();
+            async move {
+                let commit_result = commit_segment_response_into_cache(&context, &snapshot, &policy, response).await;
+                let origin_work = finish_segment_origin_attempt(context, guard).await;
+                commit_result.map(|metadata| SegmentFetchCommit {
+                    content_length: metadata.size,
+                    generation_valid: origin_work.generation_valid,
+                })
+            }
+            .boxed()
+        },
+    )
+    .await
 }
 
-async fn fetch_segment_attempt_into_cache(
+async fn commit_segment_response_into_cache(
     context: &SegmentFetchContext,
     snapshot: &SegmentFetchSnapshot,
     policy: &SegmentFetchPolicy,
+    response: reqwest::Response,
 ) -> Result<CachedSegmentMetadata, SegmentFetchError> {
-    let response = fetch_segment_once(context, &snapshot.fetch_ref).await?;
-    if snapshot.fetch_ref.byte_range.is_some() && response.status() != StatusCode::PARTIAL_CONTENT {
-        return Err(SegmentFetchError::UnexpectedByteRangeStatus);
-    }
-    if snapshot.fetch_ref.byte_range.is_none() && response.status() == StatusCode::PARTIAL_CONTENT {
-        return Err(SegmentFetchError::UnexpectedByteRangeStatus);
-    }
     let deadline = hls_object_body_deadline(policy.origin_segment_timeout_ms);
     let stream_reader = StreamReader::new(response.bytes_stream().map_err(io::Error::other));
     let proxy_session_id = context.session.read().await.proxy_session_id.clone();
@@ -764,7 +755,8 @@ async fn fetch_segment_attempt_into_cache(
         rendered_object_id: HlsRepairRenderedObjectId::Normal { proxy_seq: snapshot.proxy_seq },
         resource_id: format!("{:06}", snapshot.proxy_seq),
         file_ext: snapshot.proxy_file_ext.clone(),
-        normalized_origin_uri: snapshot.fetch_ref.resolved_origin_url.clone(),
+        // Segment repair uses the concrete fetch URL for diagnostics/postprocess metadata only.
+        origin_fetch_uri_for_diagnostics: snapshot.fetch_ref.resolved_origin_url.clone(),
         media_sequence: Some(snapshot.origin_seq),
         discontinuity_sequence: None,
         complete_object: snapshot.complete_object,
@@ -779,102 +771,17 @@ async fn fetch_segment_attempt_into_cache(
             if err.kind() == io::ErrorKind::TimedOut {
                 SegmentFetchError::Timeout
             } else {
-                SegmentFetchError::Cache
+                SegmentFetchError::cache_commit(&err)
             }
         })
 }
 
-async fn fetch_segment_once(
-    context: &SegmentFetchContext,
-    fetch_ref: &OriginSegmentFetchRef,
-) -> Result<reqwest::Response, SegmentFetchError> {
-    let url = Url::parse(&fetch_ref.resolved_origin_url).map_err(|_| SegmentFetchError::InvalidOriginUrl)?;
-    let headers = build_segment_origin_headers(&context.headers, fetch_ref.byte_range)?;
-    if context.use_manual_redirects {
-        fetch_segment_with_manual_redirects(&url, headers, &context.no_redirect_client).await
-    } else {
-        let response =
-            context.client.get(url).headers(headers).send().await.map_err(|err| {
-                SegmentFetchError::Request(sanitize_sensitive_info(err.to_string().as_str()).to_string())
-            })?;
-        classify_segment_response(response)
-    }
-}
-
-async fn fetch_segment_with_manual_redirects(
-    entry_url: &Url,
-    headers: HeaderMap,
-    client: &Client,
-) -> Result<reqwest::Response, SegmentFetchError> {
-    let mut current_url = entry_url.clone();
-    let mut current_headers = headers;
-    let mut remaining_redirects = MAX_MANUAL_REDIRECTS;
-
-    loop {
-        let response =
-            client.get(current_url.clone()).headers(current_headers.clone()).send().await.map_err(|err| {
-                SegmentFetchError::Request(sanitize_sensitive_info(err.to_string().as_str()).to_string())
-            })?;
-        if !response.status().is_redirection() {
-            return classify_segment_response(response);
-        }
-        if remaining_redirects == 0 {
-            return Err(SegmentFetchError::Redirect);
-        }
-        let response_url = response.url().clone();
-        let location = response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or(SegmentFetchError::Redirect)?;
-        let next_url =
-            response_url.join(location).or_else(|_| Url::parse(location)).map_err(|_| SegmentFetchError::Redirect)?;
-        if !same_origin(&response_url, &next_url) {
-            strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
-        }
-        current_url = next_url;
-        remaining_redirects = remaining_redirects.saturating_sub(1);
-    }
-}
-
-fn classify_segment_response(response: reqwest::Response) -> Result<reqwest::Response, SegmentFetchError> {
-    let status = response.status();
-    match classify_hls_resource_status(status) {
-        HlsResourceStatusClass::Success => Ok(response),
-        HlsResourceStatusClass::Retryable => Err(SegmentFetchError::RetryableStatus(status)),
-        HlsResourceStatusClass::Permanent => Err(SegmentFetchError::PermanentStatus(status)),
-        HlsResourceStatusClass::NonRetryable => Err(SegmentFetchError::NonRetryableStatus(status)),
-    }
-}
-
 fn build_segment_origin_headers(
     source_headers: &HeaderMap,
+    provider_session_headers: &HeaderMap,
     byte_range: Option<ParsedByteRange>,
 ) -> Result<HeaderMap, SegmentFetchError> {
-    let mut headers = source_headers.clone();
-    scrub_hls_origin_headers(&mut headers, None);
-    force_identity_without_range(&mut headers);
-    if let Some(byte_range) = byte_range {
-        let end = byte_range
-            .offset
-            .checked_add(byte_range.length)
-            .and_then(|end_exclusive| end_exclusive.checked_sub(1))
-            .ok_or(SegmentFetchError::InvalidByteRange)?;
-        let range_value = format!("bytes={}-{}", byte_range.offset, end);
-        let range_value = HeaderValue::from_str(&range_value).map_err(|_| SegmentFetchError::InvalidByteRange)?;
-        headers.insert(header::RANGE, range_value);
-    }
-    Ok(headers)
-}
-
-fn same_origin(lhs: &Url, rhs: &Url) -> bool {
-    lhs.scheme().eq_ignore_ascii_case(rhs.scheme())
-        && lhs.host_str() == rhs.host_str()
-        && lhs.port_or_known_default() == rhs.port_or_known_default()
-}
-
-fn strip_sensitive_headers_for_cross_origin_redirect(headers: &mut HeaderMap) {
-    scrub_hls_origin_headers(headers, None);
+    build_hls_origin_resource_headers(source_headers, provider_session_headers, byte_range)
 }
 
 fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
@@ -947,7 +854,7 @@ mod tests {
         headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
         headers.insert(header::COOKIE, HeaderValue::from_static("sid=secret"));
         headers.insert(header::HOST, HeaderValue::from_static("origin.example.com"));
-        let headers = build_segment_origin_headers(&headers, None).expect("headers should build");
+        let headers = build_segment_origin_headers(&headers, &HeaderMap::new(), None).expect("headers should build");
 
         assert!(!headers.contains_key(header::RANGE));
         assert!(!headers.contains_key(header::AUTHORIZATION));
@@ -960,11 +867,59 @@ mod tests {
     fn segment_origin_headers_apply_byterange() {
         let headers = build_segment_origin_headers(
             &HeaderMap::new(),
+            &HeaderMap::new(),
             Some(crate::processing::parser::hls::origin_manifest::ParsedByteRange { offset: 10, length: 5 }),
         )
         .expect("headers should build");
 
         assert_eq!(headers.get(header::RANGE).expect("range"), "bytes=10-14");
+    }
+
+    #[tokio::test]
+    async fn segment_fetch_snapshot_uses_concrete_final_segment_fetch_url() {
+        let manifest = match parse_origin_media_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:4.0,\nmedia/seg001.ts\n",
+            "https://cdn.example.net/live/redirected/playlist.m3u8",
+        ) {
+            OriginManifestParseOutcome::Normal(manifest) => manifest,
+            OriginManifestParseOutcome::TransientPassthrough { reason } => {
+                panic!("expected normal manifest: {reason:?}")
+            }
+        };
+        let store = HlsSessionStore::new();
+        let session = store.get_or_create_session(HlsSessionKey::new(1, "1"), b"secret", 0).await;
+        {
+            let mut session = session.write().await;
+            session.configure_segment_prefetch_queue(SegmentFetchPolicy::default().max_prefetch_queue_depth);
+            session.apply_origin_manifest(&manifest).expect("manifest maps");
+            session.queue_manifest_prefetch_candidates(10);
+        }
+
+        let worker = Arc::new(HlsSegmentWorkerPool::new(SegmentFetchPolicy::default()));
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        grant_usable_worker_access_lease(&worker, &proxy_session_id).await;
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let context = SegmentFetchContext {
+            session: Arc::clone(&session),
+            segment_cache: Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path())),
+            segment_repair: test_segment_repair_manager(),
+            repair_access_lease_id: None,
+            headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
+            client: reqwest::Client::new(),
+            no_redirect_client: reqwest::Client::new(),
+            use_manual_redirects: false,
+            origin_io: None,
+        };
+
+        let snapshot = worker
+            .next_fetch_snapshot(&context, 11, &SegmentFetchPolicy::default())
+            .await
+            .expect("segment snapshot");
+
+        assert_eq!(snapshot.fetch_ref.resolved_origin_url, "https://cdn.example.net/live/redirected/media/seg001.ts");
+        assert_eq!(snapshot.fetch_ref.byte_range, None);
+        assert_eq!(snapshot.origin_seq, 10);
     }
 
     struct TestSegmentServer {
@@ -1183,6 +1138,7 @@ mod tests {
         {
             let mut session = session.write().await;
             session.configure_segment_prefetch_queue(policy.max_prefetch_queue_depth);
+            session.proxy_next_seq = Some(1);
             session
                 .apply_origin_manifest(&normal_manifest(&format!(
                     "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4.0,\n{}/1.ts\n#EXTINF:4.0,\n{}/2.ts\n#EXTINF:4.0,\n{}/3.ts\n",
@@ -1202,6 +1158,7 @@ mod tests {
             segment_repair: test_segment_repair_manager(),
             repair_access_lease_id: None,
             headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
             client: reqwest::Client::new(),
             no_redirect_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -1379,6 +1336,7 @@ mod tests {
             segment_repair: test_segment_repair_manager(),
             repair_access_lease_id: None,
             headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
             client: reqwest::Client::new(),
             no_redirect_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())

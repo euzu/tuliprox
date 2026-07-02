@@ -5,6 +5,7 @@ use crate::{
 use axum::http::StatusCode;
 use bytes::Bytes;
 use futures::stream::BoxStream;
+use shared::model::{PlaylistItemType, StreamChannel};
 use std::{collections::HashMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -17,11 +18,31 @@ pub type ProviderStreamResponse = (Option<BoxedProviderStream>, ProviderStreamIn
 
 pub type ProviderStreamFactoryResponse = (BoxedProviderStream, ProviderStreamInfo);
 
+pub(crate) fn uses_direct_body_idle_timeout(stream_channel: &StreamChannel) -> bool {
+    !stream_channel.shared
+        && matches!(
+            stream_channel.item_type,
+            PlaylistItemType::Video
+                | PlaylistItemType::Series
+                | PlaylistItemType::LocalVideo
+                | PlaylistItemType::LocalSeries
+        )
+}
+
 type StreamUrl = Arc<str>;
 type ProviderName = Arc<str>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderStreamCustomReason {
+    ProviderExhausted,
+    UnmappedProviderUrl,
+}
+
 pub enum ProviderStreamState {
-    Custom(ProviderStreamResponse),
+    Custom {
+        response: ProviderStreamResponse,
+        reason: ProviderStreamCustomReason,
+    },
     Available(Option<ProviderName>, StreamUrl),
     GracePeriod(Option<ProviderName>, StreamUrl),
 }

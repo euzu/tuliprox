@@ -136,8 +136,8 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
-    let is_hls_manifest_request = stream_ext == Some(HLS_EXT)
-        || (stream_ext.is_none() && extract_extension_from_url(&pli.url).as_deref() == Some(HLS_EXT));
+    let is_hls_manifest_request =
+        stream_ext == Some(HLS_EXT) || (stream_ext.is_none() && extract_extension_from_url(&pli.url) == Some(HLS_EXT));
 
     if !user.allows_item_type(pli.item_type) {
         if is_hls_manifest_request {
@@ -400,7 +400,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             fingerprint,
             app_state,
             &user,
-            target.id,
+            &target,
             user_session.as_ref(),
             &pli.url,
             archive_reference,
@@ -408,7 +408,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             &input,
             req_headers,
             connection_permission,
-            connection_kind,
+            Some(connection_kind),
             &original_hls_entry_path,
         )
         .await
@@ -504,11 +504,21 @@ async fn m3u_api_stream(
         )
         .into_response();
     }
-    let pli = try_result_not_found!(
-        m3u_get_item_for_stream_id(req_virtual_id, app_state, &target).await,
-        true,
-        format!("Failed to read m3u item for stream id {req_virtual_id}")
-    );
+    let pli = match m3u_get_item_for_stream_id(req_virtual_id, app_state, &target).await {
+        Ok(pli) => pli,
+        Err(err) => {
+            error!("Failed to read m3u item for stream id {req_virtual_id}: {err}");
+            if stream_ext == Some(HLS_EXT) {
+                return axum::http::StatusCode::NOT_FOUND.into_response();
+            }
+            return crate::api::model::create_custom_video_stream_response(
+                app_state,
+                &fingerprint.addr,
+                crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+            )
+            .into_response();
+        }
+    };
 
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),

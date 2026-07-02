@@ -274,7 +274,7 @@ pub fn create_custom_video_stream_response(
     let config = &app_state.app_config;
     if let (Some(stream), Some((headers, status_code, _, _))) = match video_response {
         CustomVideoStreamType::ChannelUnavailable => {
-            create_channel_unavailable_stream(config, &[], StatusCode::BAD_REQUEST)
+            create_channel_unavailable_stream(config, &[], StatusCode::OK)
         }
         CustomVideoStreamType::UserConnectionsExhausted => create_user_connections_exhausted_stream(config, &[]),
         CustomVideoStreamType::ProviderConnectionsExhausted => {

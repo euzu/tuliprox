@@ -1,36 +1,47 @@
 use super::{
-    begin_hls_origin_account_io, finish_hls_origin_account_io, safe_origin_log_value, safe_proxy_session_id,
-    safe_session_key, sanitized_hls_origin_headers, HlsManifestRenderer, HlsMapWorkerPool, HlsOriginIoContext,
-    HlsOriginWorkClass, HlsSegmentCache, HlsSegmentRepairManager, HlsSegmentWorkerPool, HlsSessionHandle,
-    HlsSessionMode, MapFetchContext, RenderPolicy, SegmentFetchContext, TransientPassthroughReason,
+    begin_hls_origin_account_io, finish_hls_origin_account_io, is_hls_provisioning_gap_segment,
+    is_hls_provisioning_segment,
+    manifest_fetch::{
+        commit_error_to_fetch_error, evaluate_manifest_origin_quality_with_mode, fetch_hls_origin_manifest_request,
+        fetched_effective_manifest_host, log_hls_manifest_initial_selected, manifest_host_switch_failure_threshold,
+        manifest_origin_quality_from_candidate, next_committed_origin_highwater,
+        retry_hls_origin_manifest_recovery_chain, score_hls_manifest_candidate_for_selection_log,
+        FetchedOriginManifest, HlsManifestAcceptanceRejectReason, HlsManifestCommitAcceptanceMode,
+        HlsManifestCommitError, HlsManifestOriginQuality, HlsManifestOriginRelation, HlsManifestRejectLogReason,
+        HlsManifestSequenceRelation, HlsOriginManifestFetchContext, HlsOriginManifestFetchRequest, LiveHlsOriginEntry,
+        OriginManifestFetchError, RetryPolicy,
+    },
+    safe_hls_access_lease_id, safe_origin_log_value, safe_proxy_session_id, safe_session_key,
+    hls_origin_headers_with_provider_session, sanitized_hls_origin_headers,
+    HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseId, HlsFreshManifestRequiredReason, HlsManifestRenderer,
+    HlsManifestTemporaryFailureKind, HlsManifestTemporaryFailureTransition, HlsMapWorkerPool, HlsOriginIoContext,
+    HlsOriginWorkClass, HlsProxyManager, HlsSegmentCache, HlsSegmentRepairManager, HlsSegmentWorkerPool, HlsSessionHandle,
+    HlsSessionMode, MapFetchContext, RenderedManifestStoreOutcome, RenderedManifestStoreRejectReason,
+    SegmentFetchContext, TransientPassthroughReason,
 };
 use crate::{
-    model::{
-        resolve_provider_scheme_url_with_provider_index, AppConfig, ConfigProvider, InputSource,
-        ReverseProxyDisabledHeaderConfig, StripConfig,
-    },
+    model::{AppConfig, HlsManifestRecoveryBurstConfig, ReverseProxyDisabledHeaderConfig, StripConfig, StripMode},
     processing::parser::hls::{
+        initial_strip::initial_hls_strip_segments_for_durations,
         origin_manifest::{
-            parse_manifest_timing, parse_origin_manifest_timeline, parse_origin_media_manifest,
-            OriginManifestParseOutcome, OriginManifestTransientReason, ParsedOriginManifest,
-            ParsedOriginManifestTimeline,
+            parse_manifest_timing, parse_manifest_validity, parse_origin_manifest_timeline,
+            parse_origin_media_manifest, OriginManifestParseOutcome, OriginManifestTransientReason,
+            ParsedOriginManifest, ParsedOriginManifestTimeline,
         },
-        transient_manifest::{TransientManifestRewriter, TransientRewriteOptions},
-    },
-    utils::request::{
-        download_text_content_with_manual_redirects_and_options, download_text_content_with_options,
-        RequestFetchOptions,
+        transient_manifest::{
+            apply_transient_discontinuity_sequence, materialize_transient_provisioning_handoff_view,
+            transient_discontinuity_sequence, transient_visible_discontinuity_count, TransientManifestRewriter,
+            TransientRewriteOptions,
+        },
     },
 };
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::HeaderMap;
 use log::{debug, info, warn};
 use reqwest::Client;
-use shared::{model::InputFetchMethod, utils::sanitize_sensitive_info};
-use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
-use tokio::time::timeout;
+use shared::utils::sanitize_sensitive_info;
+use std::sync::Arc;
 use url::Url;
 
-const MAX_MANUAL_REDIRECTS: usize = 10;
 const COLD_START_RETRY_AFTER_SECONDS: u64 = 2;
 const FIRST_FAILURE_BACKOFF_MS: u64 = 0;
 const SECOND_FAILURE_BACKOFF_MS: u64 = 500;
@@ -64,7 +75,7 @@ impl OriginRefreshState {
         timing: HlsManifestRefreshTiming,
     ) -> u64 {
         let refresh_interval_ms = match timing.progress {
-            HlsManifestProgress::Advanced => {
+            HlsManifestProgress::Advanced | HlsManifestProgress::Rollover => {
                 self.consecutive_empty_refreshes = 0;
                 timing.base_interval_ms
             }
@@ -100,123 +111,18 @@ impl OriginRefreshState {
     }
 }
 
-/// Origin manifest entrypoint snapshot for live HLS refreshes.
-#[derive(Clone)]
-pub struct LiveHlsOriginEntry {
-    url: Url,
-    provider: Option<Arc<ConfigProvider>>,
-}
-
-impl LiveHlsOriginEntry {
-    pub fn parse(url: &str) -> Option<Self> { Self::parse_with_provider(url, None) }
-
-    pub fn parse_with_provider(url: &str, provider: Option<Arc<ConfigProvider>>) -> Option<Self> {
-        Url::parse(url).ok().map(|url| Self { url, provider })
-    }
-
-    pub fn url(&self) -> &Url { &self.url }
-
-    pub fn provider(&self) -> Option<&Arc<ConfigProvider>> { self.provider.as_ref() }
-
-    pub fn to_input_source(&self) -> InputSource {
-        InputSource {
-            name: Arc::<str>::from("hls-origin"),
-            url: self.url.to_string(),
-            provider: self.provider.clone(),
-            username: None,
-            password: None,
-            method: InputFetchMethod::GET,
-            headers: HashMap::new(),
-        }
-    }
-}
-
-impl fmt::Debug for LiveHlsOriginEntry {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LiveHlsOriginEntry")
-            .field("scheme", &self.url.scheme())
-            .field("host", &self.url.host_str().unwrap_or("<missing>"))
-            .field("path", &"<redacted>")
-            .field("provider", &self.provider.as_ref().map(|provider| provider.name.as_ref()))
-            .finish()
-    }
-}
-
-/// Fixed retry policy for HLS origin manifest refreshes.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct RetryPolicy {
-    pub delays_ms: [u64; 5],
-    pub jitter_max_ms: u64,
-}
-
-impl Default for RetryPolicy {
-    fn default() -> Self { Self { delays_ms: [0, 100, 250, 500, 750], jitter_max_ms: 100 } }
-}
-
-impl RetryPolicy {
-    pub fn delay_for_attempt_ms(&self, attempt_index: usize, jitter_ms: u64) -> Option<u64> {
-        self.delays_ms.get(attempt_index).map(|base| base.saturating_add(jitter_ms.min(self.jitter_max_ms)))
-    }
-
-    fn attempt_count(&self) -> usize { self.delays_ms.len() }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum OriginManifestStatusClass {
-    Success,
-    Retryable,
-    PermanentFailure,
-    NonRetryableFailure,
-}
-
-pub fn classify_origin_manifest_status(status: StatusCode) -> OriginManifestStatusClass {
-    if status.is_success() {
-        return OriginManifestStatusClass::Success;
-    }
-    if status.is_server_error()
-        || matches!(
-            status,
-            StatusCode::PROXY_AUTHENTICATION_REQUIRED
-                | StatusCode::REQUEST_TIMEOUT
-                | StatusCode::TOO_EARLY
-                | StatusCode::TOO_MANY_REQUESTS
-        )
-    {
-        return OriginManifestStatusClass::Retryable;
-    }
-    if matches!(
-        status,
-        StatusCode::BAD_REQUEST
-            | StatusCode::UNAUTHORIZED
-            | StatusCode::FORBIDDEN
-            | StatusCode::NOT_FOUND
-            | StatusCode::GONE
-    ) {
-        return OriginManifestStatusClass::PermanentFailure;
-    }
-    OriginManifestStatusClass::NonRetryableFailure
-}
-
-#[derive(Debug)]
-pub enum OriginManifestFetchError {
-    PermanentStatus(StatusCode),
-    RetryableStatus(StatusCode, Option<u64>),
-    RetryExhausted,
-    NonRetryableStatus(StatusCode),
-    Request(String),
-    Redirect(String),
-    Timeout,
-    ProviderUnavailable,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum OriginManifestCommitError {
-    TimelineRejected,
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HlsManifestAcceptanceDecision {
+    Accept { quality: HlsManifestOriginQuality },
+    RetryCurrentTarget { quality: HlsManifestOriginQuality },
+    AcceptHostSwitch { quality: HlsManifestOriginQuality },
+    Reject { reason: HlsManifestAcceptanceRejectReason, quality: HlsManifestOriginQuality },
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum HlsManifestProgress {
     Advanced,
+    Rollover,
     Unchanged,
 }
 
@@ -224,6 +130,7 @@ impl HlsManifestProgress {
     fn as_log_value(self) -> &'static str {
         match self {
             Self::Advanced => "advanced",
+            Self::Rollover => "rollover",
             Self::Unchanged => "unchanged",
         }
     }
@@ -255,53 +162,55 @@ struct HlsManifestRefreshTiming {
     progress: HlsManifestProgress,
 }
 
-#[derive(Clone, Eq, PartialEq)]
-pub struct FetchedOriginManifest {
-    pub body: String,
-    pub final_manifest_url: String,
-    pub resolved_request_url: String,
-    pub redirect_host: Option<String>,
-    pub provider_url_index: Option<usize>,
-    pub status: StatusCode,
-    pub attempts: usize,
-}
-
-impl fmt::Debug for FetchedOriginManifest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FetchedOriginManifest")
-            .field("body_len", &self.body.len())
-            .field("final_manifest_url", &"<redacted>")
-            .field("resolved_request_url", &"<redacted>")
-            .field("redirect_host", &self.redirect_host)
-            .field("provider_url_index", &self.provider_url_index)
-            .field("status", &self.status)
-            .field("attempts", &self.attempts)
-            .finish()
-    }
-}
-
 #[derive(Clone)]
 pub struct OriginRefreshRequest {
     pub app_config: Arc<AppConfig>,
     pub session: HlsSessionHandle,
     pub origin_entry: LiveHlsOriginEntry,
-    pub origin_input_source: InputSource,
     pub headers: HeaderMap,
+    pub origin_provider_session_headers: HeaderMap,
     pub disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
     pub client: Client,
     pub no_redirect_client: Client,
     pub use_manual_redirects: bool,
     pub segment_cache: Arc<HlsSegmentCache>,
+    pub hls_proxy: Arc<HlsProxyManager>,
     pub segment_repair: Arc<HlsSegmentRepairManager>,
     pub segment_worker_pool: Arc<HlsSegmentWorkerPool>,
     pub map_worker_pool: Arc<HlsMapWorkerPool>,
     pub origin_manifest_timeout_ms: u64,
+    pub manifest_recovery_burst: HlsManifestRecoveryBurstConfig,
     pub strip: StripConfig,
     pub retry_policy: RetryPolicy,
     pub reverse_proxy_rewrite_secret: Vec<u8>,
     pub transient_resource_ttl_ms: u64,
+    pub manifest_commit_requirement: HlsManifestCommitRequirement,
+    pub access_lease_id: Option<HlsAccessLeaseId>,
     pub now_ms: u64,
     pub origin_io: Option<HlsOriginIoContext>,
+}
+
+/// Controls whether a canonical HLS refresh may rely on an existing committed manifest.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum HlsManifestCommitRequirement {
+    CommittedManifestAllowed,
+    FreshCommitRequired { reason: HlsFreshManifestRequiredReason },
+}
+
+impl HlsManifestCommitRequirement {
+    const fn fresh_reason(self) -> Option<HlsFreshManifestRequiredReason> {
+        match self {
+            Self::CommittedManifestAllowed => None,
+            Self::FreshCommitRequired { reason } => Some(reason),
+        }
+    }
+
+    const fn acceptance_mode(self) -> HlsManifestCommitAcceptanceMode {
+        match self {
+            Self::CommittedManifestAllowed => HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+            Self::FreshCommitRequired { .. } => HlsManifestCommitAcceptanceMode::FreshBaseline,
+        }
+    }
 }
 
 pub async fn maybe_trigger_origin_refresh(mut request: OriginRefreshRequest) -> bool {
@@ -354,7 +263,9 @@ async fn mark_origin_refresh_started(request: &mut OriginRefreshRequest, fetch_s
             );
             return false;
         }
-        if fetch_started_at_ms < session.origin_refresh.next_fetch_allowed_at_ms {
+        if fetch_started_at_ms < session.origin_refresh.next_fetch_allowed_at_ms
+            && request.manifest_commit_requirement.fresh_reason().is_none()
+        {
             metrics.record_refresh_skipped();
             let wait_ms = session.origin_refresh.next_fetch_allowed_at_ms.saturating_sub(fetch_started_at_ms);
             debug!(
@@ -385,17 +296,20 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
     let provider_lease = if let Some(origin_io) = request.origin_io.as_ref() {
         let binding = request.session.read().await.origin_account_binding.clone();
         if let Some(binding) = binding {
-            if let Ok(guard) = begin_hls_origin_account_io(origin_io, &request.session, &binding).await {
-                debug!(
-                    "HLS provider session lease joined for manifest refresh: provider={}",
-                    sanitize_sensitive_info(binding.account_name.as_ref())
-                );
-                Some((origin_io.clone(), guard))
-            } else {
-                touch_refresh_origin_account_binding(&request, false).await;
-                let _ = finish_refresh_origin_work(&request, current_time_millis()).await;
-                finish_refresh_failure(&request, OriginManifestFetchError::ProviderUnavailable).await;
-                return;
+            match begin_hls_origin_account_io(origin_io, &request.session, &binding).await {
+                Ok(guard) => {
+                    debug!(
+                        "HLS provider session lease joined for manifest refresh: provider={}",
+                        sanitize_sensitive_info(binding.account_name.as_ref())
+                    );
+                    Some((origin_io.clone(), guard))
+                }
+                Err(kind) => {
+                    touch_refresh_origin_account_binding(&request, false).await;
+                    let _ = finish_refresh_origin_work(&request, current_time_millis()).await;
+                    finish_refresh_failure(&request, OriginManifestFetchError::ProviderUnavailable(kind)).await;
+                    return;
+                }
             }
         } else {
             None
@@ -426,17 +340,28 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
         .await;
     }
     let metrics = Arc::clone(request.segment_worker_pool.metrics());
-    let (should_wake_segment_scheduler, should_wake_map_scheduler) = {
+    let (
+        should_wake_segment_scheduler,
+        should_wake_map_scheduler,
+        fresh_manifest_failure_reason,
+        temporary_manifest_failure_reason,
+        pending_manifest_follow_up,
+    ) = {
         let mut session = request.session.write().await;
         match result {
-            Ok(CommittedOriginManifest {
-                fetched,
-                refresh_timing,
-                wake_segment_scheduler,
-                wake_map_scheduler,
-            }) => {
-                let applied_refresh_interval_ms =
-                    session.origin_refresh.mark_success_with_timing(fetch_started_at_ms, fetch_finished_at_ms, refresh_timing);
+            Ok(CommittedOriginManifest { fetched, refresh_timing, wake_segment_scheduler, wake_map_scheduler }) => {
+                let pending_manifest_follow_up = Some((session.proxy_session_id.clone(), session.target_duration));
+                let applied_refresh_interval_ms = session.origin_refresh.mark_success_with_timing(
+                    fetch_started_at_ms,
+                    fetch_finished_at_ms,
+                    refresh_timing,
+                );
+                if let Some(reset_failures) = session.record_successful_manifest_fetch() {
+                    debug!(
+                        "HLS manifest temporary failure counter reset: session={} previous_failures={reset_failures}",
+                        safe_session_key(&session.key)
+                    );
+                }
                 log_manifest_refresh_timing(&session, refresh_timing, applied_refresh_interval_ms);
                 metrics.record_refresh_completed();
                 for _ in 1..fetched.attempts {
@@ -452,25 +377,64 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
                     fetched.attempts
                 );
                 if origin_work_state.generation_valid {
-                    (wake_segment_scheduler, wake_map_scheduler)
+                    (wake_segment_scheduler, wake_map_scheduler, None, None, pending_manifest_follow_up)
                 } else {
                     session.invalidate_queued_origin_work();
-                    (false, false)
+                    (false, false, None, None, pending_manifest_follow_up)
                 }
             }
             Err(err) => {
                 session.origin_refresh.mark_failure(fetch_finished_at_ms);
                 metrics.record_refresh_failed();
+                let temporary_manifest_failure_reason = record_temporary_manifest_fetch_failure_if_needed(
+                    &mut session,
+                    &request.strip,
+                    &err,
+                    fetch_finished_at_ms,
+                );
+                if manifest_hard_fetch_error(&err) {
+                    session.require_fresh_manifest_commit(HlsFreshManifestRequiredReason::PreviousHardManifestFailure);
+                    debug!(
+                        "HLS manifest marked fresh-commit required after hard fetch failure: session={}",
+                        safe_session_key(&session.key)
+                    );
+                }
                 warn!(
                     "HLS origin manifest refresh completed: session={} proxy_session_id={} result=failed error={}",
                     safe_session_key(&session.key),
                     safe_proxy_session_id(&session.proxy_session_id),
                     safe_origin_log_value(format!("{err:?}"))
                 );
-                (false, false)
+                (
+                    false,
+                    false,
+                    request.manifest_commit_requirement.fresh_reason(),
+                    temporary_manifest_failure_reason,
+                    None,
+                )
             }
         }
     };
+    if let Some((proxy_session_id, target_duration)) = pending_manifest_follow_up {
+        let shortened = request
+            .hls_proxy
+            .mark_pending_manifest_follow_up_for_session(&proxy_session_id, fetch_finished_at_ms, target_duration)
+            .await;
+        if shortened > 0 {
+            debug!(
+                "HLS pending manifest leases shortened after manifest commit: session={} leases={shortened}",
+                safe_proxy_session_id(&proxy_session_id)
+            );
+        }
+    }
+    if let Some(reason) = fresh_manifest_failure_reason {
+        mark_fresh_manifest_commit_failed_access_leases(&request, fetch_finished_at_ms, reason).await;
+    }
+    if let Some((failures, threshold)) = temporary_manifest_failure_reason {
+        mark_manifest_temporary_failure_access_leases(&request, fetch_finished_at_ms, failures, threshold).await;
+    }
+
+    let origin_provider_session_headers = request.session.read().await.origin_provider_session_headers.clone();
 
     if should_wake_map_scheduler {
         request
@@ -480,6 +444,7 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
                     session: Arc::clone(&request.session),
                     segment_cache: Arc::clone(&request.segment_cache),
                     headers: request.headers.clone(),
+                    origin_provider_session_headers: origin_provider_session_headers.clone(),
                     client: request.client.clone(),
                     no_redirect_client: request.no_redirect_client.clone(),
                     use_manual_redirects: request.use_manual_redirects,
@@ -503,6 +468,7 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
                     segment_repair: request.segment_repair,
                     repair_access_lease_id: None,
                     headers: request.headers,
+                    origin_provider_session_headers,
                     client: request.client,
                     no_redirect_client: request.no_redirect_client,
                     use_manual_redirects: request.use_manual_redirects,
@@ -513,6 +479,147 @@ async fn refresh_and_commit(mut request: OriginRefreshRequest, fetch_started_at_
                 fetch_finished_at_ms,
             )
             .await;
+    }
+}
+
+async fn mark_fresh_manifest_commit_failed_access_leases(
+    request: &OriginRefreshRequest,
+    failed_at_ms: u64,
+    reason: HlsFreshManifestRequiredReason,
+) {
+    let Some(origin_io) = request.origin_io.as_ref() else {
+        return;
+    };
+    let unavailable_reason = HlsAccessLeaseChannelUnavailableReason::ManifestCommitFailed { reason };
+    if let Some(access_lease_id) = request.access_lease_id.as_ref() {
+        let marked = origin_io
+            .app_state
+            .hls_proxy
+            .mark_access_lease_channel_unavailable(access_lease_id, failed_at_ms, unavailable_reason)
+            .await;
+        if marked {
+            let proxy_session_id = request.session.read().await.proxy_session_id.clone();
+            debug!(
+                "HLS access lease marked channel unavailable after fresh manifest commit failed: session={} lease={} reason={reason:?}",
+                safe_proxy_session_id(&proxy_session_id),
+                safe_hls_access_lease_id(access_lease_id)
+            );
+        }
+        return;
+    }
+
+    let proxy_session_id = request.session.read().await.proxy_session_id.clone();
+    let marked = origin_io
+        .app_state
+        .hls_proxy
+        .mark_access_leases_channel_unavailable_for_session(
+            &proxy_session_id,
+            failed_at_ms,
+            unavailable_reason,
+        )
+        .await;
+    if marked > 0 {
+        debug!(
+            "HLS access leases marked channel unavailable after fresh manifest commit failed: session={} marked={marked} reason={reason:?}",
+            safe_proxy_session_id(&proxy_session_id)
+        );
+    }
+}
+
+fn record_temporary_manifest_fetch_failure_if_needed(
+    session: &mut super::HlsSession,
+    strip: &StripConfig,
+    err: &OriginManifestFetchError,
+    failed_at_ms: u64,
+) -> Option<(u32, u32)> {
+    let kind = manifest_temporary_failure_kind(err)?;
+    let threshold = manifest_host_switch_failure_threshold(session, strip);
+    match session.record_temporary_manifest_fetch_failure(failed_at_ms, kind, threshold) {
+        HlsManifestTemporaryFailureTransition::StillRetryable { failures, threshold } => {
+            debug!(
+                "HLS manifest temporary failure counted: session={} failures={} threshold={}",
+                safe_session_key(&session.key),
+                failures,
+                threshold
+            );
+            None
+        }
+        HlsManifestTemporaryFailureTransition::BecameChannelUnavailable { failures, threshold } => {
+            debug!(
+                "HLS manifest temporary failure threshold reached: session={} failures={} threshold={}",
+                safe_session_key(&session.key),
+                failures,
+                threshold
+            );
+            Some((failures, threshold))
+        }
+    }
+}
+
+fn manifest_temporary_failure_kind(err: &OriginManifestFetchError) -> Option<HlsManifestTemporaryFailureKind> {
+    match err {
+        OriginManifestFetchError::Timeout => Some(HlsManifestTemporaryFailureKind::Timeout),
+        OriginManifestFetchError::RetryableStatus(status, _) => {
+            Some(HlsManifestTemporaryFailureKind::RetryableStatus { status: *status })
+        }
+        OriginManifestFetchError::Request(message) if request_error_indicates_timeout(message) => {
+            Some(HlsManifestTemporaryFailureKind::Timeout)
+        }
+        OriginManifestFetchError::ProviderUnavailable(kind) if kind.is_retryable_resource_failure() => {
+            Some(HlsManifestTemporaryFailureKind::ProviderAcquire { kind: *kind })
+        }
+        OriginManifestFetchError::PermanentStatus(_)
+        | OriginManifestFetchError::RetryExhausted
+        | OriginManifestFetchError::NonRetryableStatus(_)
+        | OriginManifestFetchError::Request(_)
+        | OriginManifestFetchError::Redirect(_)
+        | OriginManifestFetchError::ProviderUnavailable(_) => None,
+    }
+}
+
+fn manifest_hard_fetch_error(err: &OriginManifestFetchError) -> bool {
+    match err {
+        OriginManifestFetchError::PermanentStatus(_) | OriginManifestFetchError::NonRetryableStatus(_) => true,
+        OriginManifestFetchError::ProviderUnavailable(kind) => !kind.is_retryable_resource_failure(),
+        OriginManifestFetchError::RetryableStatus(_, _)
+        | OriginManifestFetchError::RetryExhausted
+        | OriginManifestFetchError::Request(_)
+        | OriginManifestFetchError::Redirect(_)
+        | OriginManifestFetchError::Timeout => false,
+    }
+}
+
+fn request_error_indicates_timeout(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("timeout") || lower.contains("timed out")
+}
+
+async fn mark_manifest_temporary_failure_access_leases(
+    request: &OriginRefreshRequest,
+    failed_at_ms: u64,
+    failures: u32,
+    threshold: u32,
+) {
+    let Some(origin_io) = request.origin_io.as_ref() else {
+        return;
+    };
+    let proxy_session_id = request.session.read().await.proxy_session_id.clone();
+    let marked = origin_io
+        .app_state
+        .hls_proxy
+        .mark_access_leases_channel_unavailable_for_session(
+            &proxy_session_id,
+            failed_at_ms,
+            HlsAccessLeaseChannelUnavailableReason::ManifestTemporaryFailureThreshold { failures, threshold },
+        )
+        .await;
+    if marked > 0 {
+        debug!(
+            "HLS access leases marked channel unavailable after temporary manifest failures: session={} marked={marked} failures={} threshold={}",
+            safe_proxy_session_id(&proxy_session_id),
+            failures,
+            threshold
+        );
     }
 }
 
@@ -536,16 +643,32 @@ async fn finish_refresh_failure(request: &OriginRefreshRequest, err: OriginManif
     release_preacquired_origin_provider_handle(request).await;
     let fetch_finished_at_ms = current_time_millis();
     let metrics = Arc::clone(request.segment_worker_pool.metrics());
-    {
+    let (fresh_manifest_failure_reason, temporary_manifest_failure_reason) = {
         let mut session = request.session.write().await;
         session.origin_refresh.mark_failure(fetch_finished_at_ms);
         metrics.record_refresh_failed();
+        let temporary_manifest_failure_reason =
+            record_temporary_manifest_fetch_failure_if_needed(&mut session, &request.strip, &err, fetch_finished_at_ms);
+        if manifest_hard_fetch_error(&err) {
+            session.require_fresh_manifest_commit(HlsFreshManifestRequiredReason::PreviousHardManifestFailure);
+            debug!(
+                "HLS manifest marked fresh-commit required after hard fetch failure: session={}",
+                safe_session_key(&session.key)
+            );
+        }
         warn!(
             "HLS origin manifest refresh completed: session={} proxy_session_id={} result=failed error={}",
             safe_session_key(&session.key),
             safe_proxy_session_id(&session.proxy_session_id),
             safe_origin_log_value(format!("{err:?}"))
         );
+        (request.manifest_commit_requirement.fresh_reason(), temporary_manifest_failure_reason)
+    };
+    if let Some(reason) = fresh_manifest_failure_reason {
+        mark_fresh_manifest_commit_failed_access_leases(request, fetch_finished_at_ms, reason).await;
+    }
+    if let Some((failures, threshold)) = temporary_manifest_failure_reason {
+        mark_manifest_temporary_failure_access_leases(request, fetch_finished_at_ms, failures, threshold).await;
     }
 }
 
@@ -586,99 +709,139 @@ struct CommittedOriginManifest {
     wake_map_scheduler: bool,
 }
 
+fn manifest_fetch_context(request: &OriginRefreshRequest) -> HlsOriginManifestFetchContext {
+    HlsOriginManifestFetchContext {
+        app_config: Arc::clone(&request.app_config),
+        session: Arc::clone(&request.session),
+        origin_entry: request.origin_entry.clone(),
+        headers: hls_origin_headers_with_provider_session(&request.headers, &request.origin_provider_session_headers),
+        client: request.client.clone(),
+        no_redirect_client: request.no_redirect_client.clone(),
+        use_manual_redirects: request.use_manual_redirects,
+        origin_manifest_timeout_ms: request.origin_manifest_timeout_ms,
+        manifest_recovery_burst: request.manifest_recovery_burst.clone(),
+        retry_policy: request.retry_policy.clone(),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 async fn fetch_and_commit_manifest_with_policy(
     request: &mut OriginRefreshRequest,
 ) -> Result<CommittedOriginManifest, OriginManifestFetchError> {
-    let mut target_url = None;
-    let mut target_provider_url_index = None;
-    let attempts = request.retry_policy.attempt_count();
-    let mut last_error = OriginManifestFetchError::RetryExhausted;
+    let fetch_context = manifest_fetch_context(request);
+    let fetched =
+        fetch_hls_origin_manifest_request(HlsOriginManifestFetchRequest::initial_global_policy(&fetch_context))
+            .await?
+            .with_attempts(1);
+    let acceptance_mode = request.manifest_commit_requirement.acceptance_mode();
+    let selected_report =
+        score_hls_manifest_candidate_for_selection_log(&fetch_context, &fetched, acceptance_mode).await;
+    let commit_result = {
+        let mut session = request.session.write().await;
+        commit_fetched_manifest(&mut session, &fetched, request, current_time_millis())
+    };
 
-    for attempt_index in 0..attempts {
-        let delay_ms = {
-            let jitter = if request.retry_policy.jitter_max_ms == 0 {
-                0
-            } else {
-                fastrand::u64(0..=request.retry_policy.jitter_max_ms)
-            };
-            request.retry_policy.delay_for_attempt_ms(attempt_index, jitter).unwrap_or_default()
-        };
-        if delay_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+    match commit_result {
+        Ok((refresh_timing, wake_segment_scheduler, wake_map_scheduler)) => {
+            if let Some(report) = selected_report.as_ref() {
+                log_hls_manifest_initial_selected(&fetch_context, report).await;
+            }
+            Ok(CommittedOriginManifest { fetched, refresh_timing, wake_segment_scheduler, wake_map_scheduler })
         }
-
-        let fetch_result = if let Some(target) = target_url.as_ref() {
-            fetch_origin_manifest_for_hls_reject_attempt(request, target, target_provider_url_index, attempt_index)
-                .await
-        } else {
-            fetch_origin_manifest_with_global_policy(request, &request.origin_input_source).await
-        };
-
-        let mut fetched = match fetch_result {
-            Ok(fetched) => fetched.with_attempts(attempt_index + 1),
-            Err(err)
-                if target_url.is_some()
-                    && is_hls_retryable_manifest_reject_fetch_error(&err)
-                    && attempt_index + 1 < attempts =>
+        Err(HlsManifestCommitError::RetryCurrentTarget) => {
+            let target_url = Url::parse(&fetched.resolved_request_url)
+                .map_err(|err| OriginManifestFetchError::Request(err.to_string()))?;
+            let last_error = match retry_hls_origin_manifest_recovery_chain(
+                &fetch_context,
+                target_url,
+                fetched.provider_url_index,
+                None,
+                |fetched, acceptance_mode| commit_manifest_recovery_candidate(request, fetched, acceptance_mode),
+            )
+            .await
             {
-                log_origin_refresh_retry_scheduled(
-                    &request.origin_entry,
-                    attempt_index,
-                    next_retry_delay_ms(&request.retry_policy, attempt_index, None),
-                    format!("reason=timeline-rejected error={}", safe_origin_log_value(format!("{err:?}"))),
-                );
-                last_error = err;
-                continue;
-            }
-            Err(err) => return Err(err),
-        };
-        if fetched.provider_url_index.is_none() {
-            fetched.provider_url_index = target_provider_url_index;
-        }
+                Ok(committed) => return Ok(committed),
+                Err(err) => err,
+            };
 
-        let commit_result = {
-            let mut session = request.session.write().await;
-            commit_fetched_manifest(&mut session, &fetched, request, current_time_millis())
-        };
-
-        match commit_result {
-            Ok((refresh_timing, wake_segment_scheduler, wake_map_scheduler)) => {
-                return Ok(CommittedOriginManifest {
-                    fetched,
-                    refresh_timing,
-                    wake_segment_scheduler,
-                    wake_map_scheduler,
-                });
-            }
-            Err(OriginManifestCommitError::TimelineRejected) => {
-                target_url = Url::parse(&fetched.resolved_request_url).ok();
-                target_provider_url_index = fetched.provider_url_index;
-                if attempt_index + 1 == attempts {
-                    return Err(OriginManifestFetchError::RetryExhausted);
+            let decision = {
+                let mut session = request.session.write().await;
+                record_pinned_host_recovery_chain_failed(&mut session, &request.strip, current_time_millis())
+            };
+            match decision {
+                HlsManifestAcceptanceDecision::AcceptHostSwitch { .. } => {
+                    let candidate_commit_result = {
+                        let mut session = request.session.write().await;
+                        commit_fetched_manifest_with_acceptance_mode(
+                            &mut session,
+                            &fetched,
+                            request,
+                            current_time_millis(),
+                            HlsManifestCommitAcceptanceMode::AllowHeldHostSwitchCandidate,
+                        )
+                    };
+                    match candidate_commit_result {
+                        Ok((refresh_timing, wake_segment_scheduler, wake_map_scheduler)) => {
+                            if let Some(report) = selected_report.as_ref() {
+                                log_hls_manifest_initial_selected(&fetch_context, report).await;
+                            }
+                            Ok(CommittedOriginManifest {
+                                fetched,
+                                refresh_timing,
+                                wake_segment_scheduler,
+                                wake_map_scheduler,
+                            })
+                        }
+                        Err(err) => Err(commit_error_to_fetch_error(&err)),
+                    }
                 }
-                log_origin_refresh_retry_scheduled(
-                    &request.origin_entry,
-                    attempt_index,
-                    next_retry_delay_ms(&request.retry_policy, attempt_index, None),
-                    "error=timeline-rejected",
-                );
-                last_error = OriginManifestFetchError::RetryExhausted;
+                HlsManifestAcceptanceDecision::Reject { reason, .. } => {
+                    debug!(
+                        "HLS origin manifest host switch held: origin_entry={} reason={reason:?}",
+                        safe_origin_log_value(request.origin_entry.url().as_str())
+                    );
+                    Err(last_error)
+                }
+                HlsManifestAcceptanceDecision::Accept { .. }
+                | HlsManifestAcceptanceDecision::RetryCurrentTarget { .. } => Err(last_error),
             }
+        }
+        Err(HlsManifestCommitError::TimelineRejected { reason }) => {
+            let target_url =
+                Url::parse(&fetched.resolved_request_url).map_err(|_| OriginManifestFetchError::RetryExhausted)?;
+            retry_hls_origin_manifest_recovery_chain(
+                &fetch_context,
+                target_url,
+                fetched.provider_url_index,
+                Some(reason),
+                |fetched, acceptance_mode| commit_manifest_recovery_candidate(request, fetched, acceptance_mode),
+            )
+            .await
         }
     }
-
-    Err(last_error)
 }
 
-fn is_hls_retryable_manifest_reject_fetch_error(err: &OriginManifestFetchError) -> bool {
-    matches!(
-        err,
-        OriginManifestFetchError::RetryableStatus(_, _)
-            | OriginManifestFetchError::Request(_)
-            | OriginManifestFetchError::Redirect(_)
-            | OriginManifestFetchError::Timeout
-            | OriginManifestFetchError::RetryExhausted
-    )
+async fn commit_manifest_recovery_candidate(
+    request: &OriginRefreshRequest,
+    fetched: FetchedOriginManifest,
+    acceptance_mode: HlsManifestCommitAcceptanceMode,
+) -> Result<CommittedOriginManifest, HlsManifestCommitError> {
+    let commit_result = {
+        let mut session = request.session.write().await;
+        commit_fetched_manifest_with_acceptance_mode(
+            &mut session,
+            &fetched,
+            request,
+            current_time_millis(),
+            acceptance_mode,
+        )
+    };
+    match commit_result {
+        Ok((refresh_timing, wake_segment_scheduler, wake_map_scheduler)) => {
+            Ok(CommittedOriginManifest { fetched, refresh_timing, wake_segment_scheduler, wake_map_scheduler })
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn commit_fetched_manifest(
@@ -686,7 +849,23 @@ fn commit_fetched_manifest(
     fetched: &FetchedOriginManifest,
     request: &OriginRefreshRequest,
     fetch_finished_at_ms: u64,
-) -> Result<(HlsManifestRefreshTiming, bool, bool), OriginManifestCommitError> {
+) -> Result<(HlsManifestRefreshTiming, bool, bool), HlsManifestCommitError> {
+    commit_fetched_manifest_with_acceptance_mode(
+        session,
+        fetched,
+        request,
+        fetch_finished_at_ms,
+        request.manifest_commit_requirement.acceptance_mode(),
+    )
+}
+
+fn commit_fetched_manifest_with_acceptance_mode(
+    session: &mut super::HlsSession,
+    fetched: &FetchedOriginManifest,
+    request: &OriginRefreshRequest,
+    fetch_finished_at_ms: u64,
+    acceptance_mode: HlsManifestCommitAcceptanceMode,
+) -> Result<(HlsManifestRefreshTiming, bool, bool), HlsManifestCommitError> {
     let existing_transient_reason = match &session.mode {
         HlsSessionMode::TransientPassthrough { reason } => Some(reason.clone()),
         HlsSessionMode::NormalCacheTimeline => None,
@@ -694,113 +873,277 @@ fn commit_fetched_manifest(
 
     match (existing_transient_reason, parse_origin_media_manifest(&fetched.body, &fetched.final_manifest_url)) {
         (None, OriginManifestParseOutcome::Normal(manifest)) => {
+            let quality = evaluate_manifest_acceptance_for_commit(
+                session,
+                fetched,
+                ParsedOriginManifestTimeline {
+                    origin_manifest_sequence: manifest.origin_manifest_sequence,
+                    origin_manifest_segment_cnt: manifest.origin_manifest_segment_cnt,
+                },
+                request,
+                fetch_finished_at_ms,
+                acceptance_mode,
+            )?;
+            mark_manifest_handoff_discontinuity_if_needed(session, &quality);
             let result = commit_normal_manifest(
                 session,
                 &manifest,
                 fetched.redirect_host.as_deref(),
-                fetched.provider_url_index,
                 request,
                 &fetched.resolved_request_url,
                 fetch_finished_at_ms,
+                quality.sequence_relation,
             );
-            result.map(|refresh_timing| (refresh_timing, true, true))
+            result.map(|refresh_timing| {
+                update_origin_provider_session_headers(session, fetched);
+                mark_manifest_acceptance_success(session, fetched, &quality);
+                (refresh_timing, true, true)
+            })
         }
         (Some(reason), _) => {
-            let timeline = validate_transient_manifest_continuity_for_commit(
+            let timeline = parse_transient_manifest_timeline_for_commit(session, &fetched.body)?;
+            let quality = evaluate_manifest_acceptance_for_commit(
+                session,
+                fetched,
+                timeline,
+                request,
+                fetch_finished_at_ms,
+                acceptance_mode,
+            )?;
+            mark_manifest_handoff_discontinuity_if_needed(session, &quality);
+            let refresh_timing = commit_transient_manifest(
                 session,
                 &fetched.body,
+                &fetched.final_manifest_url,
+                &fetched.resolved_request_url,
                 fetched.redirect_host.as_deref(),
-            )?;
-            Ok((
-                commit_transient_manifest(
-                    session,
-                    &fetched.body,
-                    &fetched.final_manifest_url,
-                    &fetched.resolved_request_url,
-                    fetched.redirect_host.as_deref(),
-                    fetched.provider_url_index,
-                    &request.headers,
-                    reason,
-                    &request.reverse_proxy_rewrite_secret,
-                    request.transient_resource_ttl_ms,
-                    fetch_finished_at_ms,
-                    timeline,
-                ),
-                false,
-                false,
-            ))
+                &request.headers,
+                reason,
+                &request.reverse_proxy_rewrite_secret,
+                request.transient_resource_ttl_ms,
+                fetch_finished_at_ms,
+                timeline,
+                &quality,
+                &request.strip,
+            );
+            update_origin_provider_session_headers(session, fetched);
+            mark_manifest_acceptance_success(session, fetched, &quality);
+            Ok((refresh_timing, false, false))
         }
         (None, OriginManifestParseOutcome::TransientPassthrough { reason }) => {
-            let timeline = validate_transient_manifest_continuity_for_commit(
+            let timeline = parse_transient_manifest_timeline_for_commit(session, &fetched.body)?;
+            let quality = evaluate_manifest_acceptance_for_commit(
                 session,
-                &fetched.body,
-                fetched.redirect_host.as_deref(),
+                fetched,
+                timeline,
+                request,
+                fetch_finished_at_ms,
+                acceptance_mode,
             )?;
             request.segment_worker_pool.metrics().record_transient_switch();
-            Ok((
-                commit_transient_manifest(
-                    session,
-                    &fetched.body,
-                    &fetched.final_manifest_url,
-                    &fetched.resolved_request_url,
-                    fetched.redirect_host.as_deref(),
-                    fetched.provider_url_index,
-                    &request.headers,
-                    map_transient_reason(reason),
-                    &request.reverse_proxy_rewrite_secret,
-                    request.transient_resource_ttl_ms,
-                    fetch_finished_at_ms,
-                    timeline,
-                ),
-                false,
-                false,
-            ))
+            mark_manifest_handoff_discontinuity_if_needed(session, &quality);
+            let refresh_timing = commit_transient_manifest(
+                session,
+                &fetched.body,
+                &fetched.final_manifest_url,
+                &fetched.resolved_request_url,
+                fetched.redirect_host.as_deref(),
+                &request.headers,
+                map_transient_reason(reason),
+                &request.reverse_proxy_rewrite_secret,
+                request.transient_resource_ttl_ms,
+                fetch_finished_at_ms,
+                timeline,
+                &quality,
+                &request.strip,
+            );
+            update_origin_provider_session_headers(session, fetched);
+            mark_manifest_acceptance_success(session, fetched, &quality);
+            Ok((refresh_timing, false, false))
         }
     }
 }
 
-fn validate_origin_manifest_continuity_for_commit(
-    session: &super::HlsSession,
-    redirect_host: Option<&str>,
-    timeline: ParsedOriginManifestTimeline,
-) -> Result<(), OriginManifestCommitError> {
-    if can_use_redirect_manifest(
-        session.origin_seq_highwater,
-        session.last_redirect_host.as_deref(),
-        redirect_host,
-        timeline.origin_manifest_sequence,
-        timeline.origin_manifest_segment_cnt,
-    ) {
-        return Ok(());
+fn update_origin_provider_session_headers(session: &mut super::HlsSession, fetched: &FetchedOriginManifest) {
+    if !fetched.provider_session_headers.is_empty() {
+        session.origin_provider_session_headers = fetched.provider_session_headers.clone();
     }
-
-    warn!(
-        "HLS origin manifest rejected: session={} proxy_session_id={} reason=redirect-or-sequence-check media_sequence={} segments={}",
-        safe_session_key(&session.key),
-        safe_proxy_session_id(&session.proxy_session_id),
-        timeline.origin_manifest_sequence,
-        timeline.origin_manifest_segment_cnt
-    );
-    Err(OriginManifestCommitError::TimelineRejected)
 }
 
-fn validate_transient_manifest_continuity_for_commit(
+fn parse_transient_manifest_timeline_for_commit(
     session: &super::HlsSession,
     body: &str,
-    redirect_host: Option<&str>,
-) -> Result<ParsedOriginManifestTimeline, OriginManifestCommitError> {
-    let timeline = parse_origin_manifest_timeline(body).map_err(|reason| {
+) -> Result<ParsedOriginManifestTimeline, HlsManifestCommitError> {
+    parse_origin_manifest_timeline(body).map_err(|reason| {
         warn!(
             "HLS origin manifest rejected: session={} proxy_session_id={} reason=malformed-transient-timeline error={}",
             safe_session_key(&session.key),
             safe_proxy_session_id(&session.proxy_session_id),
             safe_origin_log_value(format!("{reason:?}"))
         );
-        OriginManifestCommitError::TimelineRejected
-    })?;
-    validate_origin_manifest_continuity_for_commit(session, redirect_host, timeline)?;
+        HlsManifestCommitError::TimelineRejected { reason: HlsManifestRejectLogReason::MalformedTransientTimeline }
+    })
+}
 
-    Ok(timeline)
+fn evaluate_manifest_acceptance_for_commit(
+    session: &mut super::HlsSession,
+    fetched: &FetchedOriginManifest,
+    timeline: ParsedOriginManifestTimeline,
+    request: &OriginRefreshRequest,
+    now_ms: u64,
+    mode: HlsManifestCommitAcceptanceMode,
+) -> Result<HlsManifestOriginQuality, HlsManifestCommitError> {
+    let fetch_context = manifest_fetch_context(request);
+    match evaluate_manifest_acceptance(session, fetched, timeline, &fetch_context, now_ms, mode) {
+        HlsManifestAcceptanceDecision::Accept { quality }
+        | HlsManifestAcceptanceDecision::AcceptHostSwitch { quality } => Ok(quality),
+        HlsManifestAcceptanceDecision::RetryCurrentTarget { .. } => Err(HlsManifestCommitError::RetryCurrentTarget),
+        HlsManifestAcceptanceDecision::Reject { reason, .. } => {
+            let log_reason = HlsManifestRejectLogReason::from(reason.clone());
+            warn!(
+                "HLS origin manifest rejected: session={} proxy_session_id={} reason={} media_sequence={} segments={}",
+                safe_session_key(&session.key),
+                safe_proxy_session_id(&session.proxy_session_id),
+                log_reason.status_label(),
+                timeline.origin_manifest_sequence,
+                timeline.origin_manifest_segment_cnt
+            );
+            Err(HlsManifestCommitError::TimelineRejected { reason: log_reason })
+        }
+    }
+}
+
+fn evaluate_manifest_acceptance(
+    session: &mut super::HlsSession,
+    fetched: &FetchedOriginManifest,
+    timeline: ParsedOriginManifestTimeline,
+    fetch_context: &HlsOriginManifestFetchContext,
+    now_ms: u64,
+    mode: HlsManifestCommitAcceptanceMode,
+) -> HlsManifestAcceptanceDecision {
+    let quality = evaluate_manifest_origin_quality_with_mode(session, fetched, timeline, fetch_context, now_ms, mode);
+
+    match quality.host_relation {
+        HlsManifestOriginRelation::Initial
+        | HlsManifestOriginRelation::SameRedirectHost
+        | HlsManifestOriginRelation::UnknownHost => {
+            if let Some(reason) = quality.reject_reason.clone() {
+                return HlsManifestAcceptanceDecision::Reject { reason, quality };
+            }
+            HlsManifestAcceptanceDecision::Accept { quality }
+        }
+        HlsManifestOriginRelation::OtherRedirectHost => {
+            let Some(effective_host) = quality.effective_host.clone() else {
+                return HlsManifestAcceptanceDecision::Accept { quality };
+            };
+
+            upsert_host_switch_candidate(session, fetched, &quality, effective_host.clone(), now_ms);
+            if matches!(mode, HlsManifestCommitAcceptanceMode::AllowHeldHostSwitchCandidate)
+                && session
+                    .manifest_acceptance
+                    .host_switch_candidate
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.host == effective_host)
+            {
+                if let Some(reason) = quality.reject_reason.clone() {
+                    return HlsManifestAcceptanceDecision::Reject { reason, quality };
+                }
+                return HlsManifestAcceptanceDecision::AcceptHostSwitch { quality };
+            }
+
+            HlsManifestAcceptanceDecision::RetryCurrentTarget { quality }
+        }
+    }
+}
+
+fn mark_manifest_handoff_discontinuity_if_needed(
+    session: &mut super::HlsSession,
+    quality: &HlsManifestOriginQuality,
+) {
+    if !quality.requires_handoff_discontinuity {
+        return;
+    }
+    if matches!(quality.host_relation, HlsManifestOriginRelation::OtherRedirectHost) {
+        session.mark_pending_origin_epoch_handoff_discontinuity(0);
+    } else if session.pending_handoff_discontinuity_sequence.is_none() {
+        session.mark_pending_handoff_discontinuity(0);
+    }
+}
+
+fn upsert_host_switch_candidate(
+    session: &mut super::HlsSession,
+    fetched: &FetchedOriginManifest,
+    quality: &HlsManifestOriginQuality,
+    host: String,
+    now_ms: u64,
+) {
+    match session.manifest_acceptance.host_switch_candidate.as_mut() {
+        Some(candidate) if candidate.host == host => {
+            candidate.target_url.clone_from(&fetched.resolved_request_url);
+            candidate.last_seen_at_ms = now_ms;
+            candidate.seen_count = candidate.seen_count.saturating_add(1);
+            candidate.highwater = quality.origin_highwater;
+            candidate.quality_score = quality.score.rank();
+        }
+        _ => {
+            session.manifest_acceptance.host_switch_candidate = Some(super::HlsManifestHostSwitchCandidate {
+                host,
+                target_url: fetched.resolved_request_url.clone(),
+                first_seen_at_ms: now_ms,
+                last_seen_at_ms: now_ms,
+                seen_count: 1,
+                highwater: quality.origin_highwater,
+                quality_score: quality.score.rank(),
+            });
+        }
+    }
+}
+
+fn record_pinned_host_recovery_chain_failed(
+    session: &mut super::HlsSession,
+    strip: &StripConfig,
+    now_ms: u64,
+) -> HlsManifestAcceptanceDecision {
+    let Some(candidate) = session.manifest_acceptance.host_switch_candidate.as_mut() else {
+        let quality = manifest_origin_quality_from_candidate(None);
+        return HlsManifestAcceptanceDecision::Reject {
+            reason: HlsManifestAcceptanceRejectReason::MissingPinnedTarget,
+            quality,
+        };
+    };
+    candidate.last_seen_at_ms = now_ms;
+    let failures = session.manifest_acceptance.same_host_retry_chain_failures.saturating_add(1);
+    session.manifest_acceptance.same_host_retry_chain_failures = failures;
+    let threshold = manifest_host_switch_failure_threshold(session, strip);
+    let quality = manifest_origin_quality_from_candidate(session.manifest_acceptance.host_switch_candidate.as_ref());
+    if failures >= threshold {
+        HlsManifestAcceptanceDecision::AcceptHostSwitch { quality }
+    } else {
+        HlsManifestAcceptanceDecision::Reject {
+            reason: HlsManifestAcceptanceRejectReason::HostSwitchPending { failures, threshold },
+            quality,
+        }
+    }
+}
+
+fn mark_manifest_acceptance_success(
+    session: &mut super::HlsSession,
+    fetched: &FetchedOriginManifest,
+    quality: &HlsManifestOriginQuality,
+) {
+    if let Some(effective_host) = fetched_effective_manifest_host(fetched) {
+        session.last_effective_manifest_host = Some(effective_host);
+    }
+    if quality.should_reset_stall_counter {
+        session.manifest_acceptance.same_host_retry_chain_failures = 0;
+        session.manifest_acceptance.host_switch_candidate = None;
+    } else if quality.should_increment_stall_counter {
+        session.manifest_acceptance.same_host_retry_chain_failures =
+            session.manifest_acceptance.same_host_retry_chain_failures.saturating_add(1);
+    }
+    if matches!(quality.host_relation, HlsManifestOriginRelation::OtherRedirectHost) {
+        session.manifest_acceptance.host_switch_candidate = None;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -808,15 +1151,16 @@ fn commit_transient_manifest(
     session: &mut super::HlsSession,
     body: &str,
     final_manifest_url: &str,
-    resolved_request_url: &str,
-    redirect_host: Option<&str>,
-    provider_url_index: Option<usize>,
+    _resolved_request_url: &str,
+    _redirect_host: Option<&str>,
     request_headers: &HeaderMap,
     reason: TransientPassthroughReason,
     reverse_proxy_rewrite_secret: &[u8],
     transient_resource_ttl_ms: u64,
     rendered_at_ms: u64,
     timeline: ParsedOriginManifestTimeline,
+    quality: &HlsManifestOriginQuality,
+    strip: &StripConfig,
 ) -> HlsManifestRefreshTiming {
     let was_normal = matches!(session.mode, HlsSessionMode::NormalCacheTimeline);
     let reason_log_fields = transient_reason_log_fields(&reason);
@@ -832,14 +1176,19 @@ fn commit_transient_manifest(
     session.origin_request_headers = request_headers.clone();
     session.transient.set_resource_ttl_ms(transient_resource_ttl_ms);
     session.transient.prune_expired(rendered_at_ms);
-    if let Some(redirect_host) = redirect_host {
-        session.last_redirect_host = Some(redirect_host.to_string());
-    }
-    session.last_successful_manifest_target_url = Some(resolved_request_url.to_string());
-    session.last_successful_manifest_provider_url_index = provider_url_index;
 
+    let previous_provisioning_manifest_body = session
+        .last_rendered_manifest
+        .as_ref()
+        .filter(|_| session.segments.values().any(is_hls_provisioning_segment))
+        .map(|rendered| rendered.body.clone());
+    let provisioning_segment_duration_ms = session
+        .segments
+        .values()
+        .find(|entry| is_hls_provisioning_segment(entry) || is_hls_provisioning_gap_segment(entry))
+        .map_or(2_000, |entry| entry.duration_ms);
     let handoff_discontinuity_sequence = session.take_pending_handoff_discontinuity_sequence();
-    let rewritten = if handoff_discontinuity_sequence.is_some() {
+    let mut rewritten = if handoff_discontinuity_sequence.is_some() {
         TransientManifestRewriter::rewrite_with_options(
             body,
             final_manifest_url,
@@ -859,12 +1208,33 @@ fn commit_transient_manifest(
             transient_resource_ttl_ms,
         )
     };
+    if handoff_discontinuity_sequence.is_some() {
+        if let Some(handoff_body) = materialize_transient_provisioning_handoff_view(
+            &rewritten.body,
+            previous_provisioning_manifest_body.as_deref(),
+            strip,
+            provisioning_segment_duration_ms,
+        ) {
+            rewritten.body = handoff_body;
+        }
+        let current_discontinuity_sequence = transient_discontinuity_sequence(&rewritten.body)
+            .unwrap_or(session.transient_discontinuity_sequence.unwrap_or(0));
+        session.transient_discontinuity_sequence =
+            Some(current_discontinuity_sequence.saturating_add(transient_visible_discontinuity_count(&rewritten.body)));
+    } else if let Some(discontinuity_sequence) = session.transient_discontinuity_sequence {
+        rewritten.body = apply_transient_discontinuity_sequence(&rewritten.body, discontinuity_sequence);
+    }
+    let manifest_validity = parse_manifest_validity(&rewritten.body);
     session.transient.upsert_resources(rewritten.resources);
-    session.transient.replace_manifest(rewritten.body, rendered_at_ms);
+    if let Some(validity) = manifest_validity {
+        session.transient.replace_manifest_with_validity(rewritten.body, rendered_at_ms, validity.playlist_duration_ms);
+    } else {
+        session.transient.replace_manifest(rewritten.body, rendered_at_ms);
+    }
     let previous_highwater = session.origin_seq_highwater;
     if let Some(highwater) = timeline.origin_highwater() {
         session.origin_seq_highwater =
-            Some(session.origin_seq_highwater.map_or(highwater, |current| current.max(highwater)));
+            Some(next_committed_origin_highwater(session.origin_seq_highwater, highwater, quality.sequence_relation));
     }
 
     let timing = parse_manifest_timing(body);
@@ -875,32 +1245,31 @@ fn commit_transient_manifest(
     }
     let target_duration_ms =
         timing.target_duration_ms.or_else(|| session.target_duration.map(|duration| u64::from(duration) * 1_000));
-    let progress = manifest_progress_from_highwater(previous_highwater, session.origin_seq_highwater);
+    let progress =
+        manifest_progress_from_highwater(previous_highwater, session.origin_seq_highwater, quality.sequence_relation);
     build_manifest_refresh_timing(timing.last_segment_duration_ms, target_duration_ms, progress)
 }
 
 fn commit_normal_manifest(
     session: &mut super::HlsSession,
     manifest: &ParsedOriginManifest,
-    redirect_host: Option<&str>,
-    provider_url_index: Option<usize>,
+    _redirect_host: Option<&str>,
     request: &OriginRefreshRequest,
-    resolved_request_url: &str,
+    _resolved_request_url: &str,
     rendered_at_ms: u64,
-) -> Result<HlsManifestRefreshTiming, OriginManifestCommitError> {
-    validate_origin_manifest_continuity_for_commit(
-        session,
-        redirect_host,
-        ParsedOriginManifestTimeline {
-            origin_manifest_sequence: manifest.origin_manifest_sequence,
-            origin_manifest_segment_cnt: manifest.origin_manifest_segment_cnt,
-        },
-    )?;
-
+    sequence_relation: HlsManifestSequenceRelation,
+) -> Result<HlsManifestRefreshTiming, HlsManifestCommitError> {
     let previous_highwater = session.origin_seq_highwater;
+    let provisioning_handoff = session.pending_handoff_discontinuity_sequence.is_some()
+        && session.segments.values().any(is_hls_provisioning_segment);
     let segment_durations = manifest.segments.iter().map(|segment| segment.duration_ms).collect::<Vec<_>>();
-    session.render_policy = RenderPolicy::from_strip_config(&request.strip, &segment_durations);
-    session.apply_origin_manifest(manifest).map_err(|_| OriginManifestCommitError::TimelineRejected)?;
+    session.initial_prefetch_gap_segments = initial_hls_strip_segments_for_durations(&request.strip, &segment_durations);
+    session
+        .apply_origin_manifest(manifest)
+        .map_err(|err| HlsManifestCommitError::TimelineRejected { reason: HlsManifestRejectLogReason::from(err) })?;
+    if provisioning_handoff {
+        limit_publishable_normal_provisioning_handoff_tail(session, &request.strip, manifest.segments.len());
+    }
     session.origin_request_headers = request.headers.clone();
     session.queue_map_fetch_candidates(rendered_at_ms);
     let backpressure = request.segment_worker_pool.classify_backpressure_for_session(session);
@@ -923,25 +1292,39 @@ fn commit_normal_manifest(
             queue_report.prefetch_skipped
         );
     }
-    if let Some(redirect_host) = redirect_host {
-        session.last_redirect_host = Some(redirect_host.to_string());
-    }
-    session.last_successful_manifest_target_url = Some(resolved_request_url.to_string());
-    session.last_successful_manifest_provider_url_index = provider_url_index;
     match HlsManifestRenderer::render(session, rendered_at_ms) {
         Ok(rendered) => {
             let segment_count = rendered.segment_proxy_seqs.len();
             let render_gap_segments = rendered.render_gap_segments;
-            session.store_rendered_manifest(rendered);
-            request.segment_worker_pool.metrics().record_manifest_rendered();
-            info!(
-                "HLS manifest rendered: session={} proxy_session_id={} media_sequence={} segments={} render_gap_segments={}",
-                safe_session_key(&session.key),
-                safe_proxy_session_id(&session.proxy_session_id),
-                manifest.origin_manifest_sequence,
-                segment_count,
-                render_gap_segments
-            );
+            let media_sequence = rendered.first_proxy_seq;
+            match session.store_rendered_manifest(rendered) {
+                RenderedManifestStoreOutcome::Stored => {
+                    request.segment_worker_pool.metrics().record_manifest_rendered();
+                    info!(
+                        "HLS manifest rendered: session={} proxy_session_id={} media_sequence={} segments={} render_gap_segments={}",
+                        safe_session_key(&session.key),
+                        safe_proxy_session_id(&session.proxy_session_id),
+                        media_sequence,
+                        segment_count,
+                        render_gap_segments
+                    );
+                }
+                RenderedManifestStoreOutcome::Rejected(
+                    RenderedManifestStoreRejectReason::RegressiveMediaSequence {
+                        previous_first_proxy_seq,
+                        candidate_first_proxy_seq,
+                    },
+                ) => {
+                    request.segment_worker_pool.metrics().record_manifest_render_skipped();
+                    debug!(
+                        "HLS manifest render rejected: session={} proxy_session_id={} reason=regressive-media-sequence previous={} candidate={}",
+                        safe_session_key(&session.key),
+                        safe_proxy_session_id(&session.proxy_session_id),
+                        previous_first_proxy_seq,
+                        candidate_first_proxy_seq
+                    );
+                }
+            }
         }
         Err(err) => {
             request.segment_worker_pool.metrics().record_manifest_render_skipped();
@@ -955,8 +1338,66 @@ fn commit_normal_manifest(
 
     let last_segment_duration_ms = manifest.segments.last().map(|segment| segment.duration_ms);
     let target_duration_ms = manifest.target_duration.map(|duration| u64::from(duration) * 1_000);
-    let progress = manifest_progress_from_highwater(previous_highwater, session.origin_seq_highwater);
+    let progress =
+        manifest_progress_from_highwater(previous_highwater, session.origin_seq_highwater, sequence_relation);
     Ok(build_manifest_refresh_timing(last_segment_duration_ms, target_duration_ms, progress))
+}
+
+fn limit_publishable_normal_provisioning_handoff_tail(
+    session: &mut super::HlsSession,
+    strip: &StripConfig,
+    origin_segment_count: usize,
+) {
+    let Some(gap_seq) = session
+        .segments
+        .iter()
+        .filter_map(|(proxy_seq, entry)| is_hls_provisioning_gap_segment(entry).then_some(*proxy_seq))
+        .max()
+    else {
+        return;
+    };
+    let first_origin_seq = gap_seq.saturating_add(1);
+    if !session.segments.contains_key(&first_origin_seq) {
+        return;
+    }
+    if let Some(head_seq) = visible_provisioning_handoff_head_proxy_seq(session) {
+        session.publishable_origin_head_proxy_seq = Some(head_seq);
+    }
+    let initial_origin_segments = configured_handoff_origin_window_segments(strip, origin_segment_count).clamp(1, 3);
+    let tail_seq =
+        first_origin_seq.saturating_add(u64::try_from(initial_origin_segments.saturating_sub(1)).unwrap_or(0));
+    if session.segments.contains_key(&tail_seq) {
+        session.publishable_origin_tail_proxy_seq = Some(tail_seq);
+    }
+}
+
+fn visible_provisioning_handoff_head_proxy_seq(session: &super::HlsSession) -> Option<u64> {
+    session
+        .last_rendered_manifest
+        .as_ref()
+        .and_then(|rendered| {
+            rendered
+                .segment_proxy_seqs
+                .iter()
+                .copied()
+                .find(|proxy_seq| session.segments.get(proxy_seq).is_some_and(is_hls_provisioning_segment))
+        })
+        .or_else(|| {
+            session
+                .segments
+                .iter()
+                .filter_map(|(proxy_seq, entry)| is_hls_provisioning_segment(entry).then_some(*proxy_seq))
+                .min()
+        })
+}
+
+fn configured_handoff_origin_window_segments(strip: &StripConfig, origin_segment_count: usize) -> usize {
+    match strip.mode {
+        StripMode::Segments => usize::try_from(strip.value).unwrap_or(usize::MAX),
+        StripMode::Seconds => 0,
+    }
+    .saturating_add(3)
+    .min(origin_segment_count)
 }
 
 fn build_manifest_refresh_timing_base(
@@ -990,10 +1431,15 @@ fn build_manifest_refresh_timing(
     timing
 }
 
-fn manifest_progress_from_highwater(before: Option<u64>, after: Option<u64>) -> HlsManifestProgress {
-    match (before, after) {
-        (None, Some(_)) => HlsManifestProgress::Advanced,
-        (Some(before), Some(after)) if after > before => HlsManifestProgress::Advanced,
+fn manifest_progress_from_highwater(
+    before: Option<u64>,
+    after: Option<u64>,
+    sequence_relation: HlsManifestSequenceRelation,
+) -> HlsManifestProgress {
+    match (sequence_relation, before, after) {
+        (HlsManifestSequenceRelation::RolloverCandidate, _, _) => HlsManifestProgress::Rollover,
+        (_, None, Some(_)) => HlsManifestProgress::Advanced,
+        (_, Some(before), Some(after)) if after > before => HlsManifestProgress::Advanced,
         _ => HlsManifestProgress::Unchanged,
     }
 }
@@ -1029,29 +1475,6 @@ fn format_millis_as_seconds(value_ms: u64) -> String {
     format!("{seconds}.{millis:03}")
 }
 
-pub fn can_use_redirect_manifest(
-    session_seq_highwater: Option<u64>,
-    last_redirect_host: Option<&str>,
-    redirect_host: Option<&str>,
-    origin_manifest_sequence: u64,
-    origin_manifest_segment_cnt: usize,
-) -> bool {
-    let Some(highwater) = session_seq_highwater else {
-        return true;
-    };
-    if redirect_host.is_some() && redirect_host == last_redirect_host {
-        return true;
-    }
-    let segment_cnt = u64::try_from(origin_manifest_segment_cnt).unwrap_or(u64::MAX);
-    if segment_cnt == 0 {
-        return false;
-    }
-    let Some(next_highwater) = origin_manifest_sequence.checked_add(segment_cnt.saturating_sub(1)) else {
-        return false;
-    };
-    next_highwater > highwater && origin_manifest_sequence <= highwater.saturating_add(1)
-}
-
 fn map_transient_reason(reason: OriginManifestTransientReason) -> TransientPassthroughReason {
     match reason {
         OriginManifestTransientReason::ExtXKey => TransientPassthroughReason::ExtXKey,
@@ -1081,401 +1504,40 @@ pub fn compute_origin_refresh_interval_ms(
 
 pub fn cold_start_retry_after_seconds() -> u64 { COLD_START_RETRY_AFTER_SECONDS }
 
-#[cfg(test)]
-pub async fn refresh_from_live_hls_entrypoint_with_retries(
-    origin_entry: &LiveHlsOriginEntry,
-    headers: &HeaderMap,
-    client: &Client,
-    no_redirect_client: &Client,
-    use_manual_redirects: bool,
-    origin_manifest_timeout_ms: u64,
-    retry_policy: &RetryPolicy,
-) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
-    let mut retry_after_delay_ms = None;
-    let attempts = retry_policy.attempt_count();
-
-    for attempt_index in 0..attempts {
-        let delay_ms = retry_after_delay_ms.take().unwrap_or_else(|| {
-            let jitter =
-                if retry_policy.jitter_max_ms == 0 { 0 } else { fastrand::u64(0..=retry_policy.jitter_max_ms) };
-            retry_policy.delay_for_attempt_ms(attempt_index, jitter).unwrap_or_default()
-        });
-        if delay_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        }
-
-        let fetch_result = timeout(
-            Duration::from_millis(origin_manifest_timeout_ms.max(1)),
-            fetch_origin_manifest_once(
-                origin_entry.url(),
-                headers,
-                client,
-                no_redirect_client,
-                use_manual_redirects,
-                None,
-            ),
-        )
-        .await
-        .map_err(|_| OriginManifestFetchError::Timeout);
-
-        match fetch_result {
-            Ok(Ok(fetched)) => return Ok(fetched.with_attempts(attempt_index + 1)),
-            Ok(Err(OriginManifestFetchError::PermanentStatus(status))) => {
-                return Err(OriginManifestFetchError::PermanentStatus(status));
-            }
-            Ok(Err(OriginManifestFetchError::NonRetryableStatus(status))) => {
-                return Err(OriginManifestFetchError::NonRetryableStatus(status));
-            }
-            Ok(Err(OriginManifestFetchError::RetryableStatus(status, retry_after_ms))) => {
-                if attempt_index + 1 == attempts {
-                    return Err(OriginManifestFetchError::RetryableStatus(status, retry_after_ms));
-                }
-                log_origin_refresh_retry_scheduled(
-                    origin_entry,
-                    attempt_index,
-                    next_retry_delay_ms(retry_policy, attempt_index, retry_after_ms),
-                    format!("status={}", status.as_u16()),
-                );
-                retry_after_delay_ms = retry_after_ms;
-            }
-            Ok(Err(OriginManifestFetchError::Request(err))) => {
-                if attempt_index + 1 == attempts {
-                    return Err(OriginManifestFetchError::Request(err));
-                }
-                log_origin_refresh_retry_scheduled(
-                    origin_entry,
-                    attempt_index,
-                    next_retry_delay_ms(retry_policy, attempt_index, None),
-                    format!("error={}", safe_origin_log_value(&err)),
-                );
-            }
-            Ok(Err(err @ (OriginManifestFetchError::Redirect(_) | OriginManifestFetchError::Timeout))) => {
-                if attempt_index + 1 == attempts {
-                    return Err(err);
-                }
-                log_origin_refresh_retry_scheduled(
-                    origin_entry,
-                    attempt_index,
-                    next_retry_delay_ms(retry_policy, attempt_index, None),
-                    format!("error={}", safe_origin_log_value(format!("{err:?}"))),
-                );
-            }
-            Ok(Err(OriginManifestFetchError::RetryExhausted)) => return Err(OriginManifestFetchError::RetryExhausted),
-            Ok(Err(OriginManifestFetchError::ProviderUnavailable)) => {
-                return Err(OriginManifestFetchError::ProviderUnavailable);
-            }
-            Err(OriginManifestFetchError::Timeout) => {
-                if attempt_index + 1 == attempts {
-                    return Err(OriginManifestFetchError::Timeout);
-                }
-                log_origin_refresh_retry_scheduled(
-                    origin_entry,
-                    attempt_index,
-                    next_retry_delay_ms(retry_policy, attempt_index, None),
-                    "error=timeout",
-                );
-            }
-            Err(err) => return Err(err),
-        }
-    }
-
-    Err(OriginManifestFetchError::RetryExhausted)
-}
-
-fn next_retry_delay_ms(retry_policy: &RetryPolicy, attempt_index: usize, retry_after_ms: Option<u64>) -> u64 {
-    retry_after_ms.unwrap_or_else(|| retry_policy.delays_ms.get(attempt_index + 1).copied().unwrap_or_default())
-}
-
-fn log_origin_refresh_retry_scheduled(
-    origin_entry: &LiveHlsOriginEntry,
-    attempt_index: usize,
-    delay_ms: u64,
-    detail: impl AsRef<str>,
-) {
-    warn!(
-        "HLS origin manifest refresh retry scheduled: origin_entry={} attempt={} {} delay_ms={delay_ms}",
-        safe_origin_log_value(origin_entry.url().as_str()),
-        attempt_index + 1,
-        detail.as_ref()
-    );
-}
-
-impl FetchedOriginManifest {
-    fn with_attempts(mut self, attempts: usize) -> Self {
-        self.attempts = attempts;
-        self
-    }
-}
-
-async fn fetch_origin_manifest_once(
-    entry_url: &Url,
-    headers: &HeaderMap,
-    client: &Client,
-    no_redirect_client: &Client,
-    use_manual_redirects: bool,
-    provider_url_index: Option<usize>,
-) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
-    if use_manual_redirects {
-        fetch_origin_manifest_with_manual_redirects(entry_url, headers, no_redirect_client, provider_url_index).await
-    } else {
-        let response = client.get(entry_url.clone()).headers(headers.clone()).send().await.map_err(|err| {
-            OriginManifestFetchError::Request(sanitize_sensitive_info(err.to_string().as_str()).to_string())
-        })?;
-        response_to_fetched_manifest(response, provider_url_index, entry_url.clone()).await
-    }
-}
-
-async fn fetch_origin_manifest_with_manual_redirects(
-    entry_url: &Url,
-    headers: &HeaderMap,
-    client: &Client,
-    provider_url_index: Option<usize>,
-) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
-    let mut current_url = entry_url.clone();
-    let mut current_headers = headers.clone();
-    let mut remaining_redirects = MAX_MANUAL_REDIRECTS;
-
-    loop {
-        let response =
-            client.get(current_url.clone()).headers(current_headers.clone()).send().await.map_err(|err| {
-                OriginManifestFetchError::Request(sanitize_sensitive_info(err.to_string().as_str()).to_string())
-            })?;
-        if !response.status().is_redirection() {
-            return response_to_fetched_manifest(response, provider_url_index, entry_url.clone()).await;
-        }
-        if remaining_redirects == 0 {
-            return Err(OriginManifestFetchError::Redirect("too many redirects".to_string()));
-        }
-        let response_url = response.url().clone();
-        let location = response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| OriginManifestFetchError::Redirect("redirect missing location".to_string()))?;
-        let next_url = response_url
-            .join(location)
-            .or_else(|_| Url::parse(location))
-            .map_err(|_| OriginManifestFetchError::Redirect("redirect location invalid".to_string()))?;
-
-        if !same_origin(&response_url, &next_url) {
-            strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
-        }
-        current_url = next_url;
-        remaining_redirects = remaining_redirects.saturating_sub(1);
-    }
-}
-
-async fn fetch_origin_manifest_for_hls_reject_attempt(
-    request: &OriginRefreshRequest,
-    target_url: &Url,
-    provider_url_index: Option<usize>,
-    attempt_index: usize,
-) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
-    debug!(
-        "HLS origin manifest request started: reason=timeline-rejected attempt={} request_target={}",
-        attempt_index + 1,
-        safe_origin_log_value(target_url.as_str())
-    );
-    timeout(
-        Duration::from_millis(request.origin_manifest_timeout_ms.max(1)),
-        fetch_origin_manifest_once(
-            target_url,
-            &request.headers,
-            &request.client,
-            &request.no_redirect_client,
-            request.use_manual_redirects,
-            provider_url_index,
-        ),
-    )
-    .await
-    .map_err(|_| OriginManifestFetchError::Timeout)?
-}
-
-async fn fetch_origin_manifest_with_global_policy(
-    request: &OriginRefreshRequest,
-    input_source: &InputSource,
-) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
-    let account_binding = {
-        let session = request.session.read().await;
-        if session.origin_account_binding.is_some() {
-            "present"
-        } else {
-            "absent"
-        }
-    };
-    debug!(
-        "HLS origin manifest request started: account_binding={account_binding} origin_entry={}",
-        safe_origin_log_value(input_source.url.as_str())
-    );
-    let fetch_options =
-        RequestFetchOptions::with_attempt_idle_timeout(Duration::from_millis(request.origin_manifest_timeout_ms.max(1)));
-    let download_result = if request.use_manual_redirects {
-        download_text_content_with_manual_redirects_and_options(
-            &request.app_config,
-            &request.no_redirect_client,
-            input_source,
-            Some(&request.headers),
-            None,
-            false,
-            MAX_MANUAL_REDIRECTS,
-            fetch_options,
-        )
-        .await
-    } else {
-        download_text_content_with_options(
-            &request.app_config,
-            &request.client,
-            input_source,
-            Some(&request.headers),
-            None,
-            false,
-            fetch_options,
-        )
-        .await
-    };
-    let (body, final_manifest_url) = download_result.map_err(|err| {
-        OriginManifestFetchError::Request(sanitize_sensitive_info(err.to_string().as_str()).to_string())
-    })?;
-    let provider_url_index = input_source.get_provider().map(|provider| provider.get_current_index());
-    let resolved_request_url =
-        resolved_hls_manifest_request_url_from_input(input_source, provider_url_index, request.origin_entry.url());
-    fetched_manifest_from_downloaded_text(body, final_manifest_url, &resolved_request_url, provider_url_index)
-}
-
-fn fetched_manifest_from_downloaded_text(
-    body: String,
-    final_manifest_url: String,
-    resolved_request_url: &Url,
-    provider_url_index: Option<usize>,
-) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
-    let final_url = Url::parse(final_manifest_url.as_str()).map_err(|err| {
-        OriginManifestFetchError::Request(sanitize_sensitive_info(err.to_string().as_str()).to_string())
-    })?;
-    debug!(
-        "HLS origin manifest response received: request_target={} final_target={} status=200",
-        safe_origin_log_value(resolved_request_url.as_str()),
-        safe_origin_log_value(final_url.as_str())
-    );
-    Ok(FetchedOriginManifest {
-        body,
-        final_manifest_url,
-        resolved_request_url: resolved_request_url.to_string(),
-        redirect_host: final_url.host_str().map(str::to_string),
-        provider_url_index,
-        status: StatusCode::OK,
-        attempts: 1,
-    })
-}
-
-async fn response_to_fetched_manifest(
-    response: reqwest::Response,
-    provider_url_index: Option<usize>,
-    resolved_request_url: Url,
-) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
-    let status = response.status();
-    debug!(
-        "HLS origin manifest response received: request_target={} final_target={} status={}",
-        safe_origin_log_value(resolved_request_url.as_str()),
-        safe_origin_log_value(response.url().as_str()),
-        status.as_u16()
-    );
-    match classify_origin_manifest_status(status) {
-        OriginManifestStatusClass::Success => {
-            let final_url = response.url().clone();
-            let redirect_host = final_url.host_str().map(str::to_string);
-            let body = response.text().await.map_err(|err| {
-                OriginManifestFetchError::Request(sanitize_sensitive_info(err.to_string().as_str()).to_string())
-            })?;
-            Ok(FetchedOriginManifest {
-                body,
-                final_manifest_url: final_url.to_string(),
-                resolved_request_url: resolved_request_url.to_string(),
-                redirect_host,
-                provider_url_index,
-                status,
-                attempts: 1,
-            })
-        }
-        OriginManifestStatusClass::Retryable => {
-            Err(OriginManifestFetchError::RetryableStatus(status, retry_after_delay_ms(response.headers())))
-        }
-        OriginManifestStatusClass::PermanentFailure => Err(OriginManifestFetchError::PermanentStatus(status)),
-        OriginManifestStatusClass::NonRetryableFailure => Err(OriginManifestFetchError::NonRetryableStatus(status)),
-    }
-}
-
-fn resolved_hls_manifest_request_url_from_input(
-    input_source: &InputSource,
-    provider_url_index: Option<usize>,
-    fallback_url: &Url,
-) -> Url {
-    let fallback = || Url::parse(input_source.url.as_str()).unwrap_or_else(|_| fallback_url.clone());
-    let (Some(provider), Some(provider_url_index)) = (input_source.get_provider(), provider_url_index) else {
-        return fallback();
-    };
-    match resolve_provider_scheme_url_with_provider_index(
-        input_source.url.as_str(),
-        Some(Arc::clone(provider)),
-        provider_url_index,
-    ) {
-        Ok((_provider, resolved_url)) => Url::parse(resolved_url.as_ref()).unwrap_or_else(|err| {
-            debug!(
-                "HLS provider URL resolution returned invalid URL: error={} origin={}",
-                sanitize_sensitive_info(err.to_string().as_str()),
-                safe_origin_log_value(input_source.url.as_str())
-            );
-            fallback()
-        }),
-        Err(err) => {
-            debug!(
-                "HLS provider URL resolution failed: error={} origin={}",
-                sanitize_sensitive_info(err.to_string().as_str()),
-                safe_origin_log_value(input_source.url.as_str())
-            );
-            fallback()
-        }
-    }
-}
-
-fn same_origin(lhs: &Url, rhs: &Url) -> bool {
-    lhs.scheme().eq_ignore_ascii_case(rhs.scheme())
-        && lhs.host_str() == rhs.host_str()
-        && lhs.port_or_known_default() == rhs.port_or_known_default()
-}
-
-fn strip_sensitive_headers_for_cross_origin_redirect(headers: &mut HeaderMap) {
-    super::scrub_hls_origin_headers(headers, None);
-}
-
-pub fn retry_after_delay_ms(headers: &HeaderMap) -> Option<u64> {
-    headers
-        .get(header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .map(|seconds| seconds.saturating_mul(1_000))
-}
-
 fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_manifest_refresh_timing, can_use_redirect_manifest, classify_origin_manifest_status,
-        commit_fetched_manifest, compute_origin_refresh_interval_ms, format_millis_as_seconds,
-        format_optional_millis_as_seconds, manifest_progress_from_highwater,
-        refresh_from_live_hls_entrypoint_with_retries, resolved_hls_manifest_request_url_from_input,
-        retry_after_delay_ms, transient_reason_log_fields, FetchedOriginManifest, HlsManifestProgress,
-        LiveHlsOriginEntry, OriginManifestFetchError, OriginManifestStatusClass, OriginRefreshRequest,
-        OriginRefreshState, RetryPolicy,
+        super::manifest_fetch::{
+            classify_origin_manifest_status, hls_manifest_redirect_host,
+            manifest_host_switch_failure_threshold_for_strip_segments, origin_highwater_policy_limit,
+            refresh_from_live_hls_entrypoint_with_retries, resolved_hls_manifest_request_url_from_input,
+            retry_after_delay_ms, retry_hls_origin_manifest_recovery_chain,
+            score_hls_manifest_recovery_candidate as score_manifest_recovery_candidate, FetchedOriginManifest,
+            HlsManifestCommitAcceptanceMode, HlsManifestCommitError, HlsManifestOriginQualityScore,
+            HlsManifestRejectLogReason, HlsManifestSequenceRelation, LiveHlsOriginEntry,
+            ManifestRecoverySelectionLogPhase, OriginManifestFetchError, OriginManifestStatusClass, RetryPolicy,
+        },
+        build_manifest_refresh_timing, commit_fetched_manifest, compute_origin_refresh_interval_ms,
+        fetched_effective_manifest_host, format_millis_as_seconds, format_optional_millis_as_seconds,
+        manifest_fetch_context, manifest_hard_fetch_error, manifest_progress_from_highwater, mark_origin_refresh_started,
+        manifest_temporary_failure_kind, record_pinned_host_recovery_chain_failed, request_error_indicates_timeout,
+        transient_reason_log_fields, HlsManifestAcceptanceDecision, HlsManifestCommitRequirement, HlsManifestProgress,
+        trigger_origin_refresh_sync, OriginRefreshRequest, OriginRefreshState,
     };
     use crate::{
         api::model::{
-            maybe_trigger_origin_refresh, HlsMapWorkerPool, HlsSegmentCache, HlsSegmentRepairManager,
-            HlsSegmentWorkerPool, HlsSession, HlsSessionKey, HlsSessionMode, TransientPassthroughReason,
+            maybe_trigger_origin_refresh, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeasePendingDeadline,
+            HlsFreshManifestRequiredReason, HlsMapWorkerPool, HlsOriginAccountBinding, HlsPlaybackFamilyKey,
+            HlsProxyManager, HlsSegmentCache, HlsSegmentRepairManager, HlsSegmentWorkerPool, HlsSession,
+            HlsSessionKey, HlsSessionMode, HlsBoundAccountAcquireErrorKind, TimelineMapError,
+            TransientPassthroughReason,
         },
         model::{
-            AppConfig, Config, ConfigProvider, HlsSegmentRepairConfig, HlsSegmentRepairMode,
-            ReverseProxyDisabledHeaderConfig, SourcesConfig, StripConfig, StripMode,
+            AppConfig, Config, ConfigProvider, HlsManifestRecoveryBurstConfig, HlsManifestRecoveryBurstLevel,
+            HlsSegmentRepairConfig, HlsSegmentRepairMode, ReverseProxyDisabledHeaderConfig, SourcesConfig, StripConfig,
+            StripMode,
         },
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
@@ -1490,6 +1552,23 @@ mod tests {
         net::TcpListener,
         sync::{Mutex, RwLock},
     };
+    use url::Url;
+
+    async fn retry_test_manifest_recovery_chain(
+        request: &OriginRefreshRequest,
+        target_url: Url,
+        reject_reason: HlsManifestRejectLogReason,
+    ) -> Result<super::CommittedOriginManifest, OriginManifestFetchError> {
+        let fetch_context = manifest_fetch_context(request);
+        retry_hls_origin_manifest_recovery_chain(
+            &fetch_context,
+            target_url,
+            None,
+            Some(reject_reason),
+            |fetched, acceptance_mode| super::commit_manifest_recovery_candidate(request, fetched, acceptance_mode),
+        )
+        .await
+    }
 
     fn test_session() -> Arc<RwLock<HlsSession>> {
         Arc::new(RwLock::new(HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0)))
@@ -1564,8 +1643,7 @@ mod tests {
         assert_eq!(state.next_fetch_allowed_at_ms, 3_000);
 
         state.mark_started(3_100);
-        let success_timing =
-            build_manifest_refresh_timing(Some(20_000), None, HlsManifestProgress::Advanced);
+        let success_timing = build_manifest_refresh_timing(Some(20_000), None, HlsManifestProgress::Advanced);
         assert_eq!(state.mark_success_with_timing(3_100, 3_200, success_timing), 10_000);
         assert_eq!(state.consecutive_failures, 0);
         assert_eq!(state.last_error_at_ms, None);
@@ -1601,6 +1679,127 @@ mod tests {
     }
 
     #[test]
+    fn manifest_temporary_failure_kind_counts_retryable_status_and_timeout_only() {
+        assert_eq!(
+            manifest_temporary_failure_kind(&OriginManifestFetchError::RetryableStatus(
+                StatusCode::TOO_MANY_REQUESTS,
+                None,
+            )),
+            Some(crate::api::model::HlsManifestTemporaryFailureKind::RetryableStatus {
+                status: StatusCode::TOO_MANY_REQUESTS
+            })
+        );
+        assert_eq!(
+            manifest_temporary_failure_kind(&OriginManifestFetchError::Timeout),
+            Some(crate::api::model::HlsManifestTemporaryFailureKind::Timeout)
+        );
+        assert_eq!(
+            manifest_temporary_failure_kind(&OriginManifestFetchError::Request(
+                "Request timed out and no retries left".to_string(),
+            )),
+            Some(crate::api::model::HlsManifestTemporaryFailureKind::Timeout)
+        );
+        assert_eq!(
+            manifest_temporary_failure_kind(&OriginManifestFetchError::ProviderUnavailable(
+                HlsBoundAccountAcquireErrorKind::WaitTimedOut,
+            )),
+            Some(crate::api::model::HlsManifestTemporaryFailureKind::ProviderAcquire {
+                kind: HlsBoundAccountAcquireErrorKind::WaitTimedOut
+            })
+        );
+        assert!(manifest_temporary_failure_kind(&OriginManifestFetchError::Request(
+            "Request error: error sending request".to_string(),
+        ))
+        .is_none());
+        assert!(manifest_temporary_failure_kind(&OriginManifestFetchError::ProviderUnavailable(
+            HlsBoundAccountAcquireErrorKind::Expired,
+        ))
+        .is_none());
+        assert!(manifest_temporary_failure_kind(&OriginManifestFetchError::PermanentStatus(StatusCode::NOT_FOUND))
+            .is_none());
+    }
+
+    #[test]
+    fn manifest_hard_fetch_error_matches_permanent_and_non_retryable_status_only() {
+        assert!(manifest_hard_fetch_error(&OriginManifestFetchError::PermanentStatus(StatusCode::NOT_FOUND)));
+        assert!(manifest_hard_fetch_error(&OriginManifestFetchError::NonRetryableStatus(StatusCode::IM_A_TEAPOT)));
+        assert!(!manifest_hard_fetch_error(&OriginManifestFetchError::RetryableStatus(
+            StatusCode::TOO_MANY_REQUESTS,
+            None,
+        )));
+        assert!(!manifest_hard_fetch_error(&OriginManifestFetchError::Timeout));
+        assert!(!manifest_hard_fetch_error(&OriginManifestFetchError::ProviderUnavailable(
+            HlsBoundAccountAcquireErrorKind::WaitTimedOut,
+        )));
+        assert!(manifest_hard_fetch_error(&OriginManifestFetchError::ProviderUnavailable(
+            HlsBoundAccountAcquireErrorKind::Expired,
+        )));
+    }
+
+    #[test]
+    fn request_error_timeout_detection_matches_global_helper_wording() {
+        assert!(request_error_indicates_timeout("Request timed out and no retries left"));
+        assert!(request_error_indicates_timeout("idle timeout while trying provider://demo"));
+        assert!(!request_error_indicates_timeout("Request error: error sending request"));
+    }
+
+    #[test]
+    fn manifest_reject_log_reason_formats_host_switch_pending() {
+        let reason = HlsManifestRejectLogReason::HostSwitchPending { failures: 2, threshold: 3 };
+        assert_eq!(reason.status_label(), "host-switch-pending failures=2 threshold=3");
+    }
+
+    #[test]
+    fn manifest_reject_log_reason_preserves_timeline_mapping_error() {
+        assert_eq!(
+            HlsManifestRejectLogReason::from(TimelineMapError::UnsupportedSegmentExtension).status_label(),
+            "unsupported-segment-extension"
+        );
+        assert_eq!(
+            HlsManifestRejectLogReason::from(TimelineMapError::ProxyMapIdOverflow).status_label(),
+            "proxy-map-id-overflow"
+        );
+    }
+
+    #[test]
+    fn manifest_host_switch_failure_threshold_uses_half_of_visible_window_with_cap() {
+        assert_eq!(manifest_host_switch_failure_threshold_for_strip_segments(0), 1);
+        assert_eq!(manifest_host_switch_failure_threshold_for_strip_segments(1), 2);
+        assert_eq!(manifest_host_switch_failure_threshold_for_strip_segments(2), 2);
+        assert_eq!(manifest_host_switch_failure_threshold_for_strip_segments(3), 3);
+        assert_eq!(manifest_host_switch_failure_threshold_for_strip_segments(6), 4);
+        assert_eq!(manifest_host_switch_failure_threshold_for_strip_segments(7), 5);
+        assert_eq!(manifest_host_switch_failure_threshold_for_strip_segments(100), 5);
+    }
+
+    #[test]
+    fn manifest_highwater_policy_limit_uses_target_duration_fallback() {
+        assert_eq!(origin_highwater_policy_limit(60, None), Some(4));
+        assert_eq!(origin_highwater_policy_limit(61, None), Some(5));
+        assert_eq!(origin_highwater_policy_limit(60, Some(12)), Some(5));
+    }
+
+    #[test]
+    fn manifest_recovery_burst_levels_map_to_candidate_counts() {
+        let cases = [
+            (HlsManifestRecoveryBurstLevel::Off, 1, 1, 1),
+            (HlsManifestRecoveryBurstLevel::Friendly, 2, 1, 2),
+            (HlsManifestRecoveryBurstLevel::Cautious, 3, 1, 3),
+            (HlsManifestRecoveryBurstLevel::Balanced, 4, 1, 4),
+            (HlsManifestRecoveryBurstLevel::Intense, 5, 1, 5),
+            (HlsManifestRecoveryBurstLevel::Aggressive, 6, 1, 6),
+            (HlsManifestRecoveryBurstLevel::Beast, 6, 2, 12),
+        ];
+        for (level, expected_slots, expected_lanes, expected_candidates) in cases {
+            let plan = level.plan();
+            assert_eq!(plan.slots, expected_slots);
+            assert_eq!(plan.lanes_per_slot, expected_lanes);
+            assert_eq!(plan.total_candidates(), expected_candidates);
+            assert_eq!(level.total_candidates(), expected_candidates);
+        }
+    }
+
+    #[test]
     fn retry_after_header_is_parsed_as_milliseconds() {
         let mut headers = HeaderMap::new();
         headers.insert(header::RETRY_AFTER, HeaderValue::from_static("3"));
@@ -1616,7 +1815,8 @@ mod tests {
             dns: None,
         }));
         let provider_entry =
-            LiveHlsOriginEntry::parse_with_provider("provider://demo/live/u/p/1.m3u8", Some(provider)).unwrap();
+            LiveHlsOriginEntry::parse_with_url_failover_provider("provider://demo/live/u/p/1.m3u8", Some(provider))
+                .unwrap();
 
         let resolved = resolved_hls_manifest_request_url_from_input(
             &provider_entry.to_input_source(),
@@ -1676,10 +1876,11 @@ mod tests {
     }
 
     #[test]
-    fn advanced_refresh_resets_empty_refresh_counter() {
+    fn advanced_or_rollover_refresh_resets_empty_refresh_counter() {
         let mut state = OriginRefreshState::default();
         let unchanged = build_manifest_refresh_timing(None, Some(12_000), HlsManifestProgress::Unchanged);
         let advanced = build_manifest_refresh_timing(None, Some(12_000), HlsManifestProgress::Advanced);
+        let rollover = build_manifest_refresh_timing(None, Some(12_000), HlsManifestProgress::Rollover);
 
         state.mark_started(0);
         assert_eq!(state.mark_success_with_timing(0, 100, unchanged), 3_000);
@@ -1691,6 +1892,15 @@ mod tests {
         assert_eq!(state.mark_success_with_timing(4_500, 4_600, advanced), 6_000);
         assert_eq!(state.consecutive_empty_refreshes, 0);
         assert_eq!(state.next_fetch_allowed_at_ms, 10_500);
+
+        state.mark_started(10_500);
+        assert_eq!(state.mark_success_with_timing(10_500, 10_600, unchanged), 3_000);
+        assert_eq!(state.consecutive_empty_refreshes, 1);
+
+        state.mark_started(13_500);
+        assert_eq!(state.mark_success_with_timing(13_500, 13_600, rollover), 6_000);
+        assert_eq!(state.consecutive_empty_refreshes, 0);
+        assert_eq!(state.next_fetch_allowed_at_ms, 19_500);
     }
 
     #[test]
@@ -1709,11 +1919,44 @@ mod tests {
 
     #[test]
     fn manifest_progress_tracks_highwater_advancement() {
-        assert_eq!(manifest_progress_from_highwater(None, Some(10)), HlsManifestProgress::Advanced);
-        assert_eq!(manifest_progress_from_highwater(Some(10), Some(11)), HlsManifestProgress::Advanced);
-        assert_eq!(manifest_progress_from_highwater(Some(10), Some(10)), HlsManifestProgress::Unchanged);
-        assert_eq!(manifest_progress_from_highwater(Some(10), Some(9)), HlsManifestProgress::Unchanged);
-        assert_eq!(manifest_progress_from_highwater(None, None), HlsManifestProgress::Unchanged);
+        assert_eq!(
+            manifest_progress_from_highwater(None, Some(10), HlsManifestSequenceRelation::NoPreviousHighwater),
+            HlsManifestProgress::Advanced
+        );
+        assert_eq!(
+            manifest_progress_from_highwater(Some(10), Some(11), HlsManifestSequenceRelation::Next),
+            HlsManifestProgress::Advanced
+        );
+        assert_eq!(
+            manifest_progress_from_highwater(Some(10), Some(10), HlsManifestSequenceRelation::Same),
+            HlsManifestProgress::Unchanged
+        );
+        assert_eq!(
+            manifest_progress_from_highwater(Some(10), Some(9), HlsManifestSequenceRelation::Backward),
+            HlsManifestProgress::Unchanged
+        );
+        assert_eq!(
+            manifest_progress_from_highwater(Some(10), Some(1), HlsManifestSequenceRelation::RolloverCandidate),
+            HlsManifestProgress::Rollover
+        );
+        assert_eq!(
+            manifest_progress_from_highwater(None, None, HlsManifestSequenceRelation::NoOriginHighwater),
+            HlsManifestProgress::Unchanged
+        );
+    }
+
+    #[test]
+    fn recovery_selection_log_phase_distinguishes_single_candidate_from_burst() {
+        assert_eq!(
+            ManifestRecoverySelectionLogPhase::from_candidate_count(1),
+            ManifestRecoverySelectionLogPhase::Recovery
+        );
+        assert_eq!(
+            ManifestRecoverySelectionLogPhase::from_candidate_count(2),
+            ManifestRecoverySelectionLogPhase::Burst
+        );
+        assert_eq!(ManifestRecoverySelectionLogPhase::Recovery.as_log_label(), "recovery");
+        assert_eq!(ManifestRecoverySelectionLogPhase::Burst.as_log_label(), "burst");
     }
 
     #[test]
@@ -1724,50 +1967,108 @@ mod tests {
     }
 
     #[test]
-    fn redirect_manifest_acceptance_matches_concept() {
-        assert!(can_use_redirect_manifest(None, None, Some("origin.example.com"), 10, 6));
-        assert!(can_use_redirect_manifest(
-            Some(15),
-            Some("redirect-a.example.com"),
-            Some("redirect-a.example.com"),
-            0,
-            6
+    fn different_host_candidate_is_not_committed_immediately() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+        session.origin_seq_highwater = Some(758);
+        session.last_effective_manifest_host = Some("previous.example.com".to_string());
+        let request = test_origin_refresh_request(test_session());
+        let fetched = fetched_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:758\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\nseg758.ts\n#EXTINF:4.0,\nseg759.ts\n",
+        );
+
+        let result = commit_fetched_manifest(&mut session, &fetched, &request, 100);
+
+        assert!(matches!(result, Err(HlsManifestCommitError::RetryCurrentTarget)));
+        let candidate = session.manifest_acceptance.host_switch_candidate.as_ref().expect("candidate is held");
+        assert_eq!(candidate.host, "origin.example.com");
+        assert_eq!(candidate.highwater, Some(759));
+        assert!(session.transient.last_manifest_body.is_none());
+    }
+
+    #[test]
+    fn fresh_commit_rebases_normal_manifest_against_stale_session_baseline() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+        session.origin_seq_highwater = Some(1_000);
+        session.last_effective_manifest_host = Some("previous.example.com".to_string());
+        session.manifest_acceptance.same_host_retry_chain_failures = 3;
+        session.manifest_acceptance.host_switch_candidate = Some(super::super::HlsManifestHostSwitchCandidate {
+            host: "stale.example.com".to_string(),
+            target_url: "http://stale.example.com/live/user/pass/12345.m3u8".to_string(),
+            first_seen_at_ms: 1,
+            last_seen_at_ms: 2,
+            seen_count: 2,
+            highwater: Some(1_000),
+            quality_score: 1,
+        });
+        let mut request = test_origin_refresh_request(test_session());
+        request.manifest_commit_requirement = HlsManifestCommitRequirement::FreshCommitRequired {
+            reason: HlsFreshManifestRequiredReason::ExpiredRevalidation,
+        };
+        let fetched =
+            fetched_manifest("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:4.0,\nseg10.ts\n");
+
+        let result = commit_fetched_manifest(&mut session, &fetched, &request, 100);
+
+        assert!(result.is_ok());
+        assert_eq!(session.origin_seq_highwater, Some(10));
+        assert_eq!(session.last_effective_manifest_host.as_deref(), Some("origin.example.com"));
+        assert_eq!(session.manifest_acceptance.same_host_retry_chain_failures, 0);
+        assert!(session.manifest_acceptance.host_switch_candidate.is_none());
+    }
+
+    #[test]
+    fn host_switch_candidate_commits_only_after_failed_chain_threshold() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+        session.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
+        session.origin_seq_highwater = Some(758);
+        session.last_effective_manifest_host = Some("previous.example.com".to_string());
+        let request = test_origin_refresh_request(test_session());
+        let fetched = fetched_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:758\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\nseg758.ts\n#EXTINF:4.0,\nseg759.ts\n",
+        );
+
+        assert!(matches!(
+            commit_fetched_manifest(&mut session, &fetched, &request, 100),
+            Err(HlsManifestCommitError::RetryCurrentTarget)
         ));
-        assert!(can_use_redirect_manifest(
-            Some(15),
-            Some("redirect-a.example.com"),
-            Some("redirect-b.example.com"),
-            11,
-            6
+        assert!(matches!(
+            record_pinned_host_recovery_chain_failed(
+                &mut session,
+                &StripConfig { mode: StripMode::Segments, value: 3 },
+                200
+            ),
+            HlsManifestAcceptanceDecision::Reject { .. }
         ));
-        assert!(can_use_redirect_manifest(
-            Some(15),
-            Some("redirect-a.example.com"),
-            Some("redirect-b.example.com"),
-            16,
-            6
+        assert!(matches!(
+            record_pinned_host_recovery_chain_failed(
+                &mut session,
+                &StripConfig { mode: StripMode::Segments, value: 3 },
+                300
+            ),
+            HlsManifestAcceptanceDecision::Reject { .. }
         ));
-        assert!(!can_use_redirect_manifest(
-            Some(15),
-            Some("redirect-a.example.com"),
-            Some("redirect-b.example.com"),
-            17,
-            6
+        assert!(matches!(
+            record_pinned_host_recovery_chain_failed(
+                &mut session,
+                &StripConfig { mode: StripMode::Segments, value: 3 },
+                400
+            ),
+            HlsManifestAcceptanceDecision::AcceptHostSwitch { .. }
         ));
-        assert!(!can_use_redirect_manifest(
-            Some(15),
-            Some("redirect-a.example.com"),
-            Some("redirect-b.example.com"),
-            10,
-            6
-        ));
-        assert!(!can_use_redirect_manifest(
-            Some(15),
-            Some("redirect-a.example.com"),
-            Some("redirect-b.example.com"),
-            16,
-            0
-        ));
+
+        let result = super::commit_fetched_manifest_with_acceptance_mode(
+            &mut session,
+            &fetched,
+            &request,
+            500,
+            HlsManifestCommitAcceptanceMode::AllowHeldHostSwitchCandidate,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(session.origin_seq_highwater, Some(759));
+        assert_eq!(session.last_effective_manifest_host.as_deref(), Some("origin.example.com"));
+        assert_eq!(session.manifest_acceptance.same_host_retry_chain_failures, 0);
+        assert!(session.manifest_acceptance.host_switch_candidate.is_none());
     }
 
     #[tokio::test]
@@ -1782,20 +2083,24 @@ mod tests {
             app_config: test_app_config(),
             session: Arc::clone(&session),
             origin_entry: entry.clone(),
-            origin_input_source: entry.to_input_source(),
             headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
             client,
             no_redirect_client,
             use_manual_redirects: false,
             segment_cache: Arc::new(HlsSegmentCache::new()),
+            hls_proxy: Arc::new(HlsProxyManager::new()),
             segment_repair: test_segment_repair_manager(),
             segment_worker_pool: Arc::new(HlsSegmentWorkerPool::default()),
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 1,
-            strip: StripConfig { mode: StripMode::Segments, value: 0 },
+            manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
+            strip: StripConfig { mode: StripMode::Segments, value: 3 },
             retry_policy: RetryPolicy { delays_ms: [0, 0, 0, 0, 0], jitter_max_ms: 0 },
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
+            manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
+            access_lease_id: None,
             disabled_headers: None,
             now_ms: 100,
             origin_io: None,
@@ -1815,6 +2120,76 @@ mod tests {
         assert_eq!(started, 1);
     }
 
+    #[tokio::test]
+    async fn fresh_manifest_commit_bypasses_refresh_debounce() {
+        let session = test_session();
+        session.write().await.origin_refresh.next_fetch_allowed_at_ms = 10_000;
+        let mut request = test_origin_refresh_request(Arc::clone(&session));
+        request.manifest_commit_requirement = HlsManifestCommitRequirement::FreshCommitRequired {
+            reason: HlsFreshManifestRequiredReason::ColdStart,
+        };
+
+        assert!(mark_origin_refresh_started(&mut request, 1_000).await);
+        assert!(session.read().await.origin_refresh.in_flight);
+    }
+
+    #[tokio::test]
+    async fn committed_manifest_refresh_still_obeys_debounce() {
+        let session = test_session();
+        session.write().await.origin_refresh.next_fetch_allowed_at_ms = 10_000;
+        let mut request = test_origin_refresh_request(Arc::clone(&session));
+
+        assert!(!mark_origin_refresh_started(&mut request, 1_000).await);
+        assert!(!session.read().await.origin_refresh.in_flight);
+    }
+
+    #[tokio::test]
+    async fn successful_manifest_commit_shortens_pending_leases_without_response_path() {
+        let session = test_session();
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        let hls_proxy = Arc::new(HlsProxyManager::new());
+        let now_ms = super::current_time_millis();
+        let lease_id = HlsAccessLeaseId("lease-a".to_string());
+        hls_proxy
+            .prepare_access_lease(HlsAccessLease::pending(
+                lease_id.clone(),
+                HlsPlaybackFamilyKey::new("user", "client"),
+                proxy_session_id.clone(),
+                "user".to_string(),
+                "session-token".to_string(),
+                1,
+                "12345".to_string(),
+                12345,
+                now_ms,
+                90_000,
+            ))
+            .await;
+        let server = spawn_test_origin(Arc::new(|_path| {
+            (200, Vec::new(), "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg.ts\n".to_string())
+        }))
+        .await;
+        let entry = LiveHlsOriginEntry::parse(&format!("{}/live/user/pass/12345.m3u8", server.base_url))
+            .expect("valid origin entry");
+        let mut request = test_origin_refresh_request(Arc::clone(&session));
+        request.hls_proxy = Arc::clone(&hls_proxy);
+        request.origin_entry = entry;
+        request.now_ms = now_ms;
+
+        assert!(trigger_origin_refresh_sync(request).await);
+
+        let lease = hls_proxy
+            .access_leases()
+            .write()
+            .await
+            .response_snapshot(&lease_id, &proxy_session_id, super::current_time_millis())
+            .expect("pending lease should remain available");
+        let Some(HlsAccessLeasePendingDeadline::FollowUp { deadline_ms }) = lease.pending_deadline else {
+            panic!("pending lease should be shortened to follow-up");
+        };
+        assert!(deadline_ms < now_ms.saturating_add(90_000));
+        assert!(deadline_ms <= super::current_time_millis().saturating_add(10_000));
+    }
+
     async fn refresh_session_with_origin_body(body: &'static str) -> Arc<RwLock<HlsSession>> {
         let session = test_session();
         let server = spawn_test_origin(Arc::new(move |_path| (200, Vec::new(), body.to_string()))).await;
@@ -1824,8 +2199,8 @@ mod tests {
             app_config: test_app_config(),
             session: Arc::clone(&session),
             origin_entry: entry.clone(),
-            origin_input_source: entry.to_input_source(),
             headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
             client: reqwest::Client::new(),
             no_redirect_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -1833,14 +2208,18 @@ mod tests {
                 .expect("client builds"),
             use_manual_redirects: false,
             segment_cache: Arc::new(HlsSegmentCache::new()),
+            hls_proxy: Arc::new(HlsProxyManager::new()),
             segment_repair: test_segment_repair_manager(),
             segment_worker_pool: Arc::new(HlsSegmentWorkerPool::default()),
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
-            strip: StripConfig { mode: StripMode::Segments, value: 0 },
+            manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
+            strip: StripConfig { mode: StripMode::Segments, value: 3 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
+            manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
+            access_lease_id: None,
             disabled_headers: None,
             now_ms: 100,
             origin_io: None,
@@ -1878,8 +2257,8 @@ mod tests {
             app_config: test_app_config(),
             session: Arc::clone(&session),
             origin_entry: entry.clone(),
-            origin_input_source: entry.to_input_source(),
             headers,
+            origin_provider_session_headers: HeaderMap::new(),
             disabled_headers: Some(ReverseProxyDisabledHeaderConfig {
                 referer_header: false,
                 x_header: true,
@@ -1893,14 +2272,18 @@ mod tests {
                 .expect("client builds"),
             use_manual_redirects: false,
             segment_cache: Arc::new(HlsSegmentCache::new()),
+            hls_proxy: Arc::new(HlsProxyManager::new()),
             segment_repair: test_segment_repair_manager(),
             segment_worker_pool: Arc::new(HlsSegmentWorkerPool::default()),
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
+            manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
             strip: StripConfig { mode: StripMode::Segments, value: 0 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
+            manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
+            access_lease_id: None,
             now_ms: 100,
             origin_io: None,
         };
@@ -1924,6 +2307,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepted_manifest_commit_stores_provider_session_cookie_separately() {
+        let session = test_session();
+        let server = spawn_test_origin(Arc::new(|_path| {
+            (
+                200,
+                vec![
+                    ("Set-Cookie", "sid=abc; Path=/; HttpOnly".to_string()),
+                    ("Set-Cookie", "pref=1; SameSite=Lax".to_string()),
+                ],
+                "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg.ts\n".to_string(),
+            )
+        }))
+        .await;
+        let entry = LiveHlsOriginEntry::parse(&format!("{}/live/user/pass/12345.m3u8", server.base_url))
+            .expect("valid origin entry");
+        let mut request = test_origin_refresh_request(Arc::clone(&session));
+        request.origin_entry = entry;
+
+        assert!(trigger_origin_refresh_sync(request).await);
+
+        let session = session.read().await;
+        assert!(!session.origin_request_headers.contains_key(header::COOKIE));
+        assert_eq!(
+            session.origin_provider_session_headers.get(header::COOKIE).expect("provider cookie"),
+            "sid=abc; pref=1"
+        );
+    }
+
+    #[test]
+    fn origin_account_binding_change_clears_provider_session_headers() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "1"), b"secret", 100);
+        session.origin_provider_session_headers.insert(header::COOKIE, HeaderValue::from_static("sid=abc"));
+        session.replace_origin_account_binding(Some(HlsOriginAccountBinding::new(
+            Arc::<str>::from("input"),
+            Arc::<str>::from("account-a"),
+            &session.proxy_session_id.clone(),
+            100,
+        )));
+        assert!(session.origin_provider_session_headers.is_empty());
+
+        session.origin_provider_session_headers.insert(header::COOKIE, HeaderValue::from_static("sid=next"));
+        session.replace_origin_account_binding(Some(HlsOriginAccountBinding::new(
+            Arc::<str>::from("input"),
+            Arc::<str>::from("account-a"),
+            &session.proxy_session_id.clone(),
+            200,
+        )));
+        assert!(!session.origin_provider_session_headers.is_empty());
+
+        session.replace_origin_account_binding(Some(HlsOriginAccountBinding::new(
+            Arc::<str>::from("input"),
+            Arc::<str>::from("account-b"),
+            &session.proxy_session_id.clone(),
+            300,
+        )));
+        assert!(session.origin_provider_session_headers.is_empty());
+    }
+
+    #[tokio::test]
     async fn ext_x_key_manifest_commits_transient_rewrite() {
         let session = refresh_session_with_origin_body(
             "#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\nseg.ts\n",
@@ -1936,7 +2378,7 @@ mod tests {
             session.mode,
             HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey }
         ));
-        assert!(body.contains("/proxy/hls/live/"));
+        assert!(body.contains("/hls/shared/live/"));
         assert!(body.contains("/r/"));
         assert!(!body.contains("/hls/user/"));
         assert_eq!(session.transient.resources.len(), 2);
@@ -1945,25 +2387,71 @@ mod tests {
     }
 
     #[test]
-    fn transient_commit_accepts_same_redirect_host_even_when_media_sequence_moves_backward() {
+    fn transient_commit_accepts_plausible_same_redirect_host_rollover_and_resets_highwater() {
         let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
         session.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
         session.origin_seq_highwater = Some(758);
-        session.last_redirect_host = Some("origin.example.com".to_string());
+        session.last_effective_manifest_host = Some("origin.example.com".to_string());
+        session.mark_authorized_media_access(100);
         let previous_manifest =
-            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:757\n#EXTINF:4.0,\n/proxy/hls/live/session/lease/r/old.ts\n".to_string();
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:757\n#EXTINF:4.0,\n/hls/shared/live/session/lease/r/old.ts\n".to_string();
         session.transient.replace_manifest(previous_manifest.clone(), 10);
         let request = test_origin_refresh_request(test_session());
         let fetched = fetched_manifest(
-            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:226\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\nseg.ts\n",
+            "#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\nseg.ts\n",
         );
 
         let result = commit_fetched_manifest(&mut session, &fetched, &request, 100);
 
         assert!(result.is_ok());
         assert_ne!(session.transient.last_manifest_body.as_deref(), Some(previous_manifest.as_str()));
-        assert_eq!(session.origin_seq_highwater, Some(758));
+        assert_eq!(session.origin_seq_highwater, Some(0));
         assert!(session.transient.last_manifest_body.as_ref().is_some_and(|body| body.contains("/r/")));
+    }
+
+    #[test]
+    fn transient_commit_rejects_same_host_backward_manifest_outside_rollover_window() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+        session.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
+        session.origin_seq_highwater = Some(758);
+        session.last_effective_manifest_host = Some("origin.example.com".to_string());
+        session.mark_authorized_media_access(100);
+        let previous_manifest =
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:757\n#EXTINF:4.0,\n/hls/shared/live/session/lease/r/old.ts\n".to_string();
+        session.transient.replace_manifest(previous_manifest.clone(), 10);
+        let request = test_origin_refresh_request(test_session());
+        let fetched = fetched_manifest(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:226\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\nseg.ts\n",
+        );
+
+        let result = commit_fetched_manifest(&mut session, &fetched, &request, 100);
+
+        assert!(matches!(result, Err(HlsManifestCommitError::TimelineRejected { .. })));
+        assert_eq!(session.transient.last_manifest_body.as_deref(), Some(previous_manifest.as_str()));
+        assert_eq!(session.origin_seq_highwater, Some(758));
+    }
+
+    #[test]
+    fn transient_commit_rebases_expired_session_highwater() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+        session.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
+        session.target_duration = Some(12);
+        session.origin_seq_highwater = Some(758);
+        session.last_effective_manifest_host = Some("origin.example.com".to_string());
+        session.mark_authorized_media_access(1_000);
+        let previous_manifest =
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:757\n#EXTINF:4.0,\n/hls/shared/live/session/lease/r/old.ts\n".to_string();
+        session.transient.replace_manifest(previous_manifest.clone(), 10);
+        let request = test_origin_refresh_request(test_session());
+        let fetched = fetched_manifest(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:900\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\nseg.ts\n",
+        );
+
+        let result = commit_fetched_manifest(&mut session, &fetched, &request, 40_000);
+
+        assert!(result.is_ok());
+        assert_ne!(session.transient.last_manifest_body.as_deref(), Some(previous_manifest.as_str()));
+        assert_eq!(session.origin_seq_highwater, Some(900));
     }
 
     #[test]
@@ -1971,9 +2459,9 @@ mod tests {
         let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
         session.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
         session.origin_seq_highwater = Some(758);
-        session.last_redirect_host = Some("origin.example.com".to_string());
+        session.last_effective_manifest_host = Some("origin.example.com".to_string());
         session.transient.replace_manifest(
-            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:757\n#EXTINF:4.0,\n/proxy/hls/live/session/lease/r/old.ts\n".to_string(),
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:757\n#EXTINF:4.0,\n/hls/shared/live/session/lease/r/old.ts\n".to_string(),
             10,
         );
         let request = test_origin_refresh_request(test_session());
@@ -1989,11 +2477,11 @@ mod tests {
     }
 
     #[test]
-    fn transient_commit_with_different_redirect_host_accepts_manifest_that_extends_highwater() {
+    fn transient_commit_with_different_redirect_host_is_held_as_candidate() {
         let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
         session.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
         session.origin_seq_highwater = Some(758);
-        session.last_redirect_host = Some("previous.example.com".to_string());
+        session.last_effective_manifest_host = Some("previous.example.com".to_string());
         let request = test_origin_refresh_request(test_session());
         let fetched = fetched_manifest(
             "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:758\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\nseg758.ts\n#EXTINF:4.0,\nseg759.ts\n",
@@ -2001,8 +2489,45 @@ mod tests {
 
         let result = commit_fetched_manifest(&mut session, &fetched, &request, 100);
 
+        assert!(matches!(result, Err(HlsManifestCommitError::RetryCurrentTarget)));
+        assert_eq!(session.origin_seq_highwater, Some(758));
+        assert!(session.transient.last_manifest_body.is_none());
+        let candidate = session.manifest_acceptance.host_switch_candidate.as_ref().expect("candidate");
+        assert_eq!(candidate.host, "origin.example.com");
+        assert_eq!(candidate.highwater, Some(759));
+    }
+
+    #[test]
+    fn fresh_commit_rebases_transient_manifest_against_stale_session_baseline() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+        session.mode = HlsSessionMode::TransientPassthrough { reason: TransientPassthroughReason::ExtXKey };
+        session.origin_seq_highwater = Some(1_000);
+        session.last_effective_manifest_host = Some("previous.example.com".to_string());
+        session.manifest_acceptance.same_host_retry_chain_failures = 3;
+        session.manifest_acceptance.host_switch_candidate = Some(super::super::HlsManifestHostSwitchCandidate {
+            host: "stale.example.com".to_string(),
+            target_url: "http://stale.example.com/live/user/pass/12345.m3u8".to_string(),
+            first_seen_at_ms: 1,
+            last_seen_at_ms: 2,
+            seen_count: 2,
+            highwater: Some(1_000),
+            quality_score: 1,
+        });
+        let mut request = test_origin_refresh_request(test_session());
+        request.manifest_commit_requirement = HlsManifestCommitRequirement::FreshCommitRequired {
+            reason: HlsFreshManifestRequiredReason::ExpiredRevalidation,
+        };
+        let fetched = fetched_manifest(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:10\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4.0,\nseg10.ts\n",
+        );
+
+        let result = commit_fetched_manifest(&mut session, &fetched, &request, 100);
+
         assert!(result.is_ok());
-        assert_eq!(session.origin_seq_highwater, Some(759));
+        assert_eq!(session.origin_seq_highwater, Some(10));
+        assert_eq!(session.last_effective_manifest_host.as_deref(), Some("origin.example.com"));
+        assert_eq!(session.manifest_acceptance.same_host_retry_chain_failures, 0);
+        assert!(session.manifest_acceptance.host_switch_candidate.is_none());
         assert!(session.transient.last_manifest_body.as_ref().is_some_and(|body| body.contains("/r/")));
     }
 
@@ -2119,8 +2644,8 @@ mod tests {
             app_config: test_app_config(),
             session,
             origin_entry: entry.clone(),
-            origin_input_source: entry.to_input_source(),
             headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
             client: reqwest::Client::new(),
             no_redirect_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -2128,14 +2653,18 @@ mod tests {
                 .expect("client builds"),
             use_manual_redirects: false,
             segment_cache: Arc::new(HlsSegmentCache::new()),
+            hls_proxy: Arc::new(HlsProxyManager::new()),
             segment_repair: test_segment_repair_manager(),
             segment_worker_pool: Arc::new(HlsSegmentWorkerPool::default()),
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
+            manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
             strip: StripConfig { mode: StripMode::Segments, value: 0 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
+            manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
+            access_lease_id: None,
             disabled_headers: None,
             now_ms: 100,
             origin_io: None,
@@ -2149,9 +2678,44 @@ mod tests {
             resolved_request_url: "http://origin.example.com/live/user/pass/12345.m3u8".to_string(),
             redirect_host: Some("origin.example.com".to_string()),
             provider_url_index: None,
+            provider_session_headers: HeaderMap::new(),
             status: StatusCode::OK,
             attempts: 1,
         }
+    }
+
+    #[test]
+    fn provider_failover_mirror_without_redirect_is_not_manifest_host_signal() {
+        let mut fetched = fetched_manifest("#EXTM3U\n#EXTINF:4.0,\nseg.ts\n");
+        fetched.redirect_host = None;
+        fetched.resolved_request_url = "http://mirror.example.com/live/user/pass/12345.m3u8".to_string();
+        fetched.provider_url_index = Some(1);
+
+        assert_eq!(fetched_effective_manifest_host(&fetched), None);
+    }
+
+    #[test]
+    fn provider_failover_with_redirect_uses_redirect_host_as_manifest_host_signal() {
+        let mut fetched = fetched_manifest("#EXTM3U\n#EXTINF:4.0,\nseg.ts\n");
+        fetched.redirect_host = Some("redirect.example.com".to_string());
+        fetched.resolved_request_url = "http://mirror.example.com/live/user/pass/12345.m3u8".to_string();
+        fetched.provider_url_index = Some(1);
+
+        assert_eq!(fetched_effective_manifest_host(&fetched).as_deref(), Some("redirect.example.com"));
+    }
+
+    #[test]
+    fn manifest_redirect_host_is_only_set_for_actual_redirect_host_switch() {
+        let resolved = Url::parse("http://mirror.example.com/live/user/pass/12345.m3u8").expect("resolved url");
+        let same_target = Url::parse("http://mirror.example.com/live/user/pass/12345.m3u8").expect("same url");
+        let redirected = Url::parse("http://cdn.example.net/live/play/12345.m3u8").expect("redirect url");
+
+        assert_eq!(hls_manifest_redirect_host(&resolved, &same_target), None);
+        assert_eq!(hls_manifest_redirect_host(&resolved, &redirected).as_deref(), Some("cdn.example.net"));
+    }
+
+    fn host_from_base_url(base_url: &str) -> String {
+        url::Url::parse(base_url).expect("base url").host_str().expect("host").to_string()
     }
 
     fn manifest_body() -> String { "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg.ts\n".to_string() }
@@ -2269,17 +2833,20 @@ mod tests {
             dns: None,
         }));
         let session = test_session();
-        let entry = LiveHlsOriginEntry::parse_with_provider(
+        let initial_session_key = session.read().await.key.stable_value();
+        let initial_proxy_session_id = session.read().await.proxy_session_id.clone();
+        let entry = LiveHlsOriginEntry::parse_with_url_failover_provider(
             "provider://demo/live/user/pass/12345.m3u8",
             Some(Arc::clone(&provider)),
         )
         .expect("provider entry url");
+        let segment_worker_pool = Arc::new(HlsSegmentWorkerPool::default());
         let request = OriginRefreshRequest {
             app_config: test_app_config(),
             session: Arc::clone(&session),
             origin_entry: entry.clone(),
-            origin_input_source: entry.to_input_source(),
             headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
             client: reqwest::Client::new(),
             no_redirect_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -2287,95 +2854,18 @@ mod tests {
                 .expect("client builds"),
             use_manual_redirects: false,
             segment_cache: Arc::new(HlsSegmentCache::new()),
+            hls_proxy: Arc::new(HlsProxyManager::new()),
             segment_repair: test_segment_repair_manager(),
-            segment_worker_pool: Arc::new(HlsSegmentWorkerPool::default()),
+            segment_worker_pool: Arc::clone(&segment_worker_pool),
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
+            manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
             strip: StripConfig { mode: StripMode::Segments, value: 0 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
-            disabled_headers: None,
-            now_ms: 100,
-            origin_io: None,
-        };
-
-        assert!(maybe_trigger_origin_refresh(request).await);
-        for _ in 0..50 {
-            if session.read().await.last_successful_manifest_provider_url_index == Some(1) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-
-        let first_requests = first.requests.lock().await;
-        let second_requests = second.requests.lock().await;
-        let first_manifest_requests =
-            first_requests.iter().filter(|path| path.as_str() == "/live/user/pass/12345.m3u8").count();
-        let second_manifest_requests =
-            second_requests.iter().filter(|path| path.as_str() == "/live/user/pass/12345.m3u8").count();
-        assert_eq!(first_manifest_requests, 1);
-        assert_eq!(second_manifest_requests, 1);
-        assert_eq!(provider.get_current_index(), 1);
-        let session = session.read().await;
-        assert_eq!(session.last_successful_manifest_provider_url_index, Some(1));
-        assert!(session
-            .last_successful_manifest_target_url
-            .as_ref()
-            .is_some_and(|url| { url.starts_with(second.base_url.as_str()) }));
-    }
-
-    #[tokio::test]
-    async fn timeline_reject_uses_hls_retry_against_successful_target() {
-        let hits = Arc::new(AtomicUsize::new(0));
-        let hits_for_handler = Arc::clone(&hits);
-        let server = spawn_test_origin(Arc::new(move |_path| {
-            let hit = hits_for_handler.fetch_add(1, Ordering::SeqCst);
-            if hit == 0 {
-                return (
-                    200,
-                    Vec::new(),
-                    "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:102\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n102.ts\n".to_string(),
-                );
-            }
-            (
-                200,
-                Vec::new(),
-                "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:101\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n101.ts\n#EXTINF:4.0,\n102.ts\n".to_string(),
-            )
-        }))
-        .await;
-        let session = test_session();
-        {
-            let mut session = session.write().await;
-            session.origin_seq_highwater = Some(100);
-            session.last_redirect_host = Some("other-origin.example.com".to_string());
-            session.last_successful_manifest_target_url =
-                Some(format!("{}/live/user/pass/12345.m3u8", server.base_url));
-        }
-        let entry =
-            LiveHlsOriginEntry::parse(&format!("{}/live/user/pass/12345.m3u8", server.base_url)).expect("entry url");
-        let request = OriginRefreshRequest {
-            app_config: test_app_config(),
-            session: Arc::clone(&session),
-            origin_entry: entry.clone(),
-            origin_input_source: entry.to_input_source(),
-            headers: HeaderMap::new(),
-            client: reqwest::Client::new(),
-            no_redirect_client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("client builds"),
-            use_manual_redirects: false,
-            segment_cache: Arc::new(HlsSegmentCache::new()),
-            segment_repair: test_segment_repair_manager(),
-            segment_worker_pool: Arc::new(HlsSegmentWorkerPool::default()),
-            map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
-            origin_manifest_timeout_ms: 2_000,
-            strip: StripConfig { mode: StripMode::Segments, value: 0 },
-            retry_policy: no_delay_policy(),
-            reverse_proxy_rewrite_secret: b"secret".to_vec(),
-            transient_resource_ttl_ms: 300_000,
+            manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
+            access_lease_id: None,
             disabled_headers: None,
             now_ms: 100,
             origin_io: None,
@@ -2389,14 +2879,226 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
-        let manifest_requests =
-            server.requests.lock().await.iter().filter(|path| path.as_str() == "/live/user/pass/12345.m3u8").count();
-        assert_eq!(manifest_requests, 2);
-        assert_eq!(session.read().await.origin_seq_highwater, Some(102));
+        let first_requests = first.requests.lock().await;
+        let second_requests = second.requests.lock().await;
+        let first_manifest_requests =
+            first_requests.iter().filter(|path| path.as_str() == "/live/user/pass/12345.m3u8").count();
+        let second_manifest_requests =
+            second_requests.iter().filter(|path| path.as_str() == "/live/user/pass/12345.m3u8").count();
+        assert_eq!(first_manifest_requests, 1);
+        assert_eq!(second_manifest_requests, 1);
+        let session = session.read().await;
+        assert_eq!(session.key.stable_value(), initial_session_key);
+        assert_eq!(session.proxy_session_id, initial_proxy_session_id);
+        assert!(!session.key.stable_value().contains("provider://"));
+        assert!(!session.key.stable_value().contains(first.base_url.as_str()));
+        assert!(!session.key.stable_value().contains(second.base_url.as_str()));
+        assert_eq!(session.origin_seq_highwater, Some(0));
+        assert_eq!(session.last_effective_manifest_host, None);
+        assert!(session.manifest_acceptance.host_switch_candidate.is_none());
+        let metrics = segment_worker_pool.metrics().snapshot();
+        assert_eq!(metrics.refresh_started, 1);
+        assert_eq!(metrics.refresh_completed, 1);
+        assert_eq!(metrics.refresh_retried, 0);
+        assert_eq!(metrics.refresh_failed, 0);
     }
 
     #[tokio::test]
-    async fn timeline_reject_after_provider_failover_retries_resolved_url_without_provider_chain() {
+    async fn different_host_retries_current_target_before_switching() {
+        let candidate_hits = Arc::new(AtomicUsize::new(0));
+        let candidate_hits_for_handler = Arc::clone(&candidate_hits);
+        let candidate = spawn_test_origin(Arc::new(move |_path| {
+            candidate_hits_for_handler.fetch_add(1, Ordering::SeqCst);
+            (
+                200,
+                Vec::new(),
+                "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:101\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n101.ts\n#EXTINF:4.0,\n102.ts\n".to_string(),
+            )
+        }))
+        .await;
+        let session = test_session();
+        {
+            let mut session = session.write().await;
+            session.origin_seq_highwater = Some(100);
+            session.last_effective_manifest_host = Some("previous.example.com".to_string());
+        }
+        let candidate_entry_url =
+            format!("{}/live/user/pass/12345.m3u8", candidate.base_url).replacen("127.0.0.1", "localhost", 1);
+        let entry = LiveHlsOriginEntry::parse(&candidate_entry_url).expect("entry url");
+        let request = OriginRefreshRequest {
+            app_config: test_app_config(),
+            session: Arc::clone(&session),
+            origin_entry: entry.clone(),
+            headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
+            client: reqwest::Client::new(),
+            no_redirect_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("client builds"),
+            use_manual_redirects: false,
+            segment_cache: Arc::new(HlsSegmentCache::new()),
+            hls_proxy: Arc::new(HlsProxyManager::new()),
+            segment_repair: test_segment_repair_manager(),
+            segment_worker_pool: Arc::new(HlsSegmentWorkerPool::default()),
+            map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
+            origin_manifest_timeout_ms: 2_000,
+            manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
+            strip: StripConfig { mode: StripMode::Segments, value: 0 },
+            retry_policy: no_delay_policy(),
+            reverse_proxy_rewrite_secret: b"secret".to_vec(),
+            transient_resource_ttl_ms: 300_000,
+            manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
+            access_lease_id: None,
+            disabled_headers: None,
+            now_ms: 100,
+            origin_io: None,
+        };
+
+        assert!(maybe_trigger_origin_refresh(request).await);
+        for _ in 0..50 {
+            if session.read().await.origin_seq_highwater == Some(102) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let candidate_requests =
+            candidate.requests.lock().await.iter().filter(|path| path.as_str() == "/live/user/pass/12345.m3u8").count();
+        assert_eq!(candidate_requests, 6);
+        assert_eq!(session.read().await.origin_seq_highwater, Some(102));
+        assert_eq!(session.read().await.manifest_acceptance.same_host_retry_chain_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn manifest_recovery_burst_skips_rejected_candidate() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_handler = Arc::clone(&hits);
+        let origin = spawn_test_origin(Arc::new(move |_path| {
+            let hit = hits_for_handler.fetch_add(1, Ordering::SeqCst);
+            if hit == 0 {
+                return (
+                    200,
+                    Vec::new(),
+                    "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:50\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n50.bin\n".to_string(),
+                );
+            }
+            (
+                200,
+                Vec::new(),
+                "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:101\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n101.ts\n".to_string(),
+            )
+        }))
+        .await;
+        let session = test_session();
+        {
+            let mut session = session.write().await;
+            session.origin_seq_highwater = Some(100);
+            session.last_effective_manifest_host = Some(host_from_base_url(&origin.base_url));
+        }
+        let entry =
+            LiveHlsOriginEntry::parse(&format!("{}/live/user/pass/12345.m3u8", origin.base_url)).expect("entry url");
+        let mut request = test_origin_refresh_request(Arc::clone(&session));
+        request.origin_entry = entry;
+        request.manifest_recovery_burst =
+            HlsManifestRecoveryBurstConfig { level: HlsManifestRecoveryBurstLevel::Friendly };
+
+        let target_url = Url::parse(&format!("{}/live/user/pass/12345.m3u8", origin.base_url)).expect("target url");
+        let committed = retry_test_manifest_recovery_chain(
+            &request,
+            target_url,
+            HlsManifestRejectLogReason::PinnedHostRecoveryRejected,
+        )
+        .await
+        .expect("burst should commit accepted candidate");
+
+        assert_eq!(committed.fetched.attempts, 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(session.read().await.origin_seq_highwater, Some(101));
+    }
+
+    #[test]
+    fn manifest_recovery_candidate_score_prefers_same_host_next_sequence() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0);
+        session.origin_seq_highwater = Some(100);
+        session.last_effective_manifest_host = Some("origin.example.com".to_string());
+        session.mark_authorized_media_access(super::current_time_millis());
+        let request = test_origin_refresh_request(test_session());
+        let fetch_context = manifest_fetch_context(&request);
+        let same_host_unchanged =
+            fetched_manifest("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n100.ts\n");
+        let same_host_next =
+            fetched_manifest("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:101\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n101.ts\n");
+        let mut other_host_next = same_host_next.clone();
+        other_host_next.redirect_host = Some("other.example.com".to_string());
+
+        assert_eq!(
+            score_manifest_recovery_candidate(&session, &same_host_unchanged, &fetch_context)
+                .expect("score")
+                .quality
+                .score,
+            HlsManifestOriginQualityScore::SameHostUnchanged
+        );
+        assert_eq!(
+            score_manifest_recovery_candidate(&session, &same_host_next, &fetch_context).expect("score").quality.score,
+            HlsManifestOriginQualityScore::SameHostNextSequence
+        );
+        let other_host_score = score_manifest_recovery_candidate(&session, &other_host_next, &fetch_context)
+            .expect("score")
+            .quality;
+        assert_eq!(other_host_score.score, HlsManifestOriginQualityScore::OtherHostNextSequence);
+        assert!(other_host_score.requires_handoff_discontinuity);
+    }
+
+    #[tokio::test]
+    async fn manifest_recovery_burst_commits_best_same_host_candidate() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_handler = Arc::clone(&hits);
+        let origin = spawn_test_origin(Arc::new(move |_path| {
+            let hit = hits_for_handler.fetch_add(1, Ordering::SeqCst);
+            if hit == 0 {
+                return (
+                    200,
+                    Vec::new(),
+                    "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n100.ts\n".to_string(),
+                );
+            }
+            (
+                200,
+                Vec::new(),
+                "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:101\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n101.ts\n".to_string(),
+            )
+        }))
+        .await;
+        let session = test_session();
+        {
+            let mut session = session.write().await;
+            session.origin_seq_highwater = Some(100);
+            session.last_effective_manifest_host = Some(host_from_base_url(&origin.base_url));
+        }
+        let entry =
+            LiveHlsOriginEntry::parse(&format!("{}/live/user/pass/12345.m3u8", origin.base_url)).expect("entry url");
+        let mut request = test_origin_refresh_request(Arc::clone(&session));
+        request.origin_entry = entry;
+        request.manifest_recovery_burst =
+            HlsManifestRecoveryBurstConfig { level: HlsManifestRecoveryBurstLevel::Friendly };
+
+        let target_url = Url::parse(&format!("{}/live/user/pass/12345.m3u8", origin.base_url)).expect("target url");
+        let committed = retry_test_manifest_recovery_chain(
+            &request,
+            target_url,
+            HlsManifestRejectLogReason::PinnedHostRecoveryRejected,
+        )
+        .await
+        .expect("burst should commit best same-host candidate");
+
+        assert_eq!(committed.fetched.attempts, 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(session.read().await.origin_seq_highwater, Some(101));
+    }
+
+    #[tokio::test]
+    async fn provider_failover_initial_success_commits_without_hls_host_retry_when_unpinned() {
         let first = spawn_test_origin(Arc::new(|_path| (407, Vec::new(), "rotate".to_string()))).await;
         let second_hits = Arc::new(AtomicUsize::new(0));
         let second_hits_for_handler = Arc::clone(&second_hits);
@@ -2426,7 +3128,7 @@ mod tests {
         {
             session.write().await.origin_seq_highwater = Some(100);
         }
-        let entry = LiveHlsOriginEntry::parse_with_provider(
+        let entry = LiveHlsOriginEntry::parse_with_url_failover_provider(
             "provider://demo/live/user/pass/12345.m3u8",
             Some(Arc::clone(&provider)),
         )
@@ -2435,8 +3137,8 @@ mod tests {
             app_config: test_app_config(),
             session: Arc::clone(&session),
             origin_entry: entry.clone(),
-            origin_input_source: entry.to_input_source(),
             headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
             client: reqwest::Client::new(),
             no_redirect_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -2444,14 +3146,18 @@ mod tests {
                 .expect("client builds"),
             use_manual_redirects: false,
             segment_cache: Arc::new(HlsSegmentCache::new()),
+            hls_proxy: Arc::new(HlsProxyManager::new()),
             segment_repair: test_segment_repair_manager(),
             segment_worker_pool: Arc::new(HlsSegmentWorkerPool::default()),
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
+            manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
             strip: StripConfig { mode: StripMode::Segments, value: 0 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
+            manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
+            access_lease_id: None,
             disabled_headers: None,
             now_ms: 100,
             origin_io: None,
@@ -2470,38 +3176,38 @@ mod tests {
         let second_manifest_requests =
             second.requests.lock().await.iter().filter(|path| path.as_str() == "/live/user/pass/12345.m3u8").count();
         assert_eq!(first_manifest_requests, 1);
-        assert_eq!(second_manifest_requests, 2);
+        assert_eq!(second_manifest_requests, 1);
         assert_eq!(session.read().await.origin_seq_highwater, Some(102));
     }
 
     #[tokio::test]
-    async fn timeline_reject_fetch_errors_use_single_hls_policy_attempts() {
-        let hits = Arc::new(AtomicUsize::new(0));
-        let hits_for_handler = Arc::clone(&hits);
-        let server = spawn_test_origin(Arc::new(move |_path| {
-            let hit = hits_for_handler.fetch_add(1, Ordering::SeqCst);
-            if hit == 0 {
-                return (
-                    200,
-                    Vec::new(),
-                    "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:102\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n102.ts\n".to_string(),
-                );
-            }
-            (407, Vec::new(), "retry".to_string())
+    async fn host_switch_failure_counter_increments_once_per_full_retry_chain() {
+        let candidate_hits = Arc::new(AtomicUsize::new(0));
+        let candidate_hits_for_handler = Arc::clone(&candidate_hits);
+        let candidate = spawn_test_origin(Arc::new(move |_path| {
+            candidate_hits_for_handler.fetch_add(1, Ordering::SeqCst);
+            (
+                200,
+                Vec::new(),
+                "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:900\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\n900.ts\n".to_string(),
+            )
         }))
         .await;
         let session = test_session();
         {
-            session.write().await.origin_seq_highwater = Some(100);
+            let mut session = session.write().await;
+            session.origin_seq_highwater = Some(100);
+            session.last_effective_manifest_host = Some("previous.example.com".to_string());
         }
-        let entry =
-            LiveHlsOriginEntry::parse(&format!("{}/live/user/pass/12345.m3u8", server.base_url)).expect("entry url");
+        let candidate_entry_url =
+            format!("{}/live/user/pass/12345.m3u8", candidate.base_url).replacen("127.0.0.1", "localhost", 1);
+        let entry = LiveHlsOriginEntry::parse(&candidate_entry_url).expect("entry url");
         let request = OriginRefreshRequest {
             app_config: test_app_config(),
             session: Arc::clone(&session),
             origin_entry: entry.clone(),
-            origin_input_source: entry.to_input_source(),
             headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
             client: reqwest::Client::new(),
             no_redirect_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -2509,14 +3215,18 @@ mod tests {
                 .expect("client builds"),
             use_manual_redirects: false,
             segment_cache: Arc::new(HlsSegmentCache::new()),
+            hls_proxy: Arc::new(HlsProxyManager::new()),
             segment_repair: test_segment_repair_manager(),
             segment_worker_pool: Arc::new(HlsSegmentWorkerPool::default()),
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
-            strip: StripConfig { mode: StripMode::Segments, value: 0 },
+            manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
+            strip: StripConfig { mode: StripMode::Segments, value: 3 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
+            manifest_commit_requirement: HlsManifestCommitRequirement::CommittedManifestAllowed,
+            access_lease_id: None,
             disabled_headers: None,
             now_ms: 100,
             origin_io: None,
@@ -2524,13 +3234,14 @@ mod tests {
 
         assert!(maybe_trigger_origin_refresh(request).await);
         for _ in 0..50 {
-            if hits.load(Ordering::SeqCst) >= 5 {
+            if candidate_hits.load(Ordering::SeqCst) >= 6 {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
-        assert_eq!(hits.load(Ordering::SeqCst), 5);
+        assert_eq!(candidate_hits.load(Ordering::SeqCst), 6);
         assert_eq!(session.read().await.origin_seq_highwater, Some(100));
+        assert_eq!(session.read().await.manifest_acceptance.same_host_retry_chain_failures, 1);
     }
 }

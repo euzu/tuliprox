@@ -1,6 +1,6 @@
 use crate::{
     api::{
-        model::{AppState, CustomVideoStreamType, HlsAccessLeaseId, ProxySessionId},
+        model::{is_custom_video_stream_enabled, AppState, CustomVideoStreamType, HlsAccessLeaseId, ProxySessionId},
         panel_api::{can_provision_on_exhausted, try_provision_account_on_exhausted},
     },
     model::{ConfigInput, ProxyUserCredentials},
@@ -18,16 +18,10 @@ use std::{
     sync::Arc,
 };
 
-const PLAYLIST_TEMPLATE: &str = r"#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-TARGETDURATION:10
-#EXT-X-MEDIA-SEQUENCE:0
-#EXTINF:10.0,
-{url}
-#EXT-X-ENDLIST
-";
+const HLS_STATIC_CUSTOM_VIDEO_TARGET_DURATION_SECS: u64 = 10;
+const HLS_STATIC_CUSTOM_VIDEO_EXTINF: &str = "10.0";
+const HLS_STATIC_CUSTOM_VIDEO_SEGMENT_COUNT: usize = 12;
 const PROVISIONING_HLS_TARGET_DURATION_SECS: u64 = 2;
-const PROVISIONING_HLS_SEGMENT_DURATION_MS: u64 = 2_000;
 const PROVISIONING_HLS_EXTINF: &str = "2.000000";
 pub(crate) const CUSTOM_VIDEO_HLS_PROVISIONING_SEGMENT_COUNT: usize =
     shared::utils::PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT;
@@ -339,7 +333,10 @@ fn hls_response(hls_content: String) -> axum::response::Response {
     }
 }
 
-fn hls_custom_video_type_configured(app_state: &Arc<AppState>, video_type: CustomVideoStreamType) -> bool {
+pub(crate) fn hls_custom_video_type_configured(app_state: &Arc<AppState>, video_type: CustomVideoStreamType) -> bool {
+    if !is_custom_video_stream_enabled(&app_state.app_config) {
+        return false;
+    }
     let custom_stream_response = app_state.app_config.custom_stream_response.load();
     match video_type {
         CustomVideoStreamType::ChannelUnavailable => {
@@ -378,6 +375,16 @@ fn hls_custom_video_url(base_url: &str, user: &ProxyUserCredentials, video_type:
     )
 }
 
+pub(crate) fn hls_custom_video_manifest_path(
+    user: &ProxyUserCredentials,
+    video_type: CustomVideoStreamType,
+) -> String {
+    format!(
+        "/{CUSTOM_VIDEO_PREFIX}/{HLS_CUSTOM_VIDEO_ROUTE_KIND}/{}/{}/{}.m3u8",
+        user.username, user.password, video_type
+    )
+}
+
 pub(crate) fn hls_panel_provisioning_segment_route_name(index: usize) -> String {
     format!("provisioning_{index:03}.ts")
 }
@@ -398,21 +405,6 @@ fn hls_panel_provisioning_segment_url(base_url: &str, user: &ProxyUserCredential
     )
 }
 
-fn hls_shared_panel_provisioning_segment_url(
-    base_url: &str,
-    proxy_session_id: &ProxySessionId,
-    access_lease_id: &HlsAccessLeaseId,
-    index: usize,
-) -> String {
-    format!(
-        "{}/{CUSTOM_VIDEO_PREFIX}/{HLS_CUSTOM_VIDEO_ROUTE_KIND}/{}/{}/s/{}",
-        base_url.trim_end_matches('/'),
-        proxy_session_id.0,
-        access_lease_id.0,
-        hls_panel_provisioning_segment_route_name(index)
-    )
-}
-
 pub(crate) fn hls_panel_provisioning_manifest_path(user: &ProxyUserCredentials, virtual_id: u32) -> String {
     format!(
         "/{CUSTOM_VIDEO_PREFIX}/{HLS_CUSTOM_VIDEO_ROUTE_KIND}/{}/{}/provisioning.m3u8?id={virtual_id}",
@@ -420,19 +412,8 @@ pub(crate) fn hls_panel_provisioning_manifest_path(user: &ProxyUserCredentials, 
     )
 }
 
-pub(crate) fn hls_shared_panel_provisioning_manifest_path(
-    proxy_session_id: &ProxySessionId,
-    access_lease_id: &HlsAccessLeaseId,
-    virtual_id: u32,
-) -> String {
-    format!(
-        "/{CUSTOM_VIDEO_PREFIX}/{HLS_CUSTOM_VIDEO_ROUTE_KIND}/{}/{}/s/provisioning.m3u8?id={virtual_id}",
-        proxy_session_id.0, access_lease_id.0
-    )
-}
-
-pub(crate) fn hls_provisioning_discontinuity_sequence(now_ms: u64) -> u64 {
-    now_ms / PROVISIONING_HLS_SEGMENT_DURATION_MS
+pub(crate) fn hls_provisioning_discontinuity_sequence(_now_ms: u64) -> u64 {
+    0
 }
 
 fn build_hls_panel_provisioning_manifest_body(mut segment_url: impl FnMut(usize) -> String) -> String {
@@ -442,13 +423,26 @@ fn build_hls_panel_provisioning_manifest_body(mut segment_url: impl FnMut(usize)
          #EXT-X-VERSION:3\n\
          #EXT-X-TARGETDURATION:{PROVISIONING_HLS_TARGET_DURATION_SECS}\n\
          #EXT-X-MEDIA-SEQUENCE:{media_sequence}\n\
-         #EXT-X-INDEPENDENT-SEGMENTS\n\
-         #EXT-X-DISCONTINUITY-SEQUENCE:{media_sequence}\n"
+         #EXT-X-INDEPENDENT-SEGMENTS\n"
     );
     for index in 0..CUSTOM_VIDEO_HLS_PROVISIONING_SEGMENT_COUNT {
         let video_url = segment_url(index);
-        let _ = write!(playlist, "#EXT-X-DISCONTINUITY\n#EXTINF:{PROVISIONING_HLS_EXTINF},\n{video_url}\n");
+        let _ = write!(playlist, "#EXTINF:{PROVISIONING_HLS_EXTINF},\n{video_url}\n");
     }
+    playlist
+}
+
+fn build_hls_static_custom_video_manifest_body(video_url: &str) -> String {
+    let mut playlist = format!(
+        "#EXTM3U\n\
+         #EXT-X-VERSION:3\n\
+         #EXT-X-TARGETDURATION:{HLS_STATIC_CUSTOM_VIDEO_TARGET_DURATION_SECS}\n\
+         #EXT-X-MEDIA-SEQUENCE:0\n"
+    );
+    for _ in 0..HLS_STATIC_CUSTOM_VIDEO_SEGMENT_COUNT {
+        let _ = write!(playlist, "#EXTINF:{HLS_STATIC_CUSTOM_VIDEO_EXTINF},\n{video_url}\n");
+    }
+    playlist.push_str("#EXT-X-ENDLIST\n");
     playlist
 }
 
@@ -461,7 +455,7 @@ pub(crate) fn build_hls_custom_video_manifest_body(
 ) -> String {
     if video_type != CustomVideoStreamType::Provisioning {
         let video_url = hls_custom_video_url(base_url, user, video_type);
-        return PLAYLIST_TEMPLATE.replace("{url}", &video_url);
+        return build_hls_static_custom_video_manifest_body(&video_url);
     }
 
     build_hls_panel_provisioning_manifest_body(|index| hls_panel_provisioning_segment_url(base_url, user, index))
@@ -490,28 +484,8 @@ pub(crate) fn hls_custom_video_manifest_response_with_virtual_id(
     ))
 }
 
-pub(crate) fn hls_shared_panel_provisioning_manifest_response(
-    app_state: &Arc<AppState>,
-    user: &ProxyUserCredentials,
-    proxy_session_id: &ProxySessionId,
-    access_lease_id: &HlsAccessLeaseId,
-    fallback_status: StatusCode,
-) -> axum::response::Response {
-    if !hls_custom_video_type_configured(app_state, CustomVideoStreamType::Provisioning) {
-        return fallback_status.into_response();
-    }
-    let Some(server_info) = app_state.app_config.get_user_server_info(user) else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-
-    hls_response(build_hls_panel_provisioning_manifest_body(|index| {
-        hls_shared_panel_provisioning_segment_url(&server_info.get_base_url(), proxy_session_id, access_lease_id, index)
-    }))
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct HlsPanelProvisioningRedirectPaths<'a> {
-    pub ready_entry_path: Option<&'a str>,
     pub waiting_manifest_path: Option<&'a str>,
 }
 
@@ -544,7 +518,9 @@ pub(crate) async fn try_hls_panel_provisioning_manifest_response(
     };
 
     match status {
-        HlsProvisioningStatus::InProgress => {
+        HlsProvisioningStatus::InProgress | HlsProvisioningStatus::Ready => {
+            // A ready provisioning job only means that credentials were persisted/probed.
+            // Stream handoff must happen in a route that can reserve a runtime origin account first.
             if !hls_custom_video_type_configured(app_state, CustomVideoStreamType::Provisioning) {
                 return Some(fallback_status.into_response());
             }
@@ -556,22 +532,6 @@ pub(crate) async fn try_hls_panel_provisioning_manifest_response(
                 &manifest_path,
                 server_path.as_deref(),
             ))
-        }
-        HlsProvisioningStatus::Ready => {
-            let ready_slot = app_state
-                .hls_provisioning
-                .take_ready_slot_for_consumer(&input.name, virtual_id, current_time_millis());
-            if ready_slot {
-                redirect_paths.ready_entry_path.map(|path| hls_virtual_entry_redirect_response(path, server_path))
-            } else {
-                Some(hls_custom_video_manifest_response_with_virtual_id(
-                    app_state,
-                    user,
-                    CustomVideoStreamType::Provisioning,
-                    fallback_status,
-                    Some(virtual_id),
-                ))
-            }
         }
         HlsProvisioningStatus::ProviderExhausted => Some(hls_custom_video_manifest_response_with_virtual_id(
             app_state,
@@ -597,15 +557,14 @@ pub(crate) fn start_hls_panel_provisioning_once(app_state: &Arc<AppState>, input
     }
     for job_index in 0..jobs_to_start {
         let app_state = Arc::clone(app_state);
-        let input = input.clone();
         let key = Arc::clone(&key);
         tokio::spawn(async move {
             debug!(
                 "HLS panel provisioning started: input={} job_index={}",
-                sanitize_sensitive_info(input.name.as_ref()),
+                sanitize_sensitive_info(key.as_ref()),
                 job_index
             );
-            let outcome = try_provision_account_on_exhausted(&app_state, &input).await;
+            let outcome = try_provision_account_on_exhausted(&app_state, &key).await;
             let ready = outcome.is_some();
             let finished_at_ms = current_time_millis();
             if ready {
@@ -617,7 +576,7 @@ pub(crate) fn start_hls_panel_provisioning_once(app_state: &Arc<AppState>, input
             }
             debug!(
                 "HLS panel provisioning completed: input={} outcome={} ready={}",
-                sanitize_sensitive_info(input.name.as_ref()),
+                sanitize_sensitive_info(key.as_ref()),
                 outcome.as_ref().map_or("unchanged", |outcome| outcome.kind_label()),
                 ready
             );
@@ -758,31 +717,6 @@ mod tests {
         assert_eq!(parse_hls_panel_provisioning_segment_route_name("provisioning_005.ts"), Some(5));
         assert_eq!(parse_hls_panel_provisioning_segment_route_name("provisioning_006.ts"), None);
         assert_eq!(parse_hls_panel_provisioning_segment_route_name("provisioning.ts"), None);
-    }
-
-    #[test]
-    fn hls_shared_provisioning_paths_keep_session_and_lease_in_url() {
-        let proxy_session_id = ProxySessionId("shared-session".to_string());
-        let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
-
-        assert_eq!(
-            hls_shared_panel_provisioning_manifest_path(&proxy_session_id, &access_lease_id, 59),
-            "/cvs/hls/shared-session/access-lease/s/provisioning.m3u8?id=59"
-        );
-
-        let manifest = build_hls_panel_provisioning_manifest_body(|index| {
-            hls_shared_panel_provisioning_segment_url(
-                "https://example.test/iptv",
-                &proxy_session_id,
-                &access_lease_id,
-                index,
-            )
-        });
-
-        assert!(manifest.contains("https://example.test/iptv/cvs/hls/shared-session/access-lease/s/provisioning_000.ts"));
-        assert!(manifest.contains("https://example.test/iptv/cvs/hls/shared-session/access-lease/s/provisioning_005.ts"));
-        assert!(!manifest.contains("/viewer/secret/"));
-        assert!(!manifest.contains("provisioning.ts"));
     }
 
     #[test]

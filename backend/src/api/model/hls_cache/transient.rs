@@ -18,7 +18,12 @@ const DEFAULT_TRANSIENT_RESOURCE_TTL_MS: u64 = 300_000;
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct TransientResourceId(pub String);
 
-/// Builds a deterministic opaque transient resource ID from the resolved origin URI.
+/// Builds a deterministic opaque transient resource ID from the concrete origin fetch URI.
+///
+/// `resolved_origin_uri` must be the concrete resource URI after manifest-relative URL resolution against the final
+/// manifest URL. In provider-url-failover/redirect flows this may intentionally include the selected mirror or final
+/// CDN/origin host. Do not make this ID input host-neutral unless `TransientResourceRef` keeps a separate concrete fetch
+/// URI and tests prove relative segment/MAP/key downloads still use that concrete URI.
 ///
 /// # Panics
 ///
@@ -49,6 +54,10 @@ pub enum TransientResourceKind {
 pub struct TransientResourceRef {
     pub id: TransientResourceId,
     pub kind: TransientResourceKind,
+    /// Concrete origin fetch URI for this transient resource.
+    ///
+    /// This is request-local fetch metadata, not HLS session identity. It must remain the final concrete URI produced
+    /// after resolving relative segment/MAP/key references against the final manifest URL.
     pub resolved_origin_uri: String,
     pub content_type_hint: Option<String>,
     pub file_ext_hint: Option<String>,
@@ -200,6 +209,8 @@ pub struct TransientPassthroughState {
     object_fetch_notifiers: HashMap<TransientObjectCacheKey, Arc<Notify>>,
     pub last_manifest_body: Option<String>,
     pub last_manifest_rendered_at_ms: Option<u64>,
+    pub last_manifest_playlist_duration_ms: Option<u64>,
+    pub last_manifest_valid_until_ms: Option<u64>,
     pub resource_ttl_ms: u64,
 }
 
@@ -211,6 +222,8 @@ impl TransientPassthroughState {
             object_fetch_notifiers: HashMap::new(),
             last_manifest_body: None,
             last_manifest_rendered_at_ms: None,
+            last_manifest_playlist_duration_ms: None,
+            last_manifest_valid_until_ms: None,
             resource_ttl_ms,
         }
     }
@@ -220,6 +233,20 @@ impl TransientPassthroughState {
     pub fn replace_manifest(&mut self, body: String, rendered_at_ms: u64) {
         self.last_manifest_body = Some(body);
         self.last_manifest_rendered_at_ms = Some(rendered_at_ms);
+        self.last_manifest_playlist_duration_ms = None;
+        self.last_manifest_valid_until_ms = None;
+    }
+
+    pub fn replace_manifest_with_validity(
+        &mut self,
+        body: String,
+        rendered_at_ms: u64,
+        playlist_duration_ms: u64,
+    ) {
+        self.last_manifest_body = Some(body);
+        self.last_manifest_rendered_at_ms = Some(rendered_at_ms);
+        self.last_manifest_playlist_duration_ms = Some(playlist_duration_ms);
+        self.last_manifest_valid_until_ms = Some(rendered_at_ms.saturating_add(playlist_duration_ms));
     }
 
     pub fn upsert_resources<I>(&mut self, resources: I)
@@ -277,6 +304,10 @@ impl TransientPassthroughState {
 
     pub fn has_active_resource_readers(&self) -> bool { self.active_resource_readers() > 0 }
 
+    /// Builds the object-cache key for an already registered transient resource.
+    ///
+    /// The key is intentionally based on the opaque resource ID. The concrete fetch URI remains in
+    /// `TransientResourceRef::resolved_origin_uri` and must not be reconstructed from this key.
     pub fn transient_object_key(
         proxy_session_id: &ProxySessionId,
         resource_id: &TransientResourceId,
@@ -468,6 +499,8 @@ impl fmt::Debug for TransientPassthroughState {
             .field("object_fetch_notifiers_len", &self.object_fetch_notifiers.len())
             .field("last_manifest_body_len", &self.last_manifest_body.as_ref().map(String::len))
             .field("last_manifest_rendered_at_ms", &self.last_manifest_rendered_at_ms)
+            .field("last_manifest_playlist_duration_ms", &self.last_manifest_playlist_duration_ms)
+            .field("last_manifest_valid_until_ms", &self.last_manifest_valid_until_ms)
             .field("resource_ttl_ms", &self.resource_ttl_ms)
             .finish()
     }
@@ -498,9 +531,8 @@ impl TransientResourceStore {
 
 fn default_content_type_for_transient_ext(extension: &str) -> Option<&'static str> {
     match extension {
-        "ts" => Some("video/MP2T"),
-        "m4a" => Some("audio/mp4"),
-        "m4s" | "mp4" => Some("video/mp4"),
+        "ts" => Some("video/mp2t"),
+        "mp4" | "m4s" | "m4v" => Some("video/mp4"),
         "key" => Some("application/octet-stream"),
         _ => None,
     }
@@ -594,6 +626,22 @@ mod tests {
     }
 
     #[test]
+    fn transient_media_resource_extensions_use_video_mp4_content_type() {
+        for extension in ["mp4", "m4s", "m4v"] {
+            let resource = TransientResourceRef::new(
+                TransientResourceKind::Segment,
+                format!("http://origin.example.com/live/seg.{extension}"),
+                b"secret",
+                10,
+                100,
+                Some(extension.to_string()),
+            );
+
+            assert_eq!(resource.content_type_hint.as_deref(), Some("video/mp4"));
+        }
+    }
+
+    #[test]
     fn transient_prune_keeps_resources_referenced_by_last_manifest() {
         let mut state = TransientPassthroughState::default();
         let resource = TransientResourceRef::new(
@@ -607,7 +655,7 @@ mod tests {
         let resource_id = resource.id.clone();
         state.upsert_resources([resource]);
         state.replace_manifest(
-            format!("#EXTM3U\n#EXTINF:1,\n/proxy/hls/live/session/lease/r/{}.ts\n", resource_id.0),
+            format!("#EXTM3U\n#EXTINF:1,\n/hls/shared/live/session/lease/r/{}.ts\n", resource_id.0),
             0,
         );
 

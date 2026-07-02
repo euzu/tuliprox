@@ -1,5 +1,6 @@
 use super::{
-    HlsSession, MapCacheStatus, ProxySessionId, SegmentCacheStatus, SegmentEntry, HLS_ACCESS_LEASE_ID_PLACEHOLDER,
+    is_hls_provisioning_gap_segment, is_hls_provisioning_segment, HlsSession, MapCacheStatus, ProxySessionId,
+    SegmentCacheStatus, SegmentEntry, HLS_ACCESS_LEASE_ID_PLACEHOLDER, HLS_PROVISIONING_TARGET_DURATION_SECS,
 };
 use crate::model::{StripConfig, StripMode};
 use std::fmt::Write as _;
@@ -48,9 +49,24 @@ pub struct RenderedManifest {
     pub first_proxy_seq: u64,
     pub last_proxy_seq: u64,
     pub playlist_duration_ms: u64,
+    pub valid_until_ms: u64,
     pub render_gap_segments: usize,
     pub rendered_at_ms: u64,
     pub segment_proxy_seqs: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RenderedManifestStoreOutcome {
+    Stored,
+    Rejected(RenderedManifestStoreRejectReason),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RenderedManifestStoreRejectReason {
+    RegressiveMediaSequence {
+        previous_first_proxy_seq: u64,
+        candidate_first_proxy_seq: u64,
+    },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -81,7 +97,17 @@ impl HlsSession {
         Ok(rendered)
     }
 
-    pub fn store_rendered_manifest(&mut self, rendered: RenderedManifest) {
+    pub fn store_rendered_manifest(&mut self, rendered: RenderedManifest) -> RenderedManifestStoreOutcome {
+        if let Some(previous) = &self.last_rendered_manifest {
+            if rendered.first_proxy_seq < previous.first_proxy_seq {
+                return RenderedManifestStoreOutcome::Rejected(
+                    RenderedManifestStoreRejectReason::RegressiveMediaSequence {
+                        previous_first_proxy_seq: previous.first_proxy_seq,
+                        candidate_first_proxy_seq: rendered.first_proxy_seq,
+                    },
+                );
+            }
+        }
         self.longest_rendered_playlist_duration_ms =
             self.longest_rendered_playlist_duration_ms.max(rendered.playlist_duration_ms);
         for proxy_seq in &rendered.segment_proxy_seqs {
@@ -90,6 +116,7 @@ impl HlsSession {
             }
         }
         self.last_rendered_manifest = Some(rendered);
+        RenderedManifestStoreOutcome::Stored
     }
 }
 
@@ -124,40 +151,39 @@ fn is_renderable(entry: &SegmentEntry, session: &HlsSession) -> bool {
 }
 
 fn select_window(session: &HlsSession, render_gap_segments: usize) -> Option<Vec<u64>> {
+    let head_seq = session.publishable_origin_head_proxy_seq?;
     let tail_seq = session.publishable_origin_tail_proxy_seq?.checked_sub(u64::try_from(render_gap_segments).ok()?)?;
-    let tail_entry = session.segments.get(&tail_seq)?;
-    if !is_renderable(tail_entry, session) {
+    if tail_seq < head_seq {
         return None;
     }
+
+    let current_origin_window_len = tail_seq.saturating_sub(head_seq).saturating_add(1);
+    let target_window_len = current_origin_window_len.min(u64::try_from(TARGET_VISIBLE_SEGMENTS).ok()?);
+    let start_seq = tail_seq
+        .saturating_add(1)
+        .saturating_sub(target_window_len)
+        .max(head_seq);
     let mut window = Vec::new();
-    let mut current = tail_seq;
     let mut not_ready_count = 0_usize;
 
-    while let Some(entry) = session.segments.get(&current) {
+    for current in start_seq..=tail_seq {
+        let entry = session.segments.get(&current)?;
         if !is_renderable(entry, session) {
-            break;
+            return None;
         }
         if !matches!(entry.status, SegmentCacheStatus::Ready { .. }) {
             not_ready_count = not_ready_count.saturating_add(1);
             if not_ready_count > session.render_policy.max_not_ready_render_segments {
-                break;
+                return None;
             }
         }
         window.push(current);
-        if window.len() == TARGET_VISIBLE_SEGMENTS {
-            break;
-        }
-        let Some(previous) = current.checked_sub(1) else {
-            break;
-        };
-        current = previous;
     }
-    window.reverse();
 
     if window.len() < MIN_VISIBLE_SEGMENTS {
         return None;
     }
-    if session.render_policy.initial_render_gap_segments == 0 {
+    if session.render_policy.initial_render_gap_segments == 0 && !window_contains_provisioning_segment(session, &window) {
         let target_duration_ms = u64::from(resolve_target_duration(session, &window)).saturating_mul(1_000);
         if playlist_duration_ms(session, &window) < target_duration_ms.saturating_mul(3) {
             return None;
@@ -183,7 +209,7 @@ fn render_window(
 
     body.push_str("#EXTM3U\n");
     writeln!(body, "#EXT-X-VERSION:{hls_version}").expect("writing to String must not fail");
-    if session.independent_segments {
+    if session.independent_segments || window_contains_provisioning_segment(session, window) {
         body.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
     }
     writeln!(body, "#EXT-X-TARGETDURATION:{target_duration}").expect("writing to String must not fail");
@@ -191,8 +217,13 @@ fn render_window(
     writeln!(body, "#EXT-X-DISCONTINUITY-SEQUENCE:{discontinuity_sequence}").expect("writing to String must not fail");
 
     let mut current_map_ref = None;
+    let contains_provisioning = window_contains_provisioning_segment(session, window);
+    let mut media_units_rendered = 0_usize;
     for proxy_seq in window {
         let entry = session.segments.get(proxy_seq).expect("selected window references an existing segment");
+        if contains_provisioning && media_units_rendered == 0 {
+            append_manifest_block_separator(&mut body);
+        }
         for daterange in &entry.daterange_tags_before {
             body.push_str(daterange);
             body.push('\n');
@@ -201,14 +232,23 @@ fn render_window(
             writeln!(body, "#EXT-X-PROGRAM-DATE-TIME:{program_date_time}").expect("writing to String must not fail");
         }
         if entry.discontinuity_before {
+            if contains_provisioning {
+                append_manifest_block_separator(&mut body);
+            }
             body.push_str("#EXT-X-DISCONTINUITY\n");
+        }
+        if is_hls_provisioning_gap_segment(entry) {
+            if contains_provisioning {
+                append_manifest_block_separator(&mut body);
+            }
+            body.push_str("#EXT-X-GAP\n");
         }
         if entry.map_ref != current_map_ref {
             if let Some(map_ref) = entry.map_ref {
                 let map = session.maps.get(&map_ref).expect("renderable map exists");
                 writeln!(
                     body,
-                    "#EXT-X-MAP:URI=\"/proxy/hls/live/{}/{}/map/{:06}.{}\"",
+                    "#EXT-X-MAP:URI=\"/hls/shared/live/{}/{}/map/{:06}.{}\"",
                     session.proxy_session_id.0, HLS_ACCESS_LEASE_ID_PLACEHOLDER, map.proxy_map_id.0, map.proxy_file_ext
                 )
                 .expect("writing to String must not fail");
@@ -216,15 +256,29 @@ fn render_window(
             current_map_ref = entry.map_ref;
         }
         writeln!(body, "#EXTINF:{},", format_duration_ms(entry.duration_ms)).expect("writing to String must not fail");
-        writeln!(
-            body,
-            "/proxy/hls/live/{}/{}/{:06}.{}",
-            proxy_session_id(session),
-            HLS_ACCESS_LEASE_ID_PLACEHOLDER,
-            entry.proxy_seq,
-            entry.proxy_file_ext
-        )
-        .expect("writing to String must not fail");
+        if is_local_provisioning_segment(entry) {
+            writeln!(
+                body,
+                "/hls/shared/live/{}/{}/{:06}.{}?pseq={}",
+                proxy_session_id(session),
+                HLS_ACCESS_LEASE_ID_PLACEHOLDER,
+                entry.proxy_seq,
+                entry.proxy_file_ext,
+                entry.proxy_seq
+            )
+            .expect("writing to String must not fail");
+        } else {
+            writeln!(
+                body,
+                "/hls/shared/live/{}/{}/{:06}.{}",
+                proxy_session_id(session),
+                HLS_ACCESS_LEASE_ID_PLACEHOLDER,
+                entry.proxy_seq,
+                entry.proxy_file_ext
+            )
+            .expect("writing to String must not fail");
+        }
+        media_units_rendered = media_units_rendered.saturating_add(1);
     }
 
     RenderedManifest {
@@ -232,10 +286,21 @@ fn render_window(
         first_proxy_seq,
         last_proxy_seq,
         playlist_duration_ms,
+        valid_until_ms: rendered_at_ms.saturating_add(playlist_duration_ms),
         render_gap_segments,
         rendered_at_ms,
         segment_proxy_seqs: window.to_vec(),
     }
+}
+
+fn append_manifest_block_separator(body: &mut String) {
+    if body.is_empty() || body.ends_with("\n\n") {
+        return;
+    }
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push('\n');
 }
 
 fn proxy_session_id(session: &HlsSession) -> &str {
@@ -244,6 +309,9 @@ fn proxy_session_id(session: &HlsSession) -> &str {
 }
 
 fn resolve_hls_version(session: &HlsSession, window: &[u64]) -> u16 {
+    if window_contains_provisioning_segment(session, window) {
+        return 7;
+    }
     let needs_map_version =
         window.iter().filter_map(|proxy_seq| session.segments.get(proxy_seq)).any(|entry| entry.map_ref.is_some());
     let feature_version = if needs_map_version { 6 } else { 3 };
@@ -251,6 +319,9 @@ fn resolve_hls_version(session: &HlsSession, window: &[u64]) -> u16 {
 }
 
 fn resolve_target_duration(session: &HlsSession, window: &[u64]) -> u32 {
+    if window_contains_provisioning_segment(session, window) && !window_contains_origin_segment(session, window) {
+        return HLS_PROVISIONING_TARGET_DURATION_SECS;
+    }
     session.target_duration.unwrap_or_else(|| {
         window
             .iter()
@@ -262,6 +333,24 @@ fn resolve_target_duration(session: &HlsSession, window: &[u64]) -> u32 {
             .try_into()
             .unwrap_or(u32::MAX)
     })
+}
+
+fn window_contains_provisioning_segment(session: &HlsSession, window: &[u64]) -> bool {
+    window
+        .iter()
+        .filter_map(|proxy_seq| session.segments.get(proxy_seq))
+        .any(is_local_provisioning_segment)
+}
+
+fn window_contains_origin_segment(session: &HlsSession, window: &[u64]) -> bool {
+    window
+        .iter()
+        .filter_map(|proxy_seq| session.segments.get(proxy_seq))
+        .any(|entry| !is_local_provisioning_segment(entry))
+}
+
+fn is_local_provisioning_segment(entry: &SegmentEntry) -> bool {
+    is_hls_provisioning_segment(entry) || is_hls_provisioning_gap_segment(entry)
 }
 
 fn playlist_duration_ms(session: &HlsSession, window: &[u64]) -> u64 {
@@ -282,7 +371,10 @@ fn format_duration_ms(duration_ms: u64) -> String { format!("{}.{:03}", duration
 
 #[cfg(test)]
 mod tests {
-    use super::{HlsManifestRenderer, RenderError, RenderPolicy};
+    use super::{
+        HlsManifestRenderer, RenderError, RenderPolicy, RenderedManifest, RenderedManifestStoreOutcome,
+        RenderedManifestStoreRejectReason,
+    };
     use crate::{
         api::model::{HlsSession, HlsSessionKey, MapCacheStatus, SegmentCacheStatus, SegmentFetchPriority},
         model::{StripConfig, StripMode},
@@ -314,6 +406,19 @@ mod tests {
         }
     }
 
+    fn rendered_manifest(first_proxy_seq: u64, last_proxy_seq: u64) -> RenderedManifest {
+        RenderedManifest {
+            body: format!("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:{first_proxy_seq}\n"),
+            first_proxy_seq,
+            last_proxy_seq,
+            playlist_duration_ms: 4_000,
+            valid_until_ms: 4_000,
+            render_gap_segments: 0,
+            rendered_at_ms: first_proxy_seq,
+            segment_proxy_seqs: (first_proxy_seq..=last_proxy_seq).collect(),
+        }
+    }
+
     #[test]
     fn renderer_does_not_emit_origin_uri_or_file_name() {
         let mut session = session();
@@ -324,7 +429,7 @@ mod tests {
 
         assert!(!rendered.body.contains("origin.example.com"));
         assert!(!rendered.body.contains("origin-name-120.ts"));
-        assert!(rendered.body.contains("/proxy/hls/live/"));
+        assert!(rendered.body.contains("/hls/shared/live/"));
     }
 
     #[test]
@@ -335,7 +440,7 @@ mod tests {
 
         let rendered = HlsManifestRenderer::render(&session, 10).expect("manifest should render");
 
-        assert!(rendered.body.contains("/000120.ts"));
+        assert!(rendered.body.contains("/000000.ts"));
     }
 
     #[test]
@@ -347,8 +452,8 @@ mod tests {
 
         let rendered = HlsManifestRenderer::render(&session, 10).expect("manifest should render");
 
-        assert_eq!(rendered.first_proxy_seq, 120);
-        assert!(rendered.body.contains("#EXT-X-MEDIA-SEQUENCE:120\n"));
+        assert_eq!(rendered.first_proxy_seq, 0);
+        assert!(rendered.body.contains("#EXT-X-MEDIA-SEQUENCE:0\n"));
         assert_eq!(rendered.render_gap_segments, 0);
     }
 
@@ -363,15 +468,15 @@ mod tests {
 
         let rendered = HlsManifestRenderer::render(&session, 10).expect("manifest should render");
 
-        assert_eq!(rendered.first_proxy_seq, 2);
+        assert_eq!(rendered.first_proxy_seq, 1);
         assert!(rendered.body.contains("#EXT-X-DISCONTINUITY-SEQUENCE:4\n"));
-        assert!(rendered.body.contains("#EXT-X-DISCONTINUITY\n#EXTINF:4.000,\n/proxy/hls/live/"));
+        assert!(rendered.body.contains("#EXT-X-DISCONTINUITY\n#EXTINF:4.000,\n/hls/shared/live/"));
     }
 
     #[test]
     fn provisioning_handoff_discontinuity_is_rendered_for_first_origin_segment() {
         let mut session = session();
-        session.mark_pending_handoff_discontinuity(61);
+        session.mark_pending_handoff_discontinuity(0);
         let manifest = normal_manifest(
             "#EXTM3U\n#EXT-X-DISCONTINUITY-SEQUENCE:7\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:4.0,\n10.ts\n#EXTINF:4.0,\n11.ts\n#EXTINF:4.0,\n12.ts\n",
         );
@@ -380,8 +485,8 @@ mod tests {
 
         let rendered = HlsManifestRenderer::render(&session, 10).expect("manifest should render");
 
-        assert!(rendered.body.contains("#EXT-X-DISCONTINUITY-SEQUENCE:68\n"));
-        assert!(rendered.body.contains("#EXT-X-DISCONTINUITY\n#EXTINF:4.000,\n/proxy/hls/live/"));
+        assert!(rendered.body.contains("#EXT-X-DISCONTINUITY-SEQUENCE:7\n"));
+        assert!(rendered.body.contains("#EXT-X-DISCONTINUITY\n#EXTINF:4.000,\n/hls/shared/live/"));
         assert_eq!(rendered.body.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
         assert_eq!(session.pending_handoff_discontinuity_sequence, None);
     }
@@ -389,7 +494,7 @@ mod tests {
     #[test]
     fn provisioning_handoff_does_not_duplicate_origin_first_segment_discontinuity() {
         let mut session = session();
-        session.mark_pending_handoff_discontinuity(61);
+        session.mark_pending_handoff_discontinuity(0);
         let manifest = normal_manifest(
             "#EXTM3U\n#EXT-X-DISCONTINUITY-SEQUENCE:7\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:10\n#EXT-X-DISCONTINUITY\n#EXTINF:4.0,\n10.ts\n#EXTINF:4.0,\n11.ts\n#EXTINF:4.0,\n12.ts\n",
         );
@@ -398,7 +503,7 @@ mod tests {
 
         let rendered = HlsManifestRenderer::render(&session, 10).expect("manifest should render");
 
-        assert!(rendered.body.contains("#EXT-X-DISCONTINUITY-SEQUENCE:68\n"));
+        assert!(rendered.body.contains("#EXT-X-DISCONTINUITY-SEQUENCE:7\n"));
         assert_eq!(rendered.body.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
     }
 
@@ -423,18 +528,18 @@ mod tests {
             "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4.0,\n1.ts\n#EXTINF:4.0,\n2.ts\n#EXTINF:4.0,\n3.ts\n#EXTINF:4.0,\n4.ts\n",
         );
         session.apply_origin_manifest(&manifest).expect("manifest should map");
+        session.segments.get_mut(&0).expect("segment").status =
+            SegmentCacheStatus::Ready { content_length: 100, ready_at_ms: 1 };
         session.segments.get_mut(&1).expect("segment").status =
             SegmentCacheStatus::Ready { content_length: 100, ready_at_ms: 1 };
         session.segments.get_mut(&2).expect("segment").status =
-            SegmentCacheStatus::Ready { content_length: 100, ready_at_ms: 1 };
-        session.segments.get_mut(&3).expect("segment").status =
             SegmentCacheStatus::Queued { priority: SegmentFetchPriority::RenderWindow, queued_at_ms: 1 };
-        session.segments.get_mut(&4).expect("segment").status =
+        session.segments.get_mut(&3).expect("segment").status =
             SegmentCacheStatus::Fetching { priority: SegmentFetchPriority::RenderWindow, started_at_ms: 1 };
 
         let rendered = HlsManifestRenderer::render(&session, 10).expect("manifest should render");
 
-        assert_eq!(rendered.segment_proxy_seqs, vec![1, 2, 3, 4]);
+        assert_eq!(rendered.segment_proxy_seqs, vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -465,6 +570,17 @@ mod tests {
     }
 
     #[test]
+    fn current_origin_manifest_head_blocks_suffix_fallback() {
+        let mut session = session();
+        session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+        mark_all_segments_ready(&mut session);
+        session.segments.get_mut(&0).expect("segment 0").status = SegmentCacheStatus::Discovered;
+        session.segments.get_mut(&1).expect("segment 1").status = SegmentCacheStatus::Discovered;
+
+        assert_eq!(HlsManifestRenderer::render(&session, 10), Err(RenderError::NoRenderableWindow));
+    }
+
+    #[test]
     fn map_ready_renders_only_proxy_map_uri() {
         let mut session = session();
         let manifest = normal_manifest(
@@ -478,7 +594,7 @@ mod tests {
 
         let rendered = HlsManifestRenderer::render(&session, 10).expect("manifest should render");
 
-        assert!(rendered.body.contains("/proxy/hls/live/"));
+        assert!(rendered.body.contains("/hls/shared/live/"));
         assert!(rendered.body.contains("/map/000000.mp4"));
         assert!(!rendered.body.contains("origin-init-name.mp4"));
     }
@@ -531,10 +647,41 @@ mod tests {
 
         let rendered = HlsManifestRenderer::render(&session, 10).expect("older valid window should render");
 
-        assert_eq!(session.publishable_origin_tail_proxy_seq, Some(7));
-        assert_eq!(rendered.last_proxy_seq, 4);
+        assert_eq!(session.publishable_origin_tail_proxy_seq, Some(6));
+        assert_eq!(rendered.last_proxy_seq, 3);
         assert_eq!(rendered.render_gap_segments, 3);
-        assert_eq!(rendered.segment_proxy_seqs, vec![1, 2, 3, 4]);
+        assert_eq!(rendered.segment_proxy_seqs, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn store_rendered_manifest_rejects_regressive_media_sequence() {
+        let mut session = session();
+        let previous = rendered_manifest(2, 7);
+        let candidate = rendered_manifest(0, 5);
+
+        assert_eq!(session.store_rendered_manifest(previous.clone()), RenderedManifestStoreOutcome::Stored);
+        assert_eq!(
+            session.store_rendered_manifest(candidate),
+            RenderedManifestStoreOutcome::Rejected(RenderedManifestStoreRejectReason::RegressiveMediaSequence {
+                previous_first_proxy_seq: 2,
+                candidate_first_proxy_seq: 0,
+            })
+        );
+        assert_eq!(session.last_rendered_manifest, Some(previous));
+    }
+
+    #[test]
+    fn store_rendered_manifest_accepts_same_or_forward_media_sequence() {
+        let mut session = session();
+        let first = rendered_manifest(2, 7);
+        let same = rendered_manifest(2, 8);
+        let forward = rendered_manifest(3, 9);
+
+        assert_eq!(session.store_rendered_manifest(first), RenderedManifestStoreOutcome::Stored);
+        assert_eq!(session.store_rendered_manifest(same.clone()), RenderedManifestStoreOutcome::Stored);
+        assert_eq!(session.last_rendered_manifest, Some(same));
+        assert_eq!(session.store_rendered_manifest(forward.clone()), RenderedManifestStoreOutcome::Stored);
+        assert_eq!(session.last_rendered_manifest, Some(forward));
     }
 
     #[test]

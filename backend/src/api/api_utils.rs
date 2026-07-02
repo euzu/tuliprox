@@ -4,11 +4,11 @@ use crate::{
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream,
-            get_custom_stream_response_error_status, get_stream_response_with_headers, is_custom_video_stream_enabled,
+            get_custom_stream_response_error_status, get_stream_response_with_headers,
             tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason,
             ProviderAllocation, ProviderConfig, ProviderHandle, ProviderStreamFactoryOptions, ProviderStreamInfo,
-            ProviderStreamState, SharedStreamManager, StreamDetails, StreamError, StreamingStrategy, ThrottledStream,
-            UserApiRequest, UserSession,
+            ProviderStreamCustomReason, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
+            StreamingStrategy, ThrottledStream, UserApiRequest, UserSession,
         },
     },
     auth::Fingerprint,
@@ -1638,11 +1638,10 @@ fn select_provider_stream_url(
 }
 
 fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamState {
-    ProviderStreamState::Custom(create_channel_unavailable_stream(
-        app_config,
-        &[],
-        StatusCode::SERVICE_UNAVAILABLE,
-    ))
+    ProviderStreamState::Custom {
+        response: create_channel_unavailable_stream(app_config, &[], StatusCode::OK),
+        reason: ProviderStreamCustomReason::UnmappedProviderUrl,
+    }
 }
 
 async fn acquire_stream_provider_handle(
@@ -1776,7 +1775,10 @@ async fn resolve_streaming_strategy(
             ProviderAllocation::Exhausted => {
                 debug!("Provider {} is exhausted. No connections allowed.", input.name);
                 let stream = create_provider_connections_exhausted_stream(&app_state.app_config, &[]);
-                ProviderStreamState::Custom(stream)
+                ProviderStreamState::Custom {
+                    response: stream,
+                    reason: ProviderStreamCustomReason::ProviderExhausted,
+                }
             }
             ProviderAllocation::Available(ref provider_cfg) | ProviderAllocation::GracePeriod(ref provider_cfg) => {
                 // Keep the URL only when it already targets the selected provider account. Hot reload can leave old
@@ -1819,7 +1821,10 @@ async fn resolve_streaming_strategy(
     } else {
         debug!("Provider {} is exhausted. No connections allowed.", input.name);
         let stream = create_provider_connections_exhausted_stream(&app_state.app_config, &[]);
-        ProviderStreamState::Custom(stream)
+        ProviderStreamState::Custom {
+            response: stream,
+            reason: ProviderStreamCustomReason::ProviderExhausted,
+        }
     };
 
     if release_failed_mapping {
@@ -1931,7 +1936,13 @@ async fn create_stream_response_details(
     let guard_provider_name =
         streaming_strategy.provider_handle.as_ref().and_then(|guard| guard.allocation.get_provider_name());
 
-    if matches!(streaming_strategy.provider_stream_state, ProviderStreamState::Custom(_))
+    if matches!(
+        streaming_strategy.provider_stream_state,
+        ProviderStreamState::Custom {
+            reason: ProviderStreamCustomReason::ProviderExhausted,
+            ..
+        }
+    )
         && can_provision_on_exhausted(app_state, input)
     {
         if let Some(handle) = streaming_strategy.provider_handle.take() {
@@ -1953,7 +1964,10 @@ async fn create_stream_response_details(
 
     match streaming_strategy.provider_stream_state {
         // custom stream means we display our own stream like connection exhausted, channel-unavailable...
-        ProviderStreamState::Custom(provider_stream) => {
+        ProviderStreamState::Custom {
+            response: provider_stream,
+            ..
+        } => {
             let (stream, stream_info) = provider_stream;
             // When allocation is exhausted or no connection was acquired, guard_provider_name is None.
             // Use input.name as fallback so the provider field is never empty.
@@ -2317,13 +2331,11 @@ fn is_hop_by_hop_response_header(name: &HeaderName) -> bool {
 }
 
 fn no_custom_video_fallback_status(app_config: &AppConfig) -> StatusCode {
-    if is_custom_video_stream_enabled(app_config) {
-        // No custom video response available but custom video response enabled
-        StatusCode::BAD_REQUEST
-    } else {
-        // reverse proxy with `proxy_intercept_errors on;` can sever the socket.
-        get_custom_stream_response_error_status(app_config)
-    }
+    // No custom video response is available, either because the operator disabled
+    // it or because the concrete resource is missing. In both cases use the
+    // configured fallback status so reverse proxies can handle the socket
+    // consistently.
+    get_custom_stream_response_error_status(app_config)
 }
 
 /// # Panics
@@ -3344,6 +3356,7 @@ pub(crate) async fn local_stream_response(
             })
             .await;
     }
+    let metering = prepare_stream_metering(app_state, &pli.url, false, true, false).await;
     let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
         stream_details: StreamDetails::from_stream(stream, grace_period_options),
         app_state,
@@ -3355,8 +3368,8 @@ pub(crate) async fn local_stream_response(
         socket_bound,
         session_token: playback_session_token,
         req_headers,
-        meter_uid: 0,
-        meter_stream: false,
+        meter_uid: metering.meter_uid,
+        meter_stream: metering.meter_stream,
     })
         .await;
 
@@ -3398,6 +3411,10 @@ fn is_path_within_allowed_directories(sub_path: &Path, root_paths: &[String]) ->
 pub fn is_stream_share_enabled(item_type: PlaylistItemType, target: &ConfigTarget) -> bool {
     (item_type == PlaylistItemType::Live/* || item_type == PlaylistItemType::LiveHls */)
         && target.options.as_ref().is_some_and(ConfigTargetOptions::share_live_mpeg_ts_enabled)
+}
+
+pub fn is_hls_stream_share_enabled(target: &ConfigTarget) -> bool {
+    target.options.as_ref().is_some_and(ConfigTargetOptions::share_live_hls_enabled)
 }
 
 pub type HeaderFilter = Option<Box<dyn Fn(&str) -> bool + Send>>;
@@ -4727,7 +4744,13 @@ mod tests {
             .await;
         assert!(strict.provider_handle.is_none(), "strict provider affinity should not allocate a different provider");
         assert!(
-            matches!(strict.provider_stream_state, ProviderStreamState::Custom(_)),
+            matches!(
+                strict.provider_stream_state,
+                ProviderStreamState::Custom {
+                    reason: ProviderStreamCustomReason::ProviderExhausted,
+                    ..
+                }
+            ),
             "strict provider affinity should fail closed when the pinned provider is unavailable"
         );
 
@@ -4829,7 +4852,13 @@ mod tests {
             .await;
 
         assert!(strategy.provider_handle.is_none());
-        assert!(matches!(strategy.provider_stream_state, ProviderStreamState::Custom(_)));
+        assert!(matches!(
+            strategy.provider_stream_state,
+            ProviderStreamState::Custom {
+                reason: ProviderStreamCustomReason::UnmappedProviderUrl,
+                ..
+            }
+        ));
 
         app_state.active_provider.release_connection(&addr).await;
     }

@@ -254,6 +254,63 @@ impl std::str::FromStr for HlsCorruptSegmentWatchdogModeDto {
     }
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HlsManifestRecoveryBurstLevelDto {
+    #[default]
+    Off,
+    Friendly,
+    Cautious,
+    Balanced,
+    Intense,
+    Aggressive,
+    Beast,
+}
+
+impl std::fmt::Display for HlsManifestRecoveryBurstLevelDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => f.write_str("off"),
+            Self::Friendly => f.write_str("friendly"),
+            Self::Cautious => f.write_str("cautious"),
+            Self::Balanced => f.write_str("balanced"),
+            Self::Intense => f.write_str("intense"),
+            Self::Aggressive => f.write_str("aggressive"),
+            Self::Beast => f.write_str("beast"),
+        }
+    }
+}
+
+impl std::str::FromStr for HlsManifestRecoveryBurstLevelDto {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "friendly" => Ok(Self::Friendly),
+            "cautious" => Ok(Self::Cautious),
+            "balanced" => Ok(Self::Balanced),
+            "intense" => Ok(Self::Intense),
+            "aggressive" => Ok(Self::Aggressive),
+            "beast" => Ok(Self::Beast),
+            _ => Err(format!("Unknown HLS manifest recovery burst level: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HlsManifestRecoveryBurstConfigDto {
+    #[serde(default)]
+    pub level: HlsManifestRecoveryBurstLevelDto,
+}
+
+impl HlsManifestRecoveryBurstConfigDto {
+    pub fn is_empty(&self) -> bool { self == &Self::default() }
+
+    pub const fn clean(&mut self) {}
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HlsSegmentRepairSizeIncreaseConfigDto {
@@ -404,6 +461,8 @@ pub struct HlsCacheConfigDto {
     pub origin_segment_timeout_ms: u64,
     #[serde(default = "default_hls_session_idle_timeout")]
     pub session_idle_timeout: u64,
+    #[serde(default, skip_serializing_if = "HlsManifestRecoveryBurstConfigDto::is_empty")]
+    pub manifest_recovery_burst: HlsManifestRecoveryBurstConfigDto,
     #[serde(default, skip_serializing_if = "HlsSegmentRepairConfigDto::is_empty")]
     pub segment_repair: HlsSegmentRepairConfigDto,
 }
@@ -422,6 +481,7 @@ impl Default for HlsCacheConfigDto {
             origin_manifest_timeout_ms: default_hls_origin_manifest_timeout_ms(),
             origin_segment_timeout_ms: default_hls_origin_segment_timeout_ms(),
             session_idle_timeout: default_hls_session_idle_timeout(),
+            manifest_recovery_burst: HlsManifestRecoveryBurstConfigDto::default(),
             segment_repair: HlsSegmentRepairConfigDto::default(),
         }
     }
@@ -432,6 +492,7 @@ impl HlsCacheConfigDto {
 
     pub fn clean(&mut self) {
         self.strip.clean();
+        self.manifest_recovery_burst.clean();
         self.segment_repair.clean();
     }
 
@@ -706,8 +767,8 @@ impl ResourceRetryConfigDto {
 mod tests {
     use super::{
         ByteSizeDto, HlsCacheConfigDto, HlsCorruptSegmentWatchdogConfigDto, HlsCorruptSegmentWatchdogModeDto,
-        HlsSegmentRepairConfigDto, HlsSegmentRepairModeDto, HlsSegmentRepairSizeIncreaseConfigDto,
-        ReverseProxyConfigDto,
+        HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevelDto, HlsSegmentRepairConfigDto,
+        HlsSegmentRepairModeDto, HlsSegmentRepairSizeIncreaseConfigDto, ReverseProxyConfigDto,
     };
     use crate::model::{QosAggregationConfigDto, StreamHistoryConfigDto};
 
@@ -934,6 +995,28 @@ hls_cache:
             !serialized.contains("command_version"),
             "command_version is internal and must not serialize, got: {serialized}"
         );
+    }
+
+    #[test]
+    fn hls_cache_serializes_non_default_manifest_recovery_burst() {
+        let cfg = ReverseProxyConfigDto {
+            rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
+            hls_cache: Some(HlsCacheConfigDto {
+                manifest_recovery_burst: HlsManifestRecoveryBurstConfigDto {
+                    level: HlsManifestRecoveryBurstLevelDto::Beast,
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let serialized = serde_saphyr::to_string(&cfg).expect("serialization should succeed");
+        assert!(
+            serialized.contains("manifest_recovery_burst:"),
+            "expected manifest recovery burst block, got: {serialized}"
+        );
+        assert!(serialized.contains("level: beast"), "expected burst level, got: {serialized}");
+        assert_eq!("beast".parse::<HlsManifestRecoveryBurstLevelDto>(), Ok(HlsManifestRecoveryBurstLevelDto::Beast));
     }
 
     #[test]

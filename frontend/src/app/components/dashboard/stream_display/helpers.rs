@@ -1,7 +1,7 @@
 use crate::{
     app::ConfigContext,
     model::{BACKGROUND_TRANSFER_CLIENT_IP, BACKGROUND_TRANSFER_PROVIDER},
-    utils::format_duration,
+    utils::{format_duration, is_shared_hls_stream},
 };
 use gloo_utils::window;
 use shared::{
@@ -105,7 +105,7 @@ fn compute_adaptive_last_seen(
 
         for stream in streams {
             if is_adaptive_session_stream(stream) {
-                if !stream.preserved || !next.contains_key(&stream.uid) {
+                if !stream.preserved || is_shared_hls_stream(stream) || !next.contains_key(&stream.uid) {
                     next.insert(stream.uid, now);
                 }
             } else {
@@ -253,6 +253,12 @@ mod tests {
         })
     }
 
+    fn test_shared_hls_stream(uid: u32, preserved: bool, has_session: bool) -> Rc<StreamInfo> {
+        let mut stream = (*test_stream(uid, PlaylistItemType::LiveHls, preserved, has_session)).clone();
+        stream.channel.shared = true;
+        Rc::new(stream)
+    }
+
     #[test]
     fn compute_adaptive_last_seen_prunes_missing_uids() {
         let existing = HashMap::from([(1, 100), (2, 200), (3, 300)]);
@@ -269,5 +275,15 @@ mod tests {
         assert!(!refreshed.contains_key(&1));
         assert!(!refreshed.contains_key(&3));
         assert!(!refreshed.contains_key(&9));
+    }
+
+    #[test]
+    fn compute_adaptive_last_seen_refreshes_preserved_shared_hls() {
+        let existing = HashMap::from([(2, 200)]);
+        let streams = Some(vec![test_shared_hls_stream(2, true, true)]);
+
+        let refreshed = compute_adaptive_last_seen(existing, &streams, 999);
+
+        assert_eq!(refreshed.get(&2), Some(&999));
     }
 }

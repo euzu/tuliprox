@@ -6,9 +6,14 @@ use crate::{
 use log::debug;
 use shared::utils::sanitize_sensitive_info;
 use std::{fmt, net::SocketAddr, sync::Arc};
-use tokio::sync::{Mutex, Notify};
+use std::time::{Duration, Instant};
+use tokio::{
+    sync::{Mutex, Notify},
+    time::timeout,
+};
 
 const HLS_ACCOUNT_OVERLAP_FALLBACK_TARGET_DURATION_MS: u64 = 15_000;
+const HLS_ORIGIN_ACCOUNT_IO_WAIT_RECHECK: Duration = Duration::from_millis(25);
 
 /// Stable source metadata for one shared live-HLS session.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -122,6 +127,14 @@ impl HlsAccountOverlapTiming {
             soft_active_window_ms: target_duration_ms.saturating_mul(2),
         }
     }
+
+    pub fn reservation_ttl_secs(self) -> u64 {
+        self.hard_active_window_ms
+            .saturating_add(self.soft_active_window_ms)
+            .saturating_add(999)
+            / 1_000
+            + 1
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +189,7 @@ pub enum HlsOriginAccountBindingMode {
 pub enum HlsOriginAccountDetachedReason {
     SoftWindowElapsed,
     ReclaimedByOriginalOwner,
+    PreemptedByHigherPriority,
     AccountMissingOrExpired,
     IdleNoActiveLease,
     Cleanup,
@@ -186,6 +200,7 @@ impl HlsOriginAccountDetachedReason {
         match self {
             Self::SoftWindowElapsed => "soft-window-elapsed",
             Self::ReclaimedByOriginalOwner => "reclaimed-by-original-owner",
+            Self::PreemptedByHigherPriority => "preempted-by-higher-priority",
             Self::AccountMissingOrExpired => "account-missing-or-expired",
             Self::IdleNoActiveLease => "idle-no-active-lease",
             Self::Cleanup => "cleanup",
@@ -317,11 +332,36 @@ pub enum HlsBoundAccountAcquireErrorKind {
     Expired,
     Exhausted,
     ReservedForOther,
+    Detached,
+    WaitTimedOut,
+    AcquireTimedOut,
+    StoreRace,
     Unavailable,
 }
 
 impl HlsBoundAccountAcquireErrorKind {
     pub fn allows_rebind(self) -> bool { matches!(self, Self::Missing | Self::Expired) }
+
+    pub fn is_retryable_resource_failure(self) -> bool {
+        matches!(
+            self,
+            Self::Exhausted | Self::WaitTimedOut | Self::AcquireTimedOut | Self::StoreRace | Self::Unavailable
+        )
+    }
+
+    pub const fn as_log_label(self) -> &'static str {
+        match self {
+            Self::Missing => "Missing",
+            Self::Expired => "Expired",
+            Self::Exhausted => "Exhausted",
+            Self::ReservedForOther => "ReservedForOther",
+            Self::Detached => "Detached",
+            Self::WaitTimedOut => "WaitTimedOut",
+            Self::AcquireTimedOut => "AcquireTimedOut",
+            Self::StoreRace => "StoreRace",
+            Self::Unavailable => "Unavailable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,7 +486,7 @@ pub async fn acquire_bound_hls_origin_account_handle(
     connection_kind: ConnectionKind,
 ) -> Result<ProviderHandle, HlsBoundAccountAcquireErrorKind> {
     if binding.is_detached() {
-        return Err(HlsBoundAccountAcquireErrorKind::Unavailable);
+        return Err(HlsBoundAccountAcquireErrorKind::Detached);
     }
     match hls_origin_account_status(app_state, binding) {
         HlsOriginAccountStatus::Missing => return Err(HlsBoundAccountAcquireErrorKind::Missing),
@@ -492,11 +532,32 @@ pub async fn begin_hls_origin_account_io(
     session: &HlsSessionHandle,
     binding: &HlsOriginAccountBinding,
 ) -> Result<HlsOriginAccountIoLeaseGuard, HlsBoundAccountAcquireErrorKind> {
+    begin_hls_origin_account_io_inner(origin_io, session, binding, None).await
+}
+
+pub async fn begin_hls_origin_account_io_bounded(
+    origin_io: &HlsOriginIoContext,
+    session: &HlsSessionHandle,
+    binding: &HlsOriginAccountBinding,
+    acquire_timeout: Duration,
+) -> Result<HlsOriginAccountIoLeaseGuard, HlsBoundAccountAcquireErrorKind> {
+    begin_hls_origin_account_io_inner(origin_io, session, binding, Some(acquire_timeout)).await
+}
+
+async fn begin_hls_origin_account_io_inner(
+    origin_io: &HlsOriginIoContext,
+    session: &HlsSessionHandle,
+    binding: &HlsOriginAccountBinding,
+    acquire_timeout: Option<Duration>,
+) -> Result<HlsOriginAccountIoLeaseGuard, HlsBoundAccountAcquireErrorKind> {
     if binding.is_detached() {
-        return Err(HlsBoundAccountAcquireErrorKind::Unavailable);
+        return Err(HlsBoundAccountAcquireErrorKind::Detached);
     }
 
-    if matches!(reserve_hls_origin_account_io_slot(session, binding).await?, HlsOriginAccountIoSlot::Joined) {
+    if matches!(
+        reserve_hls_origin_account_io_slot(session, binding, acquire_timeout).await?,
+        HlsOriginAccountIoSlot::Joined
+    ) {
         if let Some(unused_handle) = origin_io.take_preacquired_provider_handle().await {
             origin_io.app_state.connection_manager.release_provider_handle(Some(unused_handle)).await;
         }
@@ -506,15 +567,24 @@ pub async fn begin_hls_origin_account_io(
     let acquired_handle = if let Some(handle) = origin_io.take_preacquired_provider_handle().await {
         Ok(handle)
     } else {
-        acquire_bound_hls_origin_account_handle(
+        let acquire = acquire_bound_hls_origin_account_handle(
             &origin_io.app_state,
             binding,
             &origin_io.client_addr,
             origin_io.allow_grace,
             origin_io.priority,
             origin_io.connection_kind,
-        )
-        .await
+        );
+        if let Some(acquire_timeout) = acquire_timeout {
+            if let Ok(result) = timeout(acquire_timeout, acquire).await {
+                result
+            } else {
+                clear_pending_hls_origin_account_io_lease(session, binding).await;
+                return Err(HlsBoundAccountAcquireErrorKind::AcquireTimedOut);
+            }
+        } else {
+            acquire.await
+        }
     };
 
     match acquired_handle {
@@ -529,7 +599,9 @@ pub async fn begin_hls_origin_account_io(
 async fn reserve_hls_origin_account_io_slot(
     session: &HlsSessionHandle,
     binding: &HlsOriginAccountBinding,
+    acquire_timeout: Option<Duration>,
 ) -> Result<HlsOriginAccountIoSlot, HlsBoundAccountAcquireErrorKind> {
+    let wait_deadline = acquire_timeout.map(|duration| Instant::now() + duration);
     loop {
         match try_reserve_hls_origin_account_io_slot(&mut *session.write().await, binding) {
             HlsOriginAccountIoReserveOutcome::Joined => {
@@ -538,7 +610,26 @@ async fn reserve_hls_origin_account_io_slot(
             HlsOriginAccountIoReserveOutcome::Acquire => {
                 return Ok(HlsOriginAccountIoSlot::Acquire);
             }
-            HlsOriginAccountIoReserveOutcome::Wait(notify) => notify.notified().await,
+            HlsOriginAccountIoReserveOutcome::Wait(notify) => {
+                if let Some(deadline) = wait_deadline {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Err(HlsBoundAccountAcquireErrorKind::WaitTimedOut);
+                    }
+                    let wait_for = deadline
+                        .saturating_duration_since(now)
+                        .min(HLS_ORIGIN_ACCOUNT_IO_WAIT_RECHECK);
+                    tokio::select! {
+                        () = notify.notified() => {}
+                        () = tokio::time::sleep(wait_for) => {}
+                    }
+                } else {
+                    tokio::select! {
+                        () = notify.notified() => {}
+                        () = tokio::time::sleep(HLS_ORIGIN_ACCOUNT_IO_WAIT_RECHECK) => {}
+                    }
+                }
+            }
             HlsOriginAccountIoReserveOutcome::Unavailable => {
                 return Err(HlsBoundAccountAcquireErrorKind::Unavailable);
             }
@@ -625,7 +716,7 @@ async fn store_acquired_hls_origin_account_io_handle(
     if let Some(handle) = release_handle {
         origin_io.app_state.connection_manager.release_provider_handle(Some(handle)).await;
         origin_io.app_state.active_provider.clear_provider_reservation(&binding.session_owner).await;
-        return Err(HlsBoundAccountAcquireErrorKind::Unavailable);
+        return Err(HlsBoundAccountAcquireErrorKind::StoreRace);
     }
     Ok(HlsOriginAccountIoLeaseGuard { binding: binding.clone() })
 }
@@ -761,11 +852,13 @@ mod tests {
         assert_eq!(timing.target_duration_ms, 12_000);
         assert_eq!(timing.hard_active_window_ms, 12_000);
         assert_eq!(timing.soft_active_window_ms, 24_000);
+        assert_eq!(timing.reservation_ttl_secs(), 37);
 
         let fallback = HlsAccountOverlapTiming::from_target_duration_secs(None);
         assert_eq!(fallback.target_duration_ms, 15_000);
         assert_eq!(fallback.hard_active_window_ms, 15_000);
         assert_eq!(fallback.soft_active_window_ms, 30_000);
+        assert_eq!(fallback.reservation_ttl_secs(), 46);
     }
 
     #[test]
@@ -862,7 +955,24 @@ mod tests {
         assert!(HlsBoundAccountAcquireErrorKind::Expired.allows_rebind());
         assert!(!HlsBoundAccountAcquireErrorKind::Exhausted.allows_rebind());
         assert!(!HlsBoundAccountAcquireErrorKind::ReservedForOther.allows_rebind());
+        assert!(!HlsBoundAccountAcquireErrorKind::Detached.allows_rebind());
+        assert!(!HlsBoundAccountAcquireErrorKind::WaitTimedOut.allows_rebind());
+        assert!(!HlsBoundAccountAcquireErrorKind::AcquireTimedOut.allows_rebind());
+        assert!(!HlsBoundAccountAcquireErrorKind::StoreRace.allows_rebind());
         assert!(!HlsBoundAccountAcquireErrorKind::Unavailable.allows_rebind());
+    }
+
+    #[test]
+    fn bound_account_acquire_error_resource_retry_policy_matches_handoff_semantics() {
+        assert!(!HlsBoundAccountAcquireErrorKind::Missing.is_retryable_resource_failure());
+        assert!(!HlsBoundAccountAcquireErrorKind::Expired.is_retryable_resource_failure());
+        assert!(!HlsBoundAccountAcquireErrorKind::ReservedForOther.is_retryable_resource_failure());
+        assert!(!HlsBoundAccountAcquireErrorKind::Detached.is_retryable_resource_failure());
+        assert!(HlsBoundAccountAcquireErrorKind::Exhausted.is_retryable_resource_failure());
+        assert!(HlsBoundAccountAcquireErrorKind::WaitTimedOut.is_retryable_resource_failure());
+        assert!(HlsBoundAccountAcquireErrorKind::AcquireTimedOut.is_retryable_resource_failure());
+        assert!(HlsBoundAccountAcquireErrorKind::StoreRace.is_retryable_resource_failure());
+        assert!(HlsBoundAccountAcquireErrorKind::Unavailable.is_retryable_resource_failure());
     }
 
     #[test]

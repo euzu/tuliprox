@@ -281,20 +281,22 @@ async fn xtream_player_api_stream(
     }
 
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let pli = match xtream_get_item_for_stream_id(req_virtual_id, app_state, &target, None).await {
-        Ok(pli) => pli,
-        Err(_) => {
-            error!("Failed to read xtream item for stream id {req_virtual_id}");
-            if is_hls_manifest_request {
-                return hls_custom_video_manifest_response(
-                    app_state,
-                    &user,
-                    CustomVideoStreamType::ChannelUnavailable,
-                    axum::http::StatusCode::NOT_FOUND,
-                );
-            }
-            return axum::http::StatusCode::NOT_FOUND.into_response();
+    let Ok(pli) = xtream_get_item_for_stream_id(req_virtual_id, app_state, &target, None).await else {
+        error!("Failed to read xtream item for stream id {req_virtual_id}");
+        if is_hls_manifest_request {
+            return hls_custom_video_manifest_response(
+                app_state,
+                &user,
+                CustomVideoStreamType::ChannelUnavailable,
+                axum::http::StatusCode::NOT_FOUND,
+            );
         }
+        return create_custom_video_stream_response(
+            app_state,
+            &fingerprint.addr,
+            CustomVideoStreamType::ChannelUnavailable,
+        )
+        .into_response();
     };
 
     let output_allowed = if stream_req.context == ApiStreamContext::Timeshift {
@@ -588,7 +590,7 @@ async fn xtream_player_api_stream(
             fingerprint,
             app_state,
             &user,
-            target.id,
+            &target,
             user_session.as_ref(),
             &stream_url,
             None,
@@ -596,7 +598,7 @@ async fn xtream_player_api_stream(
             &input,
             req_headers,
             connection_permission,
-            connection_kind,
+            connection_admission.kind,
             &original_hls_entry_path,
         )
         .await
@@ -759,7 +761,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
                 fingerprint,
                 app_state,
                 &user,
-                target.id,
+                &target,
                 None,
                 &pli.url,
                 None,
@@ -767,7 +769,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
                 &input,
                 req_headers,
                 UserConnectionPermission::Allowed,
-                crate::api::model::ConnectionKind::Normal,
+                Some(crate::api::model::ConnectionKind::Normal),
                 &original_hls_entry_path,
             )
             .await

@@ -6,40 +6,55 @@ use crate::{
         api_utils::{
             connection_priority_for_kind, create_api_proxy_user, create_playback_session_fingerprint,
             create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
-            get_hls_session_ttl_secs, get_stream_alternative_url, is_seek_request, local_stream_response,
-            mark_response_as_uncompressed, record_connect_failed_attempt, resolve_playback_request_admission,
+            get_hls_session_ttl_secs, get_stream_alternative_url, is_hls_stream_share_enabled, is_seek_request,
+            local_stream_response, record_connect_failed_attempt, resolve_playback_request_admission,
             try_option_bad_request, try_unwrap_body, ConnectFailedAttempt, EvictionReentryGuard, HeaderFilter,
         },
         model::{
-            begin_hls_origin_account_io, build_hls_origin_session_owner, build_proxy_session_id,
-            classify_hls_resource_status, cold_start_retry_after_seconds, create_channel_unavailable_stream,
-            finish_hls_origin_account_io, hls_custom_video_manifest_response_with_virtual_id, hls_object_body_deadline,
-            hls_origin_account_status, hls_provisioning_discontinuity_sequence,
-            hls_shared_panel_provisioning_manifest_path, hls_shared_panel_provisioning_manifest_response,
-            hls_virtual_entry_redirect_response, log_hls_resource_attempt_started,
-            log_hls_resource_attempt_succeeded, log_hls_resource_fetch_failed, log_hls_resource_retry_scheduled,
-            log_hls_resource_timeout, maybe_trigger_origin_refresh, new_hls_access_lease_id,
+            begin_hls_origin_account_io_bounded, build_hls_origin_session_owner, build_proxy_session_id,
+            cold_start_retry_after_seconds, hls_cached_manifest_options_for_requirement,
+            extract_hls_provider_session_headers, hls_committed_manifest_body_for_request,
+            hls_custom_video_manifest_path,
+            hls_custom_video_manifest_response_with_virtual_id, hls_object_body_deadline, hls_origin_account_status,
+            hls_provisioning_discontinuity_sequence, is_custom_video_stream_enabled,
+            is_hls_provisioning_gap_segment, is_hls_provisioning_segment,
+            hls_manifest_commit_requirement, hls_should_wait_for_initial_manifest_commit,
+            hls_transient_object_fetch_failure, hls_transient_origin_response,
+            hls_virtual_entry_redirect_response, maybe_trigger_origin_refresh, new_hls_access_lease_id,
             origin_account_binding_from_allocation, retry_after_secs_from_ms, safe_hls_access_lease_id,
-            safe_proxy_session_id, safe_user_session_token, scrub_hls_origin_headers, serve_hls_map_cache_response,
-            serve_hls_segment_cache_response, serve_hls_transient_object_cache_response, should_remove_hls_origin_header,
+            safe_proxy_session_id, safe_user_session_token, scrub_hls_origin_headers, serve_hls_map_cache_outcome,
+            serve_hls_segment_cache_outcome, serve_hls_transient_object_cache_outcome,
+            serve_hls_transient_object_cache_response, should_remove_hls_origin_header,
             start_hls_panel_provisioning_once,
-            try_hls_panel_provisioning_manifest_response, validate_hls_access_lease, AccessLeaseReuseBlock,
-            AccessLeaseReuseResult, AppState, CacheAccessState, CustomVideoStreamType, HlsAccessAdmissionMode,
-            HlsAccessContext, HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseId, HlsAccessLeaseState,
+            try_hls_panel_provisioning_manifest_response, validate_hls_access_lease, AppState, CacheAccessState,
+            CustomVideoStreamType, HlsAccessAdmissionMode,
+            HlsAccessContext, HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseChannelUnavailableReason,
+            HlsAccessLeaseId, HlsAccessLeasePendingDeadline, HlsAccessLeaseResponseFlag, HlsAccessLeaseState,
             HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsAccessLeaseValidationError, HlsAccountBindingProtection,
-            HlsCacheResponseContext, HlsEffectiveOriginAcquirePolicy, HlsMapFile, HlsOriginAccountBinding,
-            HlsOriginAccountBindingMode, HlsOriginAccountDetachedReason, HlsOriginAccountIoLeaseGuard,
-            HlsOriginAccountStatus, HlsOriginIoContext, HlsOriginSource, HlsOriginSourceKind, HlsOriginWorkClass,
-            HlsPanelProvisioningRedirectPaths, HlsPlaybackFamilyKey, HlsProvisioningStatus, HlsRepairRenderedObjectId,
-            HlsResourceFetchAttempt, HlsResourceFetchKind, HlsResourceFetchLogContext, HlsResourceFetchLogStatus,
-            HlsResourceStatusClass, HlsSegmentFile, HlsSegmentRepairObjectContext, HlsSegmentRepairSource,
-            HlsSessionHandle, HlsSessionKey, HlsSessionMode, HlsSessionStoreOutcome, LiveHlsOriginEntry,
-            OriginRefreshRequest, ProviderAllocation,
-            ProviderConfig as RuntimeProviderConfig, ProviderHandle, ProxySessionId, RetryPolicy, SegmentCacheStatus,
-            SegmentDemandFetchOutcome, SegmentFetchContext, SegmentFetchPolicy, TransientObjectCacheKey,
-            TransientObjectFetchDecision, TransientObjectUnavailableState, TransientResourceFile,
-            TransientResourceKind, UserSession,
-            HLS_ACCESS_LEASE_ID_PLACEHOLDER,
+            HlsCacheResponseContext, HlsAccountOverlapTiming, HlsBoundAccountAcquireErrorKind, HlsCachedManifestOptions,
+            HlsCommittedManifestBody, HlsEffectiveOriginAcquirePolicy, HlsManifestCommitRequirement, HlsMapFile,
+            HlsMediaActivityMarker,
+            HlsOriginAccountBinding, HlsOriginAccountBindingMode, HlsOriginAccountDetachedReason,
+            HlsOriginAccountStatus, HlsOriginIoContext, HlsOriginResourceClients,
+            HlsOriginResourceFetchError, HlsOriginSource,
+            HlsOriginSourceKind, HlsOriginWorkClass, HlsPanelProvisioningRedirectPaths, HlsPlaybackFamilyKey,
+            HlsProvisioningStatus, HlsQosMeterInit, HlsQosRuntimeConfig,
+            HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH, HLS_PROVISIONING_SEGMENT_DURATION_MS,
+            HLS_PROVISIONING_TARGET_DURATION_SECS,
+            HlsResourceServeFailure, HlsResourceServeOutcome, HlsSegmentFailureObject,
+            HlsSegmentFailureTransition, HlsSegmentFile,
+            HlsSession, HlsSessionHandle, HlsSessionKey,
+            HlsSessionMode, HlsSessionStoreOutcome, LiveHlsOriginEntry, OriginRefreshRequest, OriginSegmentKey,
+            ProviderAllocation,
+            ProviderConfig as RuntimeProviderConfig, ProviderHandle, ProxySessionId, RetryPolicy, SegmentCacheKey,
+            SegmentCacheStatus, SegmentDemandFetchOutcome, SegmentFetchContext, SegmentFetchPolicy, TransientObjectCacheKey,
+            TransientObjectUnavailableState, TransientResourceFile, TransientResourceRef,
+            TransientResourceKind, TransportStreamBuffer, UserSession, ConnectionHistoryMode, StreamMeterHandle,
+            HLS_ACCESS_LEASE_ID_PLACEHOLDER, HlsTransientObjectFetchFailure, HlsTransientOriginIoGuard,
+            HlsTransientCacheCommitContext, HlsTransientObjectCacheAction, HlsTransientObjectFetchFinalizer,
+            HlsTransientOriginCacheFetchRequest, HlsTransientOriginFetchRequest,
+            fetch_and_commit_hls_transient_origin_response_with_attempt_prepare,
+            fetch_hls_transient_origin_response_with_attempt_prepare, resolve_hls_transient_object_cache_action,
         },
         panel_api::can_provision_on_exhausted,
     },
@@ -50,7 +65,7 @@ use crate::{
     },
     processing::parser::hls::{
         get_hls_session_token_and_url_from_token, rewrite_hls,
-        transient_manifest::{materialize_initial_transient_strip_view, TransientInitialStripOutcome},
+        initial_strip::{materialize_initial_hls_strip_view, HlsInitialStripOutcome},
         RewriteHlsProps,
     },
     repository::{m3u_get_item_for_stream_id, storage_const, xtream_get_item_for_stream_id},
@@ -61,9 +76,8 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
 };
-use futures::{StreamExt, TryStreamExt};
+use futures::FutureExt;
 use log::{debug, error, warn};
-use reqwest::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use shared::{
@@ -71,10 +85,12 @@ use shared::{
         ConnectFailureReason, FailureStage, InputType, PlaylistItemType, StreamChannel, StreamInfo, TargetType,
         UserConnectionPermission, XtreamCluster,
     },
-    utils::{generate_random_string, is_hls_url, replace_url_extension, sanitize_sensitive_info, Internable, HLS_EXT},
+    utils::{
+        generate_random_string, is_hls_url, replace_url_extension, sanitize_sensitive_info, Internable,
+        PROVIDER_SCHEME_PREFIX, HLS_EXT,
+    },
 };
-use std::{borrow::Cow, collections::HashMap, io, sync::Arc, time::{Duration, Instant}};
-use tokio_util::io::StreamReader;
+use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
 use url::Url;
 
 const MAX_MANUAL_REDIRECTS: usize = 10;
@@ -168,22 +184,6 @@ fn hls_response(hls_content: String) -> impl IntoResponse + Send {
         .body(hls_content))
 }
 
-fn extract_hls_provider_session_headers(headers: &HeaderMap) -> HashMap<String, String> {
-    let cookies = headers
-        .get_all(axum::http::header::SET_COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .filter_map(|value| value.split(';').next().map(str::trim))
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-
-    let mut session_headers = HashMap::new();
-    if !cookies.is_empty() {
-        session_headers.insert(String::from("cookie"), cookies.join("; "));
-    }
-    session_headers
-}
-
 fn hls_custom_video_type_for_failure_reason(reason: ConnectFailureReason) -> CustomVideoStreamType {
     match reason {
         ConnectFailureReason::UserAccountExpired => CustomVideoStreamType::UserAccountExpired,
@@ -239,8 +239,8 @@ fn apply_hls_proxy_public_path_prefix(hls_content: String, server_path: Option<&
         return hls_content;
     };
 
-    let uri_attr_prefix = format!("URI=\"{path_prefix}/proxy/hls/live/");
-    let hls_content = hls_content.replace("URI=\"/proxy/hls/live/", &uri_attr_prefix);
+    let uri_attr_prefix = format!("URI=\"{path_prefix}/hls/shared/live/");
+    let hls_content = hls_content.replace("URI=\"/hls/shared/live/", &uri_attr_prefix);
     if hls_content.is_empty() {
         return hls_content;
     }
@@ -248,7 +248,7 @@ fn apply_hls_proxy_public_path_prefix(hls_content: String, server_path: Option<&
 
     for part in hls_content.split_inclusive('\n') {
         let (line, line_ending) = split_hls_line_ending(part);
-        if line.starts_with("/proxy/hls/live/") {
+        if line.starts_with("/hls/shared/live/") {
             prefixed.push_str(&path_prefix);
         }
         prefixed.push_str(line);
@@ -276,40 +276,44 @@ fn split_hls_line_ending(part: &str) -> (&str, &str) {
     }
 }
 
-fn materialize_hls_access_manifest(
-    hls_content: &str,
-    lease_id: &HlsAccessLeaseId,
-    server_path: Option<&str>,
-) -> String {
+fn materialize_hls_access_manifest(hls_content: &str, lease_id: &HlsAccessLeaseId, server_path: Option<&str>) -> String {
     let hls_content = hls_content.replace(HLS_ACCESS_LEASE_ID_PLACEHOLDER, &lease_id.0);
     apply_hls_proxy_public_path_prefix(hls_content, server_path)
 }
 
-fn materialize_transient_hls_access_manifest(
+fn hls_access_manifest_uses_startup_view(lease_state: HlsAccessLeaseState) -> bool {
+    matches!(lease_state, HlsAccessLeaseState::Pending | HlsAccessLeaseState::Idle)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_shared_hls_access_manifest(
     hls_content: &str,
     proxy_session_id: &ProxySessionId,
     lease_id: &HlsAccessLeaseId,
     lease_state: HlsAccessLeaseState,
     strip: &crate::model::StripConfig,
+    mode: &'static str,
     server_path: Option<&str>,
 ) -> String {
-    let response_body = if lease_state == HlsAccessLeaseState::Pending {
-        let view = materialize_initial_transient_strip_view(hls_content, strip);
+    let response_body = if hls_access_manifest_uses_startup_view(lease_state) {
+        let view = materialize_initial_hls_strip_view(hls_content, strip);
         match view.outcome {
-            TransientInitialStripOutcome::Applied { mode, configured, effective, visible_segments } => {
+            HlsInitialStripOutcome::Applied { mode: strip_mode, configured, effective, visible_segments } => {
                 debug!(
-                    "HLS transient initial strip applied: lease={} session={} mode={} configured={} effective={} visible_segments={}",
+                    "HLS initial strip applied: mode={} lease={} session={} strip_mode={} configured={} effective={} visible_segments={}",
+                    mode,
                     safe_hls_access_lease_id(lease_id),
                     safe_proxy_session_id(proxy_session_id),
-                    mode,
+                    strip_mode,
                     configured,
                     effective,
                     visible_segments
                 );
             }
-            TransientInitialStripOutcome::Skipped { reason, visible_segments } => {
+            HlsInitialStripOutcome::Skipped { reason, visible_segments } => {
                 debug!(
-                    "HLS transient initial strip skipped: lease={} session={} reason={} visible_segments={}",
+                    "HLS initial strip skipped: mode={} lease={} session={} reason={} visible_segments={}",
+                    mode,
                     safe_hls_access_lease_id(lease_id),
                     safe_proxy_session_id(proxy_session_id),
                     reason.as_log_reason(),
@@ -319,13 +323,12 @@ fn materialize_transient_hls_access_manifest(
         }
         view.body
     } else {
-        let reason =
-            if lease_state == HlsAccessLeaseState::Activated { "lease-activated" } else { "lease-not-pending" };
         debug!(
-            "HLS transient initial strip skipped: lease={} session={} reason={}",
+            "HLS initial strip skipped: mode={} lease={} session={} reason={}",
+            mode,
             safe_hls_access_lease_id(lease_id),
             safe_proxy_session_id(proxy_session_id),
-            reason
+            if lease_state == HlsAccessLeaseState::Activated { "lease-activated" } else { "lease-not-startup-view" }
         );
         hls_content.to_string()
     };
@@ -334,6 +337,14 @@ fn materialize_transient_hls_access_manifest(
 
 fn hls_access_lease_ttl_ms(app_state: &Arc<AppState>) -> u64 { app_state.hls_proxy.session_idle_timeout_ms() }
 
+fn duration_to_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn hls_pending_bootstrap_window_ms() -> u64 {
+    duration_to_millis_saturating(hls_initial_manifest_decision_wait_timeout())
+}
+
 async fn hls_access_lease_timing_for_session(
     app_state: &Arc<AppState>,
     session: &HlsSessionHandle,
@@ -341,6 +352,31 @@ async fn hls_access_lease_timing_for_session(
     let timing = session.read().await.account_overlap_timing();
     let active_window_ms = timing.hard_active_window_ms.saturating_mul(2);
     HlsAccessLeaseTiming { active_window_ms, valid_window_ms: hls_access_lease_ttl_ms(app_state) }
+}
+
+async fn touch_pending_manifest_follow_up_window(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    access_lease_id: &HlsAccessLeaseId,
+    access_lease_state: HlsAccessLeaseState,
+) {
+    if access_lease_state != HlsAccessLeaseState::Pending {
+        return;
+    }
+    let (proxy_session_id, target_duration) = {
+        let session = session.read().await;
+        (session.proxy_session_id.clone(), session.target_duration)
+    };
+    let now_ms = current_time_millis();
+    let _ = app_state
+        .hls_proxy
+        .mark_pending_manifest_follow_up_for_lease(
+            access_lease_id,
+            &proxy_session_id,
+            now_ms,
+            target_duration,
+        )
+        .await;
 }
 
 struct HlsResourceAccess {
@@ -369,7 +405,10 @@ async fn prepare_hls_resource_access(
             now_ms,
         )
         .await;
-    let access_context = validate_hls_proxy_access_request(
+    let access_lease_id = HlsAccessLeaseId(hls_access_lease_id.to_string());
+    let access_lease_snapshot =
+        app_state.hls_proxy.access_lease_response_snapshot(&access_lease_id, proxy_session_id, now_ms).await;
+    let access_context = match validate_hls_proxy_access_request(
         app_state,
         fingerprint,
         proxy_session_id,
@@ -379,7 +418,26 @@ async fn prepare_hls_resource_access(
         request_kind,
     )
     .await
-    .map_err(hls_access_lease_validation_response)?;
+    {
+        Ok(context) => context,
+        Err(err) => {
+            return Err(
+                hls_resource_access_lease_validation_response(
+                    app_state,
+                    proxy_session_id,
+                    access_lease_snapshot.as_ref(),
+                    now_ms,
+                    err,
+                )
+                .await,
+            );
+        }
+    };
+    let access_lease_snapshot =
+        app_state.hls_proxy.access_lease_response_snapshot(&access_lease_id, proxy_session_id, now_ms).await;
+    if let Some(flag) = access_lease_snapshot.as_ref().and_then(|lease| lease.response_flag.as_ref()) {
+        return Err(hls_access_lease_response_flag_resource_response(app_state, &access_context, flag));
+    }
     app_state
         .hls_proxy
         .sync_session_access_lease_count_and_detach_if_needed(
@@ -399,34 +457,51 @@ fn create_hls_cache_user_session_token(fingerprint: &Fingerprint, username: &str
     format!("{base}|hls-cache|{}", generate_random_string(16))
 }
 
-fn hls_access_lease_reuse_skip_log_reason(
-    reason: AccessLeaseReuseBlock,
-    state: Option<HlsAccessLeaseState>,
-) -> &'static str {
-    match (reason, state) {
-        (AccessLeaseReuseBlock::StateNotPending, Some(HlsAccessLeaseState::Activated)) => "activated",
-        (AccessLeaseReuseBlock::StateNotPending, Some(HlsAccessLeaseState::Idle)) => "idle",
-        (AccessLeaseReuseBlock::ReuseWindowExpired, _) => "reuse-window-expired",
-        _ => reason.as_log_reason(),
-    }
-}
-
 fn is_hls_media_activity_status(status: StatusCode) -> bool {
     matches!(status, StatusCode::OK | StatusCode::PARTIAL_CONTENT)
 }
 
-fn hls_cache_response_context(
+async fn hls_cache_response_context(
     app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
     access_context: &HlsAccessContext,
     now_ms: u64,
 ) -> HlsCacheResponseContext {
+    let qos_meter = app_state
+        .hls_proxy
+        .qos()
+        .meter_for_access_lease(&access_context.lease_id)
+        .await;
     HlsCacheResponseContext::new(
         access_context.lease_id.clone(),
         app_state.hls_proxy.cache_duration_seconds(),
         Arc::clone(app_state.hls_proxy.metrics()),
         Arc::clone(app_state.hls_proxy.segment_repair()),
+        qos_meter,
+        Some(HlsMediaActivityMarker::new(Arc::clone(&app_state.hls_proxy), Arc::clone(session))),
         now_ms,
     )
+}
+
+fn hls_qos_meter_init(app_state: &Arc<AppState>, qos_config: HlsQosRuntimeConfig) -> Option<HlsQosMeterInit> {
+    if !qos_config.live_metering_enabled {
+        return None;
+    }
+    let meter_uid = app_state.connection_manager.next_stream_uid();
+    let meter = Arc::new(StreamMeterHandle::new(meter_uid, Arc::downgrade(&app_state.event_manager)));
+    Some(HlsQosMeterInit { meter_uid, meter })
+}
+
+async fn register_hls_cache_stream_for_successful_media_response(
+    app_state: &Arc<AppState>,
+    fingerprint: &Fingerprint,
+    headers: &HeaderMap,
+    access_context: &HlsAccessContext,
+    session: &HlsSessionHandle,
+    response_context: &HlsCacheResponseContext,
+) {
+    let _ = ensure_hls_cache_stream_registered(app_state, fingerprint, headers, access_context, session).await;
+    response_context.set_qos_meter(app_state.hls_proxy.qos().meter_for_access_lease(&access_context.lease_id).await);
 }
 
 async fn hls_proxy_segment(
@@ -435,9 +510,6 @@ async fn hls_proxy_segment(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    let Some(segment_file) = HlsSegmentFile::parse(&params.segment_file) else {
-        return axum::http::StatusCode::NOT_FOUND.into_response();
-    };
     let proxy_session_id = ProxySessionId(params.proxy_session_id);
     let now_ms = current_time_millis();
     let HlsResourceAccess { session, access_context } = match prepare_hls_resource_access(
@@ -453,16 +525,24 @@ async fn hls_proxy_segment(
         Ok(access) => access,
         Err(response) => return response,
     };
+    let Some(segment_file) = HlsSegmentFile::parse(&params.segment_file) else {
+        return hls_resource_channel_unavailable_response(&app_state, &access_context);
+    };
     {
         let session_guard = session.read().await;
         if session_guard.is_gc_marked_for_removal() {
-            return axum::http::StatusCode::NOT_FOUND.into_response();
+            return hls_custom_video_manifest_redirect_response_for_username(
+                &app_state,
+                &access_context.username,
+                CustomVideoStreamType::HlsSessionOrLeaseExpired,
+                StatusCode::NOT_FOUND,
+            );
         }
         let Some(entry) = session_guard.segments.get(&segment_file.proxy_seq) else {
-            return axum::http::StatusCode::NOT_FOUND.into_response();
+            return hls_resource_channel_unavailable_response(&app_state, &access_context);
         };
         if entry.proxy_file_ext != segment_file.extension {
-            return axum::http::StatusCode::NOT_FOUND.into_response();
+            return hls_resource_channel_unavailable_response(&app_state, &access_context);
         }
     }
 
@@ -479,7 +559,7 @@ async fn hls_proxy_segment(
         .await
         {
             Ok(handle) => handle,
-            Err(status) => return hls_canonical_status_response(status),
+            Err(err) => return hls_origin_runtime_resource_failure_response(&app_state, &access_context, err),
         }
     } else {
         None
@@ -496,24 +576,38 @@ async fn hls_proxy_segment(
     )
     .await
     {
-        SegmentDemandFetchOutcome::NotFound => return axum::http::StatusCode::NOT_FOUND.into_response(),
+        SegmentDemandFetchOutcome::NotFound => {
+            return hls_resource_channel_unavailable_response(&app_state, &access_context);
+        }
         SegmentDemandFetchOutcome::Ready
         | SegmentDemandFetchOutcome::QueuedOrFetching
         | SegmentDemandFetchOutcome::Unavailable
         | SegmentDemandFetchOutcome::TimedOut => {}
     }
 
-    let response = serve_hls_segment_cache_response(
-        Arc::clone(app_state.hls_proxy.segment_cache()),
-        Arc::clone(&session),
-        segment_file,
-        headers.get(header::RANGE).cloned(),
-        &hls_cache_response_context(&app_state, &access_context, now_ms),
-    )
-    .await;
+    let response_context = hls_cache_response_context(&app_state, &session, &access_context, now_ms).await;
+    let response = hls_resource_serve_outcome_response(
+        &app_state,
+        &access_context,
+        serve_hls_segment_cache_outcome(
+            Arc::clone(app_state.hls_proxy.segment_cache()),
+            Arc::clone(&session),
+            segment_file,
+            headers.get(header::RANGE).cloned(),
+            &response_context,
+        )
+        .await,
+    );
     if is_hls_media_activity_status(response.status()) {
-        mark_hls_authorized_media_access(&app_state, &session, now_ms).await;
-        let _ = ensure_hls_cache_stream_registered(&app_state, &fingerprint, &headers, &access_context, &session).await;
+        register_hls_cache_stream_for_successful_media_response(
+            &app_state,
+            &fingerprint,
+            &headers,
+            &access_context,
+            &session,
+            &response_context,
+        )
+        .await;
     }
     response
 }
@@ -545,9 +639,14 @@ async fn build_hls_segment_fetch_context(
     fingerprint: &Fingerprint,
     preacquired_provider_handle: Option<ProviderHandle>,
 ) -> SegmentFetchContext {
-    let (headers, origin_policy) = {
+    let (headers, origin_provider_session_headers, origin_policy, reservation_ttl_secs) = {
         let session = session.read().await;
-        (session.origin_request_headers.clone(), session.effective_origin_acquire_policy_or_default())
+        (
+            session.origin_request_headers.clone(),
+            session.origin_provider_session_headers.clone(),
+            session.effective_origin_acquire_policy_or_default(),
+            session.account_overlap_timing().reservation_ttl_secs(),
+        )
     };
     let mut origin_io = HlsOriginIoContext {
         app_state: Arc::clone(app_state),
@@ -555,7 +654,7 @@ async fn build_hls_segment_fetch_context(
         allow_grace: HlsOriginWorkClass::Demand.allows_grace(),
         priority: origin_policy.priority,
         connection_kind: origin_policy.connection_kind,
-        reservation_ttl_secs: get_hls_session_ttl_secs(app_state),
+        reservation_ttl_secs,
         preacquired_provider_handle: None,
         started_generation: None,
     };
@@ -568,6 +667,7 @@ async fn build_hls_segment_fetch_context(
         segment_repair: Arc::clone(app_state.hls_proxy.segment_repair()),
         repair_access_lease_id,
         headers,
+        origin_provider_session_headers,
         client: app_state.http_client.load().as_ref().clone(),
         no_redirect_client: app_state.http_client_no_redirect.load().as_ref().clone(),
         use_manual_redirects: app_state.should_use_manual_redirects(),
@@ -579,15 +679,20 @@ async fn hls_effective_origin_acquire_policy(session: &HlsSessionHandle) -> HlsE
     session.read().await.effective_origin_acquire_policy_or_default()
 }
 
+async fn hls_origin_account_reservation_ttl_secs_for_session(session: &HlsSessionHandle) -> u64 {
+    session.read().await.account_overlap_timing().reservation_ttl_secs()
+}
+
+fn hls_origin_account_reservation_ttl_secs_fallback() -> u64 {
+    HlsAccountOverlapTiming::from_target_duration_secs(None).reservation_ttl_secs()
+}
+
 async fn hls_proxy_map(
     fingerprint: Fingerprint,
     axum::extract::Path(params): axum::extract::Path<HlsProxyMapPathParams>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    let Some(map_file) = HlsMapFile::parse(&params.map_file) else {
-        return axum::http::StatusCode::NOT_FOUND.into_response();
-    };
     let proxy_session_id = ProxySessionId(params.proxy_session_id);
     let now_ms = current_time_millis();
     let HlsResourceAccess { session, access_context } = match prepare_hls_resource_access(
@@ -603,30 +708,50 @@ async fn hls_proxy_map(
         Ok(access) => access,
         Err(response) => return response,
     };
+    let Some(map_file) = HlsMapFile::parse(&params.map_file) else {
+        return hls_resource_channel_unavailable_response(&app_state, &access_context);
+    };
     {
         let session_guard = session.read().await;
         if session_guard.is_gc_marked_for_removal() {
-            return axum::http::StatusCode::NOT_FOUND.into_response();
+            return hls_custom_video_manifest_redirect_response_for_username(
+                &app_state,
+                &access_context.username,
+                CustomVideoStreamType::HlsSessionOrLeaseExpired,
+                StatusCode::NOT_FOUND,
+            );
         }
         let Some(entry) = session_guard.maps.get(&map_file.proxy_map_id.into()) else {
-            return axum::http::StatusCode::NOT_FOUND.into_response();
+            return hls_resource_channel_unavailable_response(&app_state, &access_context);
         };
         if entry.proxy_file_ext != map_file.extension {
-            return axum::http::StatusCode::NOT_FOUND.into_response();
+            return hls_resource_channel_unavailable_response(&app_state, &access_context);
         }
     }
 
-    let response = serve_hls_map_cache_response(
-        Arc::clone(app_state.hls_proxy.segment_cache()),
-        Arc::clone(&session),
-        map_file,
-        headers.get(header::RANGE).cloned(),
-        &hls_cache_response_context(&app_state, &access_context, now_ms),
-    )
-    .await;
+    let response_context = hls_cache_response_context(&app_state, &session, &access_context, now_ms).await;
+    let response = hls_resource_serve_outcome_response(
+        &app_state,
+        &access_context,
+        serve_hls_map_cache_outcome(
+            Arc::clone(app_state.hls_proxy.segment_cache()),
+            Arc::clone(&session),
+            map_file,
+            headers.get(header::RANGE).cloned(),
+            &response_context,
+        )
+        .await,
+    );
     if is_hls_media_activity_status(response.status()) {
-        mark_hls_authorized_media_access(&app_state, &session, now_ms).await;
-        let _ = ensure_hls_cache_stream_registered(&app_state, &fingerprint, &headers, &access_context, &session).await;
+        register_hls_cache_stream_for_successful_media_response(
+            &app_state,
+            &fingerprint,
+            &headers,
+            &access_context,
+            &session,
+            &response_context,
+        )
+        .await;
     }
     response
 }
@@ -637,9 +762,6 @@ async fn hls_proxy_resource(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    let Some(resource_file) = TransientResourceFile::parse(&params.resource_file) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
     let proxy_session_id = ProxySessionId(params.proxy_session_id);
     let now_ms = current_time_millis();
     let HlsResourceAccess { session, access_context } = match prepare_hls_resource_access(
@@ -655,9 +777,12 @@ async fn hls_proxy_resource(
         Ok(access) => access,
         Err(response) => return response,
     };
+    let Some(resource_file) = TransientResourceFile::parse(&params.resource_file) else {
+        return hls_resource_channel_unavailable_response(&app_state, &access_context);
+    };
     let range_header = headers.get(header::RANGE).cloned();
     let cache_duration_ms = app_state.hls_proxy.cache_duration_seconds().saturating_mul(1_000);
-    let Ok((resource, origin_headers, cache_action)) = resolve_transient_object_cache_action(
+    let Ok(cache_resolution) = resolve_hls_transient_object_cache_action(
         &session,
         &proxy_session_id,
         &resource_file,
@@ -667,11 +792,15 @@ async fn hls_proxy_resource(
     )
     .await
     else {
-        return hls_channel_unavailable_or_not_found_response(&app_state);
+        return hls_resource_channel_unavailable_response(&app_state, &access_context);
     };
+    let resource = cache_resolution.resource;
+    let origin_headers = cache_resolution.origin_headers;
+    let origin_provider_session_headers = cache_resolution.origin_provider_session_headers;
+    let cache_action = cache_resolution.action;
 
     match cache_action {
-        TransientObjectCacheAction::ServeReady => {
+        HlsTransientObjectCacheAction::ServeReady => {
             return serve_transient_object_cache_response_and_mark_or_unavailable(TransientObjectCacheServeContext {
                 app_state: &app_state,
                 session: &session,
@@ -684,7 +813,7 @@ async fn hls_proxy_resource(
             })
             .await;
         }
-        TransientObjectCacheAction::WaitForFetch(notifier) => {
+        HlsTransientObjectCacheAction::WaitForFetch(notifier) => {
             return wait_for_transient_object_cache_fetch(TransientObjectWaitContext {
                 app_state: &app_state,
                 session: &session,
@@ -697,7 +826,7 @@ async fn hls_proxy_resource(
             })
             .await;
         }
-        TransientObjectCacheAction::FetchAndCache(_) | TransientObjectCacheAction::PassthroughNoCache => {}
+        HlsTransientObjectCacheAction::FetchAndCache(_) | HlsTransientObjectCacheAction::PassthroughNoCache => {}
     }
 
     fetch_or_passthrough_transient_resource(
@@ -710,6 +839,7 @@ async fn hls_proxy_resource(
         resource_file,
         cache_action,
         origin_headers,
+        origin_provider_session_headers,
         range_header,
         cache_duration_ms,
         now_ms,
@@ -726,28 +856,15 @@ async fn fetch_or_passthrough_transient_resource(
     access_context: &HlsAccessContext,
     resource: &crate::api::model::TransientResourceRef,
     resource_file: TransientResourceFile,
-    cache_action: TransientObjectCacheAction,
+    cache_action: HlsTransientObjectCacheAction,
     origin_headers: HeaderMap,
+    origin_provider_session_headers: HeaderMap,
     range_header: Option<HeaderValue>,
     cache_duration_ms: u64,
     now_ms: u64,
 ) -> axum::response::Response {
-    let transient_origin_guard = match prepare_hls_transient_origin_io_for_authorized_resource_work(
-        app_state,
-        session,
-        access_context,
-        fingerprint,
-        headers,
-        now_ms,
-    )
-    .await
-    {
-        Ok(handle) => handle,
-        Err(status) => return hls_canonical_status_response(status),
-    };
-
-    if let TransientObjectCacheAction::FetchAndCache(cache_key) = cache_action {
-        return fetch_and_cache_transient_origin_response(TransientOriginCacheFetchContext {
+    if let HlsTransientObjectCacheAction::FetchAndCache(cache_key) = cache_action {
+        return fetch_and_cache_transient_origin_response(HlsTransientEndpointCacheFetchContext {
             app_state,
             session,
             fingerprint,
@@ -757,40 +874,45 @@ async fn fetch_or_passthrough_transient_resource(
             resource_file,
             cache_key,
             origin_headers,
+            origin_provider_session_headers,
             range_header,
             cache_duration_ms,
-            origin_io_guard: transient_origin_guard,
         })
         .await;
     }
 
-    let client = app_state.http_client.load().as_ref().clone();
-    let no_redirect_client = app_state.http_client_no_redirect.load().as_ref().clone();
-    let origin_request_headers = build_transient_resource_origin_headers(&origin_headers, range_header.clone());
     let policy = app_state.hls_proxy.segment_fetch_policy();
-    match fetch_transient_resource_with_retries(
-        &resource.resolved_origin_uri,
-        &origin_request_headers,
-        &client,
-        &no_redirect_client,
-        app_state.should_use_manual_redirects(),
-        &policy,
-        resource_file.resource_id.0.as_str(),
-        resource.kind,
-    )
-    .await
-    {
-        Ok(response) => {
-            if response.status().is_success() {
+    let fetch_result = fetch_transient_origin_response_with_provider_io(HlsTransientEndpointOriginFetchRequest {
+        app_state,
+        session,
+        access_context,
+        fingerprint,
+        headers,
+        resource,
+        resource_file: &resource_file,
+        origin_headers,
+        origin_provider_session_headers,
+        range_header,
+        policy: policy.clone(),
+    })
+    .await;
+    match fetch_result.result {
+        Ok((response, transient_origin_guard)) => {
+            let media_activity_marker = if response.status().is_success() {
+                record_successful_transient_segment_fetch(session, resource).await;
                 mark_hls_authorized_media_access(app_state, session, now_ms).await;
                 let _ =
                     ensure_hls_cache_stream_registered(app_state, fingerprint, headers, access_context, session).await;
-            }
+                Some(HlsMediaActivityMarker::new(Arc::clone(&app_state.hls_proxy), Arc::clone(session)))
+            } else {
+                None
+            };
             let proxy_session_id = session.read().await.proxy_session_id.0.clone();
-            transient_origin_response(
+            hls_transient_origin_response(
                 response,
                 Arc::clone(&resource.access),
                 transient_origin_guard,
+                media_activity_marker,
                 now_ms,
                 proxy_session_id,
                 resource_file.resource_id.0.clone(),
@@ -799,19 +921,131 @@ async fn fetch_or_passthrough_transient_resource(
                 app_state.hls_proxy.segment_fetch_policy().origin_segment_timeout_ms,
             )
         }
-        Err(_) => hls_channel_unavailable_or_not_found_response(app_state),
+        Err(err) => {
+            if matches!(err, HlsOriginResourceFetchError::ProviderUnavailable(_)) {
+                if let Some(runtime_err) = fetch_result.runtime_prepare_error {
+                    return hls_origin_runtime_resource_failure_response(app_state, access_context, runtime_err);
+                }
+            }
+            match hls_transient_object_fetch_failure(&err) {
+                HlsTransientObjectFetchFailure::Retryable => {
+                    let failed_at_ms = current_time_millis();
+                    if let Some(reason) =
+                        record_temporary_transient_segment_fetch_failure(session, resource, &policy, failed_at_ms).await
+                    {
+                        let proxy_session_id = session.read().await.proxy_session_id.clone();
+                        let _ = app_state
+                            .hls_proxy
+                            .mark_access_leases_channel_unavailable_for_session(&proxy_session_id, failed_at_ms, reason)
+                            .await;
+                        hls_resource_channel_unavailable_response(app_state, access_context)
+                    } else {
+                        hls_temporary_resource_unavailable_response(HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS)
+                    }
+                }
+                HlsTransientObjectFetchFailure::Permanent { status } => {
+                    let failed_at_ms = current_time_millis();
+                    let proxy_session_id = session.read().await.proxy_session_id.clone();
+                    let _ = app_state
+                        .hls_proxy
+                        .mark_access_leases_channel_unavailable_for_session(
+                            &proxy_session_id,
+                            failed_at_ms,
+                            HlsAccessLeaseChannelUnavailableReason::TransientObjectPermanentFailure { status },
+                        )
+                        .await;
+                    hls_resource_channel_unavailable_response(app_state, access_context)
+                }
+            }
+        }
     }
 }
 
-enum TransientObjectCacheAction {
-    ServeReady,
-    FetchAndCache(TransientObjectCacheKey),
-    WaitForFetch(Arc<tokio::sync::Notify>),
-    PassthroughNoCache,
+struct HlsTransientEndpointOriginFetchRequest<'a> {
+    app_state: &'a Arc<AppState>,
+    session: &'a HlsSessionHandle,
+    access_context: &'a HlsAccessContext,
+    fingerprint: &'a Fingerprint,
+    headers: &'a HeaderMap,
+    resource: &'a TransientResourceRef,
+    resource_file: &'a TransientResourceFile,
+    origin_headers: HeaderMap,
+    origin_provider_session_headers: HeaderMap,
+    range_header: Option<HeaderValue>,
+    policy: SegmentFetchPolicy,
+}
+
+struct HlsTransientOriginFetchResult {
+    result: Result<(reqwest::Response, Option<HlsTransientOriginIoGuard>), HlsOriginResourceFetchError>,
+    runtime_prepare_error: Option<HlsOriginRuntimeAcquireError>,
+}
+
+async fn fetch_transient_origin_response_with_provider_io(
+    request: HlsTransientEndpointOriginFetchRequest<'_>,
+) -> HlsTransientOriginFetchResult {
+    let clients = HlsOriginResourceClients {
+        client: request.app_state.http_client.load().as_ref().clone(),
+        no_redirect_client: request.app_state.http_client_no_redirect.load().as_ref().clone(),
+        use_manual_redirects: request.app_state.should_use_manual_redirects(),
+    };
+    let session_log_id = request.session.read().await.proxy_session_id.0.clone();
+    let fetch_request = HlsTransientOriginFetchRequest {
+        resolved_origin_uri: request.resource.resolved_origin_uri.clone(),
+        origin_headers: request.origin_headers,
+        origin_provider_session_headers: request.origin_provider_session_headers,
+        range_header: request.range_header,
+        resource_file: request.resource_file.clone(),
+        resource_kind: request.resource.kind,
+        clients,
+        policy: request.policy,
+        session_log_id,
+    };
+    let runtime_prepare_error = Arc::new(tokio::sync::Mutex::new(None));
+    let app_state_for_prepare = Arc::clone(request.app_state);
+    let session_for_prepare = Arc::clone(request.session);
+    let access_context_for_prepare = request.access_context.clone();
+    let fingerprint_for_prepare = request.fingerprint.clone();
+    let headers_for_prepare = request.headers.clone();
+    let runtime_prepare_error_for_prepare = Arc::clone(&runtime_prepare_error);
+    let result = fetch_hls_transient_origin_response_with_attempt_prepare(
+        fetch_request,
+        move |_attempt| {
+            let app_state = Arc::clone(&app_state_for_prepare);
+            let session = Arc::clone(&session_for_prepare);
+            let access_context = access_context_for_prepare.clone();
+            let fingerprint = fingerprint_for_prepare.clone();
+            let headers = headers_for_prepare.clone();
+            let runtime_prepare_error = Arc::clone(&runtime_prepare_error_for_prepare);
+            async move {
+                match prepare_hls_transient_origin_io_for_authorized_resource_work(
+                    &app_state,
+                    &session,
+                    &access_context,
+                    &fingerprint,
+                    &headers,
+                    current_time_millis(),
+                )
+                .await
+                {
+                    Ok(guard) => Ok(guard),
+                    Err(err) => {
+                        *runtime_prepare_error.lock().await = Some(err);
+                        Err(HlsOriginResourceFetchError::ProviderUnavailable(
+                            HlsBoundAccountAcquireErrorKind::Unavailable,
+                        ))
+                    }
+                }
+            }
+            .boxed()
+        },
+    )
+    .await;
+    let runtime_prepare_error = *runtime_prepare_error.lock().await;
+    HlsTransientOriginFetchResult { result, runtime_prepare_error }
 }
 
 #[allow(clippy::too_many_arguments)]
-struct TransientOriginCacheFetchContext<'a> {
+struct HlsTransientEndpointCacheFetchContext<'a> {
     app_state: &'a Arc<AppState>,
     session: &'a HlsSessionHandle,
     fingerprint: &'a Fingerprint,
@@ -821,70 +1055,9 @@ struct TransientOriginCacheFetchContext<'a> {
     resource_file: TransientResourceFile,
     cache_key: TransientObjectCacheKey,
     origin_headers: HeaderMap,
+    origin_provider_session_headers: HeaderMap,
     range_header: Option<HeaderValue>,
     cache_duration_ms: u64,
-    origin_io_guard: Option<TransientOriginIoGuard>,
-}
-
-struct TransientObjectFetchFinalizer {
-    session: HlsSessionHandle,
-    cache_key: TransientObjectCacheKey,
-    completed: bool,
-}
-
-impl TransientObjectFetchFinalizer {
-    fn new(session: HlsSessionHandle, cache_key: TransientObjectCacheKey) -> Self {
-        Self { session, cache_key, completed: false }
-    }
-
-    fn complete(&mut self) { self.completed = true; }
-}
-
-impl Drop for TransientObjectFetchFinalizer {
-    fn drop(&mut self) {
-        if self.completed {
-            return;
-        }
-        let session = Arc::clone(&self.session);
-        let cache_key = self.cache_key.clone();
-        tokio::spawn(async move {
-            session.write().await.transient.mark_object_failed_retryable(
-                &cache_key,
-                current_time_millis(),
-                HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS,
-            );
-        });
-    }
-}
-
-async fn resolve_transient_object_cache_action(
-    session: &HlsSessionHandle,
-    proxy_session_id: &ProxySessionId,
-    resource_file: &TransientResourceFile,
-    range_header: Option<&HeaderValue>,
-    now_ms: u64,
-    cache_duration_ms: u64,
-) -> Result<(crate::api::model::TransientResourceRef, HeaderMap, TransientObjectCacheAction), StatusCode> {
-    let mut session = session.write().await;
-    if session.is_gc_marked_for_removal() {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    let Some(resource) = session.transient.get_valid_resource(&resource_file.resource_id, now_ms) else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    if resource.file_ext_hint.as_deref().is_some_and(|extension| extension != resource_file.extension) {
-        return Err(StatusCode::NOT_FOUND);
-    }
-    let cache_action = transient_object_cache_action(
-        &mut session,
-        proxy_session_id,
-        &resource,
-        resource_file,
-        range_header,
-        now_ms,
-        cache_duration_ms,
-    );
-    Ok((resource, session.origin_request_headers.clone(), cache_action))
 }
 
 struct TransientObjectWaitContext<'a> {
@@ -912,22 +1085,28 @@ struct TransientObjectCacheServeContext<'a> {
 async fn serve_transient_object_cache_response_and_mark(
     context: TransientObjectCacheServeContext<'_>,
 ) -> axum::response::Response {
-    let response = serve_hls_transient_object_cache_response(
-        Arc::clone(context.app_state.hls_proxy.segment_cache()),
-        Arc::clone(context.session),
-        context.resource_file,
-        context.range_header,
-        &hls_cache_response_context(context.app_state, context.access_context, context.now_ms),
-    )
-    .await;
+    let response_context =
+        hls_cache_response_context(context.app_state, context.session, context.access_context, context.now_ms).await;
+    let response = hls_resource_serve_outcome_response(
+        context.app_state,
+        context.access_context,
+        serve_hls_transient_object_cache_outcome(
+            Arc::clone(context.app_state.hls_proxy.segment_cache()),
+            Arc::clone(context.session),
+            context.resource_file,
+            context.range_header,
+            &response_context,
+        )
+        .await,
+    );
     if is_hls_media_activity_status(response.status()) {
-        mark_hls_authorized_media_access(context.app_state, context.session, context.now_ms).await;
-        let _ = ensure_hls_cache_stream_registered(
+        register_hls_cache_stream_for_successful_media_response(
             context.app_state,
             context.fingerprint,
             context.headers,
             context.access_context,
             context.session,
+            &response_context,
         )
         .await;
     }
@@ -937,15 +1116,7 @@ async fn serve_transient_object_cache_response_and_mark(
 async fn serve_transient_object_cache_response_and_mark_or_unavailable(
     context: TransientObjectCacheServeContext<'_>,
 ) -> axum::response::Response {
-    let app_state = Arc::clone(context.app_state);
-    let session = Arc::clone(context.session);
-    let resource_file = context.resource_file.clone();
-    let now_ms = context.now_ms;
-    let response = serve_transient_object_cache_response_and_mark(context).await;
-    if response.status() == StatusCode::SERVICE_UNAVAILABLE {
-        return hls_transient_object_unavailable_response(&app_state, &session, &resource_file, now_ms).await;
-    }
-    response
+    serve_transient_object_cache_response_and_mark(context).await
 }
 
 async fn wait_for_transient_object_cache_fetch(context: TransientObjectWaitContext<'_>) -> axum::response::Response {
@@ -968,6 +1139,7 @@ async fn wait_for_transient_object_cache_fetch(context: TransientObjectWaitConte
             context.session,
             &context.resource_file,
             current_time_millis(),
+            context.access_context,
         )
         .await;
     }
@@ -991,58 +1163,12 @@ async fn wait_for_transient_object_cache_fetch(context: TransientObjectWaitConte
     response
 }
 
-fn transient_object_cache_action(
-    session: &mut crate::api::model::HlsSession,
-    proxy_session_id: &ProxySessionId,
-    resource: &crate::api::model::TransientResourceRef,
-    resource_file: &TransientResourceFile,
-    range_header: Option<&HeaderValue>,
-    now_ms: u64,
-    cache_duration_ms: u64,
-) -> TransientObjectCacheAction {
-    if matches!(resource.kind, TransientResourceKind::Key) {
-        return TransientObjectCacheAction::PassthroughNoCache;
-    }
-    let cache_key = crate::api::model::TransientPassthroughState::transient_object_key(
-        proxy_session_id,
-        &resource.id,
-        resource_file.extension.clone(),
-    );
-    if session.transient.ready_object(&cache_key, now_ms).is_some() {
-        return TransientObjectCacheAction::ServeReady;
-    }
-    if !is_transient_full_object_cacheable_request(range_header) {
-        return TransientObjectCacheAction::PassthroughNoCache;
-    }
-    session
-        .transient
-        .begin_object_fetch(proxy_session_id, resource, &resource_file.extension, now_ms, cache_duration_ms)
-        .into()
-}
-
-impl From<TransientObjectFetchDecision> for TransientObjectCacheAction {
-    fn from(decision: TransientObjectFetchDecision) -> Self {
-        match decision {
-            TransientObjectFetchDecision::Ready => Self::ServeReady,
-            TransientObjectFetchDecision::Fetch(cache_key) => Self::FetchAndCache(cache_key),
-            TransientObjectFetchDecision::Wait(notifier) => Self::WaitForFetch(notifier),
-        }
-    }
-}
-
 fn safe_transient_resource_id(resource_id: &crate::api::model::TransientResourceId) -> String {
     let mut value = resource_id.0.chars().take(8).collect::<String>();
     if resource_id.0.len() > value.len() {
         value.push_str("...");
     }
     value
-}
-
-fn is_transient_full_object_cacheable_request(range_header: Option<&HeaderValue>) -> bool {
-    let Some(range_header) = range_header else {
-        return true;
-    };
-    range_header.to_str().is_ok_and(|range| range.trim() == "bytes=0-")
 }
 
 async fn validate_hls_proxy_access_request(
@@ -1113,15 +1239,10 @@ async fn ensure_hls_cache_stream_registered(
     let user = app_state.app_config.get_user_credentials(&access.username)?;
     let user_session =
         app_state.active_users.get_and_update_user_session(&access.username, &access.user_session_token).await?;
+    let connection_kind = user_session.connection_kind?;
+    let priority = connection_priority_for_kind(&user, connection_kind);
     let mut stream_channel = build_hls_cache_stream_channel(app_state, access, &origin_source, &proxy_session_id).await;
-    let provider = if user_session.provider.is_empty() {
-        origin_account_binding
-            .as_ref()
-            .filter(|binding| binding.is_active())
-            .map_or_else(|| Arc::clone(&origin_source.input_name), |binding| Arc::clone(&binding.account_name))
-    } else {
-        Arc::clone(&user_session.provider)
-    };
+    let provider = hls_cache_stats_provider(&origin_source, origin_account_binding.as_ref(), &user_session);
     let user_agent = req_headers
         .get(header::USER_AGENT)
         .map_or_else(|| Cow::Borrowed(""), |value| String::from_utf8_lossy(value.as_bytes()));
@@ -1136,24 +1257,60 @@ async fn ensure_hls_cache_stream_registered(
         hls_cache_shared_joined_existing(app_state, shared_stream_id, &access.username, &access.user_session_token)
             .await,
     );
+    let qos_config = HlsQosRuntimeConfig::from_app_config(&app_state.app_config);
+    let qos_registration = app_state
+        .hls_proxy
+        .qos()
+        .ensure_access_lease(
+            &access.lease_id,
+            &proxy_session_id,
+            current_time_millis(),
+            hls_qos_meter_init(app_state, qos_config),
+        )
+        .await;
+    if let Some(meter) = qos_registration.register_meter.as_ref() {
+        app_state.event_manager.register_meter(Arc::clone(meter)).await;
+    }
+    let history_mode = if qos_registration.emit_connect_record {
+        ConnectionHistoryMode::EmitConnect
+    } else {
+        ConnectionHistoryMode::RefreshOnly
+    };
 
     app_state
         .connection_manager
-        .update_connection(crate::api::model::ConnectionParams {
-            meter_uid: 0,
+        .update_connection_with_history_mode(crate::api::model::ConnectionParams {
+            meter_uid: qos_registration.meter_uid,
             username: &access.username,
             max_connections: user.max_connections,
             soft_connections: user.soft_connections,
-            connection_kind: user_session.connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal),
-            priority: user.priority,
+            connection_kind,
+            priority,
             soft_priority: user.soft_priority,
             fingerprint,
             provider,
             stream_channel: &stream_channel,
             user_agent,
             session_token: Some(&access.user_session_token),
-        })
+        }, history_mode)
         .await
+}
+
+fn hls_cache_stats_provider(
+    origin_source: &HlsOriginSource,
+    origin_account_binding: Option<&HlsOriginAccountBinding>,
+    user_session: &UserSession,
+) -> Arc<str> {
+    origin_account_binding.filter(|binding| binding.is_active()).map_or_else(
+        || {
+            if user_session.provider.is_empty() {
+                Arc::clone(&origin_source.input_name)
+            } else {
+                Arc::clone(&user_session.provider)
+            }
+        },
+        |binding| Arc::clone(&binding.account_name),
+    )
 }
 
 async fn build_hls_cache_stream_channel(
@@ -1202,7 +1359,7 @@ fn fallback_hls_cache_stream_channel(
 }
 
 fn hls_cache_stream_stats_url(proxy_session_id: &ProxySessionId) -> String {
-    format!("/proxy/hls/live/{}/manifest.m3u8", proxy_session_id.0)
+    format!("/hls/shared/live/{}/manifest.m3u8", proxy_session_id.0)
 }
 
 fn hls_cache_shared_stream_id(proxy_session_id: &ProxySessionId) -> u64 {
@@ -1252,16 +1409,6 @@ async fn validate_hls_proxy_access_context(
     .await
 }
 
-fn hls_access_lease_validation_response(err: HlsAccessLeaseValidationError) -> axum::response::Response {
-    match err {
-        HlsAccessLeaseValidationError::AdmissionDenied => StatusCode::FORBIDDEN.into_response(),
-        HlsAccessLeaseValidationError::InvalidLease
-        | HlsAccessLeaseValidationError::SessionMismatch
-        | HlsAccessLeaseValidationError::UserSessionMissing
-        | HlsAccessLeaseValidationError::Expired => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
 fn hls_custom_video_manifest_response_for_username(
     app_state: &Arc<AppState>,
     username: &str,
@@ -1272,6 +1419,135 @@ fn hls_custom_video_manifest_response_for_username(
         return hls_custom_video_manifest_response(app_state, &user, video_type, fallback_status);
     }
     fallback_status.into_response()
+}
+
+fn hls_custom_video_manifest_redirect_response_for_username(
+    app_state: &Arc<AppState>,
+    username: &str,
+    video_type: CustomVideoStreamType,
+    fallback_status: StatusCode,
+) -> axum::response::Response {
+    if !is_custom_video_stream_enabled(&app_state.app_config) {
+        return fallback_status.into_response();
+    }
+    let Some(user) = app_state.app_config.get_user_credentials(username) else {
+        return fallback_status.into_response();
+    };
+    let server_path = app_state.app_config.get_user_server_info(&user).and_then(|server| server.path);
+    hls_virtual_entry_redirect_response(&hls_custom_video_manifest_path(&user, video_type), server_path.as_deref())
+}
+
+fn hls_resource_channel_unavailable_response(
+    app_state: &Arc<AppState>,
+    access_context: &HlsAccessContext,
+) -> axum::response::Response {
+    hls_custom_video_manifest_redirect_response_for_username(
+        app_state,
+        &access_context.username,
+        CustomVideoStreamType::ChannelUnavailable,
+        StatusCode::NOT_FOUND,
+    )
+}
+
+fn hls_access_lease_response_flag_manifest_response(
+    app_state: &Arc<AppState>,
+    username: &str,
+    flag: &HlsAccessLeaseResponseFlag,
+) -> axum::response::Response {
+    match flag {
+        HlsAccessLeaseResponseFlag::ChannelUnavailable { .. } => hls_custom_video_manifest_redirect_response_for_username(
+            app_state,
+            username,
+            CustomVideoStreamType::ChannelUnavailable,
+            StatusCode::NOT_FOUND,
+        ),
+    }
+}
+
+fn hls_manifest_channel_unavailable_response_for_username(
+    app_state: &Arc<AppState>,
+    username: &str,
+) -> axum::response::Response {
+    hls_custom_video_manifest_redirect_response_for_username(
+        app_state,
+        username,
+        CustomVideoStreamType::ChannelUnavailable,
+        StatusCode::NOT_FOUND,
+    )
+}
+
+fn hls_manifest_low_priority_preempted_redirect_response_for_username(
+    app_state: &Arc<AppState>,
+    username: &str,
+) -> axum::response::Response {
+    hls_custom_video_manifest_redirect_response_for_username(
+        app_state,
+        username,
+        CustomVideoStreamType::LowPriorityPreempted,
+        StatusCode::SERVICE_UNAVAILABLE,
+    )
+}
+
+async fn hls_post_refresh_access_lease_response_flag_manifest_response(
+    app_state: &Arc<AppState>,
+    proxy_session_id: &ProxySessionId,
+    access_lease_id: &HlsAccessLeaseId,
+    username: &str,
+) -> Option<axum::response::Response> {
+    let lease = app_state
+        .hls_proxy
+        .access_lease_response_snapshot(access_lease_id, proxy_session_id, current_time_millis())
+        .await?;
+    let flag = lease.response_flag?;
+    Some(hls_access_lease_response_flag_manifest_response(app_state, username, &flag))
+}
+
+fn hls_access_lease_response_flag_resource_response(
+    app_state: &Arc<AppState>,
+    access_context: &HlsAccessContext,
+    flag: &HlsAccessLeaseResponseFlag,
+) -> axum::response::Response {
+    match flag {
+        HlsAccessLeaseResponseFlag::ChannelUnavailable { .. } => {
+            hls_resource_channel_unavailable_response(app_state, access_context)
+        }
+    }
+}
+
+fn hls_origin_runtime_resource_failure_response(
+    app_state: &Arc<AppState>,
+    access_context: &HlsAccessContext,
+    err: HlsOriginRuntimeAcquireError,
+) -> axum::response::Response {
+    match err {
+        HlsOriginRuntimeAcquireError::NoAccountAvailable { reason } => {
+            hls_custom_video_manifest_redirect_response_for_username(
+                app_state,
+                &access_context.username,
+                reason.custom_video_type(),
+                StatusCode::SERVICE_UNAVAILABLE,
+            )
+        }
+        HlsOriginRuntimeAcquireError::Fatal(status) => hls_canonical_status_response(status),
+    }
+}
+
+fn hls_resource_serve_outcome_response(
+    app_state: &Arc<AppState>,
+    access_context: &HlsAccessContext,
+    outcome: HlsResourceServeOutcome,
+) -> axum::response::Response {
+    match outcome {
+        HlsResourceServeOutcome::Ready(response) => response,
+        HlsResourceServeOutcome::Failure(HlsResourceServeFailure::TemporaryUnavailable { retry_after_ms }) => {
+            hls_temporary_resource_unavailable_response(retry_after_ms)
+        }
+        HlsResourceServeOutcome::Failure(
+            HlsResourceServeFailure::Missing
+            | HlsResourceServeFailure::Expired
+            | HlsResourceServeFailure::PermanentFailed { .. },
+        ) => hls_resource_channel_unavailable_response(app_state, access_context),
+    }
 }
 
 fn hls_session_or_lease_expired_manifest_response(
@@ -1322,6 +1598,49 @@ async fn hls_manifest_access_lease_validation_response(
     }
 }
 
+async fn hls_resource_access_lease_validation_response(
+    app_state: &Arc<AppState>,
+    proxy_session_id: &ProxySessionId,
+    lease_snapshot: Option<&HlsAccessLease>,
+    now_ms: u64,
+    err: HlsAccessLeaseValidationError,
+) -> axum::response::Response {
+    let marker = if lease_snapshot.is_none() {
+        app_state.hls_proxy.expired_session_marker(proxy_session_id, now_ms).await
+    } else {
+        None
+    };
+    let username =
+        lease_snapshot.map(|lease| lease.username.as_str()).or_else(|| marker.as_ref()?.username.as_deref());
+    match err {
+        HlsAccessLeaseValidationError::AdmissionDenied => username.map_or_else(
+            || StatusCode::FORBIDDEN.into_response(),
+            |username| {
+                hls_custom_video_manifest_redirect_response_for_username(
+                    app_state,
+                    username,
+                    CustomVideoStreamType::UserConnectionsExhausted,
+                    StatusCode::FORBIDDEN,
+                )
+            },
+        ),
+        HlsAccessLeaseValidationError::InvalidLease
+        | HlsAccessLeaseValidationError::SessionMismatch
+        | HlsAccessLeaseValidationError::UserSessionMissing
+        | HlsAccessLeaseValidationError::Expired => username.map_or_else(
+            || StatusCode::NOT_FOUND.into_response(),
+            |username| {
+                hls_custom_video_manifest_redirect_response_for_username(
+                    app_state,
+                    username,
+                    CustomVideoStreamType::HlsSessionOrLeaseExpired,
+                    StatusCode::NOT_FOUND,
+                )
+            },
+        ),
+    }
+}
+
 async fn hls_manifest_access_context_and_state(
     app_state: &Arc<AppState>,
     fingerprint: &Fingerprint,
@@ -1357,10 +1676,18 @@ async fn hls_manifest_access_context_and_state(
             .await);
         }
     };
-    if app_state.hls_proxy.sessions().get_by_proxy_session_id(proxy_session_id).await.is_none()
+    if access_lease_snapshot.is_none()
+        && app_state.hls_proxy.sessions().get_by_proxy_session_id(proxy_session_id).await.is_none()
         && app_state.hls_proxy.expired_session_marker(proxy_session_id, now_ms).await.is_some()
     {
         return Err(hls_session_or_lease_expired_manifest_response(app_state, &access_context.username));
+    }
+    if let Some(flag) = access_lease_snapshot.and_then(|lease| lease.response_flag.as_ref()) {
+        return Err(hls_access_lease_response_flag_manifest_response(
+            app_state,
+            &access_context.username,
+            flag,
+        ));
     }
     debug!(
         "HLS access lease accepted: lease={} proxy_session={} session={} request=manifest",
@@ -1376,6 +1703,9 @@ async fn hls_manifest_access_context_and_state(
             proxy_session_id,
             now_ms,
             None,
+            Some(HlsAccessLeasePendingDeadline::Bootstrap {
+                deadline_ms: now_ms.saturating_add(hls_pending_bootstrap_window_ms()),
+            }),
             hls_access_lease_ttl_ms(app_state),
         )
         .await
@@ -1397,17 +1727,6 @@ async fn hls_manifest_access_context_and_state(
     Ok((access_context, access_lease_state))
 }
 
-fn hls_channel_unavailable_or_not_found_response(app_state: &Arc<AppState>) -> axum::response::Response {
-    if let (Some(stream), _) = create_channel_unavailable_stream(&app_state.app_config, &[], StatusCode::NOT_FOUND) {
-        let mut response = try_unwrap_body!(axum::response::Response::builder()
-            .status(StatusCode::OK)
-            .body(Body::from_stream(stream)));
-        mark_response_as_uncompressed(&mut response);
-        return response;
-    }
-    StatusCode::NOT_FOUND.into_response()
-}
-
 fn hls_temporary_resource_unavailable_response(retry_after_ms: u64) -> axum::response::Response {
     try_unwrap_body!(axum::response::Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -1420,6 +1739,7 @@ async fn hls_transient_object_unavailable_response(
     session: &HlsSessionHandle,
     resource_file: &TransientResourceFile,
     now_ms: u64,
+    access_context: &HlsAccessContext,
 ) -> axum::response::Response {
     let state = {
         let session = session.read().await;
@@ -1438,593 +1758,255 @@ async fn hls_transient_object_unavailable_response(
             hls_temporary_resource_unavailable_response(retry_after_ms)
         }
         TransientObjectUnavailableState::FailedPermanent | TransientObjectUnavailableState::Missing => {
-            hls_channel_unavailable_or_not_found_response(app_state)
+            hls_resource_channel_unavailable_response(app_state, access_context)
         }
     }
 }
 
-#[derive(Debug)]
-enum TransientResourceFetchError {
-    PermanentStatus(StatusCode),
-    RetryableStatus(StatusCode),
-    NonRetryableStatus(StatusCode),
-    InvalidOriginUrl,
-    Request,
-    Redirect,
-    Timeout,
-    Cache,
-}
-
-enum TransientObjectFetchFailure {
-    Retryable,
-    Permanent { status: Option<StatusCode> },
-}
-
-impl TransientResourceFetchError {
-    fn object_failure(&self) -> TransientObjectFetchFailure {
-        match self {
-            Self::PermanentStatus(status) | Self::NonRetryableStatus(status) => {
-                TransientObjectFetchFailure::Permanent { status: Some(*status) }
-            }
-            Self::InvalidOriginUrl => TransientObjectFetchFailure::Permanent { status: None },
-            Self::RetryableStatus(_)
-            | Self::Request
-            | Self::Redirect
-            | Self::Timeout
-            | Self::Cache => TransientObjectFetchFailure::Retryable,
-        }
+async fn record_successful_transient_segment_fetch(session: &HlsSessionHandle, resource: &crate::api::model::TransientResourceRef) {
+    if resource.kind != TransientResourceKind::Segment {
+        return;
+    }
+    let mut session = session.write().await;
+    if let Some(reset_failures) = session.record_successful_segment_fetch() {
+        debug!(
+            "HLS segment temporary failure counter reset: session={} previous_failures={reset_failures}",
+            safe_proxy_session_id(&session.proxy_session_id)
+        );
     }
 }
 
-async fn fetch_transient_resource(
-    resolved_origin_uri: &str,
-    headers: HeaderMap,
-    client: &Client,
-    no_redirect_client: &Client,
-    use_manual_redirects: bool,
-) -> Result<reqwest::Response, TransientResourceFetchError> {
-    let url = Url::parse(resolved_origin_uri).map_err(|_| TransientResourceFetchError::InvalidOriginUrl)?;
-    if use_manual_redirects {
-        fetch_transient_resource_with_manual_redirects(&url, headers, no_redirect_client).await
-    } else {
-        client.get(url).headers(headers).send().await.map_err(|_| TransientResourceFetchError::Request)
-    }
-}
-
-async fn fetch_transient_resource_with_retries(
-    resolved_origin_uri: &str,
-    headers: &HeaderMap,
-    client: &Client,
-    no_redirect_client: &Client,
-    use_manual_redirects: bool,
+async fn record_temporary_transient_segment_fetch_failure(
+    session: &HlsSessionHandle,
+    resource: &crate::api::model::TransientResourceRef,
     policy: &SegmentFetchPolicy,
-    resource_id: &str,
-    resource_kind: TransientResourceKind,
-) -> Result<reqwest::Response, TransientResourceFetchError> {
-    let attempts = policy.retry_delays_ms.len();
-    for attempt_index in 0..attempts {
-        let attempt = HlsResourceFetchAttempt { attempt_index, attempts };
-        let delay_ms = policy.retry_delay_ms(attempt_index);
-        if delay_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        }
-
-        log_hls_resource_attempt_started(transient_retry_log_context(resource_id, resource_kind, resolved_origin_uri), attempt);
-        let attempt_started_at = Instant::now();
-        let result = fetch_transient_resource(
-            resolved_origin_uri,
-            headers.clone(),
-            client,
-            no_redirect_client,
-            use_manual_redirects,
-        )
-        .await
-        .and_then(classify_transient_resource_response);
-
-        match result {
-            Ok(response) => {
-                log_hls_resource_attempt_succeeded(
-                    transient_retry_log_context(resource_id, resource_kind, resolved_origin_uri),
-                    attempt_started_at.elapsed(),
-                );
-                return Ok(response);
-            }
-            Err(
-                err @ (TransientResourceFetchError::PermanentStatus(_)
-                | TransientResourceFetchError::NonRetryableStatus(_)
-                | TransientResourceFetchError::InvalidOriginUrl
-                | TransientResourceFetchError::Cache),
-            ) => {
-                log_hls_resource_fetch_failed(
-                    transient_retry_log_context(resource_id, resource_kind, resolved_origin_uri),
-                    attempt,
-                    transient_fetch_error_log_status(&err),
-                );
-                return Err(err);
-            }
-            Err(err) if attempt_index + 1 == attempts => {
-                log_hls_resource_fetch_failed(
-                    transient_retry_log_context(resource_id, resource_kind, resolved_origin_uri),
-                    attempt,
-                    transient_fetch_error_log_status(&err),
-                );
-                return Err(err);
-            }
-            Err(err) => {
-                log_hls_resource_retry_scheduled(
-                    transient_retry_log_context(resource_id, resource_kind, resolved_origin_uri),
-                    attempt,
-                    transient_fetch_error_log_status(&err),
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default(),
-                );
-            }
-        }
+    now_ms: u64,
+) -> Option<HlsAccessLeaseChannelUnavailableReason> {
+    if resource.kind != TransientResourceKind::Segment {
+        return None;
     }
-
-    Err(TransientResourceFetchError::Timeout)
-}
-
-fn classify_transient_resource_response(
-    response: reqwest::Response,
-) -> Result<reqwest::Response, TransientResourceFetchError> {
-    let status = response.status();
-    match classify_hls_resource_status(status) {
-        HlsResourceStatusClass::Success => Ok(response),
-        HlsResourceStatusClass::Retryable => Err(TransientResourceFetchError::RetryableStatus(status)),
-        HlsResourceStatusClass::Permanent => Err(TransientResourceFetchError::PermanentStatus(status)),
-        HlsResourceStatusClass::NonRetryable => Err(TransientResourceFetchError::NonRetryableStatus(status)),
+    let mut session = session.write().await;
+    let threshold = session.segment_temporary_failure_threshold(policy.permanent_failure_segment_threshold);
+    match session.record_temporary_segment_fetch_failure(
+        now_ms,
+        HlsSegmentFailureObject::Transient {
+            resource_id: resource.id.0.clone(),
+        },
+        threshold,
+    ) {
+        HlsSegmentFailureTransition::StillRetryable { failures, threshold } => {
+            debug!(
+                "HLS segment temporary failure counted: session={} object={} failures={} threshold={}",
+                safe_proxy_session_id(&session.proxy_session_id),
+                resource.id.0,
+                failures,
+                threshold
+            );
+            None
+        }
+        HlsSegmentFailureTransition::BecamePermanentlyFailed { failures, threshold } => {
+            warn!(
+                "HLS segment temporary failure threshold reached: session={} failures={} threshold={}",
+                safe_proxy_session_id(&session.proxy_session_id),
+                failures,
+                threshold
+            );
+            session.invalidate_queued_origin_work();
+            Some(HlsAccessLeaseChannelUnavailableReason::TransientObjectTemporaryFailureThreshold {
+                failures,
+                threshold,
+            })
+        }
     }
 }
 
 #[allow(clippy::too_many_lines)]
 async fn fetch_and_cache_transient_origin_response(
-    context: TransientOriginCacheFetchContext<'_>,
+    context: HlsTransientEndpointCacheFetchContext<'_>,
 ) -> axum::response::Response {
     let policy = context.app_state.hls_proxy.segment_fetch_policy();
-    let client = context.app_state.http_client.load().as_ref().clone();
-    let no_redirect_client = context.app_state.http_client_no_redirect.load().as_ref().clone();
-    let mut origin_io_guard = context.origin_io_guard;
-    let mut fetch_finalizer =
-        TransientObjectFetchFinalizer::new(Arc::clone(context.session), context.cache_key.clone());
-    let mut final_failure = TransientObjectFetchFailure::Retryable;
-    let resource_id = context.resource_file.resource_id.0.as_str();
-    let attempts = policy.retry_delays_ms.len();
-
-    for attempt_index in 0..attempts {
-        let attempt = HlsResourceFetchAttempt { attempt_index, attempts };
-        let delay_ms = policy.retry_delay_ms(attempt_index);
-        if delay_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        }
-        log_hls_resource_attempt_started(
-            transient_retry_log_context(resource_id, context.resource.kind, &context.resource.resolved_origin_uri),
-            attempt,
-        );
-        let attempt_started_at = Instant::now();
-        let origin_request_headers =
-            build_transient_resource_origin_headers(&context.origin_headers, context.range_header.clone());
-        let fetch_result = fetch_transient_resource(
-            &context.resource.resolved_origin_uri,
-            origin_request_headers,
-            &client,
-            &no_redirect_client,
-            context.app_state.should_use_manual_redirects(),
-        )
-        .await
-        .and_then(classify_transient_resource_response);
-
-        let attempt_result = match fetch_result {
-            Ok(response) => {
-                cache_transient_origin_response_attempt(
+    let mut fetch_finalizer = HlsTransientObjectFetchFinalizer::new(
+        Arc::clone(context.session),
+        context.cache_key.clone(),
+        HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS,
+    );
+    let clients = HlsOriginResourceClients {
+        client: context.app_state.http_client.load().as_ref().clone(),
+        no_redirect_client: context.app_state.http_client_no_redirect.load().as_ref().clone(),
+        use_manual_redirects: context.app_state.should_use_manual_redirects(),
+    };
+    let session_log_id = context.session.read().await.proxy_session_id.0.clone();
+    let fetch_request = HlsTransientOriginFetchRequest {
+        resolved_origin_uri: context.resource.resolved_origin_uri.clone(),
+        origin_headers: context.origin_headers.clone(),
+        origin_provider_session_headers: context.origin_provider_session_headers.clone(),
+        range_header: context.range_header.clone(),
+        resource_file: context.resource_file.clone(),
+        resource_kind: context.resource.kind,
+        clients,
+        policy: policy.clone(),
+        session_log_id,
+    };
+    let cache_fetch_request = HlsTransientOriginCacheFetchRequest {
+        fetch: fetch_request,
+        commit: HlsTransientCacheCommitContext {
+            segment_cache: Arc::clone(context.app_state.hls_proxy.segment_cache()),
+            segment_repair: Arc::clone(context.app_state.hls_proxy.segment_repair()),
+            session: Arc::clone(context.session),
+            access_lease_id: context.access_context.lease_id.clone(),
+            resource: context.resource.clone(),
+            resource_file: context.resource_file.clone(),
+            cache_key: context.cache_key.clone(),
+            range_header: context.range_header.clone(),
+            cache_duration_ms: context.cache_duration_ms,
+            origin_segment_timeout_ms: policy.origin_segment_timeout_ms,
+        },
+    };
+    let app_state_for_prepare = Arc::clone(context.app_state);
+    let session_for_prepare = Arc::clone(context.session);
+    let access_context = context.access_context.clone();
+    let fingerprint_for_prepare = context.fingerprint.clone();
+    let headers_for_prepare = context.headers.clone();
+    let runtime_prepare_error = Arc::new(tokio::sync::Mutex::new(None));
+    let runtime_prepare_error_for_prepare = Arc::clone(&runtime_prepare_error);
+    let final_failure = match fetch_and_commit_hls_transient_origin_response_with_attempt_prepare(
+        cache_fetch_request,
+        move |_attempt| {
+            let app_state = Arc::clone(&app_state_for_prepare);
+            let session = Arc::clone(&session_for_prepare);
+            let access_context = access_context.clone();
+            let fingerprint = fingerprint_for_prepare.clone();
+            let headers = headers_for_prepare.clone();
+            let runtime_prepare_error = Arc::clone(&runtime_prepare_error_for_prepare);
+            async move {
+                match prepare_hls_transient_origin_io_for_authorized_resource_work(
+                    &app_state,
+                    &session,
+                    &access_context,
+                    &fingerprint,
+                    &headers,
+                    current_time_millis(),
+                )
+                .await
+                {
+                    Ok(guard) => Ok(guard),
+                    Err(err) => {
+                        *runtime_prepare_error.lock().await = Some(err);
+                        Err(HlsOriginResourceFetchError::ProviderUnavailable(
+                            HlsBoundAccountAcquireErrorKind::Unavailable,
+                        ))
+                    }
+                }
+            }
+            .boxed()
+        },
+    )
+    .await
+    {
+        Ok(()) => {
+            let ready_at_ms = current_time_millis();
+            let response_context =
+                hls_cache_response_context(context.app_state, context.session, context.access_context, ready_at_ms)
+                    .await;
+            let response = serve_hls_transient_object_cache_response(
+                Arc::clone(context.app_state.hls_proxy.segment_cache()),
+                Arc::clone(context.session),
+                context.resource_file.clone(),
+                context.range_header.clone(),
+                &response_context,
+            )
+            .await;
+            if is_hls_media_activity_status(response.status()) {
+                register_hls_cache_stream_for_successful_media_response(
                     context.app_state,
-                    context.session,
                     context.fingerprint,
                     context.headers,
                     context.access_context,
-                    context.resource,
-                    context.resource_file.clone(),
-                    &context.cache_key,
-                    response,
-                    context.range_header.clone(),
-                    context.cache_duration_ms,
-                    &policy,
-                    attempt_index,
-                    policy.retry_delays_ms.len(),
+                    context.session,
+                    &response_context,
                 )
-                .await
+                .await;
             }
-            Err(err) => Err(err),
-        };
-
-        match attempt_result {
-            Ok(response) => {
-                log_hls_resource_attempt_succeeded(
-                    transient_retry_log_context(resource_id, context.resource.kind, &context.resource.resolved_origin_uri),
-                    attempt_started_at.elapsed(),
-                );
-                fetch_finalizer.complete();
-                drop(origin_io_guard.take());
-                return response;
-            }
-            Err(
-                TransientResourceFetchError::PermanentStatus(status)
-                | TransientResourceFetchError::NonRetryableStatus(status),
-            ) => {
-                log_hls_resource_fetch_failed(
-                    transient_retry_log_context(resource_id, context.resource.kind, &context.resource.resolved_origin_uri),
-                    attempt,
-                    HlsResourceFetchLogStatus::Http(status),
-                );
-                final_failure = TransientObjectFetchFailure::Permanent { status: Some(status) };
-                break;
-            }
-            Err(TransientResourceFetchError::RetryableStatus(status)) if attempt_index + 1 == attempts =>
-            {
-                log_hls_resource_fetch_failed(
-                    transient_retry_log_context(resource_id, context.resource.kind, &context.resource.resolved_origin_uri),
-                    attempt,
-                    HlsResourceFetchLogStatus::Http(status),
-                );
-                final_failure = TransientObjectFetchFailure::Retryable;
-                break;
-            }
-            Err(TransientResourceFetchError::RetryableStatus(status)) => {
-                log_hls_resource_retry_scheduled(
-                    transient_retry_log_context(resource_id, context.resource.kind, &context.resource.resolved_origin_uri),
-                    attempt,
-                    HlsResourceFetchLogStatus::Http(status),
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default()
-                );
-            }
-            Err(TransientResourceFetchError::Timeout) if attempt_index + 1 == attempts => {
-                log_hls_resource_fetch_failed(
-                    transient_retry_log_context(resource_id, context.resource.kind, &context.resource.resolved_origin_uri),
-                    attempt,
-                    HlsResourceFetchLogStatus::Timeout,
-                );
-                final_failure = TransientObjectFetchFailure::Retryable;
-                break;
-            }
-            Err(TransientResourceFetchError::Timeout) => {
-                log_hls_resource_retry_scheduled(
-                    transient_retry_log_context(resource_id, context.resource.kind, &context.resource.resolved_origin_uri),
-                    attempt,
-                    HlsResourceFetchLogStatus::Timeout,
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default()
-                );
-            }
-            Err(err @ (TransientResourceFetchError::Request | TransientResourceFetchError::Redirect))
-                if attempt_index + 1 == attempts =>
-            {
-                let status = transient_fetch_error_log_status(&err);
-                log_hls_resource_fetch_failed(
-                    transient_retry_log_context(resource_id, context.resource.kind, &context.resource.resolved_origin_uri),
-                    attempt,
-                    status,
-                );
-                final_failure = TransientObjectFetchFailure::Retryable;
-                break;
-            }
-            Err(err @ (TransientResourceFetchError::Request | TransientResourceFetchError::Redirect)) => {
-                let status = transient_fetch_error_log_status(&err);
-                log_hls_resource_retry_scheduled(
-                    transient_retry_log_context(resource_id, context.resource.kind, &context.resource.resolved_origin_uri),
-                    attempt,
-                    status,
-                    policy.retry_delays_ms.get(attempt_index + 1).copied().unwrap_or_default()
-                );
-            }
-            Err(err @ (TransientResourceFetchError::InvalidOriginUrl | TransientResourceFetchError::Cache)) => {
-                log_hls_resource_fetch_failed(
-                    transient_retry_log_context(resource_id, context.resource.kind, &context.resource.resolved_origin_uri),
-                    attempt,
-                    transient_fetch_error_log_status(&err),
-                );
-                final_failure = err.object_failure();
-                break;
-            }
+            record_successful_transient_segment_fetch(context.session, context.resource).await;
+            fetch_finalizer.complete();
+            return response;
         }
-    }
+        Err(err) => {
+            if matches!(err, HlsOriginResourceFetchError::ProviderUnavailable(_)) {
+                if let Some(runtime_err) = *runtime_prepare_error.lock().await {
+                    fetch_finalizer.complete();
+                    context.session.write().await.transient.mark_object_failed_retryable(
+                        &context.cache_key,
+                        current_time_millis(),
+                        HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS,
+                    );
+                    return hls_origin_runtime_resource_failure_response(
+                        context.app_state,
+                        context.access_context,
+                        runtime_err,
+                    );
+                }
+            }
+            hls_transient_object_fetch_failure(&err)
+        }
+    };
 
     let failed_at_ms = current_time_millis();
+    let mut response_flag_reason = None;
     match final_failure {
-        TransientObjectFetchFailure::Retryable => {
-            context.session.write().await.transient.mark_object_failed_retryable(
-                &context.cache_key,
-                failed_at_ms,
-                HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS,
-            );
+        HlsTransientObjectFetchFailure::Retryable => {
+            if let Some(reason) =
+                record_temporary_transient_segment_fetch_failure(context.session, context.resource, &policy, failed_at_ms)
+                    .await
+            {
+                response_flag_reason = Some(reason);
+                context.session.write().await.transient.mark_object_failed_permanent(
+                    &context.cache_key,
+                    failed_at_ms,
+                    None,
+                );
+            } else {
+                context.session.write().await.transient.mark_object_failed_retryable(
+                    &context.cache_key,
+                    failed_at_ms,
+                    HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS,
+                );
+            }
         }
-        TransientObjectFetchFailure::Permanent { status } => {
+        HlsTransientObjectFetchFailure::Permanent { status } => {
             context.session.write().await.transient.mark_object_failed_permanent(
                 &context.cache_key,
                 failed_at_ms,
                 status,
             );
+            response_flag_reason = Some(HlsAccessLeaseChannelUnavailableReason::TransientObjectPermanentFailure {
+                status,
+            });
+        }
+    }
+    if let Some(reason) = response_flag_reason {
+        let proxy_session_id = context.session.read().await.proxy_session_id.clone();
+        let marked = context
+            .app_state
+            .hls_proxy
+            .mark_access_leases_channel_unavailable_for_session(&proxy_session_id, failed_at_ms, reason)
+            .await;
+        if marked > 0 {
+            debug!(
+                "HLS access leases marked channel unavailable: session={} marked={marked}",
+                safe_proxy_session_id(&proxy_session_id)
+            );
         }
     }
     fetch_finalizer.complete();
-    drop(origin_io_guard);
     hls_transient_object_unavailable_response(
         context.app_state,
         context.session,
         &context.resource_file,
         failed_at_ms,
+        context.access_context,
     )
     .await
-}
-
-fn transient_fetch_error_log_status(error: &TransientResourceFetchError) -> HlsResourceFetchLogStatus {
-    match error {
-        TransientResourceFetchError::PermanentStatus(status)
-        | TransientResourceFetchError::RetryableStatus(status)
-        | TransientResourceFetchError::NonRetryableStatus(status) => HlsResourceFetchLogStatus::Http(*status),
-        TransientResourceFetchError::Timeout => HlsResourceFetchLogStatus::Timeout,
-        TransientResourceFetchError::Request => HlsResourceFetchLogStatus::TransportError,
-        TransientResourceFetchError::Redirect => HlsResourceFetchLogStatus::RedirectError,
-        TransientResourceFetchError::Cache => HlsResourceFetchLogStatus::CacheCommitError,
-        TransientResourceFetchError::InvalidOriginUrl => HlsResourceFetchLogStatus::TransportError,
-    }
-}
-
-fn transient_retry_log_context<'a>(
-    resource_id: &'a str,
-    resource_kind: TransientResourceKind,
-    origin_url: &'a str,
-) -> HlsResourceFetchLogContext<'a> {
-    HlsResourceFetchLogContext {
-        kind: transient_resource_fetch_kind(resource_kind),
-        object_id: resource_id,
-        origin_url: Some(origin_url),
-    }
-}
-
-fn transient_resource_fetch_kind(resource_kind: TransientResourceKind) -> HlsResourceFetchKind {
-    match resource_kind {
-        TransientResourceKind::Key => HlsResourceFetchKind::Key,
-        TransientResourceKind::Map => HlsResourceFetchKind::Map,
-        TransientResourceKind::Segment | TransientResourceKind::Other => HlsResourceFetchKind::Segment,
-    }
-}
-
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn cache_transient_origin_response_attempt(
-    app_state: &Arc<AppState>,
-    session: &HlsSessionHandle,
-    fingerprint: &Fingerprint,
-    headers: &HeaderMap,
-    access_context: &HlsAccessContext,
-    resource: &crate::api::model::TransientResourceRef,
-    resource_file: TransientResourceFile,
-    cache_key: &TransientObjectCacheKey,
-    response: reqwest::Response,
-    range_header: Option<HeaderValue>,
-    cache_duration_ms: u64,
-    policy: &SegmentFetchPolicy,
-    attempt_index: usize,
-    attempts: usize,
-) -> Result<axum::response::Response, TransientResourceFetchError> {
-    let response_headers = response.headers().clone();
-    let content_type = response_headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-        .or_else(|| resource.content_type_hint.clone())
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-    let deadline = hls_object_body_deadline(policy.origin_segment_timeout_ms);
-
-    let stream_reader = StreamReader::new(response.bytes_stream().map_err(io::Error::other));
-    let commit = app_state
-        .hls_proxy
-        .segment_repair()
-        .commit_origin_response(
-            app_state.hls_proxy.segment_cache(),
-            cache_key,
-            stream_reader,
-            deadline,
-            HlsSegmentRepairObjectContext {
-                source: HlsSegmentRepairSource::Transient,
-                proxy_session_id: session.read().await.proxy_session_id.clone(),
-                hls_access_lease_id: Some(access_context.lease_id.clone()),
-                rendered_object_id: HlsRepairRenderedObjectId::Transient {
-                    resource_id: resource_file.resource_id.0.clone(),
-                },
-                resource_id: resource_file.resource_id.0.clone(),
-                file_ext: resource_file.extension.clone(),
-                normalized_origin_uri: resource.resolved_origin_uri.clone(),
-                media_sequence: None,
-                discontinuity_sequence: None,
-                complete_object: is_transient_full_object_cacheable_request(range_header.as_ref()),
-                encrypted: resource.kind == TransientResourceKind::Key,
-                custom_response: false,
-            },
-        )
-        .await;
-    let ready_at_ms = current_time_millis();
-    let metadata = match commit {
-        Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::TimedOut => {
-            let proxy_session_id = session.read().await.proxy_session_id.0.clone();
-            log_hls_resource_timeout(
-                &proxy_session_id,
-                transient_retry_log_context(
-                    resource_file.resource_id.0.as_str(),
-                    resource.kind,
-                    &resource.resolved_origin_uri,
-                ),
-                HlsResourceFetchAttempt { attempt_index, attempts },
-                deadline.as_millis(),
-            );
-            return Err(TransientResourceFetchError::Timeout);
-        }
-        Err(_) => {
-            return Err(TransientResourceFetchError::Cache);
-        }
-    };
-    let content_length = metadata.size;
-
-    let expires_at_ms = ready_at_ms.saturating_add(cache_duration_ms).max(resource.expires_at_ms);
-    session.write().await.transient.mark_object_ready(
-        cache_key,
-        content_type,
-        content_length,
-        ready_at_ms,
-        expires_at_ms,
-    );
-    let response = serve_hls_transient_object_cache_response(
-        Arc::clone(app_state.hls_proxy.segment_cache()),
-        Arc::clone(session),
-        resource_file,
-        range_header,
-        &hls_cache_response_context(app_state, access_context, ready_at_ms),
-    )
-    .await;
-    if is_hls_media_activity_status(response.status()) {
-        mark_hls_authorized_media_access(app_state, session, ready_at_ms).await;
-        let _ = ensure_hls_cache_stream_registered(app_state, fingerprint, headers, access_context, session).await;
-    }
-    Ok(response)
-}
-
-async fn fetch_transient_resource_with_manual_redirects(
-    entry_url: &Url,
-    headers: HeaderMap,
-    client: &Client,
-) -> Result<reqwest::Response, TransientResourceFetchError> {
-    let mut current_url = entry_url.clone();
-    let mut current_headers = headers;
-    let mut remaining_redirects = MAX_MANUAL_REDIRECTS;
-
-    loop {
-        let response = client
-            .get(current_url.clone())
-            .headers(current_headers.clone())
-            .send()
-            .await
-            .map_err(|_| TransientResourceFetchError::Request)?;
-        if !response.status().is_redirection() {
-            return Ok(response);
-        }
-        if remaining_redirects == 0 {
-            return Err(TransientResourceFetchError::Redirect);
-        }
-        let response_url = response.url().clone();
-        let location = response
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or(TransientResourceFetchError::Redirect)?;
-        let next_url = response_url
-            .join(location)
-            .or_else(|_| Url::parse(location))
-            .map_err(|_| TransientResourceFetchError::Redirect)?;
-        if !same_origin(&response_url, &next_url) {
-            strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
-        }
-        current_url = next_url;
-        remaining_redirects = remaining_redirects.saturating_sub(1);
-    }
-}
-
-fn build_transient_resource_origin_headers(source_headers: &HeaderMap, client_range: Option<HeaderValue>) -> HeaderMap {
-    let mut headers = source_headers.clone();
-    scrub_hls_origin_headers(&mut headers, None);
-    headers.remove(header::RANGE);
-    headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
-    if let Some(range) = client_range {
-        headers.insert(header::RANGE, range);
-    }
-    headers
-}
-
-fn transient_origin_response(
-    response: reqwest::Response,
-    access: Arc<CacheAccessState>,
-    origin_io_guard: Option<TransientOriginIoGuard>,
-    now_ms: u64,
-    proxy_session_id: String,
-    resource_id: String,
-    resource_kind: TransientResourceKind,
-    origin_url: String,
-    origin_segment_timeout_ms: u64,
-) -> axum::response::Response {
-    let mut builder = axum::response::Response::builder().status(response.status());
-    for header_name in [
-        header::CONTENT_TYPE,
-        header::CONTENT_LENGTH,
-        header::CONTENT_RANGE,
-        header::ACCEPT_RANGES,
-        header::CACHE_CONTROL,
-        header::ETAG,
-        header::LAST_MODIFIED,
-    ] {
-        if let Some(value) = response.headers().get(&header_name) {
-            builder = builder.header(header_name, value.clone());
-        }
-    }
-
-    let guard = TransientReadGuard::new(access, now_ms);
-    let deadline = hls_object_body_deadline(origin_segment_timeout_ms);
-    let stream = futures::stream::unfold(
-        (response.bytes_stream(), Some(guard), origin_io_guard, false),
-        move |(mut stream, guard, origin_io_guard, finished)| {
-            let proxy_session_id = proxy_session_id.clone();
-            let resource_id = resource_id.clone();
-            let resource_kind = resource_kind;
-            let origin_url = origin_url.clone();
-            async move {
-                if finished {
-                    return None;
-                }
-                let next_chunk = tokio::time::timeout(deadline, stream.next()).await;
-                match next_chunk {
-                    Ok(Some(Ok(chunk))) => Some((Ok(chunk), (stream, guard, origin_io_guard, false))),
-                    Ok(Some(Err(err))) => {
-                        Some((Err(io::Error::other(err)), (stream, guard, origin_io_guard, true)))
-                    }
-                    Ok(None) => None,
-                    Err(_) => {
-                        log_hls_resource_timeout(
-                            &proxy_session_id,
-                            transient_retry_log_context(&resource_id, resource_kind, &origin_url),
-                            HlsResourceFetchAttempt { attempt_index: 0, attempts: 1 },
-                            deadline.as_millis(),
-                        );
-                        Some((
-                            Err(io::Error::new(io::ErrorKind::TimedOut, "transient passthrough body timed out")),
-                            (stream, guard, origin_io_guard, true),
-                        ))
-                    }
-                }
-            }
-        },
-    );
-    try_unwrap_body!(builder.body(Body::from_stream(stream)))
-}
-
-struct TransientReadGuard {
-    access: Arc<CacheAccessState>,
-}
-
-impl TransientReadGuard {
-    fn new(access: Arc<CacheAccessState>, now_ms: u64) -> Self {
-        access.reader_started(now_ms);
-        Self { access }
-    }
-}
-
-impl Drop for TransientReadGuard {
-    fn drop(&mut self) { self.access.reader_finished(); }
-}
-
-fn same_origin(lhs: &Url, rhs: &Url) -> bool {
-    lhs.scheme().eq_ignore_ascii_case(rhs.scheme())
-        && lhs.host_str() == rhs.host_str()
-        && lhs.port_or_known_default() == rhs.port_or_known_default()
-}
-
-fn strip_sensitive_headers_for_cross_origin_redirect(headers: &mut HeaderMap) {
-    scrub_hls_origin_headers(headers, None);
 }
 
 fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
@@ -2108,24 +2090,48 @@ fn build_hls_manifest_request_headers(
 
 struct HlsCacheManifestOrigin<'a> {
     raw_request_url: &'a str,
-    session_entry_url: &'a str,
+    session_entry_url: HlsOriginEntryUrl,
     input: &'a ConfigInput,
     origin_source: HlsOriginSource,
-    failover_provider: Option<Arc<ConfigProvider>>,
 }
 
 struct HlsCacheOriginResolution {
     hls_url: String,
-    session_entry_url: String,
-    failover_provider: Option<Arc<ConfigProvider>>,
+    session_entry_url: HlsOriginEntryUrl,
+}
+
+#[derive(Clone, Debug)]
+enum HlsOriginEntryUrl {
+    DirectHttp { url: String },
+    ProviderFailover { url: String, provider: Arc<ConfigProvider> },
+}
+
+impl HlsOriginEntryUrl {
+    fn direct_http(url: impl Into<String>) -> Self { Self::DirectHttp { url: url.into() } }
+
+    fn provider_failover(url: impl Into<String>, provider: Arc<ConfigProvider>) -> Self {
+        Self::ProviderFailover { url: url.into(), provider }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Self::DirectHttp { url } | Self::ProviderFailover { url, .. } => url,
+        }
+    }
+
+    fn url_failover_provider(&self) -> Option<Arc<ConfigProvider>> {
+        match self {
+            Self::DirectHttp { .. } => None,
+            Self::ProviderFailover { provider, .. } => Some(Arc::clone(provider)),
+        }
+    }
 }
 
 fn resolve_hls_cache_origin_entry_url(input: &ConfigInput, url: &str) -> Option<HlsCacheOriginResolution> {
-    if let Some(provider) = input.get_resolve_provider(url) {
+    if let Some(provider) = hls_url_failover_provider_for_origin_url(input, url) {
         return Some(HlsCacheOriginResolution {
-            session_entry_url: url.to_string(),
             hls_url: url.to_string(),
-            failover_provider: Some(Arc::clone(&provider)),
+            session_entry_url: HlsOriginEntryUrl::provider_failover(url, provider),
         });
     }
 
@@ -2133,13 +2139,19 @@ fn resolve_hls_cache_origin_entry_url(input: &ConfigInput, url: &str) -> Option<
     if matches!(parsed.scheme(), "http" | "https") {
         return Some(HlsCacheOriginResolution {
             hls_url: url.to_string(),
-            session_entry_url: url.to_string(),
-            failover_provider: None,
+            session_entry_url: HlsOriginEntryUrl::direct_http(url),
         });
     }
 
     warn!("HLS origin entry URL is not supported: url={}", sanitize_sensitive_info(url));
     None
+}
+
+fn hls_url_failover_provider_for_origin_url(input: &ConfigInput, url: &str) -> Option<Arc<ConfigProvider>> {
+    if !url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        return None;
+    }
+    input.get_resolve_provider(url).map(|provider| Arc::clone(&provider))
 }
 
 fn is_http_hls_origin_url(url: &str) -> bool {
@@ -2201,7 +2213,12 @@ fn build_hls_origin_fetch_url(
     session_entry_url: &str,
     provider_config: Option<&Arc<RuntimeProviderConfig>>,
 ) -> Option<String> {
-    let url = if let Some(provider_config) = provider_config {
+    let provider_scheme_url = [session_entry_url, raw_request_url]
+        .into_iter()
+        .find(|url| hls_url_failover_provider_for_origin_url(input, url).is_some());
+    let url = if let (Some(provider_config), Some(provider_scheme_url)) = (provider_config, provider_scheme_url) {
+        rewrite_hls_provider_scheme_origin_account(provider_scheme_url, input, provider_config)?
+    } else if let Some(provider_config) = provider_config {
         get_stream_alternative_url(raw_request_url, input, provider_config)
             .or_else(|| get_stream_alternative_url(session_entry_url, input, provider_config))
             .unwrap_or_else(|| session_entry_url.to_string())
@@ -2216,24 +2233,196 @@ fn build_hls_origin_fetch_url(
     }
 }
 
-struct PreparedHlsOriginRuntime {
-    fetch_url: String,
-    failover_provider: Option<Arc<ConfigProvider>>,
-    binding_to_store: Option<HlsOriginAccountBinding>,
-    preacquired_provider_handle: Option<ProviderHandle>,
+fn rewrite_hls_provider_scheme_origin_account(
+    provider_scheme_url: &str,
+    input: &ConfigInput,
+    provider_config: &Arc<RuntimeProviderConfig>,
+) -> Option<String> {
+    if !provider_scheme_url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        return None;
+    }
+    let alt_input_user_info = provider_config.get_user_info()?;
+    let Some((_source_base_url, source_username, source_password)) =
+        input.get_matched_config_by_url(provider_scheme_url)
+    else {
+        return Some(provider_scheme_url.to_string());
+    };
+    let (Some(old_username), Some(old_password)) = (source_username, source_password) else {
+        return Some(provider_scheme_url.to_string());
+    };
+
+    let mut url = Url::parse(provider_scheme_url).ok()?;
+    if rewrite_hls_url_auth_fields(
+        &mut url,
+        old_username,
+        old_password,
+        &alt_input_user_info.username,
+        &alt_input_user_info.password,
+    ) {
+        Some(url.to_string())
+    } else {
+        None
+    }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+fn rewrite_hls_url_auth_fields(
+    url: &mut Url,
+    old_username: &str,
+    old_password: &str,
+    new_username: &str,
+    new_password: &str,
+) -> bool {
+    if rewrite_hls_query_auth_fields(url, new_username, new_password) {
+        return true;
+    }
+
+    if url.username() == old_username && url.password() == Some(old_password) {
+        return url.set_username(new_username).is_ok() && url.set_password(Some(new_password)).is_ok();
+    }
+
+    rewrite_hls_path_auth_fields(url, old_username, old_password, new_username, new_password)
+}
+
+fn rewrite_hls_query_auth_fields(url: &mut Url, new_username: &str, new_password: &str) -> bool {
+    let mut has_username = false;
+    let mut has_password = false;
+    let pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(key, value)| {
+            if key.eq_ignore_ascii_case("username") {
+                has_username = true;
+                (key.into_owned(), new_username.to_string())
+            } else if key.eq_ignore_ascii_case("password") {
+                has_password = true;
+                (key.into_owned(), new_password.to_string())
+            } else {
+                (key.into_owned(), value.into_owned())
+            }
+        })
+        .collect();
+
+    if !(has_username && has_password) {
+        return false;
+    }
+
+    url.query_pairs_mut().clear().extend_pairs(pairs.iter().map(|(key, value)| (key.as_str(), value.as_str())));
+    true
+}
+
+fn rewrite_hls_path_auth_fields(
+    url: &mut Url,
+    old_username: &str,
+    old_password: &str,
+    new_username: &str,
+    new_password: &str,
+) -> bool {
+    let Some(mut segments) = url
+        .path_segments()
+        .map(|segments| segments.map(ToOwned::to_owned).collect::<Vec<_>>())
+    else {
+        return false;
+    };
+
+    let credential_index = if segments.len() >= 3
+        && matches!(segments.first().map(String::as_str), Some("live" | "movie" | "series"))
+        && segments.get(1).is_some_and(|segment| segment == old_username)
+        && segments.get(2).is_some_and(|segment| segment == old_password)
+    {
+        Some(1)
+    } else if segments.len() >= 2
+        && segments.first().is_some_and(|segment| segment == old_username)
+        && segments.get(1).is_some_and(|segment| segment == old_password)
+    {
+        Some(0)
+    } else {
+        None
+    };
+
+    let Some(credential_index) = credential_index else {
+        return false;
+    };
+
+    segments[credential_index] = new_username.to_string();
+    segments[credential_index + 1] = new_password.to_string();
+
+    let Ok(mut path_segments) = url.path_segments_mut() else {
+        return false;
+    };
+    path_segments.clear().extend(segments.iter().map(String::as_str));
+    true
+}
+
+fn hls_url_failover_provider_for_origin_context(
+    input: &ConfigInput,
+    raw_request_url: &str,
+    session_entry_url: &str,
+    fetch_url: &str,
+) -> Option<Arc<ConfigProvider>> {
+    hls_url_failover_provider_for_origin_url(input, session_entry_url)
+        .or_else(|| hls_url_failover_provider_for_origin_url(input, raw_request_url))
+        .or_else(|| hls_url_failover_provider_for_origin_url(input, fetch_url))
+}
+
+struct PreparedHlsOriginRuntime {
+    fetch_url: String,
+    // URL failover comes from source.yml provider:// resolution. Origin-account
+    // binding/handles are runtime account reservations and must stay separate.
+    url_failover_provider: Option<Arc<ConfigProvider>>,
+    origin_account_binding_to_store: Option<HlsOriginAccountBinding>,
+    preacquired_origin_account_handle: Option<ProviderHandle>,
+}
+
+fn effective_hls_url_failover_provider_for_fetch_url(
+    fetch_url: &str,
+    prepared_url_failover_provider: Option<Arc<ConfigProvider>>,
+    origin_url_failover_provider: Option<Arc<ConfigProvider>>,
+) -> Option<Arc<ConfigProvider>> {
+    if !fetch_url.starts_with(PROVIDER_SCHEME_PREFIX) {
+        return None;
+    }
+    prepared_url_failover_provider.or(origin_url_failover_provider)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HlsOriginRuntimeAcquireError {
-    NoAccountAvailable,
+    NoAccountAvailable { reason: HlsOriginRuntimeNoAccountReason },
     Fatal(StatusCode),
 }
 
-impl HlsOriginRuntimeAcquireError {
-    const fn status_code(&self) -> StatusCode {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HlsOriginRuntimeNoAccountReason {
+    ProviderConnectionsExhausted,
+    OriginBindingPreempted,
+}
+
+impl HlsOriginRuntimeNoAccountReason {
+    const fn custom_video_type(self) -> CustomVideoStreamType {
         match self {
-            Self::NoAccountAvailable | Self::Fatal(StatusCode::SERVICE_UNAVAILABLE) => StatusCode::SERVICE_UNAVAILABLE,
-            Self::Fatal(status) => *status,
+            Self::ProviderConnectionsExhausted => CustomVideoStreamType::ProviderConnectionsExhausted,
+            Self::OriginBindingPreempted => CustomVideoStreamType::LowPriorityPreempted,
+        }
+    }
+}
+
+fn hls_no_account_reason_for_binding(
+    binding: Option<&HlsOriginAccountBinding>,
+) -> HlsOriginRuntimeNoAccountReason {
+    let Some(binding) = binding else {
+        return HlsOriginRuntimeNoAccountReason::ProviderConnectionsExhausted;
+    };
+    match &binding.binding_mode {
+        HlsOriginAccountBindingMode::Detached {
+            reason: HlsOriginAccountDetachedReason::ReclaimedByOriginalOwner,
+            ..
+        }
+        | HlsOriginAccountBindingMode::Detached {
+            reason: HlsOriginAccountDetachedReason::PreemptedByHigherPriority,
+            ..
+        } => HlsOriginRuntimeNoAccountReason::OriginBindingPreempted,
+        HlsOriginAccountBindingMode::Detached { .. }
+        | HlsOriginAccountBindingMode::Active
+        | HlsOriginAccountBindingMode::Speculative { .. } => {
+            HlsOriginRuntimeNoAccountReason::ProviderConnectionsExhausted
         }
     }
 }
@@ -2241,10 +2430,149 @@ impl HlsOriginRuntimeAcquireError {
 #[derive(Clone)]
 struct HlsAccountOverlapCandidate {
     proxy_session_id: ProxySessionId,
+    input_name: Arc<str>,
     account_name: Arc<str>,
     session_owner: String,
     reclaim_until_ms: u64,
     last_media_at_ms: u64,
+    soft_overlap_eligible_at_ms: u64,
+    soft_overlap_delay_ms: u64,
+    tuliprox_target_user_connection_capacity: u32,
+    origin_input_account_connection_capacity: u32,
+}
+
+#[derive(Clone)]
+struct HlsOriginPolicyPreemptCandidate {
+    session: HlsSessionHandle,
+    proxy_session_id: ProxySessionId,
+    account_name: Arc<str>,
+    session_owner: String,
+    reservation_ttl_secs: u64,
+    victim_policy: HlsEffectiveOriginAcquirePolicy,
+    last_media_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HlsSoftOverlapCapacity {
+    tuliprox_target_user_connection_capacity: u32,
+    origin_input_account_connection_capacity: u32,
+    delay_ms: u64,
+}
+
+fn hls_soft_overlap_capacity_for_target_duration(
+    tuliprox_target_user_connection_capacity: u32,
+    origin_input_account_connection_capacity: u32,
+    target_duration_ms: u64,
+) -> HlsSoftOverlapCapacity {
+    let delay_ms = hls_soft_overlap_delay_ms(
+        target_duration_ms,
+        tuliprox_target_user_connection_capacity,
+        origin_input_account_connection_capacity,
+    );
+    HlsSoftOverlapCapacity {
+        tuliprox_target_user_connection_capacity,
+        origin_input_account_connection_capacity,
+        delay_ms,
+    }
+}
+
+async fn hls_origin_input_account_connection_capacity(app_state: &Arc<AppState>, input: &ConfigInput) -> u32 {
+    let capacities = app_state.active_provider.provider_capacities_for_input(&input.name).await;
+    if capacities.is_empty() {
+        return hls_configured_origin_input_account_connection_capacity(input);
+    }
+    capacities
+        .into_iter()
+        .map(|(_, _, max)| if max == 0 { u32::MAX } else { u32::try_from(max).unwrap_or(u32::MAX) })
+        .fold(0u32, u32::saturating_add)
+        .max(1)
+}
+
+fn hls_configured_origin_input_account_connection_capacity(input: &ConfigInput) -> u32 {
+    let input_capacity = if input.max_connections == 0 { 1 } else { u32::from(input.max_connections) };
+    input
+        .aliases
+        .as_ref()
+        .map_or(0, |aliases| {
+            aliases
+                .iter()
+                .filter(|alias| alias.enabled)
+                .map(|alias| if alias.max_connections == 0 { 1 } else { u32::from(alias.max_connections) })
+                .fold(0u32, u32::saturating_add)
+        })
+        .saturating_add(input_capacity)
+        .max(1)
+}
+
+async fn hls_tuliprox_target_user_connection_capacity(app_state: &Arc<AppState>, input: &ConfigInput) -> u32 {
+    hls_configured_tuliprox_target_user_connection_capacity(app_state, input)
+        .max(hls_active_tuliprox_target_user_connections_for_input(app_state, input).await)
+        .max(1)
+}
+
+fn hls_configured_tuliprox_target_user_connection_capacity(app_state: &Arc<AppState>, input: &ConfigInput) -> u32 {
+    let Some(api_proxy) = app_state.app_config.api_proxy.load().as_ref().cloned() else {
+        return 1;
+    };
+    api_proxy
+        .user
+        .iter()
+        .filter(|target_user| {
+            app_state
+                .app_config
+                .get_inputs_for_target(&target_user.target)
+                .is_some_and(|inputs| inputs.iter().any(|candidate| candidate.name == input.name))
+        })
+        .map(|target_user| {
+            target_user
+                .credentials
+                .iter()
+                .map(|user| {
+                    if user.max_connections == 0 {
+                        u32::MAX
+                    } else {
+                        user.max_connections.saturating_add(u32::from(user.soft_connections))
+                    }
+                })
+                .fold(0u32, u32::saturating_add)
+        })
+        .max()
+        .unwrap_or(1)
+        .max(1)
+}
+
+async fn hls_active_tuliprox_target_user_connections_for_input(app_state: &Arc<AppState>, input: &ConfigInput) -> u32 {
+    u32::try_from(
+        app_state
+            .active_users
+            .active_streams()
+            .await
+            .iter()
+            .filter(|stream| stream.channel.input_name == input.name)
+            .count(),
+    )
+    .unwrap_or(u32::MAX)
+}
+
+fn hls_soft_overlap_delay_ms(
+    target_duration_ms: u64,
+    tuliprox_target_user_connection_capacity: u32,
+    origin_input_account_connection_capacity: u32,
+) -> u64 {
+    let target_duration_ms = target_duration_ms.max(1);
+    let users = u64::from(tuliprox_target_user_connection_capacity.max(1));
+    let origin = u64::from(origin_input_account_connection_capacity.max(1));
+    if users >= origin.saturating_mul(2) {
+        return target_duration_ms;
+    }
+    if users <= origin {
+        return target_duration_ms.saturating_mul(2);
+    }
+    let numerator = origin.saturating_mul(3).saturating_sub(users);
+    target_duration_ms
+        .saturating_mul(numerator)
+        .saturating_add(origin.saturating_sub(1))
+        / origin
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -2267,6 +2595,7 @@ async fn prepare_hls_origin_runtime(
     reclaim_hls_account_overlap_if_needed(app_state, session, now_ms).await;
     let existing_binding = session.read().await.origin_account_binding.clone();
     let reacquire_detached_binding = existing_binding.as_ref().is_some_and(HlsOriginAccountBinding::is_detached);
+    let final_no_account_reason = hls_no_account_reason_for_binding(existing_binding.as_ref());
     if reacquire_detached_binding {
         log_hls_origin_binding_reacquire_started(session, work_kind).await;
     }
@@ -2320,17 +2649,39 @@ async fn prepare_hls_origin_runtime(
     {
         Ok(prepared) => {
             if reacquire_detached_binding {
-                if let Some(binding) = prepared.binding_to_store.as_ref() {
+                if let Some(binding) = prepared.origin_account_binding_to_store.as_ref() {
                     log_hls_origin_binding_reacquired(session, binding).await;
                 }
             }
             return Ok(prepared);
         }
         Err(HlsOriginRuntimeAcquireError::Fatal(status)) => return Err(HlsOriginRuntimeAcquireError::Fatal(status)),
-        Err(HlsOriginRuntimeAcquireError::NoAccountAvailable) => {}
+        Err(HlsOriginRuntimeAcquireError::NoAccountAvailable { .. }) => {}
     }
 
     if work_class.allows_speculative_overlap() {
+        if let Ok(prepared) = prepare_hls_origin_policy_preempt_runtime(
+            app_state,
+            session,
+            input,
+            raw_request_url,
+            session_entry_url,
+            proxy_session_id,
+            fingerprint,
+            connection_kind,
+            priority,
+            now_ms,
+        )
+        .await
+        {
+            if reacquire_detached_binding {
+                if let Some(binding) = prepared.origin_account_binding_to_store.as_ref() {
+                    log_hls_origin_binding_reacquired(session, binding).await;
+                }
+            }
+            return Ok(prepared);
+        }
+
         if let Ok(prepared) = prepare_hls_speculative_origin_runtime(
             app_state,
             session,
@@ -2346,7 +2697,7 @@ async fn prepare_hls_origin_runtime(
         .await
         {
             if reacquire_detached_binding {
-                if let Some(binding) = prepared.binding_to_store.as_ref() {
+                if let Some(binding) = prepared.origin_account_binding_to_store.as_ref() {
                     log_hls_origin_binding_reacquired(session, binding).await;
                 }
             }
@@ -2375,7 +2726,7 @@ async fn prepare_hls_origin_runtime(
         {
             Ok(prepared) => {
                 if reacquire_detached_binding {
-                    if let Some(binding) = prepared.binding_to_store.as_ref() {
+                    if let Some(binding) = prepared.origin_account_binding_to_store.as_ref() {
                         log_hls_origin_binding_reacquired(session, binding).await;
                     }
                 }
@@ -2384,7 +2735,7 @@ async fn prepare_hls_origin_runtime(
             Err(HlsOriginRuntimeAcquireError::Fatal(status)) => {
                 return Err(HlsOriginRuntimeAcquireError::Fatal(status))
             }
-            Err(HlsOriginRuntimeAcquireError::NoAccountAvailable) => {}
+            Err(HlsOriginRuntimeAcquireError::NoAccountAvailable { .. }) => {}
         }
     } else {
         debug!(
@@ -2396,7 +2747,7 @@ async fn prepare_hls_origin_runtime(
     if reacquire_detached_binding {
         log_hls_origin_binding_reacquire_failed(session, "no-account-available").await;
     }
-    Err(HlsOriginRuntimeAcquireError::NoAccountAvailable)
+    Err(HlsOriginRuntimeAcquireError::NoAccountAvailable { reason: final_no_account_reason })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2433,7 +2784,9 @@ async fn prepare_hls_origin_runtime_with_new_account(
             work_class.as_log_value(),
             if allow_grace { "attempted" } else { "disabled" }
         );
-        return Err(HlsOriginRuntimeAcquireError::NoAccountAvailable);
+        return Err(HlsOriginRuntimeAcquireError::NoAccountAvailable {
+            reason: HlsOriginRuntimeNoAccountReason::ProviderConnectionsExhausted,
+        });
     };
 
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
@@ -2474,10 +2827,15 @@ async fn prepare_hls_origin_runtime_with_new_account(
     );
 
     Ok(PreparedHlsOriginRuntime {
-        failover_provider: input.get_resolve_provider(&fetch_url),
+        url_failover_provider: hls_url_failover_provider_for_origin_context(
+            input,
+            raw_request_url,
+            session_entry_url,
+            &fetch_url,
+        ),
         fetch_url,
-        binding_to_store: Some(binding),
-        preacquired_provider_handle: Some(provider_handle),
+        origin_account_binding_to_store: Some(binding),
+        preacquired_origin_account_handle: Some(provider_handle),
     })
 }
 
@@ -2498,10 +2856,15 @@ fn prepared_hls_origin_runtime_for_known_binding(
         .unwrap_or_else(|| session_entry_url.to_string());
 
     PreparedHlsOriginRuntime {
-        failover_provider: input.get_resolve_provider(&fetch_url),
+        url_failover_provider: hls_url_failover_provider_for_origin_context(
+            input,
+            raw_request_url,
+            session_entry_url,
+            &fetch_url,
+        ),
         fetch_url,
-        binding_to_store: None,
-        preacquired_provider_handle: None,
+        origin_account_binding_to_store: None,
+        preacquired_origin_account_handle: None,
     }
 }
 
@@ -2581,6 +2944,204 @@ async fn detach_unprotected_hls_origin_account_bindings(app_state: &Arc<AppState
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn prepare_hls_origin_policy_preempt_runtime(
+    app_state: &Arc<AppState>,
+    new_session: &HlsSessionHandle,
+    input: &ConfigInput,
+    raw_request_url: &str,
+    session_entry_url: &str,
+    proxy_session_id: &ProxySessionId,
+    fingerprint: &Fingerprint,
+    connection_kind: crate::api::model::ConnectionKind,
+    priority: i8,
+    now_ms: u64,
+) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
+    let request_policy = HlsEffectiveOriginAcquirePolicy::new(connection_kind, priority, now_ms);
+    let Some(candidate) =
+        find_hls_origin_policy_preempt_candidate(app_state, input, proxy_session_id, request_policy, now_ms).await
+    else {
+        debug!("HLS origin policy preemption denied: reason=no-lower-origin-policy-candidate");
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    };
+
+    app_state.active_provider.clear_provider_reservation(&candidate.session_owner).await;
+    let session_owner = build_hls_origin_session_owner(proxy_session_id);
+    let Some(provider_handle) = app_state
+        .active_provider
+        .acquire_exact_connection_with_grace_for_session(
+            &candidate.account_name,
+            &fingerprint.addr,
+            false,
+            priority,
+            connection_kind,
+            Some(&session_owner),
+        )
+        .await
+    else {
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+        debug!("HLS origin policy preemption denied: reason=exact-acquire-failed");
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    };
+    let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
+        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+        debug!("HLS origin policy preemption denied: reason=missing-provider-config");
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    };
+    let Some(fetch_url) = build_hls_origin_fetch_url(input, raw_request_url, session_entry_url, Some(&provider_config))
+    else {
+        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+        debug!("HLS origin policy preemption denied: reason=invalid-origin-url");
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    };
+    let Some(binding) = origin_account_binding_from_allocation(
+        Arc::clone(&input.name),
+        proxy_session_id,
+        &provider_handle.allocation,
+        now_ms,
+    ) else {
+        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+        debug!("HLS origin policy preemption denied: reason=invalid-allocation");
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    };
+
+    let mut detached_victim = false;
+    {
+        let mut victim = candidate.session.write().await;
+        if let Some(victim_binding) = victim.origin_account_binding.as_mut() {
+            if victim_binding.account_name == candidate.account_name
+                && victim_binding.session_owner == candidate.session_owner
+                && matches!(victim_binding.binding_mode, HlsOriginAccountBindingMode::Active)
+            {
+                victim_binding.detach(HlsOriginAccountDetachedReason::PreemptedByHigherPriority, now_ms);
+                detached_victim = true;
+            }
+        }
+        if detached_victim {
+            victim.invalidate_queued_origin_work();
+        }
+    }
+    if !detached_victim {
+        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
+        restore_hls_origin_policy_preempt_candidate_reservation(app_state, &candidate).await;
+        debug!("HLS origin policy preemption denied: reason=stale-candidate");
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
+    }
+
+    {
+        let mut session_guard = new_session.write().await;
+        session_guard.replace_origin_account_binding(Some(binding.clone()));
+    }
+    debug!(
+        "HLS origin policy preempted account {}: session {} yielded to session {}; victim_kind={:?} victim_priority={} request_kind={:?} request_priority={}",
+        sanitize_sensitive_info(candidate.account_name.as_ref()),
+        safe_proxy_session_id(&candidate.proxy_session_id),
+        safe_proxy_session_id(proxy_session_id),
+        candidate.victim_policy.connection_kind,
+        candidate.victim_policy.priority,
+        request_policy.connection_kind,
+        request_policy.priority
+    );
+    debug!(
+        "HLS origin binding detached: session={} account={} reason={}",
+        safe_proxy_session_id(&candidate.proxy_session_id),
+        sanitize_sensitive_info(candidate.account_name.as_ref()),
+        HlsOriginAccountDetachedReason::PreemptedByHigherPriority.as_log_reason()
+    );
+
+    Ok(PreparedHlsOriginRuntime {
+        url_failover_provider: hls_url_failover_provider_for_origin_context(
+            input,
+            raw_request_url,
+            session_entry_url,
+            &fetch_url,
+        ),
+        fetch_url,
+        origin_account_binding_to_store: Some(binding),
+        preacquired_origin_account_handle: Some(provider_handle),
+    })
+}
+
+async fn restore_hls_origin_policy_preempt_candidate_reservation(
+    app_state: &Arc<AppState>,
+    candidate: &HlsOriginPolicyPreemptCandidate,
+) {
+    app_state
+        .active_provider
+        .refresh_provider_reservation(
+            &candidate.account_name,
+            &candidate.session_owner,
+            candidate.reservation_ttl_secs,
+        )
+        .await;
+}
+
+async fn find_hls_origin_policy_preempt_candidate(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+    new_proxy_session_id: &ProxySessionId,
+    request_policy: HlsEffectiveOriginAcquirePolicy,
+    _now_ms: u64,
+) -> Option<HlsOriginPolicyPreemptCandidate> {
+    let sessions = app_state.hls_proxy.sessions().list_sessions().await;
+    let mut best_candidate = None;
+    for session in sessions {
+        let session_guard = session.read().await;
+        if session_guard.proxy_session_id == *new_proxy_session_id {
+            continue;
+        }
+        let Some(binding) = session_guard.origin_account_binding.as_ref() else {
+            continue;
+        };
+        if binding.input_name != input.name || !matches!(binding.binding_mode, HlsOriginAccountBindingMode::Active) {
+            continue;
+        }
+        if session_guard.activity.active_origin_work_count > 0 {
+            continue;
+        }
+        if !matches!(hls_origin_account_status(app_state, binding), HlsOriginAccountStatus::Known) {
+            continue;
+        }
+        let victim_policy = session_guard.effective_origin_acquire_policy_or_default();
+        if !request_policy.is_better_than(victim_policy) {
+            continue;
+        }
+        let candidate = HlsOriginPolicyPreemptCandidate {
+            session: Arc::clone(&session),
+            proxy_session_id: session_guard.proxy_session_id.clone(),
+            account_name: Arc::clone(&binding.account_name),
+            session_owner: binding.session_owner.clone(),
+            reservation_ttl_secs: session_guard.account_overlap_timing().reservation_ttl_secs(),
+            victim_policy,
+            last_media_at_ms: session_guard.activity.last_authorized_media_at_ms.unwrap_or_default(),
+        };
+        if hls_origin_policy_preempt_candidate_is_better(best_candidate.as_ref(), &candidate) {
+            best_candidate = Some(candidate);
+        }
+    }
+    best_candidate
+}
+
+fn hls_origin_policy_preempt_candidate_is_better(
+    current: Option<&HlsOriginPolicyPreemptCandidate>,
+    candidate: &HlsOriginPolicyPreemptCandidate,
+) -> bool {
+    let Some(current) = current else {
+        return true;
+    };
+    match (candidate.victim_policy.connection_kind, current.victim_policy.connection_kind) {
+        (crate::api::model::ConnectionKind::Soft, crate::api::model::ConnectionKind::Normal) => return true,
+        (crate::api::model::ConnectionKind::Normal, crate::api::model::ConnectionKind::Soft) => return false,
+        _ => {}
+    }
+    candidate.victim_policy.priority > current.victim_policy.priority
+        || (candidate.victim_policy.priority == current.victim_policy.priority
+            && candidate.last_media_at_ms < current.last_media_at_ms)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn prepare_hls_speculative_origin_runtime(
     app_state: &Arc<AppState>,
@@ -2594,8 +3155,7 @@ async fn prepare_hls_speculative_origin_runtime(
     priority: i8,
     now_ms: u64,
 ) -> Result<PreparedHlsOriginRuntime, HlsOriginRuntimeAcquireError> {
-    let Some(candidate) = find_hls_account_overlap_candidate(app_state, &input.name, proxy_session_id, now_ms).await
-    else {
+    let Some(candidate) = find_hls_account_overlap_candidate(app_state, input, proxy_session_id, now_ms).await else {
         debug!("HLS account overlap denied: reason=no-soft-active-candidate");
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
@@ -2637,37 +3197,49 @@ async fn prepare_hls_speculative_origin_runtime(
     );
     {
         let mut session_guard = new_session.write().await;
-        session_guard.origin_account_binding = Some(binding.clone());
+        session_guard.replace_origin_account_binding(Some(binding.clone()));
     }
     debug!(
-        "HLS account overlap granted: account={} old_session={} new_session={} reclaim_until_ms={}",
+        "HLS account overlap granted for account {}: session {} yields to session {}; reclaim until {} ms, eligible after {} ms, delay {} ms (Tuliprox target user connections {}, origin input account connections {})",
         sanitize_sensitive_info(candidate.account_name.as_ref()),
         safe_proxy_session_id(&candidate.proxy_session_id),
         safe_proxy_session_id(proxy_session_id),
-        candidate.reclaim_until_ms
+        candidate.reclaim_until_ms,
+        candidate.soft_overlap_eligible_at_ms,
+        candidate.soft_overlap_delay_ms,
+        candidate.tuliprox_target_user_connection_capacity,
+        candidate.origin_input_account_connection_capacity
     );
     Ok(PreparedHlsOriginRuntime {
-        failover_provider: input.get_resolve_provider(&fetch_url),
+        url_failover_provider: hls_url_failover_provider_for_origin_context(
+            input,
+            raw_request_url,
+            session_entry_url,
+            &fetch_url,
+        ),
         fetch_url,
-        binding_to_store: Some(binding),
-        preacquired_provider_handle: Some(provider_handle),
+        origin_account_binding_to_store: Some(binding),
+        preacquired_origin_account_handle: Some(provider_handle),
     })
 }
 
 async fn find_hls_account_overlap_candidate(
     app_state: &Arc<AppState>,
-    input_name: &Arc<str>,
+    input: &ConfigInput,
     new_proxy_session_id: &ProxySessionId,
     now_ms: u64,
 ) -> Option<HlsAccountOverlapCandidate> {
     let sessions = app_state.hls_proxy.sessions().list_sessions().await;
+    let tuliprox_target_user_connection_capacity =
+        hls_tuliprox_target_user_connection_capacity(app_state, input).await;
+    let origin_input_account_connection_capacity = hls_origin_input_account_connection_capacity(app_state, input).await;
     let mut speculative_accounts = Vec::new();
     for session in &sessions {
         let session = session.read().await;
         let Some(binding) = session.origin_account_binding.as_ref() else {
             continue;
         };
-        if binding.input_name != *input_name {
+        if binding.input_name != input.name {
             continue;
         }
         if matches!(
@@ -2687,7 +3259,7 @@ async fn find_hls_account_overlap_candidate(
         let Some(binding) = session_guard.origin_account_binding.as_ref() else {
             continue;
         };
-        if binding.input_name != *input_name
+        if binding.input_name != input.name
             || speculative_accounts.iter().any(|account| account == &binding.account_name)
         {
             continue;
@@ -2710,16 +3282,65 @@ async fn find_hls_account_overlap_candidate(
             continue;
         };
         let last_media_at_ms = session_guard.activity.last_authorized_media_at_ms.unwrap_or_default();
+        let capacity = hls_soft_overlap_capacity_for_target_duration(
+            tuliprox_target_user_connection_capacity,
+            origin_input_account_connection_capacity,
+            timing.target_duration_ms,
+        );
+        let eligible_at_ms = last_media_at_ms.saturating_add(capacity.delay_ms);
+        if now_ms < eligible_at_ms {
+            debug!(
+                "HLS account overlap waits for session {} account {}; eligible at {} ms, now {} ms, delay {} ms (Tuliprox target user connections {}, origin input account connections {})",
+                safe_proxy_session_id(&session_guard.proxy_session_id),
+                sanitize_sensitive_info(binding.account_name.as_ref()),
+                eligible_at_ms,
+                now_ms,
+                capacity.delay_ms,
+                capacity.tuliprox_target_user_connection_capacity,
+                capacity.origin_input_account_connection_capacity
+            );
+            continue;
+        }
         candidates.push(HlsAccountOverlapCandidate {
             proxy_session_id: session_guard.proxy_session_id.clone(),
+            input_name: Arc::clone(&binding.input_name),
             account_name: Arc::clone(&binding.account_name),
             session_owner: binding.session_owner.clone(),
             reclaim_until_ms,
             last_media_at_ms,
+            soft_overlap_eligible_at_ms: eligible_at_ms,
+            soft_overlap_delay_ms: capacity.delay_ms,
+            tuliprox_target_user_connection_capacity: capacity.tuliprox_target_user_connection_capacity,
+            origin_input_account_connection_capacity: capacity.origin_input_account_connection_capacity,
         });
     }
-    candidates.sort_by_key(|candidate| candidate.last_media_at_ms);
-    candidates.into_iter().next()
+    let mut eligible = filter_hls_account_overlap_cooldowns(app_state, candidates, now_ms).await;
+    eligible.sort_by_key(|candidate| (candidate.last_media_at_ms, candidate.soft_overlap_eligible_at_ms));
+    eligible.into_iter().next()
+}
+
+async fn filter_hls_account_overlap_cooldowns(
+    app_state: &Arc<AppState>,
+    candidates: Vec<HlsAccountOverlapCandidate>,
+    now_ms: u64,
+) -> Vec<HlsAccountOverlapCandidate> {
+    let mut eligible = Vec::new();
+    for candidate in candidates {
+        if app_state
+            .hls_proxy
+            .is_account_overlap_cooling_down(&candidate.input_name, &candidate.account_name, now_ms)
+            .await
+        {
+            debug!(
+                "HLS account overlap skips session {} account {}; cooldown is still active",
+                safe_proxy_session_id(&candidate.proxy_session_id),
+                sanitize_sensitive_info(candidate.account_name.as_ref())
+            );
+            continue;
+        }
+        eligible.push(candidate);
+    }
+    eligible
 }
 
 async fn reclaim_hls_account_overlap_if_needed(
@@ -2759,6 +3380,16 @@ async fn reclaim_hls_account_overlap_if_needed(
                 binding.promote_to_active();
             }
         }
+        let hard_active_window_ms = winner_session.read().await.account_overlap_timing().hard_active_window_ms;
+        app_state
+            .hls_proxy
+            .mark_account_overlap_reclaimed_cooldown(
+                Arc::clone(&loser_binding.input_name),
+                Arc::clone(&loser_binding.account_name),
+                now_ms,
+                hard_active_window_ms,
+            )
+            .await;
         debug!(
             "HLS account overlap reclaimed: account={} winner={} loser={}",
             sanitize_sensitive_info(loser_binding.account_name.as_ref()),
@@ -2777,8 +3408,9 @@ async fn reclaim_hls_account_overlap_if_needed(
 async fn promote_elapsed_hls_account_overlaps(app_state: &Arc<AppState>, now_ms: u64) {
     let sessions = app_state.hls_proxy.sessions().list_sessions().await;
     for session in sessions {
-        let (account_name, promoted_session_id, displaced_session_id) = {
+        let (input_name, account_name, promoted_session_id, displaced_session_id, hard_active_window_ms) = {
             let mut session_guard = session.write().await;
+            let hard_active_window_ms = session_guard.account_overlap_timing().hard_active_window_ms;
             let Some(binding) = session_guard.origin_account_binding.as_mut() else {
                 continue;
             };
@@ -2791,10 +3423,26 @@ async fn promote_elapsed_hls_account_overlaps(app_state: &Arc<AppState>, now_ms:
                 continue;
             }
             let displaced_session_id = displaced_proxy_session_id.clone();
+            let input_name = Arc::clone(&binding.input_name);
             let account_name = Arc::clone(&binding.account_name);
             binding.promote_to_active();
-            (account_name, session_guard.proxy_session_id.clone(), displaced_session_id)
+            (
+                input_name,
+                account_name,
+                session_guard.proxy_session_id.clone(),
+                displaced_session_id,
+                hard_active_window_ms,
+            )
         };
+        app_state
+            .hls_proxy
+            .mark_account_overlap_promoted_cooldown(
+                Arc::clone(&input_name),
+                Arc::clone(&account_name),
+                now_ms,
+                hard_active_window_ms,
+            )
+            .await;
         if let Some(displaced) = app_state.hls_proxy.sessions().get_by_proxy_session_id(&displaced_session_id).await {
             let mut detached = false;
             let mut displaced = displaced.write().await;
@@ -2888,7 +3536,9 @@ async fn rebind_hls_origin_account(
         .await
     else {
         mark_hls_origin_rebind_failed(session, stale_binding, now_ms, "no_account_available").await;
-        return Err(HlsOriginRuntimeAcquireError::NoAccountAvailable);
+        return Err(HlsOriginRuntimeAcquireError::NoAccountAvailable {
+            reason: hls_no_account_reason_for_binding(Some(stale_binding)),
+        });
     };
 
     let Some(provider_config) = provider_handle.allocation.get_provider_config() else {
@@ -2919,7 +3569,7 @@ async fn rebind_hls_origin_account(
     );
     {
         let mut session_guard = session.write().await;
-        session_guard.origin_account_binding = Some(new_binding.clone());
+        session_guard.replace_origin_account_binding(Some(new_binding.clone()));
         session_guard.origin_account_rebind.mark_success();
     }
     debug!(
@@ -2929,10 +3579,15 @@ async fn rebind_hls_origin_account(
     );
 
     Ok(PreparedHlsOriginRuntime {
-        failover_provider: input.get_resolve_provider(&fetch_url),
+        url_failover_provider: hls_url_failover_provider_for_origin_context(
+            input,
+            raw_request_url,
+            session_entry_url,
+            &fetch_url,
+        ),
         fetch_url,
-        binding_to_store: None,
-        preacquired_provider_handle: Some(provider_handle),
+        origin_account_binding_to_store: None,
+        preacquired_origin_account_handle: Some(provider_handle),
     })
 }
 
@@ -2961,7 +3616,7 @@ async fn prepare_hls_cache_user_session(
     request_url: &str,
     input: &ConfigInput,
     connection_permission: UserConnectionPermission,
-    connection_kind: crate::api::model::ConnectionKind,
+    connection_kind: Option<crate::api::model::ConnectionKind>,
 ) -> String {
     app_state
         .active_users
@@ -2973,10 +3628,20 @@ async fn prepare_hls_cache_user_session(
             stream_url: request_url,
             addr: &fingerprint.addr,
             connection_permission,
-            connection_kind: Some(connection_kind),
+            connection_kind,
             socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
         })
         .await
+}
+
+fn hls_entry_origin_connection_kind(
+    connection_permission: UserConnectionPermission,
+    connection_kind: Option<crate::api::model::ConnectionKind>,
+) -> Option<crate::api::model::ConnectionKind> {
+    match connection_permission {
+        UserConnectionPermission::Allowed | UserConnectionPermission::GracePeriod => connection_kind,
+        UserConnectionPermission::Exhausted => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2990,10 +3655,10 @@ async fn try_hls_cache_entry_redirect(
     request_url: &str,
     input: &ConfigInput,
     connection_permission: UserConnectionPermission,
-    connection_kind: crate::api::model::ConnectionKind,
+    connection_kind: Option<crate::api::model::ConnectionKind>,
     server_path: Option<&str>,
 ) -> Option<axum::response::Response> {
-    if !hls_cache_enabled(app_state) {
+    if !hls_cache_configured(app_state) {
         return None;
     }
 
@@ -3001,83 +3666,45 @@ async fn try_hls_cache_entry_redirect(
     let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
     let family_key = HlsPlaybackFamilyKey::new(user.username.clone(), fingerprint.key.clone());
     let now_ms = current_time_millis();
-    let reuse_result = app_state.hls_proxy.find_reusable_access_lease(&family_key, &proxy_session_id, now_ms).await;
-    let (access_lease_id, _session_token) = if let AccessLeaseReuseResult::Reusable(lease) = reuse_result {
-        let session_token = prepare_hls_cache_user_session(
-            app_state,
-            fingerprint,
-            user,
-            &lease.user_session_token,
-            virtual_id,
-            request_url,
-            input,
-            connection_permission,
-            connection_kind,
-        )
-        .await;
-        debug!(
-            "HLS access lease prepared: lease={} proxy_session={} session={} action=reused",
-            safe_hls_access_lease_id(&lease.lease_id),
-            safe_proxy_session_id(&proxy_session_id),
-            safe_user_session_token(&session_token)
-        );
-        (lease.lease_id, session_token)
+    let origin_connection_kind = hls_entry_origin_connection_kind(connection_permission, connection_kind);
+    let access_lease_id = new_hls_access_lease_id();
+    let session_token = create_hls_cache_user_session_token(fingerprint, &user.username, virtual_id);
+    let session_token = prepare_hls_cache_user_session(
+        app_state,
+        fingerprint,
+        user,
+        &session_token,
+        virtual_id,
+        request_url,
+        input,
+        connection_permission,
+        origin_connection_kind,
+    )
+    .await;
+    let mut lease = HlsAccessLease::pending(
+        access_lease_id.clone(),
+        family_key,
+        proxy_session_id.clone(),
+        user.username.clone(),
+        session_token.clone(),
+        origin_source.input_id,
+        origin_source.stream_ref.clone(),
+        virtual_id,
+        now_ms,
+        hls_pending_bootstrap_window_ms(),
+    );
+    if let Some(connection_kind) = origin_connection_kind {
+        lease = lease.with_origin_acquire_policy(connection_kind, connection_priority_for_kind(user, connection_kind));
     } else {
-        if let AccessLeaseReuseResult::NotReusable { lease_id, reason, state, age_ms } = reuse_result {
-            if reason.as_log_reason() != "none" {
-                let reason = hls_access_lease_reuse_skip_log_reason(reason, state);
-                let state = state.map_or("<none>", HlsAccessLeaseState::as_log_value);
-                let age_ms = age_ms.map_or_else(|| "<none>".to_string(), |age_ms| age_ms.to_string());
-                debug!(
-                    "HLS access lease reuse skipped: lease={} proxy_session={} reason={} state={} age_ms={}",
-                    lease_id.as_ref().map_or_else(|| "<unknown>".to_string(), safe_hls_access_lease_id),
-                    safe_proxy_session_id(&proxy_session_id),
-                    reason,
-                    state,
-                    age_ms
-                );
-            }
-        }
-        let access_lease_id = new_hls_access_lease_id();
-        let session_token = create_hls_cache_user_session_token(fingerprint, &user.username, virtual_id);
-        let session_token = prepare_hls_cache_user_session(
-            app_state,
-            fingerprint,
-            user,
-            &session_token,
-            virtual_id,
-            request_url,
-            input,
-            connection_permission,
-            connection_kind,
-        )
-        .await;
-        app_state
-            .hls_proxy
-            .prepare_access_lease(
-                HlsAccessLease::pending(
-                    access_lease_id.clone(),
-                    family_key,
-                    proxy_session_id.clone(),
-                    user.username.clone(),
-                    session_token.clone(),
-                    origin_source.input_id,
-                    origin_source.stream_ref.clone(),
-                    virtual_id,
-                    now_ms,
-                    hls_access_lease_ttl_ms(app_state),
-                )
-                .with_origin_acquire_policy(connection_kind, connection_priority_for_kind(user, connection_kind)),
-            )
-            .await;
-        debug!(
-            "HLS access lease prepared: lease={} proxy_session={} session={} action=created reason=new-playback",
-            safe_hls_access_lease_id(&access_lease_id),
-            safe_proxy_session_id(&proxy_session_id),
-            safe_user_session_token(&session_token)
-        );
-        (access_lease_id, session_token)
-    };
+        lease.state = HlsAccessLeaseState::Denied;
+    }
+    app_state.hls_proxy.prepare_access_lease(lease).await;
+    debug!(
+        "HLS access lease prepared: lease={} proxy_session={} session={} action=created reason=new-playback",
+        safe_hls_access_lease_id(&access_lease_id),
+        safe_proxy_session_id(&proxy_session_id),
+        safe_user_session_token(&session_token)
+    );
     Some(hls_canonical_manifest_redirect(&proxy_session_id, &access_lease_id, server_path))
 }
 
@@ -3096,7 +3723,7 @@ fn hls_canonical_manifest_redirect(
 }
 
 fn hls_canonical_manifest_path(proxy_session_id: &ProxySessionId, access_lease_id: &HlsAccessLeaseId) -> String {
-    format!("/proxy/hls/live/{}/{}/manifest.m3u8", proxy_session_id.0, access_lease_id.0)
+    format!("/hls/shared/live/{}/{}/manifest.m3u8", proxy_session_id.0, access_lease_id.0)
 }
 
 fn hls_canonical_retry_after_response() -> axum::response::Response {
@@ -3131,6 +3758,7 @@ async fn try_reserve_hls_entry_origin_account_for_redirect(
     request_url: &str,
     user_session_token: &str,
     session_owner: &str,
+    reservation_ttl_secs: u64,
     connection_permission: UserConnectionPermission,
     connection_kind: crate::api::model::ConnectionKind,
     create_user_session: bool,
@@ -3177,7 +3805,7 @@ async fn try_reserve_hls_entry_origin_account_for_redirect(
 
     app_state
         .active_provider
-        .refresh_provider_reservation(&provider_config.name, session_owner, get_hls_session_ttl_secs(app_state))
+        .refresh_provider_reservation(&provider_config.name, session_owner, reservation_ttl_secs)
         .await;
 
     Some(HlsEntryOriginAccountReservation {
@@ -3227,13 +3855,19 @@ async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
     let Some(hls_cache_origin) = build_hls_origin_resolution(input, &origin_playlist_url) else {
         return false;
     };
-    let connection_kind = connection_admission.kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
-    let shared_hls_session_owner = if hls_cache_enabled(app_state) {
+    let Some(connection_kind) = connection_admission.kind else {
+        return false;
+    };
+    let (shared_hls_session_owner, reservation_ttl_secs) = if hls_cache_enabled_for_target(app_state, target) {
         let origin_source = build_hls_origin_source(input, hls_stream_ref_from_virtual_id(virtual_id));
         let proxy_session_id = build_proxy_session_id(&origin_source.session_key(), &app_state.get_encrypt_secret());
-        Some(build_hls_origin_session_owner(&proxy_session_id))
+        let reservation_ttl_secs = match app_state.hls_proxy.sessions().get_by_key(&origin_source.session_key()).await {
+            Some(session) => hls_origin_account_reservation_ttl_secs_for_session(&session).await,
+            None => hls_origin_account_reservation_ttl_secs_fallback(),
+        };
+        (Some(build_hls_origin_session_owner(&proxy_session_id)), reservation_ttl_secs)
     } else {
-        None
+        (None, get_hls_session_ttl_secs(app_state))
     };
     let session_owner = shared_hls_session_owner.as_deref().unwrap_or(session_token.as_str());
 
@@ -3243,9 +3877,10 @@ async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
         user,
         input,
         virtual_id,
-        &hls_cache_origin.session_entry_url,
+        hls_cache_origin.session_entry_url.as_str(),
         &session_token,
         session_owner,
+        reservation_ttl_secs,
         connection_admission.permission,
         connection_kind,
         false,
@@ -3266,7 +3901,7 @@ async fn mark_hls_provisioning_handoff_discontinuity(
     access_lease_id: Option<&HlsAccessLeaseId>,
     now_ms: u64,
 ) -> bool {
-    if !hls_cache_enabled(app_state) {
+    if !hls_cache_configured(app_state) {
         return false;
     }
     let origin_source = build_hls_origin_source(input, hls_stream_ref_from_virtual_id(virtual_id));
@@ -3307,6 +3942,7 @@ async fn mark_hls_provisioning_handoff_discontinuity_once_for_session(
         return false;
     }
     mark_hls_provisioning_handoff_discontinuity_for_session(session, now_ms).await;
+    ensure_shared_hls_provisioning_handoff_gap(app_state, session, now_ms).await;
     true
 }
 
@@ -3393,16 +4029,14 @@ pub(in crate::api) async fn hls_panel_provisioning_poll_manifest_response(
     .await
 }
 
-enum HlsProvisioningPollResponseKind<'a> {
+enum HlsProvisioningPollResponseKind {
     Legacy,
-    Shared { proxy_session_id: &'a ProxySessionId, access_lease_id: &'a HlsAccessLeaseId },
 }
 
-impl<'a> HlsProvisioningPollResponseKind<'a> {
-    fn access_lease_id(&self) -> Option<&'a HlsAccessLeaseId> {
+impl HlsProvisioningPollResponseKind {
+    fn access_lease_id(&self) -> Option<&HlsAccessLeaseId> {
         match self {
             Self::Legacy => None,
-            Self::Shared { access_lease_id, .. } => Some(*access_lease_id),
         }
     }
 }
@@ -3417,7 +4051,7 @@ async fn hls_panel_provisioning_poll_response(
     virtual_id: u32,
     ready_redirect_path: &str,
     server_path: Option<&str>,
-    response_kind: HlsProvisioningPollResponseKind<'_>,
+    response_kind: HlsProvisioningPollResponseKind,
 ) -> axum::response::Response {
     let now_ms = current_time_millis();
     app_state.hls_provisioning.touch_consumer(Arc::clone(&input.name), virtual_id, now_ms);
@@ -3458,24 +4092,13 @@ async fn hls_panel_provisioning_poll_response(
     });
 
     match status {
-        HlsProvisioningStatus::Ready | HlsProvisioningStatus::InProgress => match response_kind {
-            HlsProvisioningPollResponseKind::Legacy => hls_custom_video_manifest_response_with_virtual_id(
-                app_state,
-                user,
-                CustomVideoStreamType::Provisioning,
-                StatusCode::SERVICE_UNAVAILABLE,
-                Some(virtual_id),
-            ),
-            HlsProvisioningPollResponseKind::Shared { proxy_session_id, access_lease_id } => {
-                hls_shared_panel_provisioning_manifest_response(
-                    app_state,
-                    user,
-                    proxy_session_id,
-                    access_lease_id,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                )
-            }
-        },
+        HlsProvisioningStatus::Ready | HlsProvisioningStatus::InProgress => hls_custom_video_manifest_response_with_virtual_id(
+            app_state,
+            user,
+            CustomVideoStreamType::Provisioning,
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(virtual_id),
+        ),
         HlsProvisioningStatus::ProviderExhausted => hls_custom_video_manifest_response_with_virtual_id(
             app_state,
             user,
@@ -3486,112 +4109,14 @@ async fn hls_panel_provisioning_poll_response(
     }
 }
 
-async fn validate_hls_shared_panel_provisioning_context(
-    app_state: &Arc<AppState>,
-    fingerprint: &Fingerprint,
-    proxy_session_id: &ProxySessionId,
-    access_lease_id: &HlsAccessLeaseId,
-) -> Result<HlsAccessContext, axum::response::Response> {
-    let now_ms = current_time_millis();
-    let context = validate_hls_access_lease(
-        app_state,
-        fingerprint,
-        proxy_session_id,
-        access_lease_id,
-        now_ms,
-        HlsAccessAdmissionMode::ManifestPrepare,
-    )
-    .await
-    .map_err(hls_access_lease_validation_response)?;
-    match app_state
-        .hls_proxy
-        .touch_manifest_access_lease(
-            access_lease_id,
-            proxy_session_id,
-            now_ms,
-            None,
-            hls_access_lease_ttl_ms(app_state),
-        )
-        .await
-    {
-        HlsAccessLeaseTouch::Touched { .. } => Ok(context),
-        HlsAccessLeaseTouch::Denied => {
-            Err(hls_access_lease_validation_response(HlsAccessLeaseValidationError::AdmissionDenied))
-        }
-        HlsAccessLeaseTouch::Expired | HlsAccessLeaseTouch::UnknownLease | HlsAccessLeaseTouch::SessionMismatch => {
-            Err(hls_access_lease_validation_response(HlsAccessLeaseValidationError::Expired))
-        }
-    }
-}
-
-pub(in crate::api) async fn validate_hls_shared_panel_provisioning_segment_access(
-    app_state: &Arc<AppState>,
-    fingerprint: &Fingerprint,
-    proxy_session_id: &str,
-    access_lease_id: &str,
-) -> Result<(), axum::response::Response> {
-    let proxy_session_id = ProxySessionId(proxy_session_id.to_string());
-    prepare_hls_resource_access(
-        app_state,
-        fingerprint,
-        &proxy_session_id,
-        access_lease_id,
-        current_time_millis(),
-        "provisioning_segment",
-    )
-    .await
-    .map(|_| ())
-}
-
 pub(in crate::api) async fn hls_shared_panel_provisioning_poll_manifest_response(
-    app_state: &Arc<AppState>,
-    fingerprint: &Fingerprint,
-    proxy_session_id: &str,
-    access_lease_id: &str,
-    virtual_id: u32,
+    _app_state: &Arc<AppState>,
+    _fingerprint: &Fingerprint,
+    _proxy_session_id: &str,
+    _access_lease_id: &str,
+    _virtual_id: u32,
 ) -> axum::response::Response {
-    let proxy_session_id = ProxySessionId(proxy_session_id.to_string());
-    let access_lease_id = HlsAccessLeaseId(access_lease_id.to_string());
-    let context = match validate_hls_shared_panel_provisioning_context(
-        app_state,
-        fingerprint,
-        &proxy_session_id,
-        &access_lease_id,
-    )
-    .await
-    {
-        Ok(context) => context,
-        Err(response) => return response,
-    };
-    if context.virtual_id != virtual_id {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let Some((user, target)) = app_state.app_config.get_target_for_username(&context.username) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let Some(input) = resolve_hls_virtual_input_for_target(app_state, &target, virtual_id).await else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    if input.id != context.input_id {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let ready_redirect_path = hls_canonical_manifest_path(&proxy_session_id, &access_lease_id);
-    let server_path = app_state.app_config.get_user_server_info(&user).and_then(|server| server.path);
-    hls_panel_provisioning_poll_response(
-        app_state,
-        fingerprint,
-        &user,
-        &target,
-        &input,
-        virtual_id,
-        &ready_redirect_path,
-        server_path.as_deref(),
-        HlsProvisioningPollResponseKind::Shared {
-            proxy_session_id: &proxy_session_id,
-            access_lease_id: &access_lease_id,
-        },
-    )
-    .await
+    StatusCode::NOT_FOUND.into_response()
 }
 
 async fn hls_panel_provisioning_or_status_response(
@@ -3599,7 +4124,7 @@ async fn hls_panel_provisioning_or_status_response(
     user: &ProxyUserCredentials,
     input: &ConfigInput,
     virtual_id: u32,
-    original_hls_entry_path: &str,
+    _original_hls_entry_path: &str,
     server_path: Option<&str>,
     fallback_status: StatusCode,
 ) -> axum::response::Response {
@@ -3609,7 +4134,6 @@ async fn hls_panel_provisioning_or_status_response(
         input,
         virtual_id,
         HlsPanelProvisioningRedirectPaths {
-            ready_entry_path: Some(original_hls_entry_path),
             waiting_manifest_path: None,
         },
         server_path,
@@ -3619,37 +4143,424 @@ async fn hls_panel_provisioning_or_status_response(
     .unwrap_or_else(|| fallback_status.into_response())
 }
 
-async fn hls_panel_provisioning_or_retry_after_response(
+#[derive(Debug, Clone)]
+struct SharedHlsProvisioningSegmentPlan {
+    proxy_seq: u64,
+    physical_index: usize,
+    cache_key: SegmentCacheKey,
+    segment_kind: SharedHlsProvisioningLocalSegmentKind,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SharedHlsProvisioningLocalSegmentKind {
+    Provisioning,
+    Gap,
+}
+
+fn shared_hls_provisioning_segment_plans(
+    session: &HlsSession,
+    physical_segment_count: usize,
+) -> Vec<SharedHlsProvisioningSegmentPlan> {
+    let existing_provisioning_segments = session
+        .segments
+        .values()
+        .filter(|entry| is_hls_provisioning_segment(entry))
+        .count();
+    let append_count = if existing_provisioning_segments == 0 { 3 } else { 1 };
+    let start_proxy_seq = session.proxy_next_seq.unwrap_or(0);
+    (0..append_count)
+        .filter_map(|offset| {
+            let proxy_seq = start_proxy_seq.checked_add(u64::try_from(offset).ok()?)?;
+            if session.segments.contains_key(&proxy_seq) {
+                return None;
+            }
+            Some(SharedHlsProvisioningSegmentPlan {
+                proxy_seq,
+                physical_index: (existing_provisioning_segments + offset) % physical_segment_count,
+                cache_key: SegmentCacheKey::new(session.proxy_session_id.clone(), proxy_seq, "ts"),
+                segment_kind: SharedHlsProvisioningLocalSegmentKind::Provisioning,
+            })
+        })
+        .collect()
+}
+
+fn shared_hls_provisioning_segment_entry(
+    plan: SharedHlsProvisioningSegmentPlan,
+    content_length: u64,
+    duration_ms: u64,
+    now_ms: u64,
+) -> crate::api::model::SegmentEntry {
+    let origin_epoch = match plan.segment_kind {
+        SharedHlsProvisioningLocalSegmentKind::Provisioning => HLS_PROVISIONING_ORIGIN_EPOCH,
+        SharedHlsProvisioningLocalSegmentKind::Gap => HLS_PROVISIONING_GAP_ORIGIN_EPOCH,
+    };
+    crate::api::model::SegmentEntry {
+        origin_key: OriginSegmentKey { origin_epoch, origin_seq: plan.proxy_seq },
+        proxy_seq: plan.proxy_seq,
+        duration_ms,
+        proxy_file_ext: "ts".to_string(),
+        content_type: "video/mp2t".to_string(),
+        cache_key: plan.cache_key,
+        discontinuity_before: false,
+        program_date_time: None,
+        daterange_tags_before: Vec::new(),
+        origin_byte_range: None,
+        map_ref: None,
+        origin_fetch_ref: None,
+        status: SegmentCacheStatus::Ready { content_length, ready_at_ms: now_ms },
+        last_rendered_at_ms: None,
+        access: Arc::new(CacheAccessState::new()),
+    }
+}
+
+async fn commit_shared_hls_provisioning_segments(
     app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    plans: &[SharedHlsProvisioningSegmentPlan],
+    provisioning_segments: &[TransportStreamBuffer],
+) -> Option<Vec<(SharedHlsProvisioningSegmentPlan, u64, u64)>> {
+    let mut committed = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let video = provisioning_segments.get(plan.physical_index)?;
+        let duration_ms = video.duration_ms().unwrap_or(HLS_PROVISIONING_SEGMENT_DURATION_MS);
+        let metadata = match app_state
+            .hls_proxy
+            .segment_cache()
+            .write_bytes_and_commit(&plan.cache_key, video.as_bytes())
+            .await
+        {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                let safe_session = {
+                    let session_guard = session.read().await;
+                    safe_proxy_session_id(&session_guard.proxy_session_id)
+                };
+                warn!(
+                    "HLS provisioning segment cache commit failed for shared manifest: session={} seq={} error={err}",
+                    safe_session, plan.proxy_seq
+                );
+                return None;
+            }
+        };
+        committed.push((plan.clone(), metadata.size, duration_ms));
+    }
+    Some(committed)
+}
+
+async fn ensure_shared_hls_provisioning_handoff_gap(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    now_ms: u64,
+) -> bool {
+    let custom_stream_response = app_state.app_config.custom_stream_response.load();
+    let Some(provisioning_segments) = custom_stream_response
+        .as_ref()
+        .map(|response| response.panel_api_provisioning_hls_segments.clone())
+        .filter(|segments| !segments.is_empty())
+    else {
+        return false;
+    };
+    let plan = {
+        let session_guard = session.read().await;
+        if !session_guard.segments.values().any(is_hls_provisioning_segment)
+            || session_guard.segments.values().any(is_hls_provisioning_gap_segment)
+        {
+            return false;
+        }
+        let proxy_seq = session_guard.proxy_next_seq.unwrap_or(0);
+        if session_guard.segments.contains_key(&proxy_seq) {
+            return false;
+        }
+        let existing_provisioning_segments = session_guard
+            .segments
+            .values()
+            .filter(|entry| is_hls_provisioning_segment(entry))
+            .count();
+        SharedHlsProvisioningSegmentPlan {
+            proxy_seq,
+            physical_index: existing_provisioning_segments % provisioning_segments.len(),
+            cache_key: SegmentCacheKey::new(session_guard.proxy_session_id.clone(), proxy_seq, "ts"),
+            segment_kind: SharedHlsProvisioningLocalSegmentKind::Gap,
+        }
+    };
+    let Some(committed) = commit_shared_hls_provisioning_segments(
+        app_state,
+        session,
+        std::slice::from_ref(&plan),
+        &provisioning_segments,
+    )
+    .await
+    else {
+        return false;
+    };
+    let mut session_guard = session.write().await;
+    let mut inserted = false;
+    for (plan, content_length, duration_ms) in committed {
+        if session_guard.segments.contains_key(&plan.proxy_seq) {
+            continue;
+        }
+        if session_guard.publishable_origin_head_proxy_seq.is_none() {
+            session_guard.publishable_origin_head_proxy_seq = Some(plan.proxy_seq);
+        }
+        session_guard.publishable_origin_tail_proxy_seq = Some(plan.proxy_seq);
+        session_guard.proxy_next_seq = Some(plan.proxy_seq.saturating_add(1));
+        session_guard
+            .segments
+            .insert(plan.proxy_seq, shared_hls_provisioning_segment_entry(plan, content_length, duration_ms, now_ms));
+        inserted = true;
+    }
+    if inserted {
+        session_guard.target_duration = Some(HLS_PROVISIONING_TARGET_DURATION_SECS);
+        session_guard.independent_segments = true;
+    }
+    inserted
+}
+
+async fn hls_shared_provisioning_timeline_manifest_response(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    access_lease_id: &HlsAccessLeaseId,
+    access_lease_state: HlsAccessLeaseState,
+    strip: &crate::model::StripConfig,
+    server_path: Option<&str>,
+) -> Option<axum::response::Response> {
+    let custom_stream_response = app_state.app_config.custom_stream_response.load();
+    let provisioning_segments = custom_stream_response
+        .as_ref()
+        .map(|response| response.panel_api_provisioning_hls_segments.clone())
+        .filter(|segments| !segments.is_empty())?;
+    let now_ms = current_time_millis();
+    let plans = {
+        let session_guard = session.read().await;
+        shared_hls_provisioning_segment_plans(&session_guard, provisioning_segments.len())
+    };
+    if plans.is_empty() {
+        let mut session_guard = session.write().await;
+        let _ = session_guard.render_and_store_manifest(now_ms).ok()?;
+    } else {
+        let committed =
+            commit_shared_hls_provisioning_segments(app_state, session, &plans, &provisioning_segments).await?;
+        let mut session_guard = session.write().await;
+        for (plan, content_length, duration_ms) in committed {
+            if session_guard.segments.contains_key(&plan.proxy_seq) {
+                continue;
+            }
+            if session_guard.publishable_origin_head_proxy_seq.is_none() {
+                session_guard.publishable_origin_head_proxy_seq = Some(plan.proxy_seq);
+            }
+            session_guard.publishable_origin_tail_proxy_seq = Some(plan.proxy_seq);
+            session_guard.proxy_next_seq = Some(plan.proxy_seq.saturating_add(1));
+            session_guard
+                .segments
+                .insert(plan.proxy_seq, shared_hls_provisioning_segment_entry(plan, content_length, duration_ms, now_ms));
+        }
+        session_guard.target_duration = Some(HLS_PROVISIONING_TARGET_DURATION_SECS);
+        session_guard.independent_segments = true;
+        let _ = session_guard.render_and_store_manifest(now_ms).ok()?;
+    }
+
+    try_hls_cached_manifest_response(
+        app_state,
+        session,
+        access_lease_id,
+        access_lease_state,
+        strip,
+        server_path,
+        HlsCachedManifestOptions::initial(Duration::ZERO),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn hls_shared_provisioning_or_provider_exhausted_response(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
     username: &str,
     input: &ConfigInput,
     virtual_id: u32,
-    proxy_session_id: &ProxySessionId,
     access_lease_id: &HlsAccessLeaseId,
+    access_lease_state: HlsAccessLeaseState,
+    strip: &crate::model::StripConfig,
     server_path: Option<&str>,
 ) -> axum::response::Response {
-    if let Some((user, _target)) = app_state.app_config.get_target_for_username(username) {
-        let provisioning_manifest_path =
-            hls_shared_panel_provisioning_manifest_path(proxy_session_id, access_lease_id, virtual_id);
-        let ready_redirect_path = hls_canonical_manifest_path(proxy_session_id, access_lease_id);
-        if let Some(response) = try_hls_panel_provisioning_manifest_response(
+    let Some((user, _target)) = app_state.app_config.get_target_for_username(username) else {
+        return hls_canonical_retry_after_response();
+    };
+    let now_ms = current_time_millis();
+    let provisioning_enabled = can_provision_on_exhausted(app_state.as_ref(), input);
+    if provisioning_enabled {
+        app_state
+            .hls_provisioning
+            .touch_consumer(Arc::clone(&input.name), virtual_id, now_ms);
+        start_hls_panel_provisioning_once(app_state, input);
+        if let Some(HlsProvisioningStatus::ProviderExhausted) =
+            app_state.hls_provisioning.consumer_status(&input.name, virtual_id, now_ms)
+        {
+            return hls_custom_video_manifest_response(
+                app_state,
+                &user,
+                CustomVideoStreamType::ProviderConnectionsExhausted,
+                StatusCode::SERVICE_UNAVAILABLE,
+            );
+        }
+        if let Some(response) = hls_shared_provisioning_timeline_manifest_response(
             app_state,
-            &user,
-            input,
-            virtual_id,
-            HlsPanelProvisioningRedirectPaths {
-                ready_entry_path: Some(&ready_redirect_path),
-                waiting_manifest_path: Some(&provisioning_manifest_path),
-            },
+            session,
+            access_lease_id,
+            access_lease_state,
+            strip,
             server_path,
-            StatusCode::SERVICE_UNAVAILABLE,
         )
         .await
         {
             return response;
         }
     }
+
+    let provider_exhausted_custom_response_available = is_custom_video_stream_enabled(&app_state.app_config)
+        && app_state
+            .app_config
+            .custom_stream_response
+            .load()
+            .as_ref()
+            .and_then(|response| response.provider_connections_exhausted.as_ref())
+            .is_some();
+    if provider_exhausted_custom_response_available {
+        return hls_custom_video_manifest_response(
+            app_state,
+            &user,
+            CustomVideoStreamType::ProviderConnectionsExhausted,
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+    }
     hls_canonical_retry_after_response()
+}
+
+enum HlsProviderExhaustedResolution {
+    RetryAcquire,
+    Response(axum::response::Response),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn hls_provider_connections_exhausted_manifest_resolution(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    username: &str,
+    input: &ConfigInput,
+    virtual_id: u32,
+    access_lease_id: &HlsAccessLeaseId,
+    access_lease_state: HlsAccessLeaseState,
+    strip: &crate::model::StripConfig,
+    server_path: Option<&str>,
+    allow_grace_hold: bool,
+) -> HlsProviderExhaustedResolution {
+    let proxy_session_id = session.read().await.proxy_session_id.clone();
+    let grace_options = app_state.get_grace_options();
+    if allow_grace_hold && grace_options.hold_stream && grace_options.period_millis > 0 {
+        debug!(
+            "HLS provider connections exhausted; holding canonical manifest for grace: session={} lease={} hold_ms={}",
+            safe_proxy_session_id(&proxy_session_id),
+            safe_hls_access_lease_id(access_lease_id),
+            grace_options.period_millis
+        );
+        let capacity_notify = app_state.connection_manager.capacity_notified();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(grace_options.period_millis);
+        let wake_reason = tokio::select! {
+            () = capacity_notify.notified() => "capacity-notified",
+            () = tokio::time::sleep_until(deadline) => "timeout",
+        };
+        debug!(
+            "HLS provider connections exhausted grace hold completed: session={} lease={} reason={wake_reason}",
+            safe_proxy_session_id(&proxy_session_id),
+            safe_hls_access_lease_id(access_lease_id)
+        );
+        return HlsProviderExhaustedResolution::RetryAcquire;
+    }
+
+    HlsProviderExhaustedResolution::Response(
+        hls_shared_provisioning_or_provider_exhausted_response(
+            app_state,
+            session,
+            username,
+            input,
+            virtual_id,
+            access_lease_id,
+            access_lease_state,
+            strip,
+            server_path,
+        )
+        .await,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_hls_canonical_manifest_origin_runtime(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    context: &HlsAccessContext,
+    origin: &HlsCacheManifestOrigin<'_>,
+    path_proxy_session_id: &ProxySessionId,
+    access_lease_id: &HlsAccessLeaseId,
+    access_lease_state: HlsAccessLeaseState,
+    fingerprint: &Fingerprint,
+    server_path: Option<&str>,
+    now_ms: u64,
+) -> Result<PreparedHlsOriginRuntime, axum::response::Response> {
+    let mut allow_grace_hold = true;
+    loop {
+        let origin_policy = hls_effective_origin_acquire_policy(session).await;
+        match prepare_hls_origin_runtime(
+            app_state,
+            session,
+            origin.input,
+            origin.raw_request_url,
+            origin.session_entry_url.as_str(),
+            path_proxy_session_id,
+            fingerprint,
+            origin_policy.connection_kind,
+            origin_policy.priority,
+            HlsOriginWorkKind::Manifest,
+            HlsOriginWorkClass::ManifestInteractive,
+            now_ms,
+        )
+        .await
+        {
+            Ok(prepared) => return Ok(prepared),
+            Err(HlsOriginRuntimeAcquireError::NoAccountAvailable {
+                reason: HlsOriginRuntimeNoAccountReason::OriginBindingPreempted,
+            }) => {
+                return Err(hls_manifest_low_priority_preempted_redirect_response_for_username(
+                    app_state,
+                    &context.username,
+                ));
+            }
+            Err(HlsOriginRuntimeAcquireError::NoAccountAvailable {
+                reason: HlsOriginRuntimeNoAccountReason::ProviderConnectionsExhausted,
+            }) => {
+                let strip = app_state.hls_proxy.strip();
+                match hls_provider_connections_exhausted_manifest_resolution(
+                    app_state,
+                    session,
+                    &context.username,
+                    origin.input,
+                    context.virtual_id,
+                    access_lease_id,
+                    access_lease_state,
+                    &strip,
+                    server_path,
+                    allow_grace_hold,
+                )
+                .await
+                {
+                    HlsProviderExhaustedResolution::RetryAcquire => {
+                        allow_grace_hold = false;
+                    }
+                    HlsProviderExhaustedResolution::Response(response) => return Err(response),
+                }
+            }
+            Err(HlsOriginRuntimeAcquireError::Fatal(status)) => return Err(hls_canonical_status_response(status)),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -3662,11 +4573,10 @@ async fn try_hls_cache_canonical_manifest_response(
     access_lease_state: HlsAccessLeaseState,
     origin: HlsCacheManifestOrigin<'_>,
     headers: HeaderMap,
-    hls_session_ttl_secs: u64,
     server_path: Option<&str>,
     _original_hls_entry_path: &str,
 ) -> Option<axum::response::Response> {
-    if !hls_cache_enabled(app_state) {
+    if !hls_cache_configured(app_state) {
         return None;
     }
     if origin.origin_source.input_id != context.input_id || origin.origin_source.stream_ref != context.stream_ref {
@@ -3698,6 +4608,7 @@ async fn try_hls_cache_canonical_manifest_response(
                 path_proxy_session_id,
                 now_ms,
                 Some(timing),
+                None,
                 hls_access_lease_ttl_ms(app_state),
             )
             .await;
@@ -3712,51 +4623,37 @@ async fn try_hls_cache_canonical_manifest_response(
             now_ms,
         )
         .await;
-    let origin_policy = hls_effective_origin_acquire_policy(&session).await;
-    let prepared_origin = match prepare_hls_origin_runtime(
+    let prepared_origin = match prepare_hls_canonical_manifest_origin_runtime(
         app_state,
         &session,
-        origin.input,
-        origin.raw_request_url,
-        origin.session_entry_url,
+        context,
+        &origin,
         path_proxy_session_id,
+        access_lease_id,
+        access_lease_state,
         fingerprint,
-        origin_policy.connection_kind,
-        origin_policy.priority,
-        HlsOriginWorkKind::Manifest,
-        HlsOriginWorkClass::ManifestInteractive,
+        server_path,
         now_ms,
     )
     .await
     {
         Ok(prepared) => prepared,
-        Err(HlsOriginRuntimeAcquireError::NoAccountAvailable) => {
-            return Some(
-                hls_panel_provisioning_or_retry_after_response(
-                    app_state,
-                    &context.username,
-                    origin.input,
-                    context.virtual_id,
-                    path_proxy_session_id,
-                    access_lease_id,
-                    server_path,
-                )
-                .await,
-            );
-        }
-        Err(HlsOriginRuntimeAcquireError::Fatal(status)) => return Some(hls_canonical_status_response(status)),
+        Err(response) => return Some(response),
     };
-    let origin_entry = LiveHlsOriginEntry::parse_with_provider(
+    let url_failover_provider = effective_hls_url_failover_provider_for_fetch_url(
         &prepared_origin.fetch_url,
-        prepared_origin.failover_provider.or_else(|| origin.failover_provider.clone()),
-    )?;
+        prepared_origin.url_failover_provider.clone(),
+        origin.session_entry_url.url_failover_provider(),
+    );
+    let origin_entry =
+        LiveHlsOriginEntry::parse_with_url_failover_provider(&prepared_origin.fetch_url, url_failover_provider)?;
     {
         let mut session_guard = session.write().await;
         if session_guard.is_gc_marked_for_removal() {
             return Some(hls_canonical_retry_after_response());
         }
-        if prepared_origin.binding_to_store.is_some() {
-            session_guard.origin_account_binding = prepared_origin.binding_to_store;
+        if prepared_origin.origin_account_binding_to_store.is_some() {
+            session_guard.replace_origin_account_binding(prepared_origin.origin_account_binding_to_store);
         }
     }
     mark_hls_authorized_manifest_access(app_state, &session, now_ms).await;
@@ -3765,11 +4662,12 @@ async fn try_hls_cache_canonical_manifest_response(
         |binding| sanitize_sensitive_info(binding.account_name.as_ref()).to_string(),
     );
     debug!(
-        "HLS origin account selected: proxy_session_id={} account={} url_failover={}",
+        "HLS origin account selected: proxy_session_id={} account={}",
         safe_proxy_session_id(path_proxy_session_id),
-        selected_account,
-        if origin.failover_provider.is_some() { "enabled" } else { "disabled" }
+        selected_account
     );
+    let reservation_ttl_secs = hls_origin_account_reservation_ttl_secs_for_session(&session).await;
+    let previous_manifest_rendered_at_ms = latest_shared_hls_manifest_rendered_at_ms(&session).await;
     let handoff_previous_rendered_at_ms = maybe_mark_hls_provisioning_handoff_for_canonical_manifest(
         app_state,
         &session,
@@ -3779,46 +4677,69 @@ async fn try_hls_cache_canonical_manifest_response(
         now_ms,
     )
     .await;
+    let manifest_commit_requirement =
+        hls_manifest_commit_requirement(&session, session_outcome, handoff_previous_rendered_at_ms, now_ms).await;
+    let manifest_boundary_rendered_at_ms =
+        handoff_previous_rendered_at_ms.unwrap_or(previous_manifest_rendered_at_ms);
+    let wait_timeout = hls_manifest_wait_timeout_for_requirement(&session, manifest_commit_requirement).await;
+    let cached_manifest_options = hls_cached_manifest_options_for_requirement(
+        wait_timeout,
+        manifest_commit_requirement,
+        manifest_boundary_rendered_at_ms,
+    );
 
+    let origin_policy = hls_effective_origin_acquire_policy(&session).await;
+    let origin_provider_session_headers = session.read().await.origin_provider_session_headers.clone();
     let mut origin_io = HlsOriginIoContext {
         app_state: Arc::clone(app_state),
         client_addr: fingerprint.addr,
         allow_grace: HlsOriginWorkClass::ManifestInteractive.allows_grace(),
         priority: origin_policy.priority,
         connection_kind: origin_policy.connection_kind,
-        reservation_ttl_secs: hls_session_ttl_secs,
+        reservation_ttl_secs,
         preacquired_provider_handle: None,
         started_generation: None,
     };
-    if let Some(provider_handle) = prepared_origin.preacquired_provider_handle {
+    if let Some(provider_handle) = prepared_origin.preacquired_origin_account_handle {
         origin_io = origin_io.with_preacquired_provider_handle(provider_handle);
     }
 
-    let origin_input_source = origin_entry.to_input_source();
     let refresh_request = OriginRefreshRequest {
         app_config: Arc::clone(&app_state.app_config),
         session: Arc::clone(&session),
         origin_entry,
-        origin_input_source,
         headers,
+        origin_provider_session_headers,
         client: app_state.http_client.load().as_ref().clone(),
         no_redirect_client: app_state.http_client_no_redirect.load().as_ref().clone(),
         use_manual_redirects: app_state.should_use_manual_redirects(),
         segment_cache: Arc::clone(app_state.hls_proxy.segment_cache()),
+        hls_proxy: Arc::clone(&app_state.hls_proxy),
         segment_repair: Arc::clone(app_state.hls_proxy.segment_repair()),
         segment_worker_pool: Arc::clone(app_state.hls_proxy.segment_worker_pool()),
         map_worker_pool: Arc::clone(app_state.hls_proxy.map_worker_pool()),
         origin_manifest_timeout_ms: app_state.hls_proxy.origin_manifest_timeout_ms(),
+        manifest_recovery_burst: app_state.hls_proxy.manifest_recovery_burst(),
         strip: app_state.hls_proxy.strip().clone(),
         retry_policy: RetryPolicy::default(),
         reverse_proxy_rewrite_secret: rewrite_secret.to_vec(),
         transient_resource_ttl_ms: app_state.hls_proxy.transient_resource_ttl_ms(),
+        manifest_commit_requirement,
+        access_lease_id: Some(access_lease_id.clone()),
         disabled_headers: app_state.get_disabled_headers(),
         now_ms,
         origin_io: Some(origin_io),
     };
-    if let Some(previous_rendered_at_ms) = handoff_previous_rendered_at_ms {
-        let wait_timeout = hls_manifest_commit_wait_timeout(app_state);
+    if handoff_previous_rendered_at_ms.is_some() {
+        touch_initial_manifest_access_lease_window(
+            app_state,
+            access_lease_id,
+            path_proxy_session_id,
+            access_lease_state,
+            wait_timeout,
+            now_ms,
+        )
+        .await;
         let _started = maybe_trigger_origin_refresh(refresh_request).await;
         let strip = app_state.hls_proxy.strip();
         if let Some(response) = try_hls_cached_manifest_response(
@@ -3828,17 +4749,36 @@ async fn try_hls_cache_canonical_manifest_response(
             access_lease_state,
             &strip,
             server_path,
-            HlsCachedManifestOptions::initial(wait_timeout).requiring_newer_manifest(previous_rendered_at_ms),
+            cached_manifest_options,
         )
         .await
         {
             clear_hls_provisioning_handoff_consumer(app_state, origin.input, context.virtual_id, current_time_millis());
             return Some(response);
         }
-        return Some(hls_canonical_retry_after_response());
+        if let Some(response) = hls_post_refresh_access_lease_response_flag_manifest_response(
+            app_state,
+            path_proxy_session_id,
+            access_lease_id,
+            &context.username,
+        )
+        .await
+        {
+            return Some(response);
+        }
+        return Some(hls_manifest_channel_unavailable_response_for_username(app_state, &context.username));
     }
     match session_outcome {
         HlsSessionStoreOutcome::Created => {
+            touch_initial_manifest_access_lease_window(
+                app_state,
+                access_lease_id,
+                path_proxy_session_id,
+                access_lease_state,
+                wait_timeout,
+                now_ms,
+            )
+            .await;
             let _started = maybe_trigger_origin_refresh(refresh_request).await;
             let strip = app_state.hls_proxy.strip();
             if let Some(response) = try_hls_cached_manifest_response(
@@ -3848,7 +4788,7 @@ async fn try_hls_cache_canonical_manifest_response(
                 access_lease_state,
                 &strip,
                 server_path,
-                HlsCachedManifestOptions::initial(hls_manifest_commit_wait_timeout(app_state)),
+                cached_manifest_options,
             )
             .await
             {
@@ -3857,8 +4797,15 @@ async fn try_hls_cache_canonical_manifest_response(
         }
         HlsSessionStoreOutcome::Reused => {
             let _started = maybe_trigger_origin_refresh(refresh_request).await;
-            let wait_timeout =
-                hls_initial_manifest_wait_timeout(&session, hls_manifest_commit_wait_timeout(app_state)).await;
+            touch_initial_manifest_access_lease_window(
+                app_state,
+                access_lease_id,
+                path_proxy_session_id,
+                access_lease_state,
+                wait_timeout,
+                now_ms,
+            )
+            .await;
             let strip = app_state.hls_proxy.strip();
             if let Some(response) = try_hls_cached_manifest_response(
                 app_state,
@@ -3867,7 +4814,7 @@ async fn try_hls_cache_canonical_manifest_response(
                 access_lease_state,
                 &strip,
                 server_path,
-                HlsCachedManifestOptions::initial(wait_timeout),
+                cached_manifest_options,
             )
             .await
             {
@@ -3876,20 +4823,64 @@ async fn try_hls_cache_canonical_manifest_response(
         }
     }
 
-    Some(hls_canonical_retry_after_response())
+    if let Some(response) = hls_post_refresh_access_lease_response_flag_manifest_response(
+        app_state,
+        path_proxy_session_id,
+        access_lease_id,
+        &context.username,
+    )
+    .await
+    {
+        return Some(response);
+    }
+    Some(hls_manifest_channel_unavailable_response_for_username(app_state, &context.username))
 }
 
-fn hls_manifest_commit_wait_timeout(app_state: &Arc<AppState>) -> Duration {
-    Duration::from_millis(app_state.hls_proxy.origin_manifest_timeout_ms().max(1).saturating_add(250))
+fn hls_initial_manifest_decision_wait_timeout() -> Duration { Duration::from_secs(90) }
+
+async fn hls_manifest_wait_timeout_for_requirement(
+    session: &HlsSessionHandle,
+    requirement: HlsManifestCommitRequirement,
+) -> Duration {
+    match requirement {
+        HlsManifestCommitRequirement::FreshCommitRequired { .. } => hls_initial_manifest_decision_wait_timeout(),
+        HlsManifestCommitRequirement::CommittedManifestAllowed => hls_initial_manifest_wait_timeout(session).await,
+    }
 }
 
-async fn hls_initial_manifest_wait_timeout(session: &HlsSessionHandle, wait_timeout: Duration) -> Duration {
+async fn touch_initial_manifest_access_lease_window(
+    app_state: &Arc<AppState>,
+    access_lease_id: &HlsAccessLeaseId,
+    proxy_session_id: &ProxySessionId,
+    access_lease_state: HlsAccessLeaseState,
+    wait_timeout: Duration,
+    now_ms: u64,
+) {
+    if wait_timeout.is_zero() || access_lease_state != HlsAccessLeaseState::Pending {
+        return;
+    }
+    let wait_timeout_ms = duration_to_millis_saturating(wait_timeout);
+    let deadline_ms = now_ms.saturating_add(wait_timeout_ms.max(hls_pending_bootstrap_window_ms()));
+    let _ = app_state
+        .hls_proxy
+        .touch_manifest_access_lease(
+            access_lease_id,
+            proxy_session_id,
+            now_ms,
+            None,
+            Some(HlsAccessLeasePendingDeadline::Bootstrap { deadline_ms }),
+            hls_access_lease_ttl_ms(app_state),
+        )
+        .await;
+}
+
+async fn hls_initial_manifest_wait_timeout(session: &HlsSessionHandle) -> Duration {
     let session = session.read().await;
     if matches!(
         session.account_binding_protection(current_time_millis()),
         HlsAccountBindingProtection::NoMediaYet | HlsAccountBindingProtection::Expired
     ) {
-        wait_timeout
+        hls_initial_manifest_decision_wait_timeout()
     } else {
         Duration::ZERO
     }
@@ -3932,14 +4923,16 @@ async fn prepare_hls_origin_binding_for_authorized_resource_work(
     req_headers: &HeaderMap,
     work_kind: HlsOriginWorkKind,
     now_ms: u64,
-) -> Result<Option<ProviderHandle>, StatusCode> {
+) -> Result<Option<ProviderHandle>, HlsOriginRuntimeAcquireError> {
     if !hls_origin_binding_needs_reacquire(session).await {
         return Ok(None);
     }
     if session.read().await.activity.active_origin_work_count > 0 {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     }
-    let request_context = resolve_hls_playback_manifest_request_context(app_state, access_context, req_headers).await?;
+    let request_context = resolve_hls_playback_manifest_request_context(app_state, access_context, req_headers)
+        .await
+        .map_err(HlsOriginRuntimeAcquireError::Fatal)?;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
     let origin_policy = hls_effective_origin_acquire_policy(session).await;
     let prepared_origin = prepare_hls_origin_runtime(
@@ -3947,7 +4940,7 @@ async fn prepare_hls_origin_binding_for_authorized_resource_work(
         session,
         &request_context.input,
         &request_context.hls_url,
-        &request_context.session_entry_url,
+        request_context.session_entry_url.as_str(),
         &proxy_session_id,
         fingerprint,
         origin_policy.connection_kind,
@@ -3957,13 +4950,14 @@ async fn prepare_hls_origin_binding_for_authorized_resource_work(
         now_ms,
     )
     .await
-    .map_err(|err| err.status_code())?;
-    if let Some(binding) = prepared_origin.binding_to_store {
-        session.write().await.origin_account_binding = Some(binding);
+    ?;
+    if let Some(binding) = prepared_origin.origin_account_binding_to_store {
+        session.write().await.replace_origin_account_binding(Some(binding));
     }
-    Ok(prepared_origin.preacquired_provider_handle)
+    Ok(prepared_origin.preacquired_origin_account_handle)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
     app_state: &Arc<AppState>,
     session: &HlsSessionHandle,
@@ -3971,9 +4965,10 @@ async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
     fingerprint: &Fingerprint,
     req_headers: &HeaderMap,
     now_ms: u64,
-) -> Result<Option<TransientOriginIoGuard>, StatusCode> {
+) -> Result<Option<HlsTransientOriginIoGuard>, HlsOriginRuntimeAcquireError> {
     let existing_binding = session.read().await.origin_account_binding.clone();
     let origin_policy = hls_effective_origin_acquire_policy(session).await;
+    let reservation_ttl_secs = hls_origin_account_reservation_ttl_secs_for_session(session).await;
     if let Some(binding) = existing_binding.as_ref().filter(|binding| binding.is_active()) {
         match hls_origin_account_status(app_state, binding) {
             HlsOriginAccountStatus::Known => {
@@ -3983,13 +4978,20 @@ async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
                     allow_grace: HlsOriginWorkClass::Demand.allows_grace(),
                     priority: origin_policy.priority,
                     connection_kind: origin_policy.connection_kind,
-                    reservation_ttl_secs: get_hls_session_ttl_secs(app_state),
+                    reservation_ttl_secs,
                     preacquired_provider_handle: None,
                     started_generation: None,
                 };
                 let started_generation = session.write().await.start_origin_work();
-                if let Ok(lease_guard) = begin_hls_origin_account_io(&origin_io, session, binding).await {
-                    return Ok(Some(TransientOriginIoGuard::new(
+                if let Ok(lease_guard) = begin_hls_origin_account_io_bounded(
+                    &origin_io,
+                    session,
+                    binding,
+                    hls_object_body_deadline(app_state.hls_proxy.segment_fetch_policy().origin_segment_timeout_ms),
+                )
+                .await
+                {
+                    return Ok(Some(HlsTransientOriginIoGuard::new(
                         Arc::clone(session),
                         origin_io,
                         lease_guard,
@@ -3997,7 +4999,7 @@ async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
                     )));
                 }
                 session.write().await.finish_origin_work(started_generation);
-                return Err(StatusCode::SERVICE_UNAVAILABLE);
+                return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
             }
             HlsOriginAccountStatus::Missing | HlsOriginAccountStatus::Expired => {}
         }
@@ -4010,16 +5012,18 @@ async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
         return Ok(None);
     }
     if session.read().await.activity.active_origin_work_count > 0 {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     }
-    let request_context = resolve_hls_playback_manifest_request_context(app_state, access_context, req_headers).await?;
+    let request_context = resolve_hls_playback_manifest_request_context(app_state, access_context, req_headers)
+        .await
+        .map_err(HlsOriginRuntimeAcquireError::Fatal)?;
     let proxy_session_id = session.read().await.proxy_session_id.clone();
     let prepared_origin = prepare_hls_origin_runtime(
         app_state,
         session,
         &request_context.input,
         &request_context.hls_url,
-        &request_context.session_entry_url,
+        request_context.session_entry_url.as_str(),
         &proxy_session_id,
         fingerprint,
         origin_policy.connection_kind,
@@ -4029,17 +5033,17 @@ async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
         now_ms,
     )
     .await
-    .map_err(|err| err.status_code())?;
-    if let Some(binding) = prepared_origin.binding_to_store {
-        session.write().await.origin_account_binding = Some(binding);
+    ?;
+    if let Some(binding) = prepared_origin.origin_account_binding_to_store {
+        session.write().await.replace_origin_account_binding(Some(binding));
     }
-    let Some(provider_handle) = prepared_origin.preacquired_provider_handle else {
+    let Some(provider_handle) = prepared_origin.preacquired_origin_account_handle else {
         return Ok(None);
     };
     let Some(binding) = session.read().await.origin_account_binding.clone().filter(HlsOriginAccountBinding::is_active)
     else {
         app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
     let origin_io = HlsOriginIoContext {
         app_state: Arc::clone(app_state),
@@ -4047,59 +5051,24 @@ async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
         allow_grace: HlsOriginWorkClass::Demand.allows_grace(),
         priority: origin_policy.priority,
         connection_kind: origin_policy.connection_kind,
-        reservation_ttl_secs: get_hls_session_ttl_secs(app_state),
+        reservation_ttl_secs,
         preacquired_provider_handle: None,
         started_generation: None,
     }
     .with_preacquired_provider_handle(provider_handle);
     let started_generation = session.write().await.start_origin_work();
-    let Ok(lease_guard) = begin_hls_origin_account_io(&origin_io, session, &binding).await else {
+    let Ok(lease_guard) = begin_hls_origin_account_io_bounded(
+        &origin_io,
+        session,
+        &binding,
+        hls_object_body_deadline(app_state.hls_proxy.segment_fetch_policy().origin_segment_timeout_ms),
+    )
+    .await
+    else {
         session.write().await.finish_origin_work(started_generation);
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+        return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
-    Ok(Some(TransientOriginIoGuard::new(Arc::clone(session), origin_io, lease_guard, started_generation)))
-}
-
-struct TransientOriginIoGuard {
-    session: HlsSessionHandle,
-    origin_io: HlsOriginIoContext,
-    lease_guard: Option<HlsOriginAccountIoLeaseGuard>,
-    started_generation: u64,
-}
-
-impl TransientOriginIoGuard {
-    fn new(
-        session: HlsSessionHandle,
-        origin_io: HlsOriginIoContext,
-        lease_guard: HlsOriginAccountIoLeaseGuard,
-        started_generation: u64,
-    ) -> Self {
-        Self { session, origin_io, lease_guard: Some(lease_guard), started_generation }
-    }
-}
-
-impl Drop for TransientOriginIoGuard {
-    fn drop(&mut self) {
-        let Some(lease_guard) = self.lease_guard.take() else {
-            return;
-        };
-        let session = Arc::clone(&self.session);
-        let origin_io = self.origin_io.clone();
-        let started_generation = self.started_generation;
-        tokio::spawn(async move {
-            let generation_valid = {
-                let mut session = session.write().await;
-                session.finish_origin_work(started_generation)
-            };
-            let refresh_reservation = if generation_valid {
-                session.read().await.should_refresh_origin_reservation(current_time_millis())
-            } else {
-                false
-            };
-            finish_hls_origin_account_io(&origin_io, &session, lease_guard, generation_valid && refresh_reservation)
-                .await;
-        });
-    }
+    Ok(Some(HlsTransientOriginIoGuard::new(Arc::clone(session), origin_io, lease_guard, started_generation)))
 }
 
 async fn try_hls_cached_manifest_response(
@@ -4117,51 +5086,50 @@ async fn try_hls_cached_manifest_response(
         let (transient_body, rendered_body, should_wait, wait_for_initial_commit) = {
             let session = session.read().await;
             let now_ms = current_time_millis();
-            let protection = session.account_binding_protection(now_ms);
-            let transient_manifest_rendered_at_ms = session.transient.last_manifest_rendered_at_ms;
-            let transient_manifest_refreshed_after_wait_started =
-                transient_manifest_rendered_at_ms.is_some_and(|rendered_at_ms| rendered_at_ms >= started_at_ms);
-            let should_wait = session.origin_refresh.in_flight
-                || session.active_segment_fetches > 0
-                || session.active_map_fetches > 0;
-            (
-                if can_serve_committed_transient_manifest(
-                    &session,
-                    protection,
-                    options.policy,
-                    transient_manifest_refreshed_after_wait_started,
-                ) && manifest_rendered_after_required_boundary(transient_manifest_rendered_at_ms, options)
-                {
-                    session.transient.last_manifest_body.clone()
-                } else {
-                    None
-                },
-                session.last_rendered_manifest.as_ref().and_then(|rendered| {
-                    manifest_rendered_after_required_boundary(Some(rendered.rendered_at_ms), options)
-                        .then(|| rendered.body.clone())
-                }),
+            let should_wait = session.initial_manifest_commit_work_pending();
+            let committed_body = hls_committed_manifest_body_for_request(&session, options, started_at_ms, now_ms);
+            let (transient_body, rendered_body) = match committed_body {
+                Some(HlsCommittedManifestBody::Transient(body)) => (Some(body), None),
+                Some(HlsCommittedManifestBody::Normal(body)) => (None, Some(body)),
+                None => (None, None),
+            };
+            let wait_for_initial_commit = hls_should_wait_for_initial_manifest_commit(
+                &session,
+                transient_body.is_some() || rendered_body.is_some(),
                 should_wait,
-                matches!(protection, HlsAccountBindingProtection::NoMediaYet | HlsAccountBindingProtection::Expired)
-                    && should_wait
-                    && !options.wait_timeout.is_zero(),
-            )
+                options,
+                now_ms,
+            );
+            (transient_body, rendered_body, should_wait, wait_for_initial_commit)
         };
         if !wait_for_initial_commit {
             if let Some(body) = transient_body {
                 let proxy_session_id = session.read().await.proxy_session_id.clone();
-                let body = materialize_transient_hls_access_manifest(
+                let body = materialize_shared_hls_access_manifest(
                     &body,
                     &proxy_session_id,
                     access_lease_id,
                     access_lease_state,
                     strip,
+                    "transient",
                     server_path,
                 );
+                touch_pending_manifest_follow_up_window(app_state, session, access_lease_id, access_lease_state).await;
                 mark_successful_canonical_manifest_activity(app_state, session, current_time_millis()).await;
                 return Some(hls_response(body).into_response());
             }
             if let Some(body) = rendered_body {
-                let body = materialize_hls_access_manifest(&body, access_lease_id, server_path);
+                let proxy_session_id = session.read().await.proxy_session_id.clone();
+                let body = materialize_shared_hls_access_manifest(
+                    &body,
+                    &proxy_session_id,
+                    access_lease_id,
+                    access_lease_state,
+                    strip,
+                    "normal",
+                    server_path,
+                );
+                touch_pending_manifest_follow_up_window(app_state, session, access_lease_id, access_lease_state).await;
                 mark_successful_canonical_manifest_activity(app_state, session, current_time_millis()).await;
                 return Some(hls_response(body).into_response());
             }
@@ -4193,65 +5161,13 @@ async fn mark_hls_authorized_media_access(app_state: &Arc<AppState>, session: &H
     app_state.hls_proxy.schedule_session_idle_for_handle(session).await;
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Clone, Copy)]
-enum HlsCachedManifestPolicy {
-    CommittedOnly,
-    AllowInitialNoMediaYet,
-}
-
-#[derive(Clone, Copy)]
-struct HlsCachedManifestOptions {
-    wait_timeout: Duration,
-    policy: HlsCachedManifestPolicy,
-    newer_than_rendered_at_ms: Option<u64>,
-}
-
-impl HlsCachedManifestOptions {
-    #[cfg_attr(not(test), allow(dead_code))]
-    const fn committed_only(wait_timeout: Duration) -> Self {
-        Self { wait_timeout, policy: HlsCachedManifestPolicy::CommittedOnly, newer_than_rendered_at_ms: None }
-    }
-
-    const fn initial(wait_timeout: Duration) -> Self {
-        Self { wait_timeout, policy: HlsCachedManifestPolicy::AllowInitialNoMediaYet, newer_than_rendered_at_ms: None }
-    }
-
-    const fn requiring_newer_manifest(mut self, rendered_at_ms: u64) -> Self {
-        self.newer_than_rendered_at_ms = Some(rendered_at_ms);
-        self
-    }
-}
-
-fn manifest_rendered_after_required_boundary(rendered_at_ms: Option<u64>, options: HlsCachedManifestOptions) -> bool {
-    let Some(boundary) = options.newer_than_rendered_at_ms else {
-        return true;
-    };
-    rendered_at_ms.is_some_and(|rendered_at_ms| rendered_at_ms > boundary)
-}
-
-fn can_serve_committed_transient_manifest(
-    session: &crate::api::model::HlsSession,
-    protection: HlsAccountBindingProtection,
-    policy: HlsCachedManifestPolicy,
-    refreshed_after_wait_started: bool,
-) -> bool {
-    if !matches!(session.mode, HlsSessionMode::TransientPassthrough { .. }) {
-        return false;
-    }
-
-    match protection {
-        HlsAccountBindingProtection::HardActive { .. } | HlsAccountBindingProtection::SoftActive { .. } => true,
-        HlsAccountBindingProtection::NoMediaYet => matches!(policy, HlsCachedManifestPolicy::AllowInitialNoMediaYet),
-        HlsAccountBindingProtection::Expired => {
-            matches!(policy, HlsCachedManifestPolicy::AllowInitialNoMediaYet) && refreshed_after_wait_started
-        }
-    }
-}
-
-fn hls_cache_enabled(app_state: &Arc<AppState>) -> bool {
+fn hls_cache_configured(app_state: &Arc<AppState>) -> bool {
     let config = app_state.app_config.config.load();
     config.reverse_proxy.as_ref().is_some_and(|reverse_proxy| reverse_proxy.hls_cache.is_some())
+}
+
+fn hls_cache_enabled_for_target(app_state: &Arc<AppState>, target: &ConfigTarget) -> bool {
+    hls_cache_configured(app_state) && is_hls_stream_share_enabled(target)
 }
 
 pub(in crate::api) fn build_virtual_hls_entry_path(
@@ -4272,7 +5188,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     fingerprint: &Fingerprint,
     app_state: &Arc<AppState>,
     user: &ProxyUserCredentials,
-    target_id: u16,
+    target: &ConfigTarget,
     user_session: Option<&UserSession>,
     hls_url: &str,
     _archive_reference: Option<i64>,
@@ -4280,7 +5196,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     input: &ConfigInput,
     req_headers: &HeaderMap,
     connection_permission: UserConnectionPermission,
-    connection_kind: crate::api::model::ConnectionKind,
+    connection_kind: Option<crate::api::model::ConnectionKind>,
     original_hls_entry_path: &str,
 ) -> impl IntoResponse + Send {
     if app_state.active_users.is_user_blocked_for_stream(&user.username, virtual_id).await {
@@ -4312,9 +5228,8 @@ pub(in crate::api) async fn handle_hls_stream_request(
         disabled_headers.as_ref(),
         default_user_agent.as_deref(),
     );
-    let hls_session_ttl_secs = get_hls_session_ttl_secs(app_state);
 
-    if hls_cache_enabled(app_state) {
+    if hls_cache_enabled_for_target(app_state, target) {
         let Some(origin_source) = hls_origin_source.clone() else {
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
@@ -4337,6 +5252,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         }
     }
 
+    let fallback_connection_kind = connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
     let (request_url, session_token, provider_handle, _selected_provider_config) = if let Some(session) = user_session {
         let pinned_provider = if session.provider.is_empty() { &input.name } else { &session.provider };
         let provider_handle = if let Some(handle) = app_state
@@ -4345,8 +5261,17 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 pinned_provider,
                 &fingerprint.addr,
                 false,
-                connection_priority_for_kind(user, session.connection_kind.unwrap_or(connection_kind)),
-                session.connection_kind.unwrap_or(connection_kind),
+                connection_priority_for_kind(
+                    user,
+                    session
+                        .connection_kind
+                        .or(connection_kind)
+                        .unwrap_or(crate::api::model::ConnectionKind::Normal),
+                ),
+                session
+                    .connection_kind
+                    .or(connection_kind)
+                    .unwrap_or(crate::api::model::ConnectionKind::Normal),
                 Some(session.token.as_str()),
             )
             .await
@@ -4391,10 +5316,11 @@ pub(in crate::api) async fn handle_hls_stream_request(
                         stream_url: &stream_url,
                         addr: &fingerprint.addr,
                         connection_permission,
-                        connection_kind: session.connection_kind,
+                        connection_kind: session.connection_kind.or(connection_kind),
                         socket_bound: PlaylistItemType::LiveHls.uses_socket_bound_session(),
                     })
                     .await;
+                let hls_session_ttl_secs = get_hls_session_ttl_secs(app_state);
                 app_state
                     .active_provider
                     .refresh_provider_reservation(&cfg.name, &session_token, hls_session_ttl_secs)
@@ -4411,7 +5337,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             PlaylistItemType::LiveHls,
             None,
         );
-        let hls_session_owner = if hls_cache_enabled(app_state) {
+        let hls_session_owner = if hls_cache_enabled_for_target(app_state, target) {
             let session_key = HlsSessionKey::new(input.id, virtual_id.to_string());
             let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
             Some(build_hls_origin_session_owner(&proxy_session_id))
@@ -4419,6 +5345,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             None
         };
         let session_owner = hls_session_owner.as_deref().unwrap_or(user_session_token.as_str());
+        let hls_session_ttl_secs = get_hls_session_ttl_secs(app_state);
         let Some(reservation) = try_reserve_hls_entry_origin_account_for_redirect(
             app_state,
             fingerprint,
@@ -4428,8 +5355,9 @@ pub(in crate::api) async fn handle_hls_stream_request(
             &url,
             &user_session_token,
             session_owner,
+            hls_session_ttl_secs,
             connection_permission,
-            connection_kind,
+            fallback_connection_kind,
             true,
         )
         .await
@@ -4495,7 +5423,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
                 base_url: &base_url,
                 content: &content,
                 hls_url: response_url,
-                target_id,
+                target_id: target.id,
                 virtual_id,
                 input_id: input.id,
                 user_token: session_token.as_deref(),
@@ -4621,10 +5549,9 @@ async fn resolve_stream_channel(
 struct HlsAccessManifestRequestContext {
     input: Arc<ConfigInput>,
     hls_url: String,
-    session_entry_url: String,
+    session_entry_url: HlsOriginEntryUrl,
     original_hls_entry_path: String,
     origin_source: HlsOriginSource,
-    failover_provider: Option<Arc<ConfigProvider>>,
     headers: HeaderMap,
     server_path: Option<String>,
 }
@@ -4637,6 +5564,9 @@ async fn resolve_hls_playback_manifest_request_context(
     let Some((user, target)) = app_state.app_config.get_target_for_username(&access_context.username) else {
         return Err(StatusCode::NOT_FOUND);
     };
+    if !hls_cache_enabled_for_target(app_state, &target) {
+        return Err(StatusCode::NOT_FOUND);
+    }
     let Some(input) = app_state.app_config.get_input_by_id(access_context.input_id) else {
         return Err(StatusCode::NOT_FOUND);
     };
@@ -4673,7 +5603,6 @@ async fn resolve_hls_playback_manifest_request_context(
         session_entry_url: hls_cache_origin.session_entry_url,
         original_hls_entry_path,
         origin_source,
-        failover_provider: hls_cache_origin.failover_provider,
         headers,
         server_path: server_info.path.clone(),
     })
@@ -4732,13 +5661,11 @@ async fn hls_proxy_manifest(
         access_lease_state,
         HlsCacheManifestOrigin {
             raw_request_url: &request_context.hls_url,
-            session_entry_url: &request_context.session_entry_url,
+            session_entry_url: request_context.session_entry_url.clone(),
             input: &request_context.input,
             origin_source: request_context.origin_source,
-            failover_provider: request_context.failover_provider,
         },
         request_context.headers,
-        get_hls_session_ttl_secs(&app_state),
         request_context.server_path.as_deref(),
         &request_context.original_hls_entry_path,
     )
@@ -4822,6 +5749,14 @@ async fn hls_api_stream_resolved(
     let Some(decoded_hls_token) = get_hls_session_token_and_url_from_token(&encrypt_secret, &token) else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
+    if hls_cache_enabled_for_target(&app_state, &target) {
+        return hls_custom_video_manifest_redirect_response_for_username(
+            &app_state,
+            &user.username,
+            CustomVideoStreamType::ChannelUnavailable,
+            StatusCode::NOT_FOUND,
+        );
+    }
     let lookup_session_token = decoded_hls_token
         .0
         .clone()
@@ -4928,11 +5863,14 @@ async fn hls_api_stream_resolved(
             )
             .await;
         let connection_permission = connection_admission.permission;
-        let connection_kind =
-            connection_admission.kind.or(session.connection_kind).unwrap_or(crate::api::model::ConnectionKind::Normal);
+        let connection_kind = connection_admission.kind.or(session.connection_kind);
         session.permission = connection_permission;
-        session.connection_kind = Some(connection_kind);
-        if connection_permission == UserConnectionPermission::Exhausted {
+        if let Some(connection_kind) = connection_kind {
+            session.connection_kind = Some(connection_kind);
+        }
+        if connection_permission == UserConnectionPermission::Exhausted
+            || (connection_permission == UserConnectionPermission::GracePeriod && connection_kind.is_none())
+        {
             let provider = if session.provider.is_empty() { input.name.clone() } else { session.provider.clone() };
             let stream_channel =
                 resolve_stream_channel(&app_state, &target, &input, virtual_id, &session.stream_url, archive_reference)
@@ -4947,6 +5885,7 @@ async fn hls_api_stream_resolved(
                 ConnectFailureReason::UserConnectionsExhausted,
             );
         }
+        let fallback_connection_kind = connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
 
         if is_hls_url(&session.stream_url) {
             let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, virtual_id);
@@ -4954,7 +5893,7 @@ async fn hls_api_stream_resolved(
                 &fingerprint,
                 &app_state,
                 &user,
-                target.id,
+                &target,
                 Some(session),
                 &session.stream_url,
                 archive_reference,
@@ -4981,7 +5920,7 @@ async fn hls_api_stream_resolved(
                 &target,
                 &user,
                 connection_permission,
-                connection_kind,
+                fallback_connection_kind,
                 Some(&session.token),
                 Some(request_class),
                 false,
@@ -5015,24 +5954,24 @@ async fn hls_api_stream_resolved(
 pub fn hls_api_register() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route(
-            "/hls/{username}/{password}/{target_id}/{input_id}/{stream_id}/{token}",
-            axum::routing::get(hls_api_stream),
-        )
-        .route(
-            "/proxy/hls/live/{proxy_session_id}/{hls_access_lease_id}/manifest.m3u8",
+            "/hls/shared/live/{proxy_session_id}/{hls_access_lease_id}/manifest.m3u8",
             axum::routing::get(hls_proxy_manifest),
         )
         .route(
-            "/proxy/hls/live/{proxy_session_id}/{hls_access_lease_id}/{segment_file}",
+            "/hls/shared/live/{proxy_session_id}/{hls_access_lease_id}/{segment_file}",
             axum::routing::get(hls_proxy_segment),
         )
         .route(
-            "/proxy/hls/live/{proxy_session_id}/{hls_access_lease_id}/map/{map_file}",
+            "/hls/shared/live/{proxy_session_id}/{hls_access_lease_id}/map/{map_file}",
             axum::routing::get(hls_proxy_map),
         )
         .route(
-            "/proxy/hls/live/{proxy_session_id}/{hls_access_lease_id}/r/{resource_file}",
+            "/hls/shared/live/{proxy_session_id}/{hls_access_lease_id}/r/{resource_file}",
             axum::routing::get(hls_proxy_resource),
+        )
+        .route(
+            "/hls/{username}/{password}/{target_id}/{input_id}/{stream_id}/{token}",
+            axum::routing::get(hls_api_stream),
         )
     //cfg.service(web::resource("/hls/{token}/{stream}").route(web::get().to(xtream_player_api_hls_stream)));
     //cfg.service(web::resource("/play/{token}/{type}").route(web::get().to(xtream_player_api_play_stream)));
@@ -5050,22 +5989,28 @@ mod tests {
             build_transient_resource_id, finish_hls_origin_account_io, ActiveProviderManager, ActiveUserManager,
             AppState, CacheAccessState, CancelTokens, ConnectionKind, ConnectionManager, CreateUserSessionParams,
             CustomVideoStreamType, EventManager, HlsAccessContext, HlsAccessLease, HlsAccessLeaseId,
-            HlsAccessLeaseState, HlsAccessLeaseTiming, HlsLifecycleEvent, HlsLifecycleEventKey,
+            HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseResponseFlag, HlsAccessLeaseState,
+            HlsAccessLeaseTiming, HlsAccessLeaseValidationError, HlsEffectiveOriginAcquirePolicy,
+            HlsFreshManifestRequiredReason, HlsLifecycleEvent, HlsLifecycleEventKey, HlsManifestCommitRequirement,
             HlsOriginAccountBinding, HlsOriginAccountBindingMode, HlsOriginAccountDetachedReason, HlsOriginIoContext,
-            HlsPlaybackFamilyKey, HlsProxyManager, HlsSegmentFile, HlsSessionHandle, HlsSessionKey, HlsSessionMode,
-            ManualPlaylistUpdateRequest, MapCacheStatus, MapEntry, MetadataUpdateManager, OriginMapKey,
-            OriginSegmentFetchRef, OriginSegmentKey, PlaylistStorageState, ProviderConfig as RuntimeProviderConfig,
-            ProviderConfigConnection, ProxyMapId, ProxySessionId, RenderedManifest, SegmentCacheKey, SegmentCacheStatus,
-            SegmentEntry, SegmentFetchPriority, SharedStreamManager, TransientResourceKind, TransientResourceRef,
-            UpdateGuard,
+            HlsOriginSource, HlsOriginSourceKind, HlsPlaybackFamilyKey, HlsProxyManager, HlsSegmentFile, HlsSessionHandle,
+            HlsSession, HlsSessionKey, HlsSessionMode, HlsSessionStoreOutcome, ManualPlaylistUpdateRequest,
+            MapCacheStatus, MapEntry, MetadataUpdateManager, OriginMapKey, OriginSegmentFetchRef, OriginSegmentKey,
+            PlaybackLifecycle, PlaylistStorageState, ProviderConfig as RuntimeProviderConfig, ProviderConfigConnection,
+            ProxyMapId, ProxySessionId, RenderedManifest, SegmentCacheKey, SegmentCacheStatus, SegmentEntry,
+            SegmentFetchPriority, SharedStreamManager, TransientResourceKind, TransientResourceRef, TransportStreamBuffer,
+            UpdateGuard, UserSession,
         },
         auth::Fingerprint,
         model::{
-            ApiProxyConfig, AppConfig, Config, ConfigInput, ConfigProvider, ConfigTarget, HlsCacheConfig,
-            ProcessTargets, ProxyUserCredentials, ReverseProxyConfig, ReverseProxyDisabledHeaderConfig, SourcesConfig,
-            StripConfig, StripMode, TargetUser,
+            ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, ConfigProvider, ConfigTarget, HlsCacheConfig,
+            ConfigSource, CustomStreamResponse, ProcessTargets, ProxyUserCredentials, ReverseProxyConfig,
+            ReverseProxyDisabledHeaderConfig, SourcesConfig, StripConfig, StripMode, TargetUser,
         },
-        processing::parser::hls::origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome},
+        processing::parser::hls::{
+            origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome},
+            rewrite_hls, RewriteHlsProps,
+        },
         utils::GeoIp,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
@@ -5077,14 +6022,15 @@ mod tests {
     };
     use http_body_util::BodyExt;
     use shared::model::{
-        ConfigPaths, ConfigProviderDto, HlsCacheConfigDto, HlsSegmentRepairModeDto, InputType, PlaylistItemType,
-        ProviderUrlSelectionPolicy, ReverseProxyConfigDto, UserConnectionPermission,
+        ConfigPaths, ConfigProviderDto, ConfigTargetDto, ConfigTargetOptions, ConfigTargetShareLiveStreams,
+        HlsCacheConfigDto, HlsSegmentRepairModeDto, InputType, PlaylistItemType, ProviderUrlSelectionPolicy,
+        ReverseProxyConfigDto, StreamConfigDto, TargetOutputDto, UserConnectionPermission, XtreamTargetOutputDto,
     };
     use std::{collections::HashMap, fmt::Write as _, net::SocketAddr, sync::Arc, time::Duration};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
-        sync::mpsc,
+        sync::{mpsc, RwLock},
     };
     use tower::ServiceExt;
 
@@ -5130,11 +6076,23 @@ mod tests {
         hls_user.password = "hls-pass".to_string();
         hls_user.max_connections = 1;
         let api_proxy = ApiProxyConfig {
+            server: vec![ApiProxyServerInfo {
+                name: "default".to_string(),
+                protocol: "https".to_string(),
+                host: "example.test".to_string(),
+                port: None,
+                timezone: "UTC".to_string(),
+                message: String::new(),
+                path: Some("iptv".to_string()),
+            }],
             user: vec![TargetUser { target: "default".to_string(), credentials: vec![Arc::new(hls_user)] }],
             ..Default::default()
         };
         Arc::new(AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            config: Arc::new(ArcSwap::from_pointee(Config {
+                custom_stream_response_enabled: true,
+                ..Default::default()
+            })),
             sources: Arc::new(ArcSwap::from_pointee(SourcesConfig {
                 batch_files: vec![],
                 provider: vec![],
@@ -5172,8 +6130,74 @@ mod tests {
         user
     }
 
+    #[allow(dead_code)]
+    fn test_hls_share_target(hls_enabled: bool) -> ConfigTarget {
+        ConfigTarget::from(&ConfigTargetDto {
+            id: 1,
+            name: "default".to_string(),
+            options: Some(ConfigTargetOptions {
+                share_live_streams: ConfigTargetShareLiveStreams { hls: hls_enabled, mpeg_ts: false },
+                ..Default::default()
+            }),
+            output: vec![TargetOutputDto::Xtream(XtreamTargetOutputDto::default())],
+            ..Default::default()
+        })
+    }
+
+    #[allow(dead_code)]
+    fn test_hls_input() -> ConfigInput {
+        ConfigInput {
+            id: 1,
+            name: Arc::from("test-input"),
+            input_type: InputType::Xtream,
+            url: "http://origin.example.com".to_string(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            max_connections: 1,
+            enabled: true,
+            ..ConfigInput::default()
+        }
+    }
+
+    #[allow(dead_code)]
+    fn store_test_sources_with_target(app_state: &Arc<AppState>, input: ConfigInput, target: ConfigTarget) {
+        let input = Arc::new(input);
+        app_state.app_config.sources.store(Arc::new(SourcesConfig {
+            batch_files: vec![],
+            provider: vec![],
+            inputs: vec![Arc::clone(&input)],
+            sources: vec![ConfigSource {
+                inputs: vec![Arc::clone(&input.name)],
+                targets: vec![Arc::new(target)],
+            }],
+            templates: None,
+        }));
+    }
+
+    fn configure_default_test_server(app_state: &Arc<AppState>) {
+        let users = app_state
+            .app_config
+            .api_proxy
+            .load_full()
+            .as_ref()
+            .map_or_else(Vec::new, |api_proxy| api_proxy.user.clone());
+        app_state.app_config.api_proxy.store(Some(Arc::new(ApiProxyConfig {
+            server: vec![ApiProxyServerInfo {
+                name: "default".to_string(),
+                protocol: "http".to_string(),
+                host: "127.0.0.1".to_string(),
+                port: Some("8901".to_string()),
+                timezone: "UTC".to_string(),
+                message: String::new(),
+                path: None,
+            }],
+            user: users,
+            ..Default::default()
+        })));
+    }
+
     #[test]
-    fn hls_custom_video_manifest_uses_single_endlist_segment_for_non_provisioning() {
+    fn hls_custom_video_manifest_uses_twelve_endlist_segments_for_non_provisioning() {
         let user = hls_custom_video_test_user();
         let manifest = build_hls_custom_video_manifest_body(
             "https://example.test/iptv/",
@@ -5187,7 +6211,78 @@ mod tests {
         assert!(manifest.contains("#EXT-X-MEDIA-SEQUENCE:0"));
         assert!(manifest.contains("#EXT-X-ENDLIST"));
         assert!(manifest.contains("https://example.test/iptv/cvs/hls/viewer/secret/user_connections_exhausted.ts"));
-        assert_eq!(manifest.matches("#EXTINF:10.0,").count(), 1);
+        assert_eq!(manifest.matches("#EXTINF:10.0,").count(), 12);
+        assert_eq!(
+            manifest.matches("https://example.test/iptv/cvs/hls/viewer/secret/user_connections_exhausted.ts").count(),
+            12
+        );
+    }
+
+    #[test]
+    fn hls_initial_manifest_decision_wait_timeout_is_ninety_seconds() {
+        assert_eq!(super::hls_initial_manifest_decision_wait_timeout(), Duration::from_secs(90));
+    }
+
+    #[tokio::test]
+    async fn hls_manifest_channel_unavailable_redirects_to_cvs_manifest() {
+        let app_state = test_app_state();
+        enable_channel_unavailable_custom_response(&app_state);
+
+        let response = super::hls_manifest_channel_unavailable_response_for_username(&app_state, "hls-user");
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).unwrap_or("");
+        assert!(location.ends_with("/cvs/hls/hls-user/hls-pass/channel_unavailable.m3u8"));
+    }
+
+    #[tokio::test]
+    async fn hls_access_lease_channel_unavailable_flag_redirects_to_cvs_manifest() {
+        let app_state = test_app_state();
+        enable_channel_unavailable_custom_response(&app_state);
+        let flag = HlsAccessLeaseResponseFlag::ChannelUnavailable {
+            reason: HlsAccessLeaseChannelUnavailableReason::OriginAccountUnavailable,
+            set_at_ms: 1,
+        };
+
+        let response = super::hls_access_lease_response_flag_manifest_response(&app_state, "hls-user", &flag);
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).unwrap_or("");
+        assert!(location.ends_with("/cvs/hls/hls-user/hls-pass/channel_unavailable.m3u8"));
+    }
+
+    #[tokio::test]
+    async fn hls_manifest_channel_unavailable_falls_back_to_not_found_when_custom_response_is_disabled() {
+        let app_state = test_app_state();
+        disable_custom_stream_response(&app_state);
+
+        let response = super::hls_manifest_channel_unavailable_response_for_username(&app_state, "hls-user");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn hls_manifest_low_priority_preempted_redirects_to_cvs_manifest() {
+        let app_state = test_app_state();
+        enable_low_priority_preempted_custom_response(&app_state);
+
+        let response =
+            super::hls_manifest_low_priority_preempted_redirect_response_for_username(&app_state, "hls-user");
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).unwrap_or("");
+        assert!(location.ends_with("/cvs/hls/hls-user/hls-pass/low_priority_preempted.m3u8"));
+    }
+
+    #[tokio::test]
+    async fn hls_manifest_low_priority_preempted_falls_back_to_service_unavailable_without_custom_response() {
+        let app_state = test_app_state();
+        disable_custom_stream_response(&app_state);
+
+        let response =
+            super::hls_manifest_low_priority_preempted_redirect_response_for_username(&app_state, "hls-user");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
@@ -5205,7 +6300,13 @@ mod tests {
         assert!(manifest.contains(
             "https://example.test/iptv/cvs/hls/viewer/secret/hls_session_or_lease_expired.ts"
         ));
-        assert_eq!(manifest.matches("#EXTINF:10.0,").count(), 1);
+        assert_eq!(manifest.matches("#EXTINF:10.0,").count(), 12);
+        assert_eq!(
+            manifest
+                .matches("https://example.test/iptv/cvs/hls/viewer/secret/hls_session_or_lease_expired.ts")
+                .count(),
+            12
+        );
     }
 
     #[test]
@@ -5221,13 +6322,12 @@ mod tests {
 
         assert!(manifest.contains("#EXT-X-TARGETDURATION:2"));
         assert!(manifest.contains("#EXT-X-MEDIA-SEQUENCE:0"));
-        assert!(
-            manifest.contains("#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-DISCONTINUITY-SEQUENCE:0")
-        );
-        assert!(manifest.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0"));
+        assert!(manifest.contains("#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-INDEPENDENT-SEGMENTS\n"));
+        assert!(!manifest.contains("#EXT-X-DISCONTINUITY-SEQUENCE"));
         assert!(!manifest.contains("#EXT-X-SESSION-DATA"));
         assert!(!manifest.contains("#EXT-X-ENDLIST"));
-        assert_eq!(manifest.matches("#EXT-X-DISCONTINUITY\n#EXTINF:2.000000,").count(), 6);
+        assert!(!manifest.contains("#EXT-X-DISCONTINUITY\n"));
+        assert_eq!(manifest.matches("#EXTINF:2.000000,").count(), 6);
         for index in 0..6 {
             assert!(manifest
                 .contains(&format!("https://example.test/iptv/cvs/hls/viewer/secret/provisioning_{index:03}.ts")));
@@ -5313,28 +6413,28 @@ mod tests {
     fn hls_proxy_public_path_prefix_rewrites_only_proxy_hls_uri_surfaces() {
         let body = concat!(
             "#EXTM3U\n",
-            "#EXT-X-KEY:METHOD=AES-128,URI=\"/proxy/hls/live/proxy-id/r/key.key\",IV=0x1\n",
-            "#EXT-X-MAP:URI=\"/proxy/hls/live/proxy-id/map/000000.mp4\",BYTERANGE=\"10@0\"\n",
-            "#EXT-X-PART:DURATION=1.0,URI=\"/proxy/hls/live/proxy-id/r/part.m4s\"\n",
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"/hls/shared/live/proxy-id/r/key.key\",IV=0x1\n",
+            "#EXT-X-MAP:URI=\"/hls/shared/live/proxy-id/map/000000.mp4\",BYTERANGE=\"10@0\"\n",
+            "#EXT-X-PART:DURATION=1.0,URI=\"/hls/shared/live/proxy-id/r/part.m4s\"\n",
             "#EXT-X-MEDIA-SEQUENCE:7\n",
             "#EXTINF:4.0,\n",
-            "/proxy/hls/live/proxy-id/000007.ts\n",
+            "/hls/shared/live/proxy-id/000007.ts\n",
             "https://origin.example.com/not-proxy.ts\n",
         );
 
         let prefixed = super::apply_hls_proxy_public_path_prefix(body.to_string(), Some("/iptv/"));
 
-        assert!(prefixed.contains("URI=\"/iptv/proxy/hls/live/proxy-id/r/key.key\""));
-        assert!(prefixed.contains("URI=\"/iptv/proxy/hls/live/proxy-id/map/000000.mp4\""));
-        assert!(prefixed.contains("URI=\"/iptv/proxy/hls/live/proxy-id/r/part.m4s\""));
-        assert!(prefixed.contains("\n/iptv/proxy/hls/live/proxy-id/000007.ts\n"));
+        assert!(prefixed.contains("URI=\"/iptv/hls/shared/live/proxy-id/r/key.key\""));
+        assert!(prefixed.contains("URI=\"/iptv/hls/shared/live/proxy-id/map/000000.mp4\""));
+        assert!(prefixed.contains("URI=\"/iptv/hls/shared/live/proxy-id/r/part.m4s\""));
+        assert!(prefixed.contains("\n/iptv/hls/shared/live/proxy-id/000007.ts\n"));
         assert!(prefixed.contains("#EXT-X-MEDIA-SEQUENCE:7"));
         assert!(prefixed.contains("https://origin.example.com/not-proxy.ts"));
     }
 
     #[test]
     fn hls_proxy_public_path_prefix_keeps_body_unchanged_without_server_path() {
-        let body = "#EXTM3U\n#EXTINF:4.0,\n/proxy/hls/live/proxy-id/000007.ts\n".to_string();
+        let body = "#EXTM3U\n#EXTINF:4.0,\n/hls/shared/live/proxy-id/000007.ts\n".to_string();
 
         assert_eq!(super::apply_hls_proxy_public_path_prefix(body.clone(), None), body);
         assert_eq!(super::apply_hls_proxy_public_path_prefix(body.clone(), Some("/")), body);
@@ -5343,14 +6443,14 @@ mod tests {
     #[test]
     fn hls_manifest_materialization_uses_proxy_paths_without_provider_or_legacy_route() {
         let body = format!(
-            "#EXTM3U\n#EXTINF:4.0,\n/proxy/hls/live/proxy-id/{}/000123.ts\n",
+            "#EXTM3U\n#EXTINF:4.0,\n/hls/shared/live/proxy-id/{}/000123.ts\n",
             crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER
         );
         let lease_id = crate::api::model::HlsAccessLeaseId("access-lease".to_string());
 
         let materialized = super::materialize_hls_access_manifest(&body, &lease_id, Some("/iptv"));
 
-        assert!(materialized.contains("/iptv/proxy/hls/live/proxy-id/access-lease/000123.ts"));
+        assert!(materialized.contains("/iptv/hls/shared/live/proxy-id/access-lease/000123.ts"));
         assert!(!materialized.contains("provider://"));
         assert!(!materialized.contains("/hls/hls-user/"));
         assert!(!materialized.contains(crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER));
@@ -5370,14 +6470,34 @@ mod tests {
             super::resolve_hls_cache_origin_entry_url(&input, "provider://demo/live/account-a/token-a/1025130.m3u8")
                 .expect("provider entry url should resolve");
 
-        assert_eq!(origin.session_entry_url, "provider://demo/live/account-a/token-a/1025130.m3u8");
-        assert_eq!(origin.failover_provider.as_ref().expect("provider failover config").name.as_ref(), "demo");
+        assert_eq!(origin.session_entry_url.as_str(), "provider://demo/live/account-a/token-a/1025130.m3u8");
+        assert_eq!(origin.session_entry_url.url_failover_provider().expect("provider failover config").name.as_ref(), "demo");
         let provider_key = super::build_hls_origin_source(&input, "1025130").session_key();
         let direct_key = super::build_hls_origin_source(&input, "1025130").session_key();
         assert_eq!(provider_key, direct_key);
         assert_eq!(provider_key.stable_value(), "input:0|hls|1025130");
         assert!(!provider_key.stable_value().contains("provider://"));
         assert!(!provider_key.stable_value().contains("origin.example.com"));
+    }
+
+    #[test]
+    fn hls_cache_origin_entry_url_does_not_attach_url_failover_provider_to_http_url() {
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "demo".into(),
+            urls: vec!["http://origin.example.com".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
+            dns: None,
+        }));
+        let input = ConfigInput { provider_configs: Some(vec![provider]), ..ConfigInput::default() };
+
+        let origin = super::resolve_hls_cache_origin_entry_url(
+            &input,
+            "http://origin.example.com/live/account-a/token-a/1025130.m3u8",
+        )
+        .expect("http entry url should resolve");
+
+        assert_eq!(origin.session_entry_url.as_str(), "http://origin.example.com/live/account-a/token-a/1025130.m3u8");
+        assert!(origin.session_entry_url.url_failover_provider().is_none());
     }
 
     #[test]
@@ -5432,8 +6552,9 @@ mod tests {
             super::build_hls_origin_resolution(&input, "http://other.example.com/live/other/creds/1025126.m3u8")
                 .expect("xtream origin should resolve");
 
-        assert_eq!(origin.session_entry_url, "http://other.example.com/live/other/creds/1025126.m3u8");
-        assert_eq!(origin.hls_url, origin.session_entry_url);
+        assert_eq!(origin.session_entry_url.as_str(), "http://other.example.com/live/other/creds/1025126.m3u8");
+        assert_eq!(origin.hls_url, origin.session_entry_url.as_str());
+        assert!(origin.session_entry_url.url_failover_provider().is_none());
     }
 
     #[test]
@@ -5463,8 +6584,8 @@ mod tests {
         let failover_key = super::build_hls_origin_source(&input, "80510").session_key();
         let direct_key = super::build_hls_origin_source(&input, "80510").session_key();
 
-        assert_eq!(origin.session_entry_url, "provider://mirror-group/live/source-user/source-pass/1025126.m3u8");
-        assert!(origin.failover_provider.is_some());
+        assert_eq!(origin.session_entry_url.as_str(), "provider://mirror-group/live/source-user/source-pass/1025126.m3u8");
+        assert!(origin.session_entry_url.url_failover_provider().is_some());
         assert_eq!(failover_key, direct_key);
         assert!(!failover_key.stable_value().contains("provider://"));
         assert!(!failover_key.stable_value().contains("mirror-a.example.com"));
@@ -5485,7 +6606,7 @@ mod tests {
             .expect("m3u hls origin should resolve");
         let source = super::build_hls_origin_source(&input, "stable-item");
 
-        assert_eq!(origin.session_entry_url, "http://media.example.com/live/channel/index.m3u8");
+        assert_eq!(origin.session_entry_url.as_str(), "http://media.example.com/live/channel/index.m3u8");
         assert_eq!(source.source_kind, crate::api::model::HlsOriginSourceKind::M3uMediaPlaylist);
         assert_eq!(source.session_key().stable_value(), "input:9|hls|stable-item");
     }
@@ -5524,8 +6645,8 @@ mod tests {
         let key_b = super::build_hls_origin_source(&input_b, "80510").session_key();
         let secret = b"rewrite-secret";
 
-        assert!(origin_a.failover_provider.is_some());
-        assert!(origin_b.failover_provider.is_some());
+        assert!(origin_a.session_entry_url.url_failover_provider().is_some());
+        assert!(origin_b.session_entry_url.url_failover_provider().is_some());
         assert_eq!(key_a, key_b);
         assert_eq!(key_a.stable_value(), "input:7|hls|80510");
         assert_eq!(build_proxy_session_id(&key_a, secret), build_proxy_session_id(&key_b, secret));
@@ -5570,26 +6691,87 @@ mod tests {
 
         assert_eq!(fetch_url, "http://provider.example.com/live/provider-user/provider-pass/12345.m3u8");
 
+        let failover_provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "demo".into(),
+            urls: vec!["http://mirror-a.example.com".into(), "http://mirror-b.example.com".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
+            dns: None,
+        }));
         let provider_scheme_input = ConfigInput {
             name: Arc::from("source"),
             url: "provider://demo".to_string(),
             username: Some("source-user".to_string()),
             password: Some("source-pass".to_string()),
             input_type: InputType::Xtream,
+            provider_configs: Some(vec![Arc::clone(&failover_provider)]),
             ..ConfigInput::default()
         };
+        let provider_scheme_without_account_rewrite = super::build_hls_origin_fetch_url(
+            &provider_scheme_input,
+            "provider://demo/live/source-user/source-pass/12345.m3u8",
+            "provider://demo/live/source-user/source-pass/12345.m3u8",
+            None,
+        )
+        .expect("provider scheme fetch url should remain failover capable");
+        assert_eq!(
+            provider_scheme_without_account_rewrite,
+            "provider://demo/live/source-user/source-pass/12345.m3u8"
+        );
+
         let provider_scheme_fetch_url = super::build_hls_origin_fetch_url(
             &provider_scheme_input,
             "provider://demo/live/source-user/source-pass/12345.m3u8",
-            "http://resolved.example.com/live/source-user/source-pass/12345.m3u8",
+            "provider://demo/live/source-user/source-pass/12345.m3u8",
             Some(&provider),
         )
-        .expect("provider scheme fetch url should use selected runtime account");
+        .expect("provider scheme fetch url should use selected runtime account without losing failover");
 
         assert_eq!(
             provider_scheme_fetch_url,
-            "http://provider.example.com/live/provider-user/provider-pass/12345.m3u8"
+            "provider://demo/live/provider-user/provider-pass/12345.m3u8"
         );
+        let failover_context = super::hls_url_failover_provider_for_origin_context(
+            &provider_scheme_input,
+            "provider://demo/live/source-user/source-pass/12345.m3u8",
+            "provider://demo/live/source-user/source-pass/12345.m3u8",
+            &provider_scheme_fetch_url,
+        )
+        .expect("provider failover context");
+        assert_eq!(failover_context.name.as_ref(), "demo");
+    }
+
+    #[test]
+    fn hls_origin_entry_attaches_url_failover_provider_only_to_provider_scheme_fetch_url() {
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "demo".into(),
+            urls: vec!["http://mirror.example.com".into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::ResumeLastWorking,
+            dns: None,
+        }));
+
+        let http_provider = super::effective_hls_url_failover_provider_for_fetch_url(
+            "http://provider.example.com/live/user/pass/12345.m3u8",
+            None,
+            Some(Arc::clone(&provider)),
+        );
+        let http_entry = super::LiveHlsOriginEntry::parse_with_url_failover_provider(
+            "http://provider.example.com/live/user/pass/12345.m3u8",
+            http_provider,
+        )
+        .expect("http origin entry");
+        assert!(http_entry.url_failover_provider().is_none());
+
+        let provider_scheme_provider = super::effective_hls_url_failover_provider_for_fetch_url(
+            "provider://demo/live/user/pass/12345.m3u8",
+            None,
+            Some(Arc::clone(&provider)),
+        );
+        let provider_entry = super::LiveHlsOriginEntry::parse_with_url_failover_provider(
+            "provider://demo/live/user/pass/12345.m3u8",
+            provider_scheme_provider,
+        )
+        .expect("provider origin entry");
+        assert_eq!(provider_entry.url_failover_provider().expect("provider").name.as_ref(), "demo");
     }
 
     #[tokio::test]
@@ -5738,6 +6920,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hls_lifecycle_validity_timer_removes_expired_pending_access_lease() {
+        let app_state = test_app_state();
+        let now_ms = super::current_time_millis();
+        let key = HlsSessionKey::new(1, "pending-expiry-stream");
+        let (session, _) = app_state.hls_proxy.get_or_create_session_with_outcome(key, b"secret", now_ms).await;
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        let lease_id = HlsAccessLeaseId("pending-expiry-lease".to_string());
+        let active_lease_id = HlsAccessLeaseId("active-soft-lease".to_string());
+        app_state
+            .hls_proxy
+            .prepare_access_lease(HlsAccessLease::pending(
+                lease_id.clone(),
+                HlsPlaybackFamilyKey::new("hls-user", "client"),
+                proxy_session_id.clone(),
+                "hls-user".to_string(),
+                "hls-session-token".to_string(),
+                1,
+                "pending-expiry-stream".to_string(),
+                123,
+                now_ms,
+                1,
+            ))
+            .await;
+        app_state
+            .hls_proxy
+            .prepare_access_lease(
+                HlsAccessLease::pending(
+                    active_lease_id.clone(),
+                    HlsPlaybackFamilyKey::new("soft-user", "client"),
+                    proxy_session_id.clone(),
+                    "soft-user".to_string(),
+                    "soft-session-token".to_string(),
+                    1,
+                    "pending-expiry-stream".to_string(),
+                    123,
+                    now_ms,
+                    60_000,
+                )
+                .with_origin_acquire_policy(ConnectionKind::Soft, 20),
+            )
+            .await;
+        assert!(app_state
+            .hls_proxy
+            .activate_access_lease(
+                &active_lease_id,
+                &proxy_session_id,
+                now_ms,
+                HlsAccessLeaseTiming { active_window_ms: 60_000, valid_window_ms: 60_000 },
+            )
+            .await
+            .is_activated());
+
+        app_state
+            .hls_proxy
+            .handle_lifecycle_event(
+                &app_state.active_users,
+                &app_state.active_provider,
+                HlsLifecycleEvent {
+                    key: HlsLifecycleEventKey::AccessLeaseValidity {
+                        lease_id: lease_id.clone(),
+                        proxy_session_id: proxy_session_id.clone(),
+                    },
+                    due_at_ms: now_ms.saturating_add(1),
+                },
+                now_ms.saturating_add(2),
+            )
+            .await;
+
+        assert_eq!(
+            app_state.hls_proxy.access_leases().write().await.lease_state(&lease_id, now_ms.saturating_add(2)),
+            None
+        );
+        let session = session.read().await;
+        assert_eq!(session.activity.active_access_lease_count, 1);
+        let effective_policy = session.effective_origin_acquire_policy_or_default();
+        assert_eq!(effective_policy.connection_kind, ConnectionKind::Soft);
+        assert_eq!(effective_policy.priority, 20);
+    }
+
+    #[tokio::test]
     async fn hls_lifecycle_session_idle_timer_removes_idle_session() {
         let mut hls_dto = HlsCacheConfigDto { session_idle_timeout: 1, ..Default::default() };
         hls_dto.segment_repair.max_level = HlsSegmentRepairModeDto::Low;
@@ -5853,6 +7115,90 @@ mod tests {
     }
 
     fn test_app_state() -> Arc<AppState> { test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::new())) }
+
+    fn disable_custom_stream_response(app_state: &Arc<AppState>) {
+        app_state.app_config.config.store(Arc::new(Config {
+            custom_stream_response_enabled: false,
+            ..Default::default()
+        }));
+    }
+
+    fn enable_provider_exhausted_custom_response(app_state: &Arc<AppState>) {
+        let mut ts_packet = vec![0_u8; 188];
+        ts_packet[0] = 0x47;
+        app_state.app_config.custom_stream_response.store(Some(Arc::new(CustomStreamResponse {
+            channel_unavailable: None,
+            user_connections_exhausted: None,
+            provider_connections_exhausted: Some(TransportStreamBuffer::new(ts_packet)),
+            low_priority_preempted: None,
+            user_account_expired: None,
+            panel_api_provisioning: None,
+            hls_session_or_lease_expired: None,
+            panel_api_provisioning_hls_segments: Vec::new(),
+        })));
+    }
+
+    fn enable_low_priority_preempted_custom_response(app_state: &Arc<AppState>) {
+        let config = app_state.app_config.config.load();
+        app_state.app_config.config.store(Arc::new(Config {
+            custom_stream_response_enabled: true,
+            ..config.as_ref().clone()
+        }));
+        let mut ts_packet = vec![0_u8; 188];
+        ts_packet[0] = 0x47;
+        app_state.app_config.custom_stream_response.store(Some(Arc::new(CustomStreamResponse {
+            channel_unavailable: None,
+            user_connections_exhausted: None,
+            provider_connections_exhausted: None,
+            low_priority_preempted: Some(TransportStreamBuffer::new(ts_packet)),
+            user_account_expired: None,
+            panel_api_provisioning: None,
+            hls_session_or_lease_expired: None,
+            panel_api_provisioning_hls_segments: Vec::new(),
+        })));
+    }
+
+    fn enable_channel_unavailable_custom_response(app_state: &Arc<AppState>) {
+        let config = app_state.app_config.config.load();
+        app_state.app_config.config.store(Arc::new(Config {
+            custom_stream_response_enabled: true,
+            ..config.as_ref().clone()
+        }));
+        let mut ts_packet = vec![0_u8; 188];
+        ts_packet[0] = 0x47;
+        app_state.app_config.custom_stream_response.store(Some(Arc::new(CustomStreamResponse {
+            channel_unavailable: Some(TransportStreamBuffer::new(ts_packet)),
+            user_connections_exhausted: None,
+            provider_connections_exhausted: None,
+            low_priority_preempted: None,
+            user_account_expired: None,
+            panel_api_provisioning: None,
+            hls_session_or_lease_expired: None,
+            panel_api_provisioning_hls_segments: Vec::new(),
+        })));
+    }
+
+    fn enable_hls_provisioning_custom_response(app_state: &Arc<AppState>) {
+        let mut ts_packet = vec![0_u8; 188];
+        ts_packet[0] = 0x47;
+        let provisioning_segments = (0..6)
+            .map(|index| {
+                let mut packet = ts_packet.clone();
+                packet[1] = u8::try_from(index).expect("test index fits");
+                TransportStreamBuffer::new(packet)
+            })
+            .collect();
+        app_state.app_config.custom_stream_response.store(Some(Arc::new(CustomStreamResponse {
+            channel_unavailable: None,
+            user_connections_exhausted: None,
+            provider_connections_exhausted: None,
+            low_priority_preempted: None,
+            user_account_expired: None,
+            panel_api_provisioning: None,
+            hls_session_or_lease_expired: None,
+            panel_api_provisioning_hls_segments: provisioning_segments,
+        })));
+    }
 
     fn test_app_state_with_inputs(inputs: Vec<Arc<ConfigInput>>) -> Arc<AppState> {
         test_app_state_with_hls_proxy_and_inputs(Arc::new(HlsProxyManager::new()), inputs)
@@ -6150,16 +7496,29 @@ mod tests {
         let new_proxy_session_id = ProxySessionId("new-session".to_string());
 
         let hard_candidate =
-            super::find_hls_account_overlap_candidate(&app_state, &input.name, &new_proxy_session_id, 5_000).await;
+            super::find_hls_account_overlap_candidate(&app_state, &input, &new_proxy_session_id, 5_000).await;
         assert!(hard_candidate.is_none(), "hard-active sessions must not be overbooked");
 
+        let delayed_candidate =
+            super::find_hls_account_overlap_candidate(&app_state, &input, &new_proxy_session_id, 12_000).await;
+        assert!(delayed_candidate.is_none(), "soft-active candidate must respect the dynamic overlap delay");
+
         let soft_candidate =
-            super::find_hls_account_overlap_candidate(&app_state, &input.name, &new_proxy_session_id, 12_000)
+            super::find_hls_account_overlap_candidate(&app_state, &input, &new_proxy_session_id, 21_000)
                 .await
                 .expect("soft-active session can be overbooked");
         assert_eq!(soft_candidate.account_name.as_ref(), "account-a");
         assert_eq!(soft_candidate.last_media_at_ms, 1_000);
+        assert_eq!(soft_candidate.soft_overlap_eligible_at_ms, 21_000);
+        assert_eq!(soft_candidate.soft_overlap_delay_ms, 20_000);
         assert_eq!(soft_candidate.reclaim_until_ms, 31_000);
+    }
+
+    #[test]
+    fn hls_soft_overlap_delay_scales_with_tuliprox_target_pressure() {
+        assert_eq!(super::hls_soft_overlap_delay_ms(10_000, 1, 1), 20_000);
+        assert_eq!(super::hls_soft_overlap_delay_ms(10_000, 3, 2), 15_000);
+        assert_eq!(super::hls_soft_overlap_delay_ms(10_000, 4, 2), 10_000);
     }
 
     #[tokio::test]
@@ -6185,6 +7544,14 @@ mod tests {
 
         super::reclaim_hls_account_overlap_if_needed(&app_state, &winner, 10_000).await;
 
+        assert!(app_state
+            .hls_proxy
+            .is_account_overlap_cooling_down(&input.name, &Arc::from("account-a"), 10_000)
+            .await);
+        assert!(!app_state
+            .hls_proxy
+            .is_account_overlap_cooling_down(&input.name, &Arc::from("account-a"), 25_000)
+            .await);
         let loser_binding_mode = loser.read().await.origin_account_binding.as_ref().unwrap().binding_mode.clone();
         assert!(matches!(
             loser_binding_mode,
@@ -6274,11 +7641,11 @@ mod tests {
         .await
         .expect("authorized origin work can reacquire a detached binding");
 
-        let binding = prepared_origin.binding_to_store.as_ref().expect("new binding should be stored by caller");
+        let binding = prepared_origin.origin_account_binding_to_store.as_ref().expect("new binding should be stored by caller");
         assert_eq!(binding.account_name.as_ref(), "account-a");
         assert!(matches!(binding.binding_mode, HlsOriginAccountBindingMode::Active));
         assert_eq!(prepared_origin.fetch_url, "http://account.example.com/live/account-user/account-pass/12345.m3u8");
-        app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_provider_handle).await;
+        app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle).await;
     }
 
     #[tokio::test]
@@ -6312,12 +7679,12 @@ mod tests {
             0,
             super::HlsOriginWorkKind::Manifest,
             super::HlsOriginWorkClass::ManifestInteractive,
-            12_000,
+            21_000,
         )
         .await
         .expect("interactive work should use soft-active overlap before grace");
 
-        let binding = prepared_origin.binding_to_store.as_ref().expect("speculative binding should be prepared");
+        let binding = prepared_origin.origin_account_binding_to_store.as_ref().expect("speculative binding should be prepared");
         assert_eq!(binding.account_name, input.name);
         assert!(matches!(
             &binding.binding_mode,
@@ -6327,11 +7694,124 @@ mod tests {
             } if displaced_proxy_session_id == &old_proxy_session_id
         ));
         assert!(matches!(
-            prepared_origin.preacquired_provider_handle.as_ref().map(|handle| &handle.allocation),
+            prepared_origin.preacquired_origin_account_handle.as_ref().map(|handle| &handle.allocation),
             Some(super::ProviderAllocation::Available(_))
         ));
 
-        app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_provider_handle).await;
+        app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle).await;
+    }
+
+    #[tokio::test]
+    async fn hls_origin_runtime_normal_policy_preempts_active_soft_hls_binding() {
+        let input = single_hls_provider_input("policy-preempt-input");
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        let soft_session = create_bound_hls_test_session(&app_state, &input, "soft", input.name.as_ref(), 1_000).await;
+        let soft_generation = {
+            let mut session = soft_session.write().await;
+            session.target_duration = Some(10);
+            session.mark_authorized_media_access(10_000);
+            session.reconcile_effective_origin_acquire_policy(
+                Some(HlsEffectiveOriginAcquirePolicy::new(ConnectionKind::Soft, 0, 10_000)),
+                10_000,
+            );
+            session.activity.origin_work_generation
+        };
+        let soft_binding = soft_session.read().await.origin_account_binding.clone().expect("soft binding exists");
+        app_state
+            .active_provider
+            .refresh_provider_reservation(&soft_binding.account_name, &soft_binding.session_owner, 60)
+            .await;
+
+        let normal_session = create_unbound_hls_test_session(&app_state, &input, "normal", 10_500).await;
+        let normal_proxy_session_id = normal_session.read().await.proxy_session_id.clone();
+        let prepared_origin = super::prepare_hls_origin_runtime(
+            &app_state,
+            &normal_session,
+            &input,
+            "http://account.example.com/live/account-user/account-pass/normal.m3u8",
+            "http://account.example.com/live/account-user/account-pass/normal.m3u8",
+            &normal_proxy_session_id,
+            &test_fingerprint_with_addr(test_addr_with_port(55231)),
+            ConnectionKind::Normal,
+            0,
+            super::HlsOriginWorkKind::Manifest,
+            super::HlsOriginWorkClass::ManifestInteractive,
+            10_500,
+        )
+        .await
+        .expect("normal HLS policy should preempt active soft HLS binding");
+
+        let new_binding = prepared_origin
+            .origin_account_binding_to_store
+            .as_ref()
+            .expect("preempting session should receive active binding");
+        assert_eq!(new_binding.account_name, input.name);
+        assert!(matches!(new_binding.binding_mode, HlsOriginAccountBindingMode::Active));
+        assert!(matches!(
+            prepared_origin.preacquired_origin_account_handle.as_ref().map(|handle| &handle.allocation),
+            Some(super::ProviderAllocation::Available(_))
+        ));
+        let soft_session = soft_session.read().await;
+        assert_eq!(soft_session.activity.origin_work_generation, soft_generation + 1);
+        assert!(matches!(
+            soft_session.origin_account_binding.as_ref().map(|binding| &binding.binding_mode),
+            Some(HlsOriginAccountBindingMode::Detached {
+                reason: HlsOriginAccountDetachedReason::PreemptedByHigherPriority,
+                ..
+            })
+        ));
+        drop(soft_session);
+
+        app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle).await;
+    }
+
+    #[tokio::test]
+    async fn hls_origin_policy_preemption_rejects_soft_request_against_active_normal_binding() {
+        let input = single_hls_provider_input("policy-no-preempt-input");
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        let normal_session = create_bound_hls_test_session(&app_state, &input, "normal", input.name.as_ref(), 1_000).await;
+        {
+            let mut session = normal_session.write().await;
+            session.target_duration = Some(10);
+            session.mark_authorized_media_access(10_000);
+            session.reconcile_effective_origin_acquire_policy(
+                Some(HlsEffectiveOriginAcquirePolicy::new(ConnectionKind::Normal, 0, 10_000)),
+                10_000,
+            );
+        }
+        let normal_binding = normal_session.read().await.origin_account_binding.clone().expect("normal binding exists");
+        app_state
+            .active_provider
+            .refresh_provider_reservation(&normal_binding.account_name, &normal_binding.session_owner, 60)
+            .await;
+        let soft_session = create_unbound_hls_test_session(&app_state, &input, "soft", 10_500).await;
+        let soft_proxy_session_id = soft_session.read().await.proxy_session_id.clone();
+
+        let result = super::prepare_hls_origin_policy_preempt_runtime(
+            &app_state,
+            &soft_session,
+            &input,
+            "http://account.example.com/live/account-user/account-pass/soft.m3u8",
+            "http://account.example.com/live/account-user/account-pass/soft.m3u8",
+            &soft_proxy_session_id,
+            &test_fingerprint_with_addr(test_addr_with_port(55232)),
+            ConnectionKind::Soft,
+            -100,
+            10_500,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            normal_session.read().await.origin_account_binding.as_ref().map(|binding| &binding.binding_mode),
+            Some(HlsOriginAccountBindingMode::Active)
+        ));
+        assert!(
+            app_state
+                .active_provider
+                .is_provider_reserved_for_other_session(&normal_binding.account_name, Some("unrelated-session"))
+                .await
+        );
     }
 
     #[tokio::test]
@@ -6371,12 +7851,12 @@ mod tests {
         .expect("interactive work can use grace when normal acquire and overlap fail");
 
         assert!(matches!(
-            prepared_origin.preacquired_provider_handle.as_ref().map(|handle| &handle.allocation),
+            prepared_origin.preacquired_origin_account_handle.as_ref().map(|handle| &handle.allocation),
             Some(super::ProviderAllocation::GracePeriod(_))
         ));
         assert_eq!(
             prepared_origin
-                .binding_to_store
+                .origin_account_binding_to_store
                 .as_ref()
                 .expect("grace binding should still bind the selected account")
                 .account_name
@@ -6384,8 +7864,266 @@ mod tests {
             input.name.as_ref()
         );
 
-        app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_provider_handle).await;
+        app_state.connection_manager.release_provider_handle(prepared_origin.preacquired_origin_account_handle).await;
         app_state.connection_manager.release_provider_handle(Some(occupied)).await;
+    }
+
+    #[tokio::test]
+    async fn hls_provider_exhausted_without_provisioning_returns_custom_manifest() {
+        let input = single_hls_provider_input("provider-exhausted-input");
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        store_test_sources_with_target(
+            &app_state,
+            input.clone(),
+            ConfigTarget::from(&ConfigTargetDto { id: 1, name: "default".to_string(), ..Default::default() }),
+        );
+        enable_provider_exhausted_custom_response(&app_state);
+        let session = create_unbound_hls_test_session(&app_state, &input, "provider-exhausted-session", 1_000).await;
+        let access_lease_id = HlsAccessLeaseId("provider-exhausted-lease".to_string());
+        let strip = app_state.hls_proxy.strip();
+
+        let response = super::hls_shared_provisioning_or_provider_exhausted_response(
+            &app_state,
+            &session,
+            "hls-user",
+            &input,
+            59,
+            &access_lease_id,
+            HlsAccessLeaseState::Activated,
+            &strip,
+            None,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_body(response).await;
+        let manifest = String::from_utf8(body.to_vec()).expect("manifest is utf8");
+        assert!(manifest.contains("#EXTM3U"));
+        assert!(manifest.contains("/cvs/hls/hls-user/hls-pass/provider_connections_exhausted.ts"));
+    }
+
+    #[tokio::test]
+    async fn hls_provider_exhausted_grace_hold_waits_for_grace_period_before_retry() {
+        let input = single_hls_provider_input("provider-grace-hold-input");
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        app_state.app_config.config.store(Arc::new(Config {
+            reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
+                stream: Some(StreamConfigDto {
+                    grace_period_millis: 20,
+                    grace_period_timeout_secs: 10,
+                    grace_period_hold_stream: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }));
+        let session = create_unbound_hls_test_session(&app_state, &input, "provider-grace-session", 1_000).await;
+        let access_lease_id = HlsAccessLeaseId("provider-grace-lease".to_string());
+        let strip = app_state.hls_proxy.strip();
+        let resolution = super::hls_provider_connections_exhausted_manifest_resolution(
+            &app_state,
+            &session,
+            "hls-user",
+            &input,
+            59,
+            &access_lease_id,
+            HlsAccessLeaseState::Activated,
+            &strip,
+            None,
+            true,
+        );
+
+        let resolution = tokio::time::timeout(Duration::from_millis(500), resolution)
+            .await
+            .expect("grace hold deadline should wake");
+
+        assert!(matches!(resolution, super::HlsProviderExhaustedResolution::RetryAcquire));
+    }
+
+    #[tokio::test]
+    async fn shared_provisioning_timeline_manifest_uses_canonical_hls_session_segments() {
+        let input = single_hls_provider_input("shared-provisioning-timeline-input");
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        enable_hls_provisioning_custom_response(&app_state);
+        let session = create_unbound_hls_test_session(&app_state, &input, "12345", 1_000).await;
+        let access_lease_id = HlsAccessLeaseId("timeline-lease".to_string());
+        let strip = app_state.hls_proxy.strip();
+
+        let response = super::hls_shared_provisioning_timeline_manifest_response(
+            &app_state,
+            &session,
+            &access_lease_id,
+            HlsAccessLeaseState::Activated,
+            &strip,
+            None,
+        )
+        .await
+        .expect("provisioning manifest should render");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = String::from_utf8(response_body(response).await.to_vec()).expect("manifest is utf8");
+        assert!(body.contains("#EXT-X-VERSION:7\n"));
+        assert!(body.contains("#EXT-X-INDEPENDENT-SEGMENTS\n"));
+        assert!(body.contains("#EXT-X-TARGETDURATION:2\n"));
+        assert!(body.contains("#EXT-X-MEDIA-SEQUENCE:0\n"));
+        assert!(body.contains("#EXTINF:2.000,\n"));
+        assert!(!body.contains("#EXTINF:12.000,\n"));
+        assert!(body.contains("/hls/shared/live/"));
+        assert!(body.contains("/000000.ts?pseq=0"));
+        assert!(body.contains("/000001.ts?pseq=1"));
+        assert!(body.contains("/000002.ts?pseq=2"));
+        assert!(body.matches("#EXTINF:").count() <= 6);
+        assert!(!body.contains("/cvs/hls/"));
+        {
+            let session = session.read().await;
+            assert_eq!(session.proxy_next_seq, Some(3));
+            assert_eq!(session.publishable_origin_head_proxy_seq, Some(0));
+            assert_eq!(session.publishable_origin_tail_proxy_seq, Some(2));
+            assert_eq!(session.segments.len(), 3);
+        }
+
+        let response = super::hls_shared_provisioning_timeline_manifest_response(
+            &app_state,
+            &session,
+            &access_lease_id,
+            HlsAccessLeaseState::Activated,
+            &strip,
+            None,
+        )
+        .await
+        .expect("subsequent manifest should append one segment");
+        let body = String::from_utf8(response_body(response).await.to_vec()).expect("manifest is utf8");
+        assert!(body.contains("/000003.ts?pseq=3"));
+        assert!(body.matches("#EXTINF:").count() <= 6);
+        assert_eq!(session.read().await.proxy_next_seq, Some(4));
+    }
+
+    #[tokio::test]
+    async fn stale_provisioning_segments_do_not_trigger_canonical_handoff() {
+        let input = single_hls_provider_input("stale-provisioning-handoff-input");
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        enable_hls_provisioning_custom_response(&app_state);
+        let session = create_unbound_hls_test_session(&app_state, &input, "12345", 1_000).await;
+        let initial_lease_id = HlsAccessLeaseId("initial-provisioning-lease".to_string());
+        let strip = app_state.hls_proxy.strip();
+
+        super::hls_shared_provisioning_timeline_manifest_response(
+            &app_state,
+            &session,
+            &initial_lease_id,
+            HlsAccessLeaseState::Activated,
+            &strip,
+            None,
+        )
+        .await
+        .expect("provisioning manifest should render local segments");
+        {
+            let session_guard = session.read().await;
+            assert!(session_guard
+                .segments
+                .values()
+                .any(crate::api::model::is_hls_provisioning_segment));
+            assert_eq!(session_guard.segments.len(), 3);
+            assert_eq!(session_guard.pending_handoff_discontinuity_sequence, None);
+        }
+
+        let new_lease_id = HlsAccessLeaseId("new-playback-lease".to_string());
+        let previous_rendered_at = super::maybe_mark_hls_provisioning_handoff_for_canonical_manifest(
+            &app_state,
+            &session,
+            &input,
+            12345,
+            &new_lease_id,
+            2_000,
+        )
+        .await;
+
+        assert_eq!(previous_rendered_at, None);
+        let session_guard = session.read().await;
+        assert_eq!(session_guard.segments.len(), 3);
+        assert_eq!(session_guard.pending_handoff_discontinuity_sequence, None);
+    }
+
+    #[tokio::test]
+    async fn shared_provisioning_handoff_continues_proxy_sequence_for_origin_segments() {
+        let input = single_hls_provider_input("shared-provisioning-handoff-input");
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        enable_hls_provisioning_custom_response(&app_state);
+        let session = create_unbound_hls_test_session(&app_state, &input, "12345", 1_000).await;
+        let access_lease_id = HlsAccessLeaseId("handoff-lease".to_string());
+        let strip = app_state.hls_proxy.strip();
+        super::hls_shared_provisioning_timeline_manifest_response(
+            &app_state,
+            &session,
+            &access_lease_id,
+            HlsAccessLeaseState::Activated,
+            &strip,
+            None,
+        )
+        .await
+        .expect("provisioning manifest should render");
+
+        let manifest = match parse_origin_media_manifest(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:4025\n#EXTINF:4.0,\n4025.ts\n#EXTINF:4.0,\n4026.ts\n#EXTINF:4.0,\n4027.ts\n",
+            "http://origin.example/live/stream.m3u8",
+        ) {
+            OriginManifestParseOutcome::Normal(manifest) => manifest,
+            OriginManifestParseOutcome::TransientPassthrough { reason } => {
+                panic!("expected normal manifest: {reason:?}")
+            }
+        };
+        let rendered = {
+            let mut session_guard = session.write().await;
+            session_guard.mark_pending_handoff_discontinuity(0);
+            drop(session_guard);
+            assert!(
+                super::ensure_shared_hls_provisioning_handoff_gap(&app_state, &session, 2_000).await,
+                "handoff should append one gap segment"
+            );
+            let mut session_guard = session.write().await;
+            session_guard.apply_origin_manifest(&manifest).expect("origin manifest should map");
+            for proxy_seq in 4..=6 {
+                session_guard.segments.get_mut(&proxy_seq).expect("origin segment").status =
+                    SegmentCacheStatus::Ready { content_length: 1024, ready_at_ms: 2_000 };
+            }
+            session_guard.render_and_store_manifest(2_000).expect("handoff manifest should render")
+        };
+
+        assert!(rendered.body.contains("#EXT-X-MEDIA-SEQUENCE:1\n"));
+        assert!(rendered.body.contains("#EXT-X-TARGETDURATION:4\n"));
+        assert!(rendered.body.contains("/000002.ts?pseq=2"));
+        assert!(rendered.body.contains("/000004.ts"));
+        assert!(rendered.body.contains("/000005.ts"));
+        assert!(rendered.body.contains("/000006.ts"));
+        assert!(!rendered.body.contains("/004025.ts"));
+        let provisioning_tail = rendered.body.find("/000002.ts?pseq=2").expect("provisioning tail is rendered");
+        let gap_tag = rendered.body.find("#EXT-X-GAP\n").expect("handoff gap tag is rendered");
+        let gap_uri = rendered.body.find("/000003.ts?pseq=3").expect("handoff gap uri is rendered");
+        let discontinuity = rendered
+            .body
+            .find("#EXT-X-DISCONTINUITY\n#EXTINF:4.000,\n/hls/shared/live/")
+            .expect("origin handoff discontinuity is rendered");
+        let first_origin = rendered.body.find("/000004.ts").expect("first origin segment is rendered");
+        assert!(provisioning_tail < gap_tag);
+        assert!(gap_tag < gap_uri);
+        assert!(gap_uri < discontinuity);
+        assert!(discontinuity < first_origin);
+    }
+
+    #[tokio::test]
+    async fn shared_cvs_provisioning_manifest_route_is_not_accepted() {
+        let app_state = test_app_state();
+        let response = super::hls_shared_panel_provisioning_poll_manifest_response(
+            &app_state,
+            &test_fingerprint(),
+            "shared-session",
+            "access-lease",
+            59,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -6422,13 +8160,52 @@ mod tests {
         )
         .await;
 
-        assert_eq!(result.err(), Some(super::HlsOriginRuntimeAcquireError::NoAccountAvailable));
+        assert_eq!(
+            result.err(),
+            Some(super::HlsOriginRuntimeAcquireError::NoAccountAvailable {
+                reason: super::HlsOriginRuntimeNoAccountReason::ProviderConnectionsExhausted
+            })
+        );
         let old_session = old_session.read().await;
         assert!(matches!(
             old_session.origin_account_binding.as_ref().expect("old binding remains").binding_mode,
             HlsOriginAccountBindingMode::Active
         ));
         assert!(new_session.read().await.origin_account_binding.is_none());
+    }
+
+    #[test]
+    fn hls_detached_origin_binding_reclaimed_by_owner_maps_to_preempted_no_account_reason() {
+        let proxy_session_id = ProxySessionId("preempted-session".to_string());
+        let mut binding = HlsOriginAccountBinding::new(
+            Arc::from("input-a"),
+            Arc::from("account-a"),
+            &proxy_session_id,
+            1_000,
+        );
+        binding.detach(HlsOriginAccountDetachedReason::ReclaimedByOriginalOwner, 2_000);
+
+        assert_eq!(
+            super::hls_no_account_reason_for_binding(Some(&binding)),
+            super::HlsOriginRuntimeNoAccountReason::OriginBindingPreempted
+        );
+    }
+
+    #[test]
+    fn hls_detached_origin_binding_soft_window_elapsed_maps_to_exhausted_no_account_reason() {
+        let proxy_session_id = ProxySessionId("soft-window-session".to_string());
+        let mut binding = HlsOriginAccountBinding::new(
+            Arc::from("input-a"),
+            Arc::from("account-a"),
+            &proxy_session_id,
+            1_000,
+        );
+        binding.detach(HlsOriginAccountDetachedReason::SoftWindowElapsed, 2_000);
+
+        assert_eq!(
+            super::hls_no_account_reason_for_binding(Some(&binding)),
+            super::HlsOriginRuntimeNoAccountReason::ProviderConnectionsExhausted
+        );
     }
 
     #[tokio::test]
@@ -6454,7 +8231,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hls_ready_cache_hit_does_not_require_origin_reacquire_when_binding_is_detached() {
+        async fn hls_hard_manifest_failure_forces_next_fresh_commit() {
+            let session = Arc::new(RwLock::new(HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0)));
+            {
+                let mut session = session.write().await;
+            session.last_rendered_manifest = Some(RenderedManifest {
+                body: "#EXTM3U\n#EXTINF:4.0,\n000001.ts\n".to_string(),
+                first_proxy_seq: 1,
+                last_proxy_seq: 1,
+                playlist_duration_ms: 4_000,
+                valid_until_ms: 5_000,
+                render_gap_segments: 0,
+                rendered_at_ms: 1_000,
+                segment_proxy_seqs: vec![1],
+            });
+            session.require_fresh_manifest_commit(HlsFreshManifestRequiredReason::PreviousHardManifestFailure);
+        }
+
+        assert_eq!(
+            super::hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, 2_000).await,
+            HlsManifestCommitRequirement::FreshCommitRequired {
+                reason: HlsFreshManifestRequiredReason::PreviousHardManifestFailure
+            }
+            );
+        }
+
+        #[tokio::test]
+        async fn hls_normal_expired_session_allows_committed_manifest_while_manifest_valid() {
+            let now_ms = 100_000;
+            let session = Arc::new(RwLock::new(HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0)));
+            {
+                let mut session = session.write().await;
+                let proxy_session_id = session.proxy_session_id.clone();
+                session.target_duration = Some(10);
+                session.mark_authorized_media_access(1_000);
+                session.origin_account_binding = Some(HlsOriginAccountBinding::new(
+                    Arc::from("test-input"),
+                    Arc::from("test-account"),
+                    &proxy_session_id,
+                    now_ms,
+                ));
+                session.last_rendered_manifest = Some(RenderedManifest {
+                    body: "#EXTM3U\n#EXTINF:4.0,\n000001.ts\n".to_string(),
+                    first_proxy_seq: 1,
+                    last_proxy_seq: 1,
+                    playlist_duration_ms: 4_000,
+                    valid_until_ms: now_ms.saturating_add(10_000),
+                    render_gap_segments: 0,
+                    rendered_at_ms: now_ms.saturating_sub(1_000),
+                    segment_proxy_seqs: vec![1],
+                });
+            }
+
+            assert_eq!(
+                super::hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, now_ms).await,
+                HlsManifestCommitRequirement::CommittedManifestAllowed
+            );
+        }
+
+        #[tokio::test]
+        async fn hls_normal_expired_session_requires_fresh_commit_after_manifest_validity() {
+            let now_ms = 100_000;
+            let session = Arc::new(RwLock::new(HlsSession::new(HlsSessionKey::new(1, "12345"), b"secret", 0)));
+            {
+                let mut session = session.write().await;
+                let proxy_session_id = session.proxy_session_id.clone();
+                session.target_duration = Some(10);
+                session.mark_authorized_media_access(1_000);
+                session.origin_account_binding = Some(HlsOriginAccountBinding::new(
+                    Arc::from("test-input"),
+                    Arc::from("test-account"),
+                    &proxy_session_id,
+                    now_ms,
+                ));
+                session.last_rendered_manifest = Some(RenderedManifest {
+                    body: "#EXTM3U\n#EXTINF:4.0,\n000001.ts\n".to_string(),
+                    first_proxy_seq: 1,
+                    last_proxy_seq: 1,
+                    playlist_duration_ms: 4_000,
+                    valid_until_ms: now_ms.saturating_sub(1),
+                    render_gap_segments: 0,
+                    rendered_at_ms: now_ms.saturating_sub(10_000),
+                    segment_proxy_seqs: vec![1],
+                });
+            }
+
+            assert_eq!(
+                super::hls_manifest_commit_requirement(&session, HlsSessionStoreOutcome::Reused, None, now_ms).await,
+                HlsManifestCommitRequirement::FreshCommitRequired {
+                    reason: HlsFreshManifestRequiredReason::ExpiredRevalidation
+                }
+            );
+        }
+
+        #[tokio::test]
+        async fn hls_ready_cache_hit_does_not_require_origin_reacquire_when_binding_is_detached() {
         let app_state = test_app_state();
         let input = ConfigInput { id: 1, name: Arc::from("overlap-input"), ..ConfigInput::default() };
         let session = create_bound_hls_test_session(&app_state, &input, "12345", "account-a", 1_000).await;
@@ -6473,7 +8344,7 @@ mod tests {
                     proxy_seq: 123,
                     duration_ms: 4_000,
                     proxy_file_ext: "ts".to_string(),
-                    content_type: "video/MP2T".to_string(),
+                    content_type: "video/mp2t".to_string(),
                     cache_key: SegmentCacheKey::new(proxy_session_id, 123, "ts"),
                     discontinuity_before: false,
                     program_date_time: None,
@@ -6589,7 +8460,7 @@ mod tests {
             proxy_seq,
             duration_ms: 4_000,
             proxy_file_ext: "ts".to_string(),
-            content_type: "video/MP2T".to_string(),
+            content_type: "video/mp2t".to_string(),
             cache_key: SegmentCacheKey::new(proxy_session_id.clone(), proxy_seq, "ts"),
             discontinuity_before: false,
             program_date_time: None,
@@ -6942,14 +8813,12 @@ mod tests {
             HlsAccessLeaseState::Pending,
             super::HlsCacheManifestOrigin {
                 raw_request_url: &request_url,
-                session_entry_url: &request_url,
+                session_entry_url: super::HlsOriginEntryUrl::direct_http(&request_url),
                 input: &input,
                 origin_source,
-                failover_provider: None,
             },
             HeaderMap::new(),
-            60,
-            None,
+                        None,
             "/live/hls-user/hls-pass/12345.m3u8",
         )
         .await
@@ -6957,8 +8826,8 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = String::from_utf8(response_body(response).await.to_vec()).expect("manifest should be utf8");
-        assert!(body.contains("#EXT-X-MEDIA-SEQUENCE:123"));
-        assert!(body.contains(&format!("/proxy/hls/live/{}/{}/000123.ts", proxy_session_id.0, access_lease_id.0)));
+        assert!(body.contains("#EXT-X-MEDIA-SEQUENCE:0"));
+        assert!(body.contains(&format!("/hls/shared/live/{}/{}/000000.ts", proxy_session_id.0, access_lease_id.0)));
         assert!(!body.contains(crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER));
         let session = app_state
             .hls_proxy
@@ -7014,14 +8883,12 @@ mod tests {
             HlsAccessLeaseState::Pending,
             super::HlsCacheManifestOrigin {
                 raw_request_url: &request_url,
-                session_entry_url: &request_url,
+                session_entry_url: super::HlsOriginEntryUrl::direct_http(&request_url),
                 input: &input,
                 origin_source,
-                failover_provider: None,
             },
             HeaderMap::new(),
-            60,
-            None,
+                        None,
             "/live/hls-user/hls-pass/12345.m3u8",
         )
         .await
@@ -7071,14 +8938,12 @@ mod tests {
             HlsAccessLeaseState::Activated,
             super::HlsCacheManifestOrigin {
                 raw_request_url: &request_url,
-                session_entry_url: &request_url,
+                session_entry_url: super::HlsOriginEntryUrl::direct_http(&request_url),
                 input: &input,
                 origin_source,
-                failover_provider: None,
             },
             HeaderMap::new(),
-            60,
-            None,
+                        None,
             "/live/hls-user/hls-pass/12345.m3u8",
         )
         .await
@@ -7125,14 +8990,12 @@ mod tests {
             HlsAccessLeaseState::Pending,
             super::HlsCacheManifestOrigin {
                 raw_request_url: &request_url,
-                session_entry_url: &request_url,
+                session_entry_url: super::HlsOriginEntryUrl::direct_http(&request_url),
                 input: &input,
                 origin_source,
-                failover_provider: None,
             },
             HeaderMap::new(),
-            60,
-            None,
+                        None,
             "/m3u-stream/live/hls-user/hls-pass/12345.m3u8",
         )
         .await
@@ -7153,20 +9016,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hls_cache_manifest_cold_start_unreachable_origin_returns_service_unavailable() {
-        let hls_dto = HlsCacheConfigDto { origin_manifest_timeout_ms: 1, ..Default::default() };
-        let hls_config = HlsCacheConfig::from(&hls_dto);
-        let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)));
-        enable_hls_cache(&app_state);
-        create_active_hls_user_session(&app_state).await;
+    async fn hls_cache_manifest_cold_start_unreachable_origin_redirects_to_channel_unavailable_custom_response() {
         let input_name = Arc::<str>::from("test-input");
-        let input = ConfigInput { id: 1, name: Arc::clone(&input_name), ..ConfigInput::default() };
-        let request_url = "http://127.0.0.1:9/live/user/pass/12345.m3u8";
+        let origin = spawn_test_status_origin(StatusCode::NOT_FOUND, b"missing").await;
+        let input = ConfigInput {
+            id: 1,
+            name: Arc::clone(&input_name),
+            input_type: InputType::Xtream,
+            url: origin.base_url.clone(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            max_connections: 1,
+            enabled: true,
+            ..ConfigInput::default()
+        };
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        enable_hls_cache(&app_state);
+        enable_channel_unavailable_custom_response(&app_state);
+        create_active_hls_user_session(&app_state).await;
+        let request_url = format!("{}/live/user/pass/12345.m3u8", origin.base_url);
         let origin_source = super::build_hls_origin_source(&input, "12345");
         let session_key = origin_source.session_key();
         let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
         let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
         let access_context = test_hls_access_context(proxy_session_id.clone(), access_lease_id.clone());
+        prepare_pending_test_hls_access_lease(&app_state, &proxy_session_id, &access_lease_id).await;
 
         let response = super::try_hls_cache_canonical_manifest_response(
             &app_state,
@@ -7176,22 +9050,49 @@ mod tests {
             &access_lease_id,
             HlsAccessLeaseState::Pending,
             super::HlsCacheManifestOrigin {
-                raw_request_url: request_url,
-                session_entry_url: request_url,
+                raw_request_url: request_url.as_str(),
+                session_entry_url: super::HlsOriginEntryUrl::direct_http(request_url.as_str()),
                 input: &input,
                 origin_source,
-                failover_provider: None,
             },
             HeaderMap::new(),
-            60,
             None,
             "/live/hls-user/hls-pass/12345.m3u8",
         )
         .await
         .expect("hls cache should handle valid live hls entrypoint");
 
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response.headers().get(header::RETRY_AFTER).expect("retry after"), "2");
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert!(
+            response.headers().get(header::RETRY_AFTER).is_none(),
+            "custom response must not expose retry-after"
+        );
+        let location = response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).unwrap_or("");
+        assert!(location.ends_with("/cvs/hls/hls-user/hls-pass/channel_unavailable.m3u8"));
+
+        let mut marked = false;
+        for _ in 0..50 {
+            let snapshot = app_state
+                .hls_proxy
+                .access_lease_response_snapshot(&access_lease_id, &proxy_session_id, super::current_time_millis())
+                .await;
+            if snapshot.is_some_and(|lease| {
+                matches!(
+                    lease.response_flag,
+                    Some(HlsAccessLeaseResponseFlag::ChannelUnavailable {
+                        reason: HlsAccessLeaseChannelUnavailableReason::ManifestCommitFailed {
+                            reason: HlsFreshManifestRequiredReason::ColdStart
+                        },
+                        ..
+                    })
+                )
+            }) {
+                marked = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(marked, "cold-start manifest failure should mark the access lease channel unavailable");
     }
 
     #[tokio::test]
@@ -7241,14 +9142,12 @@ mod tests {
                 HlsAccessLeaseState::Pending,
                 super::HlsCacheManifestOrigin {
                     raw_request_url: &request_url,
-                    session_entry_url: &request_url,
+                    session_entry_url: super::HlsOriginEntryUrl::direct_http(&request_url),
                     input: &input,
                     origin_source,
-                    failover_provider: None,
                 },
                 HeaderMap::new(),
-                60,
-                None,
+                                None,
                 "/live/hls-user/hls-pass/12345.m3u8",
             )
             .await
@@ -7307,14 +9206,12 @@ mod tests {
             HlsAccessLeaseState::Pending,
             super::HlsCacheManifestOrigin {
                 raw_request_url: request_url,
-                session_entry_url: request_url,
+                session_entry_url: super::HlsOriginEntryUrl::direct_http(request_url),
                 input: &input,
                 origin_source,
-                failover_provider: None,
             },
             HeaderMap::new(),
-            60,
-            None,
+                        None,
             "/live/hls-user/hls-pass/12345.m3u8",
         )
         .await
@@ -7364,14 +9261,12 @@ mod tests {
             HlsAccessLeaseState::Pending,
             super::HlsCacheManifestOrigin {
                 raw_request_url: request_url,
-                session_entry_url: request_url,
+                session_entry_url: super::HlsOriginEntryUrl::direct_http(request_url),
                 input: &input,
                 origin_source,
-                failover_provider: None,
             },
             HeaderMap::new(),
-            60,
-            None,
+                        None,
             "/live/hls-user/hls-pass/12345.m3u8",
         )
         .await
@@ -7410,7 +9305,7 @@ mod tests {
             request_url,
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             Some("/iptv"),
         )
         .await
@@ -7420,7 +9315,7 @@ mod tests {
         assert_eq!(response.headers().get(header::CACHE_CONTROL).expect("cache control"), "no-store");
         let location =
             response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).expect("location header");
-        assert!(location.starts_with("/iptv/proxy/hls/live/"));
+        assert!(location.starts_with("/iptv/hls/shared/live/"));
         assert!(location.ends_with("/manifest.m3u8"));
         let access_lease_id =
             location.trim_end_matches("/manifest.m3u8").rsplit('/').next().expect("access lease id in redirect");
@@ -7428,6 +9323,245 @@ mod tests {
         assert!(app_state.hls_proxy.sessions().get_by_key(&session_key).await.is_none());
         assert_eq!(app_state.hls_proxy.metrics().snapshot().refresh_started, 0);
         assert!(app_state.active_users.active_streams().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hls_cache_entry_denies_access_lease_when_grace_has_no_origin_slot() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        let user = app_state.app_config.get_user_credentials("hls-user").expect("test user should exist");
+        let input = ConfigInput { id: 1, name: Arc::from("test-input"), ..Default::default() };
+        let request_url = "http://origin.example.com/live/user/pass/12345.m3u8";
+        let origin_source = super::build_hls_origin_source(&input, "12345");
+
+        let response = super::try_hls_cache_entry_redirect(
+            &app_state,
+            &test_fingerprint(),
+            &user,
+            origin_source,
+            12345,
+            None,
+            request_url,
+            &input,
+            UserConnectionPermission::GracePeriod,
+            None,
+            Some("/iptv"),
+        )
+        .await
+        .expect("hls cache entry should redirect to canonical denied lease");
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location =
+            response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).expect("location header");
+        let proxy_session_id = ProxySessionId(proxy_session_id_from_redirect_location(location).to_string());
+        let access_lease_id = HlsAccessLeaseId(access_lease_id_from_redirect_location(location).to_string());
+        let now_ms = super::current_time_millis();
+        let snapshot = app_state
+            .hls_proxy
+            .access_lease_response_snapshot(&access_lease_id, &proxy_session_id, now_ms)
+            .await
+            .expect("denied lease should stay available for response rendering");
+        assert_eq!(snapshot.state, HlsAccessLeaseState::Denied);
+        assert!(app_state
+            .hls_proxy
+            .access_lease_session_snapshot(&proxy_session_id, now_ms)
+            .await
+            .effective_origin_policy
+            .is_none());
+
+        let err = super::validate_hls_proxy_access_context(
+            &app_state,
+            &test_fingerprint(),
+            &proxy_session_id,
+            &access_lease_id.0,
+            now_ms,
+            crate::api::model::HlsAccessAdmissionMode::ManifestPrepare,
+        )
+        .await
+        .expect_err("denied lease must surface as admission denied");
+        assert_eq!(err, HlsAccessLeaseValidationError::AdmissionDenied);
+    }
+
+    #[tokio::test]
+    async fn hls_cache_entry_redirect_uses_cache_when_target_hls_share_enabled() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        configure_default_test_server(&app_state);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "hls-user".to_string();
+        user.password = "hls-pass".to_string();
+        let input = test_hls_input();
+        let target = test_hls_share_target(true);
+        let original_hls_entry_path = super::build_virtual_hls_entry_path(&target, &input, &user, 12345);
+
+        let response = super::handle_hls_stream_request(
+            &test_fingerprint(),
+            &app_state,
+            &user,
+            &target,
+            None,
+            "http://origin.example.com/live/user/pass/12345.m3u8",
+            None,
+            12345,
+            &input,
+            &HeaderMap::new(),
+            UserConnectionPermission::Allowed,
+            Some(ConnectionKind::Normal),
+            &original_hls_entry_path,
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location =
+            response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).expect("location header");
+        assert!(location.starts_with("/hls/shared/live/"));
+        assert!(location.ends_with("/manifest.m3u8"));
+        assert_eq!(app_state.hls_proxy.access_leases().read().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn hls_cache_entry_uses_legacy_path_when_target_hls_share_disabled() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        configure_default_test_server(&app_state);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "hls-user".to_string();
+        user.password = "hls-pass".to_string();
+        let input = test_hls_input();
+        let target = test_hls_share_target(false);
+        let original_hls_entry_path = super::build_virtual_hls_entry_path(&target, &input, &user, 12345);
+
+        let response = super::handle_hls_stream_request(
+            &test_fingerprint(),
+            &app_state,
+            &user,
+            &target,
+            None,
+            "http://origin.example.com/live/user/pass/12345.m3u8",
+            None,
+            12345,
+            &input,
+            &HeaderMap::new(),
+            UserConnectionPermission::Allowed,
+            Some(ConnectionKind::Normal),
+            &original_hls_entry_path,
+        )
+        .await
+        .into_response();
+
+        let location = response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).unwrap_or("");
+        assert!(!location.contains("/hls/shared/live/"));
+        assert!(app_state.hls_proxy.access_leases().read().await.is_empty());
+        assert_eq!(app_state.hls_proxy.metrics().snapshot().refresh_started, 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_hls_token_route_redirects_to_channel_unavailable_when_target_hls_share_enabled() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        app_state.app_config.config.store(Arc::new(Config {
+            custom_stream_response_enabled: true,
+            reverse_proxy: Some(ReverseProxyConfig::from(&ReverseProxyConfigDto {
+                hls_cache: Some(HlsCacheConfigDto::default()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }));
+        configure_default_test_server(&app_state);
+        let user = app_state.app_config.get_user_credentials("hls-user").expect("test user should exist");
+        let input = test_hls_input();
+        let target = test_hls_share_target(true);
+        store_test_sources_with_target(&app_state, input.clone(), target.clone());
+        let encrypt_secret = app_state.get_encrypt_secret();
+        let legacy_manifest = rewrite_hls(
+            &user,
+            &RewriteHlsProps {
+                secret: &encrypt_secret,
+                base_url: "",
+                content: "#EXTM3U\n#EXTINF:4.0,\nseg.ts\n",
+                hls_url: "http://origin.example.com/live/user/pass/12345.m3u8".to_string(),
+                target_id: target.id,
+                virtual_id: 12345,
+                input_id: input.id,
+                user_token: Some("legacy-session-token"),
+            },
+        );
+        let token = legacy_manifest
+            .lines()
+            .find_map(|line| line.rsplit_once('/').map(|(_, token)| token.trim().to_string()))
+            .expect("legacy hls segment token should be rendered");
+
+        let response = super::hls_api_stream_resolved(
+            test_fingerprint(),
+            HeaderMap::new(),
+            Arc::clone(&app_state),
+            Arc::clone(&user),
+            Arc::new(target),
+            input.id,
+            12345,
+            token,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).unwrap_or("");
+        assert!(location.ends_with("/cvs/hls/hls-user/hls-pass/channel_unavailable.m3u8"));
+        assert!(app_state.hls_proxy.access_leases().read().await.is_empty());
+        assert!(app_state.active_users.active_streams().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_hls_token_route_with_invalid_token_returns_bad_request_when_target_hls_share_enabled() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        let user = app_state.app_config.get_user_credentials("hls-user").expect("test user should exist");
+        let input = test_hls_input();
+        let target = test_hls_share_target(true);
+        store_test_sources_with_target(&app_state, input.clone(), target.clone());
+
+        let response = super::hls_api_stream_resolved(
+            test_fingerprint(),
+            HeaderMap::new(),
+            Arc::clone(&app_state),
+            user,
+            Arc::new(target),
+            input.id,
+            12345,
+            "not-a-valid-legacy-token.ts".to_string(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(app_state.hls_proxy.access_leases().read().await.is_empty());
+        assert!(app_state.active_users.active_streams().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hls_cache_canonical_manifest_rejects_when_target_hls_share_disabled() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        let input = test_hls_input();
+        let target = test_hls_share_target(false);
+        store_test_sources_with_target(&app_state, input, target);
+        let access_context = HlsAccessContext {
+            username: "hls-user".to_string(),
+            user_session_token: "hls-session-token".to_string(),
+            proxy_session_id: ProxySessionId("proxy-session".to_string()),
+            input_id: 1,
+            stream_ref: "12345".to_string(),
+            virtual_id: 12345,
+            lease_id: HlsAccessLeaseId("access-lease".to_string()),
+            family_key: HlsPlaybackFamilyKey::new("hls-user", test_fingerprint().key),
+        };
+
+        let Err(err) =
+            super::resolve_hls_playback_manifest_request_context(&app_state, &access_context, &HeaderMap::new()).await
+        else {
+            panic!("disabled target hls sharing should reject canonical cache path");
+        };
+
+        assert_eq!(err, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -7456,7 +9590,7 @@ mod tests {
             request_url,
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Soft,
+            Some(ConnectionKind::Soft),
             None,
         )
         .await
@@ -7480,7 +9614,7 @@ mod tests {
             request_url,
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             None,
         )
         .await
@@ -7532,6 +9666,7 @@ mod tests {
             "http://origin.example.com/live/source-user/source-pass/12345.m3u8",
             "hls-session-token",
             "hls-cache:test-session",
+            super::hls_origin_account_reservation_ttl_secs_fallback(),
             UserConnectionPermission::Allowed,
             ConnectionKind::Normal,
             false,
@@ -7558,6 +9693,7 @@ mod tests {
             "http://account.example.com/live/account-user/account-pass/12345.m3u8",
             "hls-session-token",
             session_owner,
+            super::hls_origin_account_reservation_ttl_secs_fallback(),
             UserConnectionPermission::Allowed,
             ConnectionKind::Normal,
             false,
@@ -7602,7 +9738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hls_cache_entry_reuses_existing_lease_for_same_user_session_and_proxy_session() {
+    async fn hls_cache_entry_creates_new_lease_for_same_user_session_and_proxy_session() {
         let app_state = test_app_state();
         enable_hls_cache(&app_state);
         let mut user = ProxyUserCredentials::default();
@@ -7621,7 +9757,7 @@ mod tests {
             request_url,
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             None,
         )
         .await
@@ -7647,7 +9783,7 @@ mod tests {
             request_url,
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             None,
         )
         .await
@@ -7657,7 +9793,7 @@ mod tests {
             .get(header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .expect("second location header");
-        assert_eq!(
+        assert_ne!(
             access_lease_id_from_redirect_location(first_location),
             access_lease_id_from_redirect_location(second_location)
         );
@@ -7665,11 +9801,11 @@ mod tests {
             HlsAccessLeaseId(access_lease_id_from_redirect_location(second_location).to_string());
         let second_session_token =
             access_lease_session_token(&app_state, &proxy_session_id, &second_access_lease_id).await;
-        assert_eq!(first_session_token, second_session_token);
+        assert_ne!(first_session_token, second_session_token);
     }
 
     #[tokio::test]
-    async fn hls_cache_entry_reuses_existing_lease_after_manifest_touch() {
+    async fn hls_cache_entry_creates_new_lease_after_manifest_touch() {
         let app_state = test_app_state();
         enable_hls_cache(&app_state);
         let mut user = ProxyUserCredentials::default();
@@ -7688,7 +9824,7 @@ mod tests {
             request_url,
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             None,
         )
         .await
@@ -7711,6 +9847,9 @@ mod tests {
                     &proxy_session_id,
                     now_ms,
                     None,
+                    Some(super::HlsAccessLeasePendingDeadline::Bootstrap {
+                        deadline_ms: now_ms.saturating_add(super::hls_pending_bootstrap_window_ms()),
+                    }),
                     super::hls_access_lease_ttl_ms(&app_state),
                 )
                 .await,
@@ -7727,7 +9866,7 @@ mod tests {
             request_url,
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             None,
         )
         .await
@@ -7738,12 +9877,13 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .expect("second location header");
 
-        assert_eq!(
+        assert_ne!(
             access_lease_id_from_redirect_location(first_location),
             access_lease_id_from_redirect_location(second_location)
         );
-        let second_session_token = access_lease_session_token(&app_state, &proxy_session_id, &first_lease_id).await;
-        assert_eq!(first_session_token, second_session_token);
+        let second_lease_id = HlsAccessLeaseId(access_lease_id_from_redirect_location(second_location).to_string());
+        let second_session_token = access_lease_session_token(&app_state, &proxy_session_id, &second_lease_id).await;
+        assert_ne!(first_session_token, second_session_token);
     }
 
     #[tokio::test]
@@ -7766,7 +9906,7 @@ mod tests {
             request_url,
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             None,
         )
         .await
@@ -7803,7 +9943,7 @@ mod tests {
             request_url,
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             None,
         )
         .await
@@ -7835,7 +9975,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hls_cache_entry_creates_new_session_token_after_reuse_window_expires() {
+    async fn hls_cache_entry_ignores_existing_pending_lease_for_new_playback() {
         let app_state = test_app_state();
         enable_hls_cache(&app_state);
         let mut user = ProxyUserCredentials::default();
@@ -7873,7 +10013,7 @@ mod tests {
             request_url,
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             None,
         )
         .await
@@ -7908,7 +10048,7 @@ mod tests {
             request_url,
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             None,
         )
         .await
@@ -7923,7 +10063,7 @@ mod tests {
         let proxy_session = ProxySessionId(proxy_session_id.clone());
         let first_session_token =
             access_lease_session_token(&app_state, &proxy_session, &HlsAccessLeaseId(first_lease_id.to_string())).await;
-        let first_segment_uri = format!("/proxy/hls/live/{proxy_session_id}/{first_lease_id}/000123.ts");
+        let first_segment_uri = format!("/hls/shared/live/{proxy_session_id}/{first_lease_id}/000123.ts");
         assert_eq!(get_status(Arc::clone(&app_state), &first_segment_uri).await, StatusCode::OK);
 
         let second_response = super::try_hls_cache_entry_redirect(
@@ -7936,7 +10076,7 @@ mod tests {
             request_url,
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             None,
         )
         .await
@@ -7953,7 +10093,7 @@ mod tests {
             access_lease_session_token(&app_state, &proxy_session, &HlsAccessLeaseId(second_lease_id.to_string()))
                 .await;
         assert_ne!(first_session_token, second_session_token);
-        let second_segment_uri = format!("/proxy/hls/live/{proxy_session_id}/{second_lease_id}/000123.ts");
+        let second_segment_uri = format!("/hls/shared/live/{proxy_session_id}/{second_lease_id}/000123.ts");
         assert_eq!(get_status(Arc::clone(&app_state), &second_segment_uri).await, StatusCode::OK);
 
         let streams = app_state.active_users.active_streams().await;
@@ -8000,7 +10140,7 @@ mod tests {
             "http://origin.example.com/live/user/pass/80510.m3u8",
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             None,
         )
         .await
@@ -8009,7 +10149,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         let location =
             response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).expect("location header");
-        assert!(location.starts_with(&format!("/proxy/hls/live/{}/", expected_proxy_session_id.0)));
+        assert!(location.starts_with(&format!("/hls/shared/live/{}/", expected_proxy_session_id.0)));
         assert!(location.ends_with("/manifest.m3u8"));
         assert!(app_state.hls_proxy.sessions().get_by_key(&HlsSessionKey::new(7, "80510")).await.is_none());
         assert_eq!(app_state.hls_proxy.metrics().snapshot().refresh_started, 0);
@@ -8037,7 +10177,7 @@ mod tests {
             "http://media.example.com/channel/playlist.m3u8",
             &input,
             UserConnectionPermission::Allowed,
-            ConnectionKind::Normal,
+            Some(ConnectionKind::Normal),
             Some("/iptv"),
         )
         .await
@@ -8046,7 +10186,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         let location =
             response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).expect("location header");
-        assert!(location.starts_with(&format!("/iptv/proxy/hls/live/{}/", expected_proxy_session_id.0)));
+        assert!(location.starts_with(&format!("/iptv/hls/shared/live/{}/", expected_proxy_session_id.0)));
         assert!(location.ends_with("/manifest.m3u8"));
         assert!(app_state.hls_proxy.sessions().get_by_key(&HlsSessionKey::new(9, "70001")).await.is_none());
         assert_eq!(app_state.hls_proxy.metrics().snapshot().refresh_started, 0);
@@ -8059,7 +10199,7 @@ mod tests {
 
         let response = get_response(
             Arc::clone(&app_state),
-            "/proxy/hls/live/a8f31c9eQ7sLk92pV0mTaw/not-a-valid-token/manifest.m3u8",
+            "/hls/shared/live/a8f31c9eQ7sLk92pV0mTaw/not-a-valid-token/manifest.m3u8",
             None,
         )
         .await;
@@ -8090,25 +10230,27 @@ mod tests {
             .hls_proxy
             .get_or_create_session(HlsSessionKey::new(1, "12345"), &app_state.get_encrypt_secret(), 100)
             .await;
-        let proxy_session_id = {
-            let mut session = session.write().await;
-            session.origin_refresh.next_fetch_allowed_at_ms = u64::MAX;
-            let proxy_session_id = session.proxy_session_id.0.clone();
-            session.last_rendered_manifest = Some(RenderedManifest {
-                body: format!(
-                    "#EXTM3U\n#EXT-X-MAP:URI=\"/proxy/hls/live/{proxy_session_id}/{}/map/000000.mp4\"\n#EXTINF:4.0,\n/proxy/hls/live/{proxy_session_id}/{}/000123.ts\n",
-                    crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER,
-                    crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER
+            let proxy_session_id = {
+                let mut session = session.write().await;
+                session.origin_refresh.next_fetch_allowed_at_ms = u64::MAX;
+                let proxy_session_id = session.proxy_session_id.0.clone();
+                let rendered_at_ms = super::current_time_millis();
+                session.last_rendered_manifest = Some(RenderedManifest {
+                    body: format!(
+                        "#EXTM3U\n#EXT-X-MAP:URI=\"/hls/shared/live/{proxy_session_id}/{}/map/000000.mp4\"\n#EXTINF:4.0,\n/hls/shared/live/{proxy_session_id}/{}/000123.ts\n",
+                        crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER,
+                        crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER
                 ),
-                first_proxy_seq: 123,
-                last_proxy_seq: 123,
-                playlist_duration_ms: 4_000,
-                render_gap_segments: 0,
-                rendered_at_ms: 100,
-                segment_proxy_seqs: vec![123],
-            });
-            proxy_session_id
-        };
+                    first_proxy_seq: 123,
+                    last_proxy_seq: 123,
+                    playlist_duration_ms: 4_000,
+                    valid_until_ms: rendered_at_ms.saturating_add(4_000),
+                    render_gap_segments: 0,
+                    rendered_at_ms,
+                    segment_proxy_seqs: vec![123],
+                });
+                proxy_session_id
+            };
         let proxy_session_id = ProxySessionId(proxy_session_id);
         let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
         let access_context = test_hls_access_context(proxy_session_id.clone(), access_lease_id.clone());
@@ -8122,40 +10264,45 @@ mod tests {
             HlsAccessLeaseState::Pending,
             super::HlsCacheManifestOrigin {
                 raw_request_url: "http://origin.example.com/live/user/pass/12345.m3u8",
-                session_entry_url: "http://origin.example.com/live/user/pass/12345.m3u8",
+                session_entry_url: super::HlsOriginEntryUrl::direct_http(
+                    "http://origin.example.com/live/user/pass/12345.m3u8",
+                ),
                 input: &input,
                 origin_source: super::build_hls_origin_source(&input, "12345"),
-                failover_provider: None,
             },
             HeaderMap::new(),
-            60,
-            Some("/iptv"),
+                        Some("/iptv"),
             "/live/hls-user/hls-pass/12345.m3u8",
         )
         .await
         .expect("hls cache should handle valid live hls entrypoint");
         let body = String::from_utf8(response_body(response).await.to_vec()).expect("manifest should be utf8");
 
-        assert!(body.contains(&format!("/iptv/proxy/hls/live/{}/", proxy_session_id.0)));
+        assert!(body.contains(&format!("/iptv/hls/shared/live/{}/", proxy_session_id.0)));
         assert!(body.contains("/map/000000.mp4"));
         assert!(body.contains("/000123.ts"));
         assert!(body.contains(&access_lease_id.0));
         assert!(!body.contains(crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER));
         let stored_body = session.read().await.last_rendered_manifest.as_ref().expect("stored manifest").body.clone();
         assert!(stored_body.contains(crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER));
-        assert!(stored_body.contains(&format!("/proxy/hls/live/{}/", proxy_session_id.0)));
-        assert!(!stored_body.contains("/iptv/proxy/hls/live/"));
+        assert!(stored_body.contains(&format!("/hls/shared/live/{}/", proxy_session_id.0)));
+        assert!(!stored_body.contains("/iptv/hls/shared/live/"));
         assert!(!stored_body.contains(&access_lease_id.0));
         assert!(session.read().await.activity.last_authorized_media_at_ms.is_some());
     }
 
     fn transient_manifest_body(proxy_session_id: &str) -> String {
-        let mut body = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n".to_string();
-        for index in 0..6 {
+        transient_manifest_body_from_sequence(proxy_session_id, 100, 6)
+    }
+
+    fn transient_manifest_body_from_sequence(proxy_session_id: &str, first_sequence: u64, count: usize) -> String {
+        let mut body = format!("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:{first_sequence}\n");
+        for index in 0..count {
+            let sequence = first_sequence.saturating_add(u64::try_from(index).expect("test sequence index fits u64"));
             body.push_str("#EXTINF:10.0,\n");
             let _ = writeln!(
                 body,
-                "/proxy/hls/live/{proxy_session_id}/{}/r/seg{index}.ts",
+                "/hls/shared/live/{proxy_session_id}/{}/r/seg{sequence}.ts",
                 crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER
             );
         }
@@ -8164,6 +10311,275 @@ mod tests {
 
     fn media_uri_count(body: &str) -> usize {
         body.lines().filter(|line| !line.is_empty() && !line.starts_with('#')).count()
+    }
+
+    fn normal_manifest_body(proxy_session_id: &str) -> String {
+        normal_manifest_body_from_sequence(proxy_session_id, 0, 6)
+    }
+
+    fn normal_manifest_body_from_sequence(proxy_session_id: &str, first_sequence: u64, count: usize) -> String {
+        let mut body = format!("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:{first_sequence}\n");
+        for index in 0..count {
+            let sequence = first_sequence.saturating_add(u64::try_from(index).expect("test sequence index fits u64"));
+            body.push_str("#EXTINF:10.0,\n");
+            let _ = writeln!(
+                body,
+                "/hls/shared/live/{proxy_session_id}/{}/{sequence:06}.ts",
+                crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER
+            );
+        }
+        body
+    }
+
+    fn store_normal_manifest_body(session: &mut HlsSession, body: String, rendered_at_ms: u64) {
+        store_normal_manifest_body_range(session, body, 0, 6, rendered_at_ms);
+    }
+
+    fn store_normal_manifest_body_range(
+        session: &mut HlsSession,
+        body: String,
+        first_proxy_seq: u64,
+        count: usize,
+        rendered_at_ms: u64,
+    ) {
+        let last_proxy_seq =
+            first_proxy_seq.saturating_add(u64::try_from(count.saturating_sub(1)).expect("test count fits u64"));
+        session.last_rendered_manifest = Some(RenderedManifest {
+            body,
+            first_proxy_seq,
+            last_proxy_seq,
+            playlist_duration_ms: 60_000,
+            valid_until_ms: rendered_at_ms.saturating_add(60_000),
+            render_gap_segments: 0,
+            rendered_at_ms,
+            segment_proxy_seqs: (first_proxy_seq..=last_proxy_seq).collect(),
+        });
+    }
+
+    #[tokio::test]
+    async fn hls_cache_pending_normal_manifest_applies_initial_strip_without_mutating_shared_body() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        let session = app_state
+            .hls_proxy
+            .get_or_create_session(HlsSessionKey::new(1, "12345"), &app_state.get_encrypt_secret(), 100)
+            .await;
+        let _proxy_session_id = {
+            let mut session = session.write().await;
+            let proxy_session_id = session.proxy_session_id.0.clone();
+            let rendered_at_ms = super::current_time_millis();
+            store_normal_manifest_body(&mut session, normal_manifest_body(&proxy_session_id), rendered_at_ms);
+            session.mark_authorized_media_access(rendered_at_ms);
+            proxy_session_id
+        };
+        let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
+        let strip = StripConfig { mode: StripMode::Segments, value: 3 };
+        let stored_before = session.read().await.last_rendered_manifest.as_ref().expect("normal manifest").body.clone();
+
+        let response = super::try_hls_cached_manifest_response(
+            &app_state,
+            &session,
+            &access_lease_id,
+            HlsAccessLeaseState::Pending,
+            &strip,
+            None,
+            super::HlsCachedManifestOptions::committed_only(Duration::ZERO),
+        )
+        .await
+        .expect("normal manifest response");
+        let body = String::from_utf8(response_body(response).await.to_vec()).expect("manifest utf8");
+
+        assert_eq!(media_uri_count(&body), 3);
+        assert!(body.contains("#EXT-X-MEDIA-SEQUENCE:0\n"));
+        assert!(body.contains("/000000.ts"));
+        assert!(body.contains("/000001.ts"));
+        assert!(body.contains("/000002.ts"));
+        assert!(!body.contains("/000003.ts"));
+        assert!(body.contains(&access_lease_id.0));
+        assert!(!body.contains(crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER));
+        assert_eq!(
+            session.read().await.last_rendered_manifest.as_ref().expect("stored manifest").body,
+            stored_before
+        );
+        assert_eq!(media_uri_count(&stored_before), 6);
+    }
+
+    #[tokio::test]
+    async fn hls_cache_idle_normal_manifest_applies_initial_strip_without_mutating_shared_body() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        let session = app_state
+            .hls_proxy
+            .get_or_create_session(HlsSessionKey::new(1, "12345"), &app_state.get_encrypt_secret(), 100)
+            .await;
+        let _proxy_session_id = {
+            let mut session = session.write().await;
+            let proxy_session_id = session.proxy_session_id.0.clone();
+            let rendered_at_ms = super::current_time_millis();
+            store_normal_manifest_body(&mut session, normal_manifest_body(&proxy_session_id), rendered_at_ms);
+            session.mark_authorized_media_access(rendered_at_ms);
+            proxy_session_id
+        };
+        let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
+        let strip = StripConfig { mode: StripMode::Segments, value: 3 };
+        let stored_before = session.read().await.last_rendered_manifest.as_ref().expect("normal manifest").body.clone();
+
+        let response = super::try_hls_cached_manifest_response(
+            &app_state,
+            &session,
+            &access_lease_id,
+            HlsAccessLeaseState::Idle,
+            &strip,
+            None,
+            super::HlsCachedManifestOptions::committed_only(Duration::ZERO),
+        )
+        .await
+        .expect("idle normal manifest response");
+        let body = String::from_utf8(response_body(response).await.to_vec()).expect("manifest utf8");
+
+        assert_eq!(media_uri_count(&body), 3);
+        assert!(body.contains("#EXT-X-MEDIA-SEQUENCE:0\n"));
+        assert!(body.contains("/000000.ts"));
+        assert!(body.contains("/000001.ts"));
+        assert!(body.contains("/000002.ts"));
+        assert!(!body.contains("/000003.ts"));
+        assert!(body.contains(&access_lease_id.0));
+        assert!(!body.contains(crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER));
+        assert_eq!(
+            session.read().await.last_rendered_manifest.as_ref().expect("stored manifest").body,
+            stored_before
+        );
+        assert_eq!(media_uri_count(&stored_before), 6);
+    }
+
+    #[tokio::test]
+    async fn hls_cache_activated_normal_manifest_skips_initial_strip() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        let session = app_state
+            .hls_proxy
+            .get_or_create_session(HlsSessionKey::new(1, "12345"), &app_state.get_encrypt_secret(), 100)
+            .await;
+        let _proxy_session_id = {
+            let mut session = session.write().await;
+            let proxy_session_id = session.proxy_session_id.0.clone();
+            let rendered_at_ms = super::current_time_millis();
+            store_normal_manifest_body(&mut session, normal_manifest_body(&proxy_session_id), rendered_at_ms);
+            session.mark_authorized_media_access(rendered_at_ms);
+            proxy_session_id
+        };
+        let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
+        let strip = StripConfig { mode: StripMode::Segments, value: 3 };
+
+        let response = super::try_hls_cached_manifest_response(
+            &app_state,
+            &session,
+            &access_lease_id,
+            HlsAccessLeaseState::Activated,
+            &strip,
+            None,
+            super::HlsCachedManifestOptions::committed_only(Duration::ZERO),
+        )
+        .await
+        .expect("normal manifest response");
+        let body = String::from_utf8(response_body(response).await.to_vec()).expect("manifest utf8");
+
+        assert_eq!(media_uri_count(&body), 6);
+        assert!(body.contains(&access_lease_id.0));
+        assert!(!body.contains(crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER));
+    }
+
+    #[tokio::test]
+    async fn hls_cache_fresh_required_normal_manifest_does_not_serve_stale_committed_body() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        let session = app_state
+            .hls_proxy
+            .get_or_create_session(HlsSessionKey::new(1, "12345"), &app_state.get_encrypt_secret(), 100)
+            .await;
+        let rendered_at_ms = {
+            let mut session = session.write().await;
+            let proxy_session_id = session.proxy_session_id.0.clone();
+            let rendered_at_ms = super::current_time_millis();
+            store_normal_manifest_body(&mut session, normal_manifest_body(&proxy_session_id), rendered_at_ms);
+            session.mark_authorized_media_access(rendered_at_ms);
+            rendered_at_ms
+        };
+        let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
+        let strip = StripConfig { mode: StripMode::Segments, value: 3 };
+
+        let response = super::try_hls_cached_manifest_response(
+            &app_state,
+            &session,
+            &access_lease_id,
+            HlsAccessLeaseState::Activated,
+            &strip,
+            None,
+            super::HlsCachedManifestOptions::initial(Duration::ZERO).requiring_newer_manifest(rendered_at_ms),
+        )
+        .await;
+
+        assert!(response.is_none());
+    }
+
+    #[tokio::test]
+    async fn hls_cache_fresh_required_normal_manifest_waits_for_newer_commit() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        let session = app_state
+            .hls_proxy
+            .get_or_create_session(HlsSessionKey::new(1, "12345"), &app_state.get_encrypt_secret(), 100)
+            .await;
+        let (proxy_session_id, old_rendered_at_ms) = {
+            let mut session = session.write().await;
+            let proxy_session_id = session.proxy_session_id.clone();
+            let old_rendered_at_ms = super::current_time_millis();
+            store_normal_manifest_body(&mut session, normal_manifest_body(&proxy_session_id.0), old_rendered_at_ms);
+            session.origin_refresh.in_flight = true;
+            session.mark_authorized_media_access(old_rendered_at_ms);
+            (proxy_session_id, old_rendered_at_ms)
+        };
+        let session_for_commit = Arc::clone(&session);
+        let proxy_session_for_body = proxy_session_id.0.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let mut session = session_for_commit.write().await;
+            let rendered_at_ms = super::current_time_millis();
+            session.last_rendered_manifest = Some(RenderedManifest {
+                body: format!(
+                    "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4.0,\n/hls/shared/live/{proxy_session_for_body}/{}/000100.ts\n",
+                    crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER
+                ),
+                first_proxy_seq: 100,
+                last_proxy_seq: 100,
+                playlist_duration_ms: 4_000,
+                valid_until_ms: rendered_at_ms.saturating_add(4_000),
+                render_gap_segments: 0,
+                rendered_at_ms,
+                segment_proxy_seqs: vec![100],
+            });
+            session.origin_refresh.in_flight = false;
+        });
+        let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
+        let strip = StripConfig { mode: StripMode::Segments, value: 0 };
+
+        let response = super::try_hls_cached_manifest_response(
+            &app_state,
+            &session,
+            &access_lease_id,
+            HlsAccessLeaseState::Activated,
+            &strip,
+            None,
+            super::HlsCachedManifestOptions::initial(Duration::from_millis(200))
+                .requiring_newer_manifest(old_rendered_at_ms),
+        )
+        .await
+        .expect("fresh manifest response");
+        let body = String::from_utf8(response_body(response).await.to_vec()).expect("manifest utf8");
+
+        assert!(body.contains("000100.ts"));
+        assert!(!body.contains("000000.ts"));
+        assert!(body.contains(&access_lease_id.0));
     }
 
     #[tokio::test]
@@ -8204,6 +10620,50 @@ mod tests {
         assert!(body.contains(&access_lease_id.0));
         assert!(!body.contains(crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER));
         assert!(session.read().await.activity.last_authorized_media_at_ms.is_some());
+        assert_eq!(
+            session.read().await.transient.last_manifest_body.as_ref().expect("stored manifest"),
+            &stored_before
+        );
+        assert_eq!(media_uri_count(&stored_before), 6);
+    }
+
+    #[tokio::test]
+    async fn hls_cache_idle_transient_manifest_applies_initial_strip_without_mutating_shared_body() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        let session = app_state
+            .hls_proxy
+            .get_or_create_session(HlsSessionKey::new(1, "12345"), &app_state.get_encrypt_secret(), 100)
+            .await;
+        let _proxy_session_id = {
+            let mut session = session.write().await;
+            session.mode =
+                HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
+            let proxy_session_id = session.proxy_session_id.0.clone();
+            session.transient.replace_manifest(transient_manifest_body(&proxy_session_id), 100);
+            session.mark_authorized_media_access(super::current_time_millis());
+            proxy_session_id
+        };
+        let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
+        let strip = StripConfig { mode: StripMode::Segments, value: 3 };
+        let stored_before = session.read().await.transient.last_manifest_body.clone().expect("transient manifest body");
+
+        let response = super::try_hls_cached_manifest_response(
+            &app_state,
+            &session,
+            &access_lease_id,
+            HlsAccessLeaseState::Idle,
+            &strip,
+            None,
+            super::HlsCachedManifestOptions::committed_only(Duration::ZERO),
+        )
+        .await
+        .expect("idle transient manifest response");
+        let body = String::from_utf8(response_body(response).await.to_vec()).expect("manifest utf8");
+
+        assert_eq!(media_uri_count(&body), 3);
+        assert!(body.contains(&access_lease_id.0));
+        assert!(!body.contains(crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER));
         assert_eq!(
             session.read().await.transient.last_manifest_body.as_ref().expect("stored manifest"),
             &stored_before
@@ -8259,12 +10719,15 @@ mod tests {
             .await;
         let _proxy_session_id = {
             let mut session = session.write().await;
-            session.mode =
-                HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
-            let proxy_session_id = session.proxy_session_id.0.clone();
-            session.transient.replace_manifest(transient_manifest_body(&proxy_session_id), 100);
-            proxy_session_id
-        };
+                session.mode =
+                    HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
+                let proxy_session_id = session.proxy_session_id.0.clone();
+                let rendered_at_ms = super::current_time_millis();
+                session
+                    .transient
+                    .replace_manifest_with_validity(transient_manifest_body(&proxy_session_id), rendered_at_ms, 60_000);
+                proxy_session_id
+            };
         let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
         let strip = StripConfig { mode: StripMode::Segments, value: 3 };
 
@@ -8295,7 +10758,12 @@ mod tests {
             session.mode =
                 HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
             let proxy_session_id = session.proxy_session_id.0.clone();
-            session.transient.replace_manifest(transient_manifest_body(&proxy_session_id), 100);
+            let rendered_at_ms = super::current_time_millis();
+            session.transient.replace_manifest_with_validity(
+                transient_manifest_body(&proxy_session_id),
+                rendered_at_ms,
+                60_000,
+            );
             proxy_session_id
         };
         let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
@@ -8354,6 +10822,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hls_cache_expired_transient_manifest_with_active_binding_is_served_while_manifest_valid() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        let session = app_state
+            .hls_proxy
+            .get_or_create_session(HlsSessionKey::new(1, "12345"), &app_state.get_encrypt_secret(), 100)
+            .await;
+        let now_ms = super::current_time_millis();
+        let _proxy_session_id = {
+            let mut session = session.write().await;
+            session.mode =
+                HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
+            let proxy_session_id = session.proxy_session_id.clone();
+            session.transient.replace_manifest_with_validity(
+                transient_manifest_body(&proxy_session_id.0),
+                now_ms.saturating_sub(1_000),
+                60_000,
+            );
+            session.mark_authorized_media_access(now_ms.saturating_sub(60_000));
+            session.origin_account_binding = Some(HlsOriginAccountBinding::new(
+                Arc::from("test-input"),
+                Arc::from("test-account"),
+                &proxy_session_id,
+                now_ms,
+            ));
+            session.origin_refresh.in_flight = true;
+            proxy_session_id
+        };
+        let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
+        let strip = StripConfig { mode: StripMode::Segments, value: 3 };
+
+        let response = super::try_hls_cached_manifest_response(
+            &app_state,
+            &session,
+            &access_lease_id,
+            HlsAccessLeaseState::Pending,
+            &strip,
+            None,
+            super::HlsCachedManifestOptions::initial(Duration::from_millis(200)),
+        )
+        .await
+        .expect("valid committed transient manifest response");
+        let body = String::from_utf8(response_body(response).await.to_vec()).expect("manifest utf8");
+
+        assert_eq!(media_uri_count(&body), 3);
+        assert!(body.contains(&access_lease_id.0));
+    }
+
+    #[tokio::test]
+    async fn hls_cache_expired_transient_manifest_with_active_binding_is_not_served_after_manifest_validity() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        let session = app_state
+            .hls_proxy
+            .get_or_create_session(HlsSessionKey::new(1, "12345"), &app_state.get_encrypt_secret(), 100)
+            .await;
+        let now_ms = super::current_time_millis();
+        let _proxy_session_id = {
+            let mut session = session.write().await;
+            session.mode =
+                HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
+            let proxy_session_id = session.proxy_session_id.clone();
+            session.transient.replace_manifest_with_validity(
+                transient_manifest_body(&proxy_session_id.0),
+                now_ms.saturating_sub(60_000),
+                1_000,
+            );
+            session.mark_authorized_media_access(now_ms.saturating_sub(60_000));
+            session.origin_account_binding = Some(HlsOriginAccountBinding::new(
+                Arc::from("test-input"),
+                Arc::from("test-account"),
+                &proxy_session_id,
+                now_ms,
+            ));
+            proxy_session_id
+        };
+        let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
+        let strip = StripConfig { mode: StripMode::Segments, value: 3 };
+
+        let response = super::try_hls_cached_manifest_response(
+            &app_state,
+            &session,
+            &access_lease_id,
+            HlsAccessLeaseState::Pending,
+            &strip,
+            None,
+            super::HlsCachedManifestOptions::initial(Duration::ZERO),
+        )
+        .await;
+
+        assert!(response.is_none());
+    }
+
+    #[tokio::test]
     async fn hls_cache_no_media_yet_waits_for_first_normal_manifest_commit() {
         let app_state = test_app_state();
         enable_hls_cache(&app_state);
@@ -8368,23 +10930,25 @@ mod tests {
         };
         let session_for_commit = Arc::clone(&session);
         let proxy_session_for_body = proxy_session_id.0.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            let mut session = session_for_commit.write().await;
-            session.last_rendered_manifest = Some(RenderedManifest {
-                body: format!(
-                    "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4.0,\n/proxy/hls/live/{proxy_session_for_body}/{}/000100.ts\n",
-                    crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER
-                ),
-                first_proxy_seq: 100,
-                last_proxy_seq: 100,
-                playlist_duration_ms: 4_000,
-                render_gap_segments: 0,
-                rendered_at_ms: 100,
-                segment_proxy_seqs: vec![100],
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let mut session = session_for_commit.write().await;
+                let rendered_at_ms = super::current_time_millis();
+                session.last_rendered_manifest = Some(RenderedManifest {
+                    body: format!(
+                        "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4.0,\n/hls/shared/live/{proxy_session_for_body}/{}/000100.ts\n",
+                        crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER
+                    ),
+                    first_proxy_seq: 100,
+                    last_proxy_seq: 100,
+                    playlist_duration_ms: 4_000,
+                    valid_until_ms: rendered_at_ms.saturating_add(4_000),
+                    render_gap_segments: 0,
+                    rendered_at_ms,
+                    segment_proxy_seqs: vec![100],
+                });
+                session.origin_refresh.in_flight = false;
             });
-            session.origin_refresh.in_flight = false;
-        });
         let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
         let strip = StripConfig { mode: StripMode::Segments, value: 0 };
 
@@ -8423,13 +10987,14 @@ mod tests {
         let session_for_commit = Arc::clone(&session);
         let proxy_session_for_body = proxy_session_id.0.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            let mut session = session_for_commit.write().await;
-            session
-                .transient
-                .replace_manifest(transient_manifest_body(&proxy_session_for_body), super::current_time_millis());
-            session.origin_refresh.in_flight = false;
-        });
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let mut session = session_for_commit.write().await;
+                let rendered_at_ms = super::current_time_millis();
+                session
+                    .transient
+                    .replace_manifest_with_validity(transient_manifest_body(&proxy_session_for_body), rendered_at_ms, 60_000);
+                session.origin_refresh.in_flight = false;
+            });
         let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
         let strip = StripConfig { mode: StripMode::Segments, value: 3 };
 
@@ -8470,13 +11035,14 @@ mod tests {
         let session_for_commit = Arc::clone(&session);
         let proxy_session_for_body = proxy_session_id.0.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            let mut session = session_for_commit.write().await;
-            session
-                .transient
-                .replace_manifest(transient_manifest_body(&proxy_session_for_body), super::current_time_millis());
-            session.origin_refresh.in_flight = false;
-        });
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let mut session = session_for_commit.write().await;
+                let rendered_at_ms = super::current_time_millis();
+                session
+                    .transient
+                    .replace_manifest_with_validity(transient_manifest_body(&proxy_session_for_body), rendered_at_ms, 60_000);
+                session.origin_refresh.in_flight = false;
+            });
         let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
         let strip = StripConfig { mode: StripMode::Segments, value: 3 };
 
@@ -8536,7 +11102,7 @@ mod tests {
 
     async fn hls_proxy_uri(app_state: &Arc<AppState>, proxy_session_id: &str, suffix: &str) -> String {
         let access_lease_id = grant_hls_proxy_lease(app_state, proxy_session_id).await;
-        format!("/proxy/hls/live/{proxy_session_id}/{access_lease_id}/{suffix}")
+        format!("/hls/shared/live/{proxy_session_id}/{access_lease_id}/{suffix}")
     }
 
     async fn wait_for_provider_connection_count(app_state: &Arc<AppState>, expected: usize) {
@@ -8576,6 +11142,7 @@ mod tests {
         let manifest =
             normal_manifest(&format!("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:{proxy_seq}\n#EXTINF:4.0,\n{origin_url}\n"));
         let mut session = session.write().await;
+        session.proxy_next_seq = Some(proxy_seq);
         session.apply_origin_manifest(&manifest).expect("manifest should map");
         session.proxy_session_id.0.clone()
     }
@@ -8757,11 +11324,13 @@ mod tests {
 
     #[test]
     fn transient_full_object_cacheable_request_accepts_open_zero_range() {
-        assert!(super::is_transient_full_object_cacheable_request(None));
-        assert!(super::is_transient_full_object_cacheable_request(Some(&HeaderValue::from_static("bytes=0-"))));
-        assert!(!super::is_transient_full_object_cacheable_request(Some(&HeaderValue::from_static("bytes=4-"))));
-        assert!(!super::is_transient_full_object_cacheable_request(Some(&HeaderValue::from_static("bytes=-4"))));
-        assert!(!super::is_transient_full_object_cacheable_request(Some(&HeaderValue::from_static("bytes=0-1,4-5"))));
+        use crate::api::model::is_hls_transient_full_object_cacheable_request;
+
+        assert!(is_hls_transient_full_object_cacheable_request(None));
+        assert!(is_hls_transient_full_object_cacheable_request(Some(&HeaderValue::from_static("bytes=0-"))));
+        assert!(!is_hls_transient_full_object_cacheable_request(Some(&HeaderValue::from_static("bytes=4-"))));
+        assert!(!is_hls_transient_full_object_cacheable_request(Some(&HeaderValue::from_static("bytes=-4"))));
+        assert!(!is_hls_transient_full_object_cacheable_request(Some(&HeaderValue::from_static("bytes=0-1,4-5"))));
     }
 
     async fn assert_hls_cache_stream_registered(app_state: &Arc<AppState>, proxy_session_id: &str) {
@@ -8778,11 +11347,75 @@ mod tests {
             Some(super::hls_cache_shared_stream_id(&ProxySessionId(proxy_session_id.to_string())))
         );
         assert_eq!(stream.channel.shared_joined_existing, Some(false));
-        assert_eq!(stream.channel.url.as_ref(), format!("/proxy/hls/live/{proxy_session_id}/manifest.m3u8"));
+        assert_eq!(stream.channel.url.as_ref(), format!("/hls/shared/live/{proxy_session_id}/manifest.m3u8"));
         assert!(!stream.channel.url.contains("test-access-lease"));
         assert!(!stream.channel.url.contains("hls-session-token"));
         assert!(!stream.channel.url.contains("origin.example.com"));
         assert!(!stream.channel.url.contains("/hls/hls-user/"));
+    }
+
+    fn stats_provider_test_user_session(provider: &str) -> UserSession {
+        UserSession {
+            token: "stats-session-token".to_string(),
+            transition_version: 0,
+            virtual_id: 12345,
+            provider: Arc::from(provider),
+            stream_url: Arc::from("http://origin.example.com/live/12345.m3u8"),
+            provider_session_headers: HashMap::new(),
+            addr: test_addr(),
+            socket_bound: false,
+            active_addrs: Vec::new(),
+            ts: 100,
+            started_at: 100,
+            permission: UserConnectionPermission::Allowed,
+            connection_kind: Some(ConnectionKind::Normal),
+            lifecycle: PlaybackLifecycle::Active,
+        }
+    }
+
+    #[test]
+    fn hls_cache_stats_provider_prefers_active_origin_account_binding() {
+        let origin_source = HlsOriginSource::new(1, Arc::from("cdn-dev"), "12345", HlsOriginSourceKind::XtreamLive);
+        let proxy_session_id = ProxySessionId("stats-session".to_string());
+        let binding = HlsOriginAccountBinding::new(
+            Arc::clone(&origin_source.input_name),
+            Arc::from("cdn-dev-alias"),
+            &proxy_session_id,
+            100,
+        );
+        let user_session = stats_provider_test_user_session("cdn-dev");
+
+        let provider = super::hls_cache_stats_provider(&origin_source, Some(&binding), &user_session);
+
+        assert_eq!(provider.as_ref(), "cdn-dev-alias");
+    }
+
+    #[test]
+    fn hls_cache_stats_provider_falls_back_when_origin_account_binding_is_not_active() {
+        let origin_source = HlsOriginSource::new(1, Arc::from("cdn-dev"), "12345", HlsOriginSourceKind::XtreamLive);
+        let proxy_session_id = ProxySessionId("stats-session".to_string());
+        let mut binding = HlsOriginAccountBinding::new(
+            Arc::clone(&origin_source.input_name),
+            Arc::from("cdn-dev-alias"),
+            &proxy_session_id,
+            100,
+        );
+        binding.detach(HlsOriginAccountDetachedReason::Cleanup, 200);
+        let user_session = stats_provider_test_user_session("session-provider");
+
+        let provider = super::hls_cache_stats_provider(&origin_source, Some(&binding), &user_session);
+
+        assert_eq!(provider.as_ref(), "session-provider");
+    }
+
+    #[test]
+    fn hls_cache_stats_provider_falls_back_to_input_name_without_session_provider() {
+        let origin_source = HlsOriginSource::new(1, Arc::from("cdn-dev"), "12345", HlsOriginSourceKind::XtreamLive);
+        let user_session = stats_provider_test_user_session("");
+
+        let provider = super::hls_cache_stats_provider(&origin_source, None, &user_session);
+
+        assert_eq!(provider.as_ref(), "cdn-dev");
     }
 
     async fn register_hls_cache_stream_for_stats_test(
@@ -8851,6 +11484,7 @@ mod tests {
 
         let streams = app_state.active_users.active_streams().await;
         let first_stream = find_stream_by_session_token(&streams, "hls-session-token");
+        let first_meter_uid = first_stream.meter_uid;
         assert!(first_stream.channel.shared);
         assert_eq!(first_stream.channel.shared_stream_id, Some(shared_stream_id));
         assert_eq!(first_stream.channel.shared_joined_existing, Some(false));
@@ -8887,6 +11521,7 @@ mod tests {
         let first_stream = find_stream_by_session_token(&streams, "hls-session-token");
         assert_eq!(first_stream.channel.shared_stream_id, Some(shared_stream_id));
         assert_eq!(first_stream.channel.shared_joined_existing, Some(false));
+        assert_eq!(first_stream.meter_uid, first_meter_uid);
     }
 
     struct TestSegmentOrigin {
@@ -8899,6 +11534,10 @@ mod tests {
     }
 
     async fn spawn_test_segment_origin(body: &'static [u8]) -> TestSegmentOrigin {
+        spawn_test_status_origin(StatusCode::OK, body).await
+    }
+
+    async fn spawn_test_status_origin(status: StatusCode, body: &'static [u8]) -> TestSegmentOrigin {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
         let addr = listener.local_addr().expect("local addr");
         let task = tokio::spawn(async move {
@@ -8914,8 +11553,12 @@ mod tests {
                     if read == 0 {
                         return;
                     }
-                    let response =
-                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    let reason = status.canonical_reason().unwrap_or("Status");
+                    let response = format!(
+                        "HTTP/1.1 {} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        status.as_u16(),
+                        body.len()
+                    );
                     let _ = socket.write_all(response.as_bytes()).await;
                     let _ = socket.write_all(body).await;
                 });
@@ -8958,7 +11601,7 @@ mod tests {
         spawn_test_transient_origin_with_response(
             "206 Partial Content",
             &[
-                ("Content-Type", "video/MP2T"),
+                ("Content-Type", "video/mp2t"),
                 ("Content-Range", "bytes 2-15/16"),
                 ("Accept-Ranges", "bytes"),
                 ("Cache-Control", "no-store"),
@@ -9022,7 +11665,7 @@ mod tests {
 
     #[tokio::test]
     async fn valid_hls_proxy_segment_without_session_returns_not_found() {
-        let status = get_status(test_app_state(), "/proxy/hls/live/a8f31c9eQ7sLk92pV0mTaw/000123.ts").await;
+        let status = get_status(test_app_state(), "/hls/shared/live/a8f31c9eQ7sLk92pV0mTaw/000123.ts").await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
@@ -9032,7 +11675,7 @@ mod tests {
         let app_state = test_app_state();
         let proxy_session_id = map_segment(&app_state, 123, "ts").await;
 
-        let status = get_status(app_state, &format!("/proxy/hls/live/{proxy_session_id}/000123.ts")).await;
+        let status = get_status(app_state, &format!("/hls/shared/live/{proxy_session_id}/000123.ts")).await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
@@ -9119,13 +11762,28 @@ mod tests {
         let app_state = test_app_state_with_hls_proxy(hls_proxy);
         let proxy_session_id = map_ready_segment_without_lease(&app_state, 123, "ts", b"0123456789").await;
 
-        let status = get_status(app_state, &format!("/proxy/hls/live/{proxy_session_id}/000123.ts")).await;
+        let status = get_status(app_state, &format!("/hls/shared/live/{proxy_session_id}/000123.ts")).await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
-    async fn ready_hls_proxy_segment_marked_for_gc_returns_not_found() {
+    async fn invalid_hls_proxy_segment_file_with_valid_lease_redirects_to_channel_unavailable_manifest() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let hls_proxy = Arc::new(HlsProxyManager::with_cache_settings(temp_dir.path(), 300));
+        let app_state = test_app_state_with_hls_proxy(hls_proxy);
+        let proxy_session_id = map_ready_segment(&app_state, 123, "ts", b"0123456789").await;
+        let uri = hls_proxy_uri(&app_state, &proxy_session_id, "broken.ts").await;
+
+        let response = get_response(app_state, &uri, None).await;
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).unwrap_or("");
+        assert!(location.ends_with("/cvs/hls/hls-user/hls-pass/channel_unavailable.m3u8"));
+    }
+
+    #[tokio::test]
+    async fn ready_hls_proxy_segment_marked_for_gc_redirects_to_expired_manifest() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let hls_proxy = Arc::new(HlsProxyManager::with_cache_settings(temp_dir.path(), 300));
         let app_state = test_app_state_with_hls_proxy(hls_proxy);
@@ -9139,9 +11797,11 @@ mod tests {
             .expect("session should exist");
         session.write().await.mark_for_gc_removal();
 
-        let status = get_status(app_state, &uri).await;
+        let response = get_response(app_state, &uri, None).await;
 
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).unwrap_or("");
+        assert!(location.ends_with("/cvs/hls/hls-user/hls-pass/hls_session_or_lease_expired.m3u8"));
     }
 
     #[tokio::test]
@@ -9155,7 +11815,7 @@ mod tests {
         let response = get_response(Arc::clone(&app_state), &uri, None).await;
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CONTENT_TYPE], "video/MP2T");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp2t");
         assert_eq!(response.headers()[header::CONTENT_LENGTH], "10");
         assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
         assert_eq!(response.headers()[header::CACHE_CONTROL], "public, max-age=300, immutable");
@@ -9206,13 +11866,13 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let hls_proxy = Arc::new(HlsProxyManager::with_cache_settings(temp_dir.path(), 300));
         let app_state = test_app_state_with_hls_proxy(hls_proxy);
-        let proxy_session_id = map_ready_segment(&app_state, 123, "m4a", b"0123456789").await;
-        let uri = hls_proxy_uri(&app_state, &proxy_session_id, "000123.m4a").await;
+        let proxy_session_id = map_ready_segment(&app_state, 123, "m4v", b"0123456789").await;
+        let uri = hls_proxy_uri(&app_state, &proxy_session_id, "000123.m4v").await;
 
         let response = get_response(app_state, &uri, Some("bytes=4-")).await;
 
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(response.headers()[header::CONTENT_TYPE], "audio/mp4");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp4");
         assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 4-9/10");
         assert_eq!(response.headers()[header::CONTENT_LENGTH], "6");
         assert_eq!(response_body(response).await, bytes::Bytes::from_static(b"456789"));
@@ -9291,7 +11951,7 @@ mod tests {
         let app_state = test_app_state_with_hls_proxy(hls_proxy);
         let proxy_session_id = map_hls_map(&app_state, b"map-body", false).await;
 
-        let status = get_status(app_state, &format!("/proxy/hls/live/{proxy_session_id}/map/000000.mp4")).await;
+        let status = get_status(app_state, &format!("/hls/shared/live/{proxy_session_id}/map/000000.mp4")).await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
@@ -9374,7 +12034,7 @@ mod tests {
         let (proxy_session_id, resource_id) =
             map_transient_resource(&app_state, &format!("{}/seg.ts", origin.base_url), "ts", false).await;
 
-        let status = get_status(app_state, &format!("/proxy/hls/live/{proxy_session_id}/r/{resource_id}.ts")).await;
+        let status = get_status(app_state, &format!("/hls/shared/live/{proxy_session_id}/r/{resource_id}.ts")).await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
@@ -9409,7 +12069,7 @@ mod tests {
         let response = get_response(Arc::clone(&app_state), &uri, Some("bytes=2-15")).await;
 
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(response.headers()[header::CONTENT_TYPE], "video/MP2T");
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp2t");
         assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 2-15/16");
         assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
@@ -9433,7 +12093,7 @@ mod tests {
     async fn transient_resource_without_range_is_cached_after_first_fetch() {
         let app_state = test_app_state();
         let origin =
-            spawn_test_transient_origin_with_response("200 OK", &[("Content-Type", "video/MP2T")], "0123456789").await;
+            spawn_test_transient_origin_with_response("200 OK", &[("Content-Type", "video/mp2t")], "0123456789").await;
         let (proxy_session_id, resource_id) =
             map_transient_resource(&app_state, &format!("{}/seg.ts", origin.base_url), "ts", true).await;
         let uri = hls_proxy_uri(&app_state, &proxy_session_id, &format!("r/{resource_id}.ts")).await;
@@ -9452,7 +12112,7 @@ mod tests {
     async fn transient_resource_range_from_zero_is_cached_as_full_object() {
         let app_state = test_app_state();
         let origin =
-            spawn_test_transient_origin_with_response("200 OK", &[("Content-Type", "video/MP2T")], "0123456789").await;
+            spawn_test_transient_origin_with_response("200 OK", &[("Content-Type", "video/mp2t")], "0123456789").await;
         let (proxy_session_id, resource_id) =
             map_transient_resource(&app_state, &format!("{}/seg.ts", origin.base_url), "ts", true).await;
         let uri = hls_proxy_uri(&app_state, &proxy_session_id, &format!("r/{resource_id}.ts")).await;
@@ -9472,7 +12132,7 @@ mod tests {
         let app_state = test_app_state();
         let origin = spawn_test_transient_origin_with_delayed_response(
             "200 OK",
-            &[("Content-Type", "video/MP2T")],
+            &[("Content-Type", "video/mp2t")],
             "0123456789",
             Duration::from_millis(150),
         )
@@ -9569,8 +12229,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_resource_permanent_origin_error_returns_not_found() {
+    async fn transient_resource_permanent_origin_error_redirects_to_channel_unavailable_custom_response() {
         let app_state = test_app_state();
+        let origin =
+            spawn_test_transient_origin_with_response("404 Not Found", &[("Content-Type", "text/plain")], "missing")
+                .await;
+        let (proxy_session_id, resource_id) =
+            map_transient_resource(&app_state, &format!("{}/seg.ts", origin.base_url), "ts", true).await;
+        let uri = hls_proxy_uri(&app_state, &proxy_session_id, &format!("r/{resource_id}.ts")).await;
+
+        let response = get_response(Arc::clone(&app_state), &uri, None).await;
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).unwrap_or("");
+        assert!(location.ends_with("/cvs/hls/hls-user/hls-pass/channel_unavailable.m3u8"));
+        assert_eq!(hls_session_last_media_at_ms(&app_state, &proxy_session_id).await, None);
+        assert_no_hls_cache_stream_registered(&app_state).await;
+    }
+
+    #[tokio::test]
+    async fn transient_resource_permanent_origin_error_returns_not_found_when_custom_response_disabled() {
+        let app_state = test_app_state();
+        disable_custom_stream_response(&app_state);
         let origin =
             spawn_test_transient_origin_with_response("404 Not Found", &[("Content-Type", "text/plain")], "missing")
                 .await;
@@ -9619,16 +12299,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_unknown_resource_returns_not_found() {
+    async fn transient_unknown_resource_redirects_to_channel_unavailable_custom_response() {
         let app_state = test_app_state();
         let origin = spawn_test_transient_origin().await;
         let (proxy_session_id, _) =
             map_transient_resource(&app_state, &format!("{}/seg.ts", origin.base_url), "ts", true).await;
         let uri = hls_proxy_uri(&app_state, &proxy_session_id, "r/unknown.ts").await;
 
-        let status = get_status(Arc::clone(&app_state), &uri).await;
+        let response = get_response(Arc::clone(&app_state), &uri, None).await;
 
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response.headers().get(header::LOCATION).and_then(|value| value.to_str().ok()).unwrap_or("");
+        assert!(location.ends_with("/cvs/hls/hls-user/hls-pass/channel_unavailable.m3u8"));
+        assert_eq!(hls_session_last_media_at_ms(&app_state, &proxy_session_id).await, None);
+        assert_no_hls_cache_stream_registered(&app_state).await;
+    }
+
+    #[tokio::test]
+    async fn transient_unknown_resource_returns_not_found_when_custom_response_disabled() {
+        let app_state = test_app_state();
+        disable_custom_stream_response(&app_state);
+        let origin = spawn_test_transient_origin().await;
+        let (proxy_session_id, _) =
+            map_transient_resource(&app_state, &format!("{}/seg.ts", origin.base_url), "ts", true).await;
+        let uri = hls_proxy_uri(&app_state, &proxy_session_id, "r/unknown.ts").await;
+
+        let response = get_response(Arc::clone(&app_state), &uri, None).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(hls_session_last_media_at_ms(&app_state, &proxy_session_id).await, None);
         assert_no_hls_cache_stream_registered(&app_state).await;
     }
@@ -9642,7 +12340,7 @@ mod tests {
         headers.insert(header::HOST, HeaderValue::from_static("origin.example.com"));
         headers.insert(header::RANGE, HeaderValue::from_static("bytes=0-1"));
 
-        super::strip_sensitive_headers_for_cross_origin_redirect(&mut headers);
+        crate::api::model::scrub_hls_origin_headers(&mut headers, None);
 
         assert!(!headers.contains_key(header::AUTHORIZATION));
         assert!(!headers.contains_key(header::COOKIE));
@@ -9670,11 +12368,11 @@ mod tests {
         let app_state = test_app_state();
 
         assert_eq!(
-            get_status(Arc::clone(&app_state), "/proxy/hls/live/a8f31c9eQ7sLk92pV0mTaw/123.ts").await,
+            get_status(Arc::clone(&app_state), "/hls/shared/live/a8f31c9eQ7sLk92pV0mTaw/123.ts").await,
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            get_status(app_state, "/proxy/hls/live/a8f31c9eQ7sLk92pV0mTaw/map/000123.exe").await,
+            get_status(app_state, "/hls/shared/live/a8f31c9eQ7sLk92pV0mTaw/map/000123.exe").await,
             StatusCode::NOT_FOUND
         );
     }

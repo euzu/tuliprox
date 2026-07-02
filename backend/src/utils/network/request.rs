@@ -693,8 +693,31 @@ pub async fn send_with_retry_and_provider_policy_with_options(
     allow_redirects: bool,
     retry_enabled: bool,
     options: RequestFetchOptions,
-    mut send: impl FnMut(&Url) -> reqwest::RequestBuilder,
+    send: impl FnMut(&Url) -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, std::io::Error> {
+    send_with_retry_and_provider_policy_with_options_result(
+        app_config,
+        url,
+        provider,
+        allow_redirects,
+        retry_enabled,
+        options,
+        send,
+    )
+    .await
+    .map(|result| result.response)
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn send_with_retry_and_provider_policy_with_options_result(
+    app_config: &Arc<AppConfig>,
+    url: &Url, // Used primarily for logging/context
+    provider: Option<&Arc<ConfigProvider>>,
+    allow_redirects: bool,
+    retry_enabled: bool,
+    options: RequestFetchOptions,
+    mut send: impl FnMut(&Url) -> reqwest::RequestBuilder,
+) -> Result<ProviderFailoverResponse, std::io::Error> {
     let config = app_config.config.load();
     let (max_attempts, backoff_ms, backoff_multiplier, failover_patterns) = config.reverse_proxy.as_ref().map_or_else(
         || {
@@ -804,14 +827,20 @@ pub async fn send_with_retry_and_provider_policy_with_options(
                                     if let Some(current_provider) = provider {
                                         current_provider.set_current_index(provider_url_index);
                                     }
-                                    return Ok(response);
+                                    return Ok(ProviderFailoverResponse {
+                                        response,
+                                        provider_url_index: provider.map(|_| provider_url_index),
+                                    });
                                 }
                                 let is_failover = is_failover_redirect(response.url(), &failover_patterns);
                                 if !is_failover && status.is_success() {
                                     if let Some(current_provider) = provider {
                                         current_provider.set_current_index(provider_url_index);
                                     }
-                                    return Ok(response);
+                                    return Ok(ProviderFailoverResponse {
+                                        response,
+                                        provider_url_index: provider.map(|_| provider_url_index),
+                                    });
                                 }
 
                                 last_provider_failure = Some(format!(
@@ -945,6 +974,363 @@ pub async fn send_with_retry_and_provider_policy_with_options(
                         last_failure,
                     );
                 }
+            }
+        }
+
+        break;
+    }
+
+    Err(string_to_io_error("All attempts and providers exhausted"))
+}
+
+fn prepare_input_request_headers(
+    app_config: &Arc<AppConfig>,
+    input: &InputSource,
+    headers: Option<&HeaderMap>,
+) -> (HashMap<String, String>, Option<String>) {
+    let custom_headers = headers
+        .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
+
+    let config = app_config.config.load();
+    let default_user_agent = config.default_user_agent.clone();
+    let disabled_headers = config.get_disabled_headers();
+    drop(config);
+
+    let merged = get_request_headers(
+        Some(&input.headers),
+        custom_headers.as_ref(),
+        disabled_headers.as_ref(),
+        default_user_agent.as_deref(),
+    );
+
+    let request_headers: HashMap<String, String> = merged
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
+        .collect();
+
+    (request_headers, default_user_agent)
+}
+
+#[allow(clippy::implicit_hasher)]
+pub async fn send_input_with_retry_and_provider_policy_with_options_result(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &InputSource,
+    headers: Option<&HeaderMap>,
+    url: &Url,
+    options: RequestFetchOptions,
+) -> Result<ProviderFailoverResponse, Error> {
+    let (request_headers, default_user_agent) = prepare_input_request_headers(app_config, input, headers);
+    send_with_retry_and_provider_policy_with_options_result(
+        app_config,
+        url,
+        input.get_provider(),
+        false,
+        true,
+        options,
+        |resolved_url| {
+            get_client_request(
+                client,
+                input.method,
+                Some(&request_headers),
+                resolved_url,
+                None,
+                None,
+                default_user_agent.as_deref(),
+            )
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::implicit_hasher)]
+pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &InputSource,
+    headers: Option<&HeaderMap>,
+    url: &Url,
+    max_redirects: usize,
+    options: RequestFetchOptions,
+) -> Result<ProviderFailoverResponse, Error> {
+    let config = app_config.config.load();
+    let (max_attempts, backoff_ms, backoff_multiplier, failover_patterns) = config.reverse_proxy.as_ref().map_or_else(
+        || {
+            let (a, b, c) = ResourceRetryConfig::get_default_retry_values();
+            (a, b, c, ResourceRetryConfig::default().failover_redirect_patterns)
+        },
+        |rp| {
+            let (a, b, c) = rp.resource_retry.get_retry_values();
+            (a, b, c, rp.resource_retry.failover_redirect_patterns.clone())
+        },
+    );
+    drop(config);
+
+    let (base_headers, default_user_agent) = prepare_input_request_headers(app_config, input, headers);
+    let provider = input.get_provider();
+    let max_provider_attempts = provider.as_ref().map_or(0, |p| p.urls.len());
+    let start_provider_index = provider_start_index(provider);
+    let mut provider_url_index = start_provider_index;
+    let mut last_provider_failure: Option<String> = None;
+    let idle_timeout = options.attempt_idle_timeout_or_default();
+    let idle = sleep(idle_timeout);
+    tokio::pin!(idle);
+
+    'provider_loop: loop {
+        'attempt_loop: for attempt in 0..max_attempts {
+            let mut current_url = url.clone();
+            let mut current_headers = base_headers.clone();
+            let mut remaining_redirects = max_redirects;
+            let mut attempted_dns_ips = HashSet::new();
+
+            'redirect_loop: loop {
+                let attempt_target = resolve_attempt_target_at_provider_index(&current_url, provider, provider_url_index);
+                if log_enabled!(Level::Debug) {
+                    if let Some(current_provider) = provider {
+                        let attempt_target_log = format_request_target_for_logging(&attempt_target);
+                        debug!(
+                            "Provider '{}' attempting URL index {} of {}: {}",
+                            current_provider.name,
+                            provider_url_index,
+                            max_provider_attempts,
+                            sanitize_sensitive_info(attempt_target_log.as_str())
+                        );
+                    }
+                }
+                idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+
+                let request_builder = get_client_request(
+                    client,
+                    input.method,
+                    Some(&current_headers),
+                    &attempt_target.request_url,
+                    None,
+                    None,
+                    default_user_agent.as_deref(),
+                );
+                let (base_client, request_result) = request_builder.build_split();
+                let mut request = request_result.map_err(|err| {
+                    string_to_io_error(format!("Failed to build request: {}", sanitize_sensitive_info(err.to_string().as_str())))
+                })?;
+                apply_attempt_to_request(&mut request, &attempt_target)?;
+                if let Some(timeout) = options.attempt_idle_timeout {
+                    *request.timeout_mut() = Some(timeout);
+                }
+
+                tokio::select! {
+                    () = &mut idle => {
+                        warn!("Request idle for too long: {}", sanitize_sensitive_info(url.as_str()));
+                        last_provider_failure = Some(format!(
+                            "idle timeout while trying {}",
+                            sanitize_sensitive_info(attempt_target.request_url.as_str())
+                        ));
+                        if let Some(current_provider) = provider {
+                            if rotate_to_next_provider_url(
+                                current_provider.as_ref(),
+                                &mut provider_url_index,
+                                start_provider_index,
+                                "idle timeout",
+                            ) {
+                                continue 'provider_loop;
+                            }
+                            if max_provider_attempts > 0 {
+                                log_provider_cycle_exhausted(
+                                    current_provider.as_ref(),
+                                    start_provider_index,
+                                    provider_url_index,
+                                    last_provider_failure.as_deref().unwrap_or("idle timeout"),
+                                );
+                            }
+                        }
+
+                        if attempt < max_attempts - 1 {
+                            let delay = calculate_retry_backoff(backoff_ms, backoff_multiplier, attempt);
+                            warn!("Idle timeout, retrying same URL in {}ms (attempt {})", delay, attempt + 1);
+                            tokio::time::sleep(Duration::from_millis(delay)).await;
+                            continue 'attempt_loop;
+                        }
+
+                        return Err(string_to_io_error(format!("Request timed out and no retries left: {}", sanitize_sensitive_info(url.as_str()))));
+                    }
+
+                    result = execute_attempt_request(app_config, base_client, request, &attempt_target) => {
+                        match result {
+                            Ok(response) => {
+                                if response.status().is_redirection() {
+                                    if remaining_redirects == 0 {
+                                        return Err(string_to_io_error(format!(
+                                            "Too many redirects while requesting {}",
+                                            sanitize_sensitive_info(url.as_str())
+                                        )));
+                                    }
+
+                                    let response_base_url = response.url().clone();
+                                    let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
+                                        return Err(string_to_io_error(format!(
+                                            "Redirect response missing location header for {}",
+                                            sanitize_sensitive_info(current_url.as_str())
+                                        )));
+                                    };
+                                    let Ok(location_str) = location.to_str() else {
+                                        return Err(string_to_io_error(format!(
+                                            "Redirect response contains invalid location header for {}",
+                                            sanitize_sensitive_info(current_url.as_str())
+                                        )));
+                                    };
+                                    let next_url = response_base_url
+                                        .join(location_str)
+                                        .or_else(|_| Url::parse(location_str))
+                                        .map_err(|_| {
+                                            string_to_io_error(format!(
+                                                "Redirect response contains invalid location URL for {}",
+                                                sanitize_sensitive_info(current_url.as_str())
+                                            ))
+                                        })?;
+
+                                    if !same_origin(&response_base_url, &next_url) {
+                                        strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
+                                    }
+                                    current_url = next_url;
+                                    remaining_redirects = remaining_redirects.saturating_sub(1);
+                                    continue 'redirect_loop;
+                                }
+
+                                let status = response.status();
+                                let is_failover = is_failover_redirect(response.url(), &failover_patterns);
+                                if !is_failover && status.is_success() {
+                                    if let Some(current_provider) = provider {
+                                        current_provider.set_current_index(provider_url_index);
+                                    }
+                                    return Ok(ProviderFailoverResponse {
+                                        response,
+                                        provider_url_index: provider.map(|_| provider_url_index),
+                                    });
+                                }
+
+                                last_provider_failure = Some(format!(
+                                    "status {} while trying {}",
+                                    format_http_status(status),
+                                    sanitize_sensitive_info(attempt_target.request_url.as_str())
+                                ));
+
+                                let provider_failover_exhausted = (is_failover || should_trigger_failover(status))
+                                    && provider.is_some_and(|current_provider| {
+                                        provider_cycle_exhausted(current_provider.as_ref(), provider_url_index, start_provider_index)
+                                    });
+                                if is_failover || should_trigger_failover(status) {
+                                    if let Some(current_provider) = provider {
+                                        let reason = format!("status {}", format_http_status(status));
+                                        if rotate_to_next_provider_url(
+                                            current_provider.as_ref(),
+                                            &mut provider_url_index,
+                                            start_provider_index,
+                                            reason.as_str(),
+                                        ) {
+                                            continue 'provider_loop;
+                                        }
+                                    }
+                                }
+
+                                let is_retryable = status.is_server_error()
+                                    || matches!(status, StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT);
+                                if attempt < max_attempts - 1 && is_retryable {
+                                    perform_backoff(attempt, backoff_ms, backoff_multiplier, &response).await;
+                                    continue 'attempt_loop;
+                                }
+
+                                if provider_failover_exhausted {
+                                    if let Some(current_provider) = provider {
+                                        log_provider_cycle_exhausted(
+                                            current_provider.as_ref(),
+                                            start_provider_index,
+                                            provider_url_index,
+                                            last_provider_failure.as_deref().unwrap_or("request failed"),
+                                        );
+                                    }
+                                }
+
+                                return Err(string_to_io_error(format!(
+                                    "Request failed ({}): {}",
+                                    format_http_status(status),
+                                    sanitize_sensitive_info(url.as_str())
+                                )));
+                            }
+                            Err(err) => {
+                                if (err.is_timeout() || err.is_connect())
+                                    && should_try_next_ip_on_connect_error(provider, &attempt_target, &mut attempted_dns_ips)
+                                {
+                                    continue 'redirect_loop;
+                                }
+
+                                last_provider_failure = Some(format!(
+                                    "connection error while trying {}: {}",
+                                    sanitize_sensitive_info(attempt_target.request_url.as_str()),
+                                    sanitize_sensitive_info(err.to_string().as_str())
+                                ));
+
+                                let provider_failover_exhausted = (err.is_timeout() || err.is_connect())
+                                    && provider.is_some_and(|current_provider| {
+                                        provider_cycle_exhausted(current_provider.as_ref(), provider_url_index, start_provider_index)
+                                    });
+                                if err.is_timeout() || err.is_connect() {
+                                    if let Some(current_provider) = provider {
+                                        if rotate_to_next_provider_url(
+                                            current_provider.as_ref(),
+                                            &mut provider_url_index,
+                                            start_provider_index,
+                                            "connection error",
+                                        ) {
+                                            continue 'provider_loop;
+                                        }
+                                    }
+                                }
+
+                                if (err.is_timeout() || err.is_connect()) && attempt < max_attempts - 1 {
+                                    let delay = calculate_retry_backoff(backoff_ms, backoff_multiplier, attempt);
+                                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                                    continue 'attempt_loop;
+                                }
+
+                                if provider_failover_exhausted {
+                                    if let Some(current_provider) = provider {
+                                        log_provider_cycle_exhausted(
+                                            current_provider.as_ref(),
+                                            start_provider_index,
+                                            provider_url_index,
+                                            last_provider_failure.as_deref().unwrap_or("request error"),
+                                        );
+                                    }
+                                }
+
+                                return Err(string_to_io_error(format!(
+                                    "Request error: {}",
+                                    sanitize_sensitive_info(err.to_string().as_str())
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(current_provider) = provider {
+            if rotate_to_next_provider_url(
+                current_provider.as_ref(),
+                &mut provider_url_index,
+                start_provider_index,
+                "retries exhausted for current URL",
+            ) {
+                continue 'provider_loop;
+            }
+
+            if max_provider_attempts > 0 {
+                let last_failure = last_provider_failure.as_deref().unwrap_or("all attempts and providers exhausted");
+                log_provider_cycle_exhausted(
+                    current_provider.as_ref(),
+                    start_provider_index,
+                    provider_url_index,
+                    last_failure,
+                );
             }
         }
 
@@ -1455,47 +1841,10 @@ async fn get_remote_content_as_stream_with_options(
     url: &Url,
     options: RequestFetchOptions,
 ) -> Result<(DynReader, String), Error> {
-    let custom_headers = headers
-        .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
-
-    let config = app_config.config.load();
-    let default_user_agent = config.default_user_agent.clone();
-    let disabled_headers = config.get_disabled_headers();
-    drop(config);
-
-    let merged = get_request_headers(
-        Some(&input.headers),
-        custom_headers.as_ref(),
-        disabled_headers.as_ref(),
-        default_user_agent.as_deref(),
-    );
-
-    let headers: HashMap<String, String> = merged
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
-        .collect();
-
-    let response = send_with_retry_and_provider_policy_with_options(
-        app_config,
-        url,
-        input.get_provider(),
-        false,
-        true,
-        options,
-        |resolved_url| {
-            get_client_request(
-                client,
-                input.method,
-                Some(&headers),
-                resolved_url,
-                None,
-                None,
-                default_user_agent.as_deref(),
-            )
-        },
-    )
-    .await?;
-
+    let response =
+        send_input_with_retry_and_provider_policy_with_options_result(app_config, client, input, headers, url, options)
+            .await?
+            .response;
     let response_url = response.url().to_string();
 
     let reader = build_decoded_stream_reader(response).await?;
@@ -1564,10 +1913,9 @@ async fn get_remote_content_with_options(
 ) -> Result<(String, String), Error> {
     let (max_attempts, backoff_ms, backoff_multiplier) = text_body_retry_values(app_config, options);
     for attempt in 0..max_attempts {
-        let (mut stream, response_url) =
-            get_remote_content_as_stream_with_options(app_config, client, input, headers, url, options)
-                .await
-                .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
+        let (mut stream, response_url) = get_remote_content_as_stream_with_options(app_config, client, input, headers, url, options)
+            .await
+            .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
         match read_stream_to_string_with_options(&mut stream, response_url.as_str(), options).await {
             Ok(content) => return Ok((content, response_url)),
             Err(err) if err.kind() == ErrorKind::TimedOut && attempt + 1 < max_attempts => {
@@ -1630,6 +1978,7 @@ async fn get_remote_content_with_headers(
     Ok((content, response_url, response_headers))
 }
 
+#[allow(clippy::too_many_lines)]
 async fn get_remote_content_with_manual_redirects_and_options(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
@@ -1640,99 +1989,27 @@ async fn get_remote_content_with_manual_redirects_and_options(
     options: RequestFetchOptions,
 ) -> Result<(String, String), Error> {
     let (max_body_attempts, backoff_ms, backoff_multiplier) = text_body_retry_values(app_config, options);
-    let custom_headers = headers
-        .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
-
-    let config = app_config.config.load();
-    let default_user_agent = config.default_user_agent.clone();
-    let disabled_headers = config.get_disabled_headers();
-    drop(config);
-
-    let merged = get_request_headers(
-        Some(&input.headers),
-        custom_headers.as_ref(),
-        disabled_headers.as_ref(),
-        default_user_agent.as_deref(),
-    );
-
-    let headers: HashMap<String, String> = merged
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
-        .collect();
 
     for body_attempt in 0..max_body_attempts {
-        let mut current_url = url.clone();
-        let mut current_headers = headers.clone();
-        let mut remaining_redirects = max_redirects;
-        loop {
-            let response = send_with_retry_and_provider_policy_with_options(
-                app_config,
-                &current_url,
-                input.get_provider(),
-                true,
-                true,
-                options,
-                |resolved_url| {
-                    get_client_request(
-                        client,
-                        input.method,
-                        Some(&current_headers),
-                        resolved_url,
-                        None,
-                        None,
-                        default_user_agent.as_deref(),
-                    )
-                },
-            )
-            .await?;
-            let response_base_url = response.url().clone();
-
-            if response.status().is_redirection() {
-                if remaining_redirects == 0 {
-                    return Err(string_to_io_error(format!(
-                        "Too many redirects while requesting {}",
-                        sanitize_sensitive_info(url.as_str())
-                    )));
-                }
-
-                let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
-                    return Err(string_to_io_error(format!(
-                        "Redirect response missing location header for {}",
-                        sanitize_sensitive_info(current_url.as_str())
-                    )));
-                };
-                let Ok(location_str) = location.to_str() else {
-                    return Err(string_to_io_error(format!(
-                        "Redirect response contains invalid location header for {}",
-                        sanitize_sensitive_info(current_url.as_str())
-                    )));
-                };
-                let next_url =
-                    response_base_url.join(location_str).or_else(|_| Url::parse(location_str)).map_err(|_| {
-                        string_to_io_error(format!(
-                            "Redirect response contains invalid location URL for {}",
-                            sanitize_sensitive_info(current_url.as_str())
-                        ))
-                    })?;
-
-                if !same_origin(&response_base_url, &next_url) {
-                    strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
-                }
-                current_url = next_url;
-                remaining_redirects = remaining_redirects.saturating_sub(1);
-                continue;
+        let response = send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
+            app_config,
+            client,
+            input,
+            headers,
+            url,
+            max_redirects,
+            options,
+        )
+        .await?
+        .response;
+        let response_url = response.url().to_string();
+        let mut stream = build_decoded_stream_reader(response).await?;
+        match read_stream_to_string_with_options(&mut stream, response_url.as_str(), options).await {
+            Ok(content) => return Ok((content, response_url)),
+            Err(err) if err.kind() == ErrorKind::TimedOut && body_attempt + 1 < max_body_attempts => {
+                sleep_before_text_body_retry(body_attempt, backoff_ms, backoff_multiplier, &err).await;
             }
-
-            let response_url = response.url().to_string();
-            let mut stream = build_decoded_stream_reader(response).await?;
-            match read_stream_to_string_with_options(&mut stream, response_url.as_str(), options).await {
-                Ok(content) => return Ok((content, response_url)),
-                Err(err) if err.kind() == ErrorKind::TimedOut && body_attempt + 1 < max_body_attempts => {
-                    sleep_before_text_body_retry(body_attempt, backoff_ms, backoff_multiplier, &err).await;
-                    break;
-                }
-                Err(err) => return Err(err),
-            }
+            Err(err) => return Err(err),
         }
     }
     Err(string_to_io_error("Text response body retry attempts exhausted"))
@@ -1919,7 +2196,7 @@ pub async fn download_text_content_with_options(
     let result = if let Ok(url) = input.url.parse::<url::Url>() {
         let result = if url.scheme() == "file" {
             match url.to_file_path() {
-                Ok(file_path) => get_local_file_content(&file_path).await.map(|c| (c, url.to_string())),
+                Ok(file_path) => get_local_file_content(&file_path).await.map(|content| (content, url.to_string())),
                 Err(()) => Err(string_to_io_error(format!("Unknown file {}", sanitize_sensitive_info(&input.url)))),
             }
         } else {
@@ -2027,7 +2304,7 @@ pub async fn download_text_content_with_manual_redirects_and_options(
     let result = if let Ok(url) = input.url.parse::<url::Url>() {
         let result = if url.scheme() == "file" {
             match url.to_file_path() {
-                Ok(file_path) => get_local_file_content(&file_path).await.map(|c| (c, url.to_string())),
+                Ok(file_path) => get_local_file_content(&file_path).await.map(|content| (content, url.to_string())),
                 Err(()) => Err(string_to_io_error(format!("Unknown file {}", sanitize_sensitive_info(&input.url)))),
             }
         } else {
@@ -2332,16 +2609,21 @@ mod tests {
     use super::{
         is_safe_cross_origin_redirect_header,
         next_provider_url_index, preview_request_diagnostics_for_logging, preview_request_target_for_logging,
-        resolve_attempt_target, same_origin, send_with_retry_and_provider, send_with_retry_and_provider_policy,
-        should_try_next_ip_on_connect_error, strip_sensitive_headers_for_cross_origin_redirect,
+        resolve_attempt_target, same_origin, send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result,
+        send_with_retry_and_provider, send_with_retry_and_provider_policy, should_try_next_ip_on_connect_error,
+        strip_sensitive_headers_for_cross_origin_redirect, RequestFetchOptions,
     };
     use crate::{
-        model::{AppConfig, Config, ConfigProvider, MediaToolCapabilities, ResourceRetryConfig, ReverseProxyConfig, SourcesConfig},
+        model::{
+            AppConfig, Config, ConfigProvider, InputSource, MediaToolCapabilities, ResourceRetryConfig,
+            ReverseProxyConfig, SourcesConfig,
+        },
         utils::{FileLockManager, DEFAULT_USER_AGENT},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::model::{
-        ConfigPaths, ConfigProviderDto, DnsScheme, OnConnectErrorPolicy, ProviderDnsDto, ProviderUrlSelectionPolicy,
+        ConfigPaths, ConfigProviderDto, DnsScheme, InputFetchMethod, OnConnectErrorPolicy, ProviderDnsDto,
+        ProviderUrlSelectionPolicy,
     };
     use shared::utils::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info};
     use std::{
@@ -2682,8 +2964,132 @@ mod tests {
         Ok((addr, accepted, handle))
     }
 
+    async fn start_plain_http_server_with_response(
+        response: String,
+    ) -> std::io::Result<(SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let accepted_clone = Arc::clone(&accepted);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    continue;
+                };
+                accepted_clone.fetch_add(1, Ordering::SeqCst);
+                let response = response.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0_u8; 2048];
+                    let _ = socket.read(&mut buf).await;
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        Ok((addr, accepted, handle))
+    }
+
     async fn start_plain_http_server() -> std::io::Result<(SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
         start_plain_http_server_with_body(b"ok").await
+    }
+
+    #[tokio::test]
+    async fn manual_redirect_provider_failover_restarts_from_provider_entry() {
+        let (redirect_addr, redirect_hits, redirect_handle) = match start_plain_http_server_with_response(
+            "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string(),
+        )
+        .await
+        {
+            Ok(server) => server,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping manual_redirect_provider_failover_restarts_from_provider_entry: {err}");
+                return;
+            }
+            Err(err) => panic!("failed to start redirect target server: {err}"),
+        };
+        let redirect_url = format!("http://127.0.0.1:{}/redirected", redirect_addr.port());
+        let provider_a_response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {redirect_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let provider_entrypoint = start_plain_http_server_with_response(provider_a_response)
+            .await
+            .expect("provider a test server should start");
+        let successful_mirror =
+            start_plain_http_server_with_body(b"provider-b").await.expect("provider b test server should start");
+
+        let mut cfg = Config {
+            connect_timeout_secs: 1,
+            ..Config::default()
+        };
+        cfg.reverse_proxy = Some(ReverseProxyConfig {
+            resource_rewrite_disabled: false,
+            rewrite_secret: [0; 16],
+            resource_retry: ResourceRetryConfig {
+                max_attempts: 1,
+                ..ResourceRetryConfig::default()
+            },
+            disabled_header: None,
+            stream: None,
+            cache: None,
+            rate_limit: None,
+            geoip: None,
+            stream_history: None,
+            qos_aggregation: None,
+            hls_cache: None,
+        });
+        let app_config = make_test_app_config(cfg);
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_millis(400))
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("http client should build");
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "provider-a".into(),
+            urls: vec![
+                format!("http://127.0.0.1:{}", provider_entrypoint.0.port()).into(),
+                format!("http://127.0.0.1:{}", successful_mirror.0.port()).into(),
+            ],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+            dns: None,
+        }));
+        let input = InputSource {
+            name: Arc::<str>::from("test"),
+            url: "provider://provider-a/live/u/p/1.m3u8".to_string(),
+            provider: Some(provider),
+            username: None,
+            password: None,
+            method: InputFetchMethod::GET,
+            headers: HashMap::default(),
+        };
+        let entry_url = Url::parse(input.url.as_str()).expect("provider URL should parse");
+
+        let response = send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
+            &app_config,
+            &client,
+            &input,
+            None,
+            &entry_url,
+            5,
+            RequestFetchOptions::with_attempt_idle_timeout(Duration::from_secs(1)),
+        )
+        .await
+        .expect("request should fail over from redirected target to next provider entry");
+        let provider_url_index = response.provider_url_index;
+        let body = response.response.text().await.expect("body should be readable");
+
+        assert_eq!(body, "provider-b");
+        assert_eq!(provider_url_index, Some(1));
+        assert_eq!(provider_entrypoint.1.load(Ordering::SeqCst), 1);
+        assert_eq!(redirect_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(successful_mirror.1.load(Ordering::SeqCst), 1);
+
+        provider_entrypoint.2.abort();
+        successful_mirror.2.abort();
+        redirect_handle.abort();
     }
 
     #[tokio::test]

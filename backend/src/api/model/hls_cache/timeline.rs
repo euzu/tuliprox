@@ -17,8 +17,12 @@ use std::{
 };
 use url::Url;
 
-const SEGMENT_EXTENSIONS: &[&str] = &["ts", "m4s", "m4a"];
-const MAP_EXTENSIONS: &[&str] = &["mp4", "m4s", "m4a"];
+const SEGMENT_EXTENSIONS: &[&str] = &["ts", "mp4", "m4s", "m4v"];
+const MAP_EXTENSIONS: &[&str] = &["mp4", "m4s", "m4v"];
+pub const HLS_PROVISIONING_ORIGIN_EPOCH: u64 = u64::MAX;
+pub const HLS_PROVISIONING_GAP_ORIGIN_EPOCH: u64 = u64::MAX - 1;
+pub const HLS_PROVISIONING_TARGET_DURATION_SECS: u32 = 2;
+pub const HLS_PROVISIONING_SEGMENT_DURATION_MS: u64 = 2_000;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct OriginSegmentKey {
@@ -26,8 +30,17 @@ pub struct OriginSegmentKey {
     pub origin_seq: u64,
 }
 
+/// Volatile concrete origin URL for one segment download.
+///
+/// The URL is resolved against the final fetched manifest URL and may include a redirect/CDN host. Use it only as a
+/// fetch target or sanitized diagnostics; stable timeline identity is `OriginSegmentKey`, and cache identity is the
+/// proxy sequence based `SegmentCacheKey`.
 #[derive(Clone, Eq, PartialEq)]
 pub struct OriginSegmentFetchRef {
+    /// Concrete URL used to refetch the segment object.
+    ///
+    /// This starts from `ParsedOriginSegment::resolved_origin_url`, which is resolved against the final manifest URL
+    /// after redirects. It is a fetch target only; the normal timeline identity remains `OriginSegmentKey`.
     pub resolved_origin_url: String,
     pub byte_range: Option<ParsedByteRange>,
     pub valid_until_ms: Option<u64>,
@@ -100,11 +113,18 @@ impl Eq for CacheAccessState {}
 
 pub fn default_content_type_for_segment_ext(extension: &str) -> &'static str {
     match extension {
-        "ts" => "video/MP2T",
-        "m4a" => "audio/mp4",
-        "m4s" => "video/mp4",
+        "ts" => "video/mp2t",
+        "mp4" | "m4v" | "m4s" => "video/mp4",
         _ => "application/octet-stream",
     }
+}
+
+pub fn is_hls_provisioning_segment(entry: &SegmentEntry) -> bool {
+    entry.origin_key.origin_epoch == HLS_PROVISIONING_ORIGIN_EPOCH
+}
+
+pub fn is_hls_provisioning_gap_segment(entry: &SegmentEntry) -> bool {
+    entry.origin_key.origin_epoch == HLS_PROVISIONING_GAP_ORIGIN_EPOCH
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -166,14 +186,22 @@ struct TimelineDraft {
     origin_to_proxy: HashMap<OriginSegmentKey, u64>,
     discontinuity_sequence: u64,
     pending_handoff_discontinuity_sequence: Option<u64>,
+    pending_origin_epoch_handoff: bool,
     segments: BTreeMap<u64, SegmentEntry>,
     maps: BTreeMap<ProxyMapId, MapEntry>,
     origin_map_to_proxy: HashMap<OriginMapKey, ProxyMapId>,
     next_proxy_map_id: u64,
+    publishable_origin_head_proxy_seq: Option<u64>,
     publishable_origin_tail_proxy_seq: Option<u64>,
     origin_version: Option<u16>,
     target_duration: Option<u32>,
     independent_segments: bool,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum OriginEpochTransitionReason {
+    Rollover,
+    Handoff,
 }
 
 impl From<&HlsSession> for TimelineDraft {
@@ -186,10 +214,12 @@ impl From<&HlsSession> for TimelineDraft {
             origin_to_proxy: session.origin_to_proxy.clone(),
             discontinuity_sequence: session.discontinuity_sequence,
             pending_handoff_discontinuity_sequence: session.pending_handoff_discontinuity_sequence,
+            pending_origin_epoch_handoff: session.pending_origin_epoch_handoff,
             segments: session.segments.clone(),
             maps: session.maps.clone(),
             origin_map_to_proxy: session.origin_map_to_proxy.clone(),
             next_proxy_map_id: session.next_proxy_map_id,
+            publishable_origin_head_proxy_seq: session.publishable_origin_head_proxy_seq,
             publishable_origin_tail_proxy_seq: session.publishable_origin_tail_proxy_seq,
             origin_version: session.origin_version,
             target_duration: session.target_duration,
@@ -209,10 +239,12 @@ impl HlsSession {
         self.origin_to_proxy = draft.origin_to_proxy;
         self.discontinuity_sequence = draft.discontinuity_sequence;
         self.pending_handoff_discontinuity_sequence = draft.pending_handoff_discontinuity_sequence;
+        self.pending_origin_epoch_handoff = draft.pending_origin_epoch_handoff;
         self.segments = draft.segments;
         self.maps = draft.maps;
         self.origin_map_to_proxy = draft.origin_map_to_proxy;
         self.next_proxy_map_id = draft.next_proxy_map_id;
+        self.publishable_origin_head_proxy_seq = draft.publishable_origin_head_proxy_seq;
         self.publishable_origin_tail_proxy_seq = draft.publishable_origin_tail_proxy_seq;
         self.origin_version = draft.origin_version;
         self.target_duration = draft.target_duration;
@@ -225,6 +257,8 @@ impl HlsSession {
 impl TimelineDraft {
     fn apply_manifest(&mut self, manifest: &ParsedOriginManifest) -> Result<(), TimelineMapError> {
         let handoff_discontinuity_sequence = self.pending_handoff_discontinuity_sequence.take();
+        let origin_epoch_handoff = self.pending_origin_epoch_handoff;
+        self.pending_origin_epoch_handoff = false;
         if self.segments.is_empty() {
             self.discontinuity_sequence = manifest
                 .discontinuity_sequence
@@ -235,15 +269,48 @@ impl TimelineDraft {
         self.target_duration = manifest.target_duration;
         self.independent_segments = manifest.independent_segments;
         self.apply_forward_jump(manifest)?;
+        let epoch_transition_discontinuity = self.apply_origin_epoch_transition_for_manifest(manifest, origin_epoch_handoff)?;
 
-        let mut mark_handoff_discontinuity = handoff_discontinuity_sequence.is_some();
+        let mut mark_handoff_discontinuity =
+            handoff_discontinuity_sequence.is_some() || epoch_transition_discontinuity;
+        let mut manifest_head_proxy_seq = None;
+        let mut manifest_tail_proxy_seq = None;
         for parsed in &manifest.segments {
-            self.map_origin_segment(parsed, manifest, mark_handoff_discontinuity)?;
+            let proxy_seq = self.map_origin_segment(parsed, manifest, mark_handoff_discontinuity)?;
+            manifest_head_proxy_seq.get_or_insert(proxy_seq);
+            manifest_tail_proxy_seq = Some(proxy_seq);
             mark_handoff_discontinuity = false;
         }
 
-        self.publishable_origin_tail_proxy_seq = self.segments.keys().next_back().copied();
+        self.publishable_origin_head_proxy_seq = manifest_head_proxy_seq;
+        self.publishable_origin_tail_proxy_seq = manifest_tail_proxy_seq;
         Ok(())
+    }
+
+    fn apply_origin_epoch_transition_for_manifest(
+        &mut self,
+        manifest: &ParsedOriginManifest,
+        origin_epoch_handoff: bool,
+    ) -> Result<bool, TimelineMapError> {
+        if origin_epoch_handoff && self.should_start_new_origin_epoch_for_handoff(manifest) {
+            let next_origin_seq = manifest
+                .segments
+                .first()
+                .map_or(manifest.origin_manifest_sequence, |segment| segment.origin_seq);
+            self.start_new_origin_epoch(next_origin_seq, OriginEpochTransitionReason::Handoff)?;
+            return Ok(true);
+        }
+
+        if self.should_start_new_origin_epoch_for_rollover(manifest) {
+            let next_origin_seq = manifest
+                .segments
+                .first()
+                .map_or(manifest.origin_manifest_sequence, |segment| segment.origin_seq);
+            self.start_new_origin_epoch(next_origin_seq, OriginEpochTransitionReason::Rollover)?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     fn apply_forward_jump(&mut self, manifest: &ParsedOriginManifest) -> Result<(), TimelineMapError> {
@@ -256,10 +323,6 @@ impl TimelineDraft {
         }
 
         let missing_origin_segments = manifest.origin_manifest_sequence - next_origin_seq;
-        let proxy_next_seq = self.proxy_next_seq.unwrap_or(next_origin_seq);
-        self.proxy_next_seq =
-            Some(proxy_next_seq.checked_add(missing_origin_segments).ok_or(TimelineMapError::ProxySequenceOverflow)?);
-        self.origin_seq_highwater = Some(manifest.origin_manifest_sequence - 1);
         info!(
             "HLS forward jump accepted: proxy_session_id={} origin_sequence={} missing_segments={missing_origin_segments}",
             safe_proxy_session_id(&self.proxy_session_id),
@@ -268,24 +331,62 @@ impl TimelineDraft {
         Ok(())
     }
 
+    fn should_start_new_origin_epoch_for_handoff(&self, manifest: &ParsedOriginManifest) -> bool {
+        if self.segments.is_empty() {
+            return false;
+        }
+        let Some(highwater) = self.origin_seq_highwater else {
+            return false;
+        };
+        manifest.segments.first().is_some_and(|segment| segment.origin_seq >= highwater)
+    }
+
+    fn should_start_new_origin_epoch_for_rollover(&self, manifest: &ParsedOriginManifest) -> bool {
+        if self.segments.is_empty() {
+            return false;
+        }
+        let Some(highwater) = self.origin_seq_highwater else {
+            return false;
+        };
+        manifest.segments.last().is_some_and(|segment| segment.origin_seq < highwater)
+    }
+
+    fn start_new_origin_epoch(
+        &mut self,
+        next_origin_seq: u64,
+        reason: OriginEpochTransitionReason,
+    ) -> Result<(), TimelineMapError> {
+        let previous_highwater = self.origin_seq_highwater;
+        self.origin_epoch = self.origin_epoch.checked_add(1).ok_or(TimelineMapError::ProxySequenceOverflow)?;
+        self.origin_seq_highwater = None;
+        if let (OriginEpochTransitionReason::Rollover, Some(highwater)) = (reason, previous_highwater) {
+            info!(
+                "HLS media sequence rollover detected: proxy_session_id={} previous_highwater={highwater} next_origin_seq={} origin_epoch={}",
+                safe_proxy_session_id(&self.proxy_session_id),
+                next_origin_seq,
+                self.origin_epoch
+            );
+        }
+        Ok(())
+    }
+
     fn map_origin_segment(
         &mut self,
         parsed: &ParsedOriginSegment,
         manifest: &ParsedOriginManifest,
         handoff_discontinuity_before: bool,
-    ) -> Result<(), TimelineMapError> {
+    ) -> Result<u64, TimelineMapError> {
         let current_epoch_key = OriginSegmentKey { origin_epoch: self.origin_epoch, origin_seq: parsed.origin_seq };
-        if self.origin_to_proxy.contains_key(&current_epoch_key) {
-            if let Some(proxy_seq) = self.origin_to_proxy.get(&current_epoch_key).copied() {
-                if let Some(entry) = self.segments.get_mut(&proxy_seq) {
-                    entry.origin_fetch_ref = Some(OriginSegmentFetchRef {
-                        resolved_origin_url: parsed.resolved_origin_url.clone(),
-                        byte_range: parsed.origin_byte_range,
-                        valid_until_ms: None,
-                    });
-                }
+        if let Some(proxy_seq) = self.origin_to_proxy.get(&current_epoch_key).copied() {
+            if let Some(entry) = self.segments.get_mut(&proxy_seq) {
+                // Refresh only the concrete fetch reference. Segment identity stays origin_epoch + origin_seq.
+                entry.origin_fetch_ref = Some(OriginSegmentFetchRef {
+                    resolved_origin_url: parsed.resolved_origin_url.clone(),
+                    byte_range: parsed.origin_byte_range,
+                    valid_until_ms: None,
+                });
             }
-            return Ok(());
+            return Ok(proxy_seq);
         }
 
         let mut rollover_discontinuity = false;
@@ -307,10 +408,7 @@ impl TimelineDraft {
 
         let origin_key = OriginSegmentKey { origin_epoch: self.origin_epoch, origin_seq: parsed.origin_seq };
 
-        let proxy_seq = match self.proxy_next_seq {
-            Some(next) => next,
-            None => parsed.origin_seq,
-        };
+        let proxy_seq = self.proxy_next_seq.unwrap_or_default();
         self.proxy_next_seq = Some(proxy_seq.checked_add(1).ok_or(TimelineMapError::ProxySequenceOverflow)?);
 
         let map_ref = parsed
@@ -334,6 +432,7 @@ impl TimelineDraft {
             daterange_tags_before: parsed.daterange_tags_before.clone(),
             origin_byte_range: parsed.origin_byte_range,
             map_ref,
+            // Preserve the concrete fetch target resolved by the parser; do not derive provider/session identity from it.
             origin_fetch_ref: Some(OriginSegmentFetchRef {
                 resolved_origin_url: parsed.resolved_origin_url.clone(),
                 byte_range: parsed.origin_byte_range,
@@ -346,7 +445,7 @@ impl TimelineDraft {
 
         self.origin_to_proxy.insert(origin_key, proxy_seq);
         self.segments.insert(proxy_seq, entry);
-        Ok(())
+        Ok(proxy_seq)
     }
 
     fn map_origin_map(&mut self, parsed_map: &ParsedOriginMap) -> Result<ProxyMapId, TimelineMapError> {
@@ -384,7 +483,7 @@ mod tests {
     use super::{SegmentCacheStatus, TimelineMapError};
     use crate::{
         api::model::{
-            HlsSession, HlsSessionKey, MapCacheStatus, OriginSegmentKey, ProxyMapId, RenderPolicy, SegmentFetchPriority,
+            HlsSession, HlsSessionKey, MapCacheStatus, OriginSegmentKey, ProxyMapId, SegmentFetchPriority,
         },
         processing::parser::hls::origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome},
     };
@@ -429,9 +528,60 @@ mod tests {
         session.apply_origin_manifest(&first).expect("first manifest should map");
         session.apply_origin_manifest(&second).expect("second manifest should map");
 
-        assert_eq!(session.segments.keys().copied().collect::<Vec<_>>(), vec![322, 323, 324, 325, 326, 327]);
-        assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 1, origin_seq: 0 }), Some(&325));
-        assert!(session.segments.get(&325).expect("rollover segment").discontinuity_before);
+        assert_eq!(session.segments.keys().copied().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 1, origin_seq: 0 }), Some(&3));
+        assert!(session.segments.get(&3).expect("rollover segment").discontinuity_before);
+    }
+
+    #[test]
+    fn origin_rollover_remaps_low_sequences_even_when_previous_epoch_contains_them() {
+        let mut session = session();
+        let old_low = normal_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4.0,\n0.ts\n#EXTINF:4.0,\n1.ts\n#EXTINF:4.0,\n2.ts\n",
+        );
+        let high = normal_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:190\n#EXTINF:4.0,\n190.ts\n#EXTINF:4.0,\n191.ts\n#EXTINF:4.0,\n192.ts\n",
+        );
+        let rollover = normal_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4.0,\n0.ts\n#EXTINF:4.0,\n1.ts\n#EXTINF:4.0,\n2.ts\n",
+        );
+
+        session.apply_origin_manifest(&old_low).expect("old low manifest should map");
+        session.apply_origin_manifest(&high).expect("high manifest should map");
+        session.apply_origin_manifest(&rollover).expect("rollover manifest should map");
+
+        assert_eq!(session.origin_epoch, 1);
+        assert_eq!(session.origin_seq_highwater, Some(2));
+        assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 0, origin_seq: 0 }), Some(&0));
+        assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 0, origin_seq: 190 }), Some(&3));
+        assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 1, origin_seq: 0 }), Some(&6));
+        assert_eq!(session.segments.keys().copied().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(session.segments.get(&6).expect("new epoch segment").discontinuity_before);
+    }
+
+    #[test]
+    fn repeated_manifest_after_rollover_reuses_new_epoch_mapping() {
+        let mut session = session();
+        let old_low = normal_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4.0,\n0.ts\n#EXTINF:4.0,\n1.ts\n#EXTINF:4.0,\n2.ts\n",
+        );
+        let high = normal_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:190\n#EXTINF:4.0,\n190.ts\n#EXTINF:4.0,\n191.ts\n#EXTINF:4.0,\n192.ts\n",
+        );
+        let rollover = normal_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4.0,\n0.ts\n#EXTINF:4.0,\n1.ts\n#EXTINF:4.0,\n2.ts\n",
+        );
+
+        session.apply_origin_manifest(&old_low).expect("old low manifest should map");
+        session.apply_origin_manifest(&high).expect("high manifest should map");
+        session.apply_origin_manifest(&rollover).expect("rollover manifest should map");
+        session.apply_origin_manifest(&rollover).expect("same rollover manifest should reuse new epoch");
+
+        assert_eq!(session.origin_epoch, 1);
+        assert_eq!(session.origin_seq_highwater, Some(2));
+        assert_eq!(session.proxy_next_seq, Some(9));
+        assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 1, origin_seq: 0 }), Some(&6));
+        assert_eq!(session.segments.len(), 9);
     }
 
     #[test]
@@ -443,7 +593,7 @@ mod tests {
         session.apply_origin_manifest(&manifest).expect("same manifest should be ignored");
 
         assert_eq!(session.segments.len(), 1);
-        assert_eq!(session.proxy_next_seq, Some(11));
+        assert_eq!(session.proxy_next_seq, Some(1));
     }
 
     #[test]
@@ -461,11 +611,13 @@ mod tests {
 
         assert_eq!(session.origin_epoch, 0);
         assert_eq!(session.origin_seq_highwater, Some(103));
-        assert_eq!(session.segments.keys().copied().collect::<Vec<_>>(), vec![100, 101, 102, 103]);
+        assert_eq!(session.segments.keys().copied().collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+        assert_eq!(session.publishable_origin_head_proxy_seq, Some(1));
+        assert_eq!(session.publishable_origin_tail_proxy_seq, Some(3));
     }
 
     #[test]
-    fn forward_jump_advances_proxy_next_seq_before_mapping() {
+    fn forward_jump_preserves_compact_proxy_sequence() {
         let mut session = session();
         let first = normal_manifest("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4.0,\n100.ts\n");
         let jump = normal_manifest(
@@ -475,9 +627,26 @@ mod tests {
         session.apply_origin_manifest(&first).expect("first manifest should map");
         session.apply_origin_manifest(&jump).expect("jump manifest should map");
 
-        assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 0, origin_seq: 107 }), Some(&107));
-        assert_eq!(session.proxy_next_seq, Some(110));
-        assert_eq!(session.publishable_origin_tail_proxy_seq, Some(109));
+        assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 0, origin_seq: 107 }), Some(&1));
+        assert_eq!(session.proxy_next_seq, Some(4));
+        assert_eq!(session.publishable_origin_head_proxy_seq, Some(1));
+        assert_eq!(session.publishable_origin_tail_proxy_seq, Some(3));
+    }
+
+    #[test]
+    fn host_handoff_remaps_same_origin_sequence_to_new_proxy_sequence() {
+        let mut session = session();
+        let first = normal_manifest("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4.0,\n100.ts\n");
+        let second = normal_manifest("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4.0,\n100.ts\n");
+
+        session.apply_origin_manifest(&first).expect("first manifest should map");
+        session.mark_pending_origin_epoch_handoff_discontinuity(0);
+        session.apply_origin_manifest(&second).expect("second manifest should map");
+
+        assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 0, origin_seq: 100 }), Some(&0));
+        assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 1, origin_seq: 100 }), Some(&1));
+        assert!(session.segments.get(&1).expect("host handoff segment").discontinuity_before);
+        assert_eq!(session.proxy_next_seq, Some(2));
     }
 
     #[test]
@@ -490,6 +659,7 @@ mod tests {
         session.apply_origin_manifest(&first).expect("first manifest should map");
         let previous_proxy_next_seq = session.proxy_next_seq;
         let previous_highwater = session.origin_seq_highwater;
+        let previous_head = session.publishable_origin_head_proxy_seq;
         let previous_tail = session.publishable_origin_tail_proxy_seq;
         let previous_segments = session.segments.clone();
         let previous_origin_to_proxy = session.origin_to_proxy.clone();
@@ -498,6 +668,7 @@ mod tests {
 
         assert_eq!(session.proxy_next_seq, previous_proxy_next_seq);
         assert_eq!(session.origin_seq_highwater, previous_highwater);
+        assert_eq!(session.publishable_origin_head_proxy_seq, previous_head);
         assert_eq!(session.publishable_origin_tail_proxy_seq, previous_tail);
         assert_eq!(session.segments, previous_segments);
         assert_eq!(session.origin_to_proxy, previous_origin_to_proxy);
@@ -532,22 +703,66 @@ mod tests {
     }
 
     #[test]
+    fn map_fetch_ref_preserves_final_manifest_host_for_relative_map_uri() {
+        let mut session = session();
+        let manifest = parse_origin_media_manifest(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\nseg.m4s\n",
+            "https://cdn.example.net/live/redirected/playlist.m3u8",
+        );
+        let crate::processing::parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(manifest) = manifest
+        else {
+            panic!("manifest should parse as normal timeline");
+        };
+
+        session.apply_origin_manifest(&manifest).expect("manifest should map");
+
+        let map = session.maps.get(&ProxyMapId(0)).expect("map placeholder");
+        assert_eq!(map.origin_key.resolved_origin_uri, "https://cdn.example.net/live/redirected/init.mp4");
+        assert_eq!(
+            map.origin_fetch_ref.as_ref().expect("map fetch ref").resolved_origin_url,
+            "https://cdn.example.net/live/redirected/init.mp4"
+        );
+    }
+
+    #[test]
     fn manifest_mapping_sets_origin_fetch_ref() {
         let mut session = session();
         let manifest = normal_manifest("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4.0,\nseg.ts\n");
 
         session.apply_origin_manifest(&manifest).expect("manifest should map");
 
-        let segment = session.segments.get(&1).expect("segment should be mapped");
+        let segment = session.segments.get(&0).expect("segment should be mapped");
         let fetch_ref = segment.origin_fetch_ref.as_ref().expect("fetch ref should be set");
         assert!(format!("{fetch_ref:?}").contains("<redacted>"));
         assert!(!format!("{fetch_ref:?}").contains("seg.ts"));
     }
 
     #[test]
+    fn segment_fetch_ref_preserves_final_manifest_host_for_relative_segment_uri() {
+        let mut session = session();
+        let manifest = parse_origin_media_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:4.0,\nmedia/seg001.ts\n",
+            "https://cdn.example.net/live/redirected/playlist.m3u8",
+        );
+        let crate::processing::parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(manifest) = manifest
+        else {
+            panic!("manifest should parse as normal timeline");
+        };
+
+        session.apply_origin_manifest(&manifest).expect("manifest should map");
+
+        let segment = session.segments.get(&0).expect("segment should be mapped");
+        assert_eq!(segment.origin_key, OriginSegmentKey { origin_epoch: 0, origin_seq: 10 });
+        assert_eq!(
+            segment.origin_fetch_ref.as_ref().expect("fetch ref").resolved_origin_url,
+            "https://cdn.example.net/live/redirected/media/seg001.ts"
+        );
+    }
+
+    #[test]
     fn cold_start_prefetch_prioritizes_visible_window_then_known_tail() {
         let mut session = session();
-        session.render_policy = RenderPolicy::new(3);
+        session.initial_prefetch_gap_segments = 3;
         session.configure_segment_prefetch_queue(6);
         let manifest = normal_manifest(
             "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4.0,\n100.ts\n#EXTINF:4.0,\n101.ts\n#EXTINF:4.0,\n102.ts\n#EXTINF:4.0,\n103.ts\n#EXTINF:4.0,\n104.ts\n#EXTINF:4.0,\n105.ts\n",
@@ -557,15 +772,15 @@ mod tests {
         session.queue_manifest_prefetch_candidates(10);
 
         assert!(matches!(
-            session.segments.get(&100).expect("100").status,
+            session.segments.get(&0).expect("0").status,
             SegmentCacheStatus::Queued { priority: SegmentFetchPriority::RenderWindow, .. }
         ));
         assert!(matches!(
-            session.segments.get(&102).expect("102").status,
+            session.segments.get(&2).expect("2").status,
             SegmentCacheStatus::Queued { priority: SegmentFetchPriority::RenderWindow, .. }
         ));
         assert!(matches!(
-            session.segments.get(&103).expect("103").status,
+            session.segments.get(&3).expect("3").status,
             SegmentCacheStatus::Queued { priority: SegmentFetchPriority::Prefetch, .. }
         ));
         assert_eq!(session.segment_prefetch_queue.prefetch_len(), 3);
@@ -611,8 +826,42 @@ mod tests {
         session.apply_origin_manifest(&second).expect("second manifest should map");
 
         assert_eq!(session.maps.len(), 2);
-        assert_eq!(session.segments.get(&322).expect("first epoch segment").map_ref, Some(ProxyMapId(0)));
-        assert_eq!(session.segments.get(&323).expect("second epoch segment").map_ref, Some(ProxyMapId(1)));
+        assert_eq!(session.segments.get(&0).expect("first epoch segment").map_ref, Some(ProxyMapId(0)));
+        assert_eq!(session.segments.get(&1).expect("second epoch segment").map_ref, Some(ProxyMapId(1)));
         assert_eq!(session.maps.get(&ProxyMapId(1)).expect("second map").origin_key.origin_epoch, 1);
+    }
+
+    #[test]
+    fn same_relative_map_uri_on_different_final_hosts_uses_distinct_proxy_map_ids() {
+        let mut session = session();
+        let first = parse_origin_media_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\n0.m4s\n",
+            "https://cdn-a.example.net/live/playlist.m3u8",
+        );
+        let second = parse_origin_media_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\n1.m4s\n",
+            "https://cdn-b.example.net/live/playlist.m3u8",
+        );
+        let crate::processing::parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(first) = first else {
+            panic!("first manifest should parse as normal timeline");
+        };
+        let crate::processing::parser::hls::origin_manifest::OriginManifestParseOutcome::Normal(second) = second else {
+            panic!("second manifest should parse as normal timeline");
+        };
+
+        session.apply_origin_manifest(&first).expect("first manifest should map");
+        session.apply_origin_manifest(&second).expect("second manifest should map");
+
+        assert_eq!(session.maps.len(), 2);
+        assert_eq!(
+            session.maps.get(&ProxyMapId(0)).expect("first map").origin_key.resolved_origin_uri,
+            "https://cdn-a.example.net/live/init.mp4"
+        );
+        assert_eq!(
+            session.maps.get(&ProxyMapId(1)).expect("second map").origin_key.resolved_origin_uri,
+            "https://cdn-b.example.net/live/init.mp4"
+        );
+        assert_eq!(session.segments.get(&0).expect("first segment").map_ref, Some(ProxyMapId(0)));
+        assert_eq!(session.segments.get(&1).expect("second segment").map_ref, Some(ProxyMapId(1)));
     }
 }

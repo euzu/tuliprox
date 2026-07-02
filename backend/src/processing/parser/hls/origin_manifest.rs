@@ -28,7 +28,9 @@ pub struct ParsedOriginManifest {
     pub target_duration: Option<u32>,
     pub discontinuity_sequence: Option<u64>,
     pub independent_segments: bool,
+    /// Parsed MAP fetch references before proxy MAP ID assignment.
     pub maps: Vec<ParsedOriginMap>,
+    /// Parsed segment fetch references before proxy sequence mapping.
     pub segments: Vec<ParsedOriginSegment>,
 }
 
@@ -37,6 +39,21 @@ pub struct ParsedOriginManifest {
 pub struct ParsedManifestTiming {
     pub target_duration_ms: Option<u64>,
     pub last_segment_duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParsedManifestValiditySource {
+    ExtInfSum,
+    TargetDuration,
+    Fallback,
+}
+
+/// Parsed validity window for a committed HLS manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsedManifestValidity {
+    pub playlist_duration_ms: u64,
+    pub segment_count: usize,
+    pub source: ParsedManifestValiditySource,
 }
 
 /// Lightweight timeline markers used to validate transient passthrough manifests
@@ -77,6 +94,10 @@ impl fmt::Debug for ParsedOriginManifest {
 pub struct ParsedOriginSegment {
     pub origin_seq: u64,
     pub duration_ms: u64,
+    /// Concrete absolute segment fetch URL resolved against the final manifest URL after redirects.
+    ///
+    /// This may intentionally contain a provider mirror, redirect target, or CDN host. It is request-local fetch
+    /// metadata, not HLS session identity, account binding, or provider-failover state.
     pub resolved_origin_url: String,
     pub discontinuity_before: bool,
     pub program_date_time: Option<String>,
@@ -104,6 +125,8 @@ impl fmt::Debug for ParsedOriginSegment {
 #[derive(Clone, PartialEq, Eq)]
 pub struct ParsedOriginMap {
     pub map_id: usize,
+    /// Concrete absolute MAP URI resolved against the final manifest URL after
+    /// redirects. It is a fetch URI, not a provider-failover identity.
     pub resolved_origin_uri: String,
     pub byte_range: Option<ParsedByteRange>,
 }
@@ -192,6 +215,64 @@ pub fn parse_manifest_timing(body: &str) -> ParsedManifestTiming {
         }
     }
     timing
+}
+
+pub fn parse_manifest_validity(body: &str) -> Option<ParsedManifestValidity> {
+    let mut target_duration_ms = None;
+    let mut pending_extinf_duration_ms = None;
+    let mut segment_count = 0_usize;
+    let mut extinf_sum_ms = 0_u64;
+    let mut extinf_duration_count = 0_usize;
+
+    for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some(value) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
+            if let Ok(duration) = value.trim().parse::<u64>() {
+                target_duration_ms = Some(duration.saturating_mul(1_000));
+            }
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("#EXTINF:").and_then(parse_extinf_duration_millis) {
+            pending_extinf_duration_ms = Some(value);
+            continue;
+        }
+
+        if line.starts_with('#') {
+            continue;
+        }
+
+        segment_count = segment_count.saturating_add(1);
+        if let Some(duration_ms) = pending_extinf_duration_ms.take() {
+            extinf_sum_ms = extinf_sum_ms.saturating_add(duration_ms);
+            extinf_duration_count = extinf_duration_count.saturating_add(1);
+        }
+    }
+
+    if segment_count == 0 {
+        return None;
+    }
+
+    if extinf_duration_count == segment_count && extinf_sum_ms > 0 {
+        return Some(ParsedManifestValidity {
+            playlist_duration_ms: extinf_sum_ms,
+            segment_count,
+            source: ParsedManifestValiditySource::ExtInfSum,
+        });
+    }
+
+    if let Some(target_duration_ms) = target_duration_ms {
+        return Some(ParsedManifestValidity {
+            playlist_duration_ms: target_duration_ms.saturating_mul(u64::try_from(segment_count).ok()?),
+            segment_count,
+            source: ParsedManifestValiditySource::TargetDuration,
+        });
+    }
+
+    Some(ParsedManifestValidity {
+        playlist_duration_ms: 15_000_u64.saturating_mul(u64::try_from(segment_count).ok()?),
+        segment_count,
+        source: ParsedManifestValiditySource::Fallback,
+    })
 }
 
 fn parse_extinf_duration_millis(value: &str) -> Option<u64> {
@@ -423,6 +504,7 @@ fn is_allowed_normal_timeline_tag(tag: &str) -> bool {
             | "#EXT-X-PROGRAM-DATE-TIME"
             | "#EXT-X-DATERANGE"
             | "#EXT-X-INDEPENDENT-SEGMENTS"
+            | "#EXT-X-ALLOW-CACHE"
     )
 }
 
@@ -507,8 +589,8 @@ fn parser_feature(feature: &str) -> OriginManifestTransientReason {
 #[cfg(test)]
 mod tests {
     use super::{
-        OriginManifestParseOutcome, OriginManifestTransientReason, ParsedByteRange, parse_manifest_timing,
-        parse_origin_manifest_timeline, parse_origin_media_manifest,
+        OriginManifestParseOutcome, OriginManifestTransientReason, ParsedByteRange, ParsedManifestValiditySource,
+        parse_manifest_timing, parse_manifest_validity, parse_origin_manifest_timeline, parse_origin_media_manifest,
     };
 
     const BASE_URL: &str = "http://origin.example.com/live/final/index.m3u8";
@@ -599,6 +681,19 @@ mod tests {
 
         assert_eq!(manifest.maps[0].resolved_origin_uri, "http://origin.example.com/live/final/init.mp4");
         assert_eq!(manifest.segments[0].map_ref, Some(0));
+    }
+
+    #[test]
+    fn ext_x_map_relative_uri_is_resolved_against_final_manifest_url_after_redirect() {
+        let final_manifest_url = "https://cdn.example.net/live/redirected/playlist.m3u8";
+        let outcome =
+            parse_origin_media_manifest("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\nseg001.m4s\n", final_manifest_url);
+        let OriginManifestParseOutcome::Normal(manifest) = outcome else {
+            panic!("manifest should parse as normal timeline");
+        };
+
+        assert_eq!(manifest.maps[0].resolved_origin_uri, "https://cdn.example.net/live/redirected/init.mp4");
+        assert_eq!(manifest.segments[0].resolved_origin_url, "https://cdn.example.net/live/redirected/seg001.m4s");
     }
 
     #[test]
@@ -696,5 +791,36 @@ mod tests {
             Some(9_230)
         );
         assert_eq!(parse_manifest_timing("#EXTM3U\n#EXTINF:7,\nseg.ts\n").last_segment_duration_ms, Some(7_000));
+    }
+
+    #[test]
+    fn manifest_validity_prefers_extinf_sum() {
+        let validity = parse_manifest_validity(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:4.000,\na.ts\n#EXTINF:6.250,\nb.ts\n",
+        )
+        .expect("validity");
+
+        assert_eq!(validity.playlist_duration_ms, 10_250);
+        assert_eq!(validity.segment_count, 2);
+        assert_eq!(validity.source, ParsedManifestValiditySource::ExtInfSum);
+    }
+
+    #[test]
+    fn manifest_validity_falls_back_to_target_duration() {
+        let validity = parse_manifest_validity("#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXTINF:x,\na.ts\n#EXTINF:y,\nb.ts\n")
+            .expect("validity");
+
+        assert_eq!(validity.playlist_duration_ms, 24_000);
+        assert_eq!(validity.segment_count, 2);
+        assert_eq!(validity.source, ParsedManifestValiditySource::TargetDuration);
+    }
+
+    #[test]
+    fn manifest_validity_falls_back_to_segment_count_times_15_seconds() {
+        let validity = parse_manifest_validity("#EXTM3U\n#EXTINF:x,\na.ts\n#EXTINF:y,\nb.ts\n").expect("validity");
+
+        assert_eq!(validity.playlist_duration_ms, 30_000);
+        assert_eq!(validity.segment_count, 2);
+        assert_eq!(validity.source, ParsedManifestValiditySource::Fallback);
     }
 }

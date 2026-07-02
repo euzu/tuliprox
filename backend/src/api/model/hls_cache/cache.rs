@@ -32,6 +32,8 @@ impl SegmentCacheKey {
 
     pub fn stable_value(&self) -> String { format!("hls:{}:{:020}", self.session_id.0, self.seq) }
 
+    pub fn proxy_session_id(&self) -> &ProxySessionId { &self.session_id }
+
     pub fn proxy_seq(&self) -> u64 { self.seq }
 }
 
@@ -78,6 +80,10 @@ impl fmt::Debug for MapCacheKey {
 }
 
 /// Stable cache key for one demand-cached transient passthrough object.
+///
+/// This key is not a provider-source identity. It keys the proxy-visible object for a concrete transient resource.
+/// The concrete origin fetch URI is kept in `TransientResourceRef`; callers must not reconstruct it from this key or
+/// force host-neutral cache hits across redirect/CDN contexts without a separate safe resource identity.
 #[derive(Clone, Eq, PartialEq, Hash)]
 pub struct TransientObjectCacheKey {
     session_id: ProxySessionId,
@@ -563,8 +569,8 @@ impl Default for HlsSegmentCache {
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheInvalidationOutcome, HlsSegmentCache, MapCacheKey, SegmentCacheKey};
-    use crate::api::model::ProxySessionId;
+    use super::{CacheInvalidationOutcome, HlsSegmentCache, MapCacheKey, SegmentCacheKey, TransientObjectCacheKey};
+    use crate::api::model::{build_transient_resource_id, ProxySessionId};
     use std::{io, sync::Arc, time::Duration};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -585,6 +591,27 @@ mod tests {
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("secretToken"));
         assert!(!debug.contains(&key.stable_value()));
+    }
+
+    #[test]
+    fn transient_object_cache_key_keeps_redirect_hosts_distinct_without_leaking_urls() {
+        let proxy_session_id = ProxySessionId("proxy_session".to_string());
+        let first_resource =
+            build_transient_resource_id("https://cdn-a.example.net/live/redirected/seg001.ts", b"secret");
+        let second_resource =
+            build_transient_resource_id("https://cdn-b.example.net/live/redirected/seg001.ts", b"secret");
+
+        let first = TransientObjectCacheKey::new(proxy_session_id.clone(), first_resource, "ts");
+        let second = TransientObjectCacheKey::new(proxy_session_id, second_resource, "ts");
+
+        assert_ne!(first, second);
+        assert_ne!(first.stable_value(), second.stable_value());
+        for value in [first.stable_value(), second.stable_value()] {
+            assert!(!value.contains("provider://"));
+            assert!(!value.contains("cdn-a.example.net"));
+            assert!(!value.contains("cdn-b.example.net"));
+            assert!(!value.contains("/live/redirected/seg001.ts"));
+        }
     }
 
     #[tokio::test]
