@@ -767,9 +767,9 @@ impl HlsProxyManager {
         }
         if snapshot.state != HlsAccessLeaseState::Expired && snapshot.state != HlsAccessLeaseState::Denied {
             let due_at_ms = if snapshot.state == HlsAccessLeaseState::Pending {
-                snapshot.pending_deadline
-                    .map(HlsAccessLeasePendingDeadline::deadline_ms)
-                    .unwrap_or(snapshot.valid_until_ms)
+                snapshot
+                    .pending_deadline
+                    .map_or(snapshot.valid_until_ms, HlsAccessLeasePendingDeadline::deadline_ms)
             } else {
                 snapshot.valid_until_ms
             };
