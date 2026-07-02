@@ -72,6 +72,7 @@ pub enum RenderedManifestStoreRejectReason {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RenderError {
     NoRenderableWindow,
+    StoreRejected(RenderedManifestStoreRejectReason),
 }
 
 pub struct HlsManifestRenderer;
@@ -93,8 +94,10 @@ impl HlsManifestRenderer {
 impl HlsSession {
     pub fn render_and_store_manifest(&mut self, rendered_at_ms: u64) -> Result<RenderedManifest, RenderError> {
         let rendered = HlsManifestRenderer::render(self, rendered_at_ms)?;
-        self.store_rendered_manifest(rendered.clone());
-        Ok(rendered)
+        match self.store_rendered_manifest(rendered.clone()) {
+            RenderedManifestStoreOutcome::Stored => Ok(rendered),
+            RenderedManifestStoreOutcome::Rejected(reason) => Err(RenderError::StoreRejected(reason)),
+        }
     }
 
     pub fn store_rendered_manifest(&mut self, rendered: RenderedManifest) -> RenderedManifestStoreOutcome {
@@ -668,6 +671,23 @@ mod tests {
             })
         );
         assert_eq!(session.last_rendered_manifest, Some(previous));
+    }
+
+    #[test]
+    fn render_and_store_manifest_returns_error_on_store_rejection() {
+        let mut session = session();
+        session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+        mark_all_segments_ready(&mut session);
+        session.last_rendered_manifest = Some(rendered_manifest(2, 7));
+
+        assert_eq!(
+            session.render_and_store_manifest(10),
+            Err(RenderError::StoreRejected(RenderedManifestStoreRejectReason::RegressiveMediaSequence {
+                previous_first_proxy_seq: 2,
+                candidate_first_proxy_seq: 0,
+            }))
+        );
+        assert_eq!(session.last_rendered_manifest, Some(rendered_manifest(2, 7)));
     }
 
     #[test]

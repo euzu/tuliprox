@@ -340,7 +340,7 @@ impl TimelineDraft {
         let Some(highwater) = self.origin_seq_highwater else {
             return false;
         };
-        manifest.segments.first().is_some_and(|segment| segment.origin_seq >= highwater)
+        manifest.segments.iter().any(|segment| segment.origin_seq >= highwater)
     }
 
     fn should_start_new_origin_epoch_for_rollover(&self, manifest: &ParsedOriginManifest) -> bool {
@@ -649,6 +649,26 @@ mod tests {
         assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 1, origin_seq: 100 }), Some(&1));
         assert!(session.segments.get(&1).expect("host handoff segment").discontinuity_before);
         assert_eq!(session.proxy_next_seq, Some(2));
+    }
+
+    #[test]
+    fn host_handoff_starts_new_epoch_when_range_overlaps_highwater() {
+        let mut session = session();
+        let first = normal_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4.0,\n100.ts\n#EXTINF:4.0,\n101.ts\n",
+        );
+        let second = normal_manifest(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:99\n#EXTINF:4.0,\n99.ts\n#EXTINF:4.0,\n100.ts\n#EXTINF:4.0,\n101.ts\n",
+        );
+
+        session.apply_origin_manifest(&first).expect("first manifest should map");
+        session.mark_pending_origin_epoch_handoff_discontinuity(0);
+        session.apply_origin_manifest(&second).expect("handoff manifest should map");
+
+        assert_eq!(session.origin_epoch, 1);
+        assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 1, origin_seq: 99 }), Some(&2));
+        assert_eq!(session.origin_to_proxy.get(&OriginSegmentKey { origin_epoch: 1, origin_seq: 101 }), Some(&4));
+        assert!(session.segments.get(&2).expect("handoff head").discontinuity_before);
     }
 
     #[test]

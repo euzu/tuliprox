@@ -31,6 +31,7 @@ pub enum HlsCorruptSegmentWatchdogStatus {
     DetectedCorrupt { packet_corrupt_count: u32 },
     Sanitized { packet_corrupt_before: u32, packet_corrupt_after: u32 },
     DiagnosticSanitized { packet_corrupt_before: u32, packet_corrupt_after: u32 },
+    UnsupportedContainer { extension: String },
     Timeout,
     SanitizeFailed { reason: String },
     ValidationFailed { reason: String },
@@ -143,8 +144,41 @@ impl HlsCorruptSegmentWatchdogManager {
         let lock = self.lock_for_identity(identity.clone()).await;
         let result = {
             let _permit = permit;
-            let _guard = lock.lock().await;
-            self.process_locked(segment_cache, key, raw, context, config, identity.clone(), raw_sha256, deadline).await
+            if let Some(remaining) = deadline.remaining() {
+                if let Ok(_guard) = tokio::time::timeout(remaining, lock.lock()).await {
+                    self.process_locked(
+                        segment_cache,
+                        key,
+                        raw,
+                        context,
+                        config,
+                        identity.clone(),
+                        raw_sha256,
+                        deadline,
+                    )
+                    .await
+                } else {
+                    self.record_metadata(
+                        identity.clone(),
+                        HlsCorruptSegmentWatchdogStatus::Timeout,
+                        raw.size,
+                        raw.size,
+                        Some("timeout".to_string()),
+                    )
+                    .await;
+                    segment_cache.commit_staged(key, raw).await
+                }
+            } else {
+                self.record_metadata(
+                    identity.clone(),
+                    HlsCorruptSegmentWatchdogStatus::Timeout,
+                    raw.size,
+                    raw.size,
+                    Some("timeout".to_string()),
+                )
+                .await;
+                segment_cache.commit_staged(key, raw).await
+            }
         };
         self.remove_lock_if_unused(&identity, &lock).await;
         result
@@ -215,6 +249,18 @@ impl HlsCorruptSegmentWatchdogManager {
             )
             .await;
             debug_watchdog_event(context, config.mode, "detected corrupt", Some("action=raw_commit"));
+            return segment_cache.commit_staged(key, raw).await;
+        }
+        if let Some(extension) = unsupported_sanitize_extension(&key.file_name()) {
+            self.record_metadata(
+                identity,
+                HlsCorruptSegmentWatchdogStatus::UnsupportedContainer { extension: extension.clone() },
+                raw.size,
+                raw.size,
+                Some(format!("unsupported_container:{extension}")),
+            )
+            .await;
+            debug_watchdog_event(context, config.mode, "detected corrupt", Some("action=raw_commit reason=unsupported_container"));
             return segment_cache.commit_staged(key, raw).await;
         }
         let fixed_path = watchdog_output_path(&raw.path);
@@ -608,9 +654,19 @@ fn status_log_value(status: &HlsCorruptSegmentWatchdogStatus) -> &'static str {
         HlsCorruptSegmentWatchdogStatus::DetectedCorrupt { .. } => "detected_corrupt",
         HlsCorruptSegmentWatchdogStatus::Sanitized { .. } => "sanitized",
         HlsCorruptSegmentWatchdogStatus::DiagnosticSanitized { .. } => "diagnostic_sanitized",
+        HlsCorruptSegmentWatchdogStatus::UnsupportedContainer { .. } => "unsupported_container",
         HlsCorruptSegmentWatchdogStatus::Timeout => "timeout",
         HlsCorruptSegmentWatchdogStatus::SanitizeFailed { .. } => "sanitize_failed",
         HlsCorruptSegmentWatchdogStatus::ValidationFailed { .. } => "validation_failed",
+    }
+}
+
+fn unsupported_sanitize_extension(file_name: &str) -> Option<String> {
+    let extension = file_name.rsplit_once('.')?.1.to_ascii_lowercase();
+    if matches!(extension.as_str(), "ts" | "mpegts") {
+        None
+    } else {
+        Some(extension)
     }
 }
 
@@ -641,7 +697,7 @@ fn debug_watchdog_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{count_packet_corrupt_events, parse_packet_corrupt_dts};
+    use super::{count_packet_corrupt_events, parse_packet_corrupt_dts, unsupported_sanitize_extension};
 
     #[test]
     fn packet_corrupt_counter_dedupes_mpegts_and_hls_same_dts() {
@@ -667,5 +723,13 @@ Last message repeated 3 times
     #[test]
     fn parses_packet_corrupt_dts() {
         assert_eq!(parse_packet_corrupt_dts("[mpegts @ 0x1] Packet corrupt (stream = 0, dts = -42)."), Some(-42));
+    }
+
+    #[test]
+    fn watchdog_sanitize_is_limited_to_ts_like_extensions() {
+        assert_eq!(unsupported_sanitize_extension("000001.ts"), None);
+        assert_eq!(unsupported_sanitize_extension("000001.mpegts"), None);
+        assert_eq!(unsupported_sanitize_extension("000001.m4s"), Some("m4s".to_string()));
+        assert_eq!(unsupported_sanitize_extension("000001.mp4"), Some("mp4".to_string()));
     }
 }

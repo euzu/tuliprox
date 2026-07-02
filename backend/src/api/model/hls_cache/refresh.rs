@@ -2685,13 +2685,13 @@ mod tests {
     }
 
     #[test]
-    fn provider_failover_mirror_without_redirect_is_not_manifest_host_signal() {
+    fn provider_failover_mirror_without_redirect_uses_resolved_host_signal() {
         let mut fetched = fetched_manifest("#EXTM3U\n#EXTINF:4.0,\nseg.ts\n");
         fetched.redirect_host = None;
         fetched.resolved_request_url = "http://mirror.example.com/live/user/pass/12345.m3u8".to_string();
         fetched.provider_url_index = Some(1);
 
-        assert_eq!(fetched_effective_manifest_host(&fetched), None);
+        assert_eq!(fetched_effective_manifest_host(&fetched).as_deref(), Some("mirror.example.com"));
     }
 
     #[test]
@@ -2894,7 +2894,7 @@ mod tests {
         assert!(!session.key.stable_value().contains(first.base_url.as_str()));
         assert!(!session.key.stable_value().contains(second.base_url.as_str()));
         assert_eq!(session.origin_seq_highwater, Some(0));
-        assert_eq!(session.last_effective_manifest_host, None);
+        assert_eq!(session.last_effective_manifest_host.as_deref(), Some("127.0.0.1"));
         assert!(session.manifest_acceptance.host_switch_candidate.is_none());
         let metrics = segment_worker_pool.metrics().snapshot();
         assert_eq!(metrics.refresh_started, 1);

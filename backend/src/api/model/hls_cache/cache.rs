@@ -254,6 +254,7 @@ impl HlsSegmentCache {
     where
         K: HlsCacheObjectKey,
     {
+        self.ensure_cache_root_marker().await?;
         let final_path = self.path_for_key(key);
         let Some(parent) = final_path.parent() else {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "cache path has no parent"));
@@ -294,6 +295,7 @@ impl HlsSegmentCache {
         K: HlsCacheObjectKey,
         R: AsyncRead + Unpin,
     {
+        self.ensure_cache_root_marker().await?;
         let final_path = self.path_for_key(key);
         let Some(parent) = final_path.parent() else {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "cache path has no parent"));
@@ -344,6 +346,7 @@ impl HlsSegmentCache {
         K: HlsCacheObjectKey,
         R: AsyncRead + Unpin,
     {
+        self.ensure_cache_root_marker().await?;
         let final_path = self.path_for_key(key);
         let Some(parent) = final_path.parent() else {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "cache path has no parent"));
@@ -431,11 +434,11 @@ impl HlsSegmentCache {
 
     async fn invalidate_all_unchecked(&self) -> io::Result<()> {
         let cache_path = self.cache_path_snapshot();
-        ensure_safe_cache_root(&cache_path)?;
+        ensure_safe_cache_root(&cache_path).await?;
         fs::create_dir_all(&cache_path).await?;
         let mut entries = fs::read_dir(&cache_path).await?;
         while let Some(entry) = entries.next_entry().await? {
-            if entry.file_name() == REWRITE_SECRET_FINGERPRINT_FILE {
+            if entry.file_name() == REWRITE_SECRET_FINGERPRINT_FILE || entry.file_name() == HLS_CACHE_ROOT_MARKER_FILE {
                 continue;
             }
             let file_type = entry.file_type().await?;
@@ -457,7 +460,7 @@ impl HlsSegmentCache {
     }
 
     pub async fn write_rewrite_secret_fingerprint(&self, fingerprint: &str) -> io::Result<()> {
-        fs::create_dir_all(self.cache_path_snapshot()).await?;
+        self.ensure_cache_root_marker().await?;
         fs::write(self.rewrite_secret_fingerprint_path(), fingerprint).await
     }
 
@@ -494,6 +497,13 @@ impl HlsSegmentCache {
         self.cache_path_snapshot().join(REWRITE_SECRET_FINGERPRINT_FILE)
     }
 
+    async fn ensure_cache_root_marker(&self) -> io::Result<()> {
+        let cache_path = self.cache_path_snapshot();
+        ensure_not_root_like_cache_path(&cache_path)?;
+        fs::create_dir_all(&cache_path).await?;
+        fs::write(cache_path.join(HLS_CACHE_ROOT_MARKER_FILE), b"tuliprox-hls-cache\n").await
+    }
+
     fn cache_path_snapshot(&self) -> PathBuf {
         self.cache_path.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
@@ -506,6 +516,7 @@ async fn sync_parent_directory(parent: &Path) {
 }
 
 const REWRITE_SECRET_FINGERPRINT_FILE: &str = ".rewrite_secret_fingerprint";
+const HLS_CACHE_ROOT_MARKER_FILE: &str = ".tuliprox-hls-cache-root";
 
 fn safe_session_path_component(proxy_session_id: &ProxySessionId) -> String {
     let value = &proxy_session_id.0;
@@ -515,11 +526,27 @@ fn safe_session_path_component(proxy_session_id: &ProxySessionId) -> String {
     blake3::hash(value.as_bytes()).to_hex().to_string()
 }
 
-fn ensure_safe_cache_root(cache_path: &Path) -> io::Result<()> {
+fn ensure_not_root_like_cache_path(cache_path: &Path) -> io::Result<()> {
     if cache_path.as_os_str().is_empty() || cache_path.parent().is_none() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "refusing to invalidate unsafe hls cache root"));
     }
     Ok(())
+}
+
+async fn ensure_safe_cache_root(cache_path: &Path) -> io::Result<()> {
+    ensure_not_root_like_cache_path(cache_path)?;
+    match fs::metadata(cache_path.join(HLS_CACHE_ROOT_MARKER_FILE)).await {
+        Ok(metadata) if metadata.is_file() => Ok(()),
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "refusing to invalidate hls cache root without marker file",
+        )),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "refusing to invalidate hls cache root without marker file",
+        )),
+        Err(err) => Err(err),
+    }
 }
 
 async fn delete_temp_files_older_than(
@@ -718,6 +745,19 @@ mod tests {
         writer.write_all(b"done").await.expect("write temp body");
         drop(writer);
         write_task.await.expect("temp write task joins").expect("temp write commits");
+    }
+
+    #[tokio::test]
+    async fn invalidate_all_refuses_unmarked_cache_root() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache = HlsSegmentCache::with_cache_path(temp_dir.path());
+        let unrelated_file = temp_dir.path().join("unrelated");
+        tokio::fs::write(&unrelated_file, b"keep").await.expect("fixture should write");
+
+        let err = cache.invalidate_all().await.expect_err("unmarked root should be refused");
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(unrelated_file.exists());
     }
 
     #[tokio::test]

@@ -33,7 +33,6 @@ use tokio::time::{sleep, Sleep};
 use tokio_util::io::ReaderStream;
 
 const ACCEPT_RANGES_VALUE: &str = "bytes";
-const NOT_READY_RETRY_AFTER_SECS: &str = "1";
 const NOT_READY_RETRY_AFTER_MS: u64 = 1_000;
 const BODY_READER_WAIT_LOG_THRESHOLD_MS: u128 = 10;
 static NEXT_HLS_BODY_LOG_ID: AtomicU64 = AtomicU64::new(1);
@@ -285,7 +284,9 @@ pub async fn serve_hls_transient_object_cache_outcome(
 
 fn hls_resource_failure_default_response(failure: HlsResourceServeFailure) -> Response<Body> {
     match failure {
-        HlsResourceServeFailure::TemporaryUnavailable { .. } => service_unavailable_not_ready_response(),
+        HlsResourceServeFailure::TemporaryUnavailable { retry_after_ms } => {
+            service_unavailable_not_ready_response(retry_after_ms)
+        }
         HlsResourceServeFailure::Missing
         | HlsResourceServeFailure::Expired
         | HlsResourceServeFailure::PermanentFailed { .. } => StatusCode::NOT_FOUND.into_response(),
@@ -614,11 +615,15 @@ fn range_not_satisfiable_response(full_size: u64) -> Response<Body> {
     response
 }
 
-fn service_unavailable_not_ready_response() -> Response<Body> {
+fn service_unavailable_not_ready_response(retry_after_ms: u64) -> Response<Body> {
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
     let headers = response.headers_mut();
-    headers.insert(header::RETRY_AFTER, HeaderValue::from_static(NOT_READY_RETRY_AFTER_SECS));
+    insert_header_value(
+        headers,
+        header::RETRY_AFTER,
+        &super::retry_after_secs_from_ms(retry_after_ms).to_string(),
+    );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     mark_response_as_uncompressed(&mut response);
     response
@@ -870,7 +875,7 @@ mod tests {
         model::{HlsSegmentRepairConfig, HlsSegmentRepairMode},
     };
     use arc_swap::ArcSwapOption;
-    use axum::http::{HeaderValue, StatusCode};
+    use axum::http::{header, HeaderValue, StatusCode};
     use bytes::Bytes;
     use http_body_util::BodyExt;
     use std::{sync::Arc, time::Duration};
@@ -941,6 +946,17 @@ mod tests {
         assert_eq!(transient_body_object_kind(None, "key"), "Key");
         assert_eq!(transient_body_object_kind(None, "KEY"), "Key");
         assert_eq!(transient_body_object_kind(None, "ts"), "Segment");
+    }
+
+    #[test]
+    fn temporary_unavailable_response_uses_concrete_retry_after() {
+        let response =
+            super::hls_resource_failure_default_response(super::HlsResourceServeFailure::TemporaryUnavailable {
+                retry_after_ms: 2_500,
+            });
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).expect("retry-after"), "3");
     }
 
     #[tokio::test]

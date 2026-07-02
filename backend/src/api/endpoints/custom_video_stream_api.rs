@@ -3,7 +3,7 @@ use crate::{
         api_utils::{create_api_proxy_user, mark_response_as_uncompressed},
         endpoints::hls_api::{
             build_virtual_hls_entry_path, hls_panel_provisioning_poll_manifest_response,
-            hls_shared_panel_provisioning_poll_manifest_response, resolve_hls_virtual_input_for_target,
+            resolve_hls_virtual_input_for_target,
         },
         model::{
             create_custom_video_stream_response, hls_custom_video_manifest_response_with_virtual_id,
@@ -427,45 +427,8 @@ async fn cvs_provisioning_manifest_api(
     .await
 }
 
-async fn cvs_shared_provisioning_manifest_api(
-    fingerprint: Fingerprint,
-    axum::extract::Path((proxy_session_id, access_lease_id)): axum::extract::Path<(String, String)>,
-    axum::extract::Query(query): axum::extract::Query<ProvisioningManifestQuery>,
-    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
-) -> impl IntoResponse + Send {
-    hls_shared_panel_provisioning_poll_manifest_response(
-        &app_state,
-        &fingerprint,
-        &proxy_session_id,
-        &access_lease_id,
-        query.id,
-    )
-    .await
-}
-
-async fn cvs_shared_provisioning_segment_api(
-    _fingerprint: Fingerprint,
-    axum::extract::Path((_proxy_session_id, _access_lease_id, _stream_type)): axum::extract::Path<(
-        String,
-        String,
-        String,
-    )>,
-    _headers: HeaderMap,
-    axum::extract::State(_app_state): axum::extract::State<Arc<AppState>>,
-) -> impl IntoResponse + Send {
-    StatusCode::NOT_FOUND.into_response()
-}
-
 pub fn cvs_api_register() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
-        .route(
-            "/cvs/hls/{proxy_session_id}/{hls_access_lease_id}/s/provisioning.m3u8",
-            axum::routing::get(cvs_shared_provisioning_manifest_api),
-        )
-        .route(
-            "/cvs/hls/{proxy_session_id}/{hls_access_lease_id}/s/{stream_type}",
-            axum::routing::get(cvs_shared_provisioning_segment_api),
-        )
         .route(
             "/cvs/hls/{username}/{password}/provisioning.m3u8",
             axum::routing::get(cvs_provisioning_manifest_api),

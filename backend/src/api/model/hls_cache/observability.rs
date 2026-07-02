@@ -118,13 +118,7 @@ pub fn safe_hls_access_lease_id(lease_id: &HlsAccessLeaseId) -> String { short_h
 
 pub fn safe_user_session_token(session_token: &str) -> String { short_hash(session_token) }
 
-pub fn safe_proxy_session_id(proxy_session_id: &ProxySessionId) -> String {
-    let value = &proxy_session_id.0;
-    if value.len() <= 6 {
-        return "<redacted>".to_string();
-    }
-    format!("{}...", &value[..6])
-}
+pub fn safe_proxy_session_id(proxy_session_id: &ProxySessionId) -> String { short_hash(&proxy_session_id.0) }
 
 pub fn safe_origin_log_value(value: impl AsRef<str>) -> String { sanitize_sensitive_info(value.as_ref()).into_owned() }
 
@@ -153,7 +147,7 @@ mod tests {
         assert!(!sanitized.contains("/user/password/"));
 
         let proxy_session_id = ProxySessionId("a8f31c9eQ7sLk92pV0mTaw".to_string());
-        assert_eq!(safe_proxy_session_id(&proxy_session_id), "a8f31c...");
+        assert_eq!(safe_proxy_session_id(&proxy_session_id).len(), 8);
         assert!(!safe_proxy_session_id(&proxy_session_id).contains("Lk92pV0mTaw"));
     }
 

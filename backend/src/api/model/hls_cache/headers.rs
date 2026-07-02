@@ -8,7 +8,20 @@ pub fn should_remove_hls_origin_header(
     disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>,
 ) -> bool {
     let header_lc = header_name.trim().to_ascii_lowercase();
-    matches!(header_lc.as_str(), "authorization" | "cookie" | "cookie2" | "host" | "proxy-authorization" | "set-cookie")
+    matches!(
+        header_lc.as_str(),
+        "authorization"
+            | "connection"
+            | "cookie"
+            | "cookie2"
+            | "host"
+            | "proxy-authorization"
+            | "set-cookie"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
         || header_lc.starts_with("x-tuliprox-")
         || disabled_headers.is_some_and(|disabled| disabled.should_remove(header_lc.as_str()))
 }
@@ -105,6 +118,11 @@ mod tests {
 
         assert!(should_remove_hls_origin_header("Authorization", Some(&disabled)));
         assert!(should_remove_hls_origin_header("Cookie", Some(&disabled)));
+        assert!(should_remove_hls_origin_header("Connection", Some(&disabled)));
+        assert!(should_remove_hls_origin_header("TE", Some(&disabled)));
+        assert!(should_remove_hls_origin_header("Trailer", Some(&disabled)));
+        assert!(should_remove_hls_origin_header("Transfer-Encoding", Some(&disabled)));
+        assert!(should_remove_hls_origin_header("Upgrade", Some(&disabled)));
         assert!(should_remove_hls_origin_header("Proxy-Authorization", Some(&disabled)));
         assert!(should_remove_hls_origin_header("Host", Some(&disabled)));
         assert!(should_remove_hls_origin_header("X-Tuliprox-Main-Revision", Some(&disabled)));

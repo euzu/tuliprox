@@ -1293,9 +1293,6 @@ pub(crate) fn fetched_effective_manifest_host(fetched: &FetchedOriginManifest) -
     if fetched.redirect_host.is_some() {
         return fetched.redirect_host.clone();
     }
-    if fetched.provider_url_index.is_some() {
-        return None;
-    }
     Url::parse(&fetched.resolved_request_url).ok().and_then(|url| url.host_str().map(str::to_string))
 }
 

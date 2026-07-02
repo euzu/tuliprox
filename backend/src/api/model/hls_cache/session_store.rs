@@ -97,37 +97,45 @@ impl HlsSessionStore {
     pub async fn remove_session(
         &self,
         key: &HlsSessionKey,
-        proxy_session_id: &ProxySessionId,
+        _proxy_session_id: &ProxySessionId,
     ) -> Option<HlsSessionHandle> {
+        let removed = {
+            let mut indexes = self.indexes.write().await;
+            indexes.by_key.remove(key)?
+        };
+        let proxy_session_id = removed.read().await.proxy_session_id.clone();
         let mut indexes = self.indexes.write().await;
-        indexes.by_proxy_session_id.remove(proxy_session_id);
-        indexes.by_key.remove(key)
+        indexes.by_proxy_session_id.remove(&proxy_session_id);
+        indexes.expired_by_proxy_session_id.remove(&proxy_session_id);
+        Some(removed)
     }
 
     pub async fn remove_session_marking_expired(
         &self,
         key: &HlsSessionKey,
-        proxy_session_id: &ProxySessionId,
+        _proxy_session_id: &ProxySessionId,
         now_ms: u64,
         reason: HlsExpiredSessionReason,
         username: Option<String>,
     ) -> Option<HlsSessionHandle> {
+        let removed = {
+            let mut indexes = self.indexes.write().await;
+            indexes.by_key.remove(key)?
+        };
+        let proxy_session_id = removed.read().await.proxy_session_id.clone();
         let mut indexes = self.indexes.write().await;
-        indexes.by_proxy_session_id.remove(proxy_session_id);
-        let removed = indexes.by_key.remove(key);
-        if removed.is_some() {
-            indexes.expired_by_proxy_session_id.insert(
-                proxy_session_id.clone(),
-                HlsExpiredSessionMarker {
-                    proxy_session_id: proxy_session_id.clone(),
-                    session_key: key.clone(),
-                    username,
-                    expired_at_ms: now_ms,
-                    reason,
-                },
-            );
-        }
-        removed
+        indexes.by_proxy_session_id.remove(&proxy_session_id);
+        indexes.expired_by_proxy_session_id.insert(
+            proxy_session_id.clone(),
+            HlsExpiredSessionMarker {
+                proxy_session_id: proxy_session_id.clone(),
+                session_key: key.clone(),
+                username,
+                expired_at_ms: now_ms,
+                reason,
+            },
+        );
+        Some(removed)
     }
 
     pub async fn expired_session_marker(
@@ -178,7 +186,7 @@ impl HlsSessionStore {
 #[cfg(test)]
 mod tests {
     use super::{HlsExpiredSessionReason, HlsSessionStore};
-    use crate::api::model::HlsSessionKey;
+    use crate::api::model::{HlsSessionKey, ProxySessionId};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -239,6 +247,44 @@ mod tests {
         let recreated = store.get_or_create_session(key, b"0011223344556677", 12_000).await;
         assert_eq!(recreated.read().await.proxy_session_id, proxy_session_id);
         assert!(store.expired_session_marker(&proxy_session_id, 12_100, 10_000).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_session_cleans_indexes_by_actual_session_id() {
+        let store = HlsSessionStore::new();
+        let key = HlsSessionKey::new(1, "12345");
+        let created = store.get_or_create_session(key.clone(), b"0011223344556677", 100).await;
+        let proxy_session_id = created.read().await.proxy_session_id.clone();
+        let stale_proxy_session_id = ProxySessionId("stale".to_string());
+
+        let removed = store.remove_session(&key, &stale_proxy_session_id).await;
+
+        assert!(removed.is_some());
+        assert!(store.get_by_proxy_session_id(&proxy_session_id).await.is_none());
+        assert!(store.get_by_proxy_session_id(&stale_proxy_session_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_session_marking_expired_uses_actual_session_id_for_marker() {
+        let store = HlsSessionStore::new();
+        let key = HlsSessionKey::new(1, "12345");
+        let created = store.get_or_create_session(key.clone(), b"0011223344556677", 100).await;
+        let proxy_session_id = created.read().await.proxy_session_id.clone();
+        let stale_proxy_session_id = ProxySessionId("stale".to_string());
+
+        let removed = store
+            .remove_session_marking_expired(
+                &key,
+                &stale_proxy_session_id,
+                1_000,
+                HlsExpiredSessionReason::SessionIdleTimeout,
+                None,
+            )
+            .await;
+
+        assert!(removed.is_some());
+        assert!(store.expired_session_marker(&proxy_session_id, 1_500, 10_000).await.is_some());
+        assert!(store.expired_session_marker(&stale_proxy_session_id, 1_500, 10_000).await.is_none());
     }
 
     #[tokio::test]

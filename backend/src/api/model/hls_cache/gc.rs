@@ -315,8 +315,9 @@ impl HlsGarbageCollector {
 
         for map_id in unprotected_unreferenced_map_ids(session, &ProtectedSet::from_session(session)) {
             if let Some(deletion) = remove_map_entry(session, map_id) {
+                session_size = session_size.saturating_sub(deletion.content_length);
                 report.maps_deleted = report.maps_deleted.saturating_add(1);
-                deletions.push(CacheObjectDeletion::Map(deletion));
+                deletions.push(CacheObjectDeletion::Map(deletion.key));
             }
         }
 
@@ -373,8 +374,9 @@ impl HlsGarbageCollector {
 
             for map_id in unprotected_unreferenced_map_ids(&session, &ProtectedSet::from_session(&session)) {
                 if let Some(deletion) = remove_map_entry(&mut session, map_id) {
+                    total_size = total_size.saturating_sub(deletion.content_length);
                     report.maps_deleted = report.maps_deleted.saturating_add(1);
-                    deletions.push(CacheObjectDeletion::Map(deletion));
+                    deletions.push(CacheObjectDeletion::Map(deletion.key));
                 }
             }
         }
@@ -685,10 +687,19 @@ fn unprotected_unreferenced_map_ids(session: &HlsSession, protected: &ProtectedS
         .collect()
 }
 
-fn remove_map_entry(session: &mut HlsSession, map_id: ProxyMapId) -> Option<MapCacheKey> {
+struct MapEntryDeletion {
+    key: MapCacheKey,
+    content_length: u64,
+}
+
+fn remove_map_entry(session: &mut HlsSession, map_id: ProxyMapId) -> Option<MapEntryDeletion> {
     let map = session.maps.remove(&map_id)?;
+    let content_length = match map.status {
+        MapCacheStatus::Ready { content_length, .. } => content_length,
+        _ => 0,
+    };
     session.origin_map_to_proxy.retain(|_, mapped_map_id| *mapped_map_id != map_id);
-    Some(map.cache_key)
+    Some(MapEntryDeletion { key: map.cache_key, content_length })
 }
 
 #[cfg(test)]
@@ -1054,6 +1065,38 @@ mod tests {
         assert!(!session.segments.contains_key(&0));
         assert!(session.segments.contains_key(&1));
         assert!(session.maps.contains_key(&ProxyMapId(0)));
+    }
+
+    #[tokio::test]
+    async fn global_size_gc_subtracts_map_bytes_after_segment_removal() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let (gc, session) = gc_with_session(&temp_dir).await;
+        update_gc_policy(&gc, |policy| policy.cache_bytes_global = 25);
+        let manifest = normal_manifest(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"init0.mp4\"\n#EXTINF:4.0,\n0.m4s\n#EXT-X-MAP:URI=\"init1.mp4\"\n#EXTINF:4.0,\n1.m4s\n",
+        );
+        {
+            let mut session = session.write().await;
+            session.apply_origin_manifest(&manifest).expect("manifest should map");
+            for (proxy_seq, ready_at_ms) in [(0, 0), (1, 1)] {
+                let segment = session.segments.get_mut(&proxy_seq).expect("segment");
+                segment.status = SegmentCacheStatus::Ready { content_length: 12, ready_at_ms };
+            }
+            session.maps.get_mut(&ProxyMapId(0)).expect("first map").status =
+                MapCacheStatus::Ready { content_length: 10, ready_at_ms: 0 };
+            session.maps.get_mut(&ProxyMapId(1)).expect("second map").status =
+                MapCacheStatus::Ready { content_length: 10, ready_at_ms: 1 };
+        }
+
+        let report = gc.run_once(100).await.expect("gc should run");
+
+        assert_eq!(report.segments_deleted_size_global, 1);
+        assert_eq!(report.maps_deleted, 1);
+        let session = session.read().await;
+        assert!(!session.segments.contains_key(&0));
+        assert!(session.segments.contains_key(&1));
+        assert!(!session.maps.contains_key(&ProxyMapId(0)));
+        assert!(session.maps.contains_key(&ProxyMapId(1)));
     }
 
     #[tokio::test]

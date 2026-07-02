@@ -252,14 +252,6 @@ async fn xtream_player_api_stream(
     let _guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
     let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
     let is_hls_manifest_request = stream_ext == Some(HLS_EXT);
-    if is_hls_manifest_request && user.permission_denied(app_state) {
-        return hls_custom_video_manifest_response(
-            app_state,
-            &user,
-            CustomVideoStreamType::UserAccountExpired,
-            axum::http::StatusCode::FORBIDDEN,
-        );
-    }
 
     let target_name = &target.name;
     if !target.has_output(TargetType::Xtream) {

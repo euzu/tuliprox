@@ -40,6 +40,7 @@ pub struct HlsProxyManager {
 
 #[derive(Debug, Clone)]
 struct HlsProxyRuntimeConfig {
+    enabled: bool,
     segment_fetch_policy: SegmentFetchPolicy,
     cache_duration_seconds: u64,
     strip: StripConfig,
@@ -92,7 +93,12 @@ fn hls_pending_manifest_follow_up_deadline(
 
 impl HlsProxyRuntimeConfig {
     fn from_config(config: &HlsCacheConfig, rewrite_secret: &[u8]) -> Self {
+        Self::from_config_with_enabled(config, rewrite_secret, true)
+    }
+
+    fn from_config_with_enabled(config: &HlsCacheConfig, rewrite_secret: &[u8], enabled: bool) -> Self {
         Self {
+            enabled,
             segment_fetch_policy: SegmentFetchPolicy::from_config(config),
             cache_duration_seconds: config.cache_duration,
             strip: config.strip.clone(),
@@ -142,13 +148,14 @@ impl HlsProxyManager {
     }
 
     pub fn from_hls_cache_config_and_secret(config: Option<&HlsCacheConfig>, rewrite_secret: &[u8]) -> Self {
-        match config {
-            Some(config) => Self::with_hls_cache_config_and_secret(config, rewrite_secret),
-            None => Self::with_hls_cache_config_and_secret(
-                &HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default()),
-                rewrite_secret,
-            ),
-        }
+        let default_config;
+        let (config, enabled) = if let Some(config) = config {
+            (config, true)
+        } else {
+            default_config = HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default());
+            (&default_config, false)
+        };
+        Self::with_hls_cache_config_and_secret_enabled(config, rewrite_secret, enabled)
     }
 
     pub fn with_cache_settings(cache_path: impl Into<PathBuf>, cache_duration_seconds: u64) -> Self {
@@ -208,6 +215,14 @@ impl HlsProxyManager {
     }
 
     pub fn with_hls_cache_config_and_secret(config: &HlsCacheConfig, rewrite_secret: &[u8]) -> Self {
+        Self::with_hls_cache_config_and_secret_enabled(config, rewrite_secret, true)
+    }
+
+    fn with_hls_cache_config_and_secret_enabled(
+        config: &HlsCacheConfig,
+        rewrite_secret: &[u8],
+        enabled: bool,
+    ) -> Self {
         let segment_fetch_policy = SegmentFetchPolicy::from_config(config);
         let global_fetch_semaphore = Arc::new(Semaphore::new(segment_fetch_policy.max_global_segment_fetches));
         let sessions = Arc::new(HlsSessionStore::new());
@@ -219,7 +234,7 @@ impl HlsProxyManager {
         let lifecycle = Arc::new(HlsLifecycleManager::new());
         let account_overlap_cooldowns = Arc::new(RwLock::new(HashMap::new()));
         let gc_policy = GarbageCollectionPolicy::from_config(config);
-        let runtime_config = HlsProxyRuntimeConfig::from_config(config, rewrite_secret);
+        let runtime_config = HlsProxyRuntimeConfig::from_config_with_enabled(config, rewrite_secret, enabled);
         let gc = Arc::new(HlsGarbageCollector::new_with_metrics(
             Arc::clone(&sessions),
             Arc::clone(&segment_cache),
@@ -264,6 +279,8 @@ impl HlsProxyManager {
     pub fn map_worker_pool(&self) -> &Arc<HlsMapWorkerPool> { &self.map_worker_pool }
 
     pub fn segment_fetch_policy(&self) -> SegmentFetchPolicy { self.runtime_config.load().segment_fetch_policy.clone() }
+
+    pub fn is_enabled(&self) -> bool { self.runtime_config.load().enabled }
 
     pub fn cache_duration_seconds(&self) -> u64 { self.runtime_config.load().cache_duration_seconds }
 
@@ -377,7 +394,7 @@ impl HlsProxyManager {
     }
 
     pub async fn update_config(&self, app_config: &AppConfig) {
-        let (hls_config, rewrite_secret) = {
+        let (hls_config, rewrite_secret, enabled) = {
             let config = app_config.config.load();
             let rewrite_secret = config
                 .reverse_proxy
@@ -387,11 +404,13 @@ impl HlsProxyManager {
                 .reverse_proxy
                 .as_ref()
                 .and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref())
-                .cloned()
-                .unwrap_or_else(|| HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default()));
-            (hls_config, rewrite_secret)
+                .cloned();
+            let enabled = hls_config.is_some();
+            let hls_config =
+                hls_config.unwrap_or_else(|| HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default()));
+            (hls_config, rewrite_secret, enabled)
         };
-        let runtime_config = HlsProxyRuntimeConfig::from_config(&hls_config, &rewrite_secret);
+        let runtime_config = HlsProxyRuntimeConfig::from_config_with_enabled(&hls_config, &rewrite_secret, enabled);
         let cache_path_changed = self.segment_cache.update_cache_path(PathBuf::from(&hls_config.cache_path));
         if cache_path_changed {
             self.clear_runtime_cache_state_for_cache_path_change().await;
@@ -423,8 +442,8 @@ impl HlsProxyManager {
     }
 
     pub async fn prepare_access_lease(&self, lease: HlsAccessLease) {
+        self.access_leases.write().await.prepare_access_lease(lease.clone());
         self.schedule_access_lease_validity(&lease).await;
-        self.access_leases.write().await.prepare_access_lease(lease);
     }
 
     pub async fn access_lease(
@@ -806,6 +825,9 @@ impl HlsProxyManager {
         event: HlsLifecycleEvent,
         now_ms: u64,
     ) {
+        if !self.is_enabled() {
+            return;
+        }
         match event.key {
             HlsLifecycleEventKey::AccessLeaseActive { lease_id, proxy_session_id }
             | HlsLifecycleEventKey::AccessLeaseValidity { lease_id, proxy_session_id } => {
@@ -964,6 +986,9 @@ impl HlsProxyManager {
     }
 
     pub async fn run_garbage_collection_once(&self, now_ms: u64) -> io::Result<super::GarbageCollectionReport> {
+        if !self.is_enabled() {
+            return Ok(super::GarbageCollectionReport::default());
+        }
         let report = self.gc.run_once(now_ms).await?;
         self.cleanup_after_garbage_collection(&report).await;
         Ok(report)
@@ -1002,6 +1027,9 @@ impl HlsProxyManager {
         active_provider: &Arc<ActiveProviderManager>,
         now_ms: u64,
     ) {
+        if !self.is_enabled() {
+            return;
+        }
         for session in self.sessions.list_sessions().await {
             let proxy_session_id = session.read().await.proxy_session_id.clone();
             self.sync_session_access_lease_count_and_detach_if_needed(
@@ -1183,6 +1211,25 @@ mod tests {
         assert_eq!(manager.strip().mode, crate::model::StripMode::Seconds);
         assert_eq!(manager.strip().value, 7);
         assert_eq!(session.read().await.segment_prefetch_queue.max_prefetch_depth(), 4);
+    }
+
+    #[tokio::test]
+    async fn optional_hls_config_controls_runtime_enabled_state() {
+        let manager = HlsProxyManager::from_hls_cache_config(None);
+
+        assert!(!manager.is_enabled());
+        assert_eq!(
+            manager
+                .run_garbage_collection_once(1_000)
+                .await
+                .expect("disabled gc should no-op"),
+            super::super::GarbageCollectionReport::default()
+        );
+
+        let app_config = test_app_config(config_with_hls_cache(HlsCacheConfigDto::default()));
+        manager.update_config(&app_config).await;
+
+        assert!(manager.is_enabled());
     }
 
     #[tokio::test]

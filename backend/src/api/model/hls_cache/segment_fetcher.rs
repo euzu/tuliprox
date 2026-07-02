@@ -67,15 +67,16 @@ impl SegmentFetchPolicy {
     }
 
     pub fn demand_wait_timeout(&self) -> Duration {
+        let attempts = u64::try_from(self.retry_delays_ms.len()).unwrap_or(u64::MAX);
+        let per_attempt_budget =
+            self.origin_segment_timeout_ms.saturating_add(self.effective_repair_postprocess_timeout_ms);
+        let retry_delay_budget = self.retry_delays_ms.iter().copied().fold(0_u64, u64::saturating_add);
+        let jitter_budget = attempts.saturating_mul(self.retry_jitter_max_ms);
         Duration::from_millis(
-            self.retry_delays_ms
-                .len()
-                .try_into()
-                .map_or(u64::MAX, |attempts: u64| {
-                    attempts.saturating_mul(
-                        self.origin_segment_timeout_ms.saturating_add(self.effective_repair_postprocess_timeout_ms),
-                    )
-                })
+            attempts
+                .saturating_mul(per_attempt_budget)
+                .saturating_add(retry_delay_budget)
+                .saturating_add(jitter_budget)
                 .saturating_add(1_000),
         )
     }
@@ -825,7 +826,7 @@ mod tests {
             ..SegmentFetchPolicy::default()
         };
 
-        assert_eq!(policy.demand_wait_timeout(), Duration::from_secs(61));
+        assert_eq!(policy.demand_wait_timeout(), Duration::from_millis(63_100));
     }
 
     fn normal_manifest(body: &str) -> crate::processing::parser::hls::origin_manifest::ParsedOriginManifest {

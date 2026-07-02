@@ -3,6 +3,7 @@ use super::TransientResourceId;
 const MIN_PROXY_ID_DIGITS: usize = 6;
 const SEGMENT_EXTENSIONS: &[&str] = &["ts", "mp4", "m4s", "m4v"];
 const MAP_EXTENSIONS: &[&str] = &["mp4", "m4s", "m4v"];
+const TRANSIENT_RESOURCE_EXTENSIONS: &[&str] = &["ts", "mpegts", "mp4", "m4s", "m4v", "key"];
 
 /// Parsed normal timeline segment file from `/hls/shared/live/{id}/{segment_file}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +46,11 @@ impl TransientResourceFile {
             return None;
         }
         let (resource_id, extension) = file_name.rsplit_once('.')?;
-        if resource_id.is_empty() || extension.is_empty() || !is_opaque_resource_id(resource_id) {
+        if resource_id.is_empty()
+            || extension.is_empty()
+            || !is_opaque_resource_id(resource_id)
+            || !is_safe_transient_extension(extension)
+        {
             return None;
         }
         Some(Self { resource_id: TransientResourceId(resource_id.to_string()), extension: extension.to_string() })
@@ -65,6 +70,10 @@ fn parse_numeric_file<'a>(file_name: &'a str, allowed_extensions: &[&str]) -> Op
 
 fn is_opaque_resource_id(resource_id: &str) -> bool {
     resource_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn is_safe_transient_extension(extension: &str) -> bool {
+    extension.bytes().all(|byte| byte.is_ascii_alphanumeric()) && TRANSIENT_RESOURCE_EXTENSIONS.contains(&extension)
 }
 
 #[cfg(test)]
@@ -114,7 +123,16 @@ mod tests {
 
     #[test]
     fn transient_resource_parser_rejects_missing_parts_and_origin_urls() {
-        for file_name in [".ts", "f91ac2", "f91ac2.", "http://origin/seg.ts", "provider://demo/seg.ts"] {
+        for file_name in [
+            ".ts",
+            "f91ac2",
+            "f91ac2.",
+            "f91ac2.tar.gz",
+            "f91ac2.m4s.tmp",
+            "f91ac2.exe",
+            "http://origin/seg.ts",
+            "provider://demo/seg.ts",
+        ] {
             assert!(TransientResourceFile::parse(file_name).is_none(), "{file_name} should be rejected");
         }
     }

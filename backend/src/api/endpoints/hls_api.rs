@@ -4109,16 +4109,6 @@ async fn hls_panel_provisioning_poll_response(
     }
 }
 
-pub(in crate::api) async fn hls_shared_panel_provisioning_poll_manifest_response(
-    _app_state: &Arc<AppState>,
-    _fingerprint: &Fingerprint,
-    _proxy_session_id: &str,
-    _access_lease_id: &str,
-    _virtual_id: u32,
-) -> axum::response::Response {
-    StatusCode::NOT_FOUND.into_response()
-}
-
 async fn hls_panel_provisioning_or_status_response(
     app_state: &Arc<AppState>,
     user: &ProxyUserCredentials,
@@ -8109,21 +8099,6 @@ mod tests {
         assert!(gap_tag < gap_uri);
         assert!(gap_uri < discontinuity);
         assert!(discontinuity < first_origin);
-    }
-
-    #[tokio::test]
-    async fn shared_cvs_provisioning_manifest_route_is_not_accepted() {
-        let app_state = test_app_state();
-        let response = super::hls_shared_panel_provisioning_poll_manifest_response(
-            &app_state,
-            &test_fingerprint(),
-            "shared-session",
-            "access-lease",
-            59,
-        )
-        .await;
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

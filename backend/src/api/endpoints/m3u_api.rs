@@ -495,15 +495,6 @@ async fn m3u_api_stream(
 
     let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    if stream_ext == Some(HLS_EXT) && user.permission_denied(app_state) {
-        return hls_custom_video_manifest_response(
-            app_state,
-            &user,
-            crate::api::model::CustomVideoStreamType::UserAccountExpired,
-            axum::http::StatusCode::FORBIDDEN,
-        )
-        .into_response();
-    }
     let pli = match m3u_get_item_for_stream_id(req_virtual_id, app_state, &target).await {
         Ok(pli) => pli,
         Err(err) => {
@@ -536,15 +527,6 @@ async fn m3u_api_stream(
     } else {
         (pli, None)
     };
-    if !resolved_m3u_item_is_allowed(user.as_ref(), resolved_pli.item_type) {
-        return crate::api::model::create_custom_video_stream_response(
-            app_state,
-            &fingerprint.addr,
-            crate::api::model::CustomVideoStreamType::ChannelUnavailable,
-        )
-        .into_response();
-    }
-
     m3u_api_stream_loaded(
         user,
         target,

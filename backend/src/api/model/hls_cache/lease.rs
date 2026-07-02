@@ -612,8 +612,7 @@ impl HlsAccessLeaseStore {
             if lease.proxy_session_id == *proxy_session_id
                 && (lease.state == HlsAccessLeaseState::Pending
                     || lease.state == HlsAccessLeaseState::Idle
-                    || (lease.state == HlsAccessLeaseState::Activated
-                        && lease.active_until_ms.is_some_and(|active_until| active_until > now_ms)))
+                    || (lease.state == HlsAccessLeaseState::Activated && lease.valid_until_ms > now_ms))
             {
                 has_usable_lease = true;
             }

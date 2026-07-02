@@ -51,14 +51,17 @@ impl SegmentPrefetchQueue {
 
     pub fn max_prefetch_depth(&self) -> usize { self.max_prefetch_depth }
 
-    pub fn set_max_prefetch_depth(&mut self, max_prefetch_depth: usize) {
+    pub fn set_max_prefetch_depth(&mut self, max_prefetch_depth: usize) -> Vec<u64> {
         self.max_prefetch_depth = max_prefetch_depth;
+        let mut removed = Vec::new();
         while self.prefetch.len() > self.max_prefetch_depth {
             let Some(proxy_seq) = self.prefetch.pop_last() else {
                 break;
             };
             self.queued.remove(&proxy_seq);
+            removed.push(proxy_seq);
         }
+        removed
     }
 
     pub fn enqueue(&mut self, proxy_seq: u64, priority: SegmentFetchPriority) -> bool {
@@ -255,7 +258,19 @@ impl HlsSession {
     }
 
     pub fn configure_segment_prefetch_queue(&mut self, max_prefetch_depth: usize) {
-        self.segment_prefetch_queue.set_max_prefetch_depth(max_prefetch_depth);
+        for proxy_seq in self.segment_prefetch_queue.set_max_prefetch_depth(max_prefetch_depth) {
+            if let Some(entry) = self.segments.get_mut(&proxy_seq) {
+                if matches!(
+                    entry.status,
+                    SegmentCacheStatus::Queued {
+                        priority: SegmentFetchPriority::Prefetch,
+                        ..
+                    }
+                ) {
+                    entry.status = SegmentCacheStatus::Discovered;
+                }
+            }
+        }
     }
 }
 
@@ -329,6 +344,19 @@ mod tests {
     }
 
     #[test]
+    fn max_prefetch_depth_shrink_reports_removed_prefetch_sequences() {
+        let mut queue = SegmentPrefetchQueue::new(3);
+
+        assert!(queue.enqueue(30, SegmentFetchPriority::Prefetch));
+        assert!(queue.enqueue(31, SegmentFetchPriority::Prefetch));
+        assert!(queue.enqueue(32, SegmentFetchPriority::Prefetch));
+
+        assert_eq!(queue.set_max_prefetch_depth(1), vec![32, 31]);
+        assert_eq!(queue.pop_next(), Some((30, SegmentFetchPriority::Prefetch)));
+        assert!(queue.is_empty());
+    }
+
+    #[test]
     fn manifest_fetch_candidates_skip_prefetch_when_backpressure_disallows_it() {
         let mut session = session();
         session.configure_segment_prefetch_queue(6);
@@ -349,5 +377,31 @@ mod tests {
             segment.status,
             SegmentCacheStatus::Queued { priority: SegmentFetchPriority::Prefetch, .. }
         )));
+    }
+
+    #[test]
+    fn shrinking_session_prefetch_depth_reverts_trimmed_segment_status() {
+        let mut session = session();
+        session.configure_segment_prefetch_queue(3);
+        session.initial_prefetch_gap_segments = 3;
+        session
+            .apply_origin_manifest(&normal_manifest(
+                "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4.0,\n100.ts\n#EXTINF:4.0,\n101.ts\n#EXTINF:4.0,\n102.ts\n#EXTINF:4.0,\n103.ts\n#EXTINF:4.0,\n104.ts\n#EXTINF:4.0,\n105.ts\n",
+            ))
+            .expect("manifest maps");
+
+        let report = session.queue_manifest_fetch_candidates(10, true);
+        assert_eq!(report.prefetch_queued, 3);
+
+        session.configure_segment_prefetch_queue(1);
+
+        assert!(matches!(
+            session.segments.get(&4).expect("trimmed segment").status,
+            SegmentCacheStatus::Discovered
+        ));
+        assert!(matches!(
+            session.segments.get(&5).expect("trimmed segment").status,
+            SegmentCacheStatus::Discovered
+        ));
     }
 }

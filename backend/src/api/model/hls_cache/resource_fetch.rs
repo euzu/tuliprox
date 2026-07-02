@@ -187,12 +187,9 @@ impl HlsOriginResourceFetchError {
     pub fn retryable_failure(&self) -> bool {
         matches!(
             self,
-            Self::RetryableStatus(_)
-                | Self::Transport(_)
-                | Self::Redirect
-                | Self::Timeout
-                | Self::CacheCommit(_)
+            Self::RetryableStatus(_) | Self::Transport(_) | Self::Redirect | Self::Timeout
         )
+            || matches!(self, Self::CacheCommit(failure) if !failure.storage_full())
             || matches!(self, Self::ProviderUnavailable(kind) if kind.is_retryable_resource_failure())
     }
 
@@ -682,6 +679,13 @@ mod tests {
         assert!(HlsResourceFetchLogStatus::CacheCommitError(failure)
             .label()
             .contains("storage_full=true"));
+    }
+
+    #[test]
+    fn storage_full_cache_commit_failure_is_not_retryable() {
+        let err = HlsOriginResourceFetchError::cache_commit(&io::Error::from_raw_os_error(28));
+
+        assert!(!err.retryable_failure());
     }
 
     #[test]
