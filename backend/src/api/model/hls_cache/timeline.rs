@@ -257,6 +257,8 @@ impl HlsSession {
 impl TimelineDraft {
     fn apply_manifest(&mut self, manifest: &ParsedOriginManifest) -> Result<(), TimelineMapError> {
         let handoff_discontinuity_sequence = self.pending_handoff_discontinuity_sequence.take();
+        let handoff_publishable_head_proxy_seq =
+            handoff_discontinuity_sequence.and(self.publishable_origin_head_proxy_seq);
         let origin_epoch_handoff = self.pending_origin_epoch_handoff;
         self.pending_origin_epoch_handoff = false;
         if self.segments.is_empty() {
@@ -282,7 +284,7 @@ impl TimelineDraft {
             mark_handoff_discontinuity = false;
         }
 
-        self.publishable_origin_head_proxy_seq = manifest_head_proxy_seq;
+        self.publishable_origin_head_proxy_seq = handoff_publishable_head_proxy_seq.or(manifest_head_proxy_seq);
         self.publishable_origin_tail_proxy_seq = manifest_tail_proxy_seq;
         Ok(())
     }

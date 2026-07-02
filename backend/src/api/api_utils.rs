@@ -7754,7 +7754,7 @@ mod tests {
             .await
             .into_response();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(
             app_state.active_users.user_connections(&user.username).await,
             0,

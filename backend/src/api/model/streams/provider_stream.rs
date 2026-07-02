@@ -404,8 +404,8 @@ mod tests {
         assert_eq!(parsed.to_string(), "hls_session_or_lease_expired");
     }
 
-    #[test]
-    fn test_channel_unavailable_preserves_supplied_status_code() {
+    #[tokio::test]
+    async fn test_channel_unavailable_preserves_supplied_status_code() {
         let app_cfg = create_test_app_config_with_channel_unavailable();
 
         let (_stream, info) = create_channel_unavailable_stream(&app_cfg, &[], StatusCode::SERVICE_UNAVAILABLE);
@@ -419,8 +419,8 @@ mod tests {
     /// each (field, stream type, description) tuple. Pick one representative
     /// factory — `create_user_connections_exhausted_stream` — and verify the
     /// macro forwards the correct `CustomVideoStreamType` to the stream info.
-    #[test]
-    fn test_ok_custom_stream_factory_macro_forwards_video_type() {
+    #[tokio::test]
+    async fn test_ok_custom_stream_factory_macro_forwards_video_type() {
         use super::create_user_connections_exhausted_stream;
         use crate::api::model::TransportStreamBuffer;
 
@@ -519,8 +519,8 @@ mod tests {
 
     /// Regression guard: when `custom_stream_response_enabled` is true (the default), the
     /// factory must still return the configured video with the supplied status code.
-    #[test]
-    fn test_displaying_custom_video_streams_serves_video_with_supplied_status() {
+    #[tokio::test]
+    async fn test_displaying_custom_video_streams_serves_video_with_supplied_status() {
         let app_cfg = create_test_app_config_with_channel_unavailable();
         let (stream, info) = create_channel_unavailable_stream(&app_cfg, &[], StatusCode::SERVICE_UNAVAILABLE);
         assert!(stream.is_some(), "stream must be produced when custom_stream_response_enabled is true");
