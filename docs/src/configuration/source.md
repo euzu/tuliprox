@@ -732,7 +732,7 @@ Valid values are:
 The target-level `filter` is a string-based expression using Tuliprox's filter DSL.
 It defines which entries remain in the final target after the selected processing stages have been applied.
 
-You can define complex strings or regex patterns exactly once in [template.yml](./configuration/template.md)
+You can define complex strings or regex patterns exactly once in [template.yml](./template.md)
 and call them by wrapping the template name in exclamation marks: `!MACRO_NAME!`.
 For less verbose expression definitions, inline filter definitions are also supported.
 
@@ -948,6 +948,13 @@ targets:
 | `remove_duplicates`          | Bool | No       | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output.                                                                                    |
 | `force_redirect`             | Bool | No       | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model.                                                     |
 
+> **Shared HLS:** `share_live_streams.hls` requires `reverse_proxy.hls_cache` in `config.yml`.
+> Start with [Shared HLS Sessions](./shared-hls-sessions.md) for the feature overview and
+> [Shared HLS Configuration](./shared-hls-configuration.md) for the full setup checklist.
+>
+> Use the object form shown above. The old boolean style `share_live_streams: true` is not valid for this configuration,
+> because HLS sharing and MPEG-TS sharing are independent switches.
+>
 > **⚠️ Warning:** When `share_live_streams.mpeg_ts` is enabled, each shared channel consumes at least **12 MB** of memory,
 > regardless of the number of connected clients.
 > If the reverse-proxy buffer size is increased above `1024`, memory usage increases accordingly.

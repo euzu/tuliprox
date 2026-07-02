@@ -230,6 +230,8 @@ reverse_proxy:
 ## 2.1 HLS Cache (`hls_cache`)
 
 This block configures the Live HLS cache proxy. It only defines operating parameters.
+For an operator-friendly explanation, start with [Shared HLS Sessions](./shared-hls-sessions.md).
+For the configuration reference, see [Shared HLS Configuration](./shared-hls-configuration.md).
 For the shared session, access lease, and transient delivery state machines, see
 [HLS Cache State Machines](./hls-cache-state-machine.md).
 
@@ -291,8 +293,12 @@ Supported byte-size units:
 
 Important boundaries:
 
+* `reverse_proxy.hls_cache` only prepares the global cache engine. A target must also set
+  `options.share_live_streams.hls: true` in `source.yml` before generated HLS live entries use the shared HLS path.
 * HLS cache retry behavior is fixed internally and is not user-configurable.
-* `reverse_proxy.rewrite_secret` remains the source for future HLS `proxy_session_id` and transient resource IDs.
+* `reverse_proxy.rewrite_secret` must stay stable. It is used for future HLS `proxy_session_id` values and transient resource IDs.
+* `session_idle_timeout` controls HLS cache access-lease validity and idle cleanup. It is independent from
+  `reverse_proxy.stream.hls_session_ttl_secs`, which belongs to the non-cache HLS request continuity path.
 * This block does not enable legacy resource caching; image/logo/EPG caching remains controlled by `reverse_proxy.cache`.
 
 ---
