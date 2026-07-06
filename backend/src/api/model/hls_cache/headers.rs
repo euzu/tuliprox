@@ -1,5 +1,5 @@
 use crate::model::ReverseProxyDisabledHeaderConfig;
-use axum::http::{header, HeaderMap, HeaderValue};
+use axum::http::{header, HeaderMap, HeaderName, HeaderValue};
 use std::collections::HashMap;
 
 /// Returns true when a header must never be forwarded by the live HLS cache proxy.
@@ -28,11 +28,18 @@ pub fn should_remove_hls_origin_header(
 
 /// Removes disabled and sensitive headers before an origin request leaves Tuliprox.
 pub fn scrub_hls_origin_headers(headers: &mut HeaderMap, disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>) {
-    let names = headers
+    let mut names = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|name| HeaderName::from_bytes(name.trim().as_bytes()).ok())
+        .collect::<Vec<_>>();
+    names.extend(headers
         .keys()
         .filter(|name| should_remove_hls_origin_header(name.as_str(), disabled_headers))
         .cloned()
-        .collect::<Vec<_>>();
+    );
     for name in names {
         headers.remove(name);
     }
@@ -159,6 +166,20 @@ mod tests {
         assert!(!headers.contains_key("x-blocked"));
         assert!(!headers.contains_key("x-origin-secret"));
         assert_eq!(headers.get(header::ACCEPT_LANGUAGE).expect("language"), "de");
+    }
+
+    #[test]
+    fn scrub_removes_headers_named_by_connection() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive, x-origin-hop"));
+        headers.insert(HeaderName::from_static("x-origin-hop"), HeaderValue::from_static("secret"));
+        headers.insert(header::ACCEPT_LANGUAGE, HeaderValue::from_static("de"));
+
+        scrub_hls_origin_headers(&mut headers, None);
+
+        assert!(!headers.contains_key(header::CONNECTION));
+        assert!(!headers.contains_key("x-origin-hop"));
+        assert!(headers.contains_key(header::ACCEPT_LANGUAGE));
     }
 
     #[test]

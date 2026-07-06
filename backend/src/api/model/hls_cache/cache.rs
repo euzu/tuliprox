@@ -1,15 +1,18 @@
 use super::{ProxyMapId, ProxySessionId, TransientResourceId};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt, io,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock as StdRwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, RwLock as StdRwLock,
+    },
     time::{Duration, SystemTime},
 };
 use tokio::{
     fs::{self, File, OpenOptions},
-    io::{AsyncRead, AsyncSeekExt, AsyncWriteExt, SeekFrom},
-    sync::RwLock,
+    io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
+    sync::{Mutex, RwLock},
     time::timeout,
 };
 
@@ -180,13 +183,35 @@ pub enum CacheInvalidationOutcome {
 pub struct HlsSegmentCache {
     cache_path: StdRwLock<PathBuf>,
     active_temp_files: Arc<RwLock<HashSet<PathBuf>>>,
+    max_object_bytes: AtomicU64,
+    max_cache_bytes: AtomicU64,
+    max_session_bytes: AtomicU64,
+    marker_path: StdRwLock<Option<PathBuf>>,
+    // serialize commits for exact budgets; shard accounting only if measured commit contention requires it.
+    capacity: Mutex<CacheCapacityState>,
+}
+
+#[derive(Default)]
+struct CacheCapacityState {
+    cache_path: PathBuf,
+    initialized: bool,
+    total_bytes: u64,
+    session_bytes: HashMap<String, u64>,
 }
 
 impl HlsSegmentCache {
     pub fn new() -> Self { Self::with_cache_path(DEFAULT_HLS_CACHE_PATH) }
 
     pub fn with_cache_path(cache_path: impl Into<PathBuf>) -> Self {
-        Self { cache_path: StdRwLock::new(cache_path.into()), active_temp_files: Arc::new(RwLock::new(HashSet::new())) }
+        Self {
+            cache_path: StdRwLock::new(cache_path.into()),
+            active_temp_files: Arc::new(RwLock::new(HashSet::new())),
+            max_object_bytes: AtomicU64::new(u64::MAX),
+            max_cache_bytes: AtomicU64::new(u64::MAX),
+            max_session_bytes: AtomicU64::new(u64::MAX),
+            marker_path: StdRwLock::new(None),
+            capacity: Mutex::new(CacheCapacityState::default()),
+        }
     }
 
     pub fn cache_path(&self) -> PathBuf { self.cache_path_snapshot() }
@@ -198,7 +223,16 @@ impl HlsSegmentCache {
             return false;
         }
         *current = cache_path;
+        *self.marker_path.write().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         true
+    }
+
+    pub fn update_cache_limits(&self, max_cache_bytes: u64, max_session_bytes: u64) {
+        let max_cache_bytes = max_cache_bytes.max(1);
+        let max_session_bytes = max_session_bytes.max(1);
+        self.max_cache_bytes.store(max_cache_bytes, Ordering::Release);
+        self.max_session_bytes.store(max_session_bytes, Ordering::Release);
+        self.max_object_bytes.store(max_cache_bytes.min(max_session_bytes), Ordering::Release);
     }
 
     pub async fn metadata<K: HlsCacheObjectKey>(&self, key: &K) -> io::Result<Option<CachedSegmentMetadata>> {
@@ -254,22 +288,59 @@ impl HlsSegmentCache {
     where
         K: HlsCacheObjectKey,
     {
+        let result = self.commit_staged_inner(key, &staged).await;
+        if result.is_err() {
+            let _ = fs::remove_file(&staged.path).await;
+        }
+        self.unregister_temp_file(&staged.path).await;
+        result
+    }
+
+    async fn commit_staged_inner<K>(&self, key: &K, staged: &StagedCacheObject) -> io::Result<CachedSegmentMetadata>
+    where
+        K: HlsCacheObjectKey,
+    {
         self.ensure_cache_root_marker().await?;
+        if staged.size > self.max_object_bytes.load(Ordering::Acquire) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "hls cache object exceeds configured size limit"));
+        }
         let final_path = self.path_for_key(key);
         let Some(parent) = final_path.parent() else {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "cache path has no parent"));
         };
         fs::create_dir_all(parent).await?;
-        match fs::rename(&staged.path, &final_path).await {
-            Ok(()) => {}
-            Err(err) => {
-                let _ = fs::remove_file(&staged.path).await;
-                self.unregister_temp_file(&staged.path).await;
-                return Err(err);
-            }
+        let session_component = key.session_path_component();
+        let cache_path = self.cache_path_snapshot();
+        let mut capacity = self.capacity.lock().await;
+        if !capacity.initialized || capacity.cache_path != cache_path {
+            let (total_bytes, session_bytes) = scan_committed_cache_usage(&cache_path).await?;
+            *capacity = CacheCapacityState {
+                cache_path: cache_path.clone(),
+                initialized: true,
+                total_bytes,
+                session_bytes,
+            };
         }
-        self.unregister_temp_file(&staged.path).await;
-        sync_parent_directory(parent).await;
+        let old_size = match fs::metadata(&final_path).await {
+            Ok(metadata) => metadata.len(),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
+            Err(err) => return Err(err),
+        };
+        let session_size = capacity.session_bytes.get(&session_component).copied().unwrap_or_default();
+        let projected_total = capacity.total_bytes.saturating_sub(old_size).saturating_add(staged.size);
+        let projected_session = session_size.saturating_sub(old_size).saturating_add(staged.size);
+        if projected_total > self.max_cache_bytes.load(Ordering::Acquire)
+            || projected_session > self.max_session_bytes.load(Ordering::Acquire)
+        {
+            return Err(io::Error::other("hls cache capacity exceeded"));
+        }
+        if self.cache_path_snapshot() != cache_path {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "hls cache path changed during object write"));
+        }
+        fs::rename(&staged.path, &final_path).await?;
+        capacity.total_bytes = projected_total;
+        capacity.session_bytes.insert(session_component, projected_session);
+        drop(capacity);
         self.metadata(key).await?.ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "committed segment cache file is missing after atomic rename")
         })
@@ -295,45 +366,8 @@ impl HlsSegmentCache {
         K: HlsCacheObjectKey,
         R: AsyncRead + Unpin,
     {
-        self.ensure_cache_root_marker().await?;
-        let final_path = self.path_for_key(key);
-        let Some(parent) = final_path.parent() else {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "cache path has no parent"));
-        };
-        fs::create_dir_all(parent).await?;
-
-        let (temp_path, mut temp_file) = self.create_temp_file(key).await?;
-        let commit = async {
-            tokio::io::copy(reader, &mut temp_file).await?;
-            temp_file.flush().await?;
-            temp_file.sync_all().await?;
-            drop(temp_file);
-
-            match fs::rename(&temp_path, &final_path).await {
-                Ok(()) => Ok(()),
-                Err(err) => {
-                    let _ = fs::remove_file(&temp_path).await;
-                    Err(err)
-                }
-            }
-        };
-        let commit_result = if let Some(deadline) = deadline {
-            if let Ok(result) = timeout(deadline, commit).await {
-                result
-            } else {
-                let _ = fs::remove_file(&temp_path).await;
-                Err(io::Error::new(io::ErrorKind::TimedOut, "hls cache object write timed out"))
-            }
-        } else {
-            commit.await
-        };
-        self.unregister_temp_file(&temp_path).await;
-        commit_result?;
-        sync_parent_directory(parent).await;
-
-        self.metadata(key).await?.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "committed segment cache file is missing after atomic rename")
-        })
+        let staged = self.stage_temp_inner(key, reader, deadline).await?;
+        self.commit_staged(key, staged).await
     }
 
     async fn stage_temp_inner<K, R>(
@@ -355,9 +389,13 @@ impl HlsSegmentCache {
 
         let (temp_path, mut temp_file) = self.create_temp_file(key).await?;
         let copy = async {
-            let size = tokio::io::copy(reader, &mut temp_file).await?;
+            let max_object_bytes = self.max_object_bytes.load(Ordering::Acquire);
+            let mut limited = reader.take(max_object_bytes.saturating_add(1));
+            let size = tokio::io::copy(&mut limited, &mut temp_file).await?;
+            if size > max_object_bytes {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "hls cache object exceeds configured size limit"));
+            }
             temp_file.flush().await?;
-            temp_file.sync_all().await?;
             drop(temp_file);
             Ok::<u64, io::Error>(size)
         };
@@ -390,11 +428,26 @@ impl HlsSegmentCache {
     }
 
     pub async fn delete<K: HlsCacheObjectKey>(&self, key: &K) -> io::Result<()> {
-        match fs::remove_file(self.path_for_key(key)).await {
+        let path = self.path_for_key(key);
+        let mut capacity = self.capacity.lock().await;
+        let size = fs::metadata(&path).await.map_or(0, |metadata| metadata.len());
+        let result = match fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err),
+        };
+        if result.is_ok()
+            && size > 0
+            && capacity.initialized
+            && capacity.cache_path == self.cache_path_snapshot()
+        {
+            capacity.total_bytes = capacity.total_bytes.saturating_sub(size);
+            let session_component = key.session_path_component();
+            if let Some(session_bytes) = capacity.session_bytes.get_mut(&session_component) {
+                *session_bytes = session_bytes.saturating_sub(size);
+            }
         }
+        result
     }
 
     pub fn object_path<K: HlsCacheObjectKey>(&self, key: &K) -> PathBuf { self.path_for_key(key) }
@@ -407,11 +460,50 @@ impl HlsSegmentCache {
 
     pub async fn delete_session_dir(&self, proxy_session_id: &ProxySessionId) -> io::Result<()> {
         let path = self.cache_path_snapshot().join(safe_session_path_component(proxy_session_id));
-        match fs::remove_dir_all(path).await {
+        let mut capacity = self.capacity.lock().await;
+        let result = match fs::remove_dir_all(path).await {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err),
+        };
+        if result.is_ok() && capacity.initialized && capacity.cache_path == self.cache_path_snapshot() {
+            let session_component = safe_session_path_component(proxy_session_id);
+            if let Some(bytes) = capacity.session_bytes.remove(&session_component) {
+                capacity.total_bytes = capacity.total_bytes.saturating_sub(bytes);
+            }
         }
+        result
+    }
+
+    pub async fn delete_orphan_session_dirs(&self, active_session_ids: &HashSet<ProxySessionId>) -> io::Result<usize> {
+        let cache_path = self.cache_path_snapshot();
+        ensure_safe_cache_root(&cache_path).await?;
+        let active_paths = active_session_ids
+            .iter()
+            .map(|id| cache_path.join(safe_session_path_component(id)))
+            .collect::<HashSet<_>>();
+        let active_temp_files = self.active_temp_files.write().await;
+        let mut entries = fs::read_dir(&cache_path).await?;
+        let mut removed = 0_usize;
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if !entry.file_type().await?.is_dir()
+                || active_paths.contains(&path)
+                || active_temp_files.iter().any(|temp| temp.starts_with(&path))
+            {
+                continue;
+            }
+            match fs::remove_dir_all(&path).await {
+                Ok(()) => removed = removed.saturating_add(1),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err),
+            }
+        }
+        drop(active_temp_files);
+        if removed > 0 {
+            self.capacity.lock().await.initialized = false;
+        }
+        Ok(removed)
     }
 
     pub async fn has_active_temp_files_for_session(&self, proxy_session_id: &ProxySessionId) -> bool {
@@ -448,6 +540,7 @@ impl HlsSegmentCache {
                 fs::remove_file(entry.path()).await?;
             }
         }
+        self.capacity.lock().await.initialized = false;
         Ok(())
     }
 
@@ -499,19 +592,24 @@ impl HlsSegmentCache {
 
     async fn ensure_cache_root_marker(&self) -> io::Result<()> {
         let cache_path = self.cache_path_snapshot();
+        if self
+            .marker_path
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            == Some(&cache_path)
+        {
+            return Ok(());
+        }
         ensure_not_root_like_cache_path(&cache_path)?;
         fs::create_dir_all(&cache_path).await?;
-        fs::write(cache_path.join(HLS_CACHE_ROOT_MARKER_FILE), b"tuliprox-hls-cache\n").await
+        fs::write(cache_path.join(HLS_CACHE_ROOT_MARKER_FILE), b"tuliprox-hls-cache\n").await?;
+        *self.marker_path.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cache_path);
+        Ok(())
     }
 
     fn cache_path_snapshot(&self) -> PathBuf {
         self.cache_path.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
-    }
-}
-
-async fn sync_parent_directory(parent: &Path) {
-    if let Ok(parent_dir) = File::open(parent).await {
-        let _ = parent_dir.sync_all().await;
     }
 }
 
@@ -547,6 +645,38 @@ async fn ensure_safe_cache_root(cache_path: &Path) -> io::Result<()> {
         )),
         Err(err) => Err(err),
     }
+}
+
+async fn scan_committed_cache_usage(cache_path: &Path) -> io::Result<(u64, HashMap<String, u64>)> {
+    let mut total_bytes = 0_u64;
+    let mut session_bytes = HashMap::new();
+    let mut root_entries = match fs::read_dir(cache_path).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok((0, session_bytes)),
+        Err(err) => return Err(err),
+    };
+    while let Some(root_entry) = root_entries.next_entry().await? {
+        if !root_entry.file_type().await?.is_dir() {
+            continue;
+        }
+        let session_component = root_entry.file_name().to_string_lossy().into_owned();
+        let mut bytes = 0_u64;
+        let mut pending_dirs = vec![root_entry.path()];
+        while let Some(dir) = pending_dirs.pop() {
+            let mut entries = fs::read_dir(dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let file_type = entry.file_type().await?;
+                if file_type.is_dir() {
+                    pending_dirs.push(entry.path());
+                } else if file_type.is_file() && !is_temp_cache_file(&entry.path()) {
+                    bytes = bytes.saturating_add(entry.metadata().await?.len());
+                }
+            }
+        }
+        total_bytes = total_bytes.saturating_add(bytes);
+        session_bytes.insert(session_component, bytes);
+    }
+    Ok((total_bytes, session_bytes))
 }
 
 async fn delete_temp_files_older_than(
@@ -598,7 +728,7 @@ impl Default for HlsSegmentCache {
 mod tests {
     use super::{CacheInvalidationOutcome, HlsSegmentCache, MapCacheKey, SegmentCacheKey, TransientObjectCacheKey};
     use crate::api::model::{build_transient_resource_id, ProxySessionId};
-    use std::{io, sync::Arc, time::Duration};
+    use std::{collections::HashSet, io, sync::Arc, time::Duration};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn cache_key() -> SegmentCacheKey { SegmentCacheKey::new(ProxySessionId("proxy_session".to_string()), 123, "ts") }
@@ -680,6 +810,49 @@ mod tests {
         assert_eq!(result.expect_err("commit should time out").kind(), io::ErrorKind::TimedOut);
         assert!(!cache.has_active_temp_files().await);
         assert_eq!(cache.metadata(&key).await.expect("metadata should read"), None);
+    }
+
+    #[tokio::test]
+    async fn cache_object_write_rejects_bytes_above_the_configured_limit() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache = HlsSegmentCache::with_cache_path(temp_dir.path());
+        cache.update_cache_limits(3, 3);
+        let key = SegmentCacheKey::new(ProxySessionId("session".to_string()), 1, "ts");
+
+        let result = cache.write_bytes_and_commit(&key, b"four").await;
+
+        assert!(result.is_err());
+        assert!(cache.metadata(&key).await.expect("metadata").is_none());
+    }
+
+    #[tokio::test]
+    async fn orphan_session_cleanup_preserves_active_session_directories() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache = HlsSegmentCache::with_cache_path(temp_dir.path());
+        cache.write_rewrite_secret_fingerprint("secret").await.expect("marker");
+        let active = ProxySessionId("active".to_string());
+        let orphan = ProxySessionId("orphan".to_string());
+        tokio::fs::create_dir_all(temp_dir.path().join("active")).await.expect("active dir");
+        tokio::fs::create_dir_all(temp_dir.path().join("orphan")).await.expect("orphan dir");
+
+        let removed = cache.delete_orphan_session_dirs(&HashSet::from([active])).await.expect("cleanup");
+
+        assert_eq!(removed, 1);
+        assert!(temp_dir.path().join("active").exists());
+        assert!(!temp_dir.path().join(orphan.0).exists());
+    }
+
+    #[tokio::test]
+    async fn cache_commits_enforce_the_global_budget_across_sessions() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache = HlsSegmentCache::with_cache_path(temp_dir.path());
+        cache.update_cache_limits(5, 5);
+        let first = SegmentCacheKey::new(ProxySessionId("first".to_string()), 1, "ts");
+        let second = SegmentCacheKey::new(ProxySessionId("second".to_string()), 1, "ts");
+
+        assert!(cache.write_bytes_and_commit(&first, b"123").await.is_ok());
+        assert!(cache.write_bytes_and_commit(&second, b"456").await.is_err());
+        assert!(cache.metadata(&second).await.expect("metadata").is_none());
     }
 
     #[tokio::test]

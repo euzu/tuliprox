@@ -99,13 +99,8 @@ impl HlsSessionStore {
         key: &HlsSessionKey,
         _proxy_session_id: &ProxySessionId,
     ) -> Option<HlsSessionHandle> {
-        let removed = {
-            let mut indexes = self.indexes.write().await;
-            indexes.by_key.remove(key)?
-        };
-        let proxy_session_id = removed.read().await.proxy_session_id.clone();
         let mut indexes = self.indexes.write().await;
-        indexes.by_proxy_session_id.remove(&proxy_session_id);
+        let (proxy_session_id, removed) = remove_indexed_session(&mut indexes, key)?;
         indexes.expired_by_proxy_session_id.remove(&proxy_session_id);
         Some(removed)
     }
@@ -118,13 +113,8 @@ impl HlsSessionStore {
         reason: HlsExpiredSessionReason,
         username: Option<String>,
     ) -> Option<HlsSessionHandle> {
-        let removed = {
-            let mut indexes = self.indexes.write().await;
-            indexes.by_key.remove(key)?
-        };
-        let proxy_session_id = removed.read().await.proxy_session_id.clone();
         let mut indexes = self.indexes.write().await;
-        indexes.by_proxy_session_id.remove(&proxy_session_id);
+        let (proxy_session_id, removed) = remove_indexed_session(&mut indexes, key)?;
         indexes.expired_by_proxy_session_id.insert(
             proxy_session_id.clone(),
             HlsExpiredSessionMarker {
@@ -181,6 +171,20 @@ impl HlsSessionStore {
 
     #[cfg(test)]
     pub async fn is_empty(&self) -> bool { self.indexes.read().await.by_key.is_empty() }
+}
+
+fn remove_indexed_session(
+    indexes: &mut SessionIndexes,
+    key: &HlsSessionKey,
+) -> Option<(ProxySessionId, HlsSessionHandle)> {
+    let session = indexes.by_key.get(key)?;
+    let proxy_session_id = indexes
+        .by_proxy_session_id
+        .iter()
+        .find_map(|(proxy_session_id, indexed)| Arc::ptr_eq(session, indexed).then(|| proxy_session_id.clone()))?;
+    let removed = indexes.by_key.remove(key)?;
+    indexes.by_proxy_session_id.remove(&proxy_session_id);
+    Some((proxy_session_id, removed))
 }
 
 #[cfg(test)]
@@ -307,5 +311,39 @@ mod tests {
         }
 
         assert_eq!(store.proxy_session_index_len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn removal_does_not_remove_a_concurrently_recreated_session() {
+        let store = Arc::new(HlsSessionStore::new());
+        let key = HlsSessionKey::new(1, "12345");
+        let old = store.get_or_create_session(key.clone(), b"0011223344556677", 100).await;
+        let proxy_session_id = old.read().await.proxy_session_id.clone();
+        let old_guard = old.write().await;
+        let removal_store = Arc::clone(&store);
+        let removal_key = key.clone();
+        let removal_proxy_session_id = proxy_session_id.clone();
+        let removal = tokio::spawn(async move {
+            removal_store
+                .remove_session_marking_expired(
+                    &removal_key,
+                    &removal_proxy_session_id,
+                    1_000,
+                    HlsExpiredSessionReason::SessionIdleTimeout,
+                    None,
+                )
+                .await
+        });
+
+        while store.get_by_key(&key).await.is_some() {
+            tokio::task::yield_now().await;
+        }
+        let recreated = store.get_or_create_session(key, b"0011223344556677", 1_001).await;
+        drop(old_guard);
+        assert!(matches!(removal.await, Ok(Some(_))));
+
+        let indexed = store.get_by_proxy_session_id(&proxy_session_id).await;
+        assert!(indexed.as_ref().is_some_and(|session| Arc::ptr_eq(session, &recreated)));
+        assert!(store.expired_session_marker(&proxy_session_id, 1_002, 10_000).await.is_none());
     }
 }

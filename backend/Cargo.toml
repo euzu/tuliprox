@@ -46,7 +46,6 @@ rpassword = "7.5.4"
 flate2 = "1.1.9"
 blake3.workspace = true
 bytes.workspace = true
-hmac.workspace = true
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "parking_lot", "fs", "process", "signal", "time", "macros"] }
 #console-subscriber = "0"

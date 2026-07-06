@@ -128,11 +128,8 @@ fn load(counter: &AtomicU64) -> u64 { counter.load(Ordering::Relaxed) }
 
 fn short_hash(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
-    digest[..4].iter().fold(String::with_capacity(8), |mut result, byte| {
-        use std::fmt::Write as _;
-        write!(result, "{byte:02x}").expect("writing to String must not fail");
-        result
-    })
+    let value = digest.iter().take(4).fold(0_u32, |value, byte| (value << 8) | u32::from(*byte));
+    format!("{value:08x}")
 }
 
 #[cfg(test)]

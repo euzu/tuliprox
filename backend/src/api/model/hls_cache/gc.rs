@@ -10,7 +10,6 @@ use log::{debug, error, info, warn};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
-    fmt::Write as _,
     io,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -99,6 +98,7 @@ pub struct GarbageCollectionReport {
     pub secret_cache_invalidated: bool,
     pub secret_cache_invalidation_deferred: bool,
     pub temp_files_deleted: usize,
+    pub orphan_session_dirs_deleted: usize,
     pub stale_queue_entries_removed: usize,
     pub segments_deleted_duration: usize,
     pub segments_deleted_size_session: usize,
@@ -122,6 +122,7 @@ impl GarbageCollectionReport {
         self.secret_cache_invalidated
             || self.secret_cache_invalidation_deferred
             || self.temp_files_deleted > 0
+            || self.orphan_session_dirs_deleted > 0
             || self.stale_queue_entries_removed > 0
             || self.segments_deleted() > 0
             || self.maps_deleted > 0
@@ -194,6 +195,11 @@ impl HlsGarbageCollector {
         report.temp_files_deleted = self.cache.delete_temp_files_older_than(cutoff).await?;
 
         let sessions = self.sessions.list_sessions().await;
+        let mut active_session_ids = HashSet::with_capacity(sessions.len());
+        for session in &sessions {
+            active_session_ids.insert(session.read().await.proxy_session_id.clone());
+        }
+        report.orphan_session_dirs_deleted = self.cache.delete_orphan_session_dirs(&active_session_ids).await?;
         let mut pending_deletions = Vec::new();
         for session in &sessions {
             let mut session = session.write().await;
@@ -212,8 +218,9 @@ impl HlsGarbageCollector {
         self.record_report_metrics(&report);
         if report.did_cleanup_or_invalidate() {
             info!(
-                "HLS session garbage collection completed: temp_files_deleted={} stale_queue_entries_removed={} segments_deleted={} maps_deleted={} transient_resources_pruned={} transient_objects_deleted={} transient_object_bytes_deleted={} sessions_deleted={}",
+                "HLS session garbage collection completed: temp_files_deleted={} orphan_session_dirs_deleted={} stale_queue_entries_removed={} segments_deleted={} maps_deleted={} transient_resources_pruned={} transient_objects_deleted={} transient_object_bytes_deleted={} sessions_deleted={}",
                 report.temp_files_deleted,
+                report.orphan_session_dirs_deleted,
                 report.stale_queue_entries_removed,
                 report.segments_deleted(),
                 report.maps_deleted,
@@ -460,10 +467,8 @@ impl HlsGarbageCollector {
 
 pub fn build_rewrite_secret_fingerprint(rewrite_secret: &[u8]) -> String {
     let digest = Sha256::digest(rewrite_secret);
-    digest[..8].iter().fold(String::with_capacity(16), |mut fingerprint, byte| {
-        write!(fingerprint, "{byte:02x}").expect("writing to String must not fail");
-        fingerprint
-    })
+    let value = digest.iter().take(8).fold(0_u64, |value, byte| (value << 8) | u64::from(*byte));
+    format!("{value:016x}")
 }
 
 pub fn exec_hls_cache_gc(app_state: &Arc<AppState>, cancel_token: &CancellationToken) {

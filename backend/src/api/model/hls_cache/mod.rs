@@ -37,7 +37,7 @@ pub use self::{
         SegmentCacheKey, StagedCacheObject, TransientObjectCacheKey, DEFAULT_HLS_CACHE_DURATION_SECS,
         DEFAULT_HLS_CACHE_PATH,
     },
-    deadline::{hls_client_body_send_deadline, hls_object_body_deadline},
+    deadline::{hls_client_body_send_deadline, hls_object_body_deadline, refresh_hls_client_body_send_deadline},
     gc::{
         build_rewrite_secret_fingerprint, exec_hls_cache_gc, GarbageCollectionPolicy, GarbageCollectionReport,
         HlsGarbageCollector, ProtectedSet,

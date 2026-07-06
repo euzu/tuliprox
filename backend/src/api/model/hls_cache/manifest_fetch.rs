@@ -17,6 +17,7 @@ use crate::{
     },
 };
 use axum::http::{header, HeaderMap, StatusCode};
+use futures::StreamExt;
 use log::{debug, warn};
 use reqwest::Client;
 use shared::{model::InputFetchMethod, utils::sanitize_sensitive_info};
@@ -29,6 +30,7 @@ const DEFAULT_HLS_TARGET_DURATION_SECS: u32 = 15;
 const HLS_MANIFEST_HOST_SWITCH_BASE_WINDOW_SEGMENTS: u32 = 3;
 const HLS_MANIFEST_HOST_SWITCH_MAX_FAILURE_THRESHOLD: u32 = 5;
 const DEFAULT_HLS_SESSION_IDLE_TIMEOUT_SECS: u64 = 300;
+const MAX_HLS_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
 
 /// Origin manifest entrypoint snapshot for live HLS refreshes.
 #[derive(Clone)]
@@ -1542,10 +1544,7 @@ async fn response_to_fetched_manifest(
             let final_url = response.url().clone();
             let redirect_host = hls_manifest_redirect_host(&resolved_request_url, &final_url);
             let provider_session_headers = extract_hls_provider_session_header_map(response.headers());
-            let body = timeout(Duration::from_millis(origin_manifest_timeout_ms.max(1)), response.text())
-                .await
-                .map_err(|_| OriginManifestFetchError::Timeout)?
-                .map_err(|err| origin_manifest_fetch_error_from_request_error(&err))?;
+            let body = read_origin_manifest_body(response, origin_manifest_timeout_ms).await?;
             Ok(FetchedOriginManifest {
                 body,
                 final_manifest_url: final_url.to_string(),
@@ -1563,6 +1562,37 @@ async fn response_to_fetched_manifest(
         OriginManifestStatusClass::PermanentFailure => Err(OriginManifestFetchError::PermanentStatus(status)),
         OriginManifestStatusClass::NonRetryableFailure => Err(OriginManifestFetchError::NonRetryableStatus(status)),
     }
+}
+
+fn manifest_body_size_after_chunk(current: usize, chunk: usize) -> Option<usize> {
+    current.checked_add(chunk).filter(|size| *size <= MAX_HLS_MANIFEST_BYTES)
+}
+
+async fn read_origin_manifest_body(
+    response: reqwest::Response,
+    origin_manifest_timeout_ms: u64,
+) -> Result<String, OriginManifestFetchError> {
+    if response.content_length().is_some_and(|size| size > MAX_HLS_MANIFEST_BYTES as u64) {
+        return Err(OriginManifestFetchError::NonRetryableStatus(StatusCode::PAYLOAD_TOO_LARGE));
+    }
+    let read = async move {
+        let capacity = response.content_length().map_or(0, |size| {
+            usize::try_from(size.min(MAX_HLS_MANIFEST_BYTES as u64)).unwrap_or(MAX_HLS_MANIFEST_BYTES)
+        });
+        let mut body = Vec::with_capacity(capacity);
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|err| origin_manifest_fetch_error_from_request_error(&err))?;
+            if manifest_body_size_after_chunk(body.len(), chunk.len()).is_none() {
+                return Err(OriginManifestFetchError::NonRetryableStatus(StatusCode::PAYLOAD_TOO_LARGE));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        String::from_utf8(body).map_err(|_| OriginManifestFetchError::Request("origin manifest is not UTF-8".to_string()))
+    };
+    timeout(Duration::from_millis(origin_manifest_timeout_ms.max(1)), read)
+        .await
+        .map_err(|_| OriginManifestFetchError::Timeout)?
 }
 
 pub(crate) fn hls_manifest_redirect_host(resolved_request_url: &Url, final_url: &Url) -> Option<String> {
@@ -1764,7 +1794,8 @@ fn log_origin_refresh_retry_scheduled(
 #[cfg(test)]
 mod tests {
     use super::{
-        origin_manifest_fetch_error_from_request_error, request_failed_status_from_message, OriginManifestFetchError,
+        manifest_body_size_after_chunk, origin_manifest_fetch_error_from_request_error, request_failed_status_from_message,
+        OriginManifestFetchError, MAX_HLS_MANIFEST_BYTES,
     };
     use axum::http::StatusCode;
 
@@ -1814,5 +1845,11 @@ mod tests {
     fn transport_error_without_http_status_stays_request_error() {
         let err = origin_manifest_fetch_error_from_request_error(&"error sending request for url");
         assert!(matches!(err, OriginManifestFetchError::Request(message) if message == "error sending request for url"));
+    }
+
+    #[test]
+    fn manifest_body_limit_rejects_the_first_byte_above_the_limit() {
+        assert_eq!(manifest_body_size_after_chunk(MAX_HLS_MANIFEST_BYTES - 1, 1), Some(MAX_HLS_MANIFEST_BYTES));
+        assert_eq!(manifest_body_size_after_chunk(MAX_HLS_MANIFEST_BYTES, 1), None);
     }
 }

@@ -1,11 +1,8 @@
 use base64::{engine::general_purpose, Engine as _};
-use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 
-type HmacSha256 = Hmac<Sha256>;
 const PROXY_SESSION_ID_LEN: usize = 22;
-const PROXY_SESSION_ID_HMAC_KEY_DOMAIN: &[u8] = b"tuliprox:hls-cache:proxy-session-id-key:v1";
+const PROXY_SESSION_ID_KEY_CONTEXT: &str = "tuliprox:hls-cache:proxy-session-id-key:v1";
 
 /// Stable Tuliprox content identity for a live HLS source.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -29,26 +26,11 @@ impl HlsSessionKey {
 pub struct ProxySessionId(pub String);
 
 /// Builds the public opaque proxy session token from the stable session key.
-///
-/// # Panics
-///
-/// Panics only if the HMAC implementation rejects the rewrite secret. HMAC-SHA256 accepts keys of any length.
 pub fn build_proxy_session_id(key: &HlsSessionKey, reverse_proxy_rewrite_secret: &[u8]) -> ProxySessionId {
-    let hls_session_key = derive_proxy_session_hmac_key(reverse_proxy_rewrite_secret);
-    let mut mac =
-        HmacSha256::new_from_slice(&hls_session_key).expect("HMAC-SHA256 accepts 32-byte derived keys");
-    mac.update(key.stable_value().as_bytes());
-    let digest = mac.finalize().into_bytes();
-    let token = general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    ProxySessionId(token[..PROXY_SESSION_ID_LEN].to_string())
-}
-
-fn derive_proxy_session_hmac_key(reverse_proxy_rewrite_secret: &[u8]) -> [u8; 32] {
-    let mut mac = HmacSha256::new_from_slice(reverse_proxy_rewrite_secret)
-        .expect("HMAC-SHA256 accepts rewrite secrets of any length");
-    mac.update(PROXY_SESSION_ID_HMAC_KEY_DOMAIN);
-    let digest = mac.finalize().into_bytes();
-    digest.into()
+    let hls_session_key = blake3::derive_key(PROXY_SESSION_ID_KEY_CONTEXT, reverse_proxy_rewrite_secret);
+    let digest = blake3::keyed_hash(&hls_session_key, key.stable_value().as_bytes());
+    let token = general_purpose::URL_SAFE_NO_PAD.encode(digest.as_bytes());
+    ProxySessionId(token.chars().take(PROXY_SESSION_ID_LEN).collect())
 }
 
 #[cfg(test)]

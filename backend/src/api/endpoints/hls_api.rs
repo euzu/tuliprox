@@ -1364,7 +1364,7 @@ fn hls_cache_stream_stats_url(proxy_session_id: &ProxySessionId) -> String {
 
 fn hls_cache_shared_stream_id(proxy_session_id: &ProxySessionId) -> u64 {
     let digest = Sha256::digest(proxy_session_id.0.as_bytes());
-    u64::from_be_bytes(digest[..8].try_into().expect("sha256 digest is at least 8 bytes"))
+    digest.iter().take(8).fold(0_u64, |value, byte| (value << 8) | u64::from(*byte))
 }
 
 async fn hls_cache_shared_joined_existing(

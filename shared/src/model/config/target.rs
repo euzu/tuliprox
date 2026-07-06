@@ -21,6 +21,25 @@ pub struct ConfigTargetShareLiveStreams {
     pub mpeg_ts: bool,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ConfigTargetShareLiveStreamsCompat {
+    Legacy(bool),
+    Structured(ConfigTargetShareLiveStreams),
+}
+
+fn deserialize_share_live_streams<'de, D>(deserializer: D) -> Result<ConfigTargetShareLiveStreams, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match <ConfigTargetShareLiveStreamsCompat as serde::Deserialize>::deserialize(deserializer)? {
+        ConfigTargetShareLiveStreamsCompat::Legacy(enabled) => {
+            ConfigTargetShareLiveStreams { hls: enabled, mpeg_ts: enabled }
+        }
+        ConfigTargetShareLiveStreamsCompat::Structured(config) => config,
+    })
+}
+
 impl ConfigTargetShareLiveStreams {
     pub fn is_empty(&self) -> bool { !self.hls && !self.mpeg_ts }
 }
@@ -30,7 +49,11 @@ impl ConfigTargetShareLiveStreams {
 pub struct ConfigTargetOptions {
     #[serde(default, skip_serializing_if = "is_false")]
     pub ignore_logo: bool,
-    #[serde(default, skip_serializing_if = "ConfigTargetShareLiveStreams::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_share_live_streams",
+        skip_serializing_if = "ConfigTargetShareLiveStreams::is_empty"
+    )]
     pub share_live_streams: ConfigTargetShareLiveStreams,
     #[serde(default, skip_serializing_if = "is_false")]
     pub remove_duplicates: bool,
@@ -539,15 +562,17 @@ share_live_streams:
     }
 
     #[test]
-    fn target_options_reject_legacy_bool_share_live_streams() {
+    fn target_options_maps_legacy_true_share_live_streams_to_both_modes() {
         let yaml = r#"
 share_live_streams: true
 "#;
 
-        let err = serde_saphyr::from_str::<ConfigTargetOptions>(yaml)
-            .expect_err("legacy bool share_live_streams must be rejected");
+        let options = serde_saphyr::from_str::<ConfigTargetOptions>(yaml);
 
-        assert!(err.to_string().contains("share_live_streams"), "unexpected error: {err}");
+        assert!(options.is_ok(), "legacy boolean should deserialize: {options:?}");
+        if let Ok(options) = options {
+            assert_eq!(options.share_live_streams, ConfigTargetShareLiveStreams { hls: true, mpeg_ts: true });
+        }
     }
 
     #[test]

@@ -72,6 +72,7 @@ pub enum RenderedManifestStoreRejectReason {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RenderError {
     NoRenderableWindow,
+    InvalidState,
     StoreRejected(RenderedManifestStoreRejectReason),
 }
 
@@ -83,7 +84,7 @@ impl HlsManifestRenderer {
             let Some(window) = select_window(session, render_gap_segments) else {
                 continue;
             };
-            let manifest = render_window(session, &window, render_gap_segments, rendered_at_ms);
+            let manifest = render_window(session, &window, render_gap_segments, rendered_at_ms)?;
             return Ok(manifest);
         }
 
@@ -200,9 +201,10 @@ fn render_window(
     window: &[u64],
     render_gap_segments: usize,
     rendered_at_ms: u64,
-) -> RenderedManifest {
-    let first_proxy_seq = window[0];
-    let last_proxy_seq = *window.last().expect("window is not empty");
+) -> Result<RenderedManifest, RenderError> {
+    let Some((&first_proxy_seq, &last_proxy_seq)) = window.first().zip(window.last()) else {
+        return Err(RenderError::InvalidState);
+    };
     let playlist_duration_ms = playlist_duration_ms(session, window);
     let target_duration = resolve_target_duration(session, window);
     let hls_version = resolve_hls_version(session, window);
@@ -211,19 +213,20 @@ fn render_window(
     let mut body = String::new();
 
     body.push_str("#EXTM3U\n");
-    writeln!(body, "#EXT-X-VERSION:{hls_version}").expect("writing to String must not fail");
+    writeln!(body, "#EXT-X-VERSION:{hls_version}").map_err(|_| RenderError::InvalidState)?;
     if session.independent_segments || window_contains_provisioning_segment(session, window) {
         body.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
     }
-    writeln!(body, "#EXT-X-TARGETDURATION:{target_duration}").expect("writing to String must not fail");
-    writeln!(body, "#EXT-X-MEDIA-SEQUENCE:{first_proxy_seq}").expect("writing to String must not fail");
-    writeln!(body, "#EXT-X-DISCONTINUITY-SEQUENCE:{discontinuity_sequence}").expect("writing to String must not fail");
+    writeln!(body, "#EXT-X-TARGETDURATION:{target_duration}").map_err(|_| RenderError::InvalidState)?;
+    writeln!(body, "#EXT-X-MEDIA-SEQUENCE:{first_proxy_seq}").map_err(|_| RenderError::InvalidState)?;
+    writeln!(body, "#EXT-X-DISCONTINUITY-SEQUENCE:{discontinuity_sequence}")
+        .map_err(|_| RenderError::InvalidState)?;
 
     let mut current_map_ref = None;
     let contains_provisioning = window_contains_provisioning_segment(session, window);
     let mut media_units_rendered = 0_usize;
     for proxy_seq in window {
-        let entry = session.segments.get(proxy_seq).expect("selected window references an existing segment");
+        let entry = session.segments.get(proxy_seq).ok_or(RenderError::InvalidState)?;
         if contains_provisioning && media_units_rendered == 0 {
             append_manifest_block_separator(&mut body);
         }
@@ -232,7 +235,8 @@ fn render_window(
             body.push('\n');
         }
         if let Some(program_date_time) = &entry.program_date_time {
-            writeln!(body, "#EXT-X-PROGRAM-DATE-TIME:{program_date_time}").expect("writing to String must not fail");
+            writeln!(body, "#EXT-X-PROGRAM-DATE-TIME:{program_date_time}")
+                .map_err(|_| RenderError::InvalidState)?;
         }
         if entry.discontinuity_before {
             if contains_provisioning {
@@ -248,17 +252,18 @@ fn render_window(
         }
         if entry.map_ref != current_map_ref {
             if let Some(map_ref) = entry.map_ref {
-                let map = session.maps.get(&map_ref).expect("renderable map exists");
+                let map = session.maps.get(&map_ref).ok_or(RenderError::InvalidState)?;
                 writeln!(
                     body,
                     "#EXT-X-MAP:URI=\"/hls/shared/live/{}/{}/map/{:06}.{}\"",
                     session.proxy_session_id.0, HLS_ACCESS_LEASE_ID_PLACEHOLDER, map.proxy_map_id.0, map.proxy_file_ext
                 )
-                .expect("writing to String must not fail");
+                .map_err(|_| RenderError::InvalidState)?;
             }
             current_map_ref = entry.map_ref;
         }
-        writeln!(body, "#EXTINF:{},", format_duration_ms(entry.duration_ms)).expect("writing to String must not fail");
+        writeln!(body, "#EXTINF:{},", format_duration_ms(entry.duration_ms))
+            .map_err(|_| RenderError::InvalidState)?;
         if is_local_provisioning_segment(entry) {
             writeln!(
                 body,
@@ -269,7 +274,7 @@ fn render_window(
                 entry.proxy_file_ext,
                 entry.proxy_seq
             )
-            .expect("writing to String must not fail");
+            .map_err(|_| RenderError::InvalidState)?;
         } else {
             writeln!(
                 body,
@@ -279,12 +284,12 @@ fn render_window(
                 entry.proxy_seq,
                 entry.proxy_file_ext
             )
-            .expect("writing to String must not fail");
+            .map_err(|_| RenderError::InvalidState)?;
         }
         media_units_rendered = media_units_rendered.saturating_add(1);
     }
 
-    RenderedManifest {
+    Ok(RenderedManifest {
         body,
         first_proxy_seq,
         last_proxy_seq,
@@ -293,7 +298,7 @@ fn render_window(
         render_gap_segments,
         rendered_at_ms,
         segment_proxy_seqs: window.to_vec(),
-    }
+    })
 }
 
 fn append_manifest_block_separator(body: &mut String) {
@@ -420,6 +425,17 @@ mod tests {
             rendered_at_ms: first_proxy_seq,
             segment_proxy_seqs: (first_proxy_seq..=last_proxy_seq).collect(),
         }
+    }
+
+    #[test]
+    fn rendering_an_empty_internal_window_does_not_panic() {
+        let session = session();
+
+        let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::render_window(&session, &[], 0, 0)
+        }));
+
+        assert!(rendered.is_ok());
     }
 
     #[test]

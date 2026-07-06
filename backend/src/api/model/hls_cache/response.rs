@@ -1,7 +1,8 @@
 #![allow(clippy::large_futures, clippy::large_enum_variant, clippy::too_many_lines)]
 
 use super::{
-    hls_client_body_send_deadline, safe_hls_access_lease_id, safe_proxy_session_id, CacheAccessState,
+    hls_client_body_send_deadline, refresh_hls_client_body_send_deadline, safe_hls_access_lease_id,
+    safe_proxy_session_id, CacheAccessState,
     HlsAccessLeaseId, HlsCacheMetrics, HlsMapFile, HlsProxyManager, HlsRepairRenderedObjectId, HlsSegmentCache,
     HlsSegmentFile, HlsSegmentRepairManager, HlsSegmentRepairObjectContext, HlsSegmentRepairSource,
     HlsSessionHandle, MapCacheKey, MapCacheStatus, ProxyMapId, SegmentCacheKey, SegmentCacheStatus,
@@ -783,6 +784,7 @@ impl Stream for ActiveReaderStream {
         }
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
+                refresh_hls_client_body_send_deadline(self.send_deadline.as_mut());
                 let idle_ms = self.last_yield_at.elapsed().as_millis();
                 self.max_idle_ms = self.max_idle_ms.max(idle_ms);
                 self.last_yield_at = Instant::now();

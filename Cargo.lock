@@ -4626,7 +4626,6 @@ dependencies = [
  "fs2",
  "futures",
  "handlebars",
- "hmac",
  "http-body-util",
  "hyper",
  "hyper-util",

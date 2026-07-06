@@ -1,8 +1,6 @@
 use super::{CacheAccessState, ProxySessionId, TransientObjectCacheKey};
 use axum::http::StatusCode;
 use base64::{engine::general_purpose, Engine as _};
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use std::{
     collections::{HashMap, HashSet},
     fmt,
@@ -10,9 +8,9 @@ use std::{
 };
 use tokio::sync::Notify;
 
-type HmacSha256 = Hmac<Sha256>;
 const TRANSIENT_RESOURCE_ID_LEN: usize = 16;
 const DEFAULT_TRANSIENT_RESOURCE_TTL_MS: u64 = 300_000;
+const TRANSIENT_RESOURCE_ID_KEY_CONTEXT: &str = "tuliprox:hls-cache:transient-resource-id-key:v1";
 
 /// Opaque ID for a transient passthrough resource.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -25,19 +23,14 @@ pub struct TransientResourceId(pub String);
 /// CDN/origin host. Do not make this ID input host-neutral unless `TransientResourceRef` keeps a separate concrete fetch
 /// URI and tests prove relative segment/MAP/key downloads still use that concrete URI.
 ///
-/// # Panics
-///
-/// Panics only if the HMAC implementation rejects the rewrite secret. HMAC-SHA256 accepts keys of any length.
 pub fn build_transient_resource_id(
     resolved_origin_uri: &str,
     reverse_proxy_rewrite_secret: &[u8],
 ) -> TransientResourceId {
-    let mut mac = HmacSha256::new_from_slice(reverse_proxy_rewrite_secret)
-        .expect("HMAC-SHA256 accepts rewrite secrets of any length");
-    mac.update(resolved_origin_uri.as_bytes());
-    let digest = mac.finalize().into_bytes();
-    let token = general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    TransientResourceId(token[..TRANSIENT_RESOURCE_ID_LEN].to_string())
+    let key = blake3::derive_key(TRANSIENT_RESOURCE_ID_KEY_CONTEXT, reverse_proxy_rewrite_secret);
+    let digest = blake3::keyed_hash(&key, resolved_origin_uri.as_bytes());
+    let token = general_purpose::URL_SAFE_NO_PAD.encode(digest.as_bytes());
+    TransientResourceId(token.chars().take(TRANSIENT_RESOURCE_ID_LEN).collect())
 }
 
 /// Transient origin resource category used for direct passthrough streaming.

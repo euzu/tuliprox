@@ -1,6 +1,7 @@
 use super::{
     build_hls_origin_resource_headers_with_client_range,
     finish_hls_origin_account_io, hls_client_body_send_deadline, hls_object_body_deadline,
+    refresh_hls_client_body_send_deadline,
     log_hls_resource_timeout, run_hls_origin_resource_retry_loop_with_attempt_prepare, CacheAccessState,
     HlsAccessLeaseId, HlsMediaActivityMarker, HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation,
     HlsOriginIoContext, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget,
@@ -423,6 +424,7 @@ pub fn hls_transient_origin_response(
                 };
                 match next_chunk {
                     Ok(Some(Ok(chunk))) => {
+                        refresh_hls_client_body_send_deadline(send_deadline.as_mut());
                         Some((Ok(chunk), (stream, guard, origin_io_guard, media_activity_guard, send_deadline, false)))
                     }
                     Ok(Some(Err(err))) => Some((
