@@ -7,7 +7,8 @@ use super::{
     },
     CachedSegmentMetadata, HlsCacheObjectKey, HlsSegmentCache, StagedCacheObject,
 };
-use crate::model::{HlsCorruptSegmentWatchdogConfig, HlsCorruptSegmentWatchdogMode};
+use crate::model::HlsCorruptSegmentWatchdogConfig;
+use shared::model::HlsCorruptSegmentWatchdogMode;
 use log::debug;
 use serde_json::Value;
 use std::{

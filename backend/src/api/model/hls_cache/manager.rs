@@ -1129,7 +1129,7 @@ mod tests {
         utils::FileLockManager,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
-    use shared::model::{ConfigPaths, HlsCacheConfigDto, ReverseProxyConfigDto, StripConfigDto, StripModeDto};
+    use shared::model::{ConfigPaths, HlsCacheConfigDto, HlsManifestRecoveryBurstLevel, HlsStripConfigDto, HlsStripMode, ReverseProxyConfigDto};
     use std::sync::Arc;
 
     fn empty_paths() -> ConfigPaths {
@@ -1193,8 +1193,8 @@ mod tests {
         updated_dto.origin_segment_timeout_ms = 5_678;
         updated_dto.cache_duration = 99;
         updated_dto.session_idle_timeout = 55;
-        updated_dto.manifest_recovery_burst.level = shared::model::HlsManifestRecoveryBurstLevelDto::Balanced;
-        updated_dto.strip = StripConfigDto { mode: StripModeDto::Seconds, value: 7 };
+        updated_dto.manifest_recovery_burst.level = shared::model::HlsManifestRecoveryBurstLevel::Balanced;
+        updated_dto.strip = HlsStripConfigDto { mode: HlsStripMode::Seconds, value: 7 };
         let app_config = test_app_config(config_with_hls_cache(updated_dto));
 
         manager.update_config(&app_config).await;
@@ -1209,9 +1209,9 @@ mod tests {
         assert_eq!(manager.session_idle_timeout_ms(), 55_000);
         assert_eq!(
             manager.manifest_recovery_burst().level,
-            crate::model::HlsManifestRecoveryBurstLevel::Balanced
+            HlsManifestRecoveryBurstLevel::Balanced
         );
-        assert_eq!(manager.strip().mode, crate::model::StripMode::Seconds);
+        assert_eq!(manager.strip().mode, HlsStripMode::Seconds);
         assert_eq!(manager.strip().value, 7);
         assert_eq!(session.read().await.segment_prefetch_queue.max_prefetch_depth(), 4);
     }

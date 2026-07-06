@@ -13,6 +13,7 @@ mod playlist_mem_cache;
 mod provider_config;
 mod provider_dns_manager;
 mod provider_lineup_manager;
+mod proxy;
 mod qos_aggregation_manager;
 mod recording_worker;
 mod request;
@@ -26,7 +27,7 @@ pub(crate) use self::streams::*;
 pub use self::{
     active_provider_manager::*, app_state::*, connection_manager::*, event_manager::*, hls_cache::*,
     hls_provisioning::HlsProvisioningState, metadata_update_manager::*, playlist_mem_cache::*, provider_dns_manager::*,
-    provider_lineup_manager::*, stream::*, update_guard::*,
+    provider_lineup_manager::*, proxy::*, stream::*, update_guard::*,
 };
 pub(in crate::api) use self::{
     active_user_manager::*,

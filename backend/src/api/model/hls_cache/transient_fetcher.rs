@@ -139,10 +139,14 @@ pub async fn resolve_hls_transient_object_cache_action(
     now_ms: u64,
     cache_duration_ms: u64,
 ) -> Result<HlsTransientObjectCacheResolution, StatusCode> {
-    let mut session = session.write().await;
-    if session.is_gc_marked_for_removal() {
+    // `is_gc_marked_for_removal` is `&self` and is the dominant early-exit on a
+    // busy session (GC sweeps mark sessions on a timer). Resolve it under a read
+    // lock so we don't pay for the exclusive write-lock acquisition when the
+    // session is already doomed.
+    if session.read().await.is_gc_marked_for_removal() {
         return Err(StatusCode::NOT_FOUND);
     }
+    let mut session = session.write().await;
     let Some(resource) = session.transient.get_valid_resource(&resource_file.resource_id, now_ms) else {
         return Err(StatusCode::NOT_FOUND);
     };

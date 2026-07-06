@@ -874,7 +874,7 @@ mod tests {
             CacheAccessState, HlsProxyManager, HlsSegmentCache, HlsSegmentRepairManager, HlsSession, HlsSessionKey,
             ProxySessionId, SegmentCacheKey, TransientResourceKind,
         },
-        model::{HlsSegmentRepairConfig, HlsSegmentRepairMode},
+        model::HlsSegmentRepairConfig,
     };
     use arc_swap::ArcSwapOption;
     use axum::http::{header, HeaderValue, StatusCode};
@@ -882,6 +882,7 @@ mod tests {
     use http_body_util::BodyExt;
     use std::{sync::Arc, time::Duration};
     use tokio::sync::RwLock;
+    use shared::model::HlsSegmentRepairMode;
 
     fn header(value: &str) -> HeaderValue { HeaderValue::from_str(value).expect("valid header") }
 

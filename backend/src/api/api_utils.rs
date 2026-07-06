@@ -4,7 +4,7 @@ use crate::{
         model::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream,
-            get_custom_stream_response_error_status, get_stream_response_with_headers,
+            get_custom_stream_response_error_status, get_stream_response_with_headers, is_custom_video_stream_enabled,
             tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason,
             ProviderAllocation, ProviderConfig, ProviderHandle, ProviderStreamFactoryOptions, ProviderStreamInfo,
             ProviderStreamCustomReason, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
@@ -2331,11 +2331,21 @@ fn is_hop_by_hop_response_header(name: &HeaderName) -> bool {
 }
 
 fn no_custom_video_fallback_status(app_config: &AppConfig) -> StatusCode {
-    // No custom video response is available, either because the operator disabled
-    // it or because the concrete resource is missing. In both cases use the
-    // configured fallback status so reverse proxies can handle the socket
-    // consistently.
-    get_custom_stream_response_error_status(app_config)
+    // Two reasons we have no custom-video response:
+    //   1. Operator disabled `custom_stream_response_enabled`  → return the
+    //      configured fallback status (e.g. 502) so reverse proxies handle the
+    //      socket consistently.
+    //   2. Operator enabled custom-video but the concrete resource is missing
+    //      → return `400` so downstream `proxy_intercept_errors on;` (Nginx)
+    //      can sever the socket instead of looping on `200 OK`.
+    // Collapsing both into the configured status code broke the Nginx-intercept
+    // contract that the operator relied on by enabling custom-video in the
+    // first place.
+    if is_custom_video_stream_enabled(app_config) {
+        StatusCode::BAD_REQUEST
+    } else {
+        get_custom_stream_response_error_status(app_config)
+    }
 }
 
 /// # Panics
@@ -7754,7 +7764,11 @@ mod tests {
             .await
             .into_response();
 
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        // Custom-video stream is enabled (`custom_stream_response_enabled: true`
+        // in this fixture), so a missing resource must return 400 — the
+        // Nginx `proxy_intercept_errors on;` contract requires 4xx so the
+        // socket is severed instead of looping on a 200 OK fallback body.
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             app_state.active_users.user_connections(&user.username).await,
             0,

@@ -1,3 +1,9 @@
+//! System-wide constants that aren't config defaults.
+//!
+//! Config-default constants (paths, sizes, suffixes, fallback filenames) live in
+//! `crate::defaults::*` and are re-exported through `crate::utils::*`.
+
+use crate::defaults::DEFAULT_EPG_NORMALIZE_REGEX;
 use regex::Regex;
 use std::{
     collections::HashSet,
@@ -7,51 +13,10 @@ use std::{
 
 pub const DEFAULT_HOME_ENV_VAR: &str = "TULIPROX_HOME";
 pub const DEFAULT_WEB_ROOT_ENV_VAR: &str = "TULIPROX_WEB_ROOT";
-pub const DEFAULT_USER_AGENT: &str = "VLC/3.0.16 LibVLC/3.0.16";
-pub const DEFAULT_BACKUP_DIR: &str = "backup";
-pub const DEFAULT_CACHE_DIR: &str = "cache";
-pub const DEFAULT_STORAGE_TEMP_DIR: &str = "tmp";
-pub const DEFAULT_USER_CONFIG_DIR: &str = "user_config";
-pub const DEFAULT_DOWNLOAD_DIR: &str = "downloads";
-pub const DEFAULT_CUSTOM_STREAM_RESPONSE_PATH: &str = "resources";
 pub const DNS_RESOLVED_FILE: &str = "provider_dns_resolved.json";
-pub const USER_FILE: &str = "user.txt";
-pub const USER_GROUP_FILE: &str = "groups.txt";
-pub const CONFIG_PATH: &str = "config";
-pub const CONFIG_FILE: &str = "config.yml";
-pub const SOURCE_FILE: &str = "source.yml";
-pub const MAPPING_FILE: &str = "mapping.yml";
-pub const TEMPLATE_FILE: &str = "template.yml";
-pub const API_PROXY_FILE: &str = "api-proxy.yml";
-pub const DEFAULT_WEB_DIR: &str = "web";
-pub const DEFAULT_STORAGE_DIR: &str = "data"; // TODO rename to storage and use data for config, storage, ...
-pub const DEFAULT_PORT: u16 = 8901;
+
 pub const ENCODING_GZIP: &str = "gzip";
 pub const ENCODING_DEFLATE: &str = "deflate";
-
-pub const HLS_EXT: &str = ".m3u8";
-pub const DASH_EXT: &str = ".mpd";
-
-pub const HLS_PREFIX: &str = "hls";
-pub const CUSTOM_VIDEO_PREFIX: &str = "cvs";
-
-pub const HLS_EXT_QUERY: &str = ".m3u8?";
-pub const HLS_EXT_FRAGMENT: &str = ".m3u8#";
-pub const DASH_EXT_QUERY: &str = ".mpd?";
-pub const DASH_EXT_FRAGMENT: &str = ".mpd#";
-
-pub const CHANNEL_UNAVAILABLE: &str = "channel_unavailable.ts";
-pub const USER_CONNECTIONS_EXHAUSTED: &str = "user_connections_exhausted.ts";
-pub const PROVIDER_CONNECTIONS_EXHAUSTED: &str = "provider_connections_exhausted.ts";
-pub const LOW_PRIORITY_PREEMPTED: &str = "low_priority_preempted.ts";
-pub const USER_ACCOUNT_EXPIRED: &str = "user_account_expired.ts";
-pub const PANEL_API_PROVISIONING: &str = "panel_api_provisioning.ts";
-pub const HLS_SESSION_OR_LEASE_EXPIRED: &str = "hls_session_or_lease_expired.ts";
-pub const PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT: usize = 6;
-pub const PANEL_API_PROVISIONING_HLS_SEGMENT_PREFIX: &str = "panel_api_provisioning_hls_";
-
-pub const DEFAULT_EPISODE_PATTERN: &str = r".*(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2}).*";
-pub const DEFAULT_EPG_NORMALIZE_REGEX: &str = r"[^a-zA-Z0-9\-]";
 
 pub const FILENAME_TRIM_PATTERNS: &[char] = &['.', '-', '_'];
 

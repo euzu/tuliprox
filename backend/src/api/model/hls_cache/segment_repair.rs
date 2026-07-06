@@ -4,7 +4,8 @@ use super::{
     safe_hls_access_lease_id, safe_proxy_session_id, segment_watchdog::HlsCorruptSegmentWatchdogManager,
     CachedSegmentMetadata, HlsAccessLeaseId, HlsCacheObjectKey, HlsSegmentCache, ProxySessionId, StagedCacheObject,
 };
-use crate::model::{HlsCorruptSegmentWatchdogConfig, HlsSegmentRepairConfig, HlsSegmentRepairMode};
+use crate::model::{HlsCorruptSegmentWatchdogConfig, HlsSegmentRepairConfig};
+use shared::model::{HlsSegmentRepairExecutionPlan, HlsSegmentRepairMode};
 use arc_swap::ArcSwap;
 use log::{debug, warn};
 use serde_json::Value;
@@ -235,13 +236,6 @@ impl HlsSegmentRepairTriggerSource {
             Self::UnsupportedCodec => "unsupported-codec",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum HlsSegmentRepairExecutionPlan {
-    Repair(HlsSegmentRepairMode),
-    SkipNoTrigger,
-    SkipConfiguredMaxBelowRequired,
 }
 
 #[derive(Debug, Clone)]
@@ -1101,36 +1095,6 @@ fn repair_object_metadata_key(
         repair_mode,
         command_version: COMMAND_VERSION,
         ffmpeg_version: ffmpeg_identity_version(),
-    }
-}
-
-impl HlsSegmentRepairMode {
-    const fn as_log_value(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
-    }
-
-    const fn rank(self) -> u8 {
-        match self {
-            Self::Off => 0,
-            Self::Low => 1,
-            Self::Medium => 2,
-            Self::High => 3,
-        }
-    }
-
-    const fn execution_plan(self, required_level: Self) -> HlsSegmentRepairExecutionPlan {
-        if matches!(self, Self::Off) || matches!(required_level, Self::Off) {
-            HlsSegmentRepairExecutionPlan::SkipNoTrigger
-        } else if self.rank() < required_level.rank() {
-            HlsSegmentRepairExecutionPlan::SkipConfiguredMaxBelowRequired
-        } else {
-            HlsSegmentRepairExecutionPlan::Repair(required_level)
-        }
     }
 }
 
@@ -2047,9 +2011,10 @@ mod tests {
             HlsAccessLeaseId, HlsSegmentCache, ProxySessionId, SegmentCacheKey, TransientObjectCacheKey,
             TransientResourceId,
         },
-        model::{HlsSegmentRepairConfig, HlsSegmentRepairMode},
+        model::HlsSegmentRepairConfig,
     };
     use std::sync::Arc;
+    use shared::model::HlsSegmentRepairMode;
 
     fn repair_config(mode: HlsSegmentRepairMode, apply_to_first_segments: u8) -> HlsSegmentRepairConfig {
         HlsSegmentRepairConfig {

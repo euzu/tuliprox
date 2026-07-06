@@ -1,5 +1,6 @@
 use crate::{
     error::TuliproxError,
+    model::ByteSize,
     utils::{
         default_metadata_backoff_jitter_percent, default_metadata_ffprobe_analyze_duration,
         default_metadata_ffprobe_live_analyze_duration, default_metadata_ffprobe_live_probe_size,
@@ -27,7 +28,7 @@ use crate::{
         is_default_metadata_retry_delay, is_default_metadata_tmdb_cooldown, is_default_metadata_worker_idle_timeout,
         is_default_probe_user_priority, is_default_tmdb_cache_duration_days, is_default_tmdb_language,
         is_default_tmdb_match_threshold, is_default_tmdb_rate_limit_ms, is_false, is_tmdb_default_api_key,
-        parse_duration_seconds, parse_size_base_2, TMDB_API_KEY,
+        parse_duration_seconds, TMDB_API_KEY,
     },
 };
 
@@ -338,10 +339,9 @@ pub struct FfprobeConfigDto {
     pub analyze_duration: String,
     #[serde(
         default = "default_metadata_ffprobe_probe_size",
-        skip_serializing_if = "is_default_metadata_ffprobe_probe_size",
-        deserialize_with = "deserialize_as_string"
+        skip_serializing_if = "is_default_metadata_ffprobe_probe_size"
     )]
-    pub probe_size: String,
+    pub probe_size: ByteSize,
     #[serde(
         default = "default_metadata_ffprobe_live_analyze_duration",
         skip_serializing_if = "is_default_metadata_ffprobe_live_analyze_duration",
@@ -350,10 +350,9 @@ pub struct FfprobeConfigDto {
     pub live_analyze_duration: String,
     #[serde(
         default = "default_metadata_ffprobe_live_probe_size",
-        skip_serializing_if = "is_default_metadata_ffprobe_live_probe_size",
-        deserialize_with = "deserialize_as_string"
+        skip_serializing_if = "is_default_metadata_ffprobe_live_probe_size"
     )]
-    pub live_probe_size: String,
+    pub live_probe_size: ByteSize,
 }
 
 impl Default for FfprobeConfigDto {
@@ -386,13 +385,13 @@ impl FfprobeConfigDto {
         if self.analyze_duration.trim().is_empty() {
             self.analyze_duration = default_metadata_ffprobe_analyze_duration();
         }
-        if self.probe_size.trim().is_empty() {
+        if self.probe_size.as_str().trim().is_empty() {
             self.probe_size = default_metadata_ffprobe_probe_size();
         }
         if self.live_analyze_duration.trim().is_empty() {
             self.live_analyze_duration = default_metadata_ffprobe_live_analyze_duration();
         }
-        if self.live_probe_size.trim().is_empty() {
+        if self.live_probe_size.as_str().trim().is_empty() {
             self.live_probe_size = default_metadata_ffprobe_live_probe_size();
         }
     }
@@ -407,12 +406,14 @@ impl FfprobeConfigDto {
         )?;
         self.analyze_duration = MetadataUpdateConfigDto::canonicalize_seconds(analyze_duration_secs);
 
-        let probe_size_bytes = parse_size_base_2(&self.probe_size)
+        let probe_size_bytes = self
+            .probe_size
+            .parse_bytes()
             .map_err(|err| {
                 TuliproxError::ConfigMetadataUpdate(format!("Invalid size for `ffprobe.probe_size`: {err}"))
             })?
             .max(1);
-        self.probe_size = MetadataUpdateConfigDto::canonicalize_size_bytes(probe_size_bytes);
+        self.probe_size = ByteSize::new(MetadataUpdateConfigDto::canonicalize_size_bytes(probe_size_bytes));
 
         let live_analyze_duration_secs = MetadataUpdateConfigDto::parse_and_clamp_duration_with_required_unit(
             &self.live_analyze_duration,
@@ -421,12 +422,14 @@ impl FfprobeConfigDto {
         )?;
         self.live_analyze_duration = MetadataUpdateConfigDto::canonicalize_seconds(live_analyze_duration_secs);
 
-        let live_probe_size_bytes = parse_size_base_2(&self.live_probe_size)
+        let live_probe_size_bytes = self
+            .live_probe_size
+            .parse_bytes()
             .map_err(|err| {
                 TuliproxError::ConfigMetadataUpdate(format!("Invalid size for `ffprobe.live_probe_size`: {err}"))
             })?
             .max(1);
-        self.live_probe_size = MetadataUpdateConfigDto::canonicalize_size_bytes(live_probe_size_bytes);
+        self.live_probe_size = ByteSize::new(MetadataUpdateConfigDto::canonicalize_size_bytes(live_probe_size_bytes));
 
         Ok(())
     }
@@ -605,7 +608,7 @@ impl MetadataUpdateConfigDto {
 
 #[cfg(test)]
 mod tests {
-    use super::MetadataUpdateConfigDto;
+    use super::{ByteSize, MetadataUpdateConfigDto};
 
     #[test]
     fn default_config_is_empty() {
@@ -647,7 +650,7 @@ mod tests {
         cfg.probe_fairness_resolve_burst = 0;
         cfg.ffprobe.timeout = Some(0);
         cfg.ffprobe.analyze_duration = "0s".to_string();
-        cfg.ffprobe.probe_size = "0".to_string();
+        cfg.ffprobe.probe_size = ByteSize::new("0");
 
         cfg.prepare().expect("metadata update config should clamp minimum values");
 
@@ -659,7 +662,7 @@ mod tests {
         assert_eq!(cfg.probe_fairness_resolve_burst, 1);
         assert_eq!(cfg.ffprobe.timeout, Some(1));
         assert_eq!(cfg.ffprobe.analyze_duration, "1s");
-        assert_eq!(cfg.ffprobe.probe_size, "1B");
+        assert_eq!(cfg.ffprobe.probe_size, ByteSize::new("1B"));
     }
 
     #[test]
@@ -679,9 +682,9 @@ mod tests {
         cfg.worker_idle_timeout = "60".to_string();
         cfg.probe.retry_backoff_step_3 = "3600".to_string();
         cfg.ffprobe.analyze_duration = "10s".to_string();
-        cfg.ffprobe.probe_size = "10485760".to_string();
+        cfg.ffprobe.probe_size = ByteSize::new("10485760");
         cfg.ffprobe.live_analyze_duration = "5s".to_string();
-        cfg.ffprobe.live_probe_size = "5242880".to_string();
+        cfg.ffprobe.live_probe_size = ByteSize::new("5242880");
 
         cfg.prepare().expect("metadata update config should canonicalize durations");
 
@@ -690,9 +693,9 @@ mod tests {
         assert_eq!(cfg.worker_idle_timeout, "1m");
         assert_eq!(cfg.probe.retry_backoff_step_3, "1h");
         assert_eq!(cfg.ffprobe.analyze_duration, "10s");
-        assert_eq!(cfg.ffprobe.probe_size, "10MB");
+        assert_eq!(cfg.ffprobe.probe_size, ByteSize::new("10MB"));
         assert_eq!(cfg.ffprobe.live_analyze_duration, "5s");
-        assert_eq!(cfg.ffprobe.live_probe_size, "5MB");
+        assert_eq!(cfg.ffprobe.live_probe_size, ByteSize::new("5MB"));
     }
 
     #[test]

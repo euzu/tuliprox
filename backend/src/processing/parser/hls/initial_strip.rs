@@ -2,7 +2,8 @@ use super::transient_manifest::{
     configured_strip_segments, manifest_lines, media_segment_units, strip_mode_log_value,
     MIN_HLS_INITIAL_VISIBLE_SEGMENTS,
 };
-use crate::model::{StripConfig, StripMode};
+use crate::model::StripConfig;
+use shared::model::HlsStripMode;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HlsInitialStripView {
@@ -92,8 +93,8 @@ pub fn initial_hls_strip_segments_for_durations(strip: &StripConfig, segment_dur
         return 0;
     }
     let configured_segments = match strip.mode {
-        StripMode::Segments => usize::try_from(strip.value).unwrap_or(usize::MAX),
-        StripMode::Seconds => configured_strip_segments_from_durations(strip.value, segment_durations_ms),
+        HlsStripMode::Segments => usize::try_from(strip.value).unwrap_or(usize::MAX),
+        HlsStripMode::Seconds => configured_strip_segments_from_durations(strip.value, segment_durations_ms),
     };
     let max_removable_segments = segment_durations_ms.len().saturating_sub(MIN_HLS_INITIAL_VISIBLE_SEGMENTS);
     configured_segments.min(max_removable_segments)
@@ -126,12 +127,13 @@ fn configured_strip_segments_from_durations(strip_seconds: u64, segment_duration
 #[cfg(test)]
 mod tests {
     use super::{materialize_initial_hls_strip_view, HlsInitialStripOutcome, HlsInitialStripSkipReason};
-    use crate::model::{StripConfig, StripMode};
+    use crate::model::StripConfig;
+use shared::model::HlsStripMode;
     use std::fmt::Write as _;
 
-    fn strip_segments(value: u64) -> StripConfig { StripConfig { mode: StripMode::Segments, value } }
+    fn strip_segments(value: u64) -> StripConfig { StripConfig { mode: HlsStripMode::Segments, value } }
 
-    fn strip_seconds(value: u64) -> StripConfig { StripConfig { mode: StripMode::Seconds, value } }
+    fn strip_seconds(value: u64) -> StripConfig { StripConfig { mode: HlsStripMode::Seconds, value } }
 
     fn manifest_with_segments(count: usize) -> String {
         let mut body = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n".to_string();

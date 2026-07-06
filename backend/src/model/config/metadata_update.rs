@@ -1,8 +1,9 @@
 use crate::model::macros;
 use shared::model::{
-    FfprobeConfigDto, MetadataLogConfigDto, MetadataUpdateConfigDto, ProbeConfigDto, ResolveConfigDto, TmdbConfigDto,
+    ByteSize, FfprobeConfigDto, MetadataLogConfigDto, MetadataUpdateConfigDto, ProbeConfigDto, ResolveConfigDto,
+    TmdbConfigDto,
 };
-use shared::utils::{default_metadata_ffprobe_analyze_duration, default_metadata_ffprobe_live_analyze_duration, default_metadata_ffprobe_live_probe_size, default_metadata_ffprobe_probe_size, default_metadata_max_resolve_retry_backoff, default_metadata_probe_cooldown, default_metadata_probe_retry_backoff_step_1, default_metadata_probe_retry_backoff_step_2, default_metadata_probe_retry_backoff_step_3, default_metadata_probe_retry_load_retry_delay, default_metadata_progress_log_interval, default_metadata_queue_log_interval, default_metadata_resolve_exhaustion_reset_gap, default_metadata_resolve_min_retry_base, default_metadata_retry_delay, default_metadata_tmdb_cooldown, default_metadata_worker_idle_timeout, default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_match_threshold, default_tmdb_rate_limit_ms, parse_duration_seconds, parse_size_base_2};
+use shared::utils::{default_metadata_ffprobe_analyze_duration, default_metadata_ffprobe_live_analyze_duration, default_metadata_ffprobe_live_probe_size, default_metadata_ffprobe_probe_size, default_metadata_max_resolve_retry_backoff, default_metadata_probe_cooldown, default_metadata_probe_retry_backoff_step_1, default_metadata_probe_retry_backoff_step_2, default_metadata_probe_retry_backoff_step_3, default_metadata_probe_retry_load_retry_delay, default_metadata_progress_log_interval, default_metadata_queue_log_interval, default_metadata_resolve_exhaustion_reset_gap, default_metadata_resolve_min_retry_base, default_metadata_retry_delay, default_metadata_tmdb_cooldown, default_metadata_worker_idle_timeout, default_tmdb_cache_duration_days, default_tmdb_language, default_tmdb_match_threshold, default_tmdb_rate_limit_ms, parse_duration_seconds};
 
 #[derive(Debug, Clone)]
 pub struct MetadataUpdateConfig {
@@ -63,11 +64,11 @@ pub struct FfprobeConfig {
     pub timeout: Option<u64>,
     pub analyze_duration: String,
     pub analyze_duration_micros: u64,
-    pub probe_size: String,
+    pub probe_size: ByteSize,
     pub probe_size_bytes: u64,
     pub live_analyze_duration: String,
     pub live_analyze_duration_micros: u64,
-    pub live_probe_size: String,
+    pub live_probe_size: ByteSize,
     pub live_probe_size_bytes: u64,
 }
 
@@ -113,11 +114,12 @@ fn parse_duration_or_default(value: &str, default_value: &str, require_unit: boo
         .map_or(1, |v| v.max(1))
 }
 
-fn parse_size_or_default(value: &str, default_value: &str) -> u64 {
-    parse_size_base_2(value)
+fn parse_size_or_default(value: &ByteSize, default_value: &ByteSize) -> u64 {
+    value
+        .parse_bytes()
         .ok()
         .map(|v| v.max(1))
-        .or_else(|| parse_size_base_2(default_value).ok().map(|v| v.max(1)))
+        .or_else(|| default_value.parse_bytes().ok().map(|v| v.max(1)))
         .unwrap_or(1)
 }
 

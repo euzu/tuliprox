@@ -12,10 +12,9 @@ use super::{
     HlsSegmentRepairSource, HlsSessionHandle, OriginSegmentFetchRef, SegmentCacheKey, SegmentCacheStatus,
     SegmentFetchPriority,
 };
-use crate::{
-    model::{HlsCacheConfig, HlsSegmentRepairMode, StripMode},
-    processing::parser::hls::origin_manifest::ParsedByteRange,
-};
+use crate::model::HlsCacheConfig;
+use crate::processing::parser::hls::origin_manifest::ParsedByteRange;
+use shared::model::{HlsSegmentRepairMode, HlsStripMode};
 use arc_swap::ArcSwap;
 use axum::http::HeaderMap;
 use futures::{FutureExt, TryStreamExt};
@@ -112,8 +111,8 @@ impl Default for SegmentFetchPolicy {
 
 fn permanent_failure_segment_threshold_from_config(config: &HlsCacheConfig) -> u32 {
     let configured_strip_segments = match config.strip.mode {
-        StripMode::Segments => u32::try_from(config.strip.value).unwrap_or(u32::MAX.saturating_sub(3)),
-        StripMode::Seconds => 0,
+        HlsStripMode::Segments => u32::try_from(config.strip.value).unwrap_or(u32::MAX.saturating_sub(3)),
+        HlsStripMode::Seconds => 0,
     };
     3_u32.saturating_add(configured_strip_segments)
 }
@@ -796,7 +795,7 @@ mod tests {
             HlsSegmentRepairManager, HlsSegmentWorkerPool, HlsSessionKey, HlsSessionStore, ProxySessionId,
             SegmentCacheStatus,
         },
-        model::{HlsSegmentRepairConfig, HlsSegmentRepairMode},
+        model::HlsSegmentRepairConfig,
         processing::parser::hls::origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome},
     };
     use axum::http::{header, HeaderMap, HeaderValue};
@@ -813,6 +812,7 @@ mod tests {
         net::TcpListener,
         sync::Mutex,
     };
+    use shared::model::HlsSegmentRepairMode;
 
     const BASE_URL: &str = "http://origin.example.com/live/final/index.m3u8";
 

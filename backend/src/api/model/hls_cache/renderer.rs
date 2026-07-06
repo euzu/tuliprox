@@ -2,7 +2,8 @@ use super::{
     is_hls_provisioning_gap_segment, is_hls_provisioning_segment, HlsSession, MapCacheStatus, ProxySessionId,
     SegmentCacheStatus, SegmentEntry, HLS_ACCESS_LEASE_ID_PLACEHOLDER, HLS_PROVISIONING_TARGET_DURATION_SECS,
 };
-use crate::model::{StripConfig, StripMode};
+use crate::model::StripConfig;
+use shared::model::HlsStripMode;
 use std::fmt::Write as _;
 
 const MIN_VISIBLE_SEGMENTS: usize = 3;
@@ -21,8 +22,8 @@ impl RenderPolicy {
 
     pub fn from_strip_config(strip: &StripConfig, segment_durations_ms: &[u64]) -> Self {
         match strip.mode {
-            StripMode::Segments => Self::new(usize::try_from(strip.value).unwrap_or(usize::MAX)),
-            StripMode::Seconds => {
+            HlsStripMode::Segments => Self::new(usize::try_from(strip.value).unwrap_or(usize::MAX)),
+            HlsStripMode::Seconds => {
                 let target_ms = strip.value.saturating_mul(1_000);
                 let mut accumulated_ms = 0_u64;
                 let mut gap_segments = 0_usize;
@@ -379,13 +380,14 @@ fn format_duration_ms(duration_ms: u64) -> String { format!("{}.{:03}", duration
 
 #[cfg(test)]
 mod tests {
+    use shared::model::HlsStripMode;
     use super::{
         HlsManifestRenderer, RenderError, RenderPolicy, RenderedManifest, RenderedManifestStoreOutcome,
         RenderedManifestStoreRejectReason,
     };
     use crate::{
         api::model::{HlsSession, HlsSessionKey, MapCacheStatus, SegmentCacheStatus, SegmentFetchPriority},
-        model::{StripConfig, StripMode},
+        model::StripConfig,
         processing::parser::hls::origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome},
     };
 
@@ -754,7 +756,7 @@ mod tests {
     #[test]
     fn render_policy_from_seconds_counts_tail_durations() {
         let policy = RenderPolicy::from_strip_config(
-            &StripConfig { mode: StripMode::Seconds, value: 9 },
+            &StripConfig { mode: HlsStripMode::Seconds, value: 9 },
             &[4_000, 4_000, 4_000, 4_000],
         );
 

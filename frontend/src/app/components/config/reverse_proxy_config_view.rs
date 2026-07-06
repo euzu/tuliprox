@@ -19,17 +19,18 @@ use crate::{
         context::ConfigContext,
     },
     config_field, config_field_bool, config_field_child, config_field_custom, config_field_hide, config_field_optional,
-    edit_field_bool, edit_field_list, edit_field_number, edit_field_number_f64, edit_field_number_u16,
-    edit_field_number_u64, edit_field_number_usize, edit_field_text, edit_field_text_option, generate_form_reducer,
+    edit_field_bool, edit_field_byte_size_option, edit_field_list, edit_field_number, edit_field_number_f64,
+    edit_field_number_u16, edit_field_number_u64, edit_field_number_usize, edit_field_text, edit_field_text_option,
+    generate_form_reducer,
     i18n::{use_translation, YewI18n},
 };
 use shared::{
     model::{
-        ByteSizeDto, CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, HlsCacheConfigDto,
-        HlsCorruptSegmentWatchdogModeDto, HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevelDto,
-        HlsSegmentRepairConfigDto, HlsSegmentRepairModeDto, QosAggregationConfigDto, RateLimitConfigDto,
-        ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, StreamBufferConfigDto,
-        StreamConfigDto, StreamHistoryConfigDto, StripConfigDto, StripModeDto,
+        ByteSize, CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, HlsCacheConfigDto,
+        HlsCorruptSegmentWatchdogMode, HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevel,
+        HlsSegmentRepairConfigDto, HlsSegmentRepairMode, HlsStripConfigDto, HlsStripMode, QosAggregationConfigDto,
+        RateLimitConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto,
+        StreamBufferConfigDto, StreamConfigDto, StreamHistoryConfigDto,
     },
     utils::{default_secret, format_float_localized},
 };
@@ -121,7 +122,7 @@ generate_form_reducer!(
     action_name: CacheConfigFormAction,
     fields {
         Enabled => enabled: bool,
-        Size => size: Option<String>,
+        Size => size: Option<ByteSize>,
         Dir => directory: Option<String>,
     }
 );
@@ -209,10 +210,10 @@ generate_form_reducer!(
 );
 
 generate_form_reducer!(
-    state: StripConfigFormState { form: StripConfigDto },
+    state: StripConfigFormState { form: HlsStripConfigDto },
     action_name: StripConfigFormAction,
     fields {
-        Mode => mode: StripModeDto,
+        Mode => mode: HlsStripMode,
         Value => value: u64,
     }
 );
@@ -223,8 +224,8 @@ generate_form_reducer!(
     fields {
         CachePath => cache_path: String,
         CacheDuration => cache_duration: u64,
-        CacheBytes => cache_bytes: ByteSizeDto,
-        CacheBytesPerSession => cache_bytes_per_session: ByteSizeDto,
+        CacheBytes => cache_bytes: ByteSize,
+        CacheBytesPerSession => cache_bytes_per_session: ByteSize,
         MaxSegmentsPrefetch => max_segments_prefetch: usize,
         MaxConcurrentSegmentFetchesPerSession => max_concurrent_segment_fetches_per_session: usize,
         MaxConcurrentSegmentFetchesGlobal => max_concurrent_segment_fetches_global: usize,
@@ -294,106 +295,106 @@ fn geoip_unavailable_policy_labels(translate: &YewI18n) -> Rc<Vec<String>> {
     ])
 }
 
-fn hls_strip_mode_options(selected: StripModeDto) -> Rc<Vec<DropDownOption>> {
+fn hls_strip_mode_options(selected: HlsStripMode) -> Rc<Vec<DropDownOption>> {
     Rc::new(vec![
-        DropDownOption::new("segments", html! { "segments" }, selected == StripModeDto::Segments),
-        DropDownOption::new("seconds", html! { "seconds" }, selected == StripModeDto::Seconds),
+        DropDownOption::new("segments", html! { "segments" }, selected == HlsStripMode::Segments),
+        DropDownOption::new("seconds", html! { "seconds" }, selected == HlsStripMode::Seconds),
     ])
 }
 
-fn hls_manifest_recovery_burst_options(selected: HlsManifestRecoveryBurstLevelDto) -> Rc<Vec<DropDownOption>> {
+fn hls_manifest_recovery_burst_options(selected: HlsManifestRecoveryBurstLevel) -> Rc<Vec<DropDownOption>> {
     Rc::new(vec![
-        DropDownOption::new("off", html! { "OFF" }, selected == HlsManifestRecoveryBurstLevelDto::Off),
-        DropDownOption::new("friendly", html! { "FRIENDLY" }, selected == HlsManifestRecoveryBurstLevelDto::Friendly),
-        DropDownOption::new("cautious", html! { "CAUTIOUS" }, selected == HlsManifestRecoveryBurstLevelDto::Cautious),
-        DropDownOption::new("balanced", html! { "BALANCED" }, selected == HlsManifestRecoveryBurstLevelDto::Balanced),
-        DropDownOption::new("intense", html! { "INTENSE" }, selected == HlsManifestRecoveryBurstLevelDto::Intense),
+        DropDownOption::new("off", html! { "OFF" }, selected == HlsManifestRecoveryBurstLevel::Off),
+        DropDownOption::new("friendly", html! { "FRIENDLY" }, selected == HlsManifestRecoveryBurstLevel::Friendly),
+        DropDownOption::new("cautious", html! { "CAUTIOUS" }, selected == HlsManifestRecoveryBurstLevel::Cautious),
+        DropDownOption::new("balanced", html! { "BALANCED" }, selected == HlsManifestRecoveryBurstLevel::Balanced),
+        DropDownOption::new("intense", html! { "INTENSE" }, selected == HlsManifestRecoveryBurstLevel::Intense),
         DropDownOption::new(
             "aggressive",
             html! { "AGGRESSIVE" },
-            selected == HlsManifestRecoveryBurstLevelDto::Aggressive,
+            selected == HlsManifestRecoveryBurstLevel::Aggressive,
         ),
-        DropDownOption::new("beast", html! { "BEAST" }, selected == HlsManifestRecoveryBurstLevelDto::Beast),
+        DropDownOption::new("beast", html! { "BEAST" }, selected == HlsManifestRecoveryBurstLevel::Beast),
     ])
 }
 
-fn hls_manifest_recovery_burst_label(level: HlsManifestRecoveryBurstLevelDto) -> &'static str {
+fn hls_manifest_recovery_burst_label(level: HlsManifestRecoveryBurstLevel) -> &'static str {
     match level {
-        HlsManifestRecoveryBurstLevelDto::Off => "OFF",
-        HlsManifestRecoveryBurstLevelDto::Friendly => "FRIENDLY",
-        HlsManifestRecoveryBurstLevelDto::Cautious => "CAUTIOUS",
-        HlsManifestRecoveryBurstLevelDto::Balanced => "BALANCED",
-        HlsManifestRecoveryBurstLevelDto::Intense => "INTENSE",
-        HlsManifestRecoveryBurstLevelDto::Aggressive => "AGGRESSIVE",
-        HlsManifestRecoveryBurstLevelDto::Beast => "BEAST",
+        HlsManifestRecoveryBurstLevel::Off => "OFF",
+        HlsManifestRecoveryBurstLevel::Friendly => "FRIENDLY",
+        HlsManifestRecoveryBurstLevel::Cautious => "CAUTIOUS",
+        HlsManifestRecoveryBurstLevel::Balanced => "BALANCED",
+        HlsManifestRecoveryBurstLevel::Intense => "INTENSE",
+        HlsManifestRecoveryBurstLevel::Aggressive => "AGGRESSIVE",
+        HlsManifestRecoveryBurstLevel::Beast => "BEAST",
     }
 }
 
-fn hls_segment_repair_max_level_options(selected: HlsSegmentRepairModeDto) -> Rc<Vec<DropDownOption>> {
+fn hls_segment_repair_max_level_options(selected: HlsSegmentRepairMode) -> Rc<Vec<DropDownOption>> {
     Rc::new(vec![
-        DropDownOption::new("off", html! { "OFF" }, selected == HlsSegmentRepairModeDto::Off),
-        DropDownOption::new("low", html! { "LOW" }, selected == HlsSegmentRepairModeDto::Low),
-        DropDownOption::new("medium", html! { "MEDIUM" }, selected == HlsSegmentRepairModeDto::Medium),
-        DropDownOption::new("high", html! { "HIGH" }, selected == HlsSegmentRepairModeDto::High),
+        DropDownOption::new("off", html! { "OFF" }, selected == HlsSegmentRepairMode::Off),
+        DropDownOption::new("low", html! { "LOW" }, selected == HlsSegmentRepairMode::Low),
+        DropDownOption::new("medium", html! { "MEDIUM" }, selected == HlsSegmentRepairMode::Medium),
+        DropDownOption::new("high", html! { "HIGH" }, selected == HlsSegmentRepairMode::High),
     ])
 }
 
-fn hls_segment_repair_max_level_label(mode: HlsSegmentRepairModeDto) -> &'static str {
+fn hls_segment_repair_max_level_label(mode: HlsSegmentRepairMode) -> &'static str {
     match mode {
-        HlsSegmentRepairModeDto::Off => "OFF",
-        HlsSegmentRepairModeDto::Low => "LOW",
-        HlsSegmentRepairModeDto::Medium => "MEDIUM",
-        HlsSegmentRepairModeDto::High => "HIGH",
+        HlsSegmentRepairMode::Off => "OFF",
+        HlsSegmentRepairMode::Low => "LOW",
+        HlsSegmentRepairMode::Medium => "MEDIUM",
+        HlsSegmentRepairMode::High => "HIGH",
     }
 }
 
-fn hls_corrupt_segment_watchdog_options(selected: HlsCorruptSegmentWatchdogModeDto) -> Rc<Vec<DropDownOption>> {
+fn hls_corrupt_segment_watchdog_options(selected: HlsCorruptSegmentWatchdogMode) -> Rc<Vec<DropDownOption>> {
     Rc::new(vec![
-        DropDownOption::new("off", html! { "OFF" }, selected == HlsCorruptSegmentWatchdogModeDto::Off),
+        DropDownOption::new("off", html! { "OFF" }, selected == HlsCorruptSegmentWatchdogMode::Off),
         DropDownOption::new(
             "detect_only",
             html! { "DETECT ONLY" },
-            selected == HlsCorruptSegmentWatchdogModeDto::DetectOnly,
+            selected == HlsCorruptSegmentWatchdogMode::DetectOnly,
         ),
-        DropDownOption::new("sanitize", html! { "SANITIZE" }, selected == HlsCorruptSegmentWatchdogModeDto::Sanitize),
+        DropDownOption::new("sanitize", html! { "SANITIZE" }, selected == HlsCorruptSegmentWatchdogMode::Sanitize),
         DropDownOption::new(
             "diagnostic",
             html! { "DIAGNOSTIC" },
-            selected == HlsCorruptSegmentWatchdogModeDto::Diagnostic,
+            selected == HlsCorruptSegmentWatchdogMode::Diagnostic,
         ),
     ])
 }
 
-fn hls_corrupt_segment_watchdog_label(mode: HlsCorruptSegmentWatchdogModeDto) -> &'static str {
+fn hls_corrupt_segment_watchdog_label(mode: HlsCorruptSegmentWatchdogMode) -> &'static str {
     match mode {
-        HlsCorruptSegmentWatchdogModeDto::Off => "OFF",
-        HlsCorruptSegmentWatchdogModeDto::DetectOnly => "DETECT ONLY",
-        HlsCorruptSegmentWatchdogModeDto::Sanitize => "SANITIZE",
-        HlsCorruptSegmentWatchdogModeDto::Diagnostic => "DIAGNOSTIC",
+        HlsCorruptSegmentWatchdogMode::Off => "OFF",
+        HlsCorruptSegmentWatchdogMode::DetectOnly => "DETECT ONLY",
+        HlsCorruptSegmentWatchdogMode::Sanitize => "SANITIZE",
+        HlsCorruptSegmentWatchdogMode::Diagnostic => "DIAGNOSTIC",
     }
 }
 
 fn hls_segment_repair_size_increase_percent(segment_repair: &HlsSegmentRepairConfigDto) -> Option<u8> {
     match segment_repair.max_level {
-        HlsSegmentRepairModeDto::Off => None,
-        HlsSegmentRepairModeDto::Low => Some(segment_repair.size_increase.low_percent),
-        HlsSegmentRepairModeDto::Medium => Some(segment_repair.size_increase.medium_percent),
-        HlsSegmentRepairModeDto::High => Some(segment_repair.size_increase.high_percent),
+        HlsSegmentRepairMode::Off => None,
+        HlsSegmentRepairMode::Low => Some(segment_repair.size_increase.low_percent),
+        HlsSegmentRepairMode::Medium => Some(segment_repair.size_increase.medium_percent),
+        HlsSegmentRepairMode::High => Some(segment_repair.size_increase.high_percent),
     }
 }
 
 fn set_hls_segment_repair_size_increase_percent(segment_repair: &mut HlsSegmentRepairConfigDto, value: u8) {
     match segment_repair.max_level {
-        HlsSegmentRepairModeDto::Off => {}
-        HlsSegmentRepairModeDto::Low => segment_repair.size_increase.low_percent = value,
-        HlsSegmentRepairModeDto::Medium => segment_repair.size_increase.medium_percent = value,
-        HlsSegmentRepairModeDto::High => segment_repair.size_increase.high_percent = value,
+        HlsSegmentRepairMode::Off => {}
+        HlsSegmentRepairMode::Low => segment_repair.size_increase.low_percent = value,
+        HlsSegmentRepairMode::Medium => segment_repair.size_increase.medium_percent = value,
+        HlsSegmentRepairMode::High => segment_repair.size_increase.high_percent = value,
     }
 }
 
-fn hls_segment_repair_size_increase_label(translate: &YewI18n, mode: HlsSegmentRepairModeDto) -> String {
+fn hls_segment_repair_size_increase_label(translate: &YewI18n, mode: HlsSegmentRepairMode) -> String {
     match mode {
-        HlsSegmentRepairModeDto::Off => translate.t(LABEL_SEGMENT_SIZE_INCREASE),
+        HlsSegmentRepairMode::Off => translate.t(LABEL_SEGMENT_SIZE_INCREASE),
         _ => format!("{} ({})", translate.t(LABEL_SEGMENT_SIZE_INCREASE), hls_segment_repair_max_level_label(mode)),
     }
 }
@@ -440,7 +441,7 @@ pub fn ReverseProxyConfigView() -> Html {
     let hls_cache_state: UseReducerHandle<HlsCacheConfigFormState> =
         use_reducer(|| HlsCacheConfigFormState { form: HlsCacheConfigDto::default(), modified: false });
     let hls_strip_state: UseReducerHandle<StripConfigFormState> =
-        use_reducer(|| StripConfigFormState { form: StripConfigDto::default(), modified: false });
+        use_reducer(|| StripConfigFormState { form: HlsStripConfigDto::default(), modified: false });
 
     let stream_buffer_state: UseReducerHandle<StreamBufferConfigFormState> =
         use_reducer(|| StreamBufferConfigFormState { form: StreamBufferConfigDto::default(), modified: false });
@@ -744,7 +745,7 @@ pub fn ReverseProxyConfigView() -> Html {
                     hls_cache_state.dispatch(HlsCacheConfigFormAction::SetAll(target_hls_cache));
                 }
 
-                let target_hls_strip = StripConfigDto::default();
+                let target_hls_strip = HlsStripConfigDto::default();
                 if hls_strip_state.form != target_hls_strip {
                     hls_strip_state.dispatch(StripConfigFormAction::SetAll(target_hls_strip));
                 }
@@ -911,7 +912,7 @@ pub fn ReverseProxyConfigView() -> Html {
             let hls_cache_state = hls_cache_state.clone();
             Callback::from(move |(_, selections): (String, DropDownSelection)| {
                 if let DropDownSelection::Single(selection) = selections {
-                    if let Ok(level) = HlsManifestRecoveryBurstLevelDto::from_str(selection.as_str()) {
+                    if let Ok(level) = HlsManifestRecoveryBurstLevel::from_str(selection.as_str()) {
                         hls_cache_state.dispatch(HlsCacheConfigFormAction::ManifestRecoveryBurst(
                             HlsManifestRecoveryBurstConfigDto { level },
                         ));
@@ -931,7 +932,7 @@ pub fn ReverseProxyConfigView() -> Html {
                             options={hls_strip_mode_options(selected_strip_mode)}
                             on_select={Callback::from(move |(_, selections): (String, DropDownSelection)| {
                                 if let DropDownSelection::Single(selection) = selections {
-                                    if let Ok(mode) = StripModeDto::from_str(selection.as_str()) {
+                                    if let Ok(mode) = HlsStripMode::from_str(selection.as_str()) {
                                         strip_state.dispatch(StripConfigFormAction::Mode(mode));
                                     }
                                 }
@@ -992,7 +993,7 @@ pub fn ReverseProxyConfigView() -> Html {
             let hls_cache_state = hls_cache_state.clone();
             Callback::from(move |(_, selections): (String, DropDownSelection)| {
                 if let DropDownSelection::Single(selection) = selections {
-                    if let Ok(mode) = HlsSegmentRepairModeDto::from_str(selection.as_str()) {
+                    if let Ok(mode) = HlsSegmentRepairMode::from_str(selection.as_str()) {
                         let mut segment_repair = hls_cache_state.form.segment_repair.clone();
                         segment_repair.max_level = mode;
                         hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
@@ -1030,7 +1031,7 @@ pub fn ReverseProxyConfigView() -> Html {
             let hls_cache_state = hls_cache_state.clone();
             Callback::from(move |(_, selections): (String, DropDownSelection)| {
                 if let DropDownSelection::Single(selection) = selections {
-                    if let Ok(mode) = HlsCorruptSegmentWatchdogModeDto::from_str(selection.as_str()) {
+                    if let Ok(mode) = HlsCorruptSegmentWatchdogMode::from_str(selection.as_str()) {
                         let mut segment_repair = hls_cache_state.form.segment_repair.clone();
                         segment_repair.corrupt_segment_watchdog.mode = mode;
                         hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
@@ -1379,7 +1380,7 @@ pub fn ReverseProxyConfigView() -> Html {
           <Card class="tp__config-view__card">
             <h1>{translate.t(LABEL_CACHE)}</h1>
             { edit_field_bool!(cache_state, translate.t(LABEL_ENABLED), enabled, CacheConfigFormAction::Enabled) }
-            { edit_field_text_option!(cache_state, translate.t(LABEL_SIZE), size, CacheConfigFormAction::Size) }
+            { edit_field_byte_size_option!(cache_state, translate.t(LABEL_SIZE), size, CacheConfigFormAction::Size) }
             { edit_field_text_option!(cache_state, translate.t(LABEL_DIRECTORY), directory, CacheConfigFormAction::Dir) }
           </Card>
         }

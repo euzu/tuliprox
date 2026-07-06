@@ -2,10 +2,9 @@ use crate::model::config::cache::CacheConfig;
 use crate::model::{macros, GeoIpConfig, QosAggregationConfig, RateLimitConfig, StreamConfig};
 use regex::Regex;
 use shared::model::{
-    HlsCacheConfigDto, HlsCorruptSegmentWatchdogConfigDto, HlsCorruptSegmentWatchdogModeDto,
-    HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevelDto, HlsSegmentRepairConfigDto,
-    HlsSegmentRepairModeDto, HlsSegmentRepairSizeIncreaseConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto,
-    ReverseProxyDisabledHeaderConfigDto, StripModeDto, REGEX_CACHE,
+    HlsCacheConfigDto, HlsCorruptSegmentWatchdogConfigDto, HlsManifestRecoveryBurstConfigDto,
+    HlsSegmentRepairConfigDto, HlsSegmentRepairSizeIncreaseConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto,
+    ReverseProxyDisabledHeaderConfigDto, HlsStripMode, REGEX_CACHE,
 };
 use shared::utils::{default_resource_retry_attempts, default_resource_retry_backoff_ms, default_resource_retry_backoff_multiplier, hex_to_u8_16, u8_16_to_hex};
 use std::cmp::max;
@@ -132,204 +131,33 @@ impl From<&ResourceRetryConfig> for ResourceRetryConfigDto {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum StripMode {
-    Segments,
-    Seconds,
-}
-
-impl From<&StripModeDto> for StripMode {
-    fn from(dto: &StripModeDto) -> Self {
-        match dto {
-            StripModeDto::Segments => Self::Segments,
-            StripModeDto::Seconds => Self::Seconds,
-        }
-    }
-}
-
-impl From<StripMode> for StripModeDto {
-    fn from(mode: StripMode) -> Self {
-        match mode {
-            StripMode::Segments => Self::Segments,
-            StripMode::Seconds => Self::Seconds,
-        }
-    }
-}
+// Runtime config structs hold the same enum types as their DTO counterparts
+// (no mirror enums). `is_enabled`, `as_log_value`, and `plan` live on the
+// shared enums (`shared::model::HlsCorruptSegmentWatchdogMode`,
+// `shared::model::HlsManifestRecoveryBurstLevel`) so behavior stays in one
+// place. The From impls below become trivial field-by-field clones.
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct StripConfig {
-    pub mode: StripMode,
+    pub mode: HlsStripMode,
     pub value: u64,
 }
 
-impl From<&shared::model::StripConfigDto> for StripConfig {
-    fn from(dto: &shared::model::StripConfigDto) -> Self {
-        Self {
-            mode: StripMode::from(&dto.mode),
-            value: dto.value,
-        }
+impl From<&shared::model::HlsStripConfigDto> for StripConfig {
+    fn from(dto: &shared::model::HlsStripConfigDto) -> Self {
+        Self { mode: dto.mode, value: dto.value }
     }
 }
 
-impl From<&StripConfig> for shared::model::StripConfigDto {
+impl From<&StripConfig> for shared::model::HlsStripConfigDto {
     fn from(config: &StripConfig) -> Self {
-        Self {
-            mode: StripModeDto::from(config.mode),
-            value: config.value,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub enum HlsSegmentRepairMode {
-    Off,
-    Low,
-    Medium,
-    High,
-}
-
-impl From<HlsSegmentRepairModeDto> for HlsSegmentRepairMode {
-    fn from(mode: HlsSegmentRepairModeDto) -> Self {
-        match mode {
-            HlsSegmentRepairModeDto::Off => Self::Off,
-            HlsSegmentRepairModeDto::Low => Self::Low,
-            HlsSegmentRepairModeDto::Medium => Self::Medium,
-            HlsSegmentRepairModeDto::High => Self::High,
-        }
-    }
-}
-
-impl From<HlsSegmentRepairMode> for HlsSegmentRepairModeDto {
-    fn from(mode: HlsSegmentRepairMode) -> Self {
-        match mode {
-            HlsSegmentRepairMode::Off => Self::Off,
-            HlsSegmentRepairMode::Low => Self::Low,
-            HlsSegmentRepairMode::Medium => Self::Medium,
-            HlsSegmentRepairMode::High => Self::High,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub enum HlsCorruptSegmentWatchdogMode {
-    Off,
-    DetectOnly,
-    Sanitize,
-    Diagnostic,
-}
-
-impl HlsCorruptSegmentWatchdogMode {
-    pub const fn is_enabled(self) -> bool { !matches!(self, Self::Off) }
-
-    pub const fn as_log_value(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::DetectOnly => "detect_only",
-            Self::Sanitize => "sanitize",
-            Self::Diagnostic => "diagnostic",
-        }
-    }
-}
-
-impl From<HlsCorruptSegmentWatchdogModeDto> for HlsCorruptSegmentWatchdogMode {
-    fn from(mode: HlsCorruptSegmentWatchdogModeDto) -> Self {
-        match mode {
-            HlsCorruptSegmentWatchdogModeDto::Off => Self::Off,
-            HlsCorruptSegmentWatchdogModeDto::DetectOnly => Self::DetectOnly,
-            HlsCorruptSegmentWatchdogModeDto::Sanitize => Self::Sanitize,
-            HlsCorruptSegmentWatchdogModeDto::Diagnostic => Self::Diagnostic,
-        }
-    }
-}
-
-impl From<HlsCorruptSegmentWatchdogMode> for HlsCorruptSegmentWatchdogModeDto {
-    fn from(mode: HlsCorruptSegmentWatchdogMode) -> Self {
-        match mode {
-            HlsCorruptSegmentWatchdogMode::Off => Self::Off,
-            HlsCorruptSegmentWatchdogMode::DetectOnly => Self::DetectOnly,
-            HlsCorruptSegmentWatchdogMode::Sanitize => Self::Sanitize,
-            HlsCorruptSegmentWatchdogMode::Diagnostic => Self::Diagnostic,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub enum HlsManifestRecoveryBurstLevel {
-    Off,
-    Friendly,
-    Cautious,
-    Balanced,
-    Intense,
-    Aggressive,
-    Beast,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct HlsManifestRecoveryBurstPlan {
-    pub slots: usize,
-    pub lanes_per_slot: usize,
-}
-
-impl HlsManifestRecoveryBurstLevel {
-    pub const fn plan(self) -> HlsManifestRecoveryBurstPlan {
-        match self {
-            Self::Off => HlsManifestRecoveryBurstPlan { slots: 1, lanes_per_slot: 1 },
-            Self::Friendly => HlsManifestRecoveryBurstPlan { slots: 2, lanes_per_slot: 1 },
-            Self::Cautious => HlsManifestRecoveryBurstPlan { slots: 3, lanes_per_slot: 1 },
-            Self::Balanced => HlsManifestRecoveryBurstPlan { slots: 4, lanes_per_slot: 1 },
-            Self::Intense => HlsManifestRecoveryBurstPlan { slots: 5, lanes_per_slot: 1 },
-            Self::Aggressive => HlsManifestRecoveryBurstPlan { slots: 6, lanes_per_slot: 1 },
-            Self::Beast => HlsManifestRecoveryBurstPlan { slots: 6, lanes_per_slot: 2 },
-        }
-    }
-
-    pub const fn extra_candidates(self) -> usize { self.plan().total_candidates().saturating_sub(1) }
-
-    pub const fn total_candidates(self) -> usize { self.plan().total_candidates() }
-}
-
-impl HlsManifestRecoveryBurstPlan {
-    pub const fn total_candidates(self) -> usize { self.slots.saturating_mul(self.lanes_per_slot) }
-
-    pub const fn slot_for_candidate(self, candidate_index: usize) -> usize {
-        match candidate_index.checked_div(self.lanes_per_slot) {
-            Some(slot) => slot,
-            None => 0,
-        }
-    }
-}
-
-impl From<HlsManifestRecoveryBurstLevelDto> for HlsManifestRecoveryBurstLevel {
-    fn from(level: HlsManifestRecoveryBurstLevelDto) -> Self {
-        match level {
-            HlsManifestRecoveryBurstLevelDto::Off => Self::Off,
-            HlsManifestRecoveryBurstLevelDto::Friendly => Self::Friendly,
-            HlsManifestRecoveryBurstLevelDto::Cautious => Self::Cautious,
-            HlsManifestRecoveryBurstLevelDto::Balanced => Self::Balanced,
-            HlsManifestRecoveryBurstLevelDto::Intense => Self::Intense,
-            HlsManifestRecoveryBurstLevelDto::Aggressive => Self::Aggressive,
-            HlsManifestRecoveryBurstLevelDto::Beast => Self::Beast,
-        }
-    }
-}
-
-impl From<HlsManifestRecoveryBurstLevel> for HlsManifestRecoveryBurstLevelDto {
-    fn from(level: HlsManifestRecoveryBurstLevel) -> Self {
-        match level {
-            HlsManifestRecoveryBurstLevel::Off => Self::Off,
-            HlsManifestRecoveryBurstLevel::Friendly => Self::Friendly,
-            HlsManifestRecoveryBurstLevel::Cautious => Self::Cautious,
-            HlsManifestRecoveryBurstLevel::Balanced => Self::Balanced,
-            HlsManifestRecoveryBurstLevel::Intense => Self::Intense,
-            HlsManifestRecoveryBurstLevel::Aggressive => Self::Aggressive,
-            HlsManifestRecoveryBurstLevel::Beast => Self::Beast,
-        }
+        Self { mode: config.mode, value: config.value }
     }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HlsManifestRecoveryBurstConfig {
-    pub level: HlsManifestRecoveryBurstLevel,
+    pub level: shared::model::HlsManifestRecoveryBurstLevel,
 }
 
 impl Default for HlsManifestRecoveryBurstConfig {
@@ -338,17 +166,13 @@ impl Default for HlsManifestRecoveryBurstConfig {
 
 impl From<&HlsManifestRecoveryBurstConfigDto> for HlsManifestRecoveryBurstConfig {
     fn from(dto: &HlsManifestRecoveryBurstConfigDto) -> Self {
-        Self {
-            level: HlsManifestRecoveryBurstLevel::from(dto.level),
-        }
+        Self { level: dto.level }
     }
 }
 
 impl From<&HlsManifestRecoveryBurstConfig> for HlsManifestRecoveryBurstConfigDto {
     fn from(config: &HlsManifestRecoveryBurstConfig) -> Self {
-        Self {
-            level: HlsManifestRecoveryBurstLevelDto::from(config.level),
-        }
+        Self { level: config.level }
     }
 }
 
@@ -385,7 +209,7 @@ impl From<&HlsSegmentRepairSizeIncreaseConfig> for HlsSegmentRepairSizeIncreaseC
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HlsSegmentRepairConfig {
-    pub max_level: HlsSegmentRepairMode,
+    pub max_level: shared::model::HlsSegmentRepairMode,
     pub apply_to_first_segments: u8,
     pub max_parallel_repairs: usize,
     pub postprocess_timeout_ms: u64,
@@ -400,7 +224,7 @@ impl Default for HlsSegmentRepairConfig {
 impl From<&HlsSegmentRepairConfigDto> for HlsSegmentRepairConfig {
     fn from(dto: &HlsSegmentRepairConfigDto) -> Self {
         Self {
-            max_level: HlsSegmentRepairMode::from(dto.max_level),
+            max_level: dto.max_level,
             apply_to_first_segments: dto.apply_to_first_segments,
             max_parallel_repairs: dto.max_parallel_repairs,
             postprocess_timeout_ms: dto.postprocess_timeout_ms,
@@ -413,7 +237,7 @@ impl From<&HlsSegmentRepairConfigDto> for HlsSegmentRepairConfig {
 impl From<&HlsSegmentRepairConfig> for HlsSegmentRepairConfigDto {
     fn from(config: &HlsSegmentRepairConfig) -> Self {
         Self {
-            max_level: HlsSegmentRepairModeDto::from(config.max_level),
+            max_level: config.max_level,
             apply_to_first_segments: config.apply_to_first_segments,
             max_parallel_repairs: config.max_parallel_repairs,
             postprocess_timeout_ms: config.postprocess_timeout_ms,
@@ -425,7 +249,7 @@ impl From<&HlsSegmentRepairConfig> for HlsSegmentRepairConfigDto {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HlsCorruptSegmentWatchdogConfig {
-    pub mode: HlsCorruptSegmentWatchdogMode,
+    pub mode: shared::model::HlsCorruptSegmentWatchdogMode,
     pub max_parallel_jobs: usize,
 }
 
@@ -436,7 +260,7 @@ impl Default for HlsCorruptSegmentWatchdogConfig {
 impl From<&HlsCorruptSegmentWatchdogConfigDto> for HlsCorruptSegmentWatchdogConfig {
     fn from(dto: &HlsCorruptSegmentWatchdogConfigDto) -> Self {
         Self {
-            mode: HlsCorruptSegmentWatchdogMode::from(dto.mode),
+            mode: dto.mode,
             max_parallel_jobs: dto.max_parallel_jobs,
         }
     }
@@ -445,7 +269,7 @@ impl From<&HlsCorruptSegmentWatchdogConfigDto> for HlsCorruptSegmentWatchdogConf
 impl From<&HlsCorruptSegmentWatchdogConfig> for HlsCorruptSegmentWatchdogConfigDto {
     fn from(config: &HlsCorruptSegmentWatchdogConfig) -> Self {
         Self {
-            mode: HlsCorruptSegmentWatchdogModeDto::from(config.mode),
+            mode: config.mode,
             max_parallel_jobs: config.max_parallel_jobs,
         }
     }
@@ -470,9 +294,9 @@ pub struct HlsCacheConfig {
     pub segment_repair: HlsSegmentRepairConfig,
 }
 
-fn parse_hls_byte_size_or_default(value: &shared::model::ByteSizeDto, default_value: &str) -> u64 {
+fn parse_hls_byte_size_or_default(value: &shared::model::ByteSize, default_value: &str) -> u64 {
     value.parse_bytes().unwrap_or_else(|_| {
-        shared::model::ByteSizeDto::new(default_value)
+        shared::model::ByteSize::new(default_value)
             .parse_bytes()
             .unwrap_or_default()
     })
@@ -504,10 +328,10 @@ impl From<&HlsCacheConfig> for HlsCacheConfigDto {
     fn from(config: &HlsCacheConfig) -> Self {
         Self {
             cache_path: config.cache_path.clone(),
-            strip: shared::model::StripConfigDto::from(&config.strip),
+            strip: shared::model::HlsStripConfigDto::from(&config.strip),
             cache_duration: config.cache_duration,
-            cache_bytes: shared::model::ByteSizeDto::new(config.cache_bytes_str.clone()),
-            cache_bytes_per_session: shared::model::ByteSizeDto::new(config.cache_bytes_per_session_str.clone()),
+            cache_bytes: shared::model::ByteSize::new(config.cache_bytes_str.clone()),
+            cache_bytes_per_session: shared::model::ByteSize::new(config.cache_bytes_per_session_str.clone()),
             max_segments_prefetch: config.max_segments_prefetch,
             max_concurrent_segment_fetches_per_session: config.max_concurrent_segment_fetches_per_session,
             max_concurrent_segment_fetches_global: config.max_concurrent_segment_fetches_global,
@@ -589,10 +413,10 @@ impl From<&ReverseProxyConfig> for ReverseProxyConfigDto {
 #[cfg(test)]
 mod tests {
     use super::{
-        HlsCacheConfig, HlsManifestRecoveryBurstConfig, HlsManifestRecoveryBurstLevel, HlsSegmentRepairConfig,
-        HlsSegmentRepairMode, ReverseProxyConfig, StripMode,
+        HlsCacheConfig, HlsManifestRecoveryBurstConfig,  HlsSegmentRepairConfig,
+         ReverseProxyConfig,
     };
-    use shared::model::{ByteSizeDto, HlsCacheConfigDto, QosAggregationConfigDto, ReverseProxyConfigDto, StreamHistoryConfigDto};
+    use shared::model::{ByteSize, HlsCacheConfigDto, HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripMode, QosAggregationConfigDto, ReverseProxyConfigDto, StreamHistoryConfigDto};
 
     #[test]
     fn reverse_proxy_config_preserves_nested_stream_history() {
@@ -666,13 +490,13 @@ mod tests {
             HlsCacheConfig {
                 cache_path: "/tmp/tuliprox/cache/hls".to_string(),
                 strip: super::StripConfig {
-                    mode: StripMode::Segments,
+                    mode: HlsStripMode::Segments,
                     value: 0,
                 },
                 cache_duration: 300,
-                cache_bytes: 10_000_000_000,
+                cache_bytes: 10_737_418_240, // 10 * 1024^3 (was 10 * 1e9 under SI decimal before consolidation)
                 cache_bytes_str: "10GB".to_string(),
-                cache_bytes_per_session: 512_000_000,
+                cache_bytes_per_session: 536_870_912, // 512 * 1024^2 (was 512 * 1e6 under SI decimal before consolidation)
                 cache_bytes_per_session_str: "512MB".to_string(),
                 max_segments_prefetch: 6,
                 max_concurrent_segment_fetches_per_session: 2,
@@ -694,22 +518,22 @@ mod tests {
     #[test]
     fn hls_cache_runtime_config_parses_byte_sizes() {
         let dto = HlsCacheConfigDto {
-            cache_bytes: ByteSizeDto::new("1GiB"),
-            cache_bytes_per_session: ByteSizeDto::new("512MB"),
+            cache_bytes: ByteSize::new("1GiB"),
+            cache_bytes_per_session: ByteSize::new("512MB"),
             ..Default::default()
         };
 
         let config = HlsCacheConfig::from(&dto);
 
         assert_eq!(config.cache_bytes, 1_073_741_824);
-        assert_eq!(config.cache_bytes_per_session, 512_000_000);
+        assert_eq!(config.cache_bytes_per_session, 536_870_912); // 512 * 1024^2 (binary since parse_size_base_2 consolidation)
     }
 
     #[test]
     fn hls_cache_runtime_config_roundtrips_human_readable_sizes() {
         let dto = HlsCacheConfigDto {
-            cache_bytes: ByteSizeDto::new("1GiB"),
-            cache_bytes_per_session: ByteSizeDto::new("512MB"),
+            cache_bytes: ByteSize::new("1GiB"),
+            cache_bytes_per_session: ByteSize::new("512MB"),
             ..Default::default()
         };
 

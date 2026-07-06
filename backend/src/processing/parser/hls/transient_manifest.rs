@@ -3,7 +3,8 @@ use crate::api::model::{
     ProxySessionId, TransientResourceId, TransientResourceKind, TransientResourceRef,
     HLS_ACCESS_LEASE_ID_PLACEHOLDER,
 };
-use crate::model::{StripConfig, StripMode};
+use crate::model::StripConfig;
+use shared::model::HlsStripMode;
 use shared::utils::CONSTANTS;
 use std::{collections::HashMap, time::Duration};
 use url::Url;
@@ -463,8 +464,8 @@ pub(super) fn configured_strip_segments(
     units: &[MediaSegmentUnit],
 ) -> usize {
     match strip.mode {
-        StripMode::Segments => usize::try_from(strip.value).unwrap_or(usize::MAX),
-        StripMode::Seconds => {
+        HlsStripMode::Segments => usize::try_from(strip.value).unwrap_or(usize::MAX),
+        HlsStripMode::Seconds => {
             let target_ms = strip.value.saturating_mul(1_000);
             let mut accumulated_ms = 0_u64;
             let mut strip_segments = 0_usize;
@@ -680,10 +681,10 @@ fn is_media_segment_unit_tag(line: &str) -> bool {
         || is_discontinuity_tag(line)
 }
 
-pub(super) const fn strip_mode_log_value(mode: StripMode) -> &'static str {
+pub(super) const fn strip_mode_log_value(mode: HlsStripMode) -> &'static str {
     match mode {
-        StripMode::Segments => "segments",
-        StripMode::Seconds => "seconds",
+        HlsStripMode::Segments => "segments",
+        HlsStripMode::Seconds => "seconds",
     }
 }
 
@@ -694,7 +695,8 @@ mod tests {
         transient_discontinuity_sequence, TransientManifestRewriter, TransientRewriteOptions,
     };
     use crate::api::model::{build_transient_resource_id, ProxySessionId, TransientResourceKind};
-    use crate::model::{StripConfig, StripMode};
+    use crate::model::StripConfig;
+use shared::model::HlsStripMode;
 
     const BASE_URL: &str = "http://origin.example.com/live/final/index.m3u8";
 
@@ -904,6 +906,6 @@ mod tests {
         assert!(body.contains("#EXT-X-MEDIA-SEQUENCE:6560\n#EXT-X-DISCONTINUITY-SEQUENCE:1\n"));
     }
 
-    fn strip_segments(value: u64) -> StripConfig { StripConfig { mode: StripMode::Segments, value } }
+    fn strip_segments(value: u64) -> StripConfig { StripConfig { mode: HlsStripMode::Segments, value } }
 
 }

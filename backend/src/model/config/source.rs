@@ -107,7 +107,7 @@ impl ProviderDnsCache {
         let mut guard = self.by_host.write();
         let entry = guard.entry(host.to_ascii_lowercase()).or_default();
         // `% len` guards against a stale index when the override list changed length.
-        let idx = entry.rr_index.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some((i + 1) % len)).unwrap_or_else(|i| i) % len;
+        let idx = entry.rr_index.try_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some((i + 1) % len)).unwrap_or_else(|i| i) % len;
         Some(ips[idx])
     }
 
@@ -118,7 +118,7 @@ impl ProviderDnsCache {
             return None;
         }
         let len = entry.ips.len();
-        let idx = entry.rr_index.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some((i + 1) % len)).unwrap_or_else(|i| i) % len;
+        let idx = entry.rr_index.try_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some((i + 1) % len)).unwrap_or_else(|i| i) % len;
         Some(entry.ips[idx])
     }
 
@@ -141,7 +141,7 @@ impl ProviderDnsCache {
         if new_len == 0 {
             entry.rr_index.store(0, Ordering::Relaxed);
         } else {
-            entry.rr_index.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some(i % new_len)).ok();
+            entry.rr_index.try_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some(i % new_len)).ok();
         }
         entry.last_ok = Some(SystemTime::now());
         entry.last_err = None;
@@ -358,7 +358,7 @@ impl ConfigProvider {
         }
 
         let previous = self.current_url_index
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 let next = (current + 1) % len;
                 // If we've cycled back to start, we've tried all URLs.
                 (next != start_index).then_some(next)

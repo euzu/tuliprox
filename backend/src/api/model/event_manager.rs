@@ -141,7 +141,7 @@ impl EventManager {
     pub fn stream_meter_subscriber_disconnected(&self) {
         let _ = self
             .stream_meter_subscriber_count
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |count| count.checked_sub(1));
+            .try_update(Ordering::AcqRel, Ordering::Relaxed, |count| count.checked_sub(1));
     }
 
     pub fn has_stream_meter_subscribers(&self) -> bool {

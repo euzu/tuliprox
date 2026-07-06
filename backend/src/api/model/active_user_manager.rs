@@ -725,19 +725,23 @@ impl ActiveUserManager {
 
     async fn log_active_user(&self) {
         let is_log_user_enabled = self.is_log_user_enabled();
+        // Skip the full connection-map snapshot + event send entirely when logging
+        // is disabled — this runs on every connection add/release and dominates
+        // lock contention on the active-user path at high segment rates.
+        if !is_log_user_enabled {
+            return;
+        }
         let (user_count, user_connection_count) = { self.active_users_and_connections().await };
         self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(
             user_count,
             user_connection_count,
         )));
-        if is_log_user_enabled {
-            let last_user_count = self.last_logged_user_count.load(Ordering::Relaxed);
-            let last_connection_count = self.last_logged_user_connection_count.load(Ordering::Relaxed);
-            if last_user_count != user_count || last_connection_count != user_connection_count {
-                self.last_logged_user_count.store(user_count, Ordering::Relaxed);
-                self.last_logged_user_connection_count.store(user_connection_count, Ordering::Relaxed);
-                info!("Active Users: {user_count}, Active User Connections: {user_connection_count}");
-            }
+        let last_user_count = self.last_logged_user_count.load(Ordering::Relaxed);
+        let last_connection_count = self.last_logged_user_connection_count.load(Ordering::Relaxed);
+        if last_user_count != user_count || last_connection_count != user_connection_count {
+            self.last_logged_user_count.store(user_count, Ordering::Relaxed);
+            self.last_logged_user_connection_count.store(user_connection_count, Ordering::Relaxed);
+            info!("Active Users: {user_count}, Active User Connections: {user_connection_count}");
         }
     }
 

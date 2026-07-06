@@ -20,7 +20,7 @@ use super::{
     SegmentFetchContext, TransientPassthroughReason,
 };
 use crate::{
-    model::{AppConfig, HlsManifestRecoveryBurstConfig, ReverseProxyDisabledHeaderConfig, StripConfig, StripMode},
+    model::{AppConfig, HlsManifestRecoveryBurstConfig, ReverseProxyDisabledHeaderConfig, StripConfig},
     processing::parser::hls::{
         initial_strip::initial_hls_strip_segments_for_durations,
         origin_manifest::{
@@ -38,6 +38,7 @@ use crate::{
 use axum::http::HeaderMap;
 use log::{debug, info, warn};
 use reqwest::Client;
+use shared::model::HlsStripMode;
 use shared::utils::sanitize_sensitive_info;
 use std::sync::Arc;
 use url::Url;
@@ -1393,8 +1394,8 @@ fn visible_provisioning_handoff_head_proxy_seq(session: &super::HlsSession) -> O
 
 fn configured_handoff_origin_window_segments(strip: &StripConfig, origin_segment_count: usize) -> usize {
     match strip.mode {
-        StripMode::Segments => usize::try_from(strip.value).unwrap_or(usize::MAX),
-        StripMode::Seconds => 0,
+        HlsStripMode::Segments => usize::try_from(strip.value).unwrap_or(usize::MAX),
+        HlsStripMode::Seconds => 0,
     }
     .saturating_add(3)
     .min(origin_segment_count)
@@ -1535,14 +1536,13 @@ mod tests {
             TransientPassthroughReason,
         },
         model::{
-            AppConfig, Config, ConfigProvider, HlsManifestRecoveryBurstConfig, HlsManifestRecoveryBurstLevel,
-            HlsSegmentRepairConfig, HlsSegmentRepairMode, ReverseProxyDisabledHeaderConfig, SourcesConfig, StripConfig,
-            StripMode,
+            AppConfig, Config, ConfigProvider, HlsManifestRecoveryBurstConfig,
+            HlsSegmentRepairConfig, ReverseProxyDisabledHeaderConfig, SourcesConfig, StripConfig,
         },
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
-    use shared::model::{ConfigPaths, ConfigProviderDto, ProviderUrlSelectionPolicy};
+    use shared::model::{ConfigPaths, ConfigProviderDto, HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripMode, ProviderUrlSelectionPolicy};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -2034,7 +2034,7 @@ mod tests {
         assert!(matches!(
             record_pinned_host_recovery_chain_failed(
                 &mut session,
-                &StripConfig { mode: StripMode::Segments, value: 3 },
+                &StripConfig { mode: HlsStripMode::Segments, value: 3 },
                 200
             ),
             HlsManifestAcceptanceDecision::Reject { .. }
@@ -2042,7 +2042,7 @@ mod tests {
         assert!(matches!(
             record_pinned_host_recovery_chain_failed(
                 &mut session,
-                &StripConfig { mode: StripMode::Segments, value: 3 },
+                &StripConfig { mode: HlsStripMode::Segments, value: 3 },
                 300
             ),
             HlsManifestAcceptanceDecision::Reject { .. }
@@ -2050,7 +2050,7 @@ mod tests {
         assert!(matches!(
             record_pinned_host_recovery_chain_failed(
                 &mut session,
-                &StripConfig { mode: StripMode::Segments, value: 3 },
+                &StripConfig { mode: HlsStripMode::Segments, value: 3 },
                 400
             ),
             HlsManifestAcceptanceDecision::AcceptHostSwitch { .. }
@@ -2095,7 +2095,7 @@ mod tests {
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 1,
             manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
-            strip: StripConfig { mode: StripMode::Segments, value: 3 },
+            strip: StripConfig { mode: HlsStripMode::Segments, value: 3 },
             retry_policy: RetryPolicy { delays_ms: [0, 0, 0, 0, 0], jitter_max_ms: 0 },
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
@@ -2214,7 +2214,7 @@ mod tests {
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
             manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
-            strip: StripConfig { mode: StripMode::Segments, value: 3 },
+            strip: StripConfig { mode: HlsStripMode::Segments, value: 3 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
@@ -2278,7 +2278,7 @@ mod tests {
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
             manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
-            strip: StripConfig { mode: StripMode::Segments, value: 0 },
+            strip: StripConfig { mode: HlsStripMode::Segments, value: 0 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
@@ -2659,7 +2659,7 @@ mod tests {
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
             manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
-            strip: StripConfig { mode: StripMode::Segments, value: 0 },
+            strip: StripConfig { mode: HlsStripMode::Segments, value: 0 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
@@ -2860,7 +2860,7 @@ mod tests {
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
             manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
-            strip: StripConfig { mode: StripMode::Segments, value: 0 },
+            strip: StripConfig { mode: HlsStripMode::Segments, value: 0 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
@@ -2944,7 +2944,7 @@ mod tests {
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
             manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
-            strip: StripConfig { mode: StripMode::Segments, value: 0 },
+            strip: StripConfig { mode: HlsStripMode::Segments, value: 0 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
@@ -3152,7 +3152,7 @@ mod tests {
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
             manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
-            strip: StripConfig { mode: StripMode::Segments, value: 0 },
+            strip: StripConfig { mode: HlsStripMode::Segments, value: 0 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,
@@ -3221,7 +3221,7 @@ mod tests {
             map_worker_pool: Arc::new(HlsMapWorkerPool::default()),
             origin_manifest_timeout_ms: 2_000,
             manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
-            strip: StripConfig { mode: StripMode::Segments, value: 3 },
+            strip: StripConfig { mode: HlsStripMode::Segments, value: 3 },
             retry_policy: no_delay_policy(),
             reverse_proxy_rewrite_secret: b"secret".to_vec(),
             transient_resource_ttl_ms: 300_000,

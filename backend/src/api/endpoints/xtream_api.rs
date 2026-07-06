@@ -257,12 +257,10 @@ async fn xtream_player_api_stream(
     if !target.has_output(TargetType::Xtream) {
         debug!("Target has no xtream codes playlist {target_name}");
         if is_hls_manifest_request {
-            return hls_custom_video_manifest_response(
-                app_state,
-                &user,
-                CustomVideoStreamType::ChannelUnavailable,
-                axum::http::StatusCode::NOT_FOUND,
-            );
+            // Preserve plain auth-status behaviour for HLS manifest probes —
+            // returning an HLS manifest body (even with 404) breaks auth-probes
+            // and monitoring/observability that assert on the original 401/403.
+            return auth_status.into_response();
         }
         return create_custom_video_stream_response(
             app_state,

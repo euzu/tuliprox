@@ -22,7 +22,6 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
-use bytes::Bytes;
 use serde::Deserialize;
 use std::{str::FromStr, sync::Arc};
 use url::form_urlencoded;
@@ -317,8 +316,10 @@ fn resolve_hls_cvs_range(range_header: Option<&HeaderValue>, full_size: usize) -
 }
 
 fn build_hls_cvs_response_from_buffer(video: &TransportStreamBuffer, range_header: Option<&HeaderValue>) -> Response {
-    let bytes = video.as_bytes();
-    let full_size = bytes.len();
+    // `clone_bytes` returns a `Bytes` (refcount bump) instead of forcing
+    // `Bytes::copy_from_slice` to memcpy the entire TS payload each response.
+    let bytes_owned = video.clone_bytes();
+    let full_size = bytes_owned.len();
     let range = resolve_hls_cvs_range(range_header, full_size);
     let mut response = match range {
         HlsCvsRange::Full => {
@@ -331,7 +332,7 @@ fn build_hls_cvs_response_from_buffer(video: &TransportStreamBuffer, range_heade
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
             builder
-                .body(Body::from(Bytes::copy_from_slice(bytes)))
+                .body(Body::from(bytes_owned))
                 .map_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response(), IntoResponse::into_response)
         }
         HlsCvsRange::Partial { start, end } => {
@@ -345,8 +346,9 @@ fn build_hls_cvs_response_from_buffer(video: &TransportStreamBuffer, range_heade
             {
                 return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
+            // `Bytes::slice` shares the underlying allocation (no copy).
             builder
-                .body(Body::from(Bytes::copy_from_slice(&bytes[start..=end])))
+                .body(Body::from(bytes_owned.slice(start..=end)))
                 .map_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response(), IntoResponse::into_response)
         }
         HlsCvsRange::Unsatisfiable => {

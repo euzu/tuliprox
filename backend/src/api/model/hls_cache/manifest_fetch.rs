@@ -5,7 +5,7 @@ use super::{
 use crate::{
     model::{
         resolve_provider_scheme_url_with_provider_index, AppConfig, ConfigProvider, HlsManifestRecoveryBurstConfig,
-        HlsManifestRecoveryBurstLevel, HlsManifestRecoveryBurstPlan, InputSource, StripConfig, StripMode,
+        InputSource, StripConfig,
     },
     processing::parser::hls::origin_manifest::{
         parse_manifest_timing, parse_origin_manifest_timeline, parse_origin_media_manifest, OriginManifestParseOutcome,
@@ -20,7 +20,10 @@ use axum::http::{header, HeaderMap, StatusCode};
 use futures::StreamExt;
 use log::{debug, warn};
 use reqwest::Client;
-use shared::{model::InputFetchMethod, utils::sanitize_sensitive_info};
+use shared::{
+    model::{HlsManifestRecoveryBurstLevel, HlsManifestRecoveryBurstPlan, InputFetchMethod, HlsStripMode},
+    utils::sanitize_sensitive_info,
+};
 use std::{collections::HashMap, fmt, future::Future, sync::Arc, time::Duration};
 use tokio::{task::JoinSet, time::timeout};
 use url::Url;
@@ -1275,10 +1278,10 @@ fn manifest_origin_quality_score_from_rank(rank: u16) -> HlsManifestOriginQualit
 
 pub(crate) fn manifest_host_switch_failure_threshold(session: &super::HlsSession, strip: &StripConfig) -> u32 {
     let effective_strip_segments = match strip.mode {
-        StripMode::Segments => {
+        HlsStripMode::Segments => {
             u32::try_from(strip.value).unwrap_or(u32::MAX.saturating_sub(HLS_MANIFEST_HOST_SWITCH_BASE_WINDOW_SEGMENTS))
         }
-        StripMode::Seconds => u32::try_from(session.initial_prefetch_gap_segments)
+        HlsStripMode::Seconds => u32::try_from(session.initial_prefetch_gap_segments)
             .unwrap_or(u32::MAX.saturating_sub(HLS_MANIFEST_HOST_SWITCH_BASE_WINDOW_SEGMENTS)),
     };
     manifest_host_switch_failure_threshold_for_strip_segments(effective_strip_segments)

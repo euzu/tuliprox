@@ -1,29 +1,19 @@
+use crate::api::model::proxy::header_policy::{HeaderProtocol, HopByHopHeader};
 use crate::model::ReverseProxyDisabledHeaderConfig;
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue};
 use std::collections::HashMap;
 
 /// Returns true when a header must never be forwarded by the live HLS cache proxy.
+///
+/// Thin wrapper around `HopByHopHeader::is_sensitive(HeaderProtocol::Hls, …)` so the
+/// hard-coded hop-by-hop list and Tuliprox-internal prefix live in one place shared
+/// with the MPEG-TS reverse-proxy path. Adding a new "always strip" header now
+/// requires editing only `proxy/header_policy.rs`.
 pub fn should_remove_hls_origin_header(
     header_name: &str,
     disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>,
 ) -> bool {
-    let header_lc = header_name.trim().to_ascii_lowercase();
-    matches!(
-        header_lc.as_str(),
-        "authorization"
-            | "connection"
-            | "cookie"
-            | "cookie2"
-            | "host"
-            | "proxy-authorization"
-            | "set-cookie"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-    )
-        || header_lc.starts_with("x-tuliprox-")
-        || disabled_headers.is_some_and(|disabled| disabled.should_remove(header_lc.as_str()))
+    HopByHopHeader::is_sensitive(header_name, HeaderProtocol::Hls, disabled_headers)
 }
 
 /// Removes disabled and sensitive headers before an origin request leaves Tuliprox.
