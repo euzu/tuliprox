@@ -189,7 +189,11 @@ impl HlsGarbageCollector {
             return Ok(report);
         }
 
-        let cutoff = SystemTime::now()
+        // Captured before the in-memory session snapshot so any directory committed
+        // after this instant is treated as a potential concurrent create and is
+        // skipped by the orphan cleanup freshness guard.
+        let gc_start = SystemTime::now();
+        let cutoff = gc_start
             .checked_sub(Duration::from_millis(policy.temp_file_retention_ms))
             .unwrap_or(SystemTime::UNIX_EPOCH);
         report.temp_files_deleted = self.cache.delete_temp_files_older_than(cutoff).await?;
@@ -199,7 +203,10 @@ impl HlsGarbageCollector {
         for session in &sessions {
             active_session_ids.insert(session.read().await.proxy_session_id.clone());
         }
-        report.orphan_session_dirs_deleted = self.cache.delete_orphan_session_dirs(&active_session_ids).await?;
+        report.orphan_session_dirs_deleted = self
+            .cache
+            .delete_orphan_session_dirs(&active_session_ids, gc_start)
+            .await?;
         let mut pending_deletions = Vec::new();
         for session in &sessions {
             let mut session = session.write().await;

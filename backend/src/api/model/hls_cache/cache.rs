@@ -475,7 +475,11 @@ impl HlsSegmentCache {
         result
     }
 
-    pub async fn delete_orphan_session_dirs(&self, active_session_ids: &HashSet<ProxySessionId>) -> io::Result<usize> {
+    pub async fn delete_orphan_session_dirs(
+        &self,
+        active_session_ids: &HashSet<ProxySessionId>,
+        freshness_cutoff: SystemTime,
+    ) -> io::Result<usize> {
         let cache_path = self.cache_path_snapshot();
         ensure_safe_cache_root(&cache_path).await?;
         let active_paths = active_session_ids
@@ -492,6 +496,20 @@ impl HlsSegmentCache {
                 || active_temp_files.iter().any(|temp| temp.starts_with(&path))
             {
                 continue;
+            }
+            // Freshness guard: skip directories committed after the GC took its
+            // in-memory session snapshot. Their owning session may not yet be
+            // visible in `active_session_ids`, so deleting them would race with
+            // a concurrent segment write that just created the directory.
+            let metadata = match entry.metadata().await {
+                Ok(metadata) => metadata,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            };
+            if let Ok(modified) = metadata.modified() {
+                if modified > freshness_cutoff {
+                    continue;
+                }
             }
             match fs::remove_dir_all(&path).await {
                 Ok(()) => removed = removed.saturating_add(1),
@@ -728,7 +746,7 @@ impl Default for HlsSegmentCache {
 mod tests {
     use super::{CacheInvalidationOutcome, HlsSegmentCache, MapCacheKey, SegmentCacheKey, TransientObjectCacheKey};
     use crate::api::model::{build_transient_resource_id, ProxySessionId};
-    use std::{collections::HashSet, io, sync::Arc, time::Duration};
+    use std::{collections::HashSet, io, sync::Arc, time::{Duration, SystemTime}};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn cache_key() -> SegmentCacheKey { SegmentCacheKey::new(ProxySessionId("proxy_session".to_string()), 123, "ts") }
@@ -834,12 +852,45 @@ mod tests {
         let orphan = ProxySessionId("orphan".to_string());
         tokio::fs::create_dir_all(temp_dir.path().join("active")).await.expect("active dir");
         tokio::fs::create_dir_all(temp_dir.path().join("orphan")).await.expect("orphan dir");
+        let cutoff = SystemTime::now();
 
-        let removed = cache.delete_orphan_session_dirs(&HashSet::from([active])).await.expect("cleanup");
+        let removed = cache
+            .delete_orphan_session_dirs(&HashSet::from([active]), cutoff)
+            .await
+            .expect("cleanup");
 
         assert_eq!(removed, 1);
         assert!(temp_dir.path().join("active").exists());
         assert!(!temp_dir.path().join(orphan.0).exists());
+    }
+
+    #[tokio::test]
+    async fn orphan_session_cleanup_skips_directories_newer_than_freshness_cutoff() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache = HlsSegmentCache::with_cache_path(temp_dir.path());
+        cache.write_rewrite_secret_fingerprint("secret").await.expect("marker");
+        let stale = ProxySessionId("stale".to_string());
+        let fresh = ProxySessionId("fresh".to_string());
+        tokio::fs::create_dir_all(temp_dir.path().join(stale.0.clone())).await.expect("stale dir");
+        tokio::fs::create_dir_all(temp_dir.path().join(fresh.0.clone())).await.expect("fresh dir");
+
+        // Set the fresh dir's mtime to the future relative to the cutoff.
+        let cutoff = SystemTime::now();
+        let future = cutoff + std::time::Duration::from_secs(60);
+        filetime::set_file_mtime(temp_dir.path().join(fresh.0.clone()), filetime::FileTime::from_system_time(future))
+            .expect("set fresh mtime");
+
+        let removed = cache
+            .delete_orphan_session_dirs(&HashSet::new(), cutoff)
+            .await
+            .expect("cleanup");
+
+        assert_eq!(removed, 1, "stale orphan dir should be removed");
+        assert!(!temp_dir.path().join(stale.0).exists());
+        assert!(
+            temp_dir.path().join(fresh.0).exists(),
+            "directory newer than the freshness cutoff must be preserved to avoid racing concurrent session creation"
+        );
     }
 
     #[tokio::test]

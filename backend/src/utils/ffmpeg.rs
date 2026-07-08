@@ -18,7 +18,7 @@ use tokio::{
 };
 use url::Url;
 
-const FFMPEG_TIMEOUT: Duration = Duration::from_secs(60);
+const FFMPEG_TIMEOUT: Duration = Duration::from_mins(1);
 const FFPROBE_SEEKABLE_MAX_WINDOW_BYTES: u64 = 32 * 1024 * 1024;
 const FFPROBE_TEMP_STALE_MAX_AGE: Duration = Duration::from_hours(24);
 
