@@ -1,4 +1,4 @@
-use crate::utils::{
+use crate::defaults::{
     default_as_true, default_token_ttl_mins, default_user_file_path, default_user_group_file_path,
     is_blank_or_default_user_file_path, is_blank_or_default_user_group_file_path, is_default_token_ttl_mins, is_true,
 };

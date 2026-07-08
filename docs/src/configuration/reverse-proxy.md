@@ -41,6 +41,7 @@ reverse_proxy:
   rewrite_secret: A1B2C3D4E5F60718293A4B5C6D7E8F90
   stream:
   cache:
+  hls_cache:
   rate_limit:
   disabled_header:
   resource_retry:
@@ -151,7 +152,7 @@ Stream-type provider behavior:
 `buffer.size` is defined in chunks of **8192 bytes (8 KB)**.
 
 * A size of `1024` equals approx. **8 MB** of RAM per active stream.
-* **Shared Streams Impact:** If `share_live_streams` is enabled, each channel consumes at least **12 MB** regardless of client count.
+* **Shared Streams Impact:** If `share_live_streams.mpeg_ts` is enabled, each channel consumes at least **12 MB** regardless of client count.
   Increasing `size` above 1024 (e.g., 2048) increases this to **24 MB** per shared channel.
 
 ### 1.2 `throttle_kbps`
@@ -223,6 +224,82 @@ reverse_proxy:
   If the secret changes, the old cache becomes orphaned.
 * **Client Delivery:** Instead of the client downloading directly from the provider, Tuliprox serves the local file,
   acting as a high-speed CDN for your media metadata.
+
+---
+
+## 2.1 HLS Cache (`hls_cache`)
+
+This block configures the Live HLS cache proxy. It only defines operating parameters.
+For an operator-friendly explanation, start with [Shared HLS Sessions](./shared-hls-sessions.md).
+For the configuration reference, see [Shared HLS Configuration](./shared-hls-configuration.md).
+For the shared session, access lease, and transient delivery state machines, see
+[HLS Cache State Machines](./hls-cache-state-machine.md).
+
+```yaml
+reverse_proxy:
+  hls_cache:
+    cache_path: "/tmp/tuliprox/cache/hls"
+    strip:
+      mode: "segments"
+      value: 0
+    cache_duration: 300
+    cache_bytes: "10GB"
+    cache_bytes_per_session: "512MB"
+    max_segments_prefetch: 6
+    max_concurrent_segment_fetches_per_session: 2
+    max_concurrent_segment_fetches_global: 64
+    origin_manifest_timeout_ms: 3000
+    origin_segment_timeout_ms: 10000
+    session_idle_timeout: 300
+    segment_repair:
+      max_level: "off"
+      apply_to_first_segments: 1
+      max_parallel_repairs: 1
+      postprocess_timeout_ms: 2000
+      corrupt_segment_watchdog:
+        mode: "off"
+        max_parallel_jobs: 1
+```
+
+### HLS Cache Parameter Details
+
+| Parameter | Type | Default | Technical Impact |
+| :--- | :--- | :--- | :--- |
+| `cache_path` | Path | `/tmp/tuliprox/cache/hls` | Root directory for future HLS segment and MAP cache objects. |
+| `strip.mode` | String | `segments` | Interprets `strip.value` as either a segment count (`segments`) or accumulated `#EXTINF` duration (`seconds`). |
+| `strip.value` | Int | `0` | Initial tail holdback for the first rendered HLS view. |
+| `cache_duration` | Seconds | `300` | Retention baseline for unprotected HLS cache objects. |
+| `cache_bytes` | Byte size | `10GB` | Global HLS cache byte budget. |
+| `cache_bytes_per_session` | Byte size | `512MB` | Per-session HLS cache byte budget. |
+| `max_segments_prefetch` | Int | `6` | Maximum session-local segment prefetch queue depth. |
+| `max_concurrent_segment_fetches_per_session` | Int | `2` | Maximum concurrent future segment fetches for one HLS session. |
+| `max_concurrent_segment_fetches_global` | Int | `64` | Maximum concurrent future segment fetches across all HLS sessions. |
+| `origin_manifest_timeout_ms` | Milliseconds | `3000` | Timeout for future Origin manifest fetches. |
+| `origin_segment_timeout_ms` | Milliseconds | `10000` | Timeout for future Origin segment fetches. |
+| `session_idle_timeout` | Seconds | `300` | Idle timeout before a future HLS cache session may be collected. |
+| `segment_repair.max_level` | String | `off` | Maximum repair level allowed by the codec-aware MPEG-TS segment repair policy (`off`, `low`, `medium`, `high`). |
+| `segment_repair.apply_to_first_segments` | Int | `1` | Number of visible TS objects checked per access-lease activation. |
+| `segment_repair.max_parallel_repairs` | Int | `1` | Maximum concurrent repair jobs. Must not exceed `max_segments_prefetch` when repair is enabled. |
+| `segment_repair.postprocess_timeout_ms` | Milliseconds | `2000` | Shared timeout for the complete segment post-processing chain, including repair and watchdog work. |
+| `segment_repair.corrupt_segment_watchdog.mode` | String | `off` | Optional watchdog for residual TS packet-corrupt warnings after regular repair (`off`, `detect_only`, `sanitize`, `diagnostic`). |
+| `segment_repair.corrupt_segment_watchdog.max_parallel_jobs` | Int | `1` | Maximum concurrent watchdog sanitize jobs. |
+
+Supported byte-size units:
+
+* `B`
+* `KB`, `MB`, `GB`, `TB` as decimal 1000-based units
+* `KiB`, `MiB`, `GiB`, `TiB` as binary 1024-based units
+* no suffix means bytes
+
+Important boundaries:
+
+* `reverse_proxy.hls_cache` only prepares the global cache engine. A target must also set
+  `options.share_live_streams.hls: true` in `source.yml` before generated HLS live entries use the shared HLS path.
+* HLS cache retry behavior is fixed internally and is not user-configurable.
+* `reverse_proxy.rewrite_secret` must stay stable. It is used for future HLS `proxy_session_id` values and transient resource IDs.
+* `session_idle_timeout` controls HLS cache access-lease validity and idle cleanup. It is independent from
+  `reverse_proxy.stream.hls_session_ttl_secs`, which belongs to the non-cache HLS request continuity path.
+* This block does not enable legacy resource caching; image/logo/EPG caching remains controlled by `reverse_proxy.cache`.
 
 ---
 
@@ -484,7 +561,7 @@ When Tuliprox operates as a reverse proxy, it can securely proxy upstream archiv
 
 ### Shared Live Streams
 
-Tuliprox can share a live stream (`share_live_streams: true` in the target options of `source.yml`).
+Tuliprox can share a live stream (`share_live_streams.mpeg_ts: true` in the target options of `source.yml`).
 If 5 users watch the same Live-TV channel, Tuliprox pulls the stream only 1x from the provider and multicasts the bytes locally to 5 clients.
 
 To ensure a user who tunes in 10 seconds later doesn't get player errors due to missing I-Frames/Keyframes,

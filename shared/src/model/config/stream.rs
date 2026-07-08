@@ -1,12 +1,12 @@
 use crate::{
-    error::TuliproxError,
-    utils::{
+    defaults::{
         default_as_true, default_catchup_session_ttl_secs, default_grace_period_millis,
         default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_shared_burst_buffer_mb,
-        is_blank_optional_string, is_default_catchup_session_ttl_secs, is_default_grace_period_millis,
-        is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb,
-        is_true, parse_to_kbps,
+        is_default_catchup_session_ttl_secs, is_default_grace_period_millis, is_default_grace_period_timeout_secs,
+        is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb, is_false, is_true,
     },
+    error::TuliproxError,
+    utils::{is_blank_optional_string, parse_to_kbps},
 };
 use std::{
     fmt::{Display, Formatter},
@@ -94,7 +94,7 @@ impl StreamBufferConfigDto {
 pub struct StreamConfigDto {
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub retry: bool,
-    #[serde(default, skip_serializing_if = "crate::utils::is_false")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub metrics_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub buffer: Option<StreamBufferConfigDto>,

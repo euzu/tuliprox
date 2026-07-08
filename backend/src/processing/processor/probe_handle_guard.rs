@@ -49,7 +49,8 @@ mod tests {
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::{
         model::{ConfigPaths, InputFetchMethod, InputType},
-        utils::{default_probe_user_priority, Internable},
+        utils::{Internable},
+        defaults::{default_probe_user_priority},
     };
     use std::{collections::HashMap, sync::Arc};
 

@@ -1,4 +1,4 @@
-use crate::{error::TuliproxError, model::EpgSmartMatchConfigDto, utils::is_false};
+use crate::{defaults::is_false, error::TuliproxError, model::EpgSmartMatchConfigDto};
 
 const AUTO_URL: &str = "auto";
 

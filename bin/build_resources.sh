@@ -40,19 +40,53 @@ for image in "${resources[@]}"; do
 
   if [ "$flag_force" = false ] && [ -e "${output}" ]; then
     echo "Resource ${resource_name} exists, skipping creation"
-    continue
+  else
+    if ! ffmpeg -y -nostdin -loop 1 -framerate 30 -i "${image}" \
+      -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+      -t 10 -shortest \
+      -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 23 \
+      -x264-params "keyint=30:min-keyint=30:scenecut=0:bframes=0:open_gop=0" \
+      -c:a aac -b:a 128k -ac 2 -ar 48000 \
+      -mpegts_flags +resend_headers \
+      -muxdelay 0 -muxpreload 0 \
+      -f mpegts "${output}"; then
+      echo "ffmpeg failed for resource ${resource_name}" >&2
+      exit 1
+    fi
   fi
 
-  if ! ffmpeg -y -nostdin -loop 1 -framerate 30 -i "${image}" \
-    -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
-    -t 10 -shortest \
-    -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 23 \
-    -x264-params "keyint=30:min-keyint=30:scenecut=0:bframes=0:open_gop=0" \
-    -c:a aac -b:a 128k -ac 2 -ar 48000 \
-    -mpegts_flags +resend_headers \
-    -muxdelay 0 -muxpreload 0 \
-    -f mpegts "${output}"; then
-    echo "ffmpeg failed for resource ${resource_name}" >&2
-    exit 1
+  if [ "${resource_name}" = "panel_api_provisioning" ]; then
+    hls_playlist="${image%/*}/panel_api_provisioning_hls.m3u8"
+    hls_segment_pattern="${image%/*}/panel_api_provisioning_hls_%03d.ts"
+    hls_segments_missing=false
+    for index in 0 1 2 3 4 5; do
+      if [ ! -e "$(printf "%s/panel_api_provisioning_hls_%03d.ts" "${image%/*}" "${index}")" ]; then
+        hls_segments_missing=true
+        break
+      fi
+    done
+    if [ "$flag_force" = true ] || [ "$hls_segments_missing" = true ]; then
+      rm -f "${image%/*}"/panel_api_provisioning_hls_*.ts "${hls_playlist}"
+      if ! ffmpeg -y -nostdin -loop 1 -framerate 30 -i "${image}" \
+        -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+        -t 12 -shortest \
+        -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 23 \
+        -g 60 -keyint_min 60 \
+        -force_key_frames "expr:gte(t,n_forced*2)" \
+        -x264-params "scenecut=0:bframes=0:open_gop=0" \
+        -c:a aac -b:a 128k -ac 2 -ar 48000 \
+        -mpegts_flags +resend_headers \
+        -muxdelay 0 -muxpreload 0 \
+        -f hls \
+        -hls_time 2 \
+        -hls_list_size 0 \
+        -hls_segment_type mpegts \
+        -hls_segment_filename "${hls_segment_pattern}" \
+        "${hls_playlist}"; then
+        echo "ffmpeg failed for HLS provisioning resource ${resource_name}" >&2
+        exit 1
+      fi
+      rm -f "${hls_playlist}"
+    fi
   fi
 done

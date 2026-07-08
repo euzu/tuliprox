@@ -8,8 +8,8 @@ use crate::{
         model::{
             metadata_update_manager::MetadataUpdateManager,
             qos_aggregation_manager::exec_qos_aggregation, ActiveProviderManager, ActiveUserManager,
-            ConnectionManager, DownloadQueue, EventManager, PlaylistStorage, PlaylistStorageState, SharedStreamManager,
-            UpdateGuard,
+            ConnectionManager, DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, PlaylistStorage,
+            PlaylistStorageState, SharedStreamManager, UpdateGuard,
         },
         scheduler::exec_scheduler,
     },
@@ -187,6 +187,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         metadata,
         qos_aggregation,
         downloads,
+        hls_cache: cancel_tokens.hls_cache.clone(),
     };
 
     app_state.cancel_tokens.store(Arc::new(tokens));
@@ -361,6 +362,7 @@ pub struct CancelTokens {
     pub(crate) metadata: CancellationToken,
     pub(crate) qos_aggregation: CancellationToken,
     pub(crate) downloads: CancellationToken,
+    pub(crate) hls_cache: CancellationToken,
 }
 impl Default for CancelTokens {
     fn default() -> Self {
@@ -372,6 +374,7 @@ impl Default for CancelTokens {
             metadata: CancellationToken::new(),
             qos_aggregation: CancellationToken::new(),
             downloads: CancellationToken::new(),
+            hls_cache: CancellationToken::new(),
         }
     }
 }
@@ -404,6 +407,8 @@ pub struct AppState {
     pub downloads: Arc<DownloadQueue>,
     pub cache: Arc<ArcSwapOption<RwLock<LRUResourceCache>>>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
+    pub hls_proxy: Arc<HlsProxyManager>,
+    pub hls_provisioning: Arc<HlsProvisioningState>,
     pub active_users: Arc<ActiveUserManager>,
     pub active_provider: Arc<ActiveProviderManager>,
     pub connection_manager: Arc<ConnectionManager>,
@@ -434,6 +439,7 @@ impl AppState {
         self.app_config.set_config(config)?;
         reload_logger(config_log_level.as_deref());
         self.active_provider.update_config(&self.app_config).await;
+        self.hls_proxy.update_config(&self.app_config).await;
         self.update_config().await?;
 
         let geoip_reload_needed =

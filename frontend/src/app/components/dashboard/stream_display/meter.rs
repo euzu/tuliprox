@@ -25,6 +25,7 @@ struct StreamMeterBadgeState {
     transferred_total_kb: u32,
     current_meter_uid: u32,
     current_meter_total_kb: u32,
+    has_sample: bool,
 }
 
 fn apply_stream_meter_entry(
@@ -41,11 +42,30 @@ fn apply_stream_meter_entry(
         }
         next.current_meter_total_kb = next.current_meter_total_kb.max(entry.total_kb);
         next.rate_kbps = entry.rate_kbps;
+        next.has_sample = true;
     } else {
         next.transferred_total_kb = next.transferred_total_kb.saturating_add(entry.total_kb);
     }
 
     next
+}
+
+fn format_meter_label(kind: MeterDisplayKind, state: &StreamMeterBadgeState) -> String {
+    if !state.has_sample {
+        return "-".to_string();
+    }
+    match kind {
+        MeterDisplayKind::Bandwidth if state.rate_kbps == 0 => "0 KB/s".to_string(),
+        MeterDisplayKind::Bandwidth => format_bandwidth(state.rate_kbps),
+        MeterDisplayKind::Transferred => {
+            let total_kb = state.transferred_total_kb.saturating_add(state.current_meter_total_kb);
+            if total_kb == 0 {
+                "0 KB".to_string()
+            } else {
+                format_transferred(total_kb)
+            }
+        }
+    }
 }
 
 #[component]
@@ -55,7 +75,7 @@ pub fn StreamMeterBadge(props: &StreamMeterBadgeProps) -> Html {
 
     {
         let meter_state = meter_state.clone();
-        let reset_key = props.uid;
+        let reset_key = props.meter_uid;
         use_effect_with(reset_key, move |_| {
             meter_state.set(StreamMeterBadgeState::default());
             || ()
@@ -89,12 +109,43 @@ pub fn StreamMeterBadge(props: &StreamMeterBadgeProps) -> Html {
         });
     }
 
-    let label = match props.kind {
-        MeterDisplayKind::Bandwidth => format_bandwidth(meter_state.rate_kbps),
-        MeterDisplayKind::Transferred => {
-            let total_kb = meter_state.transferred_total_kb.saturating_add(meter_state.current_meter_total_kb);
-            format_transferred(total_kb)
-        }
-    };
+    let label = format_meter_label(props.kind, &meter_state);
     html! { <span>{label}</span> }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_stream_meter_entry, format_meter_label, MeterDisplayKind, StreamMeterBadgeState};
+    use shared::model::StreamMeterEntry;
+
+    fn entry(meter_uid: u32, rate_kbps: u32, total_kb: u32, uids: Vec<u32>) -> StreamMeterEntry {
+        StreamMeterEntry { meter_uid, rate_kbps, total_kb, uids }
+    }
+
+    #[test]
+    fn meter_label_shows_dash_before_first_sample() {
+        let state = StreamMeterBadgeState::default();
+
+        assert_eq!(format_meter_label(MeterDisplayKind::Bandwidth, &state), "-");
+        assert_eq!(format_meter_label(MeterDisplayKind::Transferred, &state), "-");
+    }
+
+    #[test]
+    fn meter_label_shows_zero_after_first_empty_sample() {
+        let state = apply_stream_meter_entry(&StreamMeterBadgeState::default(), 7, &entry(7, 0, 0, vec![1]));
+
+        assert_eq!(format_meter_label(MeterDisplayKind::Bandwidth, &state), "0 KB/s");
+        assert_eq!(format_meter_label(MeterDisplayKind::Transferred, &state), "0 KB");
+    }
+
+    #[test]
+    fn same_meter_keeps_transferred_total_across_stream_uid_changes() {
+        let state = apply_stream_meter_entry(&StreamMeterBadgeState::default(), 7, &entry(7, 120, 256, vec![1]));
+        let state = apply_stream_meter_entry(&state, 7, &entry(7, 0, 256, vec![2]));
+
+        assert_eq!(state.current_meter_uid, 7);
+        assert_eq!(state.current_meter_total_kb, 256);
+        assert_eq!(state.transferred_total_kb, 0);
+        assert_eq!(format_meter_label(MeterDisplayKind::Transferred, &state), "256 KB");
+    }
 }

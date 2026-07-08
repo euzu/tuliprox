@@ -4,6 +4,7 @@ use std::io::{BufRead, ErrorKind};
 use std::path::{Path, PathBuf};
 
 use log::{debug, error, trace, warn};
+use shared::defaults::{is_blank_or_default_user_file_path, is_blank_or_default_user_group_file_path};
 use shared::error::TuliproxError;
 use shared::model::permission::{permission_from_name, PermissionSet, PERM_ALL};
 use shared::model::WebAuthConfigDto;
@@ -78,8 +79,8 @@ impl From<&WebAuthConfig> for WebAuthConfigDto {
 
 impl WebAuthConfig {
     pub fn prepare(&mut self, config_path: &str) -> Result<(), TuliproxError> {
-        let has_custom_userfile = !utils::is_blank_or_default_user_file_path(&self.userfile);
-        let has_custom_groupfile = !utils::is_blank_or_default_user_group_file_path(&self.groupfile);
+        let has_custom_userfile = !is_blank_or_default_user_file_path(&self.userfile);
+        let has_custom_groupfile = !is_blank_or_default_user_group_file_path(&self.groupfile);
         let userfile_name = if has_custom_userfile {
             self.userfile.as_ref().map_or_else(String::new, std::borrow::ToOwned::to_owned)
         } else {

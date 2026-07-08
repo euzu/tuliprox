@@ -165,7 +165,7 @@ fn stream_technical_from_properties(properties: Option<&StreamProperties>, url: 
 
     info.container = container_raw
         .and_then(normalize_container)
-        .or_else(|| extract_extension_from_url(url).and_then(|ext| normalize_container(&ext)))
+        .or_else(|| extract_extension_from_url(url).and_then(normalize_container))
         .unwrap_or_default();
 
     if info.is_empty() {

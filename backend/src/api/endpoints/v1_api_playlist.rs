@@ -34,8 +34,8 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
         enabled: true,
         options: Some(ConfigInputOptions {
             flags: ConfigInputFlags::XtreamLiveStreamUsePrefix | ConfigInputFlags::ResolveBackground,
-            resolve_delay: shared::utils::default_resolve_delay_secs(),
-            probe_delay: shared::utils::default_probe_delay_secs(),
+            resolve_delay: shared::defaults::default_resolve_delay_secs(),
+            probe_delay: shared::defaults::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
             resolve_filter: None,
             probe_filter: None,
@@ -55,8 +55,8 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
         enabled: true,
         options: Some(ConfigInputOptions {
             flags: ConfigInputFlags::XtreamLiveStreamUsePrefix | ConfigInputFlags::ResolveBackground,
-            resolve_delay: shared::utils::default_resolve_delay_secs(),
-            probe_delay: shared::utils::default_probe_delay_secs(),
+            resolve_delay: shared::defaults::default_resolve_delay_secs(),
+            probe_delay: shared::defaults::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
             resolve_filter: None,
             probe_filter: None,
@@ -766,6 +766,7 @@ mod tests {
             metadata: CancellationToken::new(),
             qos_aggregation: CancellationToken::new(),
             downloads: CancellationToken::new(),
+            hls_cache: CancellationToken::new(),
         };
         let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
         let (manual_update_sender, _) = mpsc::channel::<crate::api::model::ManualPlaylistUpdateRequest>(1);
@@ -783,6 +784,8 @@ mod tests {
             downloads: Arc::new(crate::api::model::DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
+            hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
+            hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
             active_users,
             active_provider,
             connection_manager,

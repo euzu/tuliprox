@@ -7,12 +7,13 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::time::{sleep, Sleep};
+use tokio::time::{sleep, Instant, Sleep};
 
 pub struct ThrottledStream<S> {
     inner: S,
     rate_bytes_per_sec: f64,
-    next_delay: Option<Pin<Box<Sleep>>>,
+    delay: Pin<Box<Sleep>>,
+    delay_active: bool,
 }
 
 impl<S> ThrottledStream<S> {
@@ -20,7 +21,12 @@ impl<S> ThrottledStream<S> {
     pub fn new(inner: S, throttle_kbps: usize) -> Self {
         assert!(throttle_kbps > 0, "Rate must be greater than 0");
         let rate_bytes_per_sec = (throttle_kbps as f64) * 1000.0 / 8.0;
-        Self { inner, rate_bytes_per_sec, next_delay: None }
+        Self {
+            inner,
+            rate_bytes_per_sec,
+            delay: Box::pin(sleep(Duration::ZERO)),
+            delay_active: false,
+        }
     }
 }
 
@@ -34,17 +40,10 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
 
-        // Check if there's an active delay
-        if let Some(mut delay) = this.next_delay.take() {
-            match delay.as_mut().poll(cx) {
-                Poll::Ready(()) => {
-                    // Delay completed, proceed to poll inner stream
-                }
-                Poll::Pending => {
-                    // Re-insert the delay and return Pending
-                    this.next_delay = Some(delay);
-                    return Poll::Pending;
-                }
+        if this.delay_active {
+            match this.delay.as_mut().poll(cx) {
+                Poll::Ready(()) => this.delay_active = false,
+                Poll::Pending => return Poll::Pending,
             }
         }
 
@@ -55,8 +54,8 @@ where
                 let delay_secs = (len / this.rate_bytes_per_sec).max(0.001);
                 let delay_duration = Duration::from_secs_f64(delay_secs);
 
-                // Schedule the next delay
-                this.next_delay = Some(Box::pin(sleep(delay_duration)));
+                this.delay.as_mut().reset(Instant::now() + delay_duration);
+                this.delay_active = true;
 
                 Poll::Ready(Some(Ok(bytes)))
             }
@@ -71,3 +70,32 @@ where
 }
 
 impl<S: Unpin> Unpin for ThrottledStream<S> {}
+
+#[cfg(test)]
+mod tests {
+    use super::ThrottledStream;
+    use crate::api::model::StreamError;
+    use bytes::Bytes;
+    use futures::{stream, StreamExt};
+    use std::{task::Poll, time::Duration};
+
+    #[tokio::test(start_paused = true)]
+    async fn throttled_stream_delays_between_chunks_without_recreating_stream_state() {
+        let inner = stream::iter([
+            Ok::<Bytes, StreamError>(Bytes::from_static(b"abcd")),
+            Ok::<Bytes, StreamError>(Bytes::from_static(b"efgh")),
+        ]);
+        let mut stream = ThrottledStream::new(inner, 32);
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), Bytes::from_static(b"abcd"));
+        assert!(
+            matches!(futures::poll!(stream.next()), Poll::Pending),
+            "second chunk must wait for the throttle delay"
+        );
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), Bytes::from_static(b"efgh"));
+    }
+}

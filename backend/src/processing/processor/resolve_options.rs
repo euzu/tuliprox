@@ -23,7 +23,7 @@ impl Default for ResolveOptions {
     fn default() -> Self {
         Self {
             flags: ResolveOptionsFlags::Background.into(),
-            resolve_delay: shared::utils::default_resolve_delay_secs(),
+            resolve_delay: shared::defaults::default_resolve_delay_secs(),
         }
     }
 }
