@@ -4,6 +4,11 @@
 
 ## ⚠️ Breaking Changes
 
+- **Case-insensitive EPG channel-id matching**: EPG channel-id matching is now case-insensitive (ASCII). Ids are no
+  longer lowercased when parsed — output preserves the source's original case. Users whose sources provide MixedCase
+  ids will see MixedCase ids in the M3U/XMLTV output instead of the previously-lowercased form; downstream players may
+  re-map affected channels once. Supersedes #688 (M3U tvg-id lowercasing removed).
+
 - Removed the `plex` STRM export style. Existing STRM outputs configured with `style: plex` must switch to `kodi`,
   `emby`, or `jellyfin`; Plex use cases should use the HDHomeRun integration instead. Existing generated TMDB marker
   paths remain read-compatible, but `style: plex` is no longer accepted in configuration.

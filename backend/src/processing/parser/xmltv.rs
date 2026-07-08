@@ -148,7 +148,9 @@ impl TVGuide {
                 if let Some(key) = matched_normalized_name {
                     id_cache.normalized.entry(key).and_modify(|entry| {
                         entry.replace(epg_id.clone());
-                        id_cache.channel_epg_id.insert(epg_id.clone());
+                        // Inline fold (mirrors `EpgIdCache::insert_channel_epg_id`); a
+                        // `&mut self` call would break the disjoint field capture here.
+                        id_cache.channel_epg_id.insert(epg_id.to_ascii_lowercase().intern());
                         matched = true;
                     });
                 }
@@ -333,11 +335,13 @@ impl TVGuide {
                             }
 
                             Self::prepare_tag(id_cache, &mut tag, smart_match);
+                            // Case-insensitive (ASCII) membership: fold the guide id for the
+                            // lookup only; `tag_epg_id` keeps its original case for output.
                             let add_channel = if smart_match {
-                                id_cache.channel_epg_id.contains(&tag_epg_id)
+                                id_cache.contains_channel_epg_id(&tag_epg_id)
                                     || Self::try_fuzzy_matching(id_cache, &tag_epg_id, &tag, fuzzy_matching)
                             } else {
-                                id_cache.channel_epg_id.contains(&tag_epg_id)
+                                id_cache.contains_channel_epg_id(&tag_epg_id)
                             };
 
                             if add_channel {
@@ -424,7 +428,7 @@ where
     let name_raw = String::from_utf8_lossy(binding.as_ref());
     let name = name_raw.intern();
     let tag_type = get_tag_type(&name);
-    let attributes = collect_tag_attributes(e, tag_type);
+    let attributes = collect_tag_attributes(e);
     let attribs = if attributes.is_empty() { None } else { Some(attributes) };
     let tag = XmlTag::new(name, attribs);
 
@@ -523,16 +527,6 @@ impl XmlTagType {
     pub(crate) fn is_tv(self) -> bool {
         self == XmlTagType::Tv
     }
-
-    #[inline]
-    pub(crate) fn is_channel(self) -> bool {
-        self == XmlTagType::Channel
-    }
-
-    #[inline]
-    pub(crate) fn is_program(self) -> bool {
-        self == XmlTagType::Programme
-    }
 }
 
 fn get_tag_type(name: &str) -> XmlTagType {
@@ -544,7 +538,7 @@ fn get_tag_type(name: &str) -> XmlTagType {
     }
 }
 
-fn collect_tag_attributes(e: &BytesStart, tag_type: XmlTagType) -> HashMap<Arc<str>, Arc<str>> {
+fn collect_tag_attributes(e: &BytesStart) -> HashMap<Arc<str>, Arc<str>> {
     let attributes = e.attributes().filter_map(Result::ok)
         .filter_map(|a| {
             let key_binding = a.key;
@@ -553,9 +547,10 @@ fn collect_tag_attributes(e: &BytesStart, tag_type: XmlTagType) -> HashMap<Arc<s
             if let Ok(value) = a.unescape_value().as_ref() {
                 if value.is_empty() {
                     None
-                } else if (tag_type.is_channel() && key.as_ref() == EPG_ATTRIB_ID) || (tag_type.is_program() && key.as_ref() == EPG_ATTRIB_CHANNEL) {
-                    Some((key, value.to_lowercase().intern()))
                 } else {
+                    // Ids are no longer lowercased when parsed; EPG matching folds case
+                    // at the comparison instead, so the guide's original-case <channel id>
+                    // and <programme channel> are preserved in the output.
                     Some((key, value.intern()))
                 }
             } else {
@@ -1121,6 +1116,59 @@ mod tests {
             assert_eq!(merged.children.len(), 1);
             assert_eq!(merged.children[0].id.as_ref(), "demo.channel");
             assert_eq!(merged.children[0].programmes.len(), 1);
+        });
+    }
+
+    #[test]
+    fn epg_channel_id_match_is_case_insensitive_and_preserves_guide_case() {
+        run_async_test(async move {
+            let dir = tempdir().unwrap();
+            let epg_path = dir.path().join("mixed-case.xml");
+
+            // Guide channel ids are MixedCase and differ in case from the playlist ids.
+            fs::write(
+                &epg_path,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="Sport.Extra1.DE">
+    <display-name>Sport Extra</display-name>
+  </channel>
+  <channel id="CNN.US">
+    <display-name>CNN</display-name>
+  </channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="Sport.Extra1.DE">
+    <title>Match A</title>
+  </programme>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="CNN.US">
+    <title>Match B</title>
+  </programme>
+</tv>"#,
+            )
+            .unwrap();
+
+            let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+                file_path: epg_path,
+                priority: 0,
+                logo_override: false,
+            }]);
+            let mut id_cache = EpgIdCache::new(None);
+            // Playlist epg ids arrive in a *different* case than the guide. Both origins
+            // (an Xtream source and a mapper-script literal) go through the same
+            // `insert_channel_epg_id`, which folds the membership key.
+            id_cache.insert_channel_epg_id("sport.EXTRA1.de"); // e.g. from an Xtream source
+            id_cache.insert_channel_epg_id("cnn.us"); // e.g. set by a mapper literal @epg_channel_id = "cnn.us"
+
+            let merged = tv_guide.filter_merged(&mut id_cache).await.expect("merged epg");
+
+            // Both MixedCase guide channels matched despite the case difference.
+            assert_eq!(merged.children.len(), 2);
+            let ids: HashSet<&str> = merged.children.iter().map(|c| c.id.as_ref()).collect();
+            // Emitted <channel id> preserves the guide's ORIGINAL case (not folded).
+            assert!(ids.contains("Sport.Extra1.DE"), "emitted ids: {ids:?}");
+            assert!(ids.contains("CNN.US"), "emitted ids: {ids:?}");
+            for channel in &merged.children {
+                assert_eq!(channel.programmes.len(), 1, "channel {} programmes", channel.id);
+            }
         });
     }
 

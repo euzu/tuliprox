@@ -10,6 +10,12 @@ use std::sync::Arc;
 use shared::utils::Internable;
 
 pub struct EpgIdCache {
+    /// Membership set of the epg ids collected from playlist channels.
+    /// Keys are stored ASCII-lowercased so guide-id matching is case-insensitive.
+    /// This set is used only for membership tests, never to source an emitted/display
+    /// id, so folding the stored key does not affect output (channels keep their
+    /// original-case id). Insert via [`Self::insert_channel_epg_id`] and query via
+    /// [`Self::contains_channel_epg_id`] to keep the fold consistent.
     pub channel_epg_id: HashSet<Arc<str>>,
     pub normalized: HashMap<Arc<str>, Option<Arc<str>>>,
     pub phonetics: HashMap<Arc<str>, HashSet<Arc<str>>>,
@@ -51,6 +57,21 @@ impl EpgIdCache {
 
     fn is_empty(&self) -> bool {
         self.channel_epg_id.is_empty() && self.normalized.is_empty()
+    }
+
+    /// Adds an epg id to the case-folded membership set.
+    ///
+    /// The key is ASCII-lowercased so a `MixedCase` source id matches a guide
+    /// `<channel id>` of a different case. ASCII folding (not Unicode) avoids
+    /// Turkish-i/locale issues and is faster; channel ids are ASCII.
+    pub fn insert_channel_epg_id(&mut self, id: &str) {
+        self.channel_epg_id.insert(id.to_ascii_lowercase().intern());
+    }
+
+    /// Case-insensitive (ASCII) membership test against the folded keys stored by
+    /// [`Self::insert_channel_epg_id`].
+    pub fn contains_channel_epg_id(&self, id: &str) -> bool {
+        self.channel_epg_id.contains(id.to_ascii_lowercase().as_str())
     }
 
     /// Normalizes a channel name, computes its phonetic encoding, and stores both in the cache for later EPG matching.
@@ -117,7 +138,7 @@ impl EpgIdCache {
             if let Some(id) = epg_channel_id {
                 if !id.is_empty() {
                     missing_epg_id = false;
-                    self.channel_epg_id.insert(Arc::clone(id));
+                    self.insert_channel_epg_id(id);
                 }
             }
 
@@ -141,7 +162,9 @@ impl EpgIdCache {
         for key in normalized_epg_ids {
             if let Some(entry) = self.normalized.get_mut(key) {
                 entry.replace(Arc::clone(epg_id));
-                self.channel_epg_id.insert(Arc::clone(epg_id));
+                // Inline fold (mirrors `insert_channel_epg_id`); a `&mut self` call
+                // here would conflict with the `entry` borrow of `self.normalized`.
+                self.channel_epg_id.insert(epg_id.to_ascii_lowercase().intern());
                 return true;
             }
         }
@@ -265,6 +288,22 @@ mod tests {
             .take(30)
             .map(char::from)
             .collect()
+    }
+
+    #[test]
+    fn channel_epg_id_membership_is_case_insensitive_ascii() {
+        let mut cache = super::EpgIdCache::new(None);
+        // Playlist epg ids stored MixedCase from different origins (Xtream source /
+        // mapper literal). Both go through the folding insert.
+        cache.insert_channel_epg_id("CNN.us");
+        cache.insert_channel_epg_id("BBC.One.UK");
+
+        // A guide <channel id> in any case matches the folded membership key.
+        assert!(cache.contains_channel_epg_id("cnn.US"));
+        assert!(cache.contains_channel_epg_id("CNN.US"));
+        assert!(cache.contains_channel_epg_id("cnn.us"));
+        assert!(cache.contains_channel_epg_id("bbc.one.uk"));
+        assert!(!cache.contains_channel_epg_id("unknown.tv"));
     }
 
     #[test]
