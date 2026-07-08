@@ -20,9 +20,10 @@ use crate::{
         http_layers::create_cors_layer,
         model::{
             create_cache, create_http_client, create_http_client_no_redirect, exec_provider_dns,
-            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue,
-            EventManager, EventMessage, HdHomerunAppState, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState,
-            SharedStreamManager, UpdateGuard, exec_qos_aggregation,
+            exec_hls_cache_gc, exec_hls_lifecycle, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens,
+            ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState, HlsProvisioningState,
+            HlsProxyManager, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
+            UpdateGuard, exec_qos_aggregation,
         },
         panel_api::sync_panel_api_exp_dates_on_boot,
         scheduler::{exec_interner_prune, exec_scheduler},
@@ -284,6 +285,14 @@ async fn create_shared_data(
     let event_manager = Arc::new(EventManager::new());
     let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
+    let rewrite_secret = config
+        .reverse_proxy
+        .as_ref()
+        .map_or(app_config.encrypt_secret, |reverse_proxy| reverse_proxy.rewrite_secret);
+    let hls_proxy = Arc::new(HlsProxyManager::from_hls_cache_config_and_secret(
+        config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref()),
+        &rewrite_secret,
+    ));
     active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
     let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
     active_users.start_adaptive_expiry_worker();
@@ -314,6 +323,8 @@ async fn create_shared_data(
             downloads: Arc::new(DownloadQueue::new_with_state_file(Some(downloads_state_file))),
             cache: Arc::new(ArcSwapOption::from(cache)),
             shared_stream_manager,
+            hls_proxy,
+            hls_provisioning: Arc::new(HlsProvisioningState::new()),
             active_users,
             active_provider,
             connection_manager,
@@ -363,6 +374,7 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     cancel_tokens.provider_dns.cancel();
     cancel_tokens.qos_aggregation.cancel();
     cancel_tokens.downloads.cancel();
+    cancel_tokens.hls_cache.cancel();
     app_state.active_users.shutdown();
     // Use the manager's shutdown() rather than cancelling the token directly so
     // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
@@ -602,6 +614,8 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     exec_config_watch(&app_state, &cancel_token_file_watch);
     exec_provider_dns(&app_state, &cancel_token_provider_dns);
     exec_qos_aggregation(&app_state, &cancel_token_qos_aggregation);
+    exec_hls_lifecycle(&app_state, &app_state.cancel_tokens.load().hls_cache);
+    exec_hls_cache_gc(&app_state, &app_state.cancel_tokens.load().hls_cache);
 
     let web_auth_enabled = is_web_auth_enabled(&cfg, web_ui_enabled);
 

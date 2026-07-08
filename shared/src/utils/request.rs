@@ -1,6 +1,7 @@
 use crate::{
+    defaults::{DASH_EXT, DASH_EXT_FRAGMENT, DASH_EXT_QUERY, HLS_EXT, HLS_EXT_FRAGMENT, HLS_EXT_QUERY},
     error::TuliproxError,
-    utils::{CONSTANTS, DASH_EXT, DASH_EXT_FRAGMENT, DASH_EXT_QUERY, HLS_EXT, HLS_EXT_FRAGMENT, HLS_EXT_QUERY},
+    utils::CONSTANTS,
 };
 use std::{borrow::Cow, sync::atomic::Ordering};
 use url::Url;

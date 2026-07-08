@@ -58,6 +58,7 @@ strsim = "0.11.1"
 rphonetic = "3.0.6"
 rayon = "1.12.0"
 base64.workspace = true
+sha2.workspace = true
 paste.workspace = true
 indexmap.workspace = true
 parking_lot = "0.12.5"

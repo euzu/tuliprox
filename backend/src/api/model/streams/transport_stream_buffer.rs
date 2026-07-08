@@ -331,7 +331,11 @@ fn calculate_pcr_duration_ticks(buffer: &[u8]) -> Option<u64> {
 type PacketIndices = Vec<(usize, Option<(usize, Option<usize>, u16)>)>;
 
 pub struct TransportStreamBuffer {
-    buffer: Arc<Vec<u8>>,
+    // `Bytes` instead of `Arc<Vec<u8>>`: cloning the inner payload (which
+    // happens once per HLS-CVS fallback response) is then a refcount bump
+    // instead of a deep copy. All existing `&self.buffer[..]` / `.len()` /
+    // `.is_empty()` call sites continue to work via `Bytes`'s `Deref<Target=[u8]>`.
+    buffer: Bytes,
     packet_indices: Arc<PacketIndices>,
     current_pos: usize,
     current_dts: u64,
@@ -363,7 +367,7 @@ impl std::fmt::Debug for TransportStreamBuffer {
 impl Clone for TransportStreamBuffer {
     fn clone(&self) -> Self {
         Self {
-            buffer: Arc::clone(&self.buffer),
+            buffer: self.buffer.clone(),
             packet_indices: Arc::clone(&self.packet_indices),
             current_pos: 0,
             current_dts: 0,
@@ -421,7 +425,7 @@ impl TransportStreamBuffer {
         }
 
         Self {
-            buffer: Arc::new(raw),
+            buffer: Bytes::from(raw),
             current_pos: 0,
             current_dts: 0,
             timestamp_offset: 0,
@@ -447,6 +451,16 @@ impl TransportStreamBuffer {
         } else {
             Ok(buf)
         }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] { &self.buffer }
+
+    /// Cheap clone of the underlying buffer as `Bytes` (refcount bump).
+    /// Use this from response builders to avoid `Bytes::copy_from_slice(&[u8])`.
+    pub fn clone_bytes(&self) -> Bytes { self.buffer.clone() }
+
+    pub fn duration_ms(&self) -> Option<u64> {
+        (self.stream_duration_90khz > 0).then(|| self.stream_duration_90khz.saturating_mul(1_000) / 90_000)
     }
 
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]

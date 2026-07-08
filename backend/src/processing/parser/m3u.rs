@@ -4,7 +4,8 @@ use shared::model::{
     CatchupAttribute, CatchupProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader,
     PlaylistItemType, StreamProperties, XtreamCluster,
 };
-use shared::utils::{default_supported_video_extensions, extract_id_from_url, extract_numeric_id_from_url, Internable};
+use shared::utils::{extract_id_from_url, extract_numeric_id_from_url, Internable};
+use shared::defaults::{default_supported_video_extensions};
 use std::borrow::BorrowMut;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;

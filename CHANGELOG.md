@@ -331,6 +331,11 @@
 - **Stream View**:
   - Displays the user comment in the stream view.
   - Displays EPG information in the stream view.
+- **Shared HLS Streams**
+  - Added advanced video routing with HLS and TS support, including HLS provisioning polling and correct byte-range
+    handling for TS output.
+  - Introduced live HLS reverse-proxy caching with lifecycle scheduling, garbage collection, and improved demand/prefetch backpressure.
+  - Added smarter HLS playback access/admission handling for consistent manifest responses.
 
 ## 🐛 Fixes
 

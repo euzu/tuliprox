@@ -48,9 +48,12 @@ use shared::{
         SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
     },
     utils::{
-        create_alias_uuid, default_as_default, default_probe_delay_secs, default_probe_live_interval, interner_gc,
+        create_alias_uuid, interner_gc,
         Internable,
     },
+    defaults::{
+        default_as_default, default_probe_delay_secs, default_probe_live_interval,
+    }
 };
 use std::{
     collections::{HashMap, HashSet},

@@ -1,11 +1,11 @@
 use crate::{
-    error::TuliproxError,
-    utils::{
+    defaults::{
         default_epg_best_match_threshold, default_epg_match_threshold, default_epg_name_prefix_separator,
         default_epg_normalize_regex, default_epg_strip, is_default_epg_best_match_threshold,
         is_default_epg_match_threshold, is_default_epg_name_prefix_separator, is_default_epg_normalize_regex,
         is_default_epg_strip, is_false,
     },
+    error::TuliproxError,
 };
 use log::warn;
 use std::fmt::Display;

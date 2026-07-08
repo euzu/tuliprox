@@ -2,7 +2,7 @@ use crate::model::{macros, WebAuthConfig};
 use shared::error::TuliproxError;
 use shared::model::view_type::ViewType;
 use shared::model::{ContentSecurityPolicyConfigDto, StreamInfoConfigDto, StreamInfoFields, StreamInfoFieldsSet, WebUiConfigDto};
-use shared::utils::default_kick_secs;
+use shared::defaults::default_kick_secs;
 
 #[derive(Debug, Clone)]
 pub struct StreamInfoConfig {

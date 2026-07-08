@@ -5,11 +5,15 @@ pub const fn bytes_to_megabytes(bytes: u64) -> u64 { bytes / 1_048_576 }
 
 pub fn parse_size_base_2(size_str: &str) -> Result<u64, String> {
     let units = [
-        ("KB", 1_024u64),             // Kilobytes
-        ("MB", 1_048_576u64),         // Megabytes
-        ("GB", 1_073_741_824u64),     // Gigabytes
-        ("TB", 1_099_511_628_000u64), // Terabytes
-        ("B", 1u64),                  // Bytes
+        ("TB", 1_099_511_627_776u64),  // Terabytes
+        ("TIB", 1_099_511_627_776u64), // Tebibytes (alias, same multiplier)
+        ("GB", 1_073_741_824u64),      // Gigabytes
+        ("GIB", 1_073_741_824u64),     // Gibibytes (alias)
+        ("MB", 1_048_576u64),          // Megabytes
+        ("MIB", 1_048_576u64),         // Mebibytes (alias)
+        ("KB", 1_024u64),              // Kilobytes
+        ("KIB", 1_024u64),             // Kibibytes (alias)
+        ("B", 1u64),                   // Bytes
     ];
 
     let size_str = size_str.trim().to_uppercase();
@@ -101,7 +105,7 @@ pub fn human_readable_kbps(kbps: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::parse_to_kbps;
+    use crate::utils::{parse_size_base_2, parse_to_kbps};
 
     #[test]
     fn test_parse_kpbs() {
@@ -114,5 +118,14 @@ mod tests {
         assert_eq!(parse_to_kbps("1Kbps").unwrap(), 1);
         assert_eq!(parse_to_kbps("1Mbps").unwrap(), 1000);
         assert_eq!(parse_to_kbps("1Mibps").unwrap(), 1024);
+    }
+
+    #[test]
+    fn test_parse_size_base_2_accepts_kib_mib_gib_aliases() {
+        assert_eq!(parse_size_base_2("1KiB").unwrap(), 1024);
+        assert_eq!(parse_size_base_2("1MiB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size_base_2("1GiB").unwrap(), 1024_u64.pow(3));
+        assert_eq!(parse_size_base_2("1TiB").unwrap(), 1024_u64.pow(4));
+        assert_eq!(parse_size_base_2("2gib").unwrap(), 2 * 1024_u64.pow(3)); // case-insensitive
     }
 }

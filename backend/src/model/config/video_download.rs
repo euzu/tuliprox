@@ -1,7 +1,7 @@
 use crate::model::macros;
 use regex::Regex;
 use shared::model::{VideoConfigDto, VideoDownloadConfigDto};
-use shared::utils::DEFAULT_DOWNLOAD_DIR;
+use shared::defaults::DEFAULT_DOWNLOAD_DIR;
 use std::collections::HashMap;
 use std::sync::Arc;
 

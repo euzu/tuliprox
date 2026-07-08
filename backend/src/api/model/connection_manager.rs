@@ -1,7 +1,7 @@
 use crate::{
     api::model::{
         ActiveProviderManager, ActiveUserConnectionParams, ActiveUserManager, CustomVideoStreamType, EventManager,
-        EventMessage, ProviderHandle, SharedStreamManager,
+        EventMessage, ProviderHandle, SharedStreamManager, uses_direct_body_idle_timeout,
     },
     model::StreamHistoryConfig,
     auth::Fingerprint,
@@ -487,7 +487,14 @@ async fn release_stream_with_disconnect(
     } else {
         deps.user_manager.release_stream(&addr).await
     };
-    let stream_info = stream_info?;
+    let Some(stream_info) = stream_info else {
+        debug_if_enabled!(
+            "Stream release skipped: no active stream for {} uid={:?}",
+            sanitize_sensitive_info(&addr.to_string()),
+            stream_uid
+        );
+        return None;
+    };
     let (bytes_sent, first_byte_latency_ms) = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
     deps.event_manager.unregister_meter_client(stream_info.uid).await;
     let reason = resolve_disconnect_reason(provider_end_reason, &stream_info);
@@ -514,12 +521,15 @@ enum SocketActivityEvent {
     HttpActivity {
         addr: SocketAddr,
     },
+    DirectBodyActivity {
+        addr: SocketAddr,
+    },
 }
 
 impl SocketActivityEvent {
     fn addr(&self) -> SocketAddr {
         match self {
-            Self::HttpActivity { addr, .. } => *addr,
+            Self::HttpActivity { addr, .. } | Self::DirectBodyActivity { addr, .. } => *addr,
         }
     }
 }
@@ -555,6 +565,12 @@ pub struct ConnectionParams<'a> {
     pub stream_channel: &'a StreamChannel,
     pub user_agent: Cow<'a, str>,
     pub session_token: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConnectionHistoryMode {
+    EmitConnect,
+    RefreshOnly,
 }
 
 impl ConnectionManager {
@@ -676,7 +692,10 @@ impl ConnectionManager {
         expiry_index: &mut HashMap<SocketAddr, u64>,
         user_manager: &Arc<ActiveUserManager>,
     ) {
-        let SocketActivityEvent::HttpActivity { addr } = event;
+        let addr = event.addr();
+        if matches!(event, SocketActivityEvent::DirectBodyActivity { .. }) {
+            user_manager.touch_socket_activity(&addr).await;
+        }
 
         if let Some(expires_at) = user_manager.socket_expiry_deadline(&addr).await {
             let current = expiry_index.insert(addr, expires_at);
@@ -722,6 +741,10 @@ impl ConnectionManager {
             // Fallthrough to release connection if `None` or `< now`
 
             expiry_index.remove(&addr);
+            debug_if_enabled!(
+                "Socket activity deadline expired for {}, releasing connection",
+                sanitize_sensitive_info(&addr.to_string())
+            );
             if cleanup_tx.send(CleanupEvent::ReleaseConnection { addr }).await.is_err() {
                 debug!("Cleanup channel closed, stopping socket expiry worker");
                 break;
@@ -1047,10 +1070,25 @@ impl ConnectionManager {
         self.socket_activity_tracker.track(SocketActivityEvent::HttpActivity { addr: *addr });
     }
 
+    pub(crate) fn touch_direct_body_activity(&self, addr: &SocketAddr) {
+        self.socket_activity_tracker
+            .track(SocketActivityEvent::DirectBodyActivity { addr: *addr });
+    }
+
     pub async fn update_connection(&self, update: ConnectionParams<'_>) -> Option<StreamInfo> {
+        self.update_connection_with_history_mode(update, ConnectionHistoryMode::EmitConnect)
+            .await
+    }
+
+    pub async fn update_connection_with_history_mode(
+        &self,
+        update: ConnectionParams<'_>,
+        history_mode: ConnectionHistoryMode,
+    ) -> Option<StreamInfo> {
         let uid = self.next_stream_uid();
         let username = update.username;
         let fingerprint = update.fingerprint;
+        let track_direct_body_activity = uses_direct_body_idle_timeout(update.stream_channel);
         if let Some(stream_info) = self
             .user_manager
             .update_connection(ActiveUserConnectionParams {
@@ -1073,7 +1111,16 @@ impl ConnectionManager {
             self.event_manager
                 .register_meter_client(stream_info.uid, stream_info.meter_uid)
                 .await;
-            emit_connect_record(&self.history_writer, &stream_info);
+            if history_mode == ConnectionHistoryMode::EmitConnect {
+                emit_connect_record(&self.history_writer, &stream_info);
+            }
+            if track_direct_body_activity {
+                debug_if_enabled!(
+                    "Direct body stream registered for socket expiry: {}",
+                    sanitize_sensitive_info(&fingerprint.addr.to_string())
+                );
+                self.touch_direct_body_activity(&fingerprint.addr);
+            }
             self.event_manager
                 .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info.clone())));
             Some(stream_info)
@@ -1366,7 +1413,7 @@ mod tests {
 
         tracker.track(SocketActivityEvent::HttpActivity { addr: addr_one });
         tracker.track(SocketActivityEvent::HttpActivity { addr: addr_one });
-        tracker.track(SocketActivityEvent::HttpActivity { addr: addr_two });
+        tracker.track(SocketActivityEvent::DirectBodyActivity { addr: addr_two });
 
         let pending = tracker.drain();
         assert_eq!(pending.len(), 2);
@@ -1376,7 +1423,7 @@ mod tests {
         )));
         assert!(pending.iter().any(|event| matches!(
             event,
-            SocketActivityEvent::HttpActivity { addr } if *addr == addr_two
+            SocketActivityEvent::DirectBodyActivity { addr } if *addr == addr_two
         )));
     }
 

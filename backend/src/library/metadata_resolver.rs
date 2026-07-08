@@ -1,5 +1,8 @@
 use log::{debug, error, warn};
-use shared::utils::{clean_playlist_title, TMDB_API_KEY};
+use shared::{
+    utils::{clean_playlist_title},
+    defaults::{TMDB_API_KEY},
+};
 use crate::library::metadata::{MediaMetadata, MetadataSource, MovieMetadata, SeriesMetadata};
 use crate::library::scanner::ScannedMediaFile;
 use crate::library::tmdb_client::TmdbClient;

@@ -2,6 +2,7 @@ use crate::{
     app::components::{
         config::HasFormData, select::Select, BlockId, BlockInstance, Card, ClusterFlagsInput, ClusterFlagsInputMode,
         DropDownOption, DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton,
+        ToggleSwitch,
     },
     config_field, config_field_bool, config_field_child, config_field_custom, edit_field_bool, edit_field_list_option,
     edit_field_text, generate_form_reducer,
@@ -9,7 +10,7 @@ use crate::{
 };
 use shared::{
     error::TuliproxError,
-    model::{ClusterFlags, ConfigTargetDto, ConfigTargetOptions, ProcessingOrder},
+    model::{ClusterFlags, ConfigTargetDto, ConfigTargetOptions, ConfigTargetShareLiveStreams, ProcessingOrder},
     utils::Internable,
 };
 use std::{fmt::Display, rc::Rc, str::FromStr, sync::Arc};
@@ -29,6 +30,8 @@ const LABEL_USE_MEMORY_CACHE: &str = "LABEL.USE_MEMORY_CACHE";
 const LABEL_PROCESSING_ORDER: &str = "LABEL.PROCESSING_ORDER";
 const LABEL_IGNORE_LOGO: &str = "LABEL.IGNORE_LOGO";
 const LABEL_SHARE_LIVE_STREAMS: &str = "LABEL.SHARE_LIVE_STREAMS";
+const LABEL_HLS: &str = "LABEL.HLS";
+const LABEL_MPEG_TS: &str = "LABEL.MPEG_TS";
 const LABEL_REMOVE_DUPLICATES: &str = "LABEL.REMOVE_DUPLICATES";
 const LABEL_FORCE_REDIRECT: &str = "LABEL.FORCE_REDIRECT";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
@@ -80,16 +83,73 @@ impl Internable for TargetFormPage {
 // pub rename: Option<Vec<ConfigRenameDto>>,
 // pub favourites: Option<Vec<ConfigFavouritesDto>>,
 
-generate_form_reducer!(
-    state: ConfigTargetOptionsFormState { form: ConfigTargetOptions },
-    action_name: ConfigTargetOptionsFormAction,
-    fields {
-        IgnoreLogo => ignore_logo: bool,
-        ShareLiveStreams => share_live_streams: bool,
-        RemoveDuplicates => remove_duplicates: bool,
-        ForceRedirect => force_redirect: Option<ClusterFlags>,
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigTargetOptionsFormState {
+    pub form: ConfigTargetOptions,
+    modified: bool,
+}
+
+impl HasFormData for ConfigTargetOptionsFormState {
+    type Data = ConfigTargetOptions;
+
+    fn data(&self) -> &Self::Data { &self.form }
+
+    fn modified(&self) -> bool { self.modified }
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone)]
+pub enum ConfigTargetOptionsFormAction {
+    IgnoreLogo(bool),
+    ShareLiveStreams(bool),
+    ShareLiveStreamsHls(bool),
+    ShareLiveStreamsMpegTs(bool),
+    RemoveDuplicates(bool),
+    ForceRedirect(Option<ClusterFlags>),
+    SetAll(ConfigTargetOptions),
+}
+
+impl yew::prelude::Reducible for ConfigTargetOptionsFormState {
+    type Action = ConfigTargetOptionsFormAction;
+
+    fn reduce(self: Rc<Self>, action: Self::Action) -> Rc<Self> {
+        let mut form = self.form.clone();
+        let modified;
+
+        match action {
+            ConfigTargetOptionsFormAction::IgnoreLogo(value) => {
+                form.ignore_logo = value;
+                modified = true;
+            }
+            ConfigTargetOptionsFormAction::ShareLiveStreams(value) => {
+                form.share_live_streams = ConfigTargetShareLiveStreams { hls: value, mpeg_ts: value };
+                modified = true;
+            }
+            ConfigTargetOptionsFormAction::ShareLiveStreamsHls(value) => {
+                form.share_live_streams.hls = value;
+                modified = true;
+            }
+            ConfigTargetOptionsFormAction::ShareLiveStreamsMpegTs(value) => {
+                form.share_live_streams.mpeg_ts = value;
+                modified = true;
+            }
+            ConfigTargetOptionsFormAction::RemoveDuplicates(value) => {
+                form.remove_duplicates = value;
+                modified = true;
+            }
+            ConfigTargetOptionsFormAction::ForceRedirect(value) => {
+                form.force_redirect = value;
+                modified = true;
+            }
+            ConfigTargetOptionsFormAction::SetAll(value) => {
+                form = value;
+                modified = false;
+            }
+        }
+
+        Self { form, modified }.into()
     }
-);
+}
 
 generate_form_reducer!(
     state: ConfigTargetFormState { form: ConfigTargetDto },
@@ -171,39 +231,131 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
 
     let render_options = || {
         let target_options_state_1 = target_options_state.clone();
+        let target_option_toggle =
+            |label: String, field_id: &str, value: bool, readonly: bool, on_change: Callback<bool>| {
+                html! {
+                    <div class="tp__form-field tp__form-field__bool tp__target-options__toggle-row">
+                        <ToggleSwitch value={value} readonly={readonly} on_change={on_change} />
+                        <crate::app::components::FieldLabel
+                            label={label}
+                            field_id={field_id.to_string()}
+                        />
+                    </div>
+                }
+            };
         if !props.allow_write {
             html! {
                 <Card class="tp__config-view__card">
-                    <div class="tp__config-view__cols-2">
+                    <div class="tp__target-options">
                         { config_field_bool!(target_options_state.form, translate.t(LABEL_IGNORE_LOGO), ignore_logo) }
-                        { config_field_bool!(target_options_state.form, translate.t(LABEL_SHARE_LIVE_STREAMS), share_live_streams) }
+                        <div class="tp__target-options__group">
+                            { target_option_toggle(
+                                translate.t(LABEL_SHARE_LIVE_STREAMS),
+                                "CONFIG_TARGET_OPTIONS.SHARE_LIVE_STREAMS",
+                                target_options_state.form.share_live_any_enabled(),
+                                true,
+                                Callback::noop(),
+                            ) }
+                            <div class="tp__target-options__children">
+                                { target_option_toggle(
+                                    translate.t(LABEL_HLS),
+                                    "CONFIG_TARGET_SHARE_LIVE_STREAMS.HLS",
+                                    target_options_state.form.share_live_hls_enabled(),
+                                    true,
+                                    Callback::noop(),
+                                ) }
+                                { target_option_toggle(
+                                    translate.t(LABEL_MPEG_TS),
+                                    "CONFIG_TARGET_SHARE_LIVE_STREAMS.MPEG_TS",
+                                    target_options_state.form.share_live_mpeg_ts_enabled(),
+                                    true,
+                                    Callback::noop(),
+                                ) }
+                            </div>
+                        </div>
+                        { config_field_bool!(target_options_state.form, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates) }
+                        <div class="tp__target-options__group">
+                            <div class="tp__target-options__heading">
+                                <span class="tp__form-field__label">{ translate.t(LABEL_FORCE_REDIRECT) }</span>
+                            </div>
+                            <div class="tp__target-options__children">
+                                <div class="tp__target-options__child-content">
+                                    <span class="tp__form-field__value">
+                                        { target_options_state.form.force_redirect.map_or_else(String::new, |flags| flags.to_string()) }
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    { config_field_bool!(target_options_state.form, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates) }
-                    { config_field_custom!(
-                        translate.t(LABEL_FORCE_REDIRECT),
-                        target_options_state.form.force_redirect.map_or_else(String::new, |flags| flags.to_string())
-                    ) }
                 </Card>
             }
         } else {
+            let share_live_on_change = {
+                let target_options_state = target_options_state.clone();
+                Callback::from(move |value| {
+                    target_options_state.dispatch(ConfigTargetOptionsFormAction::ShareLiveStreams(value));
+                })
+            };
+            let share_live_hls_on_change = {
+                let target_options_state = target_options_state.clone();
+                Callback::from(move |value| {
+                    target_options_state.dispatch(ConfigTargetOptionsFormAction::ShareLiveStreamsHls(value));
+                })
+            };
+            let share_live_mpeg_ts_on_change = {
+                let target_options_state = target_options_state.clone();
+                Callback::from(move |value| {
+                    target_options_state.dispatch(ConfigTargetOptionsFormAction::ShareLiveStreamsMpegTs(value));
+                })
+            };
             html! {
                 <Card class="tp__config-view__card">
-                <div class="tp__config-view__cols-2">
-                { edit_field_bool!(target_options_state, translate.t(LABEL_IGNORE_LOGO), ignore_logo,  ConfigTargetOptionsFormAction::IgnoreLogo) }
-                { edit_field_bool!(target_options_state, translate.t(LABEL_SHARE_LIVE_STREAMS), share_live_streams, ConfigTargetOptionsFormAction::ShareLiveStreams) }
+                <div class="tp__target-options">
+                    { edit_field_bool!(target_options_state, translate.t(LABEL_IGNORE_LOGO), ignore_logo,  ConfigTargetOptionsFormAction::IgnoreLogo) }
+                    <div class="tp__target-options__group">
+                        { target_option_toggle(
+                            translate.t(LABEL_SHARE_LIVE_STREAMS),
+                            "CONFIG_TARGET_OPTIONS.SHARE_LIVE_STREAMS",
+                            target_options_state.form.share_live_any_enabled(),
+                            false,
+                            share_live_on_change,
+                        ) }
+                        <div class="tp__target-options__children">
+                            { target_option_toggle(
+                                translate.t(LABEL_HLS),
+                                "CONFIG_TARGET_SHARE_LIVE_STREAMS.HLS",
+                                target_options_state.form.share_live_hls_enabled(),
+                                false,
+                                share_live_hls_on_change,
+                            ) }
+                            { target_option_toggle(
+                                translate.t(LABEL_MPEG_TS),
+                                "CONFIG_TARGET_SHARE_LIVE_STREAMS.MPEG_TS",
+                                target_options_state.form.share_live_mpeg_ts_enabled(),
+                                false,
+                                share_live_mpeg_ts_on_change,
+                            ) }
+                        </div>
+                    </div>
+                    { edit_field_bool!(target_options_state, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates, ConfigTargetOptionsFormAction::RemoveDuplicates) }
+                    <div class="tp__target-options__group">
+                        <div class="tp__target-options__heading">
+                            <span class="tp__form-field__label">{ translate.t(LABEL_FORCE_REDIRECT) }</span>
+                        </div>
+                        <div class="tp__target-options__children">
+                            <div class="tp__target-options__child-content">
+                                <ClusterFlagsInput
+                                    name="force_redirect"
+                                    value={target_options_state.form.force_redirect}
+                                    mode={ClusterFlagsInputMode::NoneIsNone}
+                                    on_change={Callback::from(move |(_name, flags):(String, Option<ClusterFlags>)| {
+                                        target_options_state_1.dispatch(ConfigTargetOptionsFormAction::ForceRedirect(flags));
+                                    })}
+                                />
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                { edit_field_bool!(target_options_state, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates, ConfigTargetOptionsFormAction::RemoveDuplicates) }
-                { config_field_child!(translate.t(LABEL_FORCE_REDIRECT), "TARGET_FORM.FORCE_REDIRECT", {
-                   html! {
-                        <ClusterFlagsInput
-                            name="force_redirect"
-                            value={target_options_state.form.force_redirect}
-                            mode={ClusterFlagsInputMode::NoneIsNone}
-                            on_change={Callback::from(move |(_name, flags):(String, Option<ClusterFlags>)| {
-                            target_options_state_1.dispatch(ConfigTargetOptionsFormAction::ForceRedirect(flags));
-                        })}
-                    />
-                }})}
                 </Card>
             }
         }

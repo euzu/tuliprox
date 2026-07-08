@@ -3,6 +3,7 @@ mod storage;
 
 use crate::i18n::YewI18n;
 pub use format::*;
+use shared::model::{PlaylistItemType, StreamInfo};
 pub use storage::*;
 use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::window;
@@ -61,4 +62,8 @@ pub fn join_non_empty_parts<'a>(parts: impl Iterator<Item = &'a str>, separator:
         result.push_str(part);
     }
     result
+}
+
+pub fn is_shared_hls_stream(stream: &StreamInfo) -> bool {
+    stream.channel.shared && stream.channel.item_type == PlaylistItemType::LiveHls
 }

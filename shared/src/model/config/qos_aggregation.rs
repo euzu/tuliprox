@@ -1,4 +1,4 @@
-use crate::{error::TuliproxError, utils::is_false};
+use crate::{defaults::is_false, error::TuliproxError};
 
 const fn default_qos_aggregation_interval_secs() -> u64 { 300 }
 const fn is_default_qos_aggregation_interval_secs(value: &u64) -> bool {

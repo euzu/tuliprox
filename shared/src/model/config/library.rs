@@ -1,10 +1,10 @@
 use crate::{
-    error::TuliproxError,
-    utils::{
+    defaults::{
         default_as_true, default_movie_category, default_series_category, default_storage_formats,
         default_supported_library_extensions, default_thumbnail_height, default_thumbnail_width,
         is_default_supported_library_extensions, is_true,
     },
+    error::TuliproxError,
 };
 use serde::{Deserialize, Serialize};
 
