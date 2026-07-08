@@ -12,10 +12,6 @@ pub const HLS_CACHE_DIR_SUFFIX: &str = "tuliprox/cache/hls";
 pub const DEFAULT_HLS_CACHE_BYTES: &str = "10GB";
 pub const DEFAULT_HLS_CACHE_BYTES_PER_SESSION: &str = "512MB";
 
-pub fn default_hls_cache_path() -> String {
-    std::env::temp_dir().join(HLS_CACHE_DIR_SUFFIX).to_string_lossy().into_owned()
-}
-
 pub const fn default_hls_cache_duration() -> u64 { 300 }
 pub fn default_hls_cache_bytes() -> ByteSize { ByteSize::new(DEFAULT_HLS_CACHE_BYTES) }
 pub fn default_hls_cache_bytes_per_session() -> ByteSize { ByteSize::new(DEFAULT_HLS_CACHE_BYTES_PER_SESSION) }

@@ -50,8 +50,9 @@ use shared::{
     utils::{
         bin_serialize, current_time_secs, extract_extension_from_url, get_credentials_from_url,
         human_readable_kbps, is_sanitize_sensitive_info_enabled, replace_url_extension, sanitize_sensitive_info, trim_slash, Internable,
-        CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON, DASH_EXT, HLS_EXT,
+        CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON,
     },
+    defaults::{DASH_EXT, HLS_EXT,},
 };
 use smallvec::SmallVec;
 use std::{
@@ -479,7 +480,7 @@ use crate::utils::LRUResourceCache;
 pub use internal_server_error;
 use shared::error::TuliproxError;
 use shared::model::{AdmissionStrategy, ConnectFailureReason, FailureStage, GeoIpUnavailablePolicy};
-use shared::utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs};
+use shared::defaults::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs};
 pub use try_option_bad_request;
 pub use try_option_forbidden;
 pub use try_result_bad_request;
@@ -4098,7 +4099,8 @@ mod tests {
             ClusterFlags, ConfigPaths, ConfigProviderDto, ConfigTargetOptions, InputFetchMethod, InputType,
             PlaylistItemType, ProcessingOrder, ProviderUrlSelectionPolicy, ProxyType, StreamChannel, XtreamCluster,
         },
-        utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs, Internable},
+        utils::{Internable},
+        defaults::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs},
     };
     use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
     use tokio::sync::{mpsc, RwLock};
@@ -8870,14 +8872,14 @@ mod tests {
             source_ordinal: 0,
         };
 
-        let hls_ext = shared::utils::HLS_EXT.to_string();
+        let hls_ext = shared::defaults::HLS_EXT.to_string();
         let (query_path, extension) =
             crate::api::endpoints::xtream_api::get_query_path("", Some(&hls_ext), &pli, &app_state);
 
         assert_eq!(extension, "");
         assert_eq!(query_path, "1");
 
-        let dash_ext = shared::utils::DASH_EXT.to_string();
+        let dash_ext = shared::defaults::DASH_EXT.to_string();
         let (query_path, extension) =
             crate::api::endpoints::xtream_api::get_query_path("", Some(&dash_ext), &pli, &app_state);
 

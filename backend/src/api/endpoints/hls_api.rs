@@ -91,8 +91,9 @@ use shared::{
     },
     utils::{
         generate_random_string, is_hls_url, replace_url_extension, sanitize_sensitive_info, Internable,
-        PROVIDER_SCHEME_PREFIX, HLS_EXT,
+        PROVIDER_SCHEME_PREFIX,
     },
+    defaults::{HLS_EXT,},
 };
 use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
 use url::Url;
@@ -7063,7 +7064,7 @@ mod tests {
     async fn hls_gc_session_removal_cleans_access_leases_and_repair_state() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let mut hls_dto = HlsCacheConfigDto {
-            cache_path: temp_dir.path().to_string_lossy().into_owned(),
+            cache_path: Some(temp_dir.path().to_string_lossy().into_owned()),
             session_idle_timeout: 1,
             ..Default::default()
         };

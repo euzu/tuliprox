@@ -1,7 +1,8 @@
 use crate::{
+    defaults::{is_blank_or_default_cache_dir, DEFAULT_CACHE_DIR},
     error::TuliproxError,
     model::ByteSize,
-    utils::{is_blank_optional_str, is_blank_or_default_cache_dir, DEFAULT_CACHE_DIR},
+    utils::is_blank_optional_str,
 };
 
 fn is_blank_optional_byte_size(value: &Option<ByteSize>) -> bool {

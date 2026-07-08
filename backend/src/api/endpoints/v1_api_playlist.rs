@@ -34,8 +34,8 @@ fn create_config_input_for_m3u(url: &str) -> ConfigInput {
         enabled: true,
         options: Some(ConfigInputOptions {
             flags: ConfigInputFlags::XtreamLiveStreamUsePrefix | ConfigInputFlags::ResolveBackground,
-            resolve_delay: shared::utils::default_resolve_delay_secs(),
-            probe_delay: shared::utils::default_probe_delay_secs(),
+            resolve_delay: shared::defaults::default_resolve_delay_secs(),
+            probe_delay: shared::defaults::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
             resolve_filter: None,
             probe_filter: None,
@@ -55,8 +55,8 @@ fn create_config_input_for_xtream(username: &str, password: &str, host: &str) ->
         enabled: true,
         options: Some(ConfigInputOptions {
             flags: ConfigInputFlags::XtreamLiveStreamUsePrefix | ConfigInputFlags::ResolveBackground,
-            resolve_delay: shared::utils::default_resolve_delay_secs(),
-            probe_delay: shared::utils::default_probe_delay_secs(),
+            resolve_delay: shared::defaults::default_resolve_delay_secs(),
+            probe_delay: shared::defaults::default_probe_delay_secs(),
             probe_live_interval_hours: 120,
             resolve_filter: None,
             probe_filter: None,

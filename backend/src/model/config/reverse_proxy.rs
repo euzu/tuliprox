@@ -6,9 +6,11 @@ use shared::model::{
     HlsSegmentRepairConfigDto, HlsSegmentRepairSizeIncreaseConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto,
     ReverseProxyDisabledHeaderConfigDto, HlsStripMode, REGEX_CACHE,
 };
-use shared::utils::{default_resource_retry_attempts, default_resource_retry_backoff_ms, default_resource_retry_backoff_multiplier, hex_to_u8_16, u8_16_to_hex};
+use shared::defaults::{default_resource_retry_attempts, default_resource_retry_backoff_ms, default_resource_retry_backoff_multiplier, };
+use shared::utils::{hex_to_u8_16, u8_16_to_hex};
 use std::cmp::max;
 use std::sync::Arc;
+use shared::defaults::HLS_CACHE_DIR_SUFFIX;
 
 #[derive(Debug, Clone)]
 pub struct ReverseProxyDisabledHeaderConfig {
@@ -302,10 +304,14 @@ fn parse_hls_byte_size_or_default(value: &shared::model::ByteSize, default_value
     })
 }
 
+pub fn default_hls_cache_path() -> String {
+    std::env::temp_dir().join(HLS_CACHE_DIR_SUFFIX).to_string_lossy().into_owned()
+}
+
 impl From<&HlsCacheConfigDto> for HlsCacheConfig {
     fn from(dto: &HlsCacheConfigDto) -> Self {
         Self {
-            cache_path: dto.cache_path.clone(),
+            cache_path: dto.cache_path.as_ref().map_or_else(default_hls_cache_path, |path: &String| Clone::clone(path)),
             strip: StripConfig::from(&dto.strip),
             cache_duration: dto.cache_duration,
             cache_bytes: parse_hls_byte_size_or_default(&dto.cache_bytes, "10GB"),
@@ -327,7 +333,7 @@ impl From<&HlsCacheConfigDto> for HlsCacheConfig {
 impl From<&HlsCacheConfig> for HlsCacheConfigDto {
     fn from(config: &HlsCacheConfig) -> Self {
         Self {
-            cache_path: config.cache_path.clone(),
+            cache_path: Some(config.cache_path.clone()),
             strip: shared::model::HlsStripConfigDto::from(&config.strip),
             cache_duration: config.cache_duration,
             cache_bytes: shared::model::ByteSize::new(config.cache_bytes_str.clone()),

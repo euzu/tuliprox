@@ -73,10 +73,10 @@ pub fn resolve_metadata_storage_path(
     storage_dir: &str,
 ) -> PathBuf {
     let configured_path = metadata_update_config.map_or_else(
-        || PathBuf::from(shared::utils::default_metadata_path()),
+        || PathBuf::from(shared::defaults::default_metadata_path()),
         |c| {
             if c.cache_path.is_empty() {
-                PathBuf::from(shared::utils::default_metadata_path())
+                PathBuf::from(shared::defaults::default_metadata_path())
             } else {
                 PathBuf::from(c.cache_path.clone())
             }

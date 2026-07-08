@@ -1,4 +1,8 @@
 use crate::{
+    defaults::{
+        default_as_default, default_as_true, is_config_target_options_empty, is_default_processing_order, is_false,
+        is_true, is_zero_u16,
+    },
     error::TuliproxError,
     foundation::{get_filter, Filter},
     handle_tuliprox_error_result_list,
@@ -6,10 +10,7 @@ use crate::{
         ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview, PatternTemplate,
         ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
     },
-    utils::{
-        default_as_default, default_as_true, is_blank_optional_string, is_config_target_options_empty,
-        is_default_processing_order, is_false, is_true, is_zero_u16,
-    },
+    utils::is_blank_optional_string,
 };
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]

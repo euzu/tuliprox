@@ -18,7 +18,6 @@ use dashmap::{mapref::entry::Entry, DashMap};
 use log::{debug, error, info, warn};
 use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
-use shared::utils::default_probe_user_priority;
 use shared::{
     create_bitset,
     error::TuliproxError,
@@ -27,6 +26,7 @@ use shared::{
         VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
     },
     utils::generate_provider_playlist_uuid,
+    defaults::default_probe_user_priority,
 };
 use std::{
     cmp::min,

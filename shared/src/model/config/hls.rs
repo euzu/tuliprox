@@ -1,19 +1,19 @@
 use crate::{
+    defaults::{
+        default_hls_cache_bytes, default_hls_cache_bytes_per_session, default_hls_cache_duration,
+        default_hls_corrupt_segment_watchdog_max_parallel_jobs, default_hls_max_concurrent_segment_fetches_global,
+        default_hls_max_concurrent_segment_fetches_per_session, default_hls_max_segments_prefetch,
+        default_hls_origin_manifest_timeout_ms, default_hls_origin_segment_timeout_ms,
+        default_hls_segment_repair_apply_to_first_segments, default_hls_segment_repair_high_size_increase_percent,
+        default_hls_segment_repair_low_size_increase_percent, default_hls_segment_repair_max_parallel_repairs,
+        default_hls_segment_repair_medium_size_increase_percent, default_hls_segment_repair_postprocess_timeout_ms,
+        default_hls_session_idle_timeout, DEFAULT_HLS_CACHE_BYTES, DEFAULT_HLS_CACHE_BYTES_PER_SESSION,
+    },
     error::TuliproxError,
     model::{
         ByteSize, HlsCorruptSegmentWatchdogMode, HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripMode,
     },
-    utils::{
-        default_hls_cache_bytes, default_hls_cache_bytes_per_session, default_hls_cache_duration,
-        default_hls_cache_path, default_hls_corrupt_segment_watchdog_max_parallel_jobs,
-        default_hls_max_concurrent_segment_fetches_global, default_hls_max_concurrent_segment_fetches_per_session,
-        default_hls_max_segments_prefetch, default_hls_origin_manifest_timeout_ms,
-        default_hls_origin_segment_timeout_ms, default_hls_segment_repair_apply_to_first_segments,
-        default_hls_segment_repair_high_size_increase_percent, default_hls_segment_repair_low_size_increase_percent,
-        default_hls_segment_repair_max_parallel_repairs, default_hls_segment_repair_medium_size_increase_percent,
-        default_hls_segment_repair_postprocess_timeout_ms, default_hls_session_idle_timeout, DEFAULT_HLS_CACHE_BYTES,
-        DEFAULT_HLS_CACHE_BYTES_PER_SESSION,
-    },
+    utils::is_blank_optional_string,
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
@@ -172,8 +172,8 @@ impl HlsCorruptSegmentWatchdogConfigDto {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HlsCacheConfigDto {
-    #[serde(default = "default_hls_cache_path")]
-    pub cache_path: String,
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub cache_path: Option<String>,
     #[serde(default)]
     pub strip: HlsStripConfigDto,
     #[serde(default = "default_hls_cache_duration")]
@@ -203,7 +203,7 @@ pub struct HlsCacheConfigDto {
 impl Default for HlsCacheConfigDto {
     fn default() -> Self {
         Self {
-            cache_path: default_hls_cache_path(),
+            cache_path: None,
             strip: HlsStripConfigDto::default(),
             cache_duration: default_hls_cache_duration(),
             cache_bytes: default_hls_cache_bytes(),
@@ -244,8 +244,11 @@ impl HlsCacheConfigDto {
     }
 
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        let cache_path = self.cache_path.trim();
-        self.cache_path = if cache_path.is_empty() { default_hls_cache_path() } else { cache_path.to_string() };
+        if let Some(cache_path) = &self.cache_path {
+            if cache_path.is_empty() {
+                self.cache_path = None;
+            }
+        }
 
         self.cache_bytes.clean_or_default(DEFAULT_HLS_CACHE_BYTES);
         self.cache_bytes_per_session.clean_or_default(DEFAULT_HLS_CACHE_BYTES_PER_SESSION);
@@ -309,7 +312,7 @@ mod tests {
         let yaml = r#"
 rewrite_secret: 00112233445566778899aabbccddeeff
 hls_cache:
-  cache_path: "/tmp/tuliprox/cache/hls"
+  cache_path:
   strip:
     mode: "segments"
     value: 0
@@ -338,7 +341,6 @@ hls_cache:
 
         let serialized = serde_saphyr::to_string(&cfg).expect("serialization should succeed");
         assert!(serialized.contains("hls_cache:"), "expected hls_cache block, got: {serialized}");
-        assert!(serialized.contains("cache_path:"), "expected cache_path field, got: {serialized}");
     }
 
     #[test]
@@ -492,7 +494,7 @@ hls_cache:
     #[test]
     fn hls_cache_prepare_sets_defaults_for_blank_values() {
         let mut cfg = HlsCacheConfigDto {
-            cache_path: " ".to_string(),
+            cache_path: None,
             cache_bytes: ByteSize::new(" "),
             cache_bytes_per_session: ByteSize::new(""),
             ..Default::default()

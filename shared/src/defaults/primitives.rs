@@ -9,16 +9,6 @@ pub const fn is_true(v: &bool) -> bool { *v }
 pub const fn is_false(v: &bool) -> bool { !*v }
 pub const fn default_as_true() -> bool { true }
 
-pub fn is_blank_optional_string(s: &Option<String>) -> bool {
-    s.as_ref().is_none_or(|s| s.chars().all(|c| c.is_whitespace()))
-}
-
-pub fn is_non_blank_optional_string(s: &Option<String>) -> bool { !is_blank_optional_string(s) }
-
-pub fn is_blank_optional_arc_str(s: &Option<::std::sync::Arc<str>>) -> bool {
-    s.as_ref().is_none_or(|s| s.chars().all(|c| c.is_whitespace()))
-}
-
 pub fn is_empty_optional_vec<T>(s: &Option<Vec<T>>) -> bool { s.as_ref().is_none_or(|v| v.is_empty()) }
 
 pub fn default_as_default() -> String { "default".into() }

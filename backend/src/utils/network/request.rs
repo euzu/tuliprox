@@ -18,7 +18,6 @@ use reqwest::{
     redirect::Policy,
     StatusCode,
 };
-use shared::utils::DEFAULT_USER_AGENT;
 use shared::{
     error::{string_to_io_error, TuliproxError},
     model::{format_elapsed_time, InputFetchMethod, OnConnectErrorPolicy, ProviderUrlSelectionPolicy},
@@ -26,6 +25,7 @@ use shared::{
         filter_request_header, human_readable_byte_size, sanitize_sensitive_info, CONTENT_TYPE_JSON, ENCODING_DEFLATE,
         ENCODING_GZIP,
     },
+    defaults::{DEFAULT_USER_AGENT}
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -2618,7 +2618,7 @@ mod tests {
             AppConfig, Config, ConfigProvider, InputSource, MediaToolCapabilities, ResourceRetryConfig,
             ReverseProxyConfig, SourcesConfig,
         },
-        utils::{FileLockManager, DEFAULT_USER_AGENT},
+        utils::{FileLockManager},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::model::{
@@ -2626,6 +2626,8 @@ mod tests {
         ProviderUrlSelectionPolicy,
     };
     use shared::utils::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info};
+    use shared::defaults::{DEFAULT_USER_AGENT};
+
     use std::{
         collections::{HashMap, HashSet},
         net::SocketAddr,

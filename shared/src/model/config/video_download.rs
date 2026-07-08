@@ -1,10 +1,11 @@
 use crate::{
-    error::TuliproxError,
-    utils::{
-        default_download_dir, default_episode_pattern, default_supported_video_extensions, is_blank_optional_str,
-        is_blank_optional_string, is_blank_or_default_download_dir, is_blank_or_default_episode_pattern,
-        is_default_supported_video_extensions, is_false, DEFAULT_USER_AGENT, F64_DEFAULT_EPSILON,
+    defaults::{
+        default_download_dir, default_episode_pattern, default_supported_video_extensions,
+        is_blank_or_default_download_dir, is_blank_or_default_episode_pattern, is_default_supported_video_extensions,
+        is_false, DEFAULT_USER_AGENT, F64_DEFAULT_EPSILON,
     },
+    error::TuliproxError,
+    utils::{is_blank_optional_str, is_blank_optional_string},
 };
 use std::{borrow::BorrowMut, collections::HashMap};
 
@@ -152,7 +153,7 @@ impl VideoConfigDto {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::DEFAULT_DOWNLOAD_DIR;
+    use crate::defaults::DEFAULT_DOWNLOAD_DIR;
 
     fn make_test_download_config() -> VideoDownloadConfigDto {
         VideoDownloadConfigDto {

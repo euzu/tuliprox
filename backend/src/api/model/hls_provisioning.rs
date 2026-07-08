@@ -12,7 +12,10 @@ use axum::{
 };
 use dashmap::DashMap;
 use log::{debug, error};
-use shared::utils::{sanitize_sensitive_info, CUSTOM_VIDEO_PREFIX};
+use shared::{
+    utils::{sanitize_sensitive_info},
+    defaults::{CUSTOM_VIDEO_PREFIX}
+};
 use std::{
     fmt::Write as _,
     sync::Arc,
@@ -24,7 +27,7 @@ const HLS_STATIC_CUSTOM_VIDEO_SEGMENT_COUNT: usize = 12;
 const PROVISIONING_HLS_TARGET_DURATION_SECS: u64 = 2;
 const PROVISIONING_HLS_EXTINF: &str = "2.000000";
 pub(crate) const CUSTOM_VIDEO_HLS_PROVISIONING_SEGMENT_COUNT: usize =
-    shared::utils::PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT;
+    shared::defaults::PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT;
 const HLS_PROVISIONING_COMPLETED_REDIRECT_WINDOW_MS: u64 = 60_000;
 const HLS_PROVISIONING_STALE_MARKER_MS: u64 = 5 * 60_000;
 const HLS_CUSTOM_VIDEO_ROUTE_KIND: &str = "hls";

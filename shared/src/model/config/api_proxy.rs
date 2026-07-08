@@ -1,7 +1,8 @@
 use crate::{
+    defaults::{default_auth_error_status, is_default_auth_error_status, is_false},
     error::TuliproxError,
     model::ProxyUserCredentialsDto,
-    utils::{default_auth_error_status, is_blank_optional_string, is_default_auth_error_status, is_false},
+    utils::is_blank_optional_string,
 };
 use std::collections::HashSet;
 

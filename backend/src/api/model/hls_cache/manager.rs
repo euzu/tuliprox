@@ -161,7 +161,7 @@ impl HlsProxyManager {
     pub fn with_cache_settings(cache_path: impl Into<PathBuf>, cache_duration_seconds: u64) -> Self {
         let default_dto = shared::model::HlsCacheConfigDto {
             cache_duration: cache_duration_seconds,
-            cache_path: cache_path.into().to_string_lossy().to_string(),
+            cache_path: Some(cache_path.into().to_string_lossy().to_string()),
             ..Default::default()
         };
         let default_config = HlsCacheConfig::from(&default_dto);
@@ -1176,7 +1176,7 @@ mod tests {
     #[tokio::test]
     async fn update_config_applies_hls_runtime_settings_to_existing_manager() {
         let initial_dto = HlsCacheConfigDto {
-            cache_path: "/tmp/tuliprox/hls-a".to_string(),
+            cache_path: Some("/tmp/tuliprox/hls-a".to_string()),
             max_segments_prefetch: 1,
             ..Default::default()
         };
@@ -1241,14 +1241,14 @@ mod tests {
         let old_cache = temp_dir.path().join("old");
         let new_cache = temp_dir.path().join("new");
         let initial_dto =
-            HlsCacheConfigDto { cache_path: old_cache.to_string_lossy().to_string(), ..Default::default() };
+            HlsCacheConfigDto { cache_path: Some(old_cache.to_string_lossy().to_string()), ..Default::default() };
         let initial_config = HlsCacheConfig::from(&initial_dto);
         let manager = HlsProxyManager::with_hls_cache_config(&initial_config);
         let _ = manager.get_or_create_session_with_outcome(HlsSessionKey::new(1, "stream-a"), b"secret", 100).await;
         assert_eq!(manager.sessions().len().await, 1);
 
         let mut updated_dto = initial_dto;
-        updated_dto.cache_path = new_cache.to_string_lossy().to_string();
+        updated_dto.cache_path = Some(new_cache.to_string_lossy().to_string());
         let app_config = test_app_config(config_with_hls_cache(updated_dto));
 
         manager.update_config(&app_config).await;

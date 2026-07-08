@@ -32,7 +32,8 @@ use shared::{
         ConnectFailureReason, FieldGetAccessor, PlaylistEntry, PlaylistItemType, TargetType, UserConnectionPermission,
         XtreamCluster,
     },
-    utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info, HLS_EXT},
+    utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info},
+    defaults::{HLS_EXT}
 };
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -394,7 +395,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     // falling back to `now`.
     let archive_reference = m3u_archive_epg_reference_ts(&pli.url);
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
-    if is_session_request && extension == shared::utils::HLS_EXT {
+    if is_session_request && extension == shared::defaults::HLS_EXT {
         let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id);
         return handle_hls_stream_request(
             fingerprint,

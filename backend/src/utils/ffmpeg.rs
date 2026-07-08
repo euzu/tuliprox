@@ -5,8 +5,11 @@ use reqwest::{
     Client, StatusCode,
 };
 use serde_json::Value;
-use shared::model::MediaQuality;
-use shared::utils::{default_thumbnail_height, default_thumbnail_width, is_dash_url, is_hls_url, sanitize_sensitive_info};
+use shared::{
+    model::MediaQuality,
+    utils::{is_dash_url, is_hls_url, sanitize_sensitive_info},
+    defaults::{default_thumbnail_height, default_thumbnail_width},
+};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -1212,7 +1215,7 @@ mod tests {
     };
     use crate::model::ProxyConfig;
     use serde_json::json;
-    use shared::utils::{default_thumbnail_height, default_thumbnail_width};
+    use shared::defaults::{default_thumbnail_height, default_thumbnail_width};
     use std::{io, path::Path, pin::Pin, task::{Context, Poll}};
     use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex};
     use tokio::{

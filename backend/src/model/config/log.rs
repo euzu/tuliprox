@@ -1,12 +1,10 @@
 use shared::model::{LogConfigDto, RuntimeConfigReportFormat};
-use shared::utils::default_as_true;
+use shared::defaults::default_as_true;
 use crate::model::macros;
+
 // We need serde for these structs to read them during
 // start from the yaml file without reading the whole config.
 //
-
-
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LogConfig {

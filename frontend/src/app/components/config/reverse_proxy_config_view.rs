@@ -25,6 +25,7 @@ use crate::{
     i18n::{use_translation, YewI18n},
 };
 use shared::{
+    defaults::default_secret,
     model::{
         ByteSize, CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, HlsCacheConfigDto,
         HlsCorruptSegmentWatchdogMode, HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevel,
@@ -32,7 +33,7 @@ use shared::{
         RateLimitConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto,
         StreamBufferConfigDto, StreamConfigDto, StreamHistoryConfigDto,
     },
-    utils::{default_secret, format_float_localized},
+    utils::format_float_localized,
 };
 use std::{rc::Rc, str::FromStr};
 use strum::IntoEnumIterator;
@@ -222,7 +223,7 @@ generate_form_reducer!(
     state: HlsCacheConfigFormState { form: HlsCacheConfigDto },
     action_name: HlsCacheConfigFormAction,
     fields {
-        CachePath => cache_path: String,
+        CachePath => cache_path: Option<String>,
         CacheDuration => cache_duration: u64,
         CacheBytes => cache_bytes: ByteSize,
         CacheBytesPerSession => cache_bytes_per_session: ByteSize,
@@ -795,7 +796,7 @@ pub fn ReverseProxyConfigView() -> Html {
         html! {
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_HLS_CACHE_PROXY)}</h1>
-                { config_field!(hls_cache_state.form, translate.t(LABEL_CACHE_PATH), cache_path) }
+                { config_field_optional!(hls_cache_state.form, translate.t(LABEL_CACHE_PATH), cache_path) }
                 { config_field_child!(translate.t(LABEL_STRIP_MODE), "HLS_CACHE_CONFIG.STRIP_MODE", {
                     html! { <span class="tp__form-field__value">{hls_strip_state.form.mode.to_string()}</span> }
                 }) }
@@ -923,7 +924,7 @@ pub fn ReverseProxyConfigView() -> Html {
         html! {
             <Card class="tp__config-view__card">
                 <h1>{translate.t(LABEL_HLS_CACHE_PROXY)}</h1>
-                { edit_field_text!(hls_cache_state, translate.t(LABEL_CACHE_PATH), cache_path, HlsCacheConfigFormAction::CachePath) }
+                { edit_field_text_option!(hls_cache_state, translate.t(LABEL_CACHE_PATH), cache_path, HlsCacheConfigFormAction::CachePath) }
                 { config_field_child!(translate.t(LABEL_STRIP_MODE), "HLS_CACHE_CONFIG.STRIP_MODE", {
                     html! {
                         <Select

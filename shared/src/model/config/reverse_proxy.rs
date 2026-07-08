@@ -1,14 +1,15 @@
 use crate::{
+    defaults::{
+        default_resource_retry_attempts, default_resource_retry_backoff_ms, default_resource_retry_backoff_multiplier,
+        is_default_resource_retry_attempts, is_default_resource_retry_backoff_ms,
+        is_default_resource_retry_backoff_multiplier, is_empty_optional_vec, is_false,
+    },
     error::TuliproxError,
     model::{
         CacheConfigDto, GeoIpConfigDto, HlsCacheConfigDto, QosAggregationConfigDto, RateLimitConfigDto,
         StreamConfigDto, StreamHistoryConfigDto,
     },
-    utils::{
-        default_resource_retry_attempts, default_resource_retry_backoff_ms, default_resource_retry_backoff_multiplier,
-        hex_to_u8_16, is_default_resource_retry_attempts, is_default_resource_retry_backoff_ms,
-        is_default_resource_retry_backoff_multiplier, is_empty_optional_vec, is_false,
-    },
+    utils::hex_to_u8_16,
 };
 use log::warn;
 

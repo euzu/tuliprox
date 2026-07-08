@@ -35,9 +35,10 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use shared::model::ConnectFailureReason;
-use shared::utils::{Internable, DEFAULT_USER_AGENT};
-use shared::model::{FailureStage};
+use shared::{
+    model::{ConnectFailureReason, FailureStage},
+    utils::Internable,
+    defaults::DEFAULT_USER_AGENT};
 
 const RETRY_SECONDS: u64 = 5;
 const ERR_MAX_RETRY_COUNT: u32 = 5;

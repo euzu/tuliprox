@@ -10,7 +10,7 @@ use log::{error, warn};
 use rand::Rng;
 use shared::error::TuliproxError;
 use shared::model::{ConfigPaths, GeoIpUnavailablePolicy};
-use shared::utils::{
+use shared::defaults::{
     CHANNEL_UNAVAILABLE, HLS_SESSION_OR_LEASE_EXPIRED, LOW_PRIORITY_PREEMPTED, PANEL_API_PROVISIONING,
     PANEL_API_PROVISIONING_HLS_SEGMENT_COUNT, PANEL_API_PROVISIONING_HLS_SEGMENT_PREFIX,
     PROVIDER_CONNECTIONS_EXHAUSTED, USER_ACCOUNT_EXPIRED, USER_CONNECTIONS_EXHAUSTED,
@@ -247,7 +247,7 @@ impl AppConfig {
             .api_proxy
             .load()
             .as_ref()
-            .map_or(shared::utils::default_auth_error_status(), |api_proxy| api_proxy.auth_error_status);
+            .map_or(shared::defaults::default_auth_error_status(), |api_proxy| api_proxy.auth_error_status);
         axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::FORBIDDEN)
     }
 

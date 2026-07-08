@@ -3,7 +3,7 @@ use crate::model::{TraktApiConfig, TraktChartConfig, TraktListConfig, TraktListI
 use log::{debug, info};
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
-use shared::{error::TuliproxError, utils::{trim_last_slash, DEFAULT_USER_AGENT, TRAKT_API_KEY}};
+use shared::{error::TuliproxError, utils::{trim_last_slash,}, defaults::{DEFAULT_USER_AGENT, TRAKT_API_KEY}};
 
 const TRAKT_PAGE_LIMIT: u32 = 100;
 const TRAKT_MAX_PAGES: u32 = 100;

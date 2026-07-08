@@ -1,4 +1,4 @@
-use crate::utils::{is_blank_optional_string, is_empty_optional_vec};
+use crate::{defaults::is_empty_optional_vec, utils::is_blank_optional_string};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConfigPaths {

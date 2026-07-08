@@ -5,8 +5,9 @@ use crate::{
 };
 use gloo_utils::window;
 use shared::{
+    defaults::default_hls_session_ttl_secs,
     model::{PlaylistItemType, StreamChannel, StreamInfo, StreamInfoConfigDto, StreamTechnicalInfo},
-    utils::{current_time_secs, default_hls_session_ttl_secs},
+    utils::current_time_secs,
 };
 use std::{
     collections::{HashMap, HashSet},

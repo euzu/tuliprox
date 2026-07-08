@@ -1528,7 +1528,7 @@ mod tests {
     };
     use std::collections::HashSet;
     use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
-    use shared::utils::{default_probe_user_priority, default_user_priority};
+    use shared::defaults::{default_probe_user_priority, default_user_priority};
 
     fn build_test_app_config(aliases: Option<Vec<ConfigInputAlias>>, max_connections: u16) -> AppConfig {
         let input = Arc::new(ConfigInput {

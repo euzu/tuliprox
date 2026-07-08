@@ -13,9 +13,13 @@ use shared::{
         UserConnectionPermission, VirtualId,
     },
     utils::{
-        current_time_secs, default_grace_period_millis, default_grace_period_timeout_secs, default_hls_session_ttl_secs,
-        extract_extension_from_url, sanitize_sensitive_info, strip_port, Internable, DASH_EXT, HLS_EXT,
+        current_time_secs,
+        extract_extension_from_url, sanitize_sensitive_info, strip_port, Internable,
     },
+    defaults::{
+        default_grace_period_millis, default_grace_period_timeout_secs, default_hls_session_ttl_secs,
+        DASH_EXT, HLS_EXT,
+    }
 };
 use std::{
     borrow::Cow,

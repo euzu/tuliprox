@@ -1,6 +1,9 @@
 use crate::model::ProxyUserCredentials;
 use shared::concat_string;
-use shared::utils::{deobfuscate_text, extract_extension_from_url, obfuscate_text, CONSTANTS, HLS_PREFIX};
+use shared::{
+    utils::{deobfuscate_text, extract_extension_from_url, obfuscate_text, CONSTANTS},
+    defaults::{HLS_PREFIX}
+};
 use std::borrow::Cow;
 use std::str;
 use url::Url;
@@ -152,7 +155,8 @@ mod test {
         get_hls_session_token_and_url_from_token, rewrite_hls, rewrite_hls_url, RewriteHlsProps,
     };
     use rand::RngCore;
-    use shared::utils::{u32_to_base64, HLS_PREFIX};
+    use shared::utils::{u32_to_base64};
+    use shared::defaults::{HLS_PREFIX};
 
     #[test]
     fn test_token_size() {

@@ -57,8 +57,9 @@ use shared::{
     },
     utils::{
         deserialize_as_string, extract_extension_from_url, generate_provider_playlist_uuid, sanitize_sensitive_info,
-        trim_slash, Internable, HLS_EXT,
+        trim_slash, Internable,
     },
+    defaults::{HLS_EXT},
 };
 use std::{
     fmt::{Display, Formatter, Write},
@@ -574,7 +575,7 @@ async fn xtream_player_api_stream(
 
     let is_session_request = is_session_based_playback(item_type, Some(playback_ext));
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
-    if is_session_request && playback_ext == shared::utils::HLS_EXT {
+    if is_session_request && playback_ext == shared::defaults::HLS_EXT {
         let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id);
         return handle_hls_stream_request(
             fingerprint,
@@ -745,7 +746,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
         // TODO how should we use fixed provider for hls in multi provider config?
 
         // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
-        if is_session_request && playback_ext == Some(shared::utils::HLS_EXT) {
+        if is_session_request && playback_ext == Some(shared::defaults::HLS_EXT) {
             let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, virtual_id);
             return handle_hls_stream_request(
                 fingerprint,
