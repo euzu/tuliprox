@@ -650,8 +650,8 @@ pub async fn read_initial_app_config(
         paths: Arc::new(ArcSwap::from_pointee(paths.clone())),
         file_locks: Arc::new(FileLockManager::default()),
         custom_stream_response: Arc::new(ArcSwapAny::default()),
-        access_token_secret: generate_default_access_secret(),
-        encrypt_secret: generate_default_encrypt_secret(),
+        access_token_secret: generate_default_access_secret()?,
+        encrypt_secret: generate_default_encrypt_secret()?,
         media_tools: Arc::new(MediaToolCapabilities::new()),
     };
     app_config.prepare(include_computed)?;
