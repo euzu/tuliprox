@@ -18,7 +18,6 @@ use dashmap::{mapref::entry::Entry, DashMap};
 use log::{debug, error, info, warn};
 use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
-use shared::utils::default_probe_user_priority;
 use shared::{
     create_bitset,
     error::TuliproxError,
@@ -27,6 +26,7 @@ use shared::{
         VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
     },
     utils::generate_provider_playlist_uuid,
+    defaults::default_probe_user_priority,
 };
 use std::{
     cmp::min,
@@ -1031,7 +1031,7 @@ impl MetadataUpdateManager {
 
         // Lock-free admission with CAS: reserve one queue slot only if capacity allows.
         if pending_task_count
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
                 if current < max_queue_size {
                     Some(current + 1)
                 } else {
@@ -1081,7 +1081,7 @@ impl MetadataUpdateManager {
     #[inline]
     fn decrement_pending_task_count(pending_task_count: &AtomicUsize) {
         // Guard against accidental underflow in edge/error paths.
-        let _ = pending_task_count.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| current.checked_sub(1));
+        let _ = pending_task_count.try_update(Ordering::AcqRel, Ordering::Relaxed, |current| current.checked_sub(1));
     }
 
     fn merge_task_payload(existing: &mut UpdateTask, task: UpdateTask) -> bool {

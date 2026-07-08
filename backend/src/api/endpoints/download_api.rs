@@ -2003,6 +2003,8 @@ mod tests {
             downloads: Arc::new(DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
+            hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
+            hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
             active_users,
             active_provider,
             connection_manager,

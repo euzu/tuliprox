@@ -1,10 +1,8 @@
 use crate::{
+    defaults::{default_as_true, default_user_priority, is_cluster_optional, is_default_user_priority, is_true},
     error::TuliproxError,
     model::{ClusterFlags, NetworkAccessDto, ProxyType, ProxyUserStatus, XtreamCluster},
-    utils::{
-        default_as_true, default_user_priority, deserialize_timestamp, is_blank_optional_string, is_cluster_optional,
-        is_default_user_priority, is_true,
-    },
+    utils::{deserialize_timestamp, is_blank_optional_string},
 };
 
 #[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

@@ -1,11 +1,10 @@
 use crate::{
-    error::TuliproxError,
-    utils::{
+    defaults::{
         default_as_true, default_media_server_catalog_page_size, default_media_server_catalog_request_delay_ms,
-        deserialize_as_option_string, get_trimmed_string, is_blank_optional_string,
-        is_default_media_server_catalog_page_size, is_default_media_server_catalog_request_delay_ms, is_false,
-        is_non_blank_optional_string, is_true,
+        is_default_media_server_catalog_page_size, is_default_media_server_catalog_request_delay_ms, is_false, is_true,
     },
+    error::TuliproxError,
+    utils::{deserialize_as_option_string, get_trimmed_string, is_blank_optional_string, is_non_blank_optional_string},
 };
 use std::sync::Arc;
 

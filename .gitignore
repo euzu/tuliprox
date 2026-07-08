@@ -56,8 +56,4 @@ backend/Cargo.lock
 !CONTRIBUTING.md
 
 # Ignore ai documentation files
-.c[lor][adu]*
-/.dual-graph*
-/graphify*
-.dual-graph/
-.dual-graph-context/
+# no ai files

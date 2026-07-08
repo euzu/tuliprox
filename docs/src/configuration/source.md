@@ -661,7 +661,9 @@ sources:
         sort: { }
         options:
           ignore_logo: false
-          share_live_streams: false
+          share_live_streams:
+            hls: false
+            mpeg_ts: false
           remove_duplicates: false
         output:
           - type: xtream
@@ -730,7 +732,7 @@ Valid values are:
 The target-level `filter` is a string-based expression using Tuliprox's filter DSL.
 It defines which entries remain in the final target after the selected processing stages have been applied.
 
-You can define complex strings or regex patterns exactly once in [template.yml](./configuration/template.md)
+You can define complex strings or regex patterns exactly once in [template.yml](./template.md)
 and call them by wrapping the template name in exclamation marks: `!MACRO_NAME!`.
 For less verbose expression definitions, inline filter definitions are also supported.
 
@@ -930,20 +932,30 @@ targets:
         use_output: xtream
     options:
       ignore_logo: false
-      share_live_streams: true
+      share_live_streams:
+        hls: true
+        mpeg_ts: true
       remove_duplicates: false
 ```
 
 #### Target Option Parameters
 
-| Parameter            | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                              |
-|:---------------------|:-----|:--------:|:--------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `ignore_logo`        | Bool |    No    | `false` | Ignores `tvg-logo` and `tvg-logo-small` attributes. This reduces downstream device-side logo caching and can keep generated M3U playlists leaner for clients with limited storage or poor cache invalidation behavior.     |
-| `share_live_streams` | Bool |    No    | `false` | Allows Tuliprox to share live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel. |
-| `remove_duplicates`  | Bool |    No    | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output.                                                                            |
-| `force_redirect`     | Bool |    No    | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model.                                             |
+| Parameter                    | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                                      |
+|:-----------------------------|:-----|:--------:|:--------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ignore_logo`                | Bool | No       | `false` | Ignores `tvg-logo` and `tvg-logo-small` attributes. This reduces downstream device-side logo caching and can keep generated M3U playlists leaner for clients with limited storage or poor cache invalidation behavior.             |
+| `share_live_streams.hls`     | Bool | No       | `false` | Enables HLS live sharing for the new HLS cache proxy path. This is a configuration switch for the HLS cache feature and is independent from MPEG-TS stream sharing.                                                                |
+| `share_live_streams.mpeg_ts` | Bool | No       | `false` | Allows Tuliprox to share MPEG-TS live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel. |
+| `remove_duplicates`          | Bool | No       | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output.                                                                                    |
+| `force_redirect`             | Bool | No       | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model.                                                     |
 
-> **⚠️ Warning:** When `share_live_streams` is enabled, each shared channel consumes at least **12 MB** of memory,
+> **Shared HLS:** `share_live_streams.hls` requires `reverse_proxy.hls_cache` in `config.yml`.
+> Start with [Shared HLS Sessions](./shared-hls-sessions.md) for the feature overview and
+> [Shared HLS Configuration](./shared-hls-configuration.md) for the full setup checklist.
+>
+> Use the object form shown above. The old boolean style `share_live_streams: true` is not valid for this configuration,
+> because HLS sharing and MPEG-TS sharing are independent switches.
+>
+> **⚠️ Warning:** When `share_live_streams.mpeg_ts` is enabled, each shared channel consumes at least **12 MB** of memory,
 > regardless of the number of connected clients.
 > If the reverse-proxy buffer size is increased above `1024`, memory usage increases accordingly.
 > Example: with a buffer size of `2048`, each shared channel consumes at least **24 MB**.

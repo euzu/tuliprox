@@ -3,12 +3,12 @@ use crate::app::{
     ConfigContext,
 };
 use shared::{
+    defaults::{default_secret, is_default_supported_library_extensions},
     model::{
         ApiProxyConfigDto, AppConfigDto, HdHomeRunConfigDto, LibraryConfigDto, LibraryMetadataConfigDto,
         LibraryPlaylistConfigDto, LogConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto,
         StreamConfigDto, TargetOutputDto, TargetUserDto, ThumbnailConfigDto, WebUiConfigDto,
     },
-    utils::{default_secret, is_default_supported_library_extensions},
 };
 use std::sync::OnceLock;
 

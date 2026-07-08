@@ -5,8 +5,11 @@ use reqwest::{
     Client, StatusCode,
 };
 use serde_json::Value;
-use shared::model::MediaQuality;
-use shared::utils::{default_thumbnail_height, default_thumbnail_width, is_dash_url, is_hls_url, sanitize_sensitive_info};
+use shared::{
+    model::MediaQuality,
+    utils::{is_dash_url, is_hls_url, sanitize_sensitive_info},
+    defaults::{default_thumbnail_height, default_thumbnail_width},
+};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -18,9 +21,9 @@ use tokio::{
 };
 use url::Url;
 
-const FFMPEG_TIMEOUT: Duration = Duration::from_secs(60);
+const FFMPEG_TIMEOUT: Duration = Duration::from_mins(1);
 const FFPROBE_SEEKABLE_MAX_WINDOW_BYTES: u64 = 32 * 1024 * 1024;
-const FFPROBE_TEMP_STALE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const FFPROBE_TEMP_STALE_MAX_AGE: Duration = Duration::from_hours(24);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeFailureKind {
@@ -1212,7 +1215,7 @@ mod tests {
     };
     use crate::model::ProxyConfig;
     use serde_json::json;
-    use shared::utils::{default_thumbnail_height, default_thumbnail_width};
+    use shared::defaults::{default_thumbnail_height, default_thumbnail_width};
     use std::{io, path::Path, pin::Pin, task::{Context, Poll}};
     use std::sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex};
     use tokio::{

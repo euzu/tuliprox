@@ -15,13 +15,16 @@ use arc_swap::{ArcSwap, ArcSwapAny};
 use chrono::Local;
 use log::{error, info, warn};
 use serde::Serialize;
-use shared::error::TuliproxError;
-use shared::foundation::prepare_templates;
-use shared::model::{
-    ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType,
-    MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
+use shared::{
+    error::TuliproxError,
+    foundation::prepare_templates,
+    model::{
+        ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType,
+        MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
+    },
+    utils::{CONSTANTS, PROVIDER_SCHEME_PREFIX},
+    defaults::{generate_default_access_secret, generate_default_encrypt_secret, TEMPLATE_FILE},
 };
-use shared::utils::{generate_default_access_secret, generate_default_encrypt_secret, CONSTANTS, PROVIDER_SCHEME_PREFIX, TEMPLATE_FILE};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;

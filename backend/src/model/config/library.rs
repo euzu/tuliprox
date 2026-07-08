@@ -1,7 +1,7 @@
 use crate::model::macros;
 use shared::error::TuliproxError;
 use shared::model::{ConfigDto, LibraryConfigDto, LibraryContentType, LibraryMetadataFormat};
-use shared::utils::DEFAULT_STORAGE_DIR;
+use shared::defaults::DEFAULT_STORAGE_DIR;
 use shared::utils::Internable;
 use std::path::PathBuf;
 use std::sync::Arc;

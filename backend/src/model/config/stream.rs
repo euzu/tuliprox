@@ -164,4 +164,6 @@ pub struct CustomStreamResponse {
     pub low_priority_preempted: Option<TransportStreamBuffer>, // stream was preempted by a higher-priority user
     pub user_account_expired: Option<TransportStreamBuffer>,
     pub panel_api_provisioning: Option<TransportStreamBuffer>,
+    pub hls_session_or_lease_expired: Option<TransportStreamBuffer>,
+    pub panel_api_provisioning_hls_segments: Vec<TransportStreamBuffer>,
 }

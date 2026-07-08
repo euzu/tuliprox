@@ -1,11 +1,9 @@
 use crate::{
     apply_flags, create_bitset,
+    defaults::{default_as_true, default_kick_secs, is_default_kick_secs, is_false, is_true},
     error::TuliproxError,
     model::{view_type::ViewType, WebAuthConfigDto},
-    utils::{
-        default_as_true, default_kick_secs, is_blank_optional_str, is_blank_optional_string, is_default_kick_secs,
-        is_false, is_true,
-    },
+    utils::{is_blank_optional_str, is_blank_optional_string},
 };
 
 const RESERVED_PATHS: &[&str] = &[

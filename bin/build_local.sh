@@ -17,6 +17,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # # Only Backend + clean
 # ./build.sh windows --backend-only --clean
 #
+# # Backend with release optimizations but debug symbols
+# ./build.sh linux-musl --backend-only --debug
+#
 # # Help
 # ./build.sh --help
 #
@@ -31,6 +34,7 @@ export RUSTFLAGS="--remap-path-prefix $HOME=~"
 BUILD_BACKEND=true
 BUILD_FRONTEND=true
 DO_CLEAN=false
+BUILD_DEBUG_SYMBOLS=false
 TARGET=""
 
 ########################################
@@ -42,7 +46,7 @@ Usage:
   $SCRIPT_NAME <target> [options]
 
 Targets:
-  linux-musl     x86_64-unknown-linux-musl        (cross)
+  linux-musl     x86_64-unknown-linux-musl        (cargo zigbuild on macOS, cross otherwise)
   linux-gnu      x86_64-unknown-linux-gnu         (cargo on Linux, cross otherwise)
   armv7          armv7-unknown-linux-musleabihf   (cross)
   aarch64        aarch64-unknown-linux-musl       (cross)
@@ -54,6 +58,7 @@ Options:
   --frontend-only    Build only frontend
   --backend-only     Build only backend
   --clean            cargo clean before build
+  --debug            Keep debug symbols in release backend binary and disable strip
   -h, --help         Show this help
 
 Examples:
@@ -61,6 +66,7 @@ Examples:
   $SCRIPT_NAME armv7 --no-frontend
   $SCRIPT_NAME aarch64 --no-frontend
   $SCRIPT_NAME windows --backend-only
+  $SCRIPT_NAME linux-musl --backend-only --debug
   $SCRIPT_NAME linux-gnu --clean
 EOF
 }
@@ -93,6 +99,9 @@ for arg in "$@"; do
     --clean)
       DO_CLEAN=true
       ;;
+    --debug)
+      BUILD_DEBUG_SYMBOLS=true
+      ;;
     -h|--help)
       usage
       exit 0
@@ -124,10 +133,28 @@ fi
 ########################################
 if [ "$BUILD_BACKEND" = true ]; then
   echo "==> Building backend ($TARGET)"
+  if [ "$BUILD_DEBUG_SYMBOLS" = true ]; then
+    echo "==> Keeping release debug symbols and disabling strip"
+    export CARGO_PROFILE_RELEASE_DEBUG=true
+    export CARGO_PROFILE_RELEASE_STRIP=false
+  fi
 
   case "$TARGET" in
     linux-musl)
-      cross build -p tuliprox --release --target x86_64-unknown-linux-musl
+      if [ "$(uname)" = "Darwin" ]; then
+        if ! command -v cargo-zigbuild >/dev/null 2>&1; then
+          echo "❌ cargo-zigbuild not found. Install with: cargo install cargo-zigbuild"
+          exit 1
+        fi
+        if ! command -v zig >/dev/null 2>&1; then
+          echo "❌ zig not found. Install with: brew install zig"
+          exit 1
+        fi
+        rustup target add x86_64-unknown-linux-musl
+        cargo zigbuild -p tuliprox --release --target x86_64-unknown-linux-musl
+      else
+        cross build -p tuliprox --release --target x86_64-unknown-linux-musl
+      fi
       ;;
     linux-gnu)
       if [ "$(uname)" = "Linux" ]; then

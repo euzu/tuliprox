@@ -1,12 +1,12 @@
 use crate::{
-    error::TuliproxError,
-    utils::{
+    defaults::{
         default_as_true, default_device_type, default_device_udn, default_firmware_name, default_firmware_version,
-        default_friendly_name, default_manufacturer, default_model_name, generate_hdhr_device_id,
-        generate_hdhr_device_id_from_base, hash_string, is_default_device_type, is_default_device_udn,
+        default_friendly_name, default_manufacturer, default_model_name, is_default_device_type, is_default_device_udn,
         is_default_firmware_name, is_default_firmware_version, is_default_friendly_name, is_default_manufacturer,
-        is_default_model_name, is_false, is_true, validate_hdhr_device_id,
+        is_default_model_name, is_false, is_true,
     },
+    error::TuliproxError,
+    utils::{generate_hdhr_device_id, generate_hdhr_device_id_from_base, hash_string, validate_hdhr_device_id},
 };
 use log::warn;
 use std::collections::HashSet;

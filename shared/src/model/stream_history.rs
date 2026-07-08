@@ -1,6 +1,6 @@
 use crate::{
+    defaults::{default_page, default_page_size},
     model::PlaylistItemType,
-    utils::{default_page, default_page_size},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};

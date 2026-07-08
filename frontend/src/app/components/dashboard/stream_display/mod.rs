@@ -23,11 +23,11 @@ use crate::{
 use gloo_timers::callback::Interval;
 pub use helpers::get_stream_info_config;
 use shared::{
+    defaults::default_kick_secs,
     error::TuliproxError,
     model::{
         PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, StreamInfoConfigDto, UserCommand,
     },
-    utils::default_kick_secs,
 };
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};

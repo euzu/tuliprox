@@ -5,5 +5,5 @@ pub(crate) fn create_cors_layer<const N: usize>(
         .allow_origin(tower_http::cors::Any)
         .allow_methods(methods)
         .allow_headers(tower_http::cors::Any)
-        .max_age(std::time::Duration::from_secs(3600))
+        .max_age(std::time::Duration::from_hours(1))
 }

@@ -1189,6 +1189,7 @@ mod tests {
                     enabled: false,
                     interval_secs: 300,
                 }),
+                hls_cache: None,
             }),
             ..crate::model::Config::default()
         };

@@ -67,8 +67,8 @@ macro_rules! create_resolve_options_function_for_xtream_target {
                                 false,
                                 false,
                                 false,
-                                shared::utils::default_resolve_delay_secs(),
-                                shared::utils::default_resolve_background(),
+                                shared::defaults::default_resolve_delay_secs(),
+                                shared::defaults::default_resolve_background(),
                             )
                         };
 

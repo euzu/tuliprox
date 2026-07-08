@@ -1,4 +1,4 @@
-use crate::utils::{
+use crate::defaults::{
     default_as_true, default_trakt_fuzzy_threshold, is_false, is_true, DEFAULT_USER_AGENT, TRAKT_API_KEY,
     TRAKT_API_URL, TRAKT_API_VERSION,
 };

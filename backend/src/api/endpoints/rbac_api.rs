@@ -23,6 +23,8 @@ use std::{
     path::{Path as FsPath, PathBuf},
     sync::Arc,
 };
+use shared::defaults::{is_blank_or_default_user_file_path, is_blank_or_default_user_group_file_path};
+use crate::utils::{get_default_user_file_path, get_default_user_group_file_path};
 
 const RBAC_MUTATION_LOCK: &str = "rbac:mutation";
 
@@ -204,13 +206,13 @@ fn user_has_admin_group(user: &WebUiUser) -> bool { user.groups.iter().any(|grou
 fn count_admin_users(users: &[WebUiUser]) -> usize { users.iter().filter(|user| user_has_admin_group(user)).count() }
 
 fn resolve_auth_paths(web_auth: &WebAuthConfig, config_path: &str) -> (PathBuf, PathBuf) {
-    let userfile_name = if utils::is_blank_or_default_user_file_path(&web_auth.userfile) {
-        utils::get_default_user_file_path(config_path)
+    let userfile_name = if is_blank_or_default_user_file_path(&web_auth.userfile) {
+        get_default_user_file_path(config_path)
     } else {
         web_auth.userfile.as_ref().map_or_else(String::new, std::borrow::ToOwned::to_owned)
     };
-    let groupfile_name = if utils::is_blank_or_default_user_group_file_path(&web_auth.groupfile) {
-        utils::get_default_user_group_file_path(config_path)
+    let groupfile_name = if is_blank_or_default_user_group_file_path(&web_auth.groupfile) {
+        get_default_user_group_file_path(config_path)
     } else {
         web_auth.groupfile.as_ref().map_or_else(String::new, std::borrow::ToOwned::to_owned)
     };
@@ -224,12 +226,12 @@ fn resolve_auth_paths(web_auth: &WebAuthConfig, config_path: &str) -> (PathBuf, 
         }
     };
 
-    let userfile_path = if utils::is_blank_or_default_user_file_path(&web_auth.userfile) {
+    let userfile_path = if is_blank_or_default_user_file_path(&web_auth.userfile) {
         PathBuf::from(&userfile_name)
     } else {
         resolve_path(&userfile_name)
     };
-    let groupfile_path = if utils::is_blank_or_default_user_group_file_path(&web_auth.groupfile) {
+    let groupfile_path = if is_blank_or_default_user_group_file_path(&web_auth.groupfile) {
         PathBuf::from(&groupfile_name)
     } else {
         resolve_path(&groupfile_name)

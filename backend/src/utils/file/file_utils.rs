@@ -1,8 +1,11 @@
 use crate::utils::debug_if_enabled;
 use log::{debug, error, trace};
 use path_clean::PathClean;
-use shared::error::str_to_io_error;
-use shared::utils::{API_PROXY_FILE, CONFIG_FILE, CONFIG_PATH, DEFAULT_HOME_ENV_VAR, DEFAULT_WEB_DIR, DEFAULT_WEB_ROOT_ENV_VAR, MAPPING_FILE, SOURCE_FILE, TEMPLATE_FILE, USER_FILE, USER_GROUP_FILE};
+use shared::{
+    error::str_to_io_error,
+    utils::{DEFAULT_HOME_ENV_VAR, DEFAULT_WEB_ROOT_ENV_VAR, },
+    defaults::{API_PROXY_FILE, CONFIG_FILE, CONFIG_PATH, DEFAULT_WEB_DIR, MAPPING_FILE, SOURCE_FILE, TEMPLATE_FILE, USER_FILE, USER_GROUP_FILE},
+};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
@@ -149,7 +152,7 @@ fn resolve_config_scoped_path(config_path: &str, candidate: &str) -> String {
 #[inline]
 pub fn resolve_mapping_file_path(config_path: &str, mapping_path: Option<&str>) -> String {
     let configured = mapping_path.map(str::trim).filter(|path| !path.is_empty()).map(ToString::to_string);
-    let candidate = if shared::utils::is_blank_or_default_mapping_path(&configured) {
+    let candidate = if shared::defaults::is_blank_or_default_mapping_path(&configured) {
         get_default_mappings_path(config_path)
     } else {
         configured.unwrap_or_else(|| get_default_mappings_path(config_path))
@@ -160,7 +163,7 @@ pub fn resolve_mapping_file_path(config_path: &str, mapping_path: Option<&str>) 
 #[inline]
 pub fn resolve_template_file_path(config_path: &str, template_path: Option<&str>) -> String {
     let configured = template_path.map(str::trim).filter(|path| !path.is_empty()).map(ToString::to_string);
-    let candidate = if shared::utils::is_blank_or_default_template_path(&configured) {
+    let candidate = if shared::defaults::is_blank_or_default_template_path(&configured) {
         get_default_templates_path(config_path)
     } else {
         configured.unwrap_or_else(|| get_default_templates_path(config_path))

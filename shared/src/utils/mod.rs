@@ -1,7 +1,5 @@
 mod bitset;
-mod constants;
 mod crypto;
-mod default_utils;
 mod directed_graph;
 pub mod flags;
 mod hash_utils;
@@ -16,10 +14,11 @@ mod string_interner;
 mod string_utils;
 mod time_utils;
 
+pub mod constants;
+
 pub use self::{
     constants::*,
     crypto::*,
-    default_utils::*,
     directed_graph::*,
     flags::{country_code_to_index, index_to_country_code, FlagEntry, FlagsLoader, DEFAULT_COMPRESSION_LEVEL},
     hash_utils::*,

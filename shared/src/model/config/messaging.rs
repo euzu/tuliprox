@@ -1,10 +1,8 @@
 use crate::{
+    defaults::{default_critical_percent, default_repeat_interval_secs, default_warn_percent, is_false},
     error::TuliproxError,
     model::MsgKind,
-    utils::{
-        default_critical_percent, default_repeat_interval_secs, default_warn_percent, is_blank_optional_str,
-        is_blank_optional_string, is_false,
-    },
+    utils::{is_blank_optional_str, is_blank_optional_string},
 };
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]

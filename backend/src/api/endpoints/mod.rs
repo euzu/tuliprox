@@ -18,3 +18,4 @@ pub(in crate::api) mod web_index;
 pub(in crate::api) mod websocket_api;
 pub(in crate::api) mod xmltv_api;
 pub(in crate::api) mod xtream_api;
+pub(in crate::api) mod xtream_url;

@@ -12,11 +12,11 @@ use crate::{
 };
 use futures::join;
 use shared::{
+    defaults::default_page_size,
     model::{
         PagedResponseDto, QosSnapshotRecordDto, QosSnapshotWindowDto, SearchRequest, StreamHistoryEventType,
         StreamHistoryPageRequestDto, StreamHistoryProviderSummaryDto, StreamHistoryRecordDto,
     },
-    utils::default_page_size,
 };
 use std::rc::Rc;
 use wasm_bindgen_futures::spawn_local;

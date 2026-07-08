@@ -7,8 +7,8 @@ use crate::{
             get_custom_stream_response_error_status, get_stream_response_with_headers, is_custom_video_stream_enabled,
             tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason,
             ProviderAllocation, ProviderConfig, ProviderHandle, ProviderStreamFactoryOptions, ProviderStreamInfo,
-            ProviderStreamState, SharedStreamManager, StreamDetails, StreamError, StreamingStrategy, ThrottledStream,
-            UserApiRequest, UserSession,
+            ProviderStreamCustomReason, ProviderStreamState, SharedStreamManager, StreamDetails, StreamError,
+            StreamingStrategy, ThrottledStream, UserApiRequest, UserSession,
         },
     },
     auth::Fingerprint,
@@ -45,13 +45,14 @@ use shared::{
     concat_string,
     model::{
         Claims, InputFetchMethod, InputType, PlaylistEntry, PlaylistItemType, ProxyType, StreamChannel, StreamInfo, TargetType,
-        UserConnectionPermission, VirtualId, XtreamCluster,
+        UserConnectionPermission, VirtualId, XtreamCluster, ConfigTargetOptions,
     },
     utils::{
         bin_serialize, current_time_secs, extract_extension_from_url, get_credentials_from_url,
         human_readable_kbps, is_sanitize_sensitive_info_enabled, replace_url_extension, sanitize_sensitive_info, trim_slash, Internable,
-        CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON, DASH_EXT, HLS_EXT,
+        CONTENT_TYPE_CBOR, CONTENT_TYPE_JSON,
     },
+    defaults::{DASH_EXT, HLS_EXT,},
 };
 use smallvec::SmallVec;
 use std::{
@@ -479,7 +480,7 @@ use crate::utils::LRUResourceCache;
 pub use internal_server_error;
 use shared::error::TuliproxError;
 use shared::model::{AdmissionStrategy, ConnectFailureReason, FailureStage, GeoIpUnavailablePolicy};
-use shared::utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs};
+use shared::defaults::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs};
 pub use try_option_bad_request;
 pub use try_option_forbidden;
 pub use try_result_bad_request;
@@ -1638,11 +1639,10 @@ fn select_provider_stream_url(
 }
 
 fn create_unmapped_provider_stream(app_config: &AppConfig) -> ProviderStreamState {
-    ProviderStreamState::Custom(create_channel_unavailable_stream(
-        app_config,
-        &[],
-        StatusCode::SERVICE_UNAVAILABLE,
-    ))
+    ProviderStreamState::Custom {
+        response: create_channel_unavailable_stream(app_config, &[], StatusCode::OK),
+        reason: ProviderStreamCustomReason::UnmappedProviderUrl,
+    }
 }
 
 async fn acquire_stream_provider_handle(
@@ -1776,7 +1776,10 @@ async fn resolve_streaming_strategy(
             ProviderAllocation::Exhausted => {
                 debug!("Provider {} is exhausted. No connections allowed.", input.name);
                 let stream = create_provider_connections_exhausted_stream(&app_state.app_config, &[]);
-                ProviderStreamState::Custom(stream)
+                ProviderStreamState::Custom {
+                    response: stream,
+                    reason: ProviderStreamCustomReason::ProviderExhausted,
+                }
             }
             ProviderAllocation::Available(ref provider_cfg) | ProviderAllocation::GracePeriod(ref provider_cfg) => {
                 // Keep the URL only when it already targets the selected provider account. Hot reload can leave old
@@ -1819,7 +1822,10 @@ async fn resolve_streaming_strategy(
     } else {
         debug!("Provider {} is exhausted. No connections allowed.", input.name);
         let stream = create_provider_connections_exhausted_stream(&app_state.app_config, &[]);
-        ProviderStreamState::Custom(stream)
+        ProviderStreamState::Custom {
+            response: stream,
+            reason: ProviderStreamCustomReason::ProviderExhausted,
+        }
     };
 
     if release_failed_mapping {
@@ -1931,7 +1937,13 @@ async fn create_stream_response_details(
     let guard_provider_name =
         streaming_strategy.provider_handle.as_ref().and_then(|guard| guard.allocation.get_provider_name());
 
-    if matches!(streaming_strategy.provider_stream_state, ProviderStreamState::Custom(_))
+    if matches!(
+        streaming_strategy.provider_stream_state,
+        ProviderStreamState::Custom {
+            reason: ProviderStreamCustomReason::ProviderExhausted,
+            ..
+        }
+    )
         && can_provision_on_exhausted(app_state, input)
     {
         if let Some(handle) = streaming_strategy.provider_handle.take() {
@@ -1953,7 +1965,10 @@ async fn create_stream_response_details(
 
     match streaming_strategy.provider_stream_state {
         // custom stream means we display our own stream like connection exhausted, channel-unavailable...
-        ProviderStreamState::Custom(provider_stream) => {
+        ProviderStreamState::Custom {
+            response: provider_stream,
+            ..
+        } => {
             let (stream, stream_info) = provider_stream;
             // When allocation is exhausted or no connection was acquired, guard_provider_name is None.
             // Use input.name as fallback so the provider field is never empty.
@@ -2317,11 +2332,19 @@ fn is_hop_by_hop_response_header(name: &HeaderName) -> bool {
 }
 
 fn no_custom_video_fallback_status(app_config: &AppConfig) -> StatusCode {
+    // Two reasons we have no custom-video response:
+    //   1. Operator disabled `custom_stream_response_enabled`  → return the
+    //      configured fallback status (e.g. 502) so reverse proxies handle the
+    //      socket consistently.
+    //   2. Operator enabled custom-video but the concrete resource is missing
+    //      → return `400` so downstream `proxy_intercept_errors on;` (Nginx)
+    //      can sever the socket instead of looping on `200 OK`.
+    // Collapsing both into the configured status code broke the Nginx-intercept
+    // contract that the operator relied on by enabling custom-video in the
+    // first place.
     if is_custom_video_stream_enabled(app_config) {
-        // No custom video response available but custom video response enabled
         StatusCode::BAD_REQUEST
     } else {
-        // reverse proxy with `proxy_intercept_errors on;` can sever the socket.
         get_custom_stream_response_error_status(app_config)
     }
 }
@@ -3344,6 +3367,7 @@ pub(crate) async fn local_stream_response(
             })
             .await;
     }
+    let metering = prepare_stream_metering(app_state, &pli.url, false, true, false).await;
     let stream = create_active_client_stream(crate::api::model::ActiveClientStreamParams {
         stream_details: StreamDetails::from_stream(stream, grace_period_options),
         app_state,
@@ -3355,8 +3379,8 @@ pub(crate) async fn local_stream_response(
         socket_bound,
         session_token: playback_session_token,
         req_headers,
-        meter_uid: 0,
-        meter_stream: false,
+        meter_uid: metering.meter_uid,
+        meter_stream: metering.meter_stream,
     })
         .await;
 
@@ -3397,7 +3421,11 @@ fn is_path_within_allowed_directories(sub_path: &Path, root_paths: &[String]) ->
 
 pub fn is_stream_share_enabled(item_type: PlaylistItemType, target: &ConfigTarget) -> bool {
     (item_type == PlaylistItemType::Live/* || item_type == PlaylistItemType::LiveHls */)
-        && target.options.as_ref().is_some_and(|opt| opt.share_live_streams)
+        && target.options.as_ref().is_some_and(ConfigTargetOptions::share_live_mpeg_ts_enabled)
+}
+
+pub fn is_hls_stream_share_enabled(target: &ConfigTarget) -> bool {
+    target.options.as_ref().is_some_and(ConfigTargetOptions::share_live_hls_enabled)
 }
 
 pub type HeaderFilter = Option<Box<dyn Fn(&str) -> bool + Send>>;
@@ -4071,7 +4099,8 @@ mod tests {
             ClusterFlags, ConfigPaths, ConfigProviderDto, ConfigTargetOptions, InputFetchMethod, InputType,
             PlaylistItemType, ProcessingOrder, ProviderUrlSelectionPolicy, ProxyType, StreamChannel, XtreamCluster,
         },
-        utils::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs, Internable},
+        utils::{Internable},
+        defaults::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs},
     };
     use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
     use tokio::sync::{mpsc, RwLock};
@@ -4727,7 +4756,13 @@ mod tests {
             .await;
         assert!(strict.provider_handle.is_none(), "strict provider affinity should not allocate a different provider");
         assert!(
-            matches!(strict.provider_stream_state, ProviderStreamState::Custom(_)),
+            matches!(
+                strict.provider_stream_state,
+                ProviderStreamState::Custom {
+                    reason: ProviderStreamCustomReason::ProviderExhausted,
+                    ..
+                }
+            ),
             "strict provider affinity should fail closed when the pinned provider is unavailable"
         );
 
@@ -4829,7 +4864,13 @@ mod tests {
             .await;
 
         assert!(strategy.provider_handle.is_none());
-        assert!(matches!(strategy.provider_stream_state, ProviderStreamState::Custom(_)));
+        assert!(matches!(
+            strategy.provider_stream_state,
+            ProviderStreamState::Custom {
+                reason: ProviderStreamCustomReason::UnmappedProviderUrl,
+                ..
+            }
+        ));
 
         app_state.active_provider.release_connection(&addr).await;
     }
@@ -5092,6 +5133,8 @@ mod tests {
             downloads: Arc::new(crate::api::model::DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
+            hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
+            hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
             active_users,
             active_provider,
             connection_manager,
@@ -5126,6 +5169,7 @@ mod tests {
                 geoip: None,
                 stream_history: None,
                 qos_aggregation: None,
+                hls_cache: None,
             }),
             user_access_control: true,
             ..Config::default()
@@ -5882,6 +5926,7 @@ mod tests {
                 geoip: None,
                 stream_history: None,
                 qos_aggregation: None,
+                hls_cache: None,
             }),
             ..Config::default()
         }));
@@ -5985,6 +6030,7 @@ mod tests {
                 geoip: None,
                 stream_history: None,
                 qos_aggregation: None,
+                hls_cache: None,
             }),
             ..Config::default()
         }));
@@ -6040,7 +6086,13 @@ mod tests {
             id: 1,
             enabled: true,
             name: "shared".to_string(),
-            options: Some(ConfigTargetOptions { share_live_streams: true, ..ConfigTargetOptions::default() }),
+            options: Some(ConfigTargetOptions {
+                share_live_streams: shared::model::ConfigTargetShareLiveStreams {
+                    mpeg_ts: true,
+                    ..Default::default()
+                },
+                ..ConfigTargetOptions::default()
+            }),
             sort: None,
             filter: Filter::default(),
             output: Vec::new(),
@@ -7714,6 +7766,10 @@ mod tests {
             .await
             .into_response();
 
+        // Custom-video stream is enabled (`custom_stream_response_enabled: true`
+        // in this fixture), so a missing resource must return 400 — the
+        // Nginx `proxy_intercept_errors on;` contract requires 4xx so the
+        // socket is severed instead of looping on a 200 OK fallback body.
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
             app_state.active_users.user_connections(&user.username).await,
@@ -8160,7 +8216,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socket_bound_playback_tokens_enforce_hard_limits_per_socket() {
+    async fn socket_bound_playback_sessions_enforce_hard_limits_per_socket() {
         let app_state = create_test_app_state();
         let mut user = ProxyUserCredentials::default();
         user.username = "user1".to_string();
@@ -8336,7 +8392,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn socket_bound_playback_tokens_still_allow_soft_slots() {
+    async fn socket_bound_playback_sessions_still_allow_soft_slots() {
         let app_state = create_test_app_state();
         let mut user = ProxyUserCredentials::default();
         user.username = "soft-user".to_string();
@@ -8535,6 +8591,7 @@ mod tests {
                 geoip: None,
                 stream_history: None,
                 qos_aggregation: None,
+                hls_cache: None,
             }),
             ..Config::default()
         };
@@ -8815,14 +8872,14 @@ mod tests {
             source_ordinal: 0,
         };
 
-        let hls_ext = shared::utils::HLS_EXT.to_string();
+        let hls_ext = shared::defaults::HLS_EXT.to_string();
         let (query_path, extension) =
             crate::api::endpoints::xtream_api::get_query_path("", Some(&hls_ext), &pli, &app_state);
 
         assert_eq!(extension, "");
         assert_eq!(query_path, "1");
 
-        let dash_ext = shared::utils::DASH_EXT.to_string();
+        let dash_ext = shared::defaults::DASH_EXT.to_string();
         let (query_path, extension) =
             crate::api::endpoints::xtream_api::get_query_path("", Some(&dash_ext), &pli, &app_state);
 
