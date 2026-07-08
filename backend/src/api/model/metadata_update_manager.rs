@@ -1031,7 +1031,7 @@ impl MetadataUpdateManager {
 
         // Lock-free admission with CAS: reserve one queue slot only if capacity allows.
         if pending_task_count
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
                 if current < max_queue_size {
                     Some(current + 1)
                 } else {
@@ -1081,7 +1081,7 @@ impl MetadataUpdateManager {
     #[inline]
     fn decrement_pending_task_count(pending_task_count: &AtomicUsize) {
         // Guard against accidental underflow in edge/error paths.
-        let _ = pending_task_count.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| current.checked_sub(1));
+        let _ = pending_task_count.try_update(Ordering::AcqRel, Ordering::Relaxed, |current| current.checked_sub(1));
     }
 
     fn merge_task_payload(existing: &mut UpdateTask, task: UpdateTask) -> bool {

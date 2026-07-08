@@ -85,33 +85,36 @@ pub const fn is_default_resource_retry_backoff_multiplier(v: &f64) -> bool {
     (*v - default_resource_retry_backoff_multiplier()).abs() < F64_DEFAULT_EPSILON
 }
 
-fn fill_with_secure_random_bytes(out: &mut [u8]) {
+fn fill_with_secure_random_bytes(out: &mut [u8]) -> Result<(), getrandom::Error> {
     #[cfg(target_arch = "wasm32")]
     {
         for byte in out {
             *byte = fastrand::u8(..);
         }
+        Ok(())
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    if let Err(err) = getrandom::fill(out) {
-        panic!("failed to generate secure random bytes: {err}");
-    }
+    getrandom::fill(out)
 }
 
-pub fn generate_default_access_secret() -> [u8; 32] {
+pub fn generate_default_access_secret() -> Result<[u8; 32], getrandom::Error> {
     let mut out = [0u8; 32];
-    fill_with_secure_random_bytes(&mut out);
-    out
+    fill_with_secure_random_bytes(&mut out)?;
+    Ok(out)
 }
 
-pub fn generate_default_encrypt_secret() -> [u8; 16] {
+pub fn generate_default_encrypt_secret() -> Result<[u8; 16], getrandom::Error> {
     let mut out = [0u8; 16];
-    fill_with_secure_random_bytes(&mut out);
-    out
+    fill_with_secure_random_bytes(&mut out)?;
+    Ok(out)
 }
 
-pub fn default_secret() -> String { generate_default_encrypt_secret().iter().map(|b| format!("{:02X}", b)).collect() }
+pub fn default_secret() -> String {
+    generate_default_encrypt_secret()
+        .map(|secret| secret.iter().map(|b| format!("{b:02X}")).collect())
+        .unwrap_or_default()
+}
 
 // 30 minutes by default; `0` still means “no expiration.”
 default_eq_fns!(

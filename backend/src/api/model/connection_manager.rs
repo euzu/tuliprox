@@ -987,7 +987,7 @@ impl ConnectionManager {
 
     pub fn next_stream_uid(&self) -> u32 {
         self.stream_uid_counter
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 let next = current.wrapping_add(1);
                 Some(if next == 0 { 1 } else { next })
             })

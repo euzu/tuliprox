@@ -3,7 +3,7 @@ use crate::model::{
     EPG_TAG_ICON, EPG_TAG_PROGRAMME, EPG_TAG_TV,
 };
 use crate::model::{EpgSmartMatchConfig, PersistedEpgSource};
-use crate::processing::processor::EpgIdCache;
+use crate::processing::processor::{with_folded_epg_id, EpgIdCache};
 use crate::utils::compressed_file_reader_async::CompressedFileReaderAsync;
 use crate::utils::{async_file_reader, parse_xmltv_time};
 use log::error;
@@ -150,7 +150,7 @@ impl TVGuide {
                         entry.replace(epg_id.clone());
                         // Inline fold (mirrors `EpgIdCache::insert_channel_epg_id`); a
                         // `&mut self` call would break the disjoint field capture here.
-                        id_cache.channel_epg_id.insert(epg_id.to_ascii_lowercase().intern());
+                        with_folded_epg_id(epg_id, |folded| id_cache.channel_epg_id.insert(folded.intern()));
                         matched = true;
                     });
                 }
@@ -345,8 +345,8 @@ impl TVGuide {
                             };
 
                             if add_channel {
-                                source_processed.insert(Arc::clone(&tag_epg_id));
-                                id_cache.processed.insert(Arc::clone(&tag_epg_id));
+                                with_folded_epg_id(&tag_epg_id, |folded| source_processed.insert(folded.intern()));
+                                id_cache.insert_processed_epg_id(&tag_epg_id);
                                 accumulator.upsert_channel(
                                     epg_source.priority,
                                     source_order,
@@ -363,7 +363,7 @@ impl TVGuide {
                         }
                         EPG_TAG_PROGRAMME => {
                             if let Some(epg_id) = tag.get_attribute_value(&epg_attrib_channel) {
-                                if source_processed.contains(epg_id) {
+                                if with_folded_epg_id(epg_id, |folded| source_processed.contains(folded)) {
                                     if let Some(programme) =
                                         Self::extract_programme(
                                             &tag,
@@ -616,7 +616,8 @@ impl EpgMergeAccumulator {
     }
 
     fn upsert_channel(&mut self, priority: i16, source_order: usize, logo_override: bool, mut channel: EpgChannel) {
-        match self.channels.entry(Arc::clone(&channel.id)) {
+        let channel_key = with_folded_epg_id(&channel.id, |folded| folded.intern());
+        match self.channels.entry(channel_key) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let acc = entry.get_mut();
                 acc.needs_programme_merge = true;
@@ -660,7 +661,7 @@ impl EpgMergeAccumulator {
     }
 
     fn push_programme(&mut self, priority: i16, source_order: usize, programme: EpgProgramme) {
-        if let Some(channel) = self.channels.get_mut(programme.get_transient_channel_id()) {
+        if let Some(channel) = with_folded_epg_id(programme.get_transient_channel_id(), |folded| self.channels.get_mut(folded)) {
             channel.programmes.push(ProgrammeMergeEntry { priority, source_order, programme });
         } else {
             error!("Channel {} not found in EPG, dangling programme", programme.get_transient_channel_id());
@@ -675,9 +676,9 @@ impl EpgMergeAccumulator {
         mut channel: EpgChannel,
     ) {
         let programmes = std::mem::take(&mut channel.programmes);
-        let channel_id = Arc::clone(&channel.id);
+        let channel_key = with_folded_epg_id(&channel.id, |folded| folded.intern());
         self.upsert_channel(priority, source_order, logo_override, channel);
-        if let Some(acc) = self.channels.get_mut(&channel_id) {
+        if let Some(acc) = self.channels.get_mut(&channel_key) {
             if !acc.programmes.is_empty() {
                 acc.needs_programme_merge = true;
             }
@@ -1109,7 +1110,7 @@ mod tests {
                 sources: vec![],
                 smart_match: Some(EpgSmartMatchConfig::from(smart_cfg)),
             }));
-            id_cache.channel_epg_id.insert("demo.channel".intern());
+            id_cache.insert_channel_epg_id("demo.channel");
 
             let merged = tv_guide.filter_merged(&mut id_cache).await.expect("merged epg");
 
@@ -1173,6 +1174,43 @@ mod tests {
     }
 
     #[test]
+    fn epg_programme_channel_match_is_case_insensitive_within_source() {
+        run_async_test(async move {
+            let dir = tempdir().unwrap();
+            let epg_path = dir.path().join("mixed-case-programme.xml");
+
+            fs::write(
+                &epg_path,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="Demo.Channel">
+    <display-name>Demo</display-name>
+  </channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="demo.channel">
+    <title>Case Variant Programme</title>
+  </programme>
+</tv>"#,
+            )
+            .unwrap();
+
+            let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+                file_path: epg_path,
+                priority: 0,
+                logo_override: false,
+            }]);
+            let mut id_cache = EpgIdCache::new(None);
+            id_cache.insert_channel_epg_id("demo.channel");
+
+            let merged = tv_guide.filter_merged(&mut id_cache).await.expect("merged epg");
+
+            assert_eq!(merged.children.len(), 1);
+            assert_eq!(merged.children[0].id.as_ref(), "Demo.Channel");
+            assert_eq!(merged.children[0].programmes.len(), 1);
+            assert_eq!(merged.children[0].programmes[0].get_transient_channel_id().as_ref(), "demo.channel");
+        });
+    }
+
+    #[test]
     fn epg_priority_merge_filter_accepts_later_source_for_already_processed_channel() {
         run_async_test(async move {
             let dir = tempdir().unwrap();
@@ -1211,11 +1249,11 @@ mod tests {
                 PersistedEpgSource { file_path: low_path, priority: 10, logo_override: false },
             ]);
             let mut id_cache = EpgIdCache::new(None);
-            id_cache.channel_epg_id.insert("demo.channel".intern());
+            id_cache.insert_channel_epg_id("demo.channel");
 
             let merged = tv_guide.filter_merged(&mut id_cache).await.expect("merged epg");
 
-            assert!(id_cache.processed.contains("demo.channel"));
+            assert!(id_cache.contains_processed_epg_id("demo.channel"));
             assert_eq!(merged.children.len(), 1);
             assert_eq!(merged.children[0].title.as_deref(), Some("High Channel"));
             assert_eq!(merged.children[0].programmes.len(), 2);
@@ -1242,7 +1280,7 @@ mod tests {
                 let tv_guide = TVGuide::new(vec![PersistedEpgSource { file_path, priority: 0, logo_override: false }]);
 
                 let mut id_cache = EpgIdCache::new(None);
-                id_cache.channel_epg_id.insert(342u32.intern());
+                id_cache.insert_channel_epg_id("342");
                 //id_cache.collect_epg_id(fp);
 
                 let channel_ids = HashSet::from([342u32.intern()]);
