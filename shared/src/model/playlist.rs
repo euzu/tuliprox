@@ -1601,6 +1601,39 @@ mod tests {
     }
 
     #[test]
+    fn m3u_to_m3u_preserves_mixed_case_tvg_id() {
+        // EPG matching is case-insensitive, so ids are no longer lowercased when parsed.
+        // The M3U tvg-id output must preserve the channel's original source case.
+        let item = M3uPlaylistItem {
+            virtual_id: 0,
+            provider_id: "prov1".intern(),
+            name: "Test Channel".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Test Group".intern(),
+            title: "Test Title".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/stream".intern(),
+            epg_channel_id: Some("CNN.us".intern()),
+            input_name: "test".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
+            source_ordinal: 0,
+            additional_properties: None,
+        };
+
+        let output = item.to_m3u(None, false);
+        assert!(output.contains(r#"tvg-id="CNN.us""#), "M3U tvg-id must preserve original case, got: {output}");
+    }
+
+    #[test]
     fn m3u_to_m3u_emits_tvg_chno_from_chno() {
         let item = M3uPlaylistItem {
             virtual_id: 0,
