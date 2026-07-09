@@ -4,11 +4,13 @@
 
 ## ⚠️ Breaking Changes
 
-- **Staged inputs reworked into a `staged` input type.** The nested `staged:` block on an input
-  (with per-cluster `live_source` / `vod_source` / `series_source` routing) has been removed. A staged
-  source is now a top-level input with `type: staged` and a `child` referencing a non-staged `m3u` /
-  `xtream` input. Existing configurations using the
-  nested `staged:` block must be migrated.
+- **Staged inputs reworked into a first-class `staged` input type.** The old nested `staged:` block on
+  provider inputs (with `enabled`, `live_source`, `vod_source`, and `series_source`) has been removed.
+  A staged source is now its own input with `type: staged`. It points to one non-staged `m3u` /
+  `xtream` provider through `staged.provider`, and `staged.clusters` selects which clusters (`live`,
+  `vod`, `series`) are loaded from the staged playlist. Clusters not selected there are loaded from the
+  provider input itself. The merged result is stored under the provider input, so playlist delivery and
+  stream/API routing continue to use the provider.
 
   Before:
 
@@ -36,13 +38,16 @@
       password: secret
     - name: provider_a_list
       type: staged
-      child: provider_a
       url: http://lists.example/list1.m3u
-      username: bob
-      password: secret
+      staged:
+        provider: provider_a
+        clusters: [live]
   ```
 
-  A staged input must reference an existing non-staged `m3u`/`xtream` child (max chain depth 2).
+  A staged input cannot be linked directly to a target. It must reference an existing non-staged `m3u` /
+  `xtream` provider input, and each provider can have at most one staged overlay. Staged inputs do not
+  use `priority`, `max_connections`, or `cache_duration`; the linked provider controls stream limits and
+  refresh cadence.
 
 - **Case-insensitive EPG channel-id matching**: EPG channel-id matching is now case-insensitive (ASCII). Ids are no
   longer lowercased when parsed — output preserves the source's original case. Users whose sources provide MixedCase

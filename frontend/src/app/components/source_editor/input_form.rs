@@ -119,12 +119,23 @@ fn libraries_to_text(libraries: &[MediaServerLibrarySelector]) -> String {
         .join(", ")
 }
 
-fn libraries_from_text(value: &str) -> Vec<MediaServerLibrarySelector> {
+fn libraries_from_text(value: &str, previous: &[MediaServerLibrarySelector]) -> Vec<MediaServerLibrarySelector> {
     value
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .map(|name| MediaServerLibrarySelector::Name(name.to_string()))
+        .map(|name| {
+            previous
+                .iter()
+                .find(|library| match library {
+                    MediaServerLibrarySelector::Name(existing) => existing.trim() == name,
+                    MediaServerLibrarySelector::Detailed(details) => {
+                        details.name.as_deref().is_some_and(|n| n.trim() == name)
+                    }
+                })
+                .cloned()
+                .unwrap_or_else(|| MediaServerLibrarySelector::Name(name.to_string()))
+        })
         .collect()
 }
 
@@ -1028,14 +1039,16 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                        { config_field_optional_hide!(input_form_state.form, translate.t(LABEL_PASSWORD), password) }
                        </>
                      })}
-                     { html_if!(!is_csv_batch, {
+                     { html_if!(!staged_input && !is_csv_batch, {
                          <>
                          { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), input_form_state.form.max_connections.to_string()) }
                          { config_field_custom!(translate.t(LABEL_PRIORITY), input_form_state.form.priority.to_string()) }
                          { config_field_custom!(translate.t(LABEL_EXP_DATE), input_form_state.form.exp_date.map_or_else(String::new, |exp_date| exp_date.to_string())) }
                          </>
                      })}
-                     { config_field_optional!(input_form_state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
+                     { html_if!(!staged_input, {
+                         { config_field_optional!(input_form_state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
+                     })}
                      { config_field_custom!(translate.t(LABEL_FETCH_METHOD), input_form_state.form.method.to_string()) }
                      </div>
                      { config_field_optional!(input_form_state.form, translate.t(LABEL_PERSIST), persist) }
@@ -1095,14 +1108,16 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                    { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
                    </>
                  })}
-                 { html_if!(!is_csv_batch, {
+                 { html_if!(!staged_input && !is_csv_batch, {
                    <>
                    { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
                    { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
                    { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
                    </>
                  })}
-                 { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
+                 { html_if!(!staged_input, {
+                   { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
+                 })}
                  { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
                    html! {
                        <RadioButtonGroup
@@ -1245,7 +1260,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let input_form_state = input_form_state.clone();
         let on_libraries = Callback::from(move |value: String| {
             let next = mutate_media_server(&input_form_state.form.media_server, |media_server| {
-                media_server.libraries = libraries_from_text(&value);
+                media_server.libraries = libraries_from_text(&value, &media_server.libraries);
             });
             input_form_state.dispatch(ConfigInputFormAction::MediaServer(next));
         });
@@ -1760,5 +1775,26 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             { render_edit_mode() }
         </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::{MediaServerLibraryKind, MediaServerLibrarySelectorDetailsDto};
+
+    #[test]
+    fn libraries_from_text_preserves_existing_detailed_selector() {
+        let detailed = MediaServerLibrarySelector::Detailed(MediaServerLibrarySelectorDetailsDto {
+            id: Some("id-1".to_string()),
+            key: Some("key-1".to_string()),
+            name: Some("Movies".to_string()),
+            kind: Some(MediaServerLibraryKind::Movies),
+        });
+        let previous = vec![detailed.clone()];
+
+        let libraries = libraries_from_text("Movies, Kids", &previous);
+
+        assert_eq!(libraries, vec![detailed, MediaServerLibrarySelector::Name("Kids".to_string())]);
     }
 }

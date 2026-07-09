@@ -122,8 +122,13 @@ impl SourcesConfigDto {
 
             // Validate referenced inputs
             for name in &source.inputs {
-                if !self.inputs.iter().any(|i| &i.name == name) {
+                let Some(input) = self.inputs.iter().find(|i| &i.name == name) else {
                     return Err(TuliproxError::ConfigSource(format!("Source references unknown input: '{name}'")));
+                };
+                if input.input_type.is_staged() {
+                    return Err(TuliproxError::ConfigSource(format!(
+                        "Source references staged input '{name}' directly; connect staged inputs to an m3u or xtream provider input instead"
+                    )));
                 }
             }
 
@@ -226,6 +231,16 @@ mod tests {
         utils::Internable,
     };
 
+    fn staged_overlay(provider: &str) -> ConfigInputDto {
+        ConfigInputDto {
+            name: "staged".intern(),
+            input_type: InputType::Staged,
+            url: "http://staged.example/playlist.m3u".to_string(),
+            staged: Some(ConfigInputStagedDto { provider: Some(provider.intern()), ..Default::default() }),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn prepare_keeps_template_placeholders_in_sources() {
         let templates = vec![
@@ -313,5 +328,85 @@ mod tests {
         let err =
             sources.prepare(false, None, None).expect_err("one provider must not accept multiple staged overlays");
         assert!(err.to_string().contains("referenced by multiple staged inputs"), "Error: {err}");
+    }
+
+    #[test]
+    fn prepare_rejects_staged_unknown_provider() {
+        let mut sources = SourcesConfigDto { inputs: vec![staged_overlay("missing_provider")], ..Default::default() };
+
+        let err = sources.prepare(false, None, None).expect_err("unknown staged provider must be rejected");
+        assert!(err.to_string().contains("references unknown provider input 'missing_provider'"), "Error: {err}");
+    }
+
+    #[test]
+    fn prepare_rejects_staged_provider_that_is_staged() {
+        let mut sources = SourcesConfigDto {
+            inputs: vec![
+                ConfigInputDto {
+                    name: "root".intern(),
+                    input_type: InputType::M3u,
+                    url: "http://root.example/playlist.m3u".to_string(),
+                    ..Default::default()
+                },
+                ConfigInputDto {
+                    name: "provider".intern(),
+                    input_type: InputType::Staged,
+                    url: "http://provider.example/playlist.m3u".to_string(),
+                    staged: Some(ConfigInputStagedDto { provider: Some("root".intern()), ..Default::default() }),
+                    ..Default::default()
+                },
+                staged_overlay("provider"),
+            ],
+            ..Default::default()
+        };
+
+        let err = sources.prepare(false, None, None).expect_err("staged provider must not be staged");
+        assert!(err.to_string().contains("cannot use another staged input 'provider' as provider"), "Error: {err}");
+    }
+
+    #[test]
+    fn prepare_rejects_staged_provider_that_is_not_m3u_or_xtream() {
+        let mut sources = SourcesConfigDto {
+            inputs: vec![
+                ConfigInputDto {
+                    name: "provider".intern(),
+                    input_type: InputType::Library,
+                    url: "/media".to_string(),
+                    ..Default::default()
+                },
+                staged_overlay("provider"),
+            ],
+            ..Default::default()
+        };
+
+        let err = sources.prepare(false, None, None).expect_err("non-provider input must be rejected");
+        assert!(err.to_string().contains("provider 'provider' must be an m3u or xtream input"), "Error: {err}");
+    }
+
+    #[test]
+    fn prepare_rejects_staged_input_referenced_by_source() {
+        let mut sources = SourcesConfigDto {
+            inputs: vec![
+                ConfigInputDto {
+                    name: "provider".intern(),
+                    input_type: InputType::M3u,
+                    url: "http://example.com/playlist.m3u".to_string(),
+                    ..Default::default()
+                },
+                staged_overlay("provider"),
+            ],
+            sources: vec![ConfigSourceDto {
+                inputs: vec!["staged".intern()],
+                targets: vec![ConfigTargetDto {
+                    filter: r#"name ~ ".*""#.to_string(),
+                    output: vec![TargetOutputDto::M3u(M3uTargetOutputDto::default())],
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let err = sources.prepare(false, None, None).expect_err("sources must not reference staged inputs directly");
+        assert!(err.to_string().contains("Source references staged input 'staged'"), "Error: {err}");
     }
 }

@@ -432,7 +432,7 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
         }
 
         // Resolve staged playlist inputs to their configured download type.
-        // The child link is kept for stream routing and must not affect staged playlist fetching.
+        // The provider link is kept for overlay routing and must not affect staged playlist fetching.
         if inputs.iter().any(|input| input.input_type.is_staged()) {
             for input in &mut inputs {
                 if !input.input_type.is_staged() {
@@ -468,6 +468,16 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
 impl SourcesConfig {
     pub(crate) fn get_source_at(&self, idx: usize) -> Option<&ConfigSource> {
         self.sources.get(idx)
+    }
+
+    pub(crate) fn get_staged_input_for_provider(&self, provider_name: &Arc<str>) -> Option<&Arc<ConfigInput>> {
+        self.inputs.iter().find(|input| {
+            input
+                .staged
+                .as_ref()
+                .and_then(|staged| staged.provider.as_ref())
+                .is_some_and(|name| name == provider_name)
+        })
     }
 
     pub fn get_target_by_id(&self, target_id: u16) -> Option<Arc<ConfigTarget>> {

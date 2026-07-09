@@ -630,18 +630,25 @@ impl ConfigInputDto {
 
     fn validate_staged_self(&mut self) -> Result<(), TuliproxError> {
         if self.input_type.is_staged() {
-            if let Some(staged) = self.staged.as_mut() {
-                if let Some(provider) = staged.provider.as_ref().map(|p| p.trim()).filter(|p| !p.is_empty()) {
-                    staged.provider = Some(provider.intern());
-                } else {
-                    staged.provider = None;
-                }
-                if staged.clusters.is_empty() {
-                    return Err(TuliproxError::ConfigInput(format!(
-                        "staged input requires at least one staged cluster (input: {})",
-                        self.name
-                    )));
-                }
+            let Some(staged) = self.staged.as_mut() else {
+                return Err(TuliproxError::ConfigInput(format!(
+                    "staged input requires a provider input (input: {})",
+                    self.name
+                )));
+            };
+            if let Some(provider) = staged.provider.as_ref().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+                staged.provider = Some(provider.intern());
+            } else {
+                return Err(TuliproxError::ConfigInput(format!(
+                    "staged input requires a provider input (input: {})",
+                    self.name
+                )));
+            }
+            if staged.clusters.is_empty() {
+                return Err(TuliproxError::ConfigInput(format!(
+                    "staged input requires at least one staged cluster (input: {})",
+                    self.name
+                )));
             }
             if self.url.trim().is_empty() {
                 return Err(TuliproxError::ConfigInput(format!(
@@ -692,6 +699,13 @@ impl ConfigInputDto {
         self.name = self.name.trim().intern();
         if self.name.is_empty() {
             return Err(TuliproxError::ConfigInput("name for input is mandatory".to_string()));
+        }
+
+        if self.input_type.is_staged() {
+            self.priority = 0;
+            self.max_connections = 0;
+            self.cache_duration = None;
+            self.cache_duration_seconds = 0;
         }
 
         if let Some(duration_str) = &self.cache_duration {
@@ -1479,13 +1493,13 @@ mod tests {
     }
 
     #[test]
-    fn test_staged_without_provider_is_allowed_for_direct_target_use() {
+    fn test_staged_requires_provider() {
         let mut dto = create_test_dto();
         dto.input_type = InputType::Staged;
         dto.url = "http://staged.com/playlist.m3u".to_string();
 
-        prepare_dto(&mut dto).expect("staged input without provider should be valid for direct target use");
-        assert!(dto.staged.is_none());
+        let err = prepare_dto(&mut dto).expect_err("staged input without provider must be rejected");
+        assert!(err.to_string().contains("requires a provider input"), "Error: {err}");
     }
 
     #[test]
@@ -1548,6 +1562,25 @@ mod tests {
         prepare_dto(&mut dto).expect("valid staged input should prepare successfully");
         assert!(dto.input_type.is_staged());
         assert_eq!(dto.staged.as_ref().and_then(|staged| staged.provider.as_deref()), Some("provider_a"));
+    }
+
+    #[test]
+    fn test_staged_ignores_stream_runtime_fields() {
+        let mut dto = create_test_dto();
+        dto.input_type = InputType::Staged;
+        dto.url = "http://staged.com/playlist.m3u".to_string();
+        dto.staged =
+            Some(ConfigInputStagedDto { provider: Some("provider_a".intern()), ..ConfigInputStagedDto::default() });
+        dto.priority = -10;
+        dto.max_connections = 2;
+        dto.cache_duration = Some("not-a-duration".to_string());
+
+        prepare_dto(&mut dto).expect("staged stream runtime fields should be ignored");
+
+        assert_eq!(dto.priority, 0);
+        assert_eq!(dto.max_connections, 0);
+        assert_eq!(dto.cache_duration, None);
+        assert_eq!(dto.cache_duration_seconds, 0);
     }
 
     #[test]

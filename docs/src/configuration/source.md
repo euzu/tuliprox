@@ -121,7 +121,6 @@ inputs:
     options: { }
     epg: { }
     aliases: [ ]
-    staged: { }
     panel_api: { }
 ```
 
@@ -130,7 +129,7 @@ inputs:
 | Parameter               | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                            |
 |:------------------------|:-------|:--------:|:--------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `name`                  | String |   Yes    |         | Internal reference ID for Tuliprox. Must be strictly unique. Critical for persistent UUID generation!                                                                                                                                                                                                                                                                                                                                    |
-| `type`                  | Enum   |    No    | `m3u`   | Allowed: `m3u`, `xtream`, `library` (Local files) and `m3u_batch`, `xtream_batch` (CSV offloading).                                                                                                                                                                                                                                                                                                                                      |
+| `type`                  | Enum   |    No    | `m3u`   | Allowed: `m3u`, `xtream`, `library`, `staged`, `emby`, `jellyfin`, `plex`, and `m3u_batch` / `xtream_batch` (CSV offloading).                                                                                                                                                                                                                                                                                                            |
 | `url`                   | String |   Yes    |         | The Provider URL. Tuliprox supports magic scheme prefixes: `http(s)://`, `file://`, `batch://`, and **`provider://my_failover_provider`** (for the Failover System above).                                                                                                                                                                                                                                                               |
 | `username` / `password` | String |  Often   |         | Mandatory if `type` = `xtream`.                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `enabled`               | Bool   |    No    | `true`  | If `false`, this input is completely ignored in all processing.                                                                                                                                                                                                                                                                                                                                                                          |
@@ -141,7 +140,7 @@ inputs:
 | `headers`               | Dict   |    No    |         | Custom HTTP headers for the download (e.g., `User-Agent: My-Player`).                                                                                                                                                                                                                                                                                                                                                                    |
 | `epg`                   | Object |    No    |         | Allows mapping of external XMLTV files (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                    |
 | `aliases`               | List   |    No    |         | Connection pooling / Sub-accounts (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                         |
-| `staged`                | Object |    No    |         | Hybrid architecture feature (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                               |
+| `staged`                | Object |    No    |         | Staged overlay settings. Only valid when `type: staged` (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                   |
 | `panel_api`             | Object |    No    |         | Automated reseller account generation (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                     |
 
 #### Input URL Schemes (`inputs[].url`)
@@ -175,7 +174,7 @@ logic.
 | `options`   | Behavior controls for metadata resolution, stream probing, and skip logic. | [See Options](#22-input-options-options)           |
 | `epg`       | XMLTV source management and Smart Match fuzzy logic settings.              | [See EPG](#23-epg-assignment--smart-match-epg)     |
 | `aliases`   | Connection pooling for multiple subscriptions from the same provider.      | [See Aliases](#24-provider-aliases-aliases--batch) |
-| `staged`    | Hybrid architecture for sideloading external playlists into an input.      | [See Staged](#25-staged-sources-staged)            |
+| `staged`    | Overlay settings for first-class staged inputs.                            | [See Staged](#25-staged-sources-staged)            |
 | `panel_api` | Automated reseller panel integration (provisioning/renewal).               | [See Panel API](#26-provider-panel-api-panel_api)  |
 
 ---
@@ -426,86 +425,67 @@ http://p2.com/get.php?username=u2&password=p2;1;5;true
 
 ### 2.5 Staged Sources (`staged`)
 
-The **"Staged Source"** acts as a structural template for an input's playlist.
-Instead of manually mapping and sorting channels within Tuliprox, this feature allows you to "inject" a pre-configured
-external playlist
-(e.g., from a GitHub repository or a third-party playlist editor) to define the layout while keeping the actual delivery
-linked to your main provider.
+The **staged input** is a first-class input type for pre-formatted playlists. Tuliprox reads the selected playlist
+clusters from the staged source, then stores the merged result in the linked provider input. Stream delivery and API
+requests continue to use that provider input.
 
-**The Hybrid Mechanism:**
+This is useful when an external playlist editor already has the desired channel order, groups, and original stream IDs.
+For example, an IPTV editor can provide the Live playlist layout while the actual streams are still opened against the
+Xtream or M3U provider.
 
-* **Structure Provider (Staged):** The external source dictates the channel order, selection, and group naming during
-  the update process.
-  It is used **temporarily** only for updating the playlist structure.
-* **Data Provider (Main Input):** Regular queries (streaming, authentication, EPG mapping, and metadata fetching)
-  still go through the main provider defined in the root of the input.
+**Data flow:**
 
-**Use Case:**
+* `staged input -> provider input`: the staged input is an overlay for that provider. Clusters listed in
+  `staged.clusters` are loaded from the staged input; the remaining clusters are loaded from the provider input itself.
+  The merged playlist is persisted under the provider input, and streaming/API requests still target the provider input.
+* `staged input -> target` is not supported. Use a normal `m3u` or `xtream` input if the source should be connected
+  directly to a target.
 
-If you have a perfectly maintained playlist in another online tool or want to bypass Tuliprox's internal mapping for a
-specific provider,
-you can "plug in" that playlist as a staged source. It won’t replace your main provider; it simply acts as a blueprint
-for the update cycle.
+#### Configuration Example (Provider With Staged Live Overlay)
 
-#### Configuration Example (Xtream Main + Staged Xtream)
-
-In this setup, Tuliprox uses an external provider's structure for Live-TV,
-but keeps the local provider's data for VOD and ignores the series section entirely.
+In this setup, Live-TV comes from the external staged playlist, while VOD and Series come from the original Xtream
+provider.
 
 ```yaml
 inputs:
   - name: provider_main
     type: xtream
-    url: [ http://provider-a.example:8080 ](http://provider-a.example:8080)
+    url: http://provider-a.example:8080
     username: main_user
     password: main_pass
-    options:
-      xtream_skip_live: false
-      xtream_skip_vod: false
-      xtream_skip_series: false
+
+  - name: provider_main_editor_live
+    type: staged
+    url: http://editor.example/provider-main-live.m3u
     staged:
-      enabled: true
-      type: xtream
-      url: [ http://provider-b.example:8080 ](http://provider-b.example:8080)
-      username: staged_user
-      password: staged_pass
-      live_source: staged
-      vod_source: input
-      series_source: skip
+      provider: provider_main
+      clusters: [live]
 ```
 
 #### Parameters
 
-| Parameter               | Type   | Required | Default    | Technical Impact & Background                                                                         |
-|:------------------------|:-------|:--------:|:-----------|:------------------------------------------------------------------------------------------------------|
-| `enabled`               | Bool   |    No    | `false`    | Master switch for the hybrid staged architecture.                                                     |
-| `type`                  | Enum   |    No    | `m3u`      | Format of the staged source. Allowed: `m3u`, `xtream`.                                                |
-| `url`                   | String |   Yes    |            | Download URL (HTTP/HTTPS) or local file path (can be gzip). For `xtream`, use the base hostname:port. |
-| `username` / `password` | String |   Yes    |            | Mandatory only if staged `type` is `xtream`.                                                          |
-| `method`                | Enum   |    No    | `GET`      | HTTP request method (`GET` or `POST`).                                                                |
-| `headers`               | Dict   |    No    |            | Custom HTTP headers for the staged download.                                                          |
-| `live_source`           | Enum   |    No    | `staged`   | Source for the Live-TV section: `staged`, `input`, or `skip`.                                         |
-| `vod_source`            | Enum   |    No    | *(Varies)* | Source for the VOD section: `staged`, `input`, or `skip`.                                             |
-| `series_source`         | Enum   |    No    | *(Varies)* | Source for the Series section: `staged`, `input`, or `skip`.                                          |
+| Parameter               | Type   | Required | Default | Technical Impact & Background                                                                         |
+|:------------------------|:-------|:--------:|:--------|:------------------------------------------------------------------------------------------------------|
+| `type`                  | Enum   |   Yes    |         | Must be `staged`.                                                                                     |
+| `staged_type`           | Enum   |    No    | `m3u`   | Format of the staged source. Allowed: `m3u`, `xtream`.                                                |
+| `url`                   | String |   Yes    |         | Download URL (HTTP/HTTPS) or local file path. For `staged_type: xtream`, use the base hostname:port.  |
+| `username` / `password` | String |   Yes    |         | Mandatory only if `staged_type: xtream`. Not inherited from the provider input.                       |
+| `method`                | Enum   |    No    | `GET`   | HTTP request method (`GET` or `POST`). Not inherited from the provider input.                         |
+| `headers`               | Dict   |    No    |         | Custom HTTP headers for the staged download. Not inherited from the provider input.                   |
+| `staged.provider`       | String |   Yes    |         | Provider input name. Must reference a non-staged `m3u` or `xtream` input.                             |
+| `staged.clusters`       | List   |    No    | all     | Clusters loaded from the staged input: `live`, `vod`, `series`.                                       |
 
-#### Staged Cluster Source Behavior & Logic
+#### Staged Cluster Behavior & Validation
 
-The selection of data sources for different clusters (Live, VOD, Series) follows specific validation and priority rules:
+`staged.clusters` is the group of clusters loaded from the staged input.
 
-1. **Global Skip Priority:** If `input.options.xtream_skip_live|vod|series` is set to `true`, that section is skipped
-   entirely,
-   regardless of the `staged` settings.
-2. **Xtream Main Inputs:**
-    * At least one cluster (`live`, `vod`, or `series`) must be set to `staged`.
-      If all effective values resolve to `input` or `skip`, the configuration is considered invalid.
-    * **Default Behavior:** If staged `type` is `xtream`, all clusters default to `staged`.
-3. **M3U Staged Sources:**
-    * M3U sources cannot provide structured VOD or Series metadata for Xtream clusters.
-      Therefore, `vod_source: staged` and `series_source: staged` are **invalid** if the staged type is `m3u`.
-    * **Default Behavior:** If staged `type` is `m3u`, it defaults to `live_source: staged`, `vod_source: input`, and
-      `series_source: input`.
-4. **M3U Main Inputs:** If the primary input `type` is `m3u`, the cluster source fields (`live_source`, etc.) are
-   ignored.
+* The referenced provider supplies all clusters not listed in `staged.clusters`.
+* `staged.provider` must reference an existing non-staged `m3u` or `xtream` input.
+* Each provider input can have at most one staged overlay.
+* `staged.clusters` must not be empty.
+* Source definitions must reference the provider input, not the staged input.
+* Staged inputs do not use `priority`, `max_connections`, or `cache_duration`. The linked provider input controls
+  stream limits and refresh cadence. If the provider input is still cached, Tuliprox does not query the staged input.
 
 #### File Persistence (`persist`)
 

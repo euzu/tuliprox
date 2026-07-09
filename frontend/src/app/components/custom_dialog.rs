@@ -45,7 +45,14 @@ pub fn CustomDialog(props: &CustomDialogProps) -> Html {
     // Update state when props change
     {
         let is_open = is_open.clone();
+        let previously_focused = previously_focused.clone();
         use_effect_with(props.open, move |&open| {
+            if open {
+                *previously_focused.borrow_mut() = window()
+                    .and_then(|w| w.document())
+                    .and_then(|document| document.active_element())
+                    .and_then(|el| el.dyn_into::<HtmlElement>().ok());
+            }
             is_open.set(open);
             || ()
         });
@@ -57,9 +64,6 @@ pub fn CustomDialog(props: &CustomDialogProps) -> Html {
         use_effect_with(*is_open, move |open| {
             if *open {
                 if let Some(document) = window().and_then(|w| w.document()) {
-                    *previously_focused.borrow_mut() =
-                        document.active_element().and_then(|el| el.dyn_into::<HtmlElement>().ok());
-
                     if let Some(container) = dialog_ref.cast::<HtmlElement>() {
                         let focus_inside =
                             document.active_element().is_some_and(|active| container.contains(Some(active.as_ref())));
@@ -100,13 +104,17 @@ pub fn CustomDialog(props: &CustomDialogProps) -> Html {
         let dismissable = props.close_on_backdrop_click;
 
         Callback::from(move |event: KeyboardEvent| match event.key().as_str() {
-            "Escape" if dismissable => {
-                if let Some(on_close) = &on_close {
-                    event.prevent_default();
-                    on_close.emit(());
+            "Escape" => {
+                event.stop_propagation();
+                if dismissable {
+                    if let Some(on_close) = &on_close {
+                        event.prevent_default();
+                        on_close.emit(());
+                    }
                 }
             }
             "Tab" => {
+                event.stop_propagation();
                 let Some(container) = dialog_ref.cast::<Element>() else {
                     return;
                 };

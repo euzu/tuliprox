@@ -43,7 +43,7 @@ use shared::{
     error::{get_errors_notify_message, TuliproxError},
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
-        CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType, ItemField,
+        ClusterFlags, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType, ItemField,
         PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, ProcessingOrder, SourceStats, StreamProperties,
         TargetStats, UUIDType, XtreamCluster,
     },
@@ -391,6 +391,44 @@ fn filter_skipped_clusters_from_source(source: PlaylistSource, input: &ConfigInp
     PlaylistSource::filtered(source, skip_set)
 }
 
+fn cluster_selected(cluster: XtreamCluster, clusters: ClusterFlags) -> bool {
+    match cluster {
+        XtreamCluster::Live => clusters.contains(ClusterFlags::Live),
+        XtreamCluster::Video => clusters.contains(ClusterFlags::Vod),
+        XtreamCluster::Series => clusters.contains(ClusterFlags::Series),
+    }
+}
+
+fn apply_staged_overlay_groups(
+    provider_name: &Arc<str>,
+    clusters: ClusterFlags,
+    provider_groups: Vec<PlaylistGroup>,
+    staged_groups: Vec<PlaylistGroup>,
+) -> Vec<PlaylistGroup> {
+    let mut groups: Vec<PlaylistGroup> = provider_groups
+        .into_iter()
+        .filter(|group| !cluster_selected(group.xtream_cluster, clusters))
+        .collect();
+
+    groups.extend(
+        staged_groups
+            .into_iter()
+            .filter(|group| cluster_selected(group.xtream_cluster, clusters))
+            .map(|mut group| {
+                for item in &mut group.channels {
+                    item.header.input_name = Arc::clone(provider_name);
+                }
+                group
+            }),
+    );
+
+    groups
+}
+
+fn should_apply_staged_overlay(download_result: &PlaylistDownloadResult) -> bool {
+    !download_result.was_cached
+}
+
 #[allow(clippy::too_many_lines)]
 async fn playlist_download_from_input(
     client: &reqwest::Client,
@@ -698,6 +736,13 @@ async fn download_input(
     ctx: &PlaylistProcessingContext,
     input: &Arc<ConfigInput>,
 ) -> (Vec<TuliproxError>, PlaylistSource, Option<TuliproxError>) {
+    let staged_overlay = if input.staged.is_none() {
+        let sources = ctx.config.sources.load();
+        sources.get_staged_input_for_provider(&input.name).cloned()
+    } else {
+        None
+    };
+
     // Coordination Logic
     let need_download = !ctx.is_input_downloaded(&input.name).await;
     // Keep this lock for the whole critical section (download + persist/load + mark processed)
@@ -765,8 +810,9 @@ async fn download_input(
             preloaded_playlist = Some((cached_playlist, None));
         }
     }
+    let apply_staged_overlay = should_apply_staged_overlay(&playlist_download_result);
 
-    let (playlist, error) = if let Some(preloaded) = preloaded_playlist {
+    let (mut playlist, mut error) = if let Some(preloaded) = preloaded_playlist {
         preloaded
     } else if playlist_download_result.was_cached || playlist_download_result.persisted {
         match load_input_playlist(ctx, input, None).await {
@@ -779,7 +825,28 @@ async fn download_input(
         (MemoryPlaylistSource::new(pl).into_source(), err)
     };
 
-    let playlist = filter_skipped_clusters_from_source(playlist, input);
+    playlist = filter_skipped_clusters_from_source(playlist, input);
+
+    if let Some(staged_input) = staged_overlay.filter(|_| apply_staged_overlay) {
+        let clusters = staged_input.staged.as_ref().map_or_else(ClusterFlags::all, |staged| staged.clusters);
+        let (mut staged_download_err, mut staged_playlist, staged_error) =
+            Box::pin(download_input(ctx, &staged_input)).await;
+        playlist_download_result.download_err.append(&mut staged_download_err);
+        if let Some(staged_error) = staged_error {
+            playlist_download_result.download_err.push(staged_error);
+        } else {
+            let provider_groups = playlist.take_groups();
+            let staged_groups = staged_playlist.take_groups();
+            let merged_groups = apply_staged_overlay_groups(&input.name, clusters, provider_groups, staged_groups);
+            let (merged_playlist, persist_error) = persist_input_playlist(&ctx.config, input, merged_groups).await;
+            playlist = MemoryPlaylistSource::new(merged_playlist).into_source();
+            if error.is_none() {
+                error = persist_error;
+            } else if let Some(persist_error) = persist_error {
+                playlist_download_result.download_err.push(persist_error);
+            }
+        }
+    }
 
     if mark_as_processed {
         // Mark after persist/load so other workers only see this input as ready when data is usable.
@@ -1592,7 +1659,7 @@ pub async fn exec_processing(
 mod tests {
     use super::*;
     use shared::foundation::{get_filter, ValueProvider};
-    use shared::model::{PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster};
+    use shared::model::{ClusterFlags, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster};
     use shared::utils::Internable;
 
     fn item_with_props(props: StreamProperties) -> PlaylistItem {
@@ -1715,6 +1782,56 @@ mod tests {
         let filtered_groups = filtered.take_groups();
         assert_eq!(filtered_groups.len(), 1);
         assert_eq!(filtered_groups[0].xtream_cluster, XtreamCluster::Video);
+    }
+
+    fn test_group(cluster: XtreamCluster, item_name: &str, input_name: &str) -> PlaylistGroup {
+        PlaylistGroup {
+            id: 1,
+            title: item_name.intern(),
+            xtream_cluster: cluster,
+            channels: vec![PlaylistItem {
+                header: PlaylistItemHeader {
+                    name: item_name.intern(),
+                    input_name: input_name.intern(),
+                    xtream_cluster: cluster,
+                    item_type: match cluster {
+                        XtreamCluster::Live => PlaylistItemType::Live,
+                        XtreamCluster::Video => PlaylistItemType::Video,
+                        XtreamCluster::Series => PlaylistItemType::Series,
+                    },
+                    ..Default::default()
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn staged_overlay_replaces_selected_clusters_and_rewrites_input_name() {
+        let provider_name = "provider".intern();
+        let provider_groups = vec![
+            test_group(XtreamCluster::Live, "provider-live", "provider"),
+            test_group(XtreamCluster::Video, "provider-vod", "provider"),
+        ];
+        let staged_groups = vec![
+            test_group(XtreamCluster::Live, "staged-live", "staged"),
+            test_group(XtreamCluster::Series, "staged-series", "staged"),
+        ];
+
+        let groups =
+            apply_staged_overlay_groups(&provider_name, ClusterFlags::Live, provider_groups, staged_groups);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].title.as_ref(), "provider-vod");
+        assert_eq!(groups[0].channels[0].header.input_name.as_ref(), "provider");
+        assert_eq!(groups[1].title.as_ref(), "staged-live");
+        assert_eq!(groups[1].channels[0].header.input_name.as_ref(), "provider");
+    }
+
+    #[test]
+    fn staged_overlay_is_skipped_when_provider_playlist_is_cached() {
+        let result = PlaylistDownloadResult::new(vec![], vec![], true, false);
+
+        assert!(!should_apply_staged_overlay(&result));
     }
 
 

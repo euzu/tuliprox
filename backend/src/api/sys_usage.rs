@@ -110,11 +110,11 @@ impl DiskProbe {
             if rc != 0 {
                 return (0, 0);
             }
-            // For 32-Bit-Systems (like ARMv7 Raspberry Pi)
+            // 32-bit systems expose f_frsize as a narrower integer.
             #[cfg(target_pointer_width = "32")]
             let bsize = u64::from(stat.f_frsize);
 
-            // Für 64-Bit-Systeme bleibt es wie es war
+            // 64-bit systems already expose f_frsize as u64.
             #[cfg(target_pointer_width = "64")]
             let bsize = stat.f_frsize;
 

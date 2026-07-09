@@ -78,11 +78,9 @@ pub fn TextArea(props: &TextAreaProps) -> Html {
                 title_content={title_content}
                 expanded={!props.value.is_empty()}
             >
-                <div class="tp__input">
-                    <div class="tp__input-wrapper">
-                        { textarea_input }
-                    </div>
-                </div>
+                <FieldWrapper label={None::<String>} field_id={resolved_field_id.clone()}>
+                    { textarea_input }
+                </FieldWrapper>
             </CollapsePanel>
         };
     }
