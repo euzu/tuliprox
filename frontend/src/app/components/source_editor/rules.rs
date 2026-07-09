@@ -29,7 +29,7 @@ pub fn can_connect(from_block: &Block, to_block: &Block, connections: &[Connecti
     if !valid_direction {
         return false;
     }
-    // Child input can have only one Stage connection.
+    // A provider input can have only one staged overlay connection.
     if from_is_staged && to_is_child_input {
         let has_stage_already = connections.iter().any(|c| c.to == to_block.id);
         if has_stage_already {

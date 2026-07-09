@@ -115,7 +115,7 @@ impl SourcesConfigDto {
             }
         }
 
-        self.validate_staged_children()?;
+        self.validate_staged_providers()?;
 
         for source in &mut self.sources {
             source_index = source.prepare(source_index, include_computed)?;
@@ -135,39 +135,47 @@ impl SourcesConfigDto {
         Ok(())
     }
 
-    fn validate_staged_children(&self) -> Result<(), TuliproxError> {
+    fn validate_staged_providers(&self) -> Result<(), TuliproxError> {
         if !self.inputs.iter().any(|input| input.input_type.is_staged()) {
             return Ok(());
         }
 
         let by_name: std::collections::HashMap<&str, &ConfigInputDto> =
             self.inputs.iter().map(|input| (input.name.as_ref(), input)).collect();
+        let mut staged_by_provider = std::collections::HashMap::<&str, &str>::new();
 
         for input in &self.inputs {
             if !input.input_type.is_staged() {
                 continue;
             }
-            let Some(child_name) = input.child.as_ref() else {
-                continue; // R2 already enforced in ConfigInputDto::prepare
+            let Some(staged) = input.staged.as_ref() else {
+                continue; // already enforced in ConfigInputDto::prepare
             };
-            let Some(child) = by_name.get(child_name.as_ref()) else {
-                return Err(TuliproxError::ConfigSource(format!(
-                    "staged input '{}' references unknown child input '{child_name}'",
-                    input.name
-                )));
+            let Some(provider_name) = staged.provider.as_deref() else {
+                continue;
             };
-            // (max chain depth 2): child must not itself be staged.
-            if child.input_type.is_staged() {
+            if let Some(existing_staged) = staged_by_provider.insert(provider_name, input.name.as_ref()) {
                 return Err(TuliproxError::ConfigSource(format!(
-                    "staged input '{}' cannot use another staged input '{child_name}' as child (max chain depth is {MAX_STAGE_CHAIN_DEPTH})",
+                    "provider input '{provider_name}' is referenced by multiple staged inputs: '{existing_staged}' and '{}'",
                     input.name
                 )));
             }
-            // child must be m3u or xtream.
-            if !(child.input_type.is_m3u() || child.input_type.is_xtream()) {
+            let Some(provider) = by_name.get(provider_name) else {
                 return Err(TuliproxError::ConfigSource(format!(
-                    "staged input '{}' child '{child_name}' must be an m3u or xtream input (found: {})",
-                    input.name, child.input_type
+                    "staged input '{}' references unknown provider input '{provider_name}'",
+                    input.name
+                )));
+            };
+            if provider.input_type.is_staged() {
+                return Err(TuliproxError::ConfigSource(format!(
+                    "staged input '{}' cannot use another staged input '{provider_name}' as provider (max chain depth is {MAX_STAGE_CHAIN_DEPTH})",
+                    input.name
+                )));
+            }
+            if !(provider.input_type.is_m3u() || provider.input_type.is_xtream()) {
+                return Err(TuliproxError::ConfigSource(format!(
+                    "staged input '{}' provider '{provider_name}' must be an m3u or xtream input (found: {})",
+                    input.name, provider.input_type
                 )));
             }
         }
@@ -211,7 +219,10 @@ impl SourcesConfigDto {
 mod tests {
     use super::*;
     use crate::{
-        model::{ConfigRenameDto, ConfigTargetDto, InputType, ItemField, M3uTargetOutputDto, TargetOutputDto},
+        model::{
+            ConfigInputStagedDto, ConfigRenameDto, ConfigTargetDto, InputType, ItemField, M3uTargetOutputDto,
+            TargetOutputDto,
+        },
         utils::Internable,
     };
 
@@ -269,5 +280,38 @@ mod tests {
             sources.sources[0].targets[0].rename.as_ref().expect("rename should exist after prepare")[0].pattern,
             original_rename_pattern
         );
+    }
+
+    #[test]
+    fn prepare_rejects_multiple_staged_inputs_for_one_provider() {
+        let mut sources = SourcesConfigDto {
+            inputs: vec![
+                ConfigInputDto {
+                    name: "provider".intern(),
+                    input_type: InputType::M3u,
+                    url: "http://example.com/playlist.m3u".to_string(),
+                    ..Default::default()
+                },
+                ConfigInputDto {
+                    name: "staged_live".intern(),
+                    input_type: InputType::Staged,
+                    url: "http://staged.example/live.m3u".to_string(),
+                    staged: Some(ConfigInputStagedDto { provider: Some("provider".intern()), ..Default::default() }),
+                    ..Default::default()
+                },
+                ConfigInputDto {
+                    name: "staged_vod".intern(),
+                    input_type: InputType::Staged,
+                    url: "http://staged.example/vod.m3u".to_string(),
+                    staged: Some(ConfigInputStagedDto { provider: Some("provider".intern()), ..Default::default() }),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let err =
+            sources.prepare(false, None, None).expect_err("one provider must not accept multiple staged overlays");
+        assert!(err.to_string().contains("referenced by multiple staged inputs"), "Error: {err}");
     }
 }

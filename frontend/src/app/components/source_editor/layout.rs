@@ -57,7 +57,7 @@ type EdgeMap = HashMap<BlockId, Vec<BlockId>>;
 
 struct InputTargetMaps {
     input_to_targets: EdgeMap,
-    /// Parent input -> staged child inputs (input -> input edges).
+    /// Staged input -> provider input edges.
     input_to_child_inputs: EdgeMap,
     adjacency: EdgeMap,
 }
@@ -258,7 +258,7 @@ fn layout_component(
     }
 
     // Desired y per input. Inputs wired to targets align to those targets; staged
-    // inputs without a direct target align to their child inputs. Process deepest
+    // inputs without a direct target align to their provider inputs. Process deepest
     // columns first so a parent can read its already-resolved children's y.
     let mut by_column_desc = input_ids.clone();
     by_column_desc.sort_by(|a, b| {

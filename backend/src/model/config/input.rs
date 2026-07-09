@@ -5,7 +5,7 @@ use log::warn;
 use shared::foundation::Filter;
 use shared::{apply_flags, create_bitset};
 use shared::error::TuliproxError;
-use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicy, MediaServerInputConfigDto, MediaServerLibrarySelector, MediaServerPlaybackConfigDto};
+use shared::model::{ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicy, MediaServerInputConfigDto, MediaServerLibrarySelector, MediaServerPlaybackConfigDto, StagedInputType};
 use shared::utils::{
     get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable,
     BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
@@ -116,6 +116,21 @@ pub struct MediaServerInputConfig {
     pub server_name: Option<String>,
     pub prefer_https: bool,
     pub allow_relay: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigInputStaged {
+    pub provider: Option<Arc<str>>,
+    pub clusters: ClusterFlags,
+}
+
+impl From<&ConfigInputStagedDto> for ConfigInputStaged {
+    fn from(dto: &ConfigInputStagedDto) -> Self {
+        Self {
+            provider: dto.provider.clone(),
+            clusters: dto.clusters,
+        }
+    }
 }
 
 impl From<&MediaServerInputConfigDto> for MediaServerInputConfig {
@@ -234,7 +249,8 @@ pub struct ConfigInput {
     pub priority: i16,
     pub max_connections: u16,
     pub method: InputFetchMethod,
-    pub child: Option<Arc<str>>,
+    pub staged_type: StagedInputType,
+    pub staged: Option<ConfigInputStaged>,
     pub exp_date: Option<i64>,
     pub t_batch_url: Option<String>,
     pub panel_api: Option<PanelApiConfig>,
@@ -303,34 +319,8 @@ impl ConfigInput {
         self.input_type
     }
 
-    /// Resolves a staged (derived-source) input against its child input.
-    ///
-    /// A staged input is always fetched as a plain M3U playlist file: it inherits only the child's
-    /// connection profile (credentials, headers and fetch method) from a non-staged m3u/xtream
-    /// child, while keeping its own `url`. The child's protocol is intentionally *not* adopted, so
-    /// the staged URL is downloaded as a static playlist and never queried via the Xtream
-    /// `player_api.php` endpoints. After this call the input behaves like a normal m3u input for the
-    /// rest of the pipeline.
-    pub fn resolve_staged_from_child(&mut self, child: &ConfigInput) {
-        // A staged input is always downloaded as a plain M3U playlist file, regardless of the
-        // child's protocol.
-        self.input_type = InputType::M3u;
-
-        // Inherit credentials when the staged input does not provide its own.
-        if !is_non_blank_optional_string(&self.username) {
-            self.username.clone_from(&child.username);
-        }
-        if !is_non_blank_optional_string(&self.password) {
-            self.password.clone_from(&child.password);
-        }
-        // Inherit headers when the staged input has none of its own.
-        if self.headers.is_empty() {
-            self.headers.clone_from(&child.headers);
-        }
-        // Inherit the fetch method when the staged input kept the default.
-        if InputFetchMethod::is_default(&self.method) {
-            self.method = child.method;
-        }
+    pub fn resolve_staged_download_type(&mut self) {
+        self.input_type = self.staged_type.input_type();
 
         // For m3u inputs credentials may live in the URL itself.
         let (username, password) = get_credentials_from_url_str(&self.url);
@@ -396,12 +386,6 @@ impl ConfigInput {
         if self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty()) {
             return Err(TuliproxError::ConfigInput(format!(
                 "media-server input does not support aliases (input: {})",
-                self.name
-            )));
-        }
-        if self.child.is_some() {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media-server input does not support a child input (input: {})",
                 self.name
             )));
         }
@@ -613,7 +597,8 @@ impl ConfigInput {
             priority: alias.priority,
             max_connections: alias.max_connections,
             method: self.method,
-            child: None,
+            staged_type: self.staged_type,
+            staged: None,
             exp_date: None,
             t_batch_url: None,
             panel_api: self.panel_api.clone(),
@@ -701,8 +686,9 @@ impl From<&ConfigInputDto> for ConfigInput {
             priority: dto.priority,
             max_connections: dto.max_connections,
             method: dto.method,
+            staged_type: dto.staged_type,
             exp_date: dto.exp_date,
-            child: dto.child.clone(),
+            staged: dto.staged.as_ref().map(ConfigInputStaged::from),
             t_batch_url: None,
             panel_api: dto.panel_api.as_ref().map(PanelApiConfig::from),
             cache_duration_seconds: dto.cache_duration_seconds,
@@ -1160,75 +1146,66 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_staged_from_child_inherits_xtream_credentials() {
-        let child = ConfigInput {
-            name: "provider_a".into(),
-            input_type: InputType::Xtream,
-            url: "http://provider.example".to_string(),
-            username: Some("parent_user".to_string()),
-            password: Some("parent_pass".to_string()),
-            headers: HashMap::from([("X-Test".to_string(), "1".to_string())]),
-            ..Default::default()
-        };
+    fn test_resolve_staged_download_type_does_not_inherit_provider_connection_profile() {
         let mut staged = ConfigInput {
             name: "staged_a".into(),
             input_type: InputType::Staged,
             url: "http://staged.example".to_string(),
-            child: Some("provider_a".into()),
             ..Default::default()
         };
 
-        staged.resolve_staged_from_child(&child);
+        staged.resolve_staged_download_type();
 
         assert_eq!(staged.input_type, InputType::M3u);
-        assert_eq!(staged.username.as_deref(), Some("parent_user"));
-        assert_eq!(staged.password.as_deref(), Some("parent_pass"));
-        assert_eq!(staged.headers.get("X-Test").map(String::as_str), Some("1"));
-        // The staged input keeps its own URL.
+        assert_eq!(staged.username, None);
+        assert_eq!(staged.password, None);
+        assert!(staged.headers.is_empty());
+        assert!(InputFetchMethod::is_default(&staged.method));
         assert_eq!(staged.url, "http://staged.example");
     }
 
     #[test]
-    fn test_resolve_staged_from_child_allows_credential_override() {
-        let child = ConfigInput {
-            name: "provider_a".into(),
-            input_type: InputType::Xtream,
-            username: Some("parent_user".to_string()),
-            password: Some("parent_pass".to_string()),
+    fn test_resolve_staged_download_type_preserves_xtream_staged_type() {
+        let mut staged = ConfigInput {
+            name: "staged_a".into(),
+            input_type: InputType::Staged,
+            staged_type: StagedInputType::Xtream,
+            url: "http://staged.example".to_string(),
             ..Default::default()
         };
+
+        staged.resolve_staged_download_type();
+
+        assert_eq!(staged.input_type, InputType::Xtream);
+    }
+
+    #[test]
+    fn test_resolve_staged_download_type_keeps_own_credentials() {
         let mut staged = ConfigInput {
             name: "staged_a".into(),
             input_type: InputType::Staged,
             url: "http://staged.example".to_string(),
             username: Some("own_user".to_string()),
             password: Some("own_pass".to_string()),
-            child: Some("provider_a".into()),
             ..Default::default()
         };
 
-        staged.resolve_staged_from_child(&child);
+        staged.resolve_staged_download_type();
 
         assert_eq!(staged.username.as_deref(), Some("own_user"));
         assert_eq!(staged.password.as_deref(), Some("own_pass"));
     }
 
     #[test]
-    fn test_resolve_staged_from_child_m3u_extracts_url_credentials() {
-        let child = ConfigInput {
-            name: "provider_a".into(),
-            input_type: InputType::M3u,
-            ..Default::default()
-        };
+    fn test_resolve_staged_download_type_m3u_extracts_url_credentials() {
         let mut staged = ConfigInput {
             name: "staged_a".into(),
             input_type: InputType::Staged,
             url: "http://staged.example/get.php?username=urluser&password=urlpass".to_string(),
-            child: Some("provider_a".into()),
             ..Default::default()
         };
 
-        staged.resolve_staged_from_child(&child);
+        staged.resolve_staged_download_type();
 
         assert_eq!(staged.input_type, InputType::M3u);
         assert_eq!(staged.username.as_deref(), Some("urluser"));

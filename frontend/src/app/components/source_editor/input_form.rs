@@ -1,9 +1,10 @@
 use crate::{
     app::{
         components::{
-            config::HasFormData, key_value_editor::KeyValueEditor, AliasItemForm, BlockId, BlockInstance, Card,
-            EditMode, EpgSmartMatchForm, EpgSourceItemForm, FilterInput, IconButton, Panel, ProviderItemForm,
-            RadioButtonGroup, SourceEditorContext, TextButton, TitledCard, ToolAction,
+            config::HasFormData, input::Input, key_value_editor::KeyValueEditor, AliasItemForm, BlockId, BlockInstance,
+            Card, ClusterFlagsInput, ClusterFlagsInputMode, EditMode, EpgSmartMatchForm, EpgSourceItemForm,
+            FilterInput, HideContent, IconButton, Panel, ProviderItemForm, RadioButtonGroup, SourceEditorContext,
+            TextButton, TitledCard, ToggleSwitch, ToolAction,
         },
         ConfigContext,
     },
@@ -18,8 +19,10 @@ use shared::{
     concat_string,
     error::TuliproxError,
     model::{
-        ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto, EpgSmartMatchConfigDto,
-        EpgSourceDto, InputFetchMethod, OnConnectErrorPolicy, ProviderUrlSelectionPolicy, XtreamLoginRequest,
+        ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto,
+        ConfigProviderDto, EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, MediaServerInputConfigDto,
+        MediaServerLibrarySelector, OnConnectErrorPolicy, ProviderUrlSelectionPolicy, StagedInputType,
+        XtreamLoginRequest,
     },
     utils::{Internable, BATCH_SCHEME_PREFIX},
 };
@@ -81,9 +84,67 @@ const LABEL_METADATA: &str = "LABEL.METADATA";
 const LABEL_CACHE_DURATION: &str = "LABEL.CACHE_DURATION";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
-const LABEL_CHILD: &str = "LABEL.CHILD";
 const LABEL_EPG: &str = "LABEL.EPG";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
+const LABEL_TYPE: &str = "LABEL.TYPE";
+const LABEL_CLUSTER: &str = "LABEL.CLUSTER";
+const LABEL_MEDIA_SERVER: &str = "LABEL.MEDIA_SERVER";
+const LABEL_LIBRARIES: &str = "LABEL.LIBRARIES";
+const LABEL_TOKEN: &str = "LABEL.TOKEN";
+const LABEL_API_KEY: &str = "LABEL.API_KEY";
+const LABEL_USER_ID: &str = "LABEL.USER_ID";
+const LABEL_ACCOUNT_TOKEN: &str = "LABEL.ACCOUNT_TOKEN";
+const LABEL_SERVER_ID: &str = "LABEL.SERVER_ID";
+const LABEL_SERVER_NAME: &str = "LABEL.SERVER_NAME";
+const LABEL_PREFER_HTTPS: &str = "LABEL.PREFER_HTTPS";
+const LABEL_ALLOW_RELAY: &str = "LABEL.ALLOW_RELAY";
+
+fn staged_type_options() -> Rc<Vec<String>> {
+    Rc::new(vec![StagedInputType::M3u.to_string(), StagedInputType::Xtream.to_string()])
+}
+
+fn staged_type_from_selection(selections: &[String]) -> StagedInputType {
+    selections.first().and_then(|value| value.parse::<StagedInputType>().ok()).unwrap_or_default()
+}
+
+fn libraries_to_text(libraries: &[MediaServerLibrarySelector]) -> String {
+    libraries
+        .iter()
+        .map(|library| match library {
+            MediaServerLibrarySelector::Name(name) => name.as_str(),
+            MediaServerLibrarySelector::Detailed(details) => details.name.as_deref().unwrap_or_default(),
+        })
+        .filter(|name| !name.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn libraries_from_text(value: &str) -> Vec<MediaServerLibrarySelector> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| MediaServerLibrarySelector::Name(name.to_string()))
+        .collect()
+}
+
+fn mutate_media_server(
+    current: &Option<MediaServerInputConfigDto>,
+    change: impl FnOnce(&mut MediaServerInputConfigDto),
+) -> Option<MediaServerInputConfigDto> {
+    let mut media_server = current.clone().unwrap_or_default();
+    change(&mut media_server);
+    Some(media_server)
+}
+
+fn mutate_staged(
+    current: &Option<ConfigInputStagedDto>,
+    change: impl FnOnce(&mut ConfigInputStagedDto),
+) -> Option<ConfigInputStagedDto> {
+    let mut staged = current.clone().unwrap_or_default();
+    change(&mut staged);
+    Some(staged)
+}
 
 fn provider_url_selection_policy_label_key(policy: ProviderUrlSelectionPolicy) -> &'static str {
     match policy {
@@ -115,11 +176,11 @@ const LABEL_LIVE_STREAMS: &str = "LABEL.LIVE_STREAMS";
 const LABEL_EPG_SMART_MATCH: &str = "LABEL.EPG_SMART_MATCH";
 const LABEL_EDIT_EPG_SMART_MATCH: &str = "LABEL.EDIT_EPG_SMART_MATCH";
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum InputFormPage {
     Main,
     Options,
-    Child,
+    Libraries,
     Epg,
     Alias,
     Provider,
@@ -128,7 +189,7 @@ enum InputFormPage {
 impl InputFormPage {
     const MAIN: &str = "Main";
     const OPTIONS: &str = "Options";
-    const CHILD: &str = "Child";
+    const LIBRARIES: &str = "Libraries";
     const EPG: &str = "Epg";
     const ALIAS: &str = "Alias";
     const PROVIDER: &str = "Provider";
@@ -141,7 +202,7 @@ impl FromStr for InputFormPage {
         match s {
             Self::MAIN => Ok(InputFormPage::Main),
             Self::OPTIONS => Ok(InputFormPage::Options),
-            Self::CHILD => Ok(InputFormPage::Child),
+            Self::LIBRARIES => Ok(InputFormPage::Libraries),
             Self::EPG => Ok(InputFormPage::Epg),
             Self::ALIAS => Ok(InputFormPage::Alias),
             Self::PROVIDER => Ok(InputFormPage::Provider),
@@ -158,7 +219,7 @@ impl Display for InputFormPage {
             match *self {
                 InputFormPage::Main => Self::MAIN,
                 InputFormPage::Options => Self::OPTIONS,
-                InputFormPage::Child => Self::CHILD,
+                InputFormPage::Libraries => Self::LIBRARIES,
                 InputFormPage::Epg => Self::EPG,
                 InputFormPage::Alias => Self::ALIAS,
                 InputFormPage::Provider => Self::PROVIDER,
@@ -172,12 +233,23 @@ impl Internable for InputFormPage {
         match self {
             Self::Main => Self::MAIN,
             Self::Options => Self::OPTIONS,
-            Self::Child => Self::CHILD,
+            Self::Libraries => Self::LIBRARIES,
             Self::Epg => Self::EPG,
             Self::Alias => Self::ALIAS,
             Self::Provider => Self::PROVIDER,
         }
         .intern()
+    }
+}
+
+#[cfg(test)]
+mod input_form_page_tests {
+    use super::*;
+
+    #[test]
+    fn media_server_libraries_page_round_trips() {
+        assert_eq!(InputFormPage::from_str(InputFormPage::LIBRARIES).ok(), Some(InputFormPage::Libraries));
+        assert_eq!(InputFormPage::Libraries.to_string(), InputFormPage::LIBRARIES);
     }
 }
 
@@ -218,6 +290,9 @@ generate_form_reducer!(
         Priority => priority: i16,
         MaxConnections => max_connections: u16,
         Method => method: InputFetchMethod,
+        StagedType => staged_type: StagedInputType,
+        Staged => staged: Option<ConfigInputStagedDto>,
+        MediaServer => media_server: Option<MediaServerInputConfigDto>,
         ExpDate => exp_date: Option<i64>,
         CacheDuration => cache_duration: Option<String>,
     }
@@ -306,15 +381,16 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 .unwrap_or_default();
             if let Some(input) = cfg {
                 let is_library = input.input_type.is_library();
+                let is_media_server = input.input_type.is_media_server();
                 let is_staged = input.input_type.is_staged();
                 let current_page = *view_visible;
                 let page_allowed = match current_page {
                     InputFormPage::Main => true,
-                    InputFormPage::Child => is_staged,
+                    InputFormPage::Libraries => is_media_server,
                     InputFormPage::Alias | InputFormPage::Options | InputFormPage::Provider => {
-                        !is_library && !is_staged
+                        !is_library && !is_staged && !is_media_server
                     }
-                    InputFormPage::Epg => !is_library && !is_staged,
+                    InputFormPage::Epg => !is_library && !is_staged && !is_media_server,
                 };
                 if !page_allowed {
                     view_visible.set(InputFormPage::Main);
@@ -688,15 +764,19 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     };
 
     let library_input = input_form_state.form.input_type.is_library();
+    let media_server_input = input_form_state.form.input_type.is_media_server();
     let xtream_input = input_form_state.form.input_type.is_xtream();
     let staged_input = input_form_state.form.input_type.is_staged();
+    let staged_xtream_input = staged_input && input_form_state.form.staged_type == StagedInputType::Xtream;
+    let credentials_input = xtream_input || staged_xtream_input || media_server_input;
+    let options_input = !library_input && !media_server_input;
 
     let render_options = || {
         let headers = headers_state.clone();
         if !props.allow_write {
             return html! {
                 <Card class="tp__config-view__card">
-                { html_if!(xtream_input, {
+                { html_if!(xtream_input || staged_xtream_input, {
                     <>
                     <TitledCard title={translate.t(LABEL_SKIP)}>
                       <div class="tp__config-view__cols-3">
@@ -758,7 +838,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         }
         html! {
             <Card class="tp__config-view__card">
-            { html_if!(xtream_input, {
+            { html_if!(xtream_input || staged_xtream_input, {
                 <>
                 <TitledCard title={translate.t(LABEL_SKIP)}>
                   <div class="tp__config-view__cols-3">
@@ -833,18 +913,13 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         }
     };
 
-    let render_child = || {
-        let child_value = input_form_state.form.child.as_ref().map_or_else(String::new, |c| c.to_string());
-        html! {
-            <Card class="tp__config-view__card">
-                { config_field_custom!(translate.t(LABEL_CHILD), child_value) }
-            </Card>
-        }
-    };
-
     let render_input = || {
         let providers_state = providers_state.clone();
         let input_method_selection = Rc::new(vec![input_form_state.form.method.to_string()]);
+        let staged_type_selection = Rc::new(vec![input_form_state.form.staged_type.to_string()]);
+        let staged_type_options = staged_type_options();
+        let staged_type_labels = Rc::new(vec![translate.t("LABEL.M3U"), translate.t("LABEL.XTREAM")]);
+        let staged_clusters = input_form_state.form.staged.as_ref().map(|staged| staged.clusters);
         let is_csv_batch = input_form_state.form.url.starts_with(BATCH_SCHEME_PREFIX);
         let input_form_state_disp = input_form_state.clone();
         let exp_date_tool_action = if input_form_state.form.input_type.is_xtream() {
@@ -937,11 +1012,17 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                    { config_field!(input_form_state.form, translate.t(LABEL_NAME), name) }
                    { config_field_bool!(input_form_state.form, translate.t(LABEL_ENABLED), enabled) }
                    </div>
+                   { html_if!(staged_input, {
+                     <>
+                     { config_field_custom!(translate.t(LABEL_TYPE), input_form_state.form.staged_type.to_string()) }
+                     { config_field_custom!(translate.t(LABEL_CLUSTER), staged_clusters.map_or_else(String::new, |clusters| clusters.to_string())) }
+                     </>
+                   })}
                    { html_if!(!library_input, {
                     <>
                      { config_field!(input_form_state.form, translate.t(LABEL_URL), url) }
                      <div class="tp__config-view__cols-2">
-                     { html_if!(xtream_input && !is_csv_batch, {
+                     { html_if!(credentials_input && !is_csv_batch, {
                        <>
                        { config_field_optional!(input_form_state.form, translate.t(LABEL_USERNAME), username) }
                        { config_field_optional_hide!(input_form_state.form, translate.t(LABEL_PASSWORD), password) }
@@ -949,25 +1030,15 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                      })}
                      { html_if!(!is_csv_batch, {
                          <>
-                         { html_if!(!staged_input, {
-                           { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), input_form_state.form.max_connections.to_string()) }
-                         })}
-                         { html_if!(!staged_input, {
-                           { config_field_custom!(translate.t(LABEL_PRIORITY), input_form_state.form.priority.to_string()) }
-                         })}
-                         { html_if!(!staged_input, {
-                           { config_field_custom!(translate.t(LABEL_EXP_DATE), input_form_state.form.exp_date.map_or_else(String::new, |exp_date| exp_date.to_string())) }
-                         })}
+                         { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), input_form_state.form.max_connections.to_string()) }
+                         { config_field_custom!(translate.t(LABEL_PRIORITY), input_form_state.form.priority.to_string()) }
+                         { config_field_custom!(translate.t(LABEL_EXP_DATE), input_form_state.form.exp_date.map_or_else(String::new, |exp_date| exp_date.to_string())) }
                          </>
                      })}
-                     { html_if!(!staged_input, {
-                       { config_field_optional!(input_form_state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
-                     })}
+                     { config_field_optional!(input_form_state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
                      { config_field_custom!(translate.t(LABEL_FETCH_METHOD), input_form_state.form.method.to_string()) }
                      </div>
-                     { html_if!(!staged_input, {
-                       { config_field_optional!(input_form_state.form, translate.t(LABEL_PERSIST), persist) }
-                     })}
+                     { config_field_optional!(input_form_state.form, translate.t(LABEL_PERSIST), persist) }
                     </>
                    })}
                 </Card>
@@ -979,11 +1050,46 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                { edit_field_text!(input_form_state, translate.t(LABEL_NAME),  name, ConfigInputFormAction::Name) }
                { edit_field_bool!(input_form_state, translate.t(LABEL_ENABLED), enabled, ConfigInputFormAction::Enabled) }
                </div>
+               { html_if!(staged_input, {
+                 <>
+                 { config_field_child!(translate.t(LABEL_TYPE), "INPUT_FORM.STAGED_TYPE", {
+                   let input_form_state = input_form_state.clone();
+                   html! {
+                       <RadioButtonGroup
+                        multi_select={false}
+                        none_allowed={false}
+                        options={staged_type_options}
+                        labels={Some(staged_type_labels)}
+                        selected={staged_type_selection}
+                        on_select={Callback::from(move |selections: Rc<Vec<String>>| {
+                            input_form_state.dispatch(ConfigInputFormAction::StagedType(staged_type_from_selection(&selections)));
+                        })}
+                    />
+                 }})}
+                 { config_field_child!(translate.t(LABEL_CLUSTER), "INPUT_FORM.STAGED_CLUSTERS", {
+                   let input_form_state = input_form_state.clone();
+                   html! {
+                       <ClusterFlagsInput
+                        name={"staged_clusters"}
+                        value={staged_clusters}
+                        mode={ClusterFlagsInputMode::NoneIsAll}
+                        on_change={Callback::from(move |(_, flags): (String, Option<ClusterFlags>)| {
+                            // Staged inputs must keep at least one cluster; mirror ConfigInputStagedDto::default() when the user clears the last chip.
+                            let clusters = flags.filter(|f| !f.is_empty()).unwrap_or_else(ClusterFlags::all);
+                            let next = mutate_staged(&input_form_state.form.staged, |staged| {
+                                staged.clusters = clusters;
+                            });
+                            input_form_state.dispatch(ConfigInputFormAction::Staged(next));
+                        })}
+                    />
+                 }})}
+                 </>
+               })}
                { html_if!(!library_input, {
                 <>
                  { edit_field_text!(input_form_state, translate.t(LABEL_URL),  url, ConfigInputFormAction::Url) }
                  <div class="tp__config-view__cols-2">
-                 { html_if!(xtream_input && !is_csv_batch, {
+                 { html_if!(credentials_input && !is_csv_batch, {
                    <>
                    { edit_field_text_option!(input_form_state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
                    { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
@@ -991,20 +1097,12 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                  })}
                  { html_if!(!is_csv_batch, {
                    <>
-                   { html_if!(!staged_input, {
-                     { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
-                   })}
-                   { html_if!(!staged_input, {
-                     { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
-                   })}
-                   { html_if!(!staged_input, {
-                     { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
-                   })}
+                   { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
+                   { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
+                   { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
                    </>
                  })}
-                 { html_if!(!staged_input, {
-                   { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
-                 })}
+                 { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
                  { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
                    html! {
                        <RadioButtonGroup
@@ -1019,11 +1117,142 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     />
                  }})}
                  </div>
-                 { html_if!(!staged_input, {
-                   { edit_field_text_option!(input_form_state, translate.t(LABEL_PERSIST), persist, ConfigInputFormAction::Persist) }
-                 })}
+                 { edit_field_text_option!(input_form_state, translate.t(LABEL_PERSIST), persist, ConfigInputFormAction::Persist) }
                 </>
                })}
+            </Card>
+        }
+    };
+
+    let render_media_server = || {
+        let media_server = input_form_state.form.media_server.clone().unwrap_or_default();
+        let token = media_server.token.clone().unwrap_or_default();
+        let api_key = media_server.api_key.clone().unwrap_or_default();
+        let user_id = media_server.user_id.clone().unwrap_or_default();
+        let account_token = media_server.account_token.clone().unwrap_or_default();
+        let server_id = media_server.server_id.clone().unwrap_or_default();
+        let server_name = media_server.server_name.clone().unwrap_or_default();
+
+        if !props.allow_write {
+            return html! {
+                <Card class="tp__config-view__card">
+                    <TitledCard title={translate.t(LABEL_MEDIA_SERVER)}>
+                        { config_field_child!(translate.t(LABEL_TOKEN), "MEDIA_SERVER.TOKEN", {
+                            html! { <span class="tp__form-field__value"><HideContent content={token} /></span> }
+                        })}
+                        { config_field_child!(translate.t(LABEL_API_KEY), "MEDIA_SERVER.API_KEY", {
+                            html! { <span class="tp__form-field__value"><HideContent content={api_key} /></span> }
+                        })}
+                        { config_field_child!(translate.t(LABEL_USER_ID), "MEDIA_SERVER.USER_ID", {
+                            html! { <span class="tp__form-field__value">{user_id}</span> }
+                        })}
+                        { config_field_child!(translate.t(LABEL_ACCOUNT_TOKEN), "MEDIA_SERVER.ACCOUNT_TOKEN", {
+                            html! { <span class="tp__form-field__value"><HideContent content={account_token} /></span> }
+                        })}
+                        { config_field_child!(translate.t(LABEL_SERVER_ID), "MEDIA_SERVER.SERVER_ID", {
+                            html! { <span class="tp__form-field__value">{server_id}</span> }
+                        })}
+                        { config_field_child!(translate.t(LABEL_SERVER_NAME), "MEDIA_SERVER.SERVER_NAME", {
+                            html! { <span class="tp__form-field__value">{server_name}</span> }
+                        })}
+                        <div class="tp__config-view__cols-2">
+                            { config_field_child!(translate.t(LABEL_PREFER_HTTPS), "MEDIA_SERVER.PREFER_HTTPS", {
+                                html! { <ToggleSwitch value={media_server.prefer_https} readonly={true} /> }
+                            })}
+                            { config_field_child!(translate.t(LABEL_ALLOW_RELAY), "MEDIA_SERVER.ALLOW_RELAY", {
+                                html! { <ToggleSwitch value={media_server.allow_relay} readonly={true} /> }
+                            })}
+                        </div>
+                    </TitledCard>
+                </Card>
+            };
+        }
+
+        let dispatch_media = |change: fn(&mut MediaServerInputConfigDto, String)| {
+            let state = input_form_state.clone();
+            Callback::from(move |value: String| {
+                let next = mutate_media_server(&state.form.media_server, |media_server| change(media_server, value));
+                state.dispatch(ConfigInputFormAction::MediaServer(next));
+            })
+        };
+        let dispatch_media_bool = |change: fn(&mut MediaServerInputConfigDto, bool)| {
+            let state = input_form_state.clone();
+            Callback::from(move |value: bool| {
+                let next = mutate_media_server(&state.form.media_server, |media_server| change(media_server, value));
+                state.dispatch(ConfigInputFormAction::MediaServer(next));
+            })
+        };
+
+        let on_token = dispatch_media(|media_server, value| {
+            media_server.token = (!value.is_empty()).then_some(value);
+        });
+        let on_api_key = dispatch_media(|media_server, value| {
+            media_server.api_key = (!value.is_empty()).then_some(value);
+        });
+        let on_user_id = dispatch_media(|media_server, value| {
+            media_server.user_id = (!value.is_empty()).then_some(value);
+        });
+        let on_account_token = dispatch_media(|media_server, value| {
+            media_server.account_token = (!value.is_empty()).then_some(value);
+        });
+        let on_server_id = dispatch_media(|media_server, value| {
+            media_server.server_id = (!value.is_empty()).then_some(value);
+        });
+        let on_server_name = dispatch_media(|media_server, value| {
+            media_server.server_name = (!value.is_empty()).then_some(value);
+        });
+        let on_prefer_https = dispatch_media_bool(|media_server, value| media_server.prefer_https = value);
+        let on_allow_relay = dispatch_media_bool(|media_server, value| media_server.allow_relay = value);
+
+        html! {
+            <Card class="tp__config-view__card">
+                <TitledCard title={translate.t(LABEL_MEDIA_SERVER)}>
+                    <div class="tp__config-view__cols-2">
+                        <Input name="media_server_token" field_id={Some("MEDIA_SERVER.TOKEN".to_string())} label={Some(translate.t(LABEL_TOKEN))} value={token} hidden={true} on_change={Some(on_token)} />
+                        <Input name="media_server_api_key" field_id={Some("MEDIA_SERVER.API_KEY".to_string())} label={Some(translate.t(LABEL_API_KEY))} value={api_key} hidden={true} on_change={Some(on_api_key)} />
+                        <Input name="media_server_user_id" field_id={Some("MEDIA_SERVER.USER_ID".to_string())} label={Some(translate.t(LABEL_USER_ID))} value={user_id} on_change={Some(on_user_id)} />
+                        <Input name="media_server_account_token" field_id={Some("MEDIA_SERVER.ACCOUNT_TOKEN".to_string())} label={Some(translate.t(LABEL_ACCOUNT_TOKEN))} value={account_token} hidden={true} on_change={Some(on_account_token)} />
+                        <Input name="media_server_server_id" field_id={Some("MEDIA_SERVER.SERVER_ID".to_string())} label={Some(translate.t(LABEL_SERVER_ID))} value={server_id} on_change={Some(on_server_id)} />
+                        <Input name="media_server_server_name" field_id={Some("MEDIA_SERVER.SERVER_NAME".to_string())} label={Some(translate.t(LABEL_SERVER_NAME))} value={server_name} on_change={Some(on_server_name)} />
+                    </div>
+                    <div class="tp__config-view__cols-2">
+                        { config_field_child!(translate.t(LABEL_PREFER_HTTPS), "MEDIA_SERVER.PREFER_HTTPS", {
+                            html! { <ToggleSwitch value={media_server.prefer_https} on_change={on_prefer_https} /> }
+                        })}
+                        { config_field_child!(translate.t(LABEL_ALLOW_RELAY), "MEDIA_SERVER.ALLOW_RELAY", {
+                            html! { <ToggleSwitch value={media_server.allow_relay} on_change={on_allow_relay} /> }
+                        })}
+                    </div>
+                </TitledCard>
+            </Card>
+        }
+    };
+
+    let render_media_server_libraries = || {
+        let media_server = input_form_state.form.media_server.clone().unwrap_or_default();
+        let libraries = libraries_to_text(&media_server.libraries);
+
+        if !props.allow_write {
+            return html! {
+                <Card class="tp__config-view__card">
+                    { config_field_child!(translate.t(LABEL_LIBRARIES), "MEDIA_SERVER.LIBRARIES", {
+                        html! { <span class="tp__form-field__value">{libraries}</span> }
+                    })}
+                </Card>
+            };
+        }
+
+        let input_form_state = input_form_state.clone();
+        let on_libraries = Callback::from(move |value: String| {
+            let next = mutate_media_server(&input_form_state.form.media_server, |media_server| {
+                media_server.libraries = libraries_from_text(&value);
+            });
+            input_form_state.dispatch(ConfigInputFormAction::MediaServer(next));
+        });
+
+        html! {
+            <Card class="tp__config-view__card">
+                <Input name="media_server_libraries" field_id={Some("MEDIA_SERVER.LIBRARIES".to_string())} label={Some(translate.t(LABEL_LIBRARIES))} value={libraries} on_change={Some(on_libraries)} />
             </Card>
         }
     };
@@ -1384,9 +1613,15 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             let options = input_options_state.data();
             input.options = if options.is_empty() { None } else { Some(options.clone()) };
 
-            // Only staged inputs carry a child reference.
-            if !input.input_type.is_staged() {
-                input.child = None;
+            if input.input_type.is_staged() {
+                input.staged.get_or_insert_with(ConfigInputStagedDto::default);
+            } else {
+                input.staged = None;
+            }
+            if input.input_type.is_media_server() {
+                input.media_server.get_or_insert_with(MediaServerInputConfigDto::default);
+            } else {
+                input.media_server = None;
             }
 
             // Handle Headers
@@ -1443,18 +1678,28 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
             <div class="tp__source-editor-form__body__pages">
                 <Panel value={InputFormPage::Main.intern()} active={view_visible.intern()}>
-                {render_input()}
+                    {render_input()}
                 </Panel>
-                { html_if!(!library_input && !staged_input, {
+                { html_if!(media_server_input, {
+                    <Panel value={InputFormPage::Libraries.intern()} active={view_visible.intern()}>
+                    {render_media_server()}
+                    {render_media_server_libraries()}
+                    </Panel>
+                })}
+                { html_if!(!library_input && !staged_input && !media_server_input, {
                     <Panel value={InputFormPage::Alias.intern()} active={view_visible.intern()}>
                     {render_alias()}
                     </Panel>
                 })}
-                { html_if!(!library_input && !staged_input, {
+                { html_if!(options_input, {
                  <>
                   <Panel value={InputFormPage::Options.intern()} active={view_visible.intern()}>
                    {render_options()}
                   </Panel>
+                    </>
+                })}
+                { html_if!(!library_input && !staged_input && !media_server_input, {
+                 <>
                   <Panel value={InputFormPage::Provider.intern()} active={view_visible.intern()}>
                    {render_provider()}
                    </Panel>
@@ -1462,11 +1707,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                    {render_epg()}
                   </Panel>
                     </>
-                })}
-                { html_if!(staged_input, {
-                  <Panel value={InputFormPage::Child.intern()} active={view_visible.intern()}>
-                   {render_child()}
-                   </Panel>
                 })}
             </div>
             </div>
@@ -1480,19 +1720,23 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         html! {
             <div class={concat_string!("tp__source-editor-form__sidebar", if button_disabled {" disabled"} else {""})}>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Main, if *view_visible == InputFormPage::Main { " active" } else {""})}  icon="Settings" hint={translate.t(LABEL_MAIN)} name={InputFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
-            {html_if!(!library_input && !staged_input, {
+            {html_if!(media_server_input, {
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Libraries, if *view_visible == InputFormPage::Libraries { " active" } else {""})}  icon="VideoConfig" hint={translate.t(LABEL_MEDIA_SERVER)} name={InputFormPage::Libraries.to_string()} onclick={&handle_menu_click}></IconButton>
+            })}
+            {html_if!(!library_input && !staged_input && !media_server_input, {
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Alias, if *view_visible == InputFormPage::Alias { " active" } else {""})}  icon="Alias" hint={translate.t(LABEL_ALIAS)} name={InputFormPage::Alias.to_string()} onclick={&handle_menu_click}></IconButton>
             })}
-            { html_if!(!library_input && !staged_input, {
+            { html_if!(options_input, {
                 <>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Options, if *view_visible == InputFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={InputFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
+                </>
+             })}
+            { html_if!(!library_input && !staged_input && !media_server_input, {
+                <>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Epg, if *view_visible == InputFormPage::Epg { " active" } else {""})}  icon="Epg" hint={translate.t(LABEL_EPG)} name={InputFormPage::Epg.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Provider, if *view_visible == InputFormPage::Provider { " active" } else {""})}  icon="Dns" hint={translate.t(LABEL_PROVIDER)} name={InputFormPage::Provider.to_string()} onclick={&handle_menu_click}></IconButton>
                 </>
              })}
-            {html_if!(staged_input, {
-            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Child, if *view_visible == InputFormPage::Child { " active" } else {""})}  icon="Staged" hint={translate.t(LABEL_CHILD)} name={InputFormPage::Child.to_string()} onclick={&handle_menu_click}></IconButton>
-            })}
           </div>
         }
     };

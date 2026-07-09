@@ -4,16 +4,31 @@ use crate::{
 };
 use yew::prelude::*;
 
-pub const BLOCK_TYPES_INPUT: [BlockType; 4] = [
+pub const BLOCK_TYPES_INPUT: [BlockType; 7] = [
     BlockType::InputXtream,
     BlockType::InputM3u,
     BlockType::InputLibrary,
     BlockType::InputStaged,
-    // Enable when media_server feature fully implemented
-    // BlockType::InputJellyfin,
-    // BlockType::InputEmby,
-    // BlockType::InputPlex,
+    BlockType::InputJellyfin,
+    BlockType::InputEmby,
+    BlockType::InputPlex,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sidebar_exposes_all_first_class_input_types() {
+        assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputXtream));
+        assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputM3u));
+        assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputLibrary));
+        assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputStaged));
+        assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputEmby));
+        assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputJellyfin));
+        assert!(BLOCK_TYPES_INPUT.contains(&BlockType::InputPlex));
+    }
+}
 
 pub const BLOCK_TYPES_TARGET: [BlockType; 1] = [BlockType::Target];
 

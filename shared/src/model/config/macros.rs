@@ -79,7 +79,7 @@ macro_rules! check_input_credentials {
                 // validation happens in ConfigInputDto/ConfigInput prepare methods.
             }
             InputType::Staged => {
-                // Staged inputs inherit credentials from their parent input; detailed
+                // Staged credentials belong to the staged playlist source itself.
                 // validation happens in ConfigInputDto/ConfigInput prepare methods.
             }
         }

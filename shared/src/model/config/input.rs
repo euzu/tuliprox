@@ -8,7 +8,7 @@ use crate::{
     },
     error::TuliproxError,
     foundation::{get_filter, Filter},
-    model::{config::media_server_catalog::MediaServerInputConfigDto, EpgConfigDto, PatternTemplate},
+    model::{config::media_server_catalog::MediaServerInputConfigDto, ClusterFlags, EpgConfigDto, PatternTemplate},
     utils::{
         arc_str_option_serde, arc_str_serde, arc_str_vec_serde, deserialize_timestamp, get_credentials_from_url_str,
         get_trimmed_string, is_blank_optional_arc_str, is_blank_optional_string, is_non_blank_optional_string,
@@ -109,6 +109,39 @@ pub enum InputType {
     Jellyfin,
     Plex,
     Staged,
+}
+
+#[derive(Debug, Copy, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default, Display, EnumString)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum StagedInputType {
+    #[default]
+    M3u,
+    Xtream,
+}
+
+impl StagedInputType {
+    pub fn is_default(value: &Self) -> bool { matches!(value, Self::M3u) }
+
+    pub const fn input_type(self) -> InputType {
+        match self {
+            Self::M3u => InputType::M3u,
+            Self::Xtream => InputType::Xtream,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigInputStagedDto {
+    #[serde(default, skip_serializing_if = "is_blank_optional_arc_str", with = "arc_str_option_serde")]
+    pub provider: Option<Arc<str>>,
+    #[serde(default)]
+    pub clusters: ClusterFlags,
+}
+
+impl Default for ConfigInputStagedDto {
+    fn default() -> Self { Self { provider: None, clusters: ClusterFlags::all() } }
 }
 
 impl InputType {
@@ -424,8 +457,10 @@ pub struct ConfigInputDto {
     pub max_connections: u16,
     #[serde(default, skip_serializing_if = "InputFetchMethod::is_default")]
     pub method: InputFetchMethod,
-    #[serde(default, skip_serializing_if = "is_blank_optional_arc_str", with = "arc_str_option_serde")]
-    pub child: Option<Arc<str>>,
+    #[serde(default, skip_serializing_if = "StagedInputType::is_default")]
+    pub staged_type: StagedInputType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged: Option<ConfigInputStagedDto>,
     #[serde(default, deserialize_with = "deserialize_timestamp", skip_serializing_if = "Option::is_none")]
     pub exp_date: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -455,7 +490,8 @@ impl Default for ConfigInputDto {
             priority: 0,
             max_connections: 0,
             method: InputFetchMethod::default(),
-            child: None,
+            staged_type: StagedInputType::default(),
+            staged: None,
             exp_date: None,
             panel_api: None,
             provider: None,
@@ -464,7 +500,13 @@ impl Default for ConfigInputDto {
 }
 
 impl ConfigInputDto {
-    pub fn new_with_type(input_type: InputType) -> Self { Self { input_type, ..Self::default() } }
+    pub fn new_with_type(input_type: InputType) -> Self {
+        Self {
+            input_type,
+            media_server: input_type.is_media_server().then(MediaServerInputConfigDto::default),
+            ..Self::default()
+        }
+    }
 
     fn normalize_input_type_from_batch_url(&mut self) {
         let is_batch_url = self.url.trim().starts_with(BATCH_SCHEME_PREFIX);
@@ -506,12 +548,6 @@ impl ConfigInputDto {
         if self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty()) {
             return Err(TuliproxError::ConfigInput(format!(
                 "media-server input does not support aliases (input: {})",
-                self.name
-            )));
-        }
-        if self.child.is_some() {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media-server input does not support a child input (input: {})",
                 self.name
             )));
         }
@@ -598,21 +634,34 @@ impl ConfigInputDto {
 
     fn validate_staged_self(&mut self) -> Result<(), TuliproxError> {
         if self.input_type.is_staged() {
-            // R2
-            let child = self.child.as_ref().map(|c| c.trim()).filter(|c| !c.is_empty());
-            if child.is_none() {
-                return Err(TuliproxError::ConfigInput(format!(
-                    "staged input requires a child input (input: {})",
-                    self.name
-                )));
+            if let Some(staged) = self.staged.as_mut() {
+                if let Some(provider) = staged.provider.as_ref().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+                    staged.provider = Some(provider.intern());
+                } else {
+                    staged.provider = None;
+                }
+                if staged.clusters.is_empty() {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "staged input requires at least one staged cluster (input: {})",
+                        self.name
+                    )));
+                }
             }
-            self.child = child.map(Internable::intern);
-            // R5
             if self.url.trim().is_empty() {
                 return Err(TuliproxError::ConfigInput(format!(
                     "url for staged input is mandatory (input: {})",
                     self.name
                 )));
+            }
+            if self.staged_type == StagedInputType::Xtream {
+                let has_credentials = self.username.as_ref().is_some_and(|u| !u.trim().is_empty())
+                    && self.password.as_ref().is_some_and(|p| !p.trim().is_empty());
+                if !has_credentials {
+                    return Err(TuliproxError::ConfigInput(format!(
+                        "staged xtream input requires username and password (input: {})",
+                        self.name
+                    )));
+                }
             }
             // R7
             if self.media_server.is_some() {
@@ -627,10 +676,9 @@ impl ConfigInputDto {
                     self.name
                 )));
             }
-        } else if self.child.is_some() {
-            // R1
+        } else if self.staged.is_some() {
             return Err(TuliproxError::ConfigInput(format!(
-                "child input is only allowed for staged inputs (input: {})",
+                "staged configuration is only allowed for staged inputs (input: {})",
                 self.name
             )));
         }
@@ -1435,20 +1483,21 @@ mod tests {
     }
 
     #[test]
-    fn test_staged_requires_child() {
+    fn test_staged_without_provider_is_allowed_for_direct_target_use() {
         let mut dto = create_test_dto();
         dto.input_type = InputType::Staged;
         dto.url = "http://staged.com/playlist.m3u".to_string();
 
-        let err = prepare_dto(&mut dto).expect_err("staged input without child must be rejected");
-        assert!(err.to_string().contains("requires a child input"), "Error: {err}");
+        prepare_dto(&mut dto).expect("staged input without provider should be valid for direct target use");
+        assert!(dto.staged.is_none());
     }
 
     #[test]
     fn test_staged_requires_url() {
         let mut dto = create_test_dto();
         dto.input_type = InputType::Staged;
-        dto.child = Some("provider_a".intern());
+        dto.staged =
+            Some(ConfigInputStagedDto { provider: Some("provider_a".intern()), ..ConfigInputStagedDto::default() });
         dto.url = String::new();
 
         let err = prepare_dto(&mut dto).expect_err("staged input without url must be rejected");
@@ -1456,21 +1505,35 @@ mod tests {
     }
 
     #[test]
-    fn test_child_only_allowed_for_staged() {
+    fn test_staged_requires_non_empty_clusters() {
+        let mut dto = create_test_dto();
+        dto.input_type = InputType::Staged;
+        dto.staged =
+            Some(ConfigInputStagedDto { provider: Some("provider_a".intern()), clusters: ClusterFlags::empty() });
+        dto.url = "http://staged.com/playlist.m3u".to_string();
+
+        let err = prepare_dto(&mut dto).expect_err("staged input without clusters must be rejected");
+        assert!(err.to_string().contains("requires at least one staged cluster"), "Error: {err}");
+    }
+
+    #[test]
+    fn test_staged_config_only_allowed_for_staged() {
         let mut dto = create_test_dto();
         dto.input_type = InputType::M3u;
         dto.url = "http://main.com/playlist.m3u".to_string();
-        dto.child = Some("provider_a".intern());
+        dto.staged =
+            Some(ConfigInputStagedDto { provider: Some("provider_a".intern()), ..ConfigInputStagedDto::default() });
 
-        let err = prepare_dto(&mut dto).expect_err("non-staged input with child must be rejected");
-        assert!(err.to_string().contains("child input is only allowed for staged inputs"), "Error: {err}");
+        let err = prepare_dto(&mut dto).expect_err("non-staged input with staged config must be rejected");
+        assert!(err.to_string().contains("staged configuration is only allowed for staged inputs"), "Error: {err}");
     }
 
     #[test]
     fn test_staged_rejects_media_server() {
         let mut dto = create_test_dto();
         dto.input_type = InputType::Staged;
-        dto.child = Some("provider_a".intern());
+        dto.staged =
+            Some(ConfigInputStagedDto { provider: Some("provider_a".intern()), ..ConfigInputStagedDto::default() });
         dto.url = "http://staged.com/playlist.m3u".to_string();
         dto.media_server = Some(MediaServerInputConfigDto::default());
 
@@ -1482,12 +1545,13 @@ mod tests {
     fn test_staged_valid() {
         let mut dto = create_test_dto();
         dto.input_type = InputType::Staged;
-        dto.child = Some("provider_a".intern());
+        dto.staged =
+            Some(ConfigInputStagedDto { provider: Some(" provider_a ".intern()), ..ConfigInputStagedDto::default() });
         dto.url = "http://staged.com/playlist.m3u".to_string();
 
         prepare_dto(&mut dto).expect("valid staged input should prepare successfully");
         assert!(dto.input_type.is_staged());
-        assert_eq!(dto.child.as_deref(), Some("provider_a"));
+        assert_eq!(dto.staged.as_ref().and_then(|staged| staged.provider.as_deref()), Some("provider_a"));
     }
 
     #[test]

@@ -7,8 +7,7 @@
 - **Staged inputs reworked into a `staged` input type.** The nested `staged:` block on an input
   (with per-cluster `live_source` / `vod_source` / `series_source` routing) has been removed. A staged
   source is now a top-level input with `type: staged` and a `child` referencing a non-staged `m3u` /
-  `xtream` input. The staged input inherits the child's credentials, headers and fetch method while
-  using its own `url`, and connects to targets like any other input. Existing configurations using the
+  `xtream` input. Existing configurations using the
   nested `staged:` block must be migrated.
 
   Before:
@@ -39,6 +38,8 @@
       type: staged
       child: provider_a
       url: http://lists.example/list1.m3u
+      username: bob
+      password: secret
   ```
 
   A staged input must reference an existing non-staged `m3u`/`xtream` child (max chain depth 2).

@@ -431,25 +431,14 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
             inputs.push(input);
         }
 
-        // Resolve staged (derived-source) inputs against their child's connection profile.
-        // Validation (child exists, is non-staged m3u/xtream, max chain depth) already happened
-        // in the DTO prepare passes, so a missing child here is treated defensively.
+        // Resolve staged playlist inputs to their configured download type.
+        // The child link is kept for stream routing and must not affect staged playlist fetching.
         if inputs.iter().any(|input| input.input_type.is_staged()) {
-            let children: std::collections::HashMap<Arc<str>, ConfigInput> = inputs
-                .iter()
-                .filter(|input| !input.input_type.is_staged())
-                .map(|input| (input.name.clone(), input.clone()))
-                .collect();
             for input in &mut inputs {
                 if !input.input_type.is_staged() {
                     continue;
                 }
-                let Some(child_name) = input.child.clone() else {
-                    continue;
-                };
-                if let Some(child) = children.get(&child_name) {
-                    input.resolve_staged_from_child(child);
-                }
+                input.resolve_staged_download_type();
             }
         }
 

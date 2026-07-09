@@ -374,7 +374,7 @@ impl Deref for ProviderConfigWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::{InputFetchMethod, InputType};
+    use shared::model::{InputFetchMethod, InputType, StagedInputType};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -396,7 +396,8 @@ mod tests {
             media_server: None,
             aliases: None,
             method: InputFetchMethod::default(),
-            child: None,
+            staged_type: StagedInputType::default(),
+            staged: None,
             exp_date: None,
             t_batch_url: None,
             panel_api: None,

@@ -19,5 +19,10 @@
     flex-flow: row;
     box-sizing: border-box;
     gap: var(--gap-small);
+
+    .svg-icon {
+      height: 2rem;
+      width: 2rem;
+    }
   }
 }

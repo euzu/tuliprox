@@ -511,24 +511,6 @@ mod tests {
     }
 
     #[test]
-    fn prepare_rejects_media_server_child_input() {
-        let mut dto = ConfigInputDto {
-            name: "emby_media_server".intern(),
-            input_type: InputType::Emby,
-            url: "https://media.example.invalid".to_string(),
-            media_server: Some(MediaServerInputConfigDto {
-                token: Some("token-value".to_string()),
-                ..media_server_config_with_library()
-            }),
-            child: Some("provider_a".intern()),
-            ..ConfigInputDto::default()
-        };
-
-        let err = prepare_dto(&mut dto).expect_err("media_server input must reject child config");
-        assert!(err.to_string().contains("does not support a child input"));
-    }
-
-    #[test]
     fn prepare_rejects_plex_without_token_or_server_selector() {
         let mut without_token = ConfigInputDto {
             name: "plex_media_server".intern(),

@@ -15,8 +15,9 @@ use crate::{
 use gloo_timers::callback::Timeout;
 use shared::{
     model::{
-        permission::Permission, ConfigInputDto, ConfigSourceDto, ConfigTargetDto, HdHomeRunTargetOutputDto, InputType,
-        M3uTargetOutputDto, SourcesConfigDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
+        permission::Permission, ConfigInputDto, ConfigInputStagedDto, ConfigSourceDto, ConfigTargetDto,
+        HdHomeRunTargetOutputDto, InputType, M3uTargetOutputDto, SourcesConfigDto, StrmTargetOutputDto,
+        TargetOutputDto, XtreamTargetOutputDto,
     },
     utils::BATCH_SCHEME_PREFIX,
 };
@@ -251,42 +252,12 @@ fn world_from_screen(position: Position, canvas_offset: Position, zoom_factor: f
 
 fn clamp_zoom_factor(zoom_factor: f32) -> f32 { zoom_factor.clamp(MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR) }
 
-/// Computes a canvas offset and zoom that centers and fits all blocks inside the
-/// given viewport. Falls back to the identity transform when there is nothing to
-/// fit or the viewport size is unknown.
-fn fit_to_view(blocks: &[Block], view_width: f32, view_height: f32) -> (Position, f32) {
-    const FIT_PADDING: f32 = 40.0;
+fn initial_layout_view_transform() -> (Position, f32) { ((0.0, 0.0), 1.0) }
 
-    if blocks.is_empty() || view_width <= 0.0 || view_height <= 0.0 {
-        return ((0.0, 0.0), 1.0);
-    }
-
-    let mut min_x = f32::INFINITY;
-    let mut min_y = f32::INFINITY;
-    let mut max_x = f32::NEG_INFINITY;
-    let mut max_y = f32::NEG_INFINITY;
-    for block in blocks {
-        let (left, top, right, bottom) = block.bounds((0.0, 0.0), 1.0);
-        min_x = min_x.min(left);
-        min_y = min_y.min(top);
-        max_x = max_x.max(right);
-        max_y = max_y.max(bottom);
-    }
-
-    if !(min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite()) {
-        return ((0.0, 0.0), 1.0);
-    }
-
-    let content_width = (max_x - min_x).max(1.0);
-    let content_height = (max_y - min_y).max(1.0);
-    let available_width = (view_width - FIT_PADDING * 2.0).max(1.0);
-    let available_height = (view_height - FIT_PADDING * 2.0).max(1.0);
-    let zoom_factor = clamp_zoom_factor((available_width / content_width).min(available_height / content_height));
-
-    let offset_x = (view_width - content_width * zoom_factor) / 2.0 - min_x * zoom_factor;
-    let offset_y = (view_height - content_height * zoom_factor) / 2.0 - min_y * zoom_factor;
-
-    ((offset_x, offset_y), zoom_factor)
+fn reset_layout_view(editor_state: &mut EditorState) {
+    let (offset, zoom) = initial_layout_view_transform();
+    editor_state.canvas_offset = offset;
+    editor_state.zoom_factor = zoom;
 }
 
 fn apply_zoom_at_screen_point(editor_state: &mut EditorState, next_zoom: f32, anchor_screen: Position) -> bool {
@@ -379,11 +350,10 @@ fn normalize_input_type_by_url(input: &mut ConfigInputDto, block_type: BlockType
     }
 }
 
-fn is_valid_staged_child_source_block_type(block_type: BlockType) -> bool { block_type.is_chainable_input() }
+fn is_valid_staged_provider_block_type(block_type: BlockType) -> bool { block_type.is_chainable_input() }
 
-fn is_staged_child_connection(from_block: &Block, to_block: &Block) -> bool {
-    matches!(from_block.block_type, BlockType::InputStaged)
-        && is_valid_staged_child_source_block_type(to_block.block_type)
+fn is_staged_provider_connection(from_block: &Block, to_block: &Block) -> bool {
+    matches!(from_block.block_type, BlockType::InputStaged) && is_valid_staged_provider_block_type(to_block.block_type)
 }
 
 /// Builds a collision-free `<base>_copy` name (then `_copy_2`, `_copy_3`, ...) for a duplicated block.
@@ -435,13 +405,13 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
         }
     }
 
-    // Child relation for staged inputs is driven by input-to-input graph links.
+    // Staged provider relation is driven by staged-input -> provider-input graph links.
     for conn in &editor_state.connections {
         let (Some(from_block), Some(to_block)) = (editor_state.get_block(conn.from), editor_state.get_block(conn.to))
         else {
             continue;
         };
-        if !is_staged_child_connection(from_block, to_block) {
+        if !is_staged_provider_connection(from_block, to_block) {
             continue;
         }
 
@@ -449,8 +419,8 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
             continue;
         };
 
-        let child_name = if let BlockInstance::Input(child_input) = &to_block.instance {
-            let name = child_input.name.trim();
+        let provider_name = if let BlockInstance::Input(provider_input) = &to_block.instance {
+            let name = provider_input.name.trim();
             if name.is_empty() {
                 None
             } else {
@@ -460,10 +430,13 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
             None
         };
 
-        gen_inputs[from_input_index].child = child_name.map(|name| name.into());
+        if let Some(provider_name) = provider_name {
+            let staged = gen_inputs[from_input_index].staged.get_or_insert_with(ConfigInputStagedDto::default);
+            staged.provider = Some(provider_name.into());
+        }
     }
 
-    // If a staged input has no input-link child, clear child to keep UI graph authoritative.
+    // If a staged input has no provider link, clear the provider to keep UI graph authoritative.
     for (block_id, input_index) in &input_index_by_block_id {
         let Some(block) = editor_state.get_block(*block_id) else {
             continue;
@@ -471,17 +444,19 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
         if !matches!(block.block_type, BlockType::InputStaged) {
             continue;
         }
-        let has_child_link = editor_state.connections.iter().any(|conn| {
+        let has_provider_link = editor_state.connections.iter().any(|conn| {
             if conn.from != *block_id {
                 return false;
             }
             let Some(to_block) = editor_state.get_block(conn.to) else {
                 return false;
             };
-            is_staged_child_connection(block, to_block)
+            is_staged_provider_connection(block, to_block)
         });
-        if !has_child_link {
-            gen_inputs[*input_index].child = None;
+        if !has_provider_link {
+            if let Some(staged) = gen_inputs[*input_index].staged.as_mut() {
+                staged.provider = None;
+            }
         }
     }
 
@@ -497,22 +472,7 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
                     if let Some(input_block) = editor_state.get_block(conn.from) {
                         if input_block.block_type.is_input() {
                             if let BlockInstance::Input(input_dto) = &input_block.instance {
-                                // If this child input has an incoming stage connection, serialize the stage input name instead.
-                                let mut input_name = input_dto.name.clone();
-                                if input_block.block_type.is_chainable_input() {
-                                    if let Some(stage_conn) =
-                                        editor_state.connections.iter().find(|c| c.to == input_block.id)
-                                    {
-                                        if let Some(stage_block) = editor_state.get_block(stage_conn.from) {
-                                            if matches!(stage_block.block_type, BlockType::InputStaged) {
-                                                if let BlockInstance::Input(stage_dto) = &stage_block.instance {
-                                                    input_name = stage_dto.name.clone();
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                source_dto.inputs.push(input_name);
+                                source_dto.inputs.push(input_dto.name.clone());
                             }
                         }
                     }
@@ -668,7 +628,6 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let force_update = force_update.clone();
         let initialized_from_playlist = initialized_from_playlist.clone();
-        let canvas_ref = canvas_ref.clone();
         use_effect_with(
             (playlists.sources.clone(), config_ctx.config.clone(), is_local_mode, *initialized_from_playlist),
             move |(sources, app_config, local_mode, initialized)| {
@@ -760,7 +719,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             }
                         }
 
-                        // Rebuild staged child links from config (staged input -> child input).
+                        // Rebuild staged provider links from config (staged input -> provider input).
                         let input_name_to_id: HashMap<String, BlockId> = gen_blocks
                             .iter()
                             .filter_map(|block| {
@@ -783,24 +742,29 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                                 if !matches!(block.block_type, BlockType::InputStaged) {
                                     continue;
                                 }
-                                let Some(child_name) = input.child.as_ref().map(|c| c.trim()).filter(|c| !c.is_empty())
+                                let Some(provider_name) = input
+                                    .staged
+                                    .as_ref()
+                                    .and_then(|staged| staged.provider.as_deref())
+                                    .map(str::trim)
+                                    .filter(|provider| !provider.is_empty())
                                 else {
                                     continue;
                                 };
-                                let Some(child_id) = input_name_to_id.get(child_name).copied() else {
+                                let Some(provider_id) = input_name_to_id.get(provider_name).copied() else {
                                     continue;
                                 };
-                                if child_id == block.id {
+                                if provider_id == block.id {
                                     continue;
                                 }
-                                let Some(child_block) = gen_blocks.iter().find(|b| b.id == child_id) else {
+                                let Some(provider_block) = gen_blocks.iter().find(|b| b.id == provider_id) else {
                                     continue;
                                 };
-                                if !is_staged_child_connection(block, child_block) {
+                                if !is_staged_provider_connection(block, provider_block) {
                                     continue;
                                 }
-                                if existing_connections.insert((block.id, child_id)) {
-                                    gen_connections.push(Connection { from: block.id, to: child_id });
+                                if existing_connections.insert((block.id, provider_id)) {
+                                    gen_connections.push(Connection { from: block.id, to: provider_id });
                                 }
                             }
                         }
@@ -808,17 +772,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                         if !gen_blocks.is_empty() {
                             layout(&mut gen_blocks, &gen_connections);
                         }
-                        let (fit_offset, fit_zoom) = {
-                            let (view_width, view_height) = canvas_ref
-                                .cast::<web_sys::Element>()
-                                .map(|el| (el.client_width() as f32, el.client_height() as f32))
-                                .unwrap_or((0.0, 0.0));
-                            fit_to_view(&gen_blocks, view_width, view_height)
-                        };
                         {
                             let mut editor_state = editor_state_ref.borrow_mut();
-                            editor_state.canvas_offset = fit_offset;
-                            editor_state.zoom_factor = fit_zoom;
+                            reset_layout_view(&mut editor_state);
                             editor_state.pinch_distance = None;
                             editor_state.pan_start = (0.0, 0.0);
                             editor_state.drag.reset_dragging();
@@ -988,15 +944,21 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 return;
             }
 
-            // When a staged input and its child are cloned together, point the
-            // clone at the cloned child instead of the original.
+            // When a staged input and its provider are cloned together, point the
+            // clone at the cloned provider instead of the original.
             for block in new_blocks.iter_mut() {
                 let replacement = if let BlockInstance::Input(dto) = &block.instance {
-                    dto.child.as_ref().and_then(|child| input_rename.get(child.as_ref())).map(|new_child| {
-                        let mut cloned = dto.as_ref().clone();
-                        cloned.child = Some(new_child.clone().into());
-                        BlockInstance::Input(Rc::new(cloned))
-                    })
+                    dto.staged
+                        .as_ref()
+                        .and_then(|staged| staged.provider.as_deref())
+                        .and_then(|provider| input_rename.get(provider))
+                        .map(|new_provider| {
+                            let mut cloned = dto.as_ref().clone();
+                            if let Some(staged) = cloned.staged.as_mut() {
+                                staged.provider = Some(new_provider.clone().into());
+                            }
+                            BlockInstance::Input(Rc::new(cloned))
+                        })
                 } else {
                     None
                 };
@@ -1080,8 +1042,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             let mut editor_state = editor_state_ref.borrow_mut();
             let connections = editor_state.connections.clone();
             layout(&mut editor_state.blocks, &connections);
-            editor_state.canvas_offset = (0.0, 0.0);
-            editor_state.zoom_factor = 1.0;
+            reset_layout_view(&mut editor_state);
             editor_state.pinch_distance = None;
             editor_state.pan_start = (0.0, 0.0);
 
@@ -2542,5 +2503,10 @@ mod tests {
 
             assert_eq!(input.input_type, expected_input_type);
         }
+    }
+
+    #[test]
+    fn initial_layout_view_matches_manual_layout_origin() {
+        assert_eq!(initial_layout_view_transform(), ((0.0, 0.0), 1.0));
     }
 }
