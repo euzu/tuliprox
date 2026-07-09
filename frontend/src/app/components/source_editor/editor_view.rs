@@ -470,7 +470,9 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
             for conn in &editor_state.connections {
                 if conn.to == target_block.id {
                     if let Some(input_block) = editor_state.get_block(conn.from) {
-                        if input_block.block_type.is_input() {
+                        if input_block.block_type.is_input()
+                            && !matches!(input_block.block_type, BlockType::InputStaged)
+                        {
                             if let BlockInstance::Input(input_dto) = &input_block.instance {
                                 source_dto.inputs.push(input_dto.name.clone());
                             }
