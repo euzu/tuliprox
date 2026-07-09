@@ -131,17 +131,13 @@ impl StagedInputType {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigInputStagedDto {
     #[serde(default, skip_serializing_if = "is_blank_optional_arc_str", with = "arc_str_option_serde")]
     pub provider: Option<Arc<str>>,
     #[serde(default)]
     pub clusters: ClusterFlags,
-}
-
-impl Default for ConfigInputStagedDto {
-    fn default() -> Self { Self { provider: None, clusters: ClusterFlags::all() } }
 }
 
 impl InputType {
