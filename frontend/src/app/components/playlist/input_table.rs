@@ -27,7 +27,7 @@ const HEADERS: [&str; 15] = [
     "LABEL.METHOD",
     "LABEL.EPG",
     "LABEL.HEADERS",
-    "LABEL.CHILD",
+    "LABEL.PROVIDER",
     "LABEL.EXP_DATE",
 ];
 
@@ -89,7 +89,11 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                             <InputHeaders headers={dto.headers.clone()} />
                         </RevealContent> }
                     }
-                    13 => dto.child.as_ref().map_or_else(|| html! {}, |c| html! { c.as_ref() }),
+                    13 => dto
+                        .staged
+                        .as_ref()
+                        .and_then(|staged| staged.provider.as_ref())
+                        .map_or_else(|| html! {}, |provider| html! { provider.as_ref() }),
                     14 => dto
                         .exp_date
                         .as_ref()
