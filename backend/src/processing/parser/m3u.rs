@@ -4,7 +4,8 @@ use shared::model::{
     CatchupAttribute, CatchupProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader,
     PlaylistItemType, StreamProperties, XtreamCluster,
 };
-use shared::utils::{default_supported_video_extensions, extract_id_from_url, extract_numeric_id_from_url, Internable};
+use shared::utils::{extract_id_from_url, extract_numeric_id_from_url, Internable};
+use shared::defaults::{default_supported_video_extensions};
 use std::borrow::BorrowMut;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
@@ -357,7 +358,7 @@ fn process_header_internal(
                             }
                             M3uToken::TvgChno => plih.chno = stack[val_off..].parse::<u32>().unwrap_or(0),
                             M3uToken::GroupTitle => plih.group = stack[val_off..].intern(),
-                            M3uToken::TvgId => plih.epg_channel_id = if stack.len() == val_off { None } else { Some(stack[val_off..].to_lowercase().intern()) },
+                            M3uToken::TvgId => plih.epg_channel_id = if stack.len() == val_off { None } else { Some(stack[val_off..].intern()) },
                             M3uToken::TvgName => plih.name = stack[val_off..].intern(),
                             M3uToken::TvgLogo => plih.logo = stack[val_off..].intern(),
                             M3uToken::TvgLogoSmall => plih.logo_small = stack[val_off..].intern(),
@@ -660,6 +661,20 @@ mod test {
         let pli = process_header(&input, &video_suffixes, line, url.to_string());
         assert_eq!(pli.id, "1905905".intern()); // url_id used as fallback
         assert_eq!(pli.epg_channel_id, Some("skycrime.uk".intern())); // tvg-id preserved for EPG
+    }
+
+    #[test]
+    fn test_process_header_tvg_id_preserves_mixed_case() {
+        // Supersedes #688: the M3U parser no longer lowercases tvg-id. EPG matching is
+        // now case-insensitive, so the epg_channel_id keeps its original source case and
+        // the M3U/XMLTV output preserves it.
+        let input = "test".intern();
+        let video_suffixes = Vec::new();
+        let url = "http://line.trx-ott.com/live/user/pass/1905905.ts";
+        let line = r#"#EXTINF:-1 tvg-id="CNN.us" tvg-name="CNN" group-title="News",CNN"#;
+
+        let pli = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(pli.epg_channel_id, Some("CNN.us".intern())); // original case preserved, not lowercased
     }
 
     #[test]

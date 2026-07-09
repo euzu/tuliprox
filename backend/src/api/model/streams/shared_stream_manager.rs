@@ -341,7 +341,7 @@ impl SharedStreamState {
         let burst_buffer = Arc::clone(&self.burst_buffer);
         let burst_buffer_for_log = Arc::clone(&self.burst_buffer);
         let live_notification = Arc::clone(&self.live_notification);
-        let timeout_duration = Duration::from_secs(300);
+        let timeout_duration = Duration::from_mins(5);
         let idle_check_interval = Duration::from_secs(1);
         let mut last_active = Instant::now();
         let mut last_lag_log = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);

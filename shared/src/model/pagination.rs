@@ -1,4 +1,4 @@
-use crate::utils::{default_page, default_page_size};
+use crate::defaults::{default_page, default_page_size};
 use serde::{Deserialize, Serialize};
 
 /// Search mode for paged queries.

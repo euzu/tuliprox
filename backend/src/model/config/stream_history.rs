@@ -2,7 +2,7 @@ use crate::model::macros;
 use shared::model::{
     StreamHistoryConfigDto,
 };
-use shared::utils::{default_stream_history_batch_size, default_stream_history_retention_days};
+use shared::defaults::{default_stream_history_batch_size, default_stream_history_retention_days};
 
 #[derive(Debug, Clone)]
 pub struct StreamHistoryConfig {

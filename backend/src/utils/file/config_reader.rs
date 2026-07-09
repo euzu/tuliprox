@@ -15,13 +15,16 @@ use arc_swap::{ArcSwap, ArcSwapAny};
 use chrono::Local;
 use log::{error, info, warn};
 use serde::Serialize;
-use shared::error::TuliproxError;
-use shared::foundation::prepare_templates;
-use shared::model::{
-    ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType,
-    MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
+use shared::{
+    error::TuliproxError,
+    foundation::prepare_templates,
+    model::{
+        ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType,
+        MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
+    },
+    utils::{CONSTANTS, PROVIDER_SCHEME_PREFIX},
+    defaults::{generate_default_access_secret, generate_default_encrypt_secret, TEMPLATE_FILE},
 };
-use shared::utils::{generate_default_access_secret, generate_default_encrypt_secret, CONSTANTS, PROVIDER_SCHEME_PREFIX, TEMPLATE_FILE};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
@@ -647,8 +650,8 @@ pub async fn read_initial_app_config(
         paths: Arc::new(ArcSwap::from_pointee(paths.clone())),
         file_locks: Arc::new(FileLockManager::default()),
         custom_stream_response: Arc::new(ArcSwapAny::default()),
-        access_token_secret: generate_default_access_secret(),
-        encrypt_secret: generate_default_encrypt_secret(),
+        access_token_secret: generate_default_access_secret()?,
+        encrypt_secret: generate_default_encrypt_secret()?,
         media_tools: Arc::new(MediaToolCapabilities::new()),
     };
     app_config.prepare(include_computed)?;

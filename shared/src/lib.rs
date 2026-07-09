@@ -1,3 +1,4 @@
+pub mod defaults;
 pub mod error;
 pub mod foundation;
 pub mod model;

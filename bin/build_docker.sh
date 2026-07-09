@@ -137,7 +137,7 @@ for IMAGE_NAME in "${!MULTI_PLATFORM_IMAGES[@]}"; do
 
     # THE FIX: Using type=gha for automatic GitHub Actions cache management.
     # No more local files, no more leftover artifacts.
-    docker buildx build -f Dockerfile-manual \
+    docker buildx build -f Dockerfile.manual \
         -t "${TAG_VERSION}" \
         -t "${TAG_BRANCH}" \
         --target "$BUILD_TARGET" \

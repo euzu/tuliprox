@@ -1,14 +1,15 @@
 use crate::{
-    error::TuliproxError,
-    model::{
-        CacheConfigDto, GeoIpConfigDto, QosAggregationConfigDto, RateLimitConfigDto, StreamConfigDto,
-        StreamHistoryConfigDto,
-    },
-    utils::{
+    defaults::{
         default_resource_retry_attempts, default_resource_retry_backoff_ms, default_resource_retry_backoff_multiplier,
-        hex_to_u8_16, is_default_resource_retry_attempts, is_default_resource_retry_backoff_ms,
+        is_default_resource_retry_attempts, is_default_resource_retry_backoff_ms,
         is_default_resource_retry_backoff_multiplier, is_empty_optional_vec, is_false,
     },
+    error::TuliproxError,
+    model::{
+        CacheConfigDto, GeoIpConfigDto, HlsCacheConfigDto, QosAggregationConfigDto, RateLimitConfigDto,
+        StreamConfigDto, StreamHistoryConfigDto,
+    },
+    utils::hex_to_u8_16,
 };
 use log::warn;
 
@@ -58,6 +59,8 @@ pub struct ReverseProxyConfigDto {
     pub stream_history: Option<StreamHistoryConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qos_aggregation: Option<QosAggregationConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hls_cache: Option<HlsCacheConfigDto>,
 }
 
 impl ReverseProxyConfigDto {
@@ -72,6 +75,7 @@ impl ReverseProxyConfigDto {
             && (self.stream_history.is_none() || self.stream_history.as_ref().is_some_and(|s| s.is_empty()))
             && (self.qos_aggregation.is_none()
                 || self.qos_aggregation.as_ref().is_some_and(QosAggregationConfigDto::is_empty))
+            && (self.hls_cache.is_none() || self.hls_cache.as_ref().is_some_and(HlsCacheConfigDto::is_empty))
     }
 
     pub fn clean(&mut self) {
@@ -101,6 +105,12 @@ impl ReverseProxyConfigDto {
         }
         if self.qos_aggregation.as_ref().is_some_and(QosAggregationConfigDto::is_empty) {
             self.qos_aggregation = None;
+        }
+        if let Some(hls_cache) = self.hls_cache.as_mut() {
+            hls_cache.clean();
+            if hls_cache.is_empty() {
+                self.hls_cache = None;
+            }
         }
     }
 
@@ -144,6 +154,9 @@ impl ReverseProxyConfigDto {
         if let Some(resource_retry) = self.resource_retry.as_mut() {
             resource_retry.prepare()?;
         }
+        if let Some(hls_cache) = self.hls_cache.as_mut() {
+            hls_cache.prepare()?;
+        }
 
         Ok(())
     }
@@ -180,11 +193,15 @@ impl Default for ResourceRetryConfigDto {
 }
 
 impl ResourceRetryConfigDto {
+    /// True when every field matches its documented default and the user has not
+    /// written an explicit (even if empty) `failover_redirect_patterns` section.
+    /// `Some(vec![])` is preserved on purpose — writing `failover_redirect_patterns: []`
+    /// signals "I have a retry block, just no patterns" and dropping it would lose intent.
     pub fn is_default(&self) -> bool {
         self.max_attempts == default_resource_retry_attempts()
             && self.backoff_millis == default_resource_retry_backoff_ms()
             && (self.backoff_multiplier - default_resource_retry_backoff_multiplier()).abs() < f64::EPSILON
-            && is_empty_optional_vec(&self.failover_redirect_patterns)
+            && self.failover_redirect_patterns.is_none()
     }
 
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
@@ -201,8 +218,10 @@ impl ResourceRetryConfigDto {
 
 #[cfg(test)]
 mod tests {
-    use super::ReverseProxyConfigDto;
-    use crate::model::{QosAggregationConfigDto, StreamHistoryConfigDto};
+    use crate::model::{
+        ByteSize, HlsCacheConfigDto, HlsSegmentRepairConfigDto, HlsSegmentRepairMode, QosAggregationConfigDto,
+        ReverseProxyConfigDto, StreamHistoryConfigDto,
+    };
 
     #[test]
     fn serializing_stream_history_under_reverse_proxy_uses_nested_yaml_shape() {
@@ -316,5 +335,57 @@ qos_aggregation:
 
         let err = cfg.prepare("storage").expect_err("prepare must reject zero interval");
         assert!(err.to_string().contains("interval_secs"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn reverse_proxy_prepare_rejects_invalid_hls_cache_byte_size() {
+        let mut cfg = ReverseProxyConfigDto {
+            rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
+            hls_cache: Some(HlsCacheConfigDto { cache_bytes: ByteSize::new("10XB"), ..Default::default() }),
+            ..Default::default()
+        };
+
+        let err = cfg.prepare("storage").expect_err("invalid hls cache byte size must be rejected");
+
+        assert!(err.to_string().contains("Invalid size"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn reverse_proxy_clean_removes_default_hls_cache() {
+        let mut cfg = ReverseProxyConfigDto {
+            rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
+            hls_cache: Some(HlsCacheConfigDto::default()),
+            ..Default::default()
+        };
+
+        cfg.clean();
+
+        assert!(cfg.hls_cache.is_none());
+    }
+
+    #[test]
+    fn reverse_proxy_clean_keeps_non_default_hls_segment_repair() {
+        let mut cfg = ReverseProxyConfigDto {
+            rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
+            hls_cache: Some(HlsCacheConfigDto {
+                segment_repair: HlsSegmentRepairConfigDto {
+                    max_level: HlsSegmentRepairMode::Medium,
+                    apply_to_first_segments: 1,
+                    max_parallel_repairs: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        cfg.clean();
+
+        let Some(hls_cache) = cfg.hls_cache else {
+            panic!("non-default hls segment repair must keep hls_cache");
+        };
+        assert_eq!(hls_cache.segment_repair.max_level, HlsSegmentRepairMode::Medium);
+        assert_eq!(hls_cache.segment_repair.apply_to_first_segments, 1);
+        assert_eq!(hls_cache.segment_repair.max_parallel_repairs, 1);
     }
 }

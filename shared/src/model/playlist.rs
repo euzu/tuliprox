@@ -1087,7 +1087,7 @@ impl PlaylistItem {
                     XtreamCluster::Live => None,
                     XtreamCluster::Video => {
                         let container_extension = extract_extension_from_url(&header.url)
-                            .map(|e| e.strip_prefix('.').unwrap_or(&*e).to_string())
+                            .map(|e| e.strip_prefix('.').unwrap_or(e).to_string())
                             .unwrap_or_default();
                         Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                             name: header.name.clone(),
@@ -1110,7 +1110,7 @@ impl PlaylistItem {
                     XtreamCluster::Series => {
                         if header.item_type == PlaylistItemType::Series {
                             let container_extension = extract_extension_from_url(&header.url)
-                                .map(|e| e.strip_prefix('.').unwrap_or(&e).to_string())
+                                .map(|e| e.strip_prefix('.').unwrap_or(e).to_string())
                                 .unwrap_or_default();
                             // TODO maybe from link ? like s01e02 or something like this
                             Some(StreamProperties::Episode(Box::new(EpisodeStreamProperties {
@@ -1598,6 +1598,39 @@ mod tests {
 
         let output = item.to_m3u(None, false);
         assert!(output.contains(r#"tvg-id="epg_channel_123""#), "M3U output must contain tvg-id from epg_channel_id");
+    }
+
+    #[test]
+    fn m3u_to_m3u_preserves_mixed_case_tvg_id() {
+        // EPG matching is case-insensitive, so ids are no longer lowercased when parsed.
+        // The M3U tvg-id output must preserve the channel's original source case.
+        let item = M3uPlaylistItem {
+            virtual_id: 0,
+            provider_id: "prov1".intern(),
+            name: "Test Channel".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Test Group".intern(),
+            title: "Test Title".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/stream".intern(),
+            epg_channel_id: Some("CNN.us".intern()),
+            input_name: "test".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
+            source_ordinal: 0,
+            additional_properties: None,
+        };
+
+        let output = item.to_m3u(None, false);
+        assert!(output.contains(r#"tvg-id="CNN.us""#), "M3U tvg-id must preserve original case, got: {output}");
     }
 
     #[test]

@@ -6,7 +6,8 @@ use bytes::Bytes;
 use futures::Stream;
 use shared::{
     model::VirtualId,
-    utils::{default_kick_secs, sanitize_sensitive_info},
+    utils::{sanitize_sensitive_info},
+    defaults::{default_kick_secs},
 };
 use std::{
     future::Future,

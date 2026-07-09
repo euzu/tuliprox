@@ -29,8 +29,8 @@ use chrono::{DateTime, Utc};
 use clap::Parser;
 use log::{error, info, warn};
 use shared::{
+    defaults::{CONFIG_FILE, CONFIG_PATH, DEFAULT_STORAGE_DIR, SOURCE_FILE},
     model::ConfigPaths,
-    utils::{CONFIG_FILE, CONFIG_PATH, DEFAULT_STORAGE_DIR, SOURCE_FILE},
 };
 use std::{
     fs::File,

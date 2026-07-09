@@ -16,11 +16,15 @@ where
         parts: &mut Parts,
         _state: &B,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        if let Some(accept_type) = parts.headers.get(axum::http::header::ACCEPT) {
+        let result = if let Some(accept_type) = parts.headers.get(axum::http::header::ACCEPT) {
             if let Ok(val) = accept_type.to_str() {
-                return std::future::ready(Ok(ExtractAcceptHeader(Some(val.to_string()))));
+                Ok(ExtractAcceptHeader(Some(val.to_string())))
+            } else {
+                Ok(ExtractAcceptHeader(None))
             }
-        }
-        std::future::ready(Ok(ExtractAcceptHeader(None)))
+        } else {
+            Ok(ExtractAcceptHeader(None))
+        };
+        std::future::ready(result)
     }
 }

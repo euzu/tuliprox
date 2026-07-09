@@ -175,7 +175,7 @@ pub fn exec_file_lock_prune(app_state: &Arc<AppState>) {
     tokio::spawn({
         async move {
             loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::time::sleep(Duration::from_mins(1)).await;
                 app_state.app_config.file_locks.prune_unused_locks().await;
             }
         }

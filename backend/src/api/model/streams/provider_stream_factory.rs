@@ -35,9 +35,10 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use shared::model::ConnectFailureReason;
-use shared::utils::{Internable, DEFAULT_USER_AGENT};
-use shared::model::{FailureStage};
+use shared::{
+    model::{ConnectFailureReason, FailureStage},
+    utils::Internable,
+    defaults::DEFAULT_USER_AGENT};
 
 const RETRY_SECONDS: u64 = 5;
 const ERR_MAX_RETRY_COUNT: u32 = 5;
@@ -861,7 +862,7 @@ pub async fn create_provider_stream(
             if let (Some(boxed_provider_stream), response_info) = create_channel_unavailable_stream(
                 &app_state.app_config,
                 &get_response_headers(stream_options.get_headers()),
-                status,
+                StatusCode::OK,
             ) {
                 return Some((boxed_provider_stream, response_info));
             }

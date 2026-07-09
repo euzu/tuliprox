@@ -37,7 +37,7 @@ Then you need to compile the frontend with `yarn build`
 Change into the `docker` directory and copy all the needed files (look at the Dockerfile) into the current directory.
 
 To create a docker image type:
-`docker -f Dockerfile-manual build -t tuliprox  .`
+`docker -f Dockerfile.manual build -t tuliprox  .`
 
 To start the container, you can use the `docker-compose.yml`
 But you need to change `image: ghcr.io/euzu/tuliprox:latest` to `image: tuliprox`

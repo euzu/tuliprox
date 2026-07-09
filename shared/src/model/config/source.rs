@@ -1,10 +1,11 @@
 use crate::{
+    defaults::default_as_default,
     error::TuliproxError,
     foundation::prepare_templates,
     model::{
         config::target::ConfigTargetDto, ConfigInputDto, ConfigProviderDto, HdHomeRunDeviceOverview, PatternTemplate,
     },
-    utils::{arc_str_vec_serde, default_as_default, Internable},
+    utils::{arc_str_vec_serde, Internable},
 };
 use log::warn;
 use std::{collections::HashSet, sync::Arc};

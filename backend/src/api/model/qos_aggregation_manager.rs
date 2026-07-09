@@ -806,6 +806,7 @@ mod tests {
                     stream_history_enabled: false,
                     ..Default::default()
                 }),
+                hls_cache: None,
                 qos_aggregation: Some(QosAggregationConfig {
                     enabled: true,
                     interval_secs: 300,

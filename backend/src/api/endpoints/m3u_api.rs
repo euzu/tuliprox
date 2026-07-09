@@ -4,19 +4,20 @@ use crate::{
             admission_failure_response, create_m3u_catchup_session_key,
             create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response, get_session_reservation_ttl_secs,
             get_user_target, get_user_target_by_credentials, is_seek_request, is_session_based_playback,
-            is_stream_share_enabled, local_stream_response,
-            redirect, redirect_response, resource_response,
+            is_stream_share_enabled, local_stream_response, redirect, redirect_response, resource_response,
             separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
-            try_option_bad_request, try_result_bad_request, try_result_not_found,
-            try_unwrap_body, RedirectParams,
+            try_option_bad_request, try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
         },
         endpoints::{
-            hls_api::{handle_hls_stream_request, m3u_archive_epg_reference_ts},
+            hls_api::{
+                build_virtual_hls_entry_path, handle_hls_stream_request, hls_admission_failure_manifest_response,
+                hls_custom_video_manifest_response, m3u_archive_epg_reference_ts,
+            },
             xtream_api::{ApiStreamContext, ApiStreamRequest},
         },
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
     },
-    auth::Fingerprint,
+    auth::{check_network_access_only, resolve_api_user_context, ApiUserAuthError, Fingerprint},
     model::{ConfigTarget, ProxyUserCredentials},
     repository::{m3u_get_item_for_stream_id, m3u_load_rewrite_playlist, storage_const},
     utils::{debug_if_enabled, decode_m3u_catchup_token, has_m3u_catchup_marker, resolve_m3u_catchup_url, M3uCatchupToken, PROVIDER_SCHEME_PREFIX},
@@ -26,14 +27,16 @@ use bytes::Bytes;
 use futures::StreamExt;
 use log::{debug, error};
 use shared::error::TuliproxError;
-use shared::model::ConnectFailureReason;
 use shared::{
-    model::{FieldGetAccessor, PlaylistEntry, PlaylistItemType, TargetType, UserConnectionPermission, XtreamCluster},
+    model::{
+        ConnectFailureReason, FieldGetAccessor, PlaylistEntry, PlaylistItemType, TargetType, UserConnectionPermission,
+        XtreamCluster,
+    },
     utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info},
+    defaults::{HLS_EXT}
 };
 use std::borrow::Cow;
 use std::sync::Arc;
-use crate::auth::{check_network_access_only, resolve_api_user_context, ApiUserAuthError};
 
 async fn m3u_api(
     user: Arc<ProxyUserCredentials>,
@@ -54,7 +57,8 @@ async fn m3u_api(
                 .status(axum::http::StatusCode::OK)
                 .header(axum::http::header::CONTENT_TYPE, mime::TEXT_PLAIN_UTF_8.to_string());
             if content_type == "m3u_plus" {
-                builder = builder.header(axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"playlist.m3u\"");
+                builder =
+                    builder.header(axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"playlist.m3u\"");
             }
             try_unwrap_body!(builder.body(axum::body::Body::from_stream(content_stream)))
         }
@@ -70,8 +74,7 @@ fn m3u_api_with_auth(
     app_state: &Arc<AppState>,
     api_req: &UserApiRequest,
 ) -> Result<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>), ApiUserAuthError> {
-    let (user, target) = get_user_target(api_req, app_state)
-        .ok_or(ApiUserAuthError::AuthFailed)?;
+    let (user, target) = get_user_target(api_req, app_state).ok_or(ApiUserAuthError::AuthFailed)?;
     check_network_access_only(&user, fingerprint, app_state)?;
     Ok((user, target))
 }
@@ -134,6 +137,25 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
+    let is_hls_manifest_request =
+        stream_ext == Some(HLS_EXT) || (stream_ext.is_none() && extract_extension_from_url(&pli.url) == Some(HLS_EXT));
+
+    if !user.allows_item_type(pli.item_type) {
+        if is_hls_manifest_request {
+            return hls_custom_video_manifest_response(
+                app_state,
+                &user,
+                crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+                axum::http::StatusCode::FORBIDDEN,
+            );
+        }
+        return crate::api::model::create_custom_video_stream_response(
+            app_state,
+            &fingerprint.addr,
+            crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+        )
+        .into_response();
+    }
     let virtual_id = pli.virtual_id;
 
     if app_state.active_users.is_user_blocked_for_stream(&user.username, virtual_id).await {
@@ -141,6 +163,17 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     }
 
     if user.permission_denied(app_state) {
+        if is_hls_manifest_request {
+            return hls_admission_failure_manifest_response(
+                app_state,
+                fingerprint,
+                &user,
+                pli.to_stream_channel(target.id),
+                pli.input_name.clone(),
+                req_headers,
+                ConnectFailureReason::UserAccountExpired,
+            );
+        }
         return admission_failure_response(
             app_state,
             fingerprint,
@@ -154,10 +187,8 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
 
     if pli.item_type.is_local() {
         let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, false);
-        let user_session = app_state
-            .active_users
-            .get_and_update_user_session(&user.username, &playback_session_token)
-            .await;
+        let user_session =
+            app_state.active_users.get_and_update_user_session(&user.username, &playback_session_token).await;
         let (admission, _grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
             app_state,
             &user,
@@ -196,7 +227,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         pli.item_type
     );
     let extracted_ext = extract_extension_from_url(&pli.url).unwrap_or_default();
-    let extension = stream_ext.unwrap_or(extracted_ext.as_str());
+    let extension = stream_ext.unwrap_or(extracted_ext);
     let session_key = if pli.item_type == PlaylistItemType::Catchup {
         create_m3u_catchup_session_key(
             fingerprint,
@@ -205,13 +236,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             archive_discriminator.unwrap_or("live"),
         )
     } else {
-        create_playback_session_fingerprint(
-            fingerprint,
-            &user.username,
-            virtual_id,
-            pli.item_type,
-            Some(extension),
-        )
+        create_playback_session_fingerprint(fingerprint, &user.username, virtual_id, pli.item_type, Some(extension))
     };
     let eviction_reentry_guard = if pli.item_type == PlaylistItemType::Catchup
         || !crate::api::api_utils::is_socket_bound_playback_session(pli.item_type, Some(extension))
@@ -224,6 +249,17 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
 
     let session_url = if let Some(session) = &user_session {
         if session.permission == UserConnectionPermission::Exhausted {
+            if extension == HLS_EXT {
+                return hls_admission_failure_manifest_response(
+                    app_state,
+                    fingerprint,
+                    &user,
+                    pli.to_stream_channel(target.id),
+                    session.provider.clone(),
+                    req_headers,
+                    ConnectFailureReason::UserConnectionsExhausted,
+                );
+            }
             return admission_failure_response(
                 app_state,
                 fingerprint,
@@ -236,6 +272,17 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         }
 
         if app_state.active_provider.is_over_limit(&session.provider).await {
+            if extension == HLS_EXT {
+                return hls_admission_failure_manifest_response(
+                    app_state,
+                    fingerprint,
+                    &user,
+                    pli.to_stream_channel(target.id),
+                    session.provider.clone(),
+                    req_headers,
+                    ConnectFailureReason::ProviderConnectionsExhausted,
+                );
+            }
             return admission_failure_response(
                 app_state,
                 fingerprint,
@@ -298,6 +345,17 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         session_url.as_ref(),
     );
     if connection_permission == UserConnectionPermission::Exhausted && !allow_exhausted_shared_reconnect {
+        if extension == HLS_EXT {
+            return hls_admission_failure_manifest_response(
+                app_state,
+                fingerprint,
+                &user,
+                pli.to_stream_channel(target.id),
+                input.name.clone(),
+                req_headers,
+                ConnectFailureReason::UserConnectionsExhausted,
+            );
+        }
         return admission_failure_response(
             app_state,
             fingerprint,
@@ -337,12 +395,13 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     // falling back to `now`.
     let archive_reference = m3u_archive_epg_reference_ts(&pli.url);
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
-    if is_session_request && extension == shared::utils::HLS_EXT {
+    if is_session_request && extension == shared::defaults::HLS_EXT {
+        let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id);
         return handle_hls_stream_request(
             fingerprint,
             app_state,
             &user,
-            target.id,
+            &target,
             user_session.as_ref(),
             &pli.url,
             archive_reference,
@@ -350,16 +409,15 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             &input,
             req_headers,
             connection_permission,
-            connection_kind,
+            Some(connection_kind),
+            &original_hls_entry_path,
         )
         .await
         .into_response();
     }
 
-    let pinned_provider = user_session
-        .as_ref()
-        .filter(|_| pli.item_type.requires_provider_affinity())
-        .map(|session| &session.provider);
+    let pinned_provider =
+        user_session.as_ref().filter(|_| pli.item_type.requires_provider_affinity()).map(|session| &session.provider);
 
     stream_response(
         fingerprint,
@@ -438,11 +496,21 @@ async fn m3u_api_stream(
 
     let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let pli = try_result_not_found!(
-        m3u_get_item_for_stream_id(req_virtual_id, app_state, &target).await,
-        true,
-        format!("Failed to read m3u item for stream id {req_virtual_id}")
-    );
+    let pli = match m3u_get_item_for_stream_id(req_virtual_id, app_state, &target).await {
+        Ok(pli) => pli,
+        Err(err) => {
+            error!("Failed to read m3u item for stream id {req_virtual_id}: {err}");
+            if stream_ext == Some(HLS_EXT) {
+                return axum::http::StatusCode::NOT_FOUND.into_response();
+            }
+            return crate::api::model::create_custom_video_stream_response(
+                app_state,
+                &fingerprint.addr,
+                crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+            )
+            .into_response();
+        }
+    };
 
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),
@@ -460,15 +528,6 @@ async fn m3u_api_stream(
     } else {
         (pli, None)
     };
-    if !resolved_m3u_item_is_allowed(user.as_ref(), resolved_pli.item_type) {
-        return crate::api::model::create_custom_video_stream_response(
-            app_state,
-            &fingerprint.addr,
-            crate::api::model::CustomVideoStreamType::ChannelUnavailable,
-        )
-        .into_response();
-    }
-
     m3u_api_stream_loaded(
         user,
         target,
@@ -558,8 +617,8 @@ fn m3u_api_resource_auth(
     username: &str,
     password: &str,
 ) -> Result<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>), ApiUserAuthError> {
-    let (user, target) = get_user_target_by_credentials(username, password, api_req, app_state)
-        .ok_or(ApiUserAuthError::AuthFailed)?;
+    let (user, target) =
+        get_user_target_by_credentials(username, password, api_req, app_state).ok_or(ApiUserAuthError::AuthFailed)?;
     resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), app_state)?;
     Ok((user, target))
 }

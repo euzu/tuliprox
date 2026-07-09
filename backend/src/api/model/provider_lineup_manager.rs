@@ -887,6 +887,11 @@ impl ProviderLineupManager {
         }
     }
 
+    pub fn find_provider_config(&self, provider_name: &Arc<str>) -> Option<Arc<ProviderConfig>> {
+        let snapshot = self.snapshot.load_full();
+        Self::get_provider_config_by_name(provider_name, &snapshot.providers).map(|(_, config)| config.config())
+    }
+
     pub fn provider_names_for_input(&self, input_name: &Arc<str>) -> Vec<Arc<str>> {
         let snapshot = self.snapshot.load_full();
         Self::get_provider_config_by_name(input_name, &snapshot.providers)

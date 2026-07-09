@@ -1,6 +1,7 @@
 use crate::{
     hooks::use_service_context,
     model::{EventMessage, BACKGROUND_TRANSFER_CLIENT_IP, BACKGROUND_TRANSFER_PROVIDER},
+    utils::is_shared_hls_stream,
 };
 use shared::{
     model::{
@@ -53,7 +54,7 @@ fn dedupe_streams_by_identity(streams: &mut Vec<StreamInfo>) {
 }
 
 fn should_keep_preserved_stream_visible(stream: &StreamInfo) -> bool {
-    stream.session_token.is_some() && stream.channel.item_type.is_live_adaptive()
+    stream.session_token.is_some() && (stream.channel.item_type.is_live_adaptive() || is_shared_hls_stream(stream))
 }
 
 fn should_keep_stream_when_connections_drop_to_zero(stream: &StreamInfo) -> bool {
@@ -392,6 +393,12 @@ mod tests {
         }
     }
 
+    fn test_shared_hls_stream(uid: u32, addr: &str, session_token: Option<&str>) -> StreamInfo {
+        let mut stream = test_stream(uid, addr, session_token, PlaylistItemType::LiveHls);
+        stream.channel.shared = true;
+        stream
+    }
+
     #[test]
     fn test_find_stream_update_index_prefers_adaptive_session_token_over_addr() {
         let existing = test_stream(1, "127.0.0.1:1234", Some("tok-hls"), PlaylistItemType::LiveHls);
@@ -525,6 +532,22 @@ mod tests {
         assert_eq!(status.active_user_streams, vec![other]);
         assert_eq!(status.active_users, 2);
         assert_eq!(status.active_user_connections, 2);
+    }
+
+    #[test]
+    fn test_preserved_shared_hls_update_keeps_stream_visible() {
+        let mut preserved = test_shared_hls_stream(1, "127.0.0.1:1234", Some("tok-hls"));
+        preserved.preserved = true;
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 1,
+            active_user_streams: vec![test_shared_hls_stream(1, "127.0.0.1:1234", Some("tok-hls"))],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Updated(preserved.clone()));
+
+        assert_eq!(status.active_user_streams, vec![preserved]);
     }
 
     #[test]

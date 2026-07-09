@@ -2,11 +2,11 @@ use crate::{
     api::{
         api_utils::get_stream_options,
         model::{
+            AppState, BoxedProviderStream, CleanupEvent, ConnectionManager, CustomVideoStreamType, EventManager,
+            MeteringStream, PendingProviderWakeSource, ProviderHandle, ProviderStreamFactoryOptions, StreamDetails,
+            StreamError, StreamMeterHandle, TimedClientStream, TransportStreamBuffer,
             connection_manager::{PROVIDER_END_CLOSED, PROVIDER_END_ERROR, PROVIDER_END_NOT_SET},
-            create_provider_stream, AppState, BoxedProviderStream, CleanupEvent, ConnectionManager,
-            CustomVideoStreamType, EventManager, MeteringStream, PendingProviderWakeSource, ProviderHandle,
-            ProviderStreamFactoryOptions, StreamDetails, StreamError, StreamMeterHandle, TimedClientStream,
-            TransportStreamBuffer,
+            create_provider_stream, uses_direct_body_idle_timeout,
         },
         panel_api::{can_provision_on_exhausted, find_input_by_provider_name, run_panel_api_provisioning_probe},
     },
@@ -14,10 +14,10 @@ use crate::{
     model::{ConfigInput, ProxyUserCredentials},
     utils::debug_if_enabled,
 };
-use axum::http::{header::USER_AGENT, HeaderMap};
+use axum::http::{HeaderMap, header::USER_AGENT};
 use bytes::Bytes;
-use futures::{task::AtomicWaker, Future, Stream, StreamExt};
-use log::{error, info};
+use futures::{Future, Stream, StreamExt, task::AtomicWaker};
+use log::{error, info, warn};
 use shared::model::FailureStage;
 use shared::utils::Internable;
 use shared::{
@@ -28,13 +28,17 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::{
-        atomic::{AtomicU8, Ordering},
         Arc,
+        atomic::{AtomicU8, Ordering},
     },
     task::{Context, Poll},
 };
 use tokio::sync::Notify;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
+
+const DIRECT_BODY_IDLE_TIMEOUT_SECS: u64 = 90;
+const BODY_IDLE_TIMEOUT_ERROR_CLASS: &str = "body_idle_timeout";
+const DIRECT_BODY_SOCKET_ACTIVITY_TOUCH_SECS: u64 = 1;
 
 /// Discriminates which byte-stream the client is consuming at any moment.
 /// Stored as `u8` in an `AtomicU8` for lock-free access inside `poll_next`.
@@ -151,7 +155,58 @@ enum DeferredProviderOpenOutcome {
 
 enum DeferredProviderOpenState {
     Pending(Box<DeferredProviderOpenContext>),
-    Opening(Pin<Box<dyn Future<Output=DeferredProviderOpenOutcome> + Send>>),
+    Opening(Pin<Box<dyn Future<Output = DeferredProviderOpenOutcome> + Send>>),
+}
+
+struct DirectBodyIdleTimeout {
+    enabled: bool,
+    deadline: Option<tokio::time::Instant>,
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    last_socket_activity_touch: Option<tokio::time::Instant>,
+}
+
+impl DirectBodyIdleTimeout {
+    const fn disabled() -> Self {
+        Self { enabled: false, deadline: None, sleep: None, last_socket_activity_touch: None }
+    }
+
+    const fn enabled() -> Self {
+        Self { enabled: true, deadline: None, sleep: None, last_socket_activity_touch: None }
+    }
+
+    fn mark_progress(&mut self) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        let now = tokio::time::Instant::now();
+        self.deadline = Some(now + tokio::time::Duration::from_secs(DIRECT_BODY_IDLE_TIMEOUT_SECS));
+        self.sleep = None;
+
+        let should_touch_socket = self.last_socket_activity_touch.is_none_or(|last_touch| {
+            now.duration_since(last_touch) >= tokio::time::Duration::from_secs(DIRECT_BODY_SOCKET_ACTIVITY_TOUCH_SECS)
+        });
+        if should_touch_socket {
+            self.last_socket_activity_touch = Some(now);
+        }
+        should_touch_socket
+    }
+
+    fn poll_expired(&mut self, cx: &mut Context<'_>) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        let deadline = *self.deadline.get_or_insert_with(|| {
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(DIRECT_BODY_IDLE_TIMEOUT_SECS)
+        });
+        if tokio::time::Instant::now() >= deadline {
+            return true;
+        }
+
+        self.sleep.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
+        self.sleep.as_mut().is_some_and(|sleep| sleep.as_mut().poll(cx).is_ready())
+    }
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -179,6 +234,7 @@ struct ActiveClientStreamState {
     custom_video_timeout_secs: u32,
     custom_video_timeout_mode: Option<StreamMode>,
     custom_video_timeout_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    direct_body_idle_timeout: DirectBodyIdleTimeout,
     /// Set once when the provider stream ends. Read once in Drop. Never queried during streaming.
     /// Separate from `send_custom_stream_flag` (`StreamMode`). Uses `PROVIDER_END_*` constants.
     provider_end_reason: AtomicU8,
@@ -196,7 +252,7 @@ impl ActiveClientStreamState {
             CustomVideoStreamType::ProviderConnectionsExhausted => Some(StreamMode::ProviderExhausted),
             CustomVideoStreamType::LowPriorityPreempted => Some(StreamMode::LowPriorityPreempted),
             CustomVideoStreamType::Provisioning => Some(StreamMode::Provisioning),
-            CustomVideoStreamType::UserAccountExpired => None,
+            CustomVideoStreamType::UserAccountExpired | CustomVideoStreamType::HlsSessionOrLeaseExpired => None,
         }
     }
 
@@ -207,13 +263,7 @@ impl ActiveClientStreamState {
             stream
         };
         if let Some(ctx) = self.timed_stream_context.as_ref() {
-            TimedClientStream::new(
-                &ctx.app_state,
-                stream,
-                ctx.duration_secs,
-                self.fingerprint.addr,
-                ctx.virtual_id,
-            )
+            TimedClientStream::new(&ctx.app_state, stream, ctx.duration_secs, self.fingerprint.addr, ctx.virtual_id)
                 .boxed()
         } else {
             stream
@@ -247,6 +297,61 @@ impl ActiveClientStreamState {
         });
     }
 
+    fn release_stream_and_provider_handle_once(&mut self) {
+        self.stop_grace_task();
+        let addr = self.fingerprint.addr;
+        let handle = self.provider_handle.take();
+        // `provider_handle_released` mirrors `user_stream_released` for the provider slot.
+        // When preemption already released the handle, `provider_handle` is None and the
+        // flag is true; sending None is a no-op, but the explicit guard keeps the invariant
+        // visible and safe against future call-site additions.
+        let handle_for_cleanup = if self.provider_handle_released { None } else { handle };
+        if self.user_stream_released {
+            if !self.provider_handle_released {
+                self.provider_handle_released = true;
+                self.connection_manager
+                    .send_cleanup(CleanupEvent::ReleaseProviderHandle { handle: handle_for_cleanup });
+            }
+        } else {
+            self.user_stream_released = true;
+            self.provider_handle_released = true;
+            self.connection_manager.send_cleanup(CleanupEvent::ReleaseStreamAndProviderHandle {
+                addr,
+                stream_uid: self.stream_uid,
+                handle: handle_for_cleanup,
+                provider_end_reason: self.provider_end_reason.load(Ordering::Relaxed),
+                reconnect_count: self.provider_reconnect_count.load(Ordering::Relaxed),
+                provider_error_class: self.provider_error_class,
+                provider_http_status: self.provider_http_status,
+            });
+        }
+    }
+
+    fn stop_direct_body_idle_timeout(&mut self) {
+        self.provider_stopped = true;
+        self.preempt_cancelled = None;
+        self.inner = None;
+        self.provider_error_class = Some(BODY_IDLE_TIMEOUT_ERROR_CLASS);
+        self.provider_http_status = None;
+        let _ = self.provider_end_reason.compare_exchange(
+            PROVIDER_END_NOT_SET,
+            PROVIDER_END_ERROR,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+        warn!(
+            "Direct body stream idle timeout after {DIRECT_BODY_IDLE_TIMEOUT_SECS}s for {}, terminating stream",
+            sanitize_sensitive_info(&self.fingerprint.addr.to_string())
+        );
+        self.release_stream_and_provider_handle_once();
+    }
+
+    fn mark_direct_body_progress(&mut self) {
+        if self.direct_body_idle_timeout.mark_progress() {
+            self.connection_manager.touch_direct_body_activity(&self.fingerprint.addr);
+        }
+    }
+
     fn stop_grace_task(&mut self) {
         if let Some(task) = self.grace_task_handle.take() {
             task.abort();
@@ -254,11 +359,7 @@ impl ActiveClientStreamState {
     }
 
     fn clear_finished_grace_task(&mut self) {
-        if self
-            .grace_task_handle
-            .as_ref()
-            .is_some_and(tokio::task::JoinHandle::is_finished)
-        {
+        if self.grace_task_handle.as_ref().is_some_and(tokio::task::JoinHandle::is_finished) {
             self.grace_task_handle = None;
             // If the task finished but the flag is still GRACE_PENDING (e.g. the task
             // panicked or was cancelled before it could update the flag), reset the flag
@@ -289,7 +390,8 @@ impl ActiveClientStreamState {
                     flag.store(StreamMode::LowPriorityPreempted as u8, Ordering::Release);
                 } else {
                     // Fallback: create_active_client_stream usually initializes this via stream_grace_period.
-                    self.send_custom_stream_flag = Some(Arc::new(AtomicU8::new(StreamMode::LowPriorityPreempted as u8)));
+                    self.send_custom_stream_flag =
+                        Some(Arc::new(AtomicU8::new(StreamMode::LowPriorityPreempted as u8)));
                 }
             } else if let Some(flag) = &self.send_custom_stream_flag {
                 flag.store(StreamMode::Inner as u8, Ordering::Release);
@@ -381,9 +483,9 @@ impl ActiveClientStreamState {
         if self.custom_video_timeout_mode != Some(mode) {
             self.custom_video_timeout_mode = Some(mode);
             self.custom_video_timeout_sleep = if self.custom_video_timeout_secs > 0 {
-                Some(Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(
-                    u64::from(self.custom_video_timeout_secs),
-                ))))
+                Some(Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(u64::from(
+                    self.custom_video_timeout_secs,
+                )))))
             } else {
                 None
             };
@@ -426,11 +528,7 @@ fn wrap_timed_client_stream_if_needed(
         None => stream,
         Some(mins) => {
             let secs = u32::try_from((u64::from(mins) * 60).min(u64::from(u32::MAX))).unwrap_or(0);
-            if secs > 0 {
-                TimedClientStream::new(app_state, stream, secs, addr, virtual_id).boxed()
-            } else {
-                stream
-            }
+            if secs > 0 { TimedClientStream::new(app_state, stream, secs, addr, virtual_id).boxed() } else { stream }
         }
     }
 }
@@ -453,8 +551,8 @@ fn create_deferred_provider_open_future(
     let stream_options = get_stream_options(app_state);
     let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
     let disabled_headers = app_state.get_disabled_headers();
-    let mut provider_stream_factory_options = ProviderStreamFactoryOptions::new(
-        &crate::api::model::ProviderStreamFactoryParams {
+    let mut provider_stream_factory_options =
+        ProviderStreamFactoryOptions::new(&crate::api::model::ProviderStreamFactoryParams {
             addr: fingerprint.addr,
             item_type: stream_channel.item_type,
             share_stream: stream_channel.shared,
@@ -469,8 +567,7 @@ fn create_deferred_provider_open_future(
             client_ip: Some(&fingerprint.client_ip),
             stream_channel: Some(stream_channel),
             connect_failure_stage: Some(FailureStage::ProviderOpen),
-        },
-    );
+        });
     provider_stream_factory_options.set_provider(input.get_resolve_provider(stream_url.as_ref()));
 
     Some(DeferredProviderOpenState::Pending(Box::new(DeferredProviderOpenContext {
@@ -483,11 +580,11 @@ fn create_timed_stream_context(app_state: &Arc<AppState>, virtual_id: VirtualId)
     let config = app_state.app_config.config.load();
     let mins = config.sleep_timer_mins?;
     let duration_secs = u32::try_from((u64::from(mins) * 60).min(u64::from(u32::MAX))).unwrap_or(0);
-    (duration_secs > 0).then(|| TimedStreamContext {
-        app_state: Arc::clone(app_state),
-        duration_secs,
-        virtual_id,
-    })
+    (duration_secs > 0).then(|| TimedStreamContext { app_state: Arc::clone(app_state), duration_secs, virtual_id })
+}
+
+fn should_use_direct_body_idle_timeout(stream_channel: &StreamChannel) -> bool {
+    uses_direct_body_idle_timeout(stream_channel)
 }
 
 pub(in crate::api) struct ActiveClientStream {
@@ -546,17 +643,24 @@ impl Stream for ActiveClientStream {
                                             &client,
                                             context.provider_stream_factory_options,
                                         )
-                                            .await
+                                        .await
                                         {
-                                            Some((_stream, Some((_headers, _status, _response_url, Some(custom_video_type))))) => {
+                                            Some((
+                                                _stream,
+                                                Some((_headers, _status, _response_url, Some(custom_video_type))),
+                                            )) => {
                                                 ActiveClientStreamState::mode_for_custom_video_type(custom_video_type)
-                                                    .map_or(DeferredProviderOpenOutcome::Failed, DeferredProviderOpenOutcome::Mode)
+                                                    .map_or(
+                                                        DeferredProviderOpenOutcome::Failed,
+                                                        DeferredProviderOpenOutcome::Mode,
+                                                    )
                                             }
                                             Some((stream, _stream_info)) => DeferredProviderOpenOutcome::Stream(stream),
                                             None => DeferredProviderOpenOutcome::Failed,
                                         }
                                     });
-                                    self.state.deferred_provider_open = Some(DeferredProviderOpenState::Opening(future));
+                                    self.state.deferred_provider_open =
+                                        Some(DeferredProviderOpenState::Opening(future));
                                     continue;
                                 }
                                 DeferredProviderOpenState::Opening(mut future) => match future.as_mut().poll(cx) {
@@ -568,6 +672,7 @@ impl Stream for ActiveClientStream {
                                     Poll::Ready(DeferredProviderOpenOutcome::Stream(stream)) => {
                                         self.state.provider_reconnect_count.fetch_add(1, Ordering::Relaxed);
                                         self.state.inner = Some(self.state.wrap_provider_stream(stream));
+                                        self.state.mark_direct_body_progress();
                                         continue;
                                     }
                                     Poll::Ready(DeferredProviderOpenOutcome::Mode(mode)) => {
@@ -591,7 +696,10 @@ impl Stream for ActiveClientStream {
                     }
 
                     match self.state.inner.as_mut().map(|inner| Pin::new(inner).poll_next(cx)) {
-                        Some(Poll::Ready(Some(Ok(bytes)))) => return Poll::Ready(Some(Ok(bytes))),
+                        Some(Poll::Ready(Some(Ok(bytes)))) => {
+                            self.state.mark_direct_body_progress();
+                            return Poll::Ready(Some(Ok(bytes)));
+                        }
                         Some(Poll::Ready(Some(Err(e)))) => {
                             error!("Inner stream error: {e:?}");
                             self.state.provider_error_class = Some(e.provider_error_class());
@@ -623,7 +731,13 @@ impl Stream for ActiveClientStream {
 
                             return Poll::Pending;
                         }
-                        Some(Poll::Pending) => return Poll::Pending,
+                        Some(Poll::Pending) => {
+                            if self.state.direct_body_idle_timeout.poll_expired(cx) {
+                                self.state.stop_direct_body_idle_timeout();
+                                return Poll::Ready(None);
+                            }
+                            return Poll::Pending;
+                        }
                     }
                 }
 
@@ -684,32 +798,7 @@ impl Stream for ActiveClientStream {
 
 impl Drop for ActiveClientStream {
     fn drop(&mut self) {
-        self.state.stop_grace_task();
-        let addr = self.state.fingerprint.addr;
-        let handle = self.state.provider_handle.take();
-        // `provider_handle_released` mirrors `user_stream_released` for the provider slot.
-        // When preemption already released the handle, `provider_handle` is None and the
-        // flag is true — sending None here would be a no-op, but the explicit guard makes
-        // the invariant visible and safe against future call-site additions.
-        let handle_for_cleanup = if self.state.provider_handle_released { None } else { handle };
-        if self.state.user_stream_released {
-            if !self.state.provider_handle_released {
-                self.state.provider_handle_released = true;
-                self.state.connection_manager.send_cleanup(CleanupEvent::ReleaseProviderHandle { handle: handle_for_cleanup });
-            }
-        } else {
-            self.state.user_stream_released = true;
-            self.state.provider_handle_released = true;
-            self.state.connection_manager.send_cleanup(CleanupEvent::ReleaseStreamAndProviderHandle {
-                addr,
-                stream_uid: self.state.stream_uid,
-                handle: handle_for_cleanup,
-                provider_end_reason: self.state.provider_end_reason.load(Ordering::Relaxed),
-                reconnect_count: self.state.provider_reconnect_count.load(Ordering::Relaxed),
-                provider_error_class: self.state.provider_error_class,
-                provider_http_status: self.state.provider_http_status,
-            });
-        }
+        self.state.release_stream_and_provider_handle_once();
     }
 }
 
@@ -740,6 +829,11 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
 
     let virtual_id = stream_channel.virtual_id;
     let is_shared_source_stream = stream_channel.shared && stream_details.stream.is_some();
+    let direct_body_idle_timeout = if should_use_direct_body_idle_timeout(&stream_channel) {
+        DirectBodyIdleTimeout::enabled()
+    } else {
+        DirectBodyIdleTimeout::disabled()
+    };
     let registered_stream = app_state
         .connection_manager
         .update_connection(crate::api::model::ConnectionParams {
@@ -810,16 +904,12 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
     // Compute deferred provider open before moving stream_details into the grace task.
     let deferred_provider_open =
         create_deferred_provider_open_future(app_state, &stream_details, fingerprint, &stream_channel, req_headers);
-    let timed_stream_context = deferred_provider_open
-        .as_ref()
-        .and_then(|_| create_timed_stream_context(app_state, virtual_id));
+    let timed_stream_context =
+        deferred_provider_open.as_ref().and_then(|_| create_timed_stream_context(app_state, virtual_id));
     let stream_taken = stream_details.stream.take();
     let has_deferred_open = stream_details.has_deferred_provider_open();
-    let grace_waker = if grant_user_grace_period || stream_details.provider_grace_active {
-        Some(Arc::clone(&waker))
-    } else {
-        None
-    };
+    let grace_waker =
+        if grant_user_grace_period || stream_details.provider_grace_active { Some(Arc::clone(&waker)) } else { None };
     let (grace_stop_flag, grace_task_handle) = stream_grace_period(GracePeriodParams {
         app_state: Arc::clone(app_state),
         stream_details,
@@ -883,9 +973,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         .map(|token| Box::pin(token.clone().cancelled_owned()));
 
     let mut send_custom_stream_flag = grace_stop_flag;
-    if send_custom_stream_flag.is_none()
-        && preempt_cancelled.is_some()
-        && custom_video.low_priority_preempted.is_some()
+    if send_custom_stream_flag.is_none() && preempt_cancelled.is_some() && custom_video.low_priority_preempted.is_some()
     {
         send_custom_stream_flag = Some(Arc::new(AtomicU8::new(StreamMode::Inner as u8)));
     }
@@ -912,6 +1000,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         custom_video_timeout_secs,
         custom_video_timeout_mode: None,
         custom_video_timeout_sleep: None,
+        direct_body_idle_timeout,
         provider_end_reason: AtomicU8::new(PROVIDER_END_NOT_SET),
         provider_error_class: None,
         provider_http_status: None,
@@ -982,9 +1071,8 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
     };
 
     if provider_grace_check.is_some() || user_grace_check.is_some() {
-        let stream_strategy_flag = Arc::new(AtomicU8::new(
-            if hold_stream { StreamMode::GracePending as u8 } else { StreamMode::Inner as u8 },
-        ));
+        let stream_strategy_flag =
+            Arc::new(AtomicU8::new(if hold_stream { StreamMode::GracePending as u8 } else { StreamMode::Inner as u8 }));
         let stream_strategy_flag_copy = Arc::clone(&stream_strategy_flag);
         let grace_period_millis = grace_period.period_millis;
 
@@ -1001,8 +1089,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
         // out of GRACE_PENDING so the client stream is not hung indefinitely.
         // Allow grace_period_millis for the intentional delay plus a 10-second buffer
         // for the async connection checks that follow.
-        let grace_task_timeout =
-            tokio::time::Duration::from_millis(grace_period_millis.saturating_add(10_000));
+        let grace_task_timeout = tokio::time::Duration::from_millis(grace_period_millis.saturating_add(10_000));
         // Clone handles for use in the timeout fallback, in case the inner async block is cancelled.
         let flag_for_fallback = Arc::clone(&stream_strategy_flag_copy);
         let waker_for_fallback = waker.clone();
@@ -1011,8 +1098,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
         let pending_username_timeout = pending_username.clone();
         let grace_task_handle = tokio::spawn(async move {
             let timed_out = tokio::time::timeout(grace_task_timeout, async move {
-                let deadline =
-                    tokio::time::Instant::now() + tokio::time::Duration::from_millis(grace_period_millis);
+                let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(grace_period_millis);
                 let mut pending_wake_source = PendingProviderWakeSource::Activated;
                 loop {
                     let capacity_wait = capacity_notify.notified();
@@ -1025,9 +1111,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                         None => true,
                     };
                     let provider_ok = match &provider_grace_check {
-                        Some(provider_name) => {
-                            !provider_manager.is_over_limit(provider_name).await
-                        }
+                        Some(provider_name) => !provider_manager.is_over_limit(provider_name).await,
                         None => true,
                     };
                     if user_ok && provider_ok {
@@ -1073,7 +1157,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                 ctx,
                                 grace_kind,
                             )
-                                .await;
+                            .await;
                             match remaining_result.admission.permission {
                                 shared::model::UserConnectionPermission::Allowed
                                 | shared::model::UserConnectionPermission::GracePeriod => {
@@ -1083,10 +1167,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                 }
                                 shared::model::UserConnectionPermission::Exhausted => {
                                     // Remaining strategies exhausted — final UserExhausted.
-                                    stream_strategy_flag_copy.store(
-                                        StreamMode::UserExhausted as u8,
-                                        Ordering::Release,
-                                    );
+                                    stream_strategy_flag_copy.store(StreamMode::UserExhausted as u8, Ordering::Release);
                                     connection_manager
                                         .update_stream_detail(
                                             &fingerprint.addr,
@@ -1103,12 +1184,12 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                             }
                         } else {
                             // No grace context — immediate UserExhausted.
-                            stream_strategy_flag_copy.store(
-                                StreamMode::UserExhausted as u8,
-                                Ordering::Release,
-                            );
+                            stream_strategy_flag_copy.store(StreamMode::UserExhausted as u8, Ordering::Release);
                             connection_manager
-                                .update_stream_detail(&fingerprint.addr, CustomVideoStreamType::UserConnectionsExhausted)
+                                .update_stream_detail(
+                                    &fingerprint.addr,
+                                    CustomVideoStreamType::UserConnectionsExhausted,
+                                )
                                 .await;
                             connection_manager.shared_stream_manager.release_connection(&fingerprint.addr, true).await;
                             info!("User connections exhausted for active clients: {username}");
@@ -1129,13 +1210,18 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                     "Provider grace period exhausted; provisioning for active clients: {provider_name}"
                                 );
                                 let app_state = Arc::clone(&app_state);
-                                let input = (*provisioning_info.input).clone();
+                                let input_name = Arc::clone(&provisioning_info.input.name);
                                 let stop_signal = provisioning_info.stop_signal;
                                 let addr = fingerprint.addr;
                                 tokio::spawn(async move {
-                                    if let Err(err) =
-                                        run_panel_api_provisioning_probe(app_state, input, stop_signal, addr, virtual_id)
-                                            .await
+                                    if let Err(err) = run_panel_api_provisioning_probe(
+                                        app_state,
+                                        input_name,
+                                        stop_signal,
+                                        addr,
+                                        virtual_id,
+                                    )
+                                    .await
                                     {
                                         error!("Error running Probe: {err:?}");
                                     }
@@ -1149,7 +1235,10 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                     )
                                     .await;
                                 // Release the shared stream subscription to stop the subscriber loop
-                                connection_manager.shared_stream_manager.release_connection(&fingerprint.addr, true).await;
+                                connection_manager
+                                    .shared_stream_manager
+                                    .release_connection(&fingerprint.addr, true)
+                                    .await;
                                 info!("Provider connections exhausted for active clients: {provider_name}");
                             }
                             updated = true;
@@ -1165,9 +1254,8 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                 // PendingProvider (Hold): activate on success, expire on failure.
                 if hold_stream {
                     if let (Some(token), Some(version)) = (session_token.as_deref(), pending_provider_version) {
-                        let _transition_guard = active_users
-                            .acquire_playback_transition(&pending_username, token)
-                            .await;
+                        let _transition_guard =
+                            active_users.acquire_playback_transition(&pending_username, token).await;
                         if updated {
                             active_users
                                 .expire_pending_provider(&pending_username, token, version, pending_wake_source)
@@ -1183,17 +1271,11 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                 // GraceActive (Instant): activate on success, expire on failure.
                 // grace_active_version is Some when the session is in `GraceActive` lifecycle.
                 if let (Some(token), Some(version)) = (session_token.as_deref(), grace_active_version) {
-                    let _transition_guard = active_users
-                        .acquire_playback_transition(&pending_username, token)
-                        .await;
+                    let _transition_guard = active_users.acquire_playback_transition(&pending_username, token).await;
                     if updated {
-                        active_users
-                            .expire_grace_active(&pending_username, token, version)
-                            .await;
+                        active_users.expire_grace_active(&pending_username, token, version).await;
                     } else {
-                        active_users
-                            .activate_grace_active(&pending_username, token, version)
-                            .await;
+                        active_users.activate_grace_active(&pending_username, token, version).await;
                     }
                 }
 
@@ -1207,7 +1289,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                     w.wake();
                 }
             })
-                .await;
+            .await;
 
             if timed_out.is_err() {
                 // Grace task exceeded its budget without updating the flag — reset GRACE_PENDING
@@ -1216,20 +1298,21 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                 // a PendingProvider / GraceActive session that was never resolved would cause
                 // the next admission attempt to incorrectly skip re-evaluation.
                 if let (Some(token), Some(version)) = (session_token_timeout.as_deref(), pending_provider_version) {
-                    let _transition_guard = active_users_timeout
-                        .acquire_playback_transition(&pending_username_timeout, token)
-                        .await;
+                    let _transition_guard =
+                        active_users_timeout.acquire_playback_transition(&pending_username_timeout, token).await;
                     active_users_timeout
-                        .expire_pending_provider(&pending_username_timeout, token, version, PendingProviderWakeSource::Timeout)
+                        .expire_pending_provider(
+                            &pending_username_timeout,
+                            token,
+                            version,
+                            PendingProviderWakeSource::Timeout,
+                        )
                         .await;
                 }
                 if let (Some(token), Some(version)) = (session_token_timeout.as_deref(), grace_active_version) {
-                    let _transition_guard = active_users_timeout
-                        .acquire_playback_transition(&pending_username_timeout, token)
-                        .await;
-                    active_users_timeout
-                        .expire_grace_active(&pending_username_timeout, token, version)
-                        .await;
+                    let _transition_guard =
+                        active_users_timeout.acquire_playback_transition(&pending_username_timeout, token).await;
+                    active_users_timeout.expire_grace_active(&pending_username_timeout, token, version).await;
                 }
                 error!("Grace period task timed out; resetting stream flag to prevent client hang");
                 let _ = flag_for_fallback.compare_exchange(
@@ -1251,37 +1334,43 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
 #[cfg(test)]
 mod tests {
     use super::{
-        create_active_client_stream, stream_grace_period, ActiveClientStream, ActiveClientStreamParams,
-        ActiveClientStreamState,
-        CustomVideoBuffers, DeferredProviderOpenOutcome, DeferredProviderOpenState, GracePeriodParams, StreamMode,
-        TimedStreamContext,
+        ActiveClientStream, ActiveClientStreamParams, ActiveClientStreamState, CustomVideoBuffers,
+        DIRECT_BODY_IDLE_TIMEOUT_SECS, DeferredProviderOpenOutcome, DeferredProviderOpenState, DirectBodyIdleTimeout,
+        GracePeriodParams, StreamMode, TimedStreamContext, create_active_client_stream,
+        should_use_direct_body_idle_timeout, stream_grace_period,
     };
     use crate::api::api_utils::GraceResolutionContext;
     use crate::api::model::connection_manager::PROVIDER_END_NOT_SET;
     use crate::{
         api::model::{
-            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, CreateUserSessionParams,
-            CustomVideoStreamType, DownloadQueue, EventManager, MetadataUpdateManager, PlaylistStorageState,
-            SharedStreamManager, StreamDetails, StreamError, UpdateGuard,
+            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager,
+            CreateUserSessionParams, CustomVideoStreamType, DownloadQueue, EventManager, MetadataUpdateManager,
+            PlaylistStorageState, SharedStreamManager, StreamDetails, StreamError, UpdateGuard,
         },
         auth::Fingerprint,
-        model::{AppConfig, Config, ConfigInput, GracePeriodOptions, MediaToolCapabilities, ProcessTargets, ProxyUserCredentials, SourcesConfig, StreamConfig},
+        model::{
+            AppConfig, Config, ConfigInput, GracePeriodOptions, MediaToolCapabilities, ProcessTargets,
+            ProxyUserCredentials, SourcesConfig, StreamConfig,
+        },
         utils::{FileLockManager, GeoIp},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::http::HeaderMap;
     use bytes::Bytes;
-    use futures::{pin_mut, StreamExt};
+    use futures::{StreamExt, pin_mut};
     use reqwest::Client;
     use shared::{
-        model::{AdmissionStrategy, ConfigPaths, InputFetchMethod, InputType, PlaylistItemType, StreamChannel, UserConnectionPermission, XtreamCluster},
+        model::{
+            AdmissionStrategy, ConfigPaths, InputFetchMethod, InputType, PlaylistItemType, StreamChannel,
+            UserConnectionPermission, XtreamCluster,
+        },
         utils::Internable,
     };
     use std::{
         collections::HashMap,
         sync::{
-            atomic::{AtomicU8, Ordering},
             Arc,
+            atomic::{AtomicU8, Ordering},
         },
         time::Duration,
     };
@@ -1342,13 +1431,7 @@ mod tests {
         let config = app_cfg.config.load();
         let user_manager = Arc::new(ActiveUserManager::new(&config, &geo_ip, &event_manager));
 
-        Arc::new(ConnectionManager::new(
-            &user_manager,
-            &provider_manager,
-            &shared_manager,
-            &event_manager,
-            None,
-        ))
+        Arc::new(ConnectionManager::new(&user_manager, &provider_manager, &shared_manager, &event_manager, None))
     }
 
     fn create_test_app_state() -> Arc<AppState> {
@@ -1386,6 +1469,8 @@ mod tests {
             downloads: Arc::new(DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
+            hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
+            hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
             active_users,
             active_provider,
             connection_manager,
@@ -1412,6 +1497,7 @@ mod tests {
                 geoip: None,
                 stream_history: None,
                 qos_aggregation: None,
+                hls_cache: None,
             }),
             user_access_control: true,
             ..Config::default()
@@ -1453,6 +1539,8 @@ mod tests {
             downloads: Arc::new(DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
+            hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
+            hls_provisioning: Arc::new(crate::api::model::HlsProvisioningState::new()),
             active_users,
             active_provider,
             connection_manager,
@@ -1503,6 +1591,15 @@ mod tests {
         channel
     }
 
+    fn create_test_video_stream_channel(virtual_id: u32, url: &str) -> StreamChannel {
+        let mut channel = create_test_stream_channel(virtual_id, url);
+        channel.item_type = PlaylistItemType::Video;
+        channel.cluster = XtreamCluster::Video;
+        channel.group = "Movies".intern();
+        channel.url = url.into();
+        channel
+    }
+
     fn create_deferred_provider_grace_details(
         provider_name: &Arc<str>,
         provider_handle: crate::api::model::ProviderHandle,
@@ -1531,11 +1628,7 @@ mod tests {
         provider_name: &Arc<str>,
         deferred_addr: std::net::SocketAddr,
         session_token: Option<&str>,
-    ) -> (
-        Arc<AtomicU8>,
-        tokio::task::JoinHandle<()>,
-        crate::api::model::ProviderHandle,
-    ) {
+    ) -> (Arc<AtomicU8>, tokio::task::JoinHandle<()>, crate::api::model::ProviderHandle) {
         let deferred_handle = app_state
             .active_provider
             .acquire_exact_connection_with_grace(
@@ -1552,10 +1645,7 @@ mod tests {
         let test_user = create_test_user("grace-user");
         let test_fingerprint = create_test_fingerprint(deferred_addr);
         let pending_provider_version = if let Some(token) = session_token {
-            app_state
-                .active_users
-                .pending_provider_version(&test_user.username, token)
-                .await
+            app_state.active_users.pending_provider_version(&test_user.username, token).await
         } else {
             None
         };
@@ -1608,11 +1698,7 @@ mod tests {
             event_manager: Arc::new(EventManager::new()),
             waker: None,
             connection_manager,
-            fingerprint: Arc::new(Fingerprint::new(
-                "fp-key".to_string(),
-                "127.0.0.1".to_string(),
-                addr,
-            )),
+            fingerprint: Arc::new(Fingerprint::new("fp-key".to_string(), "127.0.0.1".to_string(), addr)),
             stream_uid: None,
             provider_stopped: true,
             user_stream_released: true,
@@ -1620,6 +1706,7 @@ mod tests {
             custom_video_timeout_secs: 5,
             custom_video_timeout_mode: None,
             custom_video_timeout_sleep: None,
+            direct_body_idle_timeout: DirectBodyIdleTimeout::disabled(),
             provider_end_reason: AtomicU8::new(PROVIDER_END_NOT_SET),
             provider_error_class: None,
             provider_http_status: None,
@@ -1655,6 +1742,27 @@ mod tests {
             ActiveClientStreamState::custom_video_type_for_mode(StreamMode::ChannelUnavailable),
             CustomVideoStreamType::ChannelUnavailable
         ));
+    }
+
+    #[test]
+    fn test_direct_body_idle_timeout_only_applies_to_direct_vod_series_streams() {
+        let video = create_test_video_stream_channel(1, "http://provider-1.example/movie/1.mkv");
+        assert!(should_use_direct_body_idle_timeout(&video));
+
+        let mut series = create_test_video_stream_channel(2, "http://provider-1.example/series/2.mkv");
+        series.item_type = PlaylistItemType::Series;
+        series.cluster = XtreamCluster::Series;
+        assert!(should_use_direct_body_idle_timeout(&series));
+
+        let live = create_test_stream_channel(3, "http://provider-1.example/live/3.ts");
+        assert!(!should_use_direct_body_idle_timeout(&live));
+
+        let shared_video = {
+            let mut channel = video.clone();
+            channel.shared = true;
+            channel
+        };
+        assert!(!should_use_direct_body_idle_timeout(&shared_video));
     }
 
     #[tokio::test]
@@ -1769,7 +1877,8 @@ mod tests {
             .await
             .expect("holder should consume the provider's live capacity");
         let (_flag, grace_task, deferred_handle) =
-            start_deferred_provider_grace_resolution(&app_state, &provider_name, deferred_addr, Some("tok-grace")).await;
+            start_deferred_provider_grace_resolution(&app_state, &provider_name, deferred_addr, Some("tok-grace"))
+                .await;
 
         app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
         let join_result = tokio::time::timeout(Duration::from_millis(1), grace_task).await;
@@ -1780,7 +1889,10 @@ mod tests {
             .get_and_update_user_session(&user.username, "tok-grace")
             .await
             .expect("session should still exist");
-        assert!(!matches!(session.lifecycle, crate::api::model::PlaybackLifecycle::PendingProvider { .. }), "capacity notify should clear pending provider state");
+        assert!(
+            !matches!(session.lifecycle, crate::api::model::PlaybackLifecycle::PendingProvider { .. }),
+            "capacity notify should clear pending provider state"
+        );
         assert_eq!(session.permission, UserConnectionPermission::Allowed);
 
         app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;
@@ -1835,7 +1947,7 @@ mod tests {
             deferred_addr,
             Some("tok-grace-stale"),
         )
-            .await;
+        .await;
 
         let replacement_version = app_state
             .active_users
@@ -1857,9 +1969,7 @@ mod tests {
             .get_and_update_user_session(&user.username, "tok-grace-stale")
             .await
             .expect("session should still exist");
-        let crate::api::model::PlaybackLifecycle::PendingProvider { data: pending } =
-            &session.lifecycle
-        else {
+        let crate::api::model::PlaybackLifecycle::PendingProvider { data: pending } = &session.lifecycle else {
             panic!("stale grace task must not clear the replacement pending provider state")
         };
         assert_eq!(pending.version, replacement_version);
@@ -1916,7 +2026,7 @@ mod tests {
             meter_uid: 0,
             meter_stream: false,
         })
-            .await;
+        .await;
         pin_mut!(stream);
 
         assert!(
@@ -1991,7 +2101,7 @@ mod tests {
             meter_uid: 0,
             meter_stream: false,
         })
-            .await;
+        .await;
         pin_mut!(stream);
 
         assert!(
@@ -2031,11 +2141,7 @@ mod tests {
             deferred_provider_open: Some(DeferredProviderOpenState::Opening(Box::pin(async {
                 DeferredProviderOpenOutcome::Stream(futures::stream::pending::<Result<Bytes, StreamError>>().boxed())
             }))),
-            timed_stream_context: Some(TimedStreamContext {
-                app_state,
-                duration_secs: 1,
-                virtual_id: 1,
-            }),
+            timed_stream_context: Some(TimedStreamContext { app_state, duration_secs: 1, virtual_id: 1 }),
             preempt_cancelled: None,
             grace_task_handle: None,
             provisionable: false,
@@ -2050,11 +2156,7 @@ mod tests {
             event_manager: Arc::new(EventManager::new()),
             waker: None,
             connection_manager,
-            fingerprint: Arc::new(Fingerprint::new(
-                "fp-timeout".to_string(),
-                "127.0.0.1".to_string(),
-                addr,
-            )),
+            fingerprint: Arc::new(Fingerprint::new("fp-timeout".to_string(), "127.0.0.1".to_string(), addr)),
             stream_uid: None,
             provider_stopped: false,
             user_stream_released: true,
@@ -2062,6 +2164,7 @@ mod tests {
             custom_video_timeout_secs: 0,
             custom_video_timeout_mode: None,
             custom_video_timeout_sleep: None,
+            direct_body_idle_timeout: DirectBodyIdleTimeout::disabled(),
             provider_end_reason: AtomicU8::new(PROVIDER_END_NOT_SET),
             provider_error_class: None,
             provider_http_status: None,
@@ -2078,10 +2181,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(2)).await;
 
         let result = tokio::time::timeout(Duration::from_millis(1), stream.next()).await;
-        assert!(
-            result.is_ok(),
-            "deferred-open stream should stop once the configured sleep timer expires"
-        );
+        assert!(result.is_ok(), "deferred-open stream should stop once the configured sleep timer expires");
         match result {
             Ok(joined) => assert!(
                 joined.is_none(),
@@ -2134,8 +2234,13 @@ mod tests {
             )
             .await
             .expect("holder should consume the provider's live capacity");
-        let (flag, grace_task, deferred_handle) =
-            start_deferred_provider_grace_resolution(&app_state, &provider_name, deferred_addr, Some("tok-grace-timeout")).await;
+        let (flag, grace_task, deferred_handle) = start_deferred_provider_grace_resolution(
+            &app_state,
+            &provider_name,
+            deferred_addr,
+            Some("tok-grace-timeout"),
+        )
+        .await;
 
         assert_eq!(
             StreamMode::from_u8(flag.load(Ordering::Acquire)),
@@ -2161,7 +2266,10 @@ mod tests {
             .get_and_update_user_session(&user.username, "tok-grace-timeout")
             .await
             .expect("session should still exist");
-        assert!(!matches!(session.lifecycle, crate::api::model::PlaybackLifecycle::PendingProvider { .. }), "timeout expiry should clear pending provider state");
+        assert!(
+            !matches!(session.lifecycle, crate::api::model::PlaybackLifecycle::PendingProvider { .. }),
+            "timeout expiry should clear pending provider state"
+        );
         assert_eq!(session.permission, UserConnectionPermission::Exhausted);
 
         app_state.connection_manager.release_provider_handle(Some(holder_handle)).await;
@@ -2473,7 +2581,7 @@ mod tests {
             meter_uid: 55,
             meter_stream: true,
         })
-            .await;
+        .await;
         pin_mut!(stream);
 
         let first_chunk = stream.next().await;
@@ -2494,5 +2602,57 @@ mod tests {
         assert_eq!(entries[0].uids, vec![1]);
         assert_eq!(entries[0].rate_kbps, 1);
         assert_eq!(entries[0].total_kb, 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_direct_vod_body_idle_timeout_releases_active_stream() {
+        let app_state = create_test_app_state();
+        let addr = "127.0.0.1:55031".parse().unwrap_or_else(|_| unreachable!());
+        let test_user = create_test_user("vod-user");
+        let test_fingerprint = create_test_fingerprint(addr);
+        let provider_stream =
+            futures::stream::once(async { Ok(Bytes::from_static(b"vod")) }).chain(futures::stream::pending()).boxed();
+        let stream_details = StreamDetails::from_stream(provider_stream, GracePeriodOptions::default());
+
+        let stream = create_active_client_stream(ActiveClientStreamParams {
+            stream_details,
+            app_state: &app_state,
+            user: &test_user,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            fingerprint: &test_fingerprint,
+            stream_channel: create_test_video_stream_channel(1, "http://provider-1.example/movie/1.mkv"),
+            socket_bound: false,
+            session_token: None,
+            req_headers: &HeaderMap::default(),
+            meter_uid: 0,
+            meter_stream: false,
+        })
+        .await;
+        pin_mut!(stream);
+
+        let first_chunk = stream.next().await;
+        assert!(matches!(first_chunk, Some(Ok(ref bytes)) if bytes.as_ref() == b"vod"));
+        assert_eq!(app_state.active_users.active_streams().await.len(), 1);
+        assert!(
+            matches!(futures::poll!(stream.next()), std::task::Poll::Pending),
+            "pending VOD body should wait until the direct body idle timeout elapses"
+        );
+
+        tokio::time::advance(Duration::from_secs(DIRECT_BODY_IDLE_TIMEOUT_SECS)).await;
+        tokio::task::yield_now().await;
+
+        assert!(stream.next().await.is_none(), "VOD body idle timeout should terminate the stream");
+
+        for _ in 0..20 {
+            if app_state.active_users.active_streams().await.is_empty() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            app_state.active_users.active_streams().await.is_empty(),
+            "cleanup worker should remove the timed-out VOD stream from active streams"
+        );
     }
 }
