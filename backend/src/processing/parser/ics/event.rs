@@ -319,7 +319,28 @@ fn parse_property(line: &str) -> Option<IcsProperty> {
 }
 
 fn unescape_ics_text(value: &str) -> String {
-    value.replace("\\n", "\n").replace("\\N", "\n").replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
+    let mut result = String::with_capacity(value.len());
+    let mut chars = value.chars();
+
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            result.push(character);
+            continue;
+        }
+
+        match chars.next() {
+            Some('n' | 'N') => result.push('\n'),
+            Some(',') => result.push(','),
+            Some(';') => result.push(';'),
+            Some('\\') | None => result.push('\\'),
+            Some(next) => {
+                result.push('\\');
+                result.push(next);
+            }
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -372,6 +393,13 @@ mod tests {
         let events = parse_ics_events(&content, &config()).expect("events");
         assert_eq!(events[0].summary.as_deref(), Some("LongDESCRIPTION"));
         assert_eq!(events[0].description.as_deref(), Some("Line 1\nLine 2, ok"));
+    }
+
+    #[test]
+    fn text_unescaping_decodes_only_known_sequences() {
+        assert_eq!(unescape_ics_text(r"line\nnext\Ncomma\,semi\;slash\\"), "line\nnext\ncomma,semi;slash\\");
+        assert_eq!(unescape_ics_text(r"literal\\n literal\\, literal\\;"), r"literal\n literal\, literal\;");
+        assert_eq!(unescape_ics_text(r"unknown\x trailing\"), r"unknown\x trailing\");
     }
 
     #[test]

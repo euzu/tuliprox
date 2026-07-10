@@ -100,6 +100,7 @@ impl DiskProbe {
 
     /// Return `(total_bytes, free_bytes_available_to_caller)`.
     /// Returns `(0, 0)` if the underlying syscall fails.
+    #[allow(clippy::useless_conversion)]
     fn sample(&self) -> (u64, u64) {
         #[cfg(unix)]
         {
@@ -111,8 +112,8 @@ impl DiskProbe {
                 return (0, 0);
             }
             let bsize = stat.f_frsize as u64;
-            let total = (stat.f_blocks as u64).saturating_mul(bsize);
-            let free = (stat.f_bavail as u64).saturating_mul(bsize);
+            let total = u64::from(stat.f_blocks).saturating_mul(bsize);
+            let free = u64::from(stat.f_bavail).saturating_mul(bsize);
             (total, free)
         }
         #[cfg(windows)]
