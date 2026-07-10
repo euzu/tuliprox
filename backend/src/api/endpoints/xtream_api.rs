@@ -1836,6 +1836,7 @@ mod tests {
             },
             &epg_path,
             &std::collections::HashMap::<Arc<str>, Arc<str>>::new(),
+            &shared::model::EpgOutputOptions::default(),
         )
         .expect("write target EPG");
 

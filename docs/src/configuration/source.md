@@ -1307,8 +1307,8 @@ targets:
 | `share_live_streams.hls`                   | Bool | No       | `false` | Enables HLS live sharing for the new HLS cache proxy path. This is a configuration switch for the HLS cache feature and is independent from MPEG-TS stream sharing.                                                                            |
 | `share_live_streams.mpeg_ts`               | Bool | No       | `false` | Allows Tuliprox to share MPEG-TS live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel.             |
 | `remove_duplicates`                        | Bool | No       | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output.                                                                                                |
-| `epg_output.lowercase_ids`                 | Bool | No       | `false` | Canonicalizes technical EPG IDs with ASCII lowercase across M3U `tvg-id`, Xtream `epg_channel_id`, target EPG database keys, XMLTV channel/programme references, and runtime EPG queries. Changing this option requires a full target refresh. |
-| `epg_output.lowercase_xmltv_display_names` | Bool | No       | `false` | Applies Unicode lowercase exclusively to XMLTV `<display-name>` values. Playlist names, Xtream names, programme titles, and programme descriptions remain unchanged. Changing this option requires a full target refresh.                      |
+| `epg_output.lowercase_ids`                 | Bool | No       | `false` | Canonicalizes visible technical EPG IDs with ASCII lowercase across M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV channel/programme references, and EPG API responses. Changing this option requires a full target refresh.                     |
+| `epg_output.lowercase_xmltv_display_names` | Bool | No       | `false` | Applies Unicode lowercase exclusively to XMLTV `<display-name>` values during serialization. Playlist names, Xtream names, programme titles, and programme descriptions remain unchanged; persisted target data does not require rebuilding.   |
 | `force_redirect`                           | Bool | No       | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model.                                                                 |
 
 > **Shared HLS:** `share_live_streams.hls` requires `reverse_proxy.hls_cache` in `config.yml`.
@@ -1353,17 +1353,20 @@ technical ID of `example.channel` and the following XMLTV output:
 ```
 
 `lowercase_ids` uses ASCII lowercase for technical identifiers. Non-ASCII characters in those IDs remain unchanged.
-The canonical ID is used consistently for M3U `tvg-id`, Xtream `epg_channel_id`, target EPG database keys,
-XMLTV `<channel id>` and `<programme channel>`, and Short EPG / Stream EPG requests and responses. The two XMLTV
-attributes therefore use exactly the same canonical value.
+The canonical visible ID is used consistently for M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV `<channel id>` and
+`<programme channel>`, and Short EPG / Stream EPG responses. Target EPG database keys and API lookup keys use the same
+target output casing: source case is preserved while the option is disabled, and ASCII lowercase is used after the
+option is enabled and the target is refreshed. This keeps existing mixed-case target databases compatible while the
+two XMLTV attributes continue to use exactly the same visible value.
 
-`lowercase_xmltv_display_names` uses Unicode lowercase only while serializing XMLTV `<display-name>` values. It does
-not change playlist or Xtream names, programme titles or descriptions, input data, parser values, caches, or Smart
-Match behavior.
+`lowercase_xmltv_display_names` uses Unicode lowercase only while serializing XMLTV `<display-name>` values. It takes
+effect for subsequent XMLTV responses and normally does not require rebuilding persisted target data. It does not
+change playlist or Xtream names, programme titles or descriptions, input data, parser values, caches, or Smart Match
+behavior.
 
-Changing either option requires a full target refresh so persisted playlist and EPG artifacts use the same settings;
-a configuration hot reload alone is insufficient. After enabling `lowercase_ids`, clients may need to re-index their
-EPG data once because the visible IDs have changed.
+Changing `lowercase_ids` requires a full target refresh so persisted playlist and EPG artifacts use the same visible
+IDs; a configuration hot reload alone is insufficient. Clients may need to re-index their EPG data once after the
+visible IDs change.
 
 ---
 

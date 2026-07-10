@@ -357,6 +357,10 @@
     "CONFIG_TARGET_OPTIONS": {
       "SHARE_LIVE_STREAMS": "Enables live stream sharing. The master toggle sets HLS and MPEG-TS together; each format can also be changed separately."
     },
+    "EPG_OUTPUT_OPTIONS": {
+      "LOWERCASE_IDS": "Canonicalizes technical EPG IDs to ASCII lowercase across M3U, Xtream, XMLTV, and EPG API output. A full target refresh is required after changing this option.",
+      "LOWERCASE_XMLTV_DISPLAY_NAMES": "Converts only XMLTV display-name text to Unicode lowercase. Playlist names and programme titles remain unchanged."
+    },
     "CONFIG_TARGET_SHARE_LIVE_STREAMS": {
       "HLS": "Enables HLS live sharing for the new HLS cache proxy path.",
       "MPEG_TS": "Enables MPEG-TS live sharing for the existing stream-sharing path."
@@ -1015,6 +1019,7 @@
     "EPG": "Epg",
     "EDIT_EPG_SMART_MATCH": "Edit EPG Smart Match",
     "EPG_LOGO_OVERRIDE": "Logo Override",
+    "EPG_OUTPUT": "EPG output",
     "EPG_REQUEST_TIMESHIFT": "Epg Request Timeshift",
     "EPG_SMART_MATCH": "EPG Smart Match",
     "EPG_SOURCES": "EPG Sources",
@@ -1102,6 +1107,8 @@
     "LOG_ACTIVE_USER": "Log Active User",
     "LOG_CONFIG": "Log",
     "LOG_LEVEL": "Log Level",
+    "LOWERCASE_EPG_IDS": "Lowercase EPG IDs",
+    "LOWERCASE_XMLTV_DISPLAY_NAMES": "Lowercase XMLTV display names",
     "M3U": "m3u",
     "M3U_BATCH": "m3u batch",
     "MAIN": "Main",

@@ -2,36 +2,13 @@ use crate::model::Epg;
 use crate::model::{EpgConfig, EpgSmartMatchConfig};
 use crate::model::FetchedPlaylist;
 use crate::processing::parser::xmltv::normalize_channel_name;
+use crate::utils::with_folded_epg_id;
 use log::{debug, trace, warn};
 use rphonetic::{DoubleMetaphone, Encoder};
 use std::collections::{HashMap, HashSet};
 use shared::model::{EpgSmartMatchConfigDto, PlaylistItem, XtreamCluster};
 use std::sync::Arc;
 use shared::utils::Internable;
-
-const EPG_ID_STACK_FOLD_LEN: usize = 128;
-
-/// Runs `f` with an ASCII-lowercased EPG id.
-///
-/// Non-ASCII characters are left unchanged, matching `eq_ignore_ascii_case` semantics.
-pub(crate) fn with_folded_epg_id<R>(id: &str, f: impl FnOnce(&str) -> R) -> R {
-    if !id.bytes().any(|byte| byte.is_ascii_uppercase()) {
-        return f(id);
-    }
-
-    if id.len() <= EPG_ID_STACK_FOLD_LEN {
-        let mut buf = [0_u8; EPG_ID_STACK_FOLD_LEN];
-        for (out, byte) in buf.iter_mut().zip(id.bytes()) {
-            *out = byte.to_ascii_lowercase();
-        }
-        let folded = std::str::from_utf8(&buf[..id.len()]);
-        return f(folded.unwrap_or(id));
-    }
-
-    let mut folded = String::with_capacity(id.len());
-    folded.extend(id.chars().map(|ch| ch.to_ascii_lowercase()));
-    f(&folded)
-}
 
 pub struct EpgIdCache {
     /// Membership set of the epg ids collected from playlist channels.
