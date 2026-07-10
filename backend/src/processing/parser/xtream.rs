@@ -476,6 +476,22 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn xtream_live_stream_preserves_epg_channel_id_for_common_epg_matching() {
+        let categories = make_reader(r#"[{"category_id":"1","category_name":"Sports"}]"#);
+        let streams = make_reader(
+            r#"[{"name":"Formula 1","stream_id":"100","category_id":"1","epg_channel_id":"f1.calendar"}]"#,
+        );
+
+        let groups = parse_xtream(&test_input(), XtreamCluster::Live, categories, streams)
+            .await
+            .expect("parse xtream")
+            .expect("groups");
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].channels[0].header.epg_channel_id.as_deref(), Some("f1.calendar"));
+    }
+
     #[test]
     fn test_read_json_file_into_struct() {
         if fs::exists("/tmp/series-info.json").unwrap_or(false) {

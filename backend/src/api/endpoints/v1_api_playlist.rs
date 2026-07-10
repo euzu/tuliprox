@@ -1,28 +1,45 @@
-use crate::api::api_utils::resource_response;
-use crate::{api::{
-    api_utils::{create_api_proxy_user, json_or_bin_response, try_option_bad_request, try_result_bad_request, try_unwrap_body},
-    endpoints::{
-        api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target},
-        extract_accept_header::ExtractAcceptHeader,
-        m3u_api::m3u_api_stream_loaded,
-        xmltv_api::{rewrite_epg_channel_resource_url, serve_epg_web_ui, stream_epg_api},
-        xtream_api::{xtream_get_stream_info_response, xtream_player_api_stream_with_token, ApiStreamContext, ApiStreamRequest},
+use crate::{
+    api::{
+        api_utils::{
+            create_api_proxy_user, json_or_bin_response, resource_response, try_option_bad_request,
+            try_result_bad_request, try_unwrap_body,
+        },
+        endpoints::{
+            api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target},
+            extract_accept_header::ExtractAcceptHeader,
+            m3u_api::m3u_api_stream_loaded,
+            xmltv_api::{rewrite_epg_channel_resource_url, serve_epg_web_ui, stream_epg_api},
+            xtream_api::{
+                xtream_get_stream_info_response, xtream_player_api_stream_with_token, ApiStreamContext,
+                ApiStreamRequest,
+            },
+        },
+        model::AppState,
     },
-    model::AppState,
-}, auth::{create_access_token, permission_layer, verify_access_token}, model::{parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags, ConfigInputOptions, InputSource}, processing::parser::xmltv::merge_epg_channels_by_priority, repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id}, utils::{epg::get_input_raw_epg_file_path, file_exists_async, xtream}};
+    auth::{create_access_token, permission_layer, verify_access_token},
+    model::{
+        parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags,
+        ConfigInputOptions, EpgSource, EpgSourceType, IcsDummyPolicy, InputSource,
+    },
+    processing::parser::{
+        ics::parse_ics_file_to_channel,
+        xmltv::{merge_epg_channels_by_priority_with_dummy_policies, EpgDummyPolicySource},
+    },
+    repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id},
+    utils::{epg::get_input_raw_epg_file_path, file_exists_async, request, xtream},
+};
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
 use serde_json::json;
-use shared::utils::deobfuscate_text;
 use shared::{
+    error::TuliproxError,
     model::{
-        permission::Permission, EpgChannel, OperationRunAccepted,
-        InputType, PlaylistEpgRequest, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem,
-        XtreamCluster,
+        permission::Permission, EpgChannel, InputType, OperationRunAccepted, PlaylistEpgRequest, PlaylistRequest,
+        PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem, XtreamCluster,
     },
-    utils::{concat_path_leading_slash, sanitize_sensitive_info, Internable},
+    utils::{concat_path_leading_slash, deobfuscate_text, sanitize_sensitive_info, Internable},
 };
-use std::{str::FromStr, sync::Arc};
+use std::{path::Path, str::FromStr, sync::Arc};
 use url::Url;
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
@@ -91,9 +108,7 @@ fn resolve_provider_url_for_request(app_config: &AppConfig, playlist_request: &P
             .get_target_by_id(*target_id)
             .and_then(|target| app_config.get_inputs_for_target(&target.name))
             .and_then(|inputs| {
-                let mut matches = inputs
-                    .into_iter()
-                    .filter(|input| input.get_resolve_provider(url).is_some());
+                let mut matches = inputs.into_iter().filter(|input| input.get_resolve_provider(url).is_some());
                 let first = matches.next()?;
                 if matches.next().is_some() {
                     return None;
@@ -120,84 +135,167 @@ fn build_playlist_webplayer_url(
     )
 }
 
+#[cfg(test)]
 fn merge_epg_channels(mut channels_by_source: Vec<(i16, Vec<EpgChannel>)>) -> Vec<EpgChannel> {
     channels_by_source.sort_by_key(|(priority, _)| *priority);
-    merge_epg_channels_by_priority(channels_by_source)
+    merge_epg_channels_by_priority_with_dummy_policies(channels_by_source, Vec::new())
 }
 
-async fn load_epg_channels_for_input(
+async fn load_xmltv_epg_source_channels(
     app_state: &Arc<AppState>,
-    input: &ConfigInput,
-) -> Result<Option<Vec<EpgChannel>>, shared::error::TuliproxError> {
-    let Some(epg_config) = input.epg.as_ref() else {
-        return Ok(None);
-    };
-
-    let storage_dir = app_state.app_config.config.load().storage_dir.clone();
-        let mut channels_by_source = Vec::new();
-        let mut failed_sources = 0usize;
-
-        for epg_source in &epg_config.sources {
-            let resolved_url = resolve_provider_url_with_input(input, &epg_source.url);
-            let raw_epg_path = match get_input_raw_epg_file_path(&resolved_url, input, &storage_dir).await {
-                Ok(path) => path,
-                Err(err) => {
-                    debug!(
-                        "Skipping EPG source {}: {}",
-                        sanitize_sensitive_info(resolved_url.as_str()),
-                        sanitize_sensitive_info(&err.to_string())
-                    );
-                    failed_sources += 1;
-                    continue;
-                }
-            };
-
-            let source_channels = if file_exists_async(&raw_epg_path).await {
-            match parse_xmltv_for_web_ui_from_file(&raw_epg_path).await {
-                Ok(ch) => ch,
+    raw_epg_path: &Path,
+    resolved_url: &str,
+) -> Result<Vec<EpgChannel>, TuliproxError> {
+    {
+        let _cache_lock = app_state.app_config.file_locks.read_lock(raw_epg_path).await;
+        if file_exists_async(raw_epg_path).await {
+            match parse_xmltv_for_web_ui_from_file(raw_epg_path).await {
+                Ok(channels) => return Ok(channels),
                 Err(file_err) => {
                     debug!(
                         "EPG file parse failed {}, trying upstream: {file_err}",
                         sanitize_sensitive_info(raw_epg_path.to_str().unwrap_or_default())
                     );
-                    match parse_xmltv_for_web_ui_from_url(app_state, &resolved_url).await {
-                        Ok(ch) => ch,
-                        Err(url_err) => {
-                            debug!("EPG url also failed {}: {}",
-                                sanitize_sensitive_info(resolved_url.as_str()),
-                                sanitize_sensitive_info(&url_err.to_string()));
-                            failed_sources += 1;
-                            continue;
-                        }
-                    }
                 }
             }
-        } else {
-            match parse_xmltv_for_web_ui_from_url(app_state, &resolved_url).await {
-                Ok(ch) => ch,
-                Err(err) => {
-                    debug!("Skipping EPG url {}: {}",
-                        sanitize_sensitive_info(resolved_url.as_str()),
-                        sanitize_sensitive_info(&err.to_string()));
-                    failed_sources += 1;
-                    continue;
+        }
+    }
+
+    parse_xmltv_for_web_ui_from_url(app_state, resolved_url).await
+}
+
+async fn load_ics_epg_source_channels(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+    epg_source: &EpgSource,
+    raw_epg_path: &Path,
+    storage_dir: &str,
+) -> Result<Vec<EpgChannel>, TuliproxError> {
+    let ics_config = epg_source
+        .ics
+        .as_ref()
+        .ok_or_else(|| TuliproxError::ConfigEpg("ics configuration is required for ICS EPG sources".to_string()))?;
+
+    let channel_id = epg_source
+        .channel_id
+        .clone()
+        .ok_or_else(|| TuliproxError::ConfigEpg("channel_id is required for ICS EPG sources".to_string()))?;
+
+    {
+        let _cache_lock = app_state.app_config.file_locks.read_lock(raw_epg_path).await;
+        if file_exists_async(raw_epg_path).await {
+            match parse_ics_file_to_channel(
+                raw_epg_path,
+                channel_id.clone(),
+                epg_source.channel_title.clone(),
+                ics_config,
+            )
+            .await
+            {
+                Ok(channel) => return Ok(vec![channel]),
+                Err(file_err) => {
+                    debug!(
+                        "ICS EPG file parse failed {}, redownloading source: {}",
+                        sanitize_sensitive_info(raw_epg_path.to_str().unwrap_or_default()),
+                        sanitize_sensitive_info(&file_err.to_string())
+                    );
                 }
+            }
+        }
+    }
+
+    let client = app_state.http_client.load();
+    request::get_input_epg_content_as_file(
+        &app_state.app_config,
+        &client,
+        input,
+        request::InputEpgFileRequest {
+            headers: None,
+            storage_dir,
+            url: &epg_source.url,
+            persist_path: raw_epg_path,
+            max_bytes: Some(ics_config.max_download_bytes),
+        },
+    )
+    .await?;
+
+    let _cache_lock = app_state.app_config.file_locks.read_lock(raw_epg_path).await;
+    parse_ics_file_to_channel(raw_epg_path, channel_id, epg_source.channel_title.clone(), ics_config)
+        .await
+        .map(|channel| vec![channel])
+}
+
+async fn load_epg_channels_for_input(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+) -> Result<Option<Vec<EpgChannel>>, TuliproxError> {
+    let Some(epg_config) = input.epg.as_ref() else {
+        return Ok(None);
+    };
+
+    let storage_dir = app_state.app_config.config.load().storage_dir.clone();
+    let mut channels_by_source = Vec::new();
+    let mut dummy_policies = Vec::new();
+    let mut failed_sources = 0usize;
+
+    for (source_order, epg_source) in epg_config.sources.iter().enumerate() {
+        let raw_epg_path = match get_input_raw_epg_file_path(epg_source, input, &storage_dir).await {
+            Ok(path) => path,
+            Err(err) => {
+                debug!(
+                    "Skipping EPG source {}: {}",
+                    sanitize_sensitive_info(epg_source.url.as_str()),
+                    sanitize_sensitive_info(&err.to_string())
+                );
+                failed_sources += 1;
+                continue;
             }
         };
+
+        let source_result = match epg_source.source_type {
+            EpgSourceType::Xmltv => {
+                let resolved_url = resolve_provider_url_with_input(input, &epg_source.url);
+                load_xmltv_epg_source_channels(app_state, &raw_epg_path, &resolved_url).await
+            }
+            EpgSourceType::Ics => {
+                load_ics_epg_source_channels(app_state, input, epg_source, &raw_epg_path, &storage_dir).await
+            }
+        };
+
+        let source_channels = match source_result {
+            Ok(channels) => channels,
+            Err(err) => {
+                debug!(
+                    "Skipping EPG source {}: {}",
+                    sanitize_sensitive_info(epg_source.url.as_str()),
+                    sanitize_sensitive_info(&err.to_string())
+                );
+                failed_sources += 1;
+                continue;
+            }
+        };
+        if epg_source.source_type == EpgSourceType::Ics {
+            if let (Some(ics_config), Some(channel_id)) = (epg_source.ics.as_ref(), epg_source.channel_id.as_ref()) {
+                dummy_policies.push(EpgDummyPolicySource {
+                    priority: epg_source.priority,
+                    source_order,
+                    channel_id: channel_id.clone(),
+                    policy: IcsDummyPolicy { timezone: ics_config.timezone.clone(), config: ics_config.dummy.clone() },
+                });
+            }
+        }
         channels_by_source.push((epg_source.priority, source_channels));
     }
 
     if channels_by_source.is_empty() {
         if failed_sources > 0 {
-            Err(shared::error::TuliproxError::Config(format!(
-                "All {failed_sources} EPG source(s) failed for input '{}'",
-                input.name
-            )))
+            Err(TuliproxError::Config(format!("All {failed_sources} EPG source(s) failed for input '{}'", input.name)))
         } else {
             Ok(None)
         }
     } else {
-        Ok(Some(merge_epg_channels(channels_by_source)))
+        channels_by_source.sort_by_key(|(priority, _)| *priority);
+        Ok(Some(merge_epg_channels_by_priority_with_dummy_policies(channels_by_source, dummy_policies)))
     }
 }
 
@@ -249,26 +347,20 @@ async fn playlist_content(
             cluster,
             accept.as_deref(),
         )
-            .await
-            .into_response(),
+        .await
+        .into_response(),
         PlaylistRequest::Input(input_name) => get_playlist_for_input(
             app_state.app_config.get_input_by_name(&input_name.intern()).as_ref(),
             app_state,
             cluster,
             accept.as_deref(),
         )
-            .await
-            .into_response(),
+        .await
+        .into_response(),
         PlaylistRequest::CustomXtream(xtream) => match Url::parse(&xtream.url) {
             Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {
                 let input = Arc::new(create_config_input_for_xtream(&xtream.username, &xtream.password, &xtream.url));
-                get_playlist_for_custom_provider(
-                    client.as_ref(),
-                    Some(&input),
-                    app_state,
-                    cluster,
-                    accept.as_deref(),
-                )
+                get_playlist_for_custom_provider(client.as_ref(), Some(&input), app_state, cluster, accept.as_deref())
                     .await
                     .into_response()
             }
@@ -281,13 +373,7 @@ async fn playlist_content(
         PlaylistRequest::CustomM3u(m3u) => match Url::parse(&m3u.url) {
             Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {
                 let input = Arc::new(create_config_input_for_m3u(&m3u.url));
-                get_playlist_for_custom_provider(
-                    client.as_ref(),
-                    Some(&input),
-                    app_state,
-                    cluster,
-                    accept.as_deref(),
-                )
+                get_playlist_for_custom_provider(client.as_ref(), Some(&input), app_state, cluster, accept.as_deref())
                     .await
                     .into_response()
             }
@@ -336,8 +422,8 @@ async fn playlist_series_info(
                         &virtual_id,
                         XtreamCluster::Series,
                     )
-                        .await
-                        .into_response();
+                    .await
+                    .into_response();
                 }
             }
         }
@@ -350,11 +436,9 @@ async fn playlist_series_info(
                     // Input/custom requests only provide provider_id, so we resolve series info from
                     // the upstream Xtream API using provider_id.
                     if let Some(provider_id) = provider_id {
-                        if let Some(info_url) = xtream::get_xtream_player_api_info_url(
-                            input.as_ref(),
-                            XtreamCluster::Series,
-                            provider_id,
-                        ) {
+                        if let Some(info_url) =
+                            xtream::get_xtream_player_api_info_url(input.as_ref(), XtreamCluster::Series, provider_id)
+                        {
                             let Ok(resolved_url) = input.resolve_url(&info_url) else {
                                 return axum::http::StatusCode::NO_CONTENT.into_response();
                             };
@@ -380,7 +464,9 @@ async fn playlist_series_info(
         PlaylistRequest::CustomXtream(xtream_req) => {
             if let Some(provider_id) = provider_id {
                 let input = create_config_input_for_xtream(&xtream_req.username, &xtream_req.password, &xtream_req.url);
-                if let Some(info_url) = xtream::get_xtream_player_api_info_url(&input, XtreamCluster::Series, provider_id) {
+                if let Some(info_url) =
+                    xtream::get_xtream_player_api_info_url(&input, XtreamCluster::Series, provider_id)
+                {
                     let input_source = InputSource::from(&input).with_url(info_url);
                     if let Ok(content) = xtream::get_xtream_stream_info_content(
                         &app_state.app_config,
@@ -488,11 +574,7 @@ async fn playlist_epg(
                     TargetType::Xtream,
                 )
                 .or_else(|| {
-                    crate::api::endpoints::xmltv_api::get_epg_path_for_target_by_type(
-                        config,
-                        &target,
-                        TargetType::M3u,
-                    )
+                    crate::api::endpoints::xmltv_api::get_epg_path_for_target_by_type(config, &target, TargetType::M3u)
                 });
                 if let Some(epg_path) = epg_path {
                     return serve_epg_web_ui(&app_state, accept.as_deref(), &epg_path, &target).await;
@@ -504,7 +586,8 @@ async fn playlist_epg(
                 match load_epg_channels_for_input(&app_state, input.as_ref()).await {
                     Ok(Some(epg)) => {
                         let config = app_state.app_config.config.load();
-                        let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
+                        let web_ui_path =
+                            config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);
                         let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
                         let encrypt_secret = app_state.get_encrypt_secret();
                         let epg = epg
@@ -515,7 +598,11 @@ async fn playlist_epg(
                     }
                     Ok(None) => return axum::http::StatusCode::NO_CONTENT.into_response(),
                     Err(err) => {
-                        error!("Failed to load input EPG for '{}': {}", input.name, sanitize_sensitive_info(&err.to_string()));
+                        error!(
+                            "Failed to load input EPG for '{}': {}",
+                            input.name,
+                            sanitize_sensitive_info(&err.to_string())
+                        );
                         return (
                             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                             axum::Json(serde_json::json!({"error": "Failed to load EPG"})),
@@ -579,13 +666,7 @@ async fn playlist_resolve_url(
 ) -> impl IntoResponse + Send {
     match request {
         PlaylistUrlResolveRequest::Webplayer { target_id, virtual_id, cluster } => {
-            playlist_webplayer(
-                axum::extract::State(app_state),
-                target_id,
-                virtual_id,
-                cluster,
-            )
-                .into_response()
+            playlist_webplayer(axum::extract::State(app_state), target_id, virtual_id, cluster).into_response()
         }
         PlaylistUrlResolveRequest::Provider { playlist_request, url } => {
             resolve_provider_url_for_request(&app_state.app_config, &playlist_request, &url).into_response()
@@ -606,15 +687,11 @@ pub fn v1_api_playlist_register_protected(router: Router<Arc<AppState>>) -> axum
         .route("/playlist/series/episode/{virtual_id}", axum::routing::post(playlist_episode_item))
 }
 
-pub fn v1_api_playlist_register_public(
-    router: Router<Arc<AppState>>,
-) -> axum::Router<Arc<AppState>> {
-    router
-        .route("/playlist/resource/{resource}", axum::routing::get(playlist_resource))
-        .route(
-            "/playlist/webplayer/{token}/{target_id}/{cluster}/{stream_id}",
-            axum::routing::get(playlist_webplayer_stream),
-        )
+pub fn v1_api_playlist_register_public(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
+    router.route("/playlist/resource/{resource}", axum::routing::get(playlist_resource)).route(
+        "/playlist/webplayer/{token}/{target_id}/{cluster}/{stream_id}",
+        axum::routing::get(playlist_webplayer_stream),
+    )
 }
 
 pub fn v1_api_playlist_register_with_permissions(
@@ -639,11 +716,7 @@ pub fn v1_api_playlist_register_with_permissions(
         .route("/epg/stream", axum::routing::post(stream_epg_api))
         .layer(permission_layer!(app_state, Permission::EpgRead));
 
-    router.nest("/playlist",
-                read_routes
-                    .merge(write_routes)
-                    .merge(epg_routes),
-    )
+    router.nest("/playlist", read_routes.merge(write_routes).merge(epg_routes))
 }
 
 async fn playlist_episode_item(
@@ -675,9 +748,14 @@ mod tests {
             ActiveProviderManager, ActiveUserManager, AppState, ConnectionManager, EventManager, MetadataUpdateManager,
             PlaylistStorageState, SharedStreamManager,
         },
-        model::{AppConfig, Config, ConfigInput, ConfigProvider, ConfigSource, ConfigTarget, SourcesConfig, StreamHistoryConfig},
-        utils::epg::get_input_raw_epg_file_path,
-        utils::GeoIp,
+        model::{
+            AppConfig, Config, ConfigInput, ConfigProvider, ConfigSource, ConfigTarget, SourcesConfig,
+            StreamHistoryConfig,
+        },
+        utils::{
+            epg::{get_input_raw_epg_file_path, get_input_raw_xmltv_file_path},
+            GeoIp,
+        },
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::{
@@ -685,24 +763,42 @@ mod tests {
         http::{Request, StatusCode},
         Router,
     };
-    use shared::foundation::Filter;
+    use chrono::Utc;
     use shared::{
-        model::{ConfigPaths, ConfigProviderDto, EpgChannel, EpgConfigDto, EpgProgramme, EpgSourceDto, PlaylistRequest, XtreamCluster},
+        foundation::Filter,
+        model::{
+            ConfigPaths, ConfigProviderDto, EpgChannel, EpgConfigDto, EpgProgramme, EpgSourceDto, EpgSourceTypeDto,
+            IcsDummyConfigDto, IcsEpgSourceConfigDto, PlaylistRequest, ProcessingOrder, XtreamCluster,
+        },
         utils::Internable,
     };
     use std::sync::Arc;
-    use chrono::Utc;
     use tempfile::tempdir;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
-    use shared::model::ProcessingOrder;
 
     /// Generate an XMLTV datetime string in the format `YYYYMMDDHHmmss +0000`
     /// offset by `hours_from_now` hours from the current time.
     fn epg_dt(hours_from_now: i64) -> String {
         let dt = Utc::now() + chrono::Duration::hours(hours_from_now);
         dt.format("%Y%m%d%H%M%S %z").to_string()
+    }
+
+    fn xmltv_source_dto(url: &str, priority: i16) -> EpgSourceDto {
+        EpgSourceDto { url: url.to_string(), priority, ..EpgSourceDto::default() }
+    }
+
+    fn ics_source_dto(url: &str, channel_id: &str, priority: i16) -> EpgSourceDto {
+        EpgSourceDto {
+            source_type: EpgSourceTypeDto::Ics,
+            url: url.to_string(),
+            priority,
+            channel_id: Some(channel_id.to_string()),
+            channel_title: Some("Formula 1".to_string()),
+            ics: Some(IcsEpgSourceConfigDto::default()),
+            ..EpgSourceDto::default()
+        }
     }
 
     fn test_app_config(input: Arc<ConfigInput>, source: ConfigSource) -> AppConfig {
@@ -882,7 +978,8 @@ mod tests {
         let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
         let app_config = test_app_config(input, source);
         let original = "provider://unknown/live/user/pass/1359.ts";
-        let resolved = resolve_provider_url_for_request(&app_config, &PlaylistRequest::Input("input".to_string()), original);
+        let resolved =
+            resolve_provider_url_for_request(&app_config, &PlaylistRequest::Input("input".to_string()), original);
 
         assert_eq!(resolved, original);
     }
@@ -967,10 +1064,8 @@ mod tests {
             watch: None,
             use_memory_cache: false,
         });
-        let source = ConfigSource {
-            inputs: vec![Arc::clone(&input_a.name), Arc::clone(&input_b.name)],
-            targets: vec![target],
-        };
+        let source =
+            ConfigSource { inputs: vec![Arc::clone(&input_a.name), Arc::clone(&input_b.name)], targets: vec![target] };
         let sources = SourcesConfig {
             batch_files: vec![],
             provider: vec![],
@@ -1013,7 +1108,8 @@ mod tests {
     #[test]
     fn build_playlist_webplayer_url_uses_cluster_stream_type() {
         let live = super::build_playlist_webplayer_url("http://player.example", "token123", 1, 42, XtreamCluster::Live);
-        let movie = super::build_playlist_webplayer_url("http://player.example", "token123", 1, 42, XtreamCluster::Video);
+        let movie =
+            super::build_playlist_webplayer_url("http://player.example", "token123", 1, 42, XtreamCluster::Video);
         let series =
             super::build_playlist_webplayer_url("http://player.example", "token123", 1, 42, XtreamCluster::Series);
 
@@ -1060,18 +1156,18 @@ mod tests {
             ],
         };
 
-        let channels = super::merge_epg_channels(vec![(10, vec![low_priority]), (0, vec![high_priority]), (0, vec![same_priority])]);
+        let channels = super::merge_epg_channels(vec![
+            (10, vec![low_priority]),
+            (0, vec![high_priority]),
+            (0, vec![same_priority]),
+        ]);
 
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].title.as_deref(), Some("High"));
         assert_eq!(channels[0].icon.as_deref(), Some("http://high/icon.png"));
         assert_eq!(channels[0].programmes.len(), 3);
         assert_eq!(
-            channels[0]
-                .programmes
-                .iter()
-                .map(|programme| (programme.start, programme.stop))
-                .collect::<Vec<_>>(),
+            channels[0].programmes.iter().map(|programme| (programme.start, programme.stop)).collect::<Vec<_>>(),
             vec![(10, 20), (30, 40), (50, 60)],
         );
     }
@@ -1089,37 +1185,26 @@ mod tests {
             id: 7,
             name: "input".intern(),
             epg: Some(crate::model::EpgConfig::from(&EpgConfigDto {
-                sources: Some(vec![EpgSourceDto {
-                    url: "provider://demo/xmltv.php?username=user&password=pass".to_string(),
-                    priority: 0,
-                    logo_override: false,
-                }]),
-                t_sources: vec![EpgSourceDto {
-                    url: "provider://demo/xmltv.php?username=user&password=pass".to_string(),
-                    priority: 0,
-                    logo_override: false,
-                }],
+                sources: Some(vec![xmltv_source_dto("provider://demo/xmltv.php?username=user&password=pass", 0)]),
+                t_sources: vec![xmltv_source_dto("provider://demo/xmltv.php?username=user&password=pass", 0)],
                 smart_match: None,
             })),
             provider_configs: Some(vec![Arc::new(provider)]),
             ..Default::default()
         });
-        let source = ConfigSource {
-            inputs: vec![Arc::clone(&input.name)],
-            targets: vec![],
-        };
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
         let app_config = test_app_config(input.clone(), source);
         app_config.config.store(Arc::new(Config {
             storage_dir: temp_dir.path().to_string_lossy().to_string(),
             ..Default::default()
         }));
-        let raw_epg_path = get_input_raw_epg_file_path(
-            "http://provider.example/xmltv.php?username=user&password=pass",
+        let raw_epg_path = get_input_raw_xmltv_file_path(
+            "provider://demo/xmltv.php?username=user&password=pass",
             input.as_ref(),
             temp_dir.path().to_string_lossy().as_ref(),
         )
-            .await
-            .expect("epg path");
+        .await
+        .expect("epg path");
         if let Some(parent) = raw_epg_path.parent() {
             tokio::fs::create_dir_all(parent).await.expect("epg dir");
         }
@@ -1139,35 +1224,256 @@ mod tests {
 </tv>"#
             ),
         )
-            .await
-            .expect("write epg");
+        .await
+        .expect("write epg");
 
         let app_state = test_app_state(Arc::new(app_config));
-        let channels = super::load_epg_channels_for_input(&app_state, input.as_ref())
-            .await
-            .expect("load epg")
-            .expect("channels");
+        let channels =
+            super::load_epg_channels_for_input(&app_state, input.as_ref()).await.expect("load epg").expect("channels");
 
         assert_eq!(channels.len(), 1);
         assert_eq!(channels[0].id.as_ref(), "demo.channel");
         assert_eq!(channels[0].programmes.len(), 1);
+        assert_eq!(channels[0].programmes[0].title.as_ref().map(std::convert::AsRef::as_ref), Some("Morning Show"));
+    }
+
+    #[tokio::test]
+    async fn load_epg_channels_for_input_reads_cached_ics_source() {
+        let temp_dir = tempdir().expect("temp dir");
+        let ics_dto = ics_source_dto("https://example.com/f1.ics", "f1.calendar", -10);
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "input".intern(),
+            epg: Some(crate::model::EpgConfig::from(&EpgConfigDto {
+                sources: Some(vec![ics_dto.clone()]),
+                t_sources: vec![ics_dto],
+                smart_match: None,
+            })),
+            ..Default::default()
+        });
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
+        let app_config = test_app_config(input.clone(), source);
+        app_config.config.store(Arc::new(Config {
+            storage_dir: temp_dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        }));
+        let epg_source = &input.epg.as_ref().expect("epg").sources[0];
+        let raw_epg_path =
+            get_input_raw_epg_file_path(epg_source, input.as_ref(), temp_dir.path().to_string_lossy().as_ref())
+                .await
+                .expect("epg path");
+        if let Some(parent) = raw_epg_path.parent() {
+            tokio::fs::create_dir_all(parent).await.expect("epg dir");
+        }
+        tokio::fs::write(
+            &raw_epg_path,
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:Practice 1\nDTSTART:20260306T123000Z\nDTEND:20260306T133000Z\nEND:VEVENT\nEND:VCALENDAR",
+        )
+        .await
+        .expect("write ics");
+
+        let app_state = test_app_state(Arc::new(app_config));
+        let channels =
+            super::load_epg_channels_for_input(&app_state, input.as_ref()).await.expect("load epg").expect("channels");
+
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].id.as_ref(), "f1.calendar");
+        assert_eq!(channels[0].title.as_deref(), Some("Formula 1"));
+        assert_eq!(channels[0].programmes[0].title.as_deref(), Some("Practice 1"));
+    }
+
+    #[tokio::test]
+    async fn load_epg_channels_for_input_redownloads_invalid_cached_ics_source() {
+        let temp_dir = tempdir().expect("temp dir");
+        tokio::fs::write(
+            temp_dir.path().join("valid.ics"),
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:Downloaded\nDTSTART:20260306T123000Z\nDTEND:20260306T133000Z\nEND:VEVENT\nEND:VCALENDAR",
+        )
+        .await
+        .expect("write valid ics source");
+        let ics_dto = ics_source_dto("valid.ics", "f1.calendar", -10);
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "input".intern(),
+            epg: Some(crate::model::EpgConfig::from(&EpgConfigDto {
+                sources: Some(vec![ics_dto.clone()]),
+                t_sources: vec![ics_dto],
+                smart_match: None,
+            })),
+            ..Default::default()
+        });
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
+        let app_config = test_app_config(input.clone(), source);
+        app_config.config.store(Arc::new(Config {
+            storage_dir: temp_dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        }));
+        let epg_source = &input.epg.as_ref().expect("epg").sources[0];
+        let raw_epg_path =
+            get_input_raw_epg_file_path(epg_source, input.as_ref(), temp_dir.path().to_string_lossy().as_ref())
+                .await
+                .expect("epg path");
+        if let Some(parent) = raw_epg_path.parent() {
+            tokio::fs::create_dir_all(parent).await.expect("epg dir");
+        }
+        tokio::fs::write(&raw_epg_path, "upstream returned an error page").await.expect("write invalid cache");
+
+        let app_state = test_app_state(Arc::new(app_config));
+        let channels =
+            super::load_epg_channels_for_input(&app_state, input.as_ref()).await.expect("load epg").expect("channels");
+
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].programmes[0].title.as_deref(), Some("Downloaded"));
         assert_eq!(
-            channels[0].programmes[0].title.as_ref().map(std::convert::AsRef::as_ref),
-            Some("Morning Show")
+            tokio::fs::read_to_string(&raw_epg_path).await.expect("updated cache"),
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:Downloaded\nDTSTART:20260306T123000Z\nDTEND:20260306T133000Z\nEND:VEVENT\nEND:VCALENDAR"
         );
     }
 
     #[tokio::test]
-    async fn playlist_epg_custom_route_rejects_invalid_url_scheme() {
+    async fn load_epg_channels_for_input_preserves_invalid_cache_when_refresh_fails() {
+        let temp_dir = tempdir().expect("temp dir");
+        let invalid_cache = "upstream returned an error page";
+        let ics_dto = ics_source_dto("missing.ics", "f1.calendar", -10);
         let input = Arc::new(ConfigInput {
             id: 7,
             name: "input".intern(),
+            epg: Some(crate::model::EpgConfig::from(&EpgConfigDto {
+                sources: Some(vec![ics_dto.clone()]),
+                t_sources: vec![ics_dto],
+                smart_match: None,
+            })),
             ..Default::default()
         });
-        let source = ConfigSource {
-            inputs: vec![Arc::clone(&input.name)],
-            targets: vec![],
-        };
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
+        let app_config = test_app_config(input.clone(), source);
+        app_config.config.store(Arc::new(Config {
+            storage_dir: temp_dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        }));
+        let epg_source = &input.epg.as_ref().expect("epg").sources[0];
+        let raw_epg_path =
+            get_input_raw_epg_file_path(epg_source, input.as_ref(), temp_dir.path().to_string_lossy().as_ref())
+                .await
+                .expect("epg path");
+        if let Some(parent) = raw_epg_path.parent() {
+            tokio::fs::create_dir_all(parent).await.expect("epg dir");
+        }
+        tokio::fs::write(&raw_epg_path, invalid_cache).await.expect("write invalid cache");
+
+        let app_state = test_app_state(Arc::new(app_config));
+        assert!(super::load_epg_channels_for_input(&app_state, input.as_ref()).await.is_err());
+        assert_eq!(tokio::fs::read_to_string(&raw_epg_path).await.expect("preserved cache"), invalid_cache);
+    }
+
+    #[tokio::test]
+    async fn load_epg_channels_for_input_applies_ics_dummy_policy_in_preview() {
+        let temp_dir = tempdir().expect("temp dir");
+        tokio::fs::write(temp_dir.path().join("empty.ics"), "BEGIN:VCALENDAR\nEND:VCALENDAR")
+            .await
+            .expect("write empty ics source");
+        let mut ics_dto = ics_source_dto("empty.ics", "f1.calendar", -10);
+        ics_dto.ics = Some(IcsEpgSourceConfigDto {
+            dummy: IcsDummyConfigDto {
+                enabled: true,
+                title: "No F1".to_string(),
+                days_past: 0,
+                days_future: 0,
+                block_hours: 24,
+                ..IcsDummyConfigDto::default()
+            },
+            ..IcsEpgSourceConfigDto::default()
+        });
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "input".intern(),
+            epg: Some(crate::model::EpgConfig::from(&EpgConfigDto {
+                sources: Some(vec![ics_dto.clone()]),
+                t_sources: vec![ics_dto],
+                smart_match: None,
+            })),
+            ..Default::default()
+        });
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
+        let app_config = test_app_config(input.clone(), source);
+        app_config.config.store(Arc::new(Config {
+            storage_dir: temp_dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        }));
+
+        let app_state = test_app_state(Arc::new(app_config));
+        let channels =
+            super::load_epg_channels_for_input(&app_state, input.as_ref()).await.expect("load epg").expect("channels");
+
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0].id.as_ref(), "f1.calendar");
+        assert!(!channels[0].programmes.is_empty());
+        assert!(channels[0].programmes.iter().all(|programme| programme.title.as_deref() == Some("No F1")));
+    }
+
+    #[tokio::test]
+    async fn load_epg_channels_for_input_prefers_high_priority_ics_dummy_policy() {
+        let temp_dir = tempdir().expect("temp dir");
+        for filename in ["low.ics", "high.ics"] {
+            tokio::fs::write(temp_dir.path().join(filename), "BEGIN:VCALENDAR\nEND:VCALENDAR")
+                .await
+                .expect("write empty ics source");
+        }
+
+        let mut low_priority = ics_source_dto("low.ics", "f1.calendar", 10);
+        low_priority.ics = Some(IcsEpgSourceConfigDto {
+            dummy: IcsDummyConfigDto {
+                enabled: true,
+                title: "Low priority".to_string(),
+                days_past: 0,
+                days_future: 0,
+                block_hours: 24,
+                ..IcsDummyConfigDto::default()
+            },
+            ..IcsEpgSourceConfigDto::default()
+        });
+        let mut high_priority = ics_source_dto("high.ics", "f1.calendar", -10);
+        high_priority.ics = Some(IcsEpgSourceConfigDto {
+            dummy: IcsDummyConfigDto {
+                enabled: true,
+                title: "High priority".to_string(),
+                days_past: 0,
+                days_future: 0,
+                block_hours: 24,
+                ..IcsDummyConfigDto::default()
+            },
+            ..IcsEpgSourceConfigDto::default()
+        });
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "input".intern(),
+            epg: Some(crate::model::EpgConfig::from(&EpgConfigDto {
+                sources: Some(vec![low_priority.clone(), high_priority.clone()]),
+                t_sources: vec![low_priority, high_priority],
+                smart_match: None,
+            })),
+            ..Default::default()
+        });
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
+        let app_config = test_app_config(input.clone(), source);
+        app_config.config.store(Arc::new(Config {
+            storage_dir: temp_dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        }));
+
+        let app_state = test_app_state(Arc::new(app_config));
+        let channels =
+            super::load_epg_channels_for_input(&app_state, input.as_ref()).await.expect("load epg").expect("channels");
+
+        assert_eq!(channels.len(), 1);
+        assert!(!channels[0].programmes.is_empty());
+        assert!(channels[0].programmes.iter().all(|programme| programme.title.as_deref() == Some("High priority")));
+    }
+
+    #[tokio::test]
+    async fn playlist_epg_custom_route_rejects_invalid_url_scheme() {
+        let input = Arc::new(ConfigInput { id: 7, name: "input".intern(), ..Default::default() });
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
         let app_state = test_app_state(Arc::new(test_app_config(input, source)));
         let router = super::v1_api_playlist_register_protected(Router::new()).with_state(app_state);
         let request = Request::builder()
@@ -1195,37 +1501,26 @@ mod tests {
             id: 7,
             name: "input".intern(),
             epg: Some(crate::model::EpgConfig::from(&EpgConfigDto {
-                sources: Some(vec![EpgSourceDto {
-                    url: "provider://demo/xmltv.php?username=user&password=pass".to_string(),
-                    priority: 0,
-                    logo_override: false,
-                }]),
-                t_sources: vec![EpgSourceDto {
-                    url: "provider://demo/xmltv.php?username=user&password=pass".to_string(),
-                    priority: 0,
-                    logo_override: false,
-                }],
+                sources: Some(vec![xmltv_source_dto("provider://demo/xmltv.php?username=user&password=pass", 0)]),
+                t_sources: vec![xmltv_source_dto("provider://demo/xmltv.php?username=user&password=pass", 0)],
                 smart_match: None,
             })),
             provider_configs: Some(vec![Arc::new(provider)]),
             ..Default::default()
         });
-        let source = ConfigSource {
-            inputs: vec![Arc::clone(&input.name)],
-            targets: vec![],
-        };
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
         let app_config = test_app_config(input.clone(), source);
         app_config.config.store(Arc::new(Config {
             storage_dir: temp_dir.path().to_string_lossy().to_string(),
             ..Default::default()
         }));
-        let raw_epg_path = get_input_raw_epg_file_path(
-            "http://provider.example/xmltv.php?username=user&password=pass",
+        let raw_epg_path = get_input_raw_xmltv_file_path(
+            "provider://demo/xmltv.php?username=user&password=pass",
             input.as_ref(),
             temp_dir.path().to_string_lossy().as_ref(),
         )
-            .await
-            .expect("epg path");
+        .await
+        .expect("epg path");
         if let Some(parent) = raw_epg_path.parent() {
             tokio::fs::create_dir_all(parent).await.expect("epg dir");
         }
@@ -1245,8 +1540,8 @@ mod tests {
 </tv>"#
             ),
         )
-            .await
-            .expect("write epg");
+        .await
+        .expect("write epg");
 
         let app_state = test_app_state(Arc::new(app_config));
         let router = super::v1_api_playlist_register_protected(Router::new()).with_state(app_state);
@@ -1280,10 +1575,7 @@ mod tests {
             provider_configs: Some(vec![Arc::new(provider)]),
             ..Default::default()
         });
-        let source = ConfigSource {
-            inputs: vec![Arc::clone(&input.name)],
-            targets: vec![],
-        };
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
         let app_state = test_app_state(Arc::new(test_app_config(input, source)));
         let router = super::v1_api_playlist_register_protected(Router::new()).with_state(app_state);
         let request = Request::builder()
@@ -1315,75 +1607,42 @@ mod tests {
             name: "input".intern(),
             epg: Some(crate::model::EpgConfig::from(&EpgConfigDto {
                 sources: Some(vec![
-                    EpgSourceDto {
-                        url: secondary_url.to_string(),
-                        priority: 10,
-                        logo_override: false,
-                    },
-                    EpgSourceDto {
-                        url: primary_url.to_string(),
-                        priority: 0,
-                        logo_override: false,
-                    },
-                    EpgSourceDto {
-                        url: "provider://demo/xmltv-same-priority.php?username=user&password=pass".to_string(),
-                        priority: 0,
-                        logo_override: false,
-                    },
+                    xmltv_source_dto(secondary_url, 10),
+                    xmltv_source_dto(primary_url, 0),
+                    xmltv_source_dto("provider://demo/xmltv-same-priority.php?username=user&password=pass", 0),
                 ]),
                 t_sources: vec![
-                    EpgSourceDto {
-                        url: secondary_url.to_string(),
-                        priority: 10,
-                        logo_override: false,
-                    },
-                    EpgSourceDto {
-                        url: primary_url.to_string(),
-                        priority: 0,
-                        logo_override: false,
-                    },
-                    EpgSourceDto {
-                        url: "provider://demo/xmltv-same-priority.php?username=user&password=pass".to_string(),
-                        priority: 0,
-                        logo_override: false,
-                    },
+                    xmltv_source_dto(secondary_url, 10),
+                    xmltv_source_dto(primary_url, 0),
+                    xmltv_source_dto("provider://demo/xmltv-same-priority.php?username=user&password=pass", 0),
                 ],
                 smart_match: None,
             })),
             provider_configs: Some(vec![Arc::new(provider)]),
             ..Default::default()
         });
-        let source = ConfigSource {
-            inputs: vec![Arc::clone(&input.name)],
-            targets: vec![],
-        };
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
         let app_config = test_app_config(input.clone(), source);
         app_config.config.store(Arc::new(Config {
             storage_dir: temp_dir.path().to_string_lossy().to_string(),
             ..Default::default()
         }));
 
-        let primary_path = get_input_raw_epg_file_path(
-            "http://provider.example/xmltv-primary.php?username=user&password=pass",
+        let primary_path =
+            get_input_raw_xmltv_file_path(primary_url, input.as_ref(), temp_dir.path().to_string_lossy().as_ref())
+                .await
+                .expect("primary epg path");
+        let secondary_path =
+            get_input_raw_xmltv_file_path(secondary_url, input.as_ref(), temp_dir.path().to_string_lossy().as_ref())
+                .await
+                .expect("secondary epg path");
+        let same_priority_path = get_input_raw_xmltv_file_path(
+            "provider://demo/xmltv-same-priority.php?username=user&password=pass",
             input.as_ref(),
             temp_dir.path().to_string_lossy().as_ref(),
         )
-            .await
-            .expect("primary epg path");
-        let secondary_path = get_input_raw_epg_file_path(
-            "http://provider.example/xmltv-secondary.php?username=user&password=pass",
-            input.as_ref(),
-            temp_dir.path().to_string_lossy().as_ref(),
-        )
-            .await
-            .expect("secondary epg path");
-        let same_priority_path = get_input_raw_epg_file_path(
-            "http://provider.example/xmltv-same-priority.php?username=user&password=pass",
-            input.as_ref(),
-            temp_dir.path().to_string_lossy().as_ref(),
-        )
-            .await
-            .expect("same priority epg path");
+        .await
+        .expect("same priority epg path");
 
         for path in [&primary_path, &secondary_path, &same_priority_path] {
             if let Some(parent) = path.parent() {
@@ -1411,8 +1670,8 @@ mod tests {
 </tv>"#
             ),
         )
-            .await
-            .expect("write secondary epg");
+        .await
+        .expect("write secondary epg");
         tokio::fs::write(
             &primary_path,
             format!(
@@ -1428,8 +1687,8 @@ mod tests {
 </tv>"#
             ),
         )
-            .await
-            .expect("write primary epg");
+        .await
+        .expect("write primary epg");
         tokio::fs::write(
             &same_priority_path,
             format!(
@@ -1448,8 +1707,8 @@ mod tests {
 </tv>"#
             ),
         )
-            .await
-            .expect("write same priority epg");
+        .await
+        .expect("write same priority epg");
 
         let app_state = test_app_state(Arc::new(app_config));
         let router = super::v1_api_playlist_register_protected(Router::new()).with_state(app_state);
@@ -1471,5 +1730,4 @@ mod tests {
         assert!(body_text.contains("Second Show"), "{body_text}");
         assert!(!body_text.contains("Secondary Show"), "{body_text}");
     }
-
 }

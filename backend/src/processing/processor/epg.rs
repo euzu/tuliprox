@@ -202,6 +202,71 @@ impl EpgIdCache {
         }
         false
     }
+
+    pub fn normalize_candidates<I, S>(&self, candidates: I) -> Vec<Arc<str>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.as_ref().trim().to_string())
+            .filter(|candidate| !candidate.is_empty())
+            .map(|candidate| self.normalize(&candidate).intern())
+            .collect()
+    }
+
+    pub fn match_epg_channel_candidates(&mut self, epg_id: &Arc<str>, normalized_candidates: &[Arc<str>]) -> bool {
+        let mut matched = self.match_with_normalized(epg_id, normalized_candidates);
+        if !matched && self.fuzzy_match_enabled {
+            if let Some(key) = self.find_best_fuzzy_match_for_candidates(normalized_candidates) {
+                self.normalized.entry(key).and_modify(|entry| {
+                    entry.replace(epg_id.clone());
+                    with_folded_epg_id(epg_id, |folded| self.channel_epg_id.insert(folded.intern()));
+                    matched = true;
+                });
+            }
+        }
+        matched
+    }
+
+    fn find_best_fuzzy_match_for_candidates(&self, normalized_candidates: &[Arc<str>]) -> Option<Arc<str>> {
+        let match_threshold = self.smart_match_config.match_threshold;
+        let best_match_threshold = self.smart_match_config.best_match_threshold;
+        let pre = normalized_candidates
+            .iter()
+            .map(|candidate| (candidate.clone(), self.phonetic(candidate)))
+            .collect::<Vec<_>>();
+
+        for (candidate, code) in &pre {
+            if let Some(keys) = self.phonetics.get(code) {
+                if let Some(good_enough) = keys.iter().find(|norm_key| {
+                    let jw = strsim::jaro_winkler(norm_key, candidate);
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let score = ((jw * 100.0).round() as u16).min(100);
+                    score >= best_match_threshold
+                }) {
+                    return Some(good_enough.clone());
+                }
+            }
+        }
+
+        pre.iter()
+            .filter_map(|(candidate, code)| {
+                self.phonetics.get(code).and_then(|keys| {
+                    keys.iter()
+                        .map(|norm_key| {
+                            let jw = strsim::jaro_winkler(norm_key, candidate);
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let score = ((jw * 100.0).round() as u16).min(100);
+                            (score, norm_key)
+                        })
+                        .max_by_key(|(score, _)| *score)
+                })
+            })
+            .max_by_key(|(score, _)| *score)
+            .and_then(|(score, key)| (score >= match_threshold).then(|| key.clone()))
+    }
 }
 
 /// Assigns EPG IDs and logos to live playlist channels by matching them with EPG data.
@@ -319,14 +384,17 @@ pub async fn process_playlist_epg(fp: &mut FetchedPlaylist<'_>, epg: &mut Vec<Ep
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{ConfigInput, EpgConfig, FetchedPlaylist, PersistedEpgSource, TVGuide};
+    use crate::model::{
+        ConfigInput, EpgConfig, EpgSmartMatchConfig, FetchedPlaylist, IcsEpgSourceConfig, PersistedEpgSource,
+        PersistedEpgSourceKind, TVGuide,
+    };
     use crate::repository::MemoryPlaylistSource;
     use rand::distr::Alphanumeric;
     use rand::Rng;
     use rphonetic::{DoubleMetaphone, Encoder};
     use shared::model::{ConfigInputDto, PlaylistGroup, PlaylistItemHeader, PlaylistItemType};
     use shared::utils::Internable;
-    use std::fs;
+    use std::{fs, sync::Arc};
     use tempfile::tempdir;
     use tokio::time::Instant;
 
@@ -336,6 +404,40 @@ mod tests {
             .take(30)
             .map(char::from)
             .collect()
+    }
+
+    fn write_ics_file(path: &std::path::Path) {
+        fs::write(
+            path,
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:Practice 1\nDTSTART:20260306T123000Z\nDTEND:20260306T133000Z\nEND:VEVENT\nEND:VCALENDAR",
+        )
+        .expect("write ics");
+    }
+
+    fn ics_tv_guide(path: std::path::PathBuf, match_names: Vec<Arc<str>>) -> TVGuide {
+        TVGuide::new(vec![PersistedEpgSource {
+            file_path: path,
+            priority: 0,
+            logo_override: false,
+            kind: PersistedEpgSourceKind::Ics {
+                channel_id: "f1.calendar".intern(),
+                channel_title: Some("Formula 1".intern()),
+                match_names,
+                config: Box::new(IcsEpgSourceConfig::default()),
+            },
+        }])
+    }
+
+    fn live_playlist_item(name: &str, epg_channel_id: Option<&str>) -> shared::model::PlaylistItem {
+        shared::model::PlaylistItem {
+            header: PlaylistItemHeader {
+                name: name.intern(),
+                epg_channel_id: epg_channel_id.map(Internable::intern),
+                xtream_cluster: super::XtreamCluster::Live,
+                item_type: PlaylistItemType::Live,
+                ..PlaylistItemHeader::default()
+            },
+        }
     }
 
     #[test]
@@ -399,6 +501,7 @@ mod tests {
                 file_path: epg_path,
                 priority: 0,
                 logo_override: true,
+                kind: PersistedEpgSourceKind::Xmltv,
             }]);
             let mut playlist = FetchedPlaylist {
                 input: &input,
@@ -414,6 +517,79 @@ mod tests {
             assert_eq!(updated.header.logo.as_ref(), "http://guide/icon.png");
             assert_eq!(updated.header.logo_small.as_ref(), "http://guide/icon.png");
             assert_eq!(epg[0].children[0].id.as_ref(), "Demo.Channel");
+        });
+    }
+
+    #[test]
+    fn playlist_item_with_ics_epg_channel_id_gets_ics_programmes() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let dir = tempdir().unwrap();
+            let ics_path = dir.path().join("f1.ics");
+            write_ics_file(&ics_path);
+
+            let mut input = ConfigInput::from(ConfigInputDto::default());
+            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            let groups = vec![PlaylistGroup {
+                id: 1,
+                title: "Live".intern(),
+                channels: vec![live_playlist_item("Formula 1", Some("f1.calendar"))],
+                xtream_cluster: super::XtreamCluster::Live,
+            }];
+            let mut playlist = FetchedPlaylist {
+                input: &input,
+                source: MemoryPlaylistSource::new(groups).into_source(),
+                epg: Some(ics_tv_guide(ics_path, Vec::new())),
+            };
+            let mut epg = Vec::new();
+
+            super::process_playlist_epg(&mut playlist, &mut epg).await;
+
+            assert_eq!(epg.len(), 1);
+            assert_eq!(epg[0].children[0].id.as_ref(), "f1.calendar");
+            assert_eq!(epg[0].children[0].programmes.len(), 1);
+            assert_eq!(epg[0].children[0].programmes[0].title.as_deref(), Some("Practice 1"));
+        });
+    }
+
+    #[test]
+    fn smart_match_uses_ics_channel_title_and_match_names() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let dir = tempdir().unwrap();
+            let ics_path = dir.path().join("f1.ics");
+            write_ics_file(&ics_path);
+
+            let mut smart_dto = shared::model::EpgSmartMatchConfigDto {
+                enabled: true,
+                fuzzy_matching: false,
+                ..shared::model::EpgSmartMatchConfigDto::default()
+            };
+            smart_dto.prepare().expect("smart config");
+            let mut input = ConfigInput::from(ConfigInputDto::default());
+            input.epg = Some(EpgConfig {
+                sources: vec![],
+                smart_match: Some(EpgSmartMatchConfig::from(smart_dto)),
+            });
+            let groups = vec![PlaylistGroup {
+                id: 1,
+                title: "Live".intern(),
+                channels: vec![live_playlist_item("F1", None)],
+                xtream_cluster: super::XtreamCluster::Live,
+            }];
+            let mut playlist = FetchedPlaylist {
+                input: &input,
+                source: MemoryPlaylistSource::new(groups).into_source(),
+                epg: Some(ics_tv_guide(ics_path, vec!["F1".intern()])),
+            };
+            let mut epg = Vec::new();
+
+            super::process_playlist_epg(&mut playlist, &mut epg).await;
+
+            let updated = playlist.items_mut().next().unwrap();
+            assert_eq!(updated.header.epg_channel_id.as_deref(), Some("f1.calendar"));
+            assert_eq!(epg[0].children[0].id.as_ref(), "f1.calendar");
+            assert_eq!(epg[0].children[0].programmes.len(), 1);
         });
     }
 

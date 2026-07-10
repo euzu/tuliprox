@@ -158,11 +158,46 @@ pub async fn epg_query_channels(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{IcsEpgSourceConfig, M3uTargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput};
+    use crate::processing::parser::ics::parse_ics_file_to_channel;
     use crate::repository::BPlusTree;
     use crate::utils::FileLockManager;
-    use shared::model::EpgChannel;
+    use arc_swap::ArcSwapOption;
+    use shared::foundation::Filter;
+    use shared::model::{EpgChannel, ProcessingOrder};
     use shared::utils::Internable;
     use tempfile::TempDir;
+
+    fn target_with_m3u_and_xtream() -> ConfigTarget {
+        ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "ics-target".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: vec![
+                TargetOutput::M3u(M3uTargetOutput {
+                    filename: None,
+                    include_type_in_url: false,
+                    mask_redirect_url: false,
+                    filter: None,
+                }),
+                TargetOutput::Xtream(XtreamTargetOutput {
+                    flags: XtreamTargetFlagsSet::new(),
+                    trakt: None,
+                    filter: None,
+                }),
+            ],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::new(None)),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: false,
+        }
+    }
 
     #[tokio::test]
     async fn epg_query_channels_returns_found_channels_in_order() {
@@ -198,5 +233,72 @@ mod tests {
         assert!(results[1].1.is_some());
         assert_eq!(results[2].0.as_ref(), "ch3");
         assert!(results[2].1.is_none());
+    }
+
+    #[tokio::test]
+    async fn imported_ics_epg_uses_shared_m3u_and_xtream_target_write_read_path() {
+        let tmp = TempDir::new().expect("temp dir created");
+        let ics_path = tmp.path().join("calendar.ics");
+        std::fs::write(
+            &ics_path,
+            concat!(
+                "BEGIN:VCALENDAR\r\n",
+                "VERSION:2.0\r\n",
+                "BEGIN:VEVENT\r\n",
+                "UID:f1-session\r\n",
+                "DTSTART:20300101T120000Z\r\n",
+                "DTEND:20300101T130000Z\r\n",
+                "SUMMARY:Formula 1 Practice\r\n",
+                "DESCRIPTION:Imported from ICS\r\n",
+                "END:VEVENT\r\n",
+                "END:VCALENDAR\r\n",
+            ),
+        )
+        .expect("write ICS fixture");
+
+        let channel = parse_ics_file_to_channel(
+            &ics_path,
+            "f1.calendar".intern(),
+            Some("Formula 1".intern()),
+            &IcsEpgSourceConfig::default(),
+        )
+        .await
+        .expect("parse ICS fixture");
+        let epg = Epg {
+            priority: 0,
+            logo_override: false,
+            attributes: None,
+            children: vec![Arc::new(channel)],
+        };
+
+        let config = Config {
+            storage_dir: tmp.path().to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let target = target_with_m3u_and_xtream();
+        let target_path = crate::repository::get_target_storage_path(&config, &target.name)
+            .expect("target storage path");
+        let m3u_path = m3u_get_epg_file_path_for_target(&target_path);
+        let xtream_storage = xtream_get_storage_path(&config, &target.name).expect("xtream storage path");
+        let xtream_path = xtream_get_epg_file_path_for_target(&xtream_storage);
+        std::fs::create_dir_all(m3u_path.parent().expect("m3u parent")).expect("create m3u storage");
+        std::fs::create_dir_all(xtream_path.parent().expect("xtream parent")).expect("create xtream storage");
+
+        for output in &target.output {
+            epg_write_for_target(&config, &target, &target_path, Some(&epg), output, None)
+                .await
+                .expect("write target EPG");
+        }
+
+        let locks = FileLockManager::new();
+        for epg_path in [&m3u_path, &xtream_path] {
+            let results = epg_query_channels(&locks, epg_path, vec!["f1.calendar".intern()])
+                .await
+                .expect("read target EPG");
+            let stored = results[0].1.as_ref().expect("stored ICS channel");
+            assert_eq!(stored.title.as_deref(), Some("Formula 1"));
+            assert_eq!(stored.programmes.len(), 1);
+            assert_eq!(stored.programmes[0].title.as_deref(), Some("Formula 1 Practice"));
+        }
     }
 }
