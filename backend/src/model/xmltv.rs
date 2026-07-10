@@ -1,8 +1,9 @@
 use crate::api::model::AppState;
+use crate::model::IcsEpgSourceConfig;
 use crate::model::xmltv::XmlTagIcon::Undefined;
 use crate::model::InputSource;
 use crate::utils::request::get_remote_content_as_stream;
-use crate::utils::{async_file_reader, parse_xmltv_time};
+use crate::utils::{async_file_reader, parse_xmltv_time, FileLockManager};
 use chrono::{Datelike, TimeZone, Utc};
 use futures::TryFutureExt;
 use quick_xml::events::{Event};
@@ -78,29 +79,48 @@ pub struct Epg {
 }
 
 #[derive(Debug, Clone)]
+pub enum PersistedEpgSourceKind {
+    Xmltv,
+    Ics {
+        channel_id: Arc<str>,
+        channel_title: Option<Arc<str>>,
+        match_names: Vec<Arc<str>>,
+        config: Box<IcsEpgSourceConfig>,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct PersistedEpgSource {
     pub file_path: PathBuf,
     pub priority: i16,
     pub logo_override: bool,
+    pub kind: PersistedEpgSourceKind,
 }
 
 #[derive(Debug, Clone)]
 pub struct TVGuide {
     epg_sources: Vec<PersistedEpgSource>,
+    file_locks: Option<Arc<FileLockManager>>,
 }
 
 impl TVGuide {
     pub fn new(mut epg_sources: Vec<PersistedEpgSource>) -> Self {
         epg_sources.sort_by_key(|a| a.priority);
-        Self {
-            epg_sources,
-        }
+        Self { epg_sources, file_locks: None }
+    }
+
+    /// Uses the shared cache lock manager while reading persisted EPG sources.
+    pub fn with_file_locks(mut self, file_locks: Arc<FileLockManager>) -> Self {
+        self.file_locks = Some(file_locks);
+        self
     }
 
     #[inline]
     pub fn get_epg_sources(&self) -> &Vec<PersistedEpgSource> {
         &self.epg_sources
     }
+
+    pub(crate) fn get_file_locks(&self) -> Option<&FileLockManager> { self.file_locks.as_deref() }
 }
 
 

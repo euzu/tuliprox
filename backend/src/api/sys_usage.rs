@@ -100,6 +100,7 @@ impl DiskProbe {
 
     /// Return `(total_bytes, free_bytes_available_to_caller)`.
     /// Returns `(0, 0)` if the underlying syscall fails.
+    #[allow(clippy::useless_conversion)]
     fn sample(&self) -> (u64, u64) {
         #[cfg(unix)]
         {
@@ -111,8 +112,8 @@ impl DiskProbe {
                 return (0, 0);
             }
             let bsize = stat.f_frsize as u64;
-            let total = (stat.f_blocks as u64).saturating_mul(bsize);
-            let free = (stat.f_bavail as u64).saturating_mul(bsize);
+            let total = u64::from(stat.f_blocks).saturating_mul(bsize);
+            let free = u64::from(stat.f_bavail).saturating_mul(bsize);
             (total, free)
         }
         #[cfg(windows)]
@@ -574,14 +575,14 @@ mod platform {
             let memory_usage = query_process_memory_usage(self.process)?;
             self.networks.refresh(true);
             let (rx_bytes, tx_bytes) = super::sum_sysinfo_network_bytes(&self.networks);
-            let (net_rx_bytes_per_sec, net_tx_bytes_per_sec) = self.net_tracker.sample(rx_bytes, tx_bytes);
+            let (received_bps, sent_bps) = self.net_tracker.sample(rx_bytes, tx_bytes);
             let (disk_total_bytes, disk_free_bytes) = self.disk_probe.as_ref().map_or((0, 0), DiskProbe::sample);
             Some(SystemInfo {
                 cpu_usage: self.cpu_tracker.sample(cpu_time_secs),
                 memory_usage,
                 memory_total: self.memory_total,
-                net_rx_bytes_per_sec,
-                net_tx_bytes_per_sec,
+                net_rx_bytes_per_sec: received_bps,
+                net_tx_bytes_per_sec: sent_bps,
                 disk_total_bytes,
                 disk_free_bytes,
             })
@@ -698,14 +699,14 @@ mod platform {
             let memory_usage = query_process_memory_usage()?;
             self.networks.refresh(true);
             let (rx_bytes, tx_bytes) = super::sum_sysinfo_network_bytes(&self.networks);
-            let (net_rx_bytes_per_sec, net_tx_bytes_per_sec) = self.net_tracker.sample(rx_bytes, tx_bytes);
+            let (received_bps, sent_bps) = self.net_tracker.sample(rx_bytes, tx_bytes);
             let (disk_total_bytes, disk_free_bytes) = self.disk_probe.as_ref().map_or((0, 0), DiskProbe::sample);
             Some(SystemInfo {
                 cpu_usage: self.cpu_tracker.sample(cpu_time_secs),
                 memory_usage,
                 memory_total: self.memory_total,
-                net_rx_bytes_per_sec,
-                net_tx_bytes_per_sec,
+                net_rx_bytes_per_sec: received_bps,
+                net_tx_bytes_per_sec: sent_bps,
                 disk_total_bytes,
                 disk_free_bytes,
             })

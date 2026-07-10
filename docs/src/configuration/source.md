@@ -228,50 +228,382 @@ specific provider.
 
 ### 2.3 EPG Assignment & Smart Match (`epg`)
 
-Tuliprox can load external XMLTV files and map them intelligently using advanced fuzzy matching to streams that are
+Tuliprox can load external EPG sources and map them intelligently using advanced fuzzy matching to streams that are
 missing a valid EPG ID.
-Within the `epg` block, you can define multiple XMLTV providers.
-Tuliprox aggregates these sources and assigns EPG data based on priority and matching rules.
+
+The `epg.sources` list supports the following source types:
+
+* **XMLTV** sources, which provide complete XMLTV channel and programme data.
+* **ICS calendar** sources, which import iCalendar events and convert them into a virtual XMLTV-compatible EPG channel.
+
+Tuliprox aggregates all configured EPG sources and assigns EPG data based on priority and matching rules.
 
 #### Example Configuration
 
 ```yaml
 epg:
   sources:
-    - url: "auto"           # Automatically generated provider URL
-      priority: -2          # High priority
-      logo_override: true   # Replaces provider logos with EPG icons
+    - url: "auto" # Automatically generated provider XMLTV URL
+      priority: -2 # High priority
+      logo_override: true # Replaces provider logos with EPG icons
+
     - url: "http://localhost:3001/xmltv.php?epg_id=1"
       priority: -1
+
     - url: "http://localhost:3001/xmltv.php?epg_id=2"
       priority: 3
-    - url: "http://localhost:3001/xmltv.php?epg_id=3"
-      priority: 0
+
+    - type: ics
+      url: "https://files-f1.motorsportcalendars.com/f1-calendar_p1_p2_p3_qualifying_sprint_gp.ics"
+      channel_id: "f1.calendar"
+      channel_title: "Formula 1"
+      priority: -10
+      ics:
+        timezone: "Europe/Budapest"
+        event:
+          title: "{summary}"
+          description: "{description}"
+          include_location: true
+          include_categories: true
+        dummy:
+          enabled: true
+          title: "No Formula 1 session"
+          description: "There is currently no scheduled Formula 1 session."
+          days_past: 1
+          days_future: 30
+          block_hours: 4
+          min_gap_minutes: 1
+
   smart_match:
     enabled: true
     fuzzy_matching: true
     match_threshold: 80
     best_match_threshold: 99
     name_prefix: { suffix: "." }
-    name_prefix_separator: [ ':', '|', '-' ]
-    strip: [ "3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw" ]
+    name_prefix_separator: [":", "|", "-"]
+    strip: ["3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw"]
     normalize_regex: '[^a-zA-Z0-9\-]'
 ```
 
 #### EPG Source Parameters (`sources`)
 
-| Parameter           | Type   | Required | Default | Technical Impact & Background                                                                                                                                         |
-|:--------------------|:-------|:--------:|:--------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **`url`**           | String |   Yes    |         | The XMLTV endpoint. Use **`auto`** for Xtream inputs to automatically generate the native XMLTV URL using your credentials. Supports local paths and `http(s)` links. |
-| **`priority`**      | Int    |    No    | `0`     | Determines the lookup order. **Lower numbers have higher priority.** For example, `-2` is processed before `0`. Use negative numbers for primary sources.             |
-| **`logo_override`** | Bool   |    No    | `false` | If set to `true`, channel logos from the provider are replaced by the icons found in the XMLTV file.                                                                  |
+| Parameter           | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                          |
+| :------------------ | :----- | :------: | :------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`type`**          | Enum   |    No    | `xmltv` | Defines the source format. Supported values are `xmltv` and `ics`. Existing configurations without `type` are treated as `xmltv`.                                                                                      |
+| **`url`**           | String |   Yes    |         | The EPG source URL or local path. For XMLTV sources, use **`auto`** with Xtream inputs to automatically generate the native XMLTV URL using your credentials. For ICS sources, this points to an `.ics` calendar file. |
+| **`priority`**      | Int    |    No    | `0`     | Determines the lookup order. **Lower numbers have higher priority.** For example, `-2` is processed before `0`. Use negative numbers for primary sources.                                                              |
+| **`logo_override`** | Bool   |    No    | `false` | If set to `true`, channel logos from the provider are replaced by icons found in the EPG source. This mainly applies to XMLTV sources.                                                                                 |
+| **`channel_id`**    | String | ICS only |         | Required for `type: ics`. Defines the generated XMLTV channel ID for the imported calendar. Playlist entries can reference this value through their EPG ID or receive it through Smart Match.                          |
+| **`channel_title`** | String |    No    |         | Optional display name for the generated ICS EPG channel. If omitted, `channel_id` is used as fallback. This value is also used as a Smart Match candidate.                                                             |
+| **`match_names`**   | List   |    No    | `[]`    | Optional additional names for matching the generated ICS channel to playlist entries. Useful when the playlist channel name differs from the calendar title, for example `F1`, `Formula One`, or `Formel 1`.           |
+| **`ics`**           | Object | ICS only |         | Additional configuration for `type: ics`. See [ICS Calendar Source Parameters](#ics-calendar-source-parameters-ics).                                                                                                   |
+
+#### XMLTV Sources
+
+XMLTV is the default source type. Existing configurations remain valid and do not need to be changed.
+
+```yaml
+epg:
+  sources:
+    - url: "auto"
+      priority: -2
+      logo_override: true
+
+    - url: "https://example.org/xmltv.xml"
+      priority: 0
+```
+
+The following configuration is equivalent:
+
+```yaml
+epg:
+  sources:
+    - type: xmltv
+      url: "https://example.org/xmltv.xml"
+      priority: 0
+```
+
+For Xtream inputs, `url: "auto"` automatically generates the provider's native XMLTV endpoint from the configured
+input URL, username, and password.
+
+The ICS-only fields `channel_id`, `channel_title`, `match_names`, and `ics` are rejected on `type: xmltv` sources. This
+keeps accidental calendar settings from changing XMLTV download or runtime behavior.
+
+#### ICS Calendar Sources
+
+ICS sources import iCalendar files and convert their `VEVENT` entries into XMLTV-compatible programme entries.
+Recurring events using `RRULE`, `RDATE`, or `EXDATE` are detected but not expanded yet; Tuliprox imports the base
+`DTSTART`/`DTEND` occurrence and logs one aggregated warning per parsed source when such entries are present.
+
+An ICS source creates exactly one virtual EPG channel. It does **not** create a playlist channel or stream. The generated
+`channel_id` must therefore be assigned to an existing playlist entry by one of the following mechanisms:
+
+* the playlist entry already uses the same EPG ID,
+* a mapper rule assigns the EPG ID,
+* Smart Match matches the playlist channel name against `channel_id`, `channel_title`, or `match_names`.
+
+The generated programmes are written into the regular XMLTV output. M3U and Xtream use the same internal
+`epg_channel_id` assignment, so the same `channel_id` works for both input types. If an Xtream provider supplies a valid
+but unwanted EPG ID, use a mapping rule to overwrite the stream's EPG ID with the ICS `channel_id`.
+
+Example using the public Formula 1 calendar:
+
+```yaml
+epg:
+  sources:
+    - type: ics
+      url: "https://files-f1.motorsportcalendars.com/f1-calendar_p1_p2_p3_qualifying_sprint_gp.ics"
+      channel_id: "f1.calendar"
+      channel_title: "Formula 1"
+      priority: -10
+      match_names:
+        - "F1"
+        - "Formula One"
+        - "Formel 1"
+      ics:
+        timezone: "Europe/Budapest"
+        event:
+          title: "{summary}"
+          description: "{description}"
+          include_location: true
+          include_categories: true
+        dummy:
+          enabled: true
+          title: "No Formula 1 session"
+          description: "There is currently no scheduled Formula 1 session."
+          days_past: 1
+          days_future: 30
+          block_hours: 4
+          min_gap_minutes: 1
+```
+
+A playlist channel can then be linked explicitly by using the generated EPG channel ID:
+
+```m3u
+#EXTINF:-1 tvg-id="f1.calendar" tvg-name="Formula 1",Formula 1
+http://example.org/live/f1/index.m3u8
+```
+
+Alternatively, Smart Match can match playlist names such as `Formula 1`, `F1`, or `Formel 1` when the corresponding
+values are configured through `channel_title` or `match_names`.
+
+#### ICS Calendar Source Parameters (`ics`)
+
+| Parameter                    | Type   | Required | Default    | Technical Impact & Background                                                                                                                                    |
+| :--------------------------- | :----- | :------: | :--------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`timezone`**               | String |    No    | `UTC`      | Fallback timezone for floating ICS timestamps and the local dummy block calculation. Use an IANA zone such as `Europe/Budapest`, `UTC`, or `America/New_York`.   |
+| **`event`**                  | Object |    No    |            | Controls how calendar events are mapped to programme title and description. See [ICS Event Mapping](#ics-event-mapping-event).                                   |
+| **`dummy`**                  | Object |    No    |            | Controls optional gap filling with generated dummy programme entries. See [ICS Dummy Gap Filling](#ics-dummy-gap-filling-dummy).                                 |
+| **`include_cancelled`**      | Bool   |    No    | `false`    | If set to `true`, calendar events with `STATUS:CANCELLED` are imported. By default, cancelled events are skipped.                                                |
+| **`max_events`**             | Int    |    No    | `50000`    | Safety budget for encountered `VEVENT` blocks, including invalid or skipped events. Parsing stops when the budget is exhausted. Hard cap: `200000`.              |
+| **`max_download_bytes`**     | Int    |    No    | `10485760` | Maximum downloaded ICS size in bytes. The default is 10 MiB. Hard cap: `52428800` (50 MiB).                                                                      |
+| **`max_decompressed_bytes`** | Int    |    No    | `20971520` | Maximum decompressed ICS size in bytes. The default is 20 MiB. Hard cap: `104857600` (100 MiB).                                                                  |
+
+`timezone` must be a valid IANA timezone known to Tuliprox, for example `UTC`, `Europe/Budapest`, or
+`America/New_York`.
+
+#### ICS Event Mapping (`event`)
+
+The `event` block controls how ICS `VEVENT` properties are converted into EPG programme fields.
+
+```yaml
+ics:
+  event:
+    title: "{summary}"
+    description: "{description}"
+    include_location: true
+    include_categories: true
+```
+
+| Parameter                | Type   | Required | Default         | Technical Impact & Background                                                           |
+| :----------------------- | :----- | :------: | :-------------- | :-------------------------------------------------------------------------------------- |
+| **`title`**              | String |    No    | `{summary}`     | Template used for the generated programme title.                                        |
+| **`description`**        | String |    No    | `{description}` | Template used for the generated programme description.                                  |
+| **`include_location`**   | Bool   |    No    | `false`         | Appends the ICS `LOCATION` value to the generated programme description when available. |
+| **`include_categories`** | Bool   |    No    | `false`         | Appends ICS `CATEGORIES` to the generated programme description when available.         |
+
+Supported template variables:
+
+| Variable            | Description                                       |
+| :------------------ | :------------------------------------------------ |
+| **`{summary}`**     | The ICS `SUMMARY` value. Usually the event title. |
+| **`{description}`** | The ICS `DESCRIPTION` value.                      |
+| **`{location}`**    | The ICS `LOCATION` value.                         |
+| **`{categories}`**  | The ICS `CATEGORIES` value.                       |
+| **`{uid}`**         | The ICS `UID` value.                              |
+| **`{start}`**       | The localized event start time.                   |
+| **`{end}`**         | The localized event end time.                     |
+
+Example:
+
+```yaml
+ics:
+  event:
+    title: "Formula 1: {summary}"
+    description: "{description}"
+    include_location: true
+    include_categories: true
+```
+
+#### ICS Time Handling
+
+Tuliprox converts all imported calendar events into the internal EPG time format.
+
+Supported ICS time forms:
+
+| ICS Time Form                                  | Behavior                                                                 |
+| :--------------------------------------------- | :----------------------------------------------------------------------- |
+| `DTSTART:20260306T123000Z`                     | Treated as UTC.                                                          |
+| `DTSTART;TZID=Europe/Berlin:20260306T1230`     | Interpreted in the specified `TZID` timezone and converted internally.   |
+| `DTSTART:20260306T123000`                      | Treated as a floating timestamp and interpreted using `ics.timezone`.    |
+| `DTSTART;VALUE=DATE:20260306`                  | All-day events. These are ignored.                                       |
+
+For regular programme entries, an ICS event must provide a valid start and end time. `DTEND` is preferred. If `DTEND`
+is missing, Tuliprox may use `DURATION` when present. Events without a usable end time are skipped. For template
+variables, `{start}` and `{end}` are formatted consistently; when `DURATION` supplies the end time, `{end}` uses the
+same display timezone as `DTSTART`.
+
+#### ICS Dummy Gap Filling (`dummy`)
+
+ICS calendars often only contain real events, for example race sessions, meetings, or special broadcasts. This may leave
+large gaps in the EPG. The optional dummy gap filler can create placeholder programmes for these gaps.
+
+Dummy entries are generated in local day blocks. By default, the block size is 4 hours:
+
+```text
+00:00 - 04:00
+04:00 - 08:00
+08:00 - 12:00
+12:00 - 16:00
+16:00 - 20:00
+20:00 - 24:00
+```
+
+Example:
+
+```yaml
+ics:
+  timezone: "UTC"
+  dummy:
+    enabled: true
+    title: "No Formula 1 session"
+    description: "There is currently no scheduled Formula 1 session."
+    days_past: 1
+    days_future: 30
+    block_hours: 4
+    min_gap_minutes: 1
+```
+
+| Parameter             | Type   | Required | Default              | Technical Impact & Background                                                                                                                                      |
+| :-------------------- | :----- | :------: | :------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`enabled`**         | Bool   |    No    | `false`              | Enables generation of dummy programme entries for gaps without real events.                                                                                        |
+| **`title`**           | String |    No    | `No programme entry` | Programme title for generated dummy entries.                                                                                                                       |
+| **`description`**     | String |    No    | empty                | Programme description for generated dummy entries.                                                                                                                 |
+| **`days_past`**       | Int    |    No    | `1`                  | Number of days before the current day for which dummy entries are generated.                                                                                       |
+| **`days_future`**     | Int    |    No    | `14`                 | Number of days after the current day for which dummy entries are generated.                                                                                        |
+| **`block_hours`**     | Int    |    No    | `4`                  | Size of the local dummy blocks in hours. The value must divide 24 evenly. For example: `1`, `2`, `3`, `4`, `6`, `8`, or `12`.                                      |
+| **`min_gap_minutes`** | Int    |    No    | `1`                  | Minimum gap length required to generate a dummy entry. Smaller gaps are ignored to avoid tiny placeholder programmes caused by second-level timestamp differences. |
+
+Dummy entries never replace real programme entries. They only fill uncovered time ranges.
+
+`days_past` is capped at `30`; `days_future` is capped at `366`. Dummy titles use the same length cap as event summaries
+and dummy descriptions use the same length cap as event descriptions.
+
+Example with one real event from `03:30` to `05:00`:
+
+```text
+00:00 - 03:30  No Formula 1 session
+03:30 - 05:00  Real calendar event
+05:00 - 08:00  No Formula 1 session
+08:00 - 12:00  No Formula 1 session
+...
+```
+
+Example with an event aligned to a block boundary:
+
+```text
+00:00 - 04:00  No Formula 1 session
+04:00 - 06:00  Real calendar event
+06:00 - 08:00  No Formula 1 session
+08:00 - 12:00  No Formula 1 session
+...
+```
+
+If two events are adjacent, no dummy programme is inserted between them:
+
+```text
+10:00 - 11:00  Real calendar event
+11:00 - 12:00  Real calendar event
+12:00 - 16:00  No Formula 1 session
+```
+
+Dummy block boundaries are calculated in `ics.timezone`. Around daylight saving time changes, the local block labels
+remain stable, for example `00:00 - 04:00`, `04:00 - 08:00`, and so on, while the corresponding UTC duration may differ.
+If a local boundary does not exist during a spring-forward transition, it maps to the first real instant after the gap.
+If a boundary is ambiguous during a fall-back transition, the earlier occurrence is used. Any resulting zero-length or
+negative UTC interval is omitted, so generated dummy programmes remain ordered, non-overlapping, and continuous over
+the real local day.
+
+#### ICS Download and Security Notes
+
+ICS sources use the same download infrastructure as playlist and XMLTV EPG downloads. This means that input-level
+headers, disabled headers, default user-agent handling, cache handling, retry behavior, provider failover, and sanitized
+error logging are applied consistently.
+
+Supported URL forms for ICS sources:
+
+| URL Form         | Description                                                               |
+| :--------------- | :------------------------------------------------------------------------ |
+| `https://...`    | Recommended for remote calendar files.                                    |
+| `http://...`     | Supported when explicitly needed.                                         |
+| `webcal://...`   | Normalized internally to `https://...`.                                   |
+| `provider://...` | Uses a configured Tuliprox provider failover definition.                  |
+| `file://...`     | Reads a local calendar file from the host filesystem.                     |
+| local path       | Reads a local relative or absolute file path, subject to path validation. |
+
+Unsupported or unsafe schemes such as `data:`, `ftp:`, `gopher:`, `javascript:`, `mailto:`, or `ssh:` are rejected.
+
+Tuliprox does not load external resources referenced inside the ICS file. Fields such as `ATTACH`, `URL`, `ORGANIZER`,
+`ATTENDEE`, or `IMAGE` are treated as metadata only and must not trigger additional network requests.
+
+To protect the server, ICS imports are bounded by safety limits such as maximum download size and maximum event count.
+Sensitive request data, such as credentials and authorization headers, is sanitized in logs and error messages.
+
+Additional parser limits are enforced regardless of the configured values:
+
+| Limit | Hard Cap |
+| :---- | :------- |
+| Physical or unfolded ICS line length | 128 KiB |
+| Properties per `VEVENT` | 256 |
+| Imported `SUMMARY` text | 4 KiB, truncated at a UTF-8 boundary |
+| Imported `DESCRIPTION` text | 64 KiB, truncated at a UTF-8 boundary |
+
+If the file itself is unreadable, too large, not valid UTF-8, violates the line-length limit, or does not contain one
+complete, correctly nested `VCALENDAR` envelope, the source fails. A correctly wrapped calendar without events is
+valid. If a single `VEVENT` inside that envelope is malformed, has too many properties, has an unknown event `TZID`, or
+lacks a usable
+`DTSTART`/`DTEND`/`DURATION`, that event is skipped and the remaining events continue to be imported. The Web UI EPG
+preview uses the same merged output behavior as the client XMLTV output, including ICS dummy gap filling. If a cached
+`.ics` file cannot be parsed in preview, Tuliprox ignores the cached file and downloads the source again through the
+normal EPG download path.
+
+The graphical source editor currently preserves existing ICS fields when editing an input, but full creation and editing
+of every ICS-specific field is YAML-first. Configure new ICS sources in `source.yml`.
 
 #### Smart Match Parameters (`smart_match`)
 
 The fuzzy matching logic attempts to "guess" the EPG ID by generating search keys based on the channel name.
 
+For XMLTV sources, Tuliprox uses the channel IDs and display names from the XMLTV file.
+
+For ICS sources, Tuliprox uses the generated virtual channel metadata:
+
+* `channel_id`
+* `channel_title`
+* `match_names`
+
 | Parameter               | Type   | Default            | Technical Impact                                                                                                     |
-|:------------------------|:-------|:-------------------|:---------------------------------------------------------------------------------------------------------------------|
+| :---------------------- | :----- | :----------------- | :------------------------------------------------------------------------------------------------------------------- |
 | `enabled`               | Bool   | `false`            | Activates the Smart Match engine for streams without a fixed `tvg-id`.                                               |
 | `fuzzy_matching`        | Bool   | `false`            | Fallback to phonetic and Jaro-Winkler similarity matching if exact ID match fails.                                   |
 | `match_threshold`       | Int    | `80`               | Minimum similarity score (10-100) required to accept a fuzzy match.                                                  |
@@ -293,10 +625,33 @@ If a stream is missing the `tvg-id`, Tuliprox performs the following steps:
 4. **Reconstruction:** Using `name_prefix.suffix` (`.`), the country code is appended to the name. The target search key
    becomes `hbo.us`.
 5. **Phonetic Matching:** The engine uses **Double Metaphone** phonetic encoding to search for the ID `hbo.us` in the
-   aggregated XMLTV database.
+   aggregated EPG database.
+
+For an ICS source, the generated EPG channel participates in the same matching process. For example, this configuration:
+
+```yaml
+epg:
+  sources:
+    - type: ics
+      url: "https://files-f1.motorsportcalendars.com/f1-calendar_p1_p2_p3_qualifying_sprint_gp.ics"
+      channel_id: "f1.calendar"
+      channel_title: "Formula 1"
+      match_names:
+        - "F1"
+        - "Formel 1"
+```
+
+can match playlist channel names such as:
+
+```text
+Formula 1
+F1
+Formel 1
+```
 
 > **Note:** Lower `match_threshold` values increase the chance of EPG assignment but may lead to incorrect matches for
 > channels with very similar names.
+
 ---
 
 ### 2.4 Provider Aliases (`aliases` & `batch://`)
@@ -1148,9 +1503,9 @@ The following attributes are recognized and preserved during M3U import and expo
 
 **Proxy Behavior:**
 
-* **Direct Output:** When Tuliprox outputs streams directly (e.g., when not using proxy rewrite), it preserves the original provider  
+* **Direct Output:** When Tuliprox outputs streams directly (e.g., when not using proxy rewrite), it preserves the original provider
   metadata exactly as received.
-* **Rewritten Output (Reverse Proxy):** When Tuliprox rewrites URLs to act as a reverse proxy, it generates authenticated local Tuliprox  
+* **Rewritten Output (Reverse Proxy):** When Tuliprox rewrites URLs to act as a reverse proxy, it generates authenticated local Tuliprox
   archive URLs instead of leaking the provider's upstream archive URLs.
 
 **Supported Modes:**

@@ -794,10 +794,17 @@ mod tests {
         get_epg_path_for_target_by_type,
         group_stream_epg_items,
         rewrite_epg_channel_resource_url,
+        serve_epg,
         stream_epg_programmes_for_channel,
         stream_epg_reference_map,
     };
-    use crate::model::{Config, ConfigTarget, M3uTargetOutput, TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput};
+    use crate::api::model::create_test_app_state;
+    use crate::model::{
+        Config, ConfigTarget, Epg, IcsEpgSourceConfig, M3uTargetOutput, ProxyUserCredentials, TargetOutput,
+        XtreamTargetFlagsSet, XtreamTargetOutput,
+    };
+    use crate::processing::parser::ics::parse_ics_file_to_channel;
+    use crate::repository::epg_write_file;
     use crate::utils::{EpgProcessingOptions, EpgTimeShift};
     use arc_swap::ArcSwapOption;
     use shared::{
@@ -805,7 +812,7 @@ mod tests {
         model::{EpgChannel, EpgProgramme, ProcessingOrder, StreamEpgItemRequest, TargetType},
         utils::{concat_path, obfuscate_text, Internable},
     };
-    use std::fs;
+    use std::{collections::HashMap, fs};
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -868,6 +875,72 @@ mod tests {
             storage_dir: storage_dir.to_string(),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn regular_xmltv_output_contains_imported_ics_channel_and_programme() {
+        let dir = tempdir().expect("temp dir");
+        let ics_path = dir.path().join("calendar.ics");
+        fs::write(
+            &ics_path,
+            concat!(
+                "BEGIN:VCALENDAR\r\n",
+                "VERSION:2.0\r\n",
+                "BEGIN:VEVENT\r\n",
+                "UID:f1-race\r\n",
+                "DTSTART:20300310T140000Z\r\n",
+                "DTEND:20300310T160000Z\r\n",
+                "SUMMARY:Formula 1 Grand Prix\r\n",
+                "DESCRIPTION:Imported calendar programme\r\n",
+                "END:VEVENT\r\n",
+                "END:VCALENDAR\r\n",
+            ),
+        )
+        .expect("write ICS fixture");
+
+        let channel = parse_ics_file_to_channel(
+            &ics_path,
+            "f1.calendar".intern(),
+            None,
+            &IcsEpgSourceConfig::default(),
+        )
+        .await
+        .expect("parse ICS fixture");
+        let epg_path = dir.path().join("epg.db");
+        epg_write_file(
+            "ics-target",
+            &Epg {
+                priority: 0,
+                logo_override: false,
+                attributes: None,
+                children: vec![Arc::new(channel)],
+            },
+            &epg_path,
+            &HashMap::<Arc<str>, Arc<str>>::new(),
+        )
+        .expect("write EPG database");
+
+        let config = test_config_with_storage(dir.path().to_string_lossy().as_ref());
+        let app_state = create_test_app_state(config);
+        let target = Arc::new(test_target_with_xtream_and_m3u());
+        let response = serve_epg(
+            &app_state,
+            &epg_path,
+            &ProxyUserCredentials::default(),
+            &target,
+            None,
+        )
+        .await;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read XMLTV response body");
+        let xml = String::from_utf8(body.to_vec()).expect("XMLTV response is UTF-8");
+
+        assert!(xml.contains(r#"<channel id="f1.calendar">"#));
+        assert!(xml.contains("<display-name>f1.calendar</display-name>"));
+        assert!(xml.contains(r#"channel="f1.calendar""#));
+        assert!(xml.contains("<title>Formula 1 Grand Prix</title>"));
+        assert!(xml.contains("<desc>Imported calendar programme</desc>"));
     }
 
     #[test]

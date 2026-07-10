@@ -419,8 +419,8 @@ impl From<&ReverseProxyConfig> for ReverseProxyConfigDto {
 #[cfg(test)]
 mod tests {
     use super::{
-        HlsCacheConfig, HlsManifestRecoveryBurstConfig,  HlsSegmentRepairConfig,
-         ReverseProxyConfig,
+        default_hls_cache_path, HlsCacheConfig, HlsManifestRecoveryBurstConfig, HlsSegmentRepairConfig,
+        ReverseProxyConfig,
     };
     use shared::model::{ByteSize, HlsCacheConfigDto, HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripMode, QosAggregationConfigDto, ReverseProxyConfigDto, StreamHistoryConfigDto};
 
@@ -494,7 +494,7 @@ mod tests {
         assert_eq!(
             hls,
             HlsCacheConfig {
-                cache_path: "/tmp/tuliprox/cache/hls".to_string(),
+                cache_path: default_hls_cache_path(),
                 strip: super::StripConfig {
                     mode: HlsStripMode::Segments,
                     value: 0,
