@@ -61,6 +61,20 @@ impl RequestFetchOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FileDownloadOptions {
+    pub max_bytes: Option<u64>,
+    pub atomic_write: bool,
+}
+
+pub struct InputEpgFileRequest<'a> {
+    pub headers: Option<&'a HeaderMap>,
+    pub storage_dir: &'a str,
+    pub url: &'a str,
+    pub persist_path: &'a Path,
+    pub max_bytes: Option<u64>,
+}
+
 fn log_proxy_diagnostics(config: &Config) {
     PROXY_DIAGNOSTICS_ONCE.call_once(|| {
         if let Some(proxy_cfg) = config.proxy.as_ref() {
@@ -1361,18 +1375,29 @@ pub async fn get_input_epg_content_as_file(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &ConfigInput,
-    headers: Option<&HeaderMap>,
-    storage_dir: &str,
-    url_str: &str,
-    persist_filepath: &Path,
+    request: InputEpgFileRequest<'_>,
 ) -> Result<PathBuf, TuliproxError> {
+    let InputEpgFileRequest {
+        headers,
+        storage_dir,
+        url: url_str,
+        persist_path,
+        max_bytes,
+    } = request;
     debug_if_enabled!(
         "getting input epg content storage_dir: {}, url: {}",
         storage_dir,
         sanitize_sensitive_info(url_str)
     );
-    if url_str.parse::<url::Url>().is_ok() {
-        match download_epg_content_as_file(app_config, client, input, headers, url_str, persist_filepath).await {
+
+    // This is the single write-lock boundary for EPG cache population. Callers must
+    // not hold a lock for `persist_path` while invoking this function.
+    let _persist_lock = app_config.file_locks.write_lock(persist_path).await;
+
+    // On Windows, drive-letter paths also parse as URLs (with `c` as the scheme).
+    // Interpret an absolute platform path before attempting URL parsing.
+    if !Path::new(url_str).is_absolute() && url_str.parse::<url::Url>().is_ok() {
+        match download_epg_content_as_file(app_config, client, input, headers, url_str, persist_path, max_bytes).await {
             Ok(content) => Ok(content),
             Err(e) => {
                 error!(
@@ -1390,36 +1415,21 @@ pub async fn get_input_epg_content_as_file(
             }
         }
     } else {
-        let result = match get_file_path(storage_dir, Some(PathBuf::from(url_str))) {
-            Some(filepath) => {
-                if filepath.exists() {
-                    if let Err(e) = tokio::fs::copy(&filepath, persist_filepath).await {
-                        error!("can't persist to: {}  => {}", persist_filepath.display(), e);
-                        return Err(TuliproxError::RepositoryNetwork(format!("Failed to persist: {}  => {}", persist_filepath.display(), e)));
-                    }
-                    if filepath.exists() {
-                        Some(filepath)
-                    } else {
-                        return Err(TuliproxError::RepositoryNetwork(format!(
-                            "Failed: file does not exists {}",
-                            filepath.display()
-                        )));
-                    }
-                } else {
-                    None
-                }
-            }
-            None => None,
+        let Some(file_path) = get_file_path(storage_dir, Some(PathBuf::from(url_str))) else {
+            let msg = format!("can't read input url: {}", sanitize_sensitive_info(url_str));
+            error!("{msg}");
+            return Err(TuliproxError::RepositoryNetwork(msg));
         };
+        if !file_path.exists() {
+            let msg = format!("can't read input url: {}", sanitize_sensitive_info(url_str));
+            error!("{msg}");
+            return Err(TuliproxError::RepositoryNetwork(msg));
+        }
 
-        result.map_or_else(
-            || {
-                let msg = format!("can't read input url: {}", sanitize_sensitive_info(url_str));
-                error!("{msg}");
-                Err(TuliproxError::RepositoryNetwork(msg))
-            },
-            Ok,
-        )
+        copy_local_epg_file_to_persist(&file_path, persist_path, max_bytes).await.map_err(|err| {
+            error!("can't persist to: {}  => {}", persist_path.display(), err);
+            TuliproxError::RepositoryNetwork(format!("Failed to persist: {}  => {err}", persist_path.display()))
+        })
     }
 }
 
@@ -1721,32 +1731,60 @@ pub async fn get_remote_content_as_file(
     url: &Url,
     file_path: &Path,
 ) -> Result<PathBuf, std::io::Error> {
-    let custom_headers = headers
-        .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
+    get_remote_content_as_file_with_options(
+        app_config,
+        client,
+        input,
+        headers,
+        url,
+        file_path,
+        FileDownloadOptions::default(),
+    )
+    .await
+}
 
-    let config = app_config.config.load();
-    let default_user_agent = config.default_user_agent.clone();
-    drop(config);
+pub async fn get_remote_content_as_file_with_options(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &ConfigInput,
+    headers: Option<&HeaderMap>,
+    url: &Url,
+    file_path: &Path,
+    options: FileDownloadOptions,
+) -> Result<PathBuf, std::io::Error> {
+    let input_source = InputSource {
+        name: input.name.clone(),
+        url: url.to_string(),
+        provider: input.get_resolve_provider(url.as_str()),
+        username: input.username.clone(),
+        password: input.password.clone(),
+        method: input.method,
+        headers: input.headers.clone(),
+    };
 
-    let provider_config = input.get_resolve_provider(url.as_str());
-
-    let response = send_with_retry_and_provider(app_config, url, provider_config.as_ref(), false, |resolved_url| {
-        get_client_request(
-            client,
-            input.method,
-            Some(&input.headers),
-            resolved_url,
-            custom_headers.as_ref(),
-            None,
-            default_user_agent.as_deref(),
-        )
-    })
-        .await?;
+    let response = send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
+        app_config,
+        client,
+        &input_source,
+        headers,
+        url,
+        10,
+        RequestFetchOptions::default(),
+    )
+    .await?
+    .response;
 
     let start_time = tokio::time::Instant::now();
-    let mut writer = async_file_writer(File::create(file_path).await?);
+    let (temp_file, output_file) = if options.atomic_write {
+        let (temp_file, output_file) = create_atomic_download_file(file_path)?;
+        (Some(temp_file), output_file)
+    } else {
+        (None, File::create(file_path).await?)
+    };
+    let mut writer = async_file_writer(output_file);
 
     let mut stream = response.bytes_stream();
+    let mut downloaded = 0_u64;
 
     let idle_timeout = tokio::time::Duration::from_secs(STREAM_IDLE_TIMEOUT);
     let idle = sleep(idle_timeout);
@@ -1756,7 +1794,10 @@ pub async fn get_remote_content_as_file(
         tokio::select! {
         () = &mut idle => {
             warn!("Stream idle for request, closing {}", sanitize_sensitive_info(url.as_ref()));
-            break;
+            return Err(string_to_io_error(format!(
+                "Download timed out for {}",
+                sanitize_sensitive_info(url.as_ref())
+            )));
         }
 
         chunk = stream.next() => {
@@ -1764,6 +1805,18 @@ pub async fn get_remote_content_as_file(
 
                 match chunk {
                     Some(Ok(bytes)) => {
+                        downloaded = downloaded.checked_add(bytes.len() as u64).ok_or_else(|| {
+                            string_to_io_error(format!(
+                                "Download size overflow for {}",
+                                sanitize_sensitive_info(url.as_ref())
+                            ))
+                        })?;
+                        if options.max_bytes.is_some_and(|max| downloaded > max) {
+                            return Err(string_to_io_error(format!(
+                                "Download exceeds configured limit for {}",
+                                sanitize_sensitive_info(url.as_ref())
+                            )));
+                        }
                         writer.write_all(&bytes).await?;
                     }
                     Some(Err(e)) => {
@@ -1779,6 +1832,11 @@ pub async fn get_remote_content_as_file(
 
     writer.flush().await?;
     writer.shutdown().await?;
+    drop(writer);
+
+    if let Some(temp_file) = temp_file {
+        persist_atomic_download_file(temp_file, file_path)?;
+    }
 
     debug!(
         "File downloaded successfully to {}, took {}",
@@ -2130,6 +2188,62 @@ fn strip_sensitive_headers_for_cross_origin_redirect(headers: &mut HashMap<Strin
     headers.retain(|key, _| is_safe_cross_origin_redirect_header(key));
 }
 
+fn create_atomic_download_file(file_path: &Path) -> Result<(tempfile::NamedTempFile, File), Error> {
+    let parent = file_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let temp_file = tempfile::Builder::new()
+        .prefix(".tuliprox-download-")
+        .suffix(".tmp")
+        .tempfile_in(parent)?;
+    let output_file = File::from_std(temp_file.reopen()?);
+    Ok((temp_file, output_file))
+}
+
+fn persist_atomic_download_file(temp_file: tempfile::NamedTempFile, file_path: &Path) -> Result<(), Error> {
+    match temp_file.persist(file_path) {
+        Ok(_) => Ok(()),
+        Err(err) => Err(err.error),
+    }
+}
+
+async fn copy_local_epg_file_to_persist(
+    file_path: &Path,
+    persist_filepath: &Path,
+    max_bytes: Option<u64>,
+) -> Result<PathBuf, Error> {
+    let mut reader = File::open(file_path).await?;
+    let (temp_file, output_file) = create_atomic_download_file(persist_filepath)?;
+    let mut writer = async_file_writer(output_file);
+    let mut copied = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        copied = copied.checked_add(read as u64).ok_or_else(|| {
+            string_to_io_error(format!("Local EPG file size overflow for {}", file_path.display()))
+        })?;
+        if max_bytes.is_some_and(|max| copied > max) {
+            return Err(string_to_io_error(format!(
+                "Local EPG file {} exceeds configured limit",
+                file_path.display()
+            )));
+        }
+        writer.write_all(&buffer[..read]).await?;
+    }
+
+    writer.flush().await?;
+    writer.shutdown().await?;
+    drop(writer);
+    drop(reader);
+    persist_atomic_download_file(temp_file, persist_filepath)?;
+    Ok(persist_filepath.to_path_buf())
+}
+
 async fn download_epg_content_as_file(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
@@ -2137,26 +2251,42 @@ async fn download_epg_content_as_file(
     headers: Option<&HeaderMap>,
     url_str: &str,
     persist_filepath: &Path,
+    max_bytes: Option<u64>,
 ) -> Result<PathBuf, Error> {
     if let Ok(url) = url_str.parse::<url::Url>() {
-        if url.scheme() == "file" {
-            url.to_file_path().map_or_else(
-                |()| {
-                    Err(Error::new(
+        match url.scheme() {
+            "file" => {
+                let file_path = url.to_file_path().map_err(|()| {
+                    Error::new(
                         ErrorKind::Unsupported,
                         format!("Unknown file {}", sanitize_sensitive_info(url_str)),
-                    ))
-                },
-                |file_path| {
-                    if file_path.exists() {
-                        Ok(file_path)
-                    } else {
-                        Err(Error::new(ErrorKind::NotFound, format!("Unknown file {}", file_path.display())))
-                    }
-                },
-            )
-        } else {
-            get_remote_content_as_file(app_config, client, input, headers, &url, persist_filepath).await
+                    )
+                })?;
+                if file_path.exists() {
+                    copy_local_epg_file_to_persist(&file_path, persist_filepath, max_bytes).await
+                } else {
+                    Err(Error::new(ErrorKind::NotFound, format!("Unknown file {}", file_path.display())))
+                }
+            }
+            "http" | "https" | "provider" => {
+                get_remote_content_as_file_with_options(
+                    app_config,
+                    client,
+                    input,
+                    headers,
+                    &url,
+                    persist_filepath,
+                    FileDownloadOptions {
+                        max_bytes,
+                        atomic_write: true,
+                    },
+                )
+                .await
+            }
+            scheme => Err(Error::new(
+                ErrorKind::Unsupported,
+                format!("Unsupported EPG URL scheme '{scheme}' for {}", sanitize_sensitive_info(url_str)),
+            )),
         }
     } else {
         Err(Error::new(ErrorKind::Unsupported, format!("Malformed URL {}", sanitize_sensitive_info(url_str))))
@@ -2608,14 +2738,14 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
 mod tests {
     use super::{
         is_safe_cross_origin_redirect_header,
-        next_provider_url_index, preview_request_diagnostics_for_logging, preview_request_target_for_logging,
+        get_input_epg_content_as_file, next_provider_url_index, preview_request_diagnostics_for_logging, preview_request_target_for_logging,
         resolve_attempt_target, same_origin, send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result,
         send_with_retry_and_provider, send_with_retry_and_provider_policy, should_try_next_ip_on_connect_error,
-        strip_sensitive_headers_for_cross_origin_redirect, RequestFetchOptions,
+        strip_sensitive_headers_for_cross_origin_redirect, InputEpgFileRequest, RequestFetchOptions,
     };
     use crate::{
         model::{
-            AppConfig, Config, ConfigProvider, InputSource, MediaToolCapabilities, ResourceRetryConfig,
+            AppConfig, Config, ConfigInput, ConfigProvider, InputSource, MediaToolCapabilities, ResourceRetryConfig,
             ReverseProxyConfig, SourcesConfig,
         },
         utils::{FileLockManager},
@@ -2631,6 +2761,7 @@ mod tests {
     use std::{
         collections::{HashMap, HashSet},
         net::SocketAddr,
+        path::{Path, PathBuf},
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -2668,6 +2799,44 @@ mod tests {
             encrypt_secret: [0; 16],
             media_tools: Arc::new(MediaToolCapabilities::new()),
         })
+    }
+
+    fn make_epg_test_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(2))
+            .build()
+            .expect("test client")
+    }
+
+    async fn atomic_download_temp_files(directory: &Path) -> Vec<PathBuf> {
+        let mut result = Vec::new();
+        let mut entries = tokio::fs::read_dir(directory).await.expect("read temp directory");
+        while let Some(entry) = entries.next_entry().await.expect("read temp directory entry") {
+            if entry.file_name().to_string_lossy().starts_with(".tuliprox-download-") {
+                result.push(entry.path());
+            }
+        }
+        result
+    }
+
+    #[tokio::test]
+    async fn atomic_download_temp_files_are_unique_and_use_target_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let target = dir.path().join("cache.ics");
+        let (first_temp, first_output) = super::create_atomic_download_file(&target).expect("first temp file");
+        let (second_temp, second_output) = super::create_atomic_download_file(&target).expect("second temp file");
+
+        assert_ne!(first_temp.path(), second_temp.path());
+        assert_eq!(first_temp.path().parent(), Some(dir.path()));
+        assert_eq!(second_temp.path().parent(), Some(dir.path()));
+
+        drop(first_output);
+        drop(second_output);
+        drop(first_temp);
+        drop(second_temp);
+        assert!(atomic_download_temp_files(dir.path()).await.is_empty());
     }
 
     fn make_provider_with_dns(keep_vhost: bool, on_connect_error: OnConnectErrorPolicy, ips: Vec<&str>) -> Arc<ConfigProvider> {
@@ -2800,6 +2969,367 @@ mod tests {
         assert!(!is_safe_cross_origin_redirect_header("cookie"));
         assert!(!is_safe_cross_origin_redirect_header("x-api-key"));
         assert!(!is_safe_cross_origin_redirect_header("x-auth-token"));
+    }
+
+    #[tokio::test]
+    async fn local_epg_file_respects_max_download_bytes() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("large.ics");
+        let persist = dir.path().join("cache.ics");
+        tokio::fs::write(&source, b"0123456789").await.expect("write source");
+        tokio::fs::write(&persist, b"existing cache").await.expect("write existing cache");
+        let app_config = make_test_app_config(Config::default());
+        let client = make_epg_test_client();
+        let input = ConfigInput::default();
+
+        let err = get_input_epg_content_as_file(
+            &app_config,
+            &client,
+            &input,
+            InputEpgFileRequest {
+                headers: None,
+                storage_dir: dir.path().to_string_lossy().as_ref(),
+                url: source.to_string_lossy().as_ref(),
+                persist_path: &persist,
+                max_bytes: Some(4),
+            },
+        )
+        .await
+        .expect_err("size limit should fail");
+
+        assert!(err.to_string().contains("exceeds configured limit"));
+        assert_eq!(tokio::fs::read(&persist).await.expect("read existing cache"), b"existing cache");
+        assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn file_url_epg_source_is_copied_to_persist_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.ics");
+        let persist = dir.path().join("cache.ics");
+        tokio::fs::write(&source, b"BEGIN:VCALENDAR\nEND:VCALENDAR\n")
+            .await
+            .expect("write source");
+        tokio::fs::write(&persist, b"old cache").await.expect("write old cache");
+        let source_url = Url::from_file_path(&source).expect("file url");
+        let app_config = make_test_app_config(Config::default());
+        let client = make_epg_test_client();
+        let input = ConfigInput::default();
+
+        let result = get_input_epg_content_as_file(
+            &app_config,
+            &client,
+            &input,
+            InputEpgFileRequest {
+                headers: None,
+                storage_dir: dir.path().to_string_lossy().as_ref(),
+                url: source_url.as_str(),
+                persist_path: &persist,
+                max_bytes: Some(1024),
+            },
+        )
+        .await
+        .expect("download");
+
+        assert_eq!(result, persist);
+        assert_eq!(
+            tokio::fs::read_to_string(&persist).await.expect("persisted content"),
+            "BEGIN:VCALENDAR\nEND:VCALENDAR\n"
+        );
+        assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn file_url_epg_source_respects_streamed_size_limit() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("large.ics");
+        let persist = dir.path().join("cache.ics");
+        tokio::fs::write(&source, b"0123456789").await.expect("write source");
+        tokio::fs::write(&persist, b"existing cache").await.expect("write existing cache");
+        let source_url = Url::from_file_path(&source).expect("file url");
+        let app_config = make_test_app_config(Config::default());
+        let client = make_epg_test_client();
+        let input = ConfigInput::default();
+
+        let err = get_input_epg_content_as_file(
+            &app_config,
+            &client,
+            &input,
+            InputEpgFileRequest {
+                headers: None,
+                storage_dir: dir.path().to_string_lossy().as_ref(),
+                url: source_url.as_str(),
+                persist_path: &persist,
+                max_bytes: Some(4),
+            },
+        )
+        .await
+        .expect_err("size limit should fail");
+
+        assert!(err.to_string().contains("exceeds configured limit"));
+        assert_eq!(tokio::fs::read(&persist).await.expect("read existing cache"), b"existing cache");
+        assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_epg_replace_error_cleans_temp_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.ics");
+        let persist = dir.path().join("cache.ics");
+        tokio::fs::write(&source, b"BEGIN:VCALENDAR\nEND:VCALENDAR\n")
+            .await
+            .expect("write source");
+        tokio::fs::create_dir(&persist).await.expect("create conflicting destination");
+        let app_config = make_test_app_config(Config::default());
+        let client = make_epg_test_client();
+        let input = ConfigInput::default();
+
+        get_input_epg_content_as_file(
+            &app_config,
+            &client,
+            &input,
+            InputEpgFileRequest {
+                headers: None,
+                storage_dir: dir.path().to_string_lossy().as_ref(),
+                url: source.to_string_lossy().as_ref(),
+                persist_path: &persist,
+                max_bytes: Some(1024),
+            },
+        )
+        .await
+        .expect_err("replacing a directory should fail");
+
+        assert!(persist.is_dir());
+        assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_epg_read_error_preserves_existing_cache_and_cleans_temp_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source-directory");
+        let persist = dir.path().join("cache.ics");
+        tokio::fs::create_dir(&source).await.expect("create source directory");
+        tokio::fs::write(&persist, b"existing cache").await.expect("write existing cache");
+        let app_config = make_test_app_config(Config::default());
+        let client = make_epg_test_client();
+        let input = ConfigInput::default();
+
+        get_input_epg_content_as_file(
+            &app_config,
+            &client,
+            &input,
+            InputEpgFileRequest {
+                headers: None,
+                storage_dir: dir.path().to_string_lossy().as_ref(),
+                url: source.to_string_lossy().as_ref(),
+                persist_path: &persist,
+                max_bytes: Some(1024),
+            },
+        )
+        .await
+        .expect_err("reading a directory as an EPG file should fail");
+
+        assert_eq!(tokio::fs::read(&persist).await.expect("read existing cache"), b"existing cache");
+        assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsupported_epg_url_scheme_is_rejected_without_network_access() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let persist = dir.path().join("cache.ics");
+        let app_config = make_test_app_config(Config::default());
+        let client = make_epg_test_client();
+        let input = ConfigInput::default();
+
+        let err = get_input_epg_content_as_file(
+            &app_config,
+            &client,
+            &input,
+            InputEpgFileRequest {
+                headers: None,
+                storage_dir: dir.path().to_string_lossy().as_ref(),
+                url: "ftp://example.com/calendar.ics",
+                persist_path: &persist,
+                max_bytes: Some(1024),
+            },
+        )
+        .await
+        .expect_err("unsupported scheme should fail");
+
+        assert!(err.to_string().contains("Unsupported EPG URL scheme 'ftp'"));
+        assert!(!persist.exists());
+        assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn absolute_windows_epg_path_is_dispatched_as_local_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = dir.path().join("source.ics");
+        let persist = dir.path().join("cache.ics");
+        tokio::fs::write(&source, b"BEGIN:VCALENDAR\nEND:VCALENDAR\n")
+            .await
+            .expect("write source");
+        let app_config = make_test_app_config(Config::default());
+        let client = make_epg_test_client();
+        let input = ConfigInput::default();
+        let source_path = source.to_str().expect("Windows temp path should be UTF-8");
+        assert!(source_path.contains(':'));
+
+        get_input_epg_content_as_file(
+            &app_config,
+            &client,
+            &input,
+            InputEpgFileRequest {
+                headers: None,
+                storage_dir: dir.path().to_string_lossy().as_ref(),
+                url: source_path,
+                persist_path: &persist,
+                max_bytes: Some(1024),
+            },
+        )
+        .await
+        .expect("absolute Windows path should be copied as a local file");
+
+        assert_eq!(tokio::fs::read(&persist).await.expect("read cache"), b"BEGIN:VCALENDAR\nEND:VCALENDAR\n");
+    }
+
+    #[tokio::test]
+    async fn remote_epg_size_limit_preserves_existing_cache_and_cleans_temp_file() {
+        let (addr, _accepted, server_handle) = match start_plain_http_server_with_body(b"0123456789").await {
+            Ok(server) => server,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping remote_epg_size_limit_preserves_existing_cache_and_cleans_temp_file: {err}");
+                return;
+            }
+            Err(err) => panic!("failed to start test server: {err}"),
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let persist = dir.path().join("cache.ics");
+        tokio::fs::write(&persist, b"existing cache").await.expect("write existing cache");
+        let url = format!("http://{addr}/calendar.ics");
+        let app_config = make_test_app_config(Config::default());
+        let client = make_epg_test_client();
+        let input = ConfigInput::default();
+
+        let err = get_input_epg_content_as_file(
+            &app_config,
+            &client,
+            &input,
+            InputEpgFileRequest {
+                headers: None,
+                storage_dir: dir.path().to_string_lossy().as_ref(),
+                url: &url,
+                persist_path: &persist,
+                max_bytes: Some(4),
+            },
+        )
+        .await
+        .expect_err("remote size limit should fail");
+
+        assert!(err.to_string().contains("exceeds configured limit"));
+        assert_eq!(tokio::fs::read(&persist).await.expect("read existing cache"), b"existing cache");
+        assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn remote_epg_stream_error_preserves_existing_cache_and_cleans_temp_file() {
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\ntruncated".to_string();
+        let (addr, _accepted, server_handle) = match start_plain_http_server_with_response(response).await {
+            Ok(server) => server,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping remote_epg_stream_error_preserves_existing_cache_and_cleans_temp_file: {err}");
+                return;
+            }
+            Err(err) => panic!("failed to start test server: {err}"),
+        };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let persist = dir.path().join("cache.ics");
+        tokio::fs::write(&persist, b"existing cache").await.expect("write existing cache");
+        let url = format!("http://{addr}/calendar.ics");
+        let app_config = make_test_app_config(Config::default());
+        let client = make_epg_test_client();
+        let input = ConfigInput::default();
+
+        get_input_epg_content_as_file(
+            &app_config,
+            &client,
+            &input,
+            InputEpgFileRequest {
+                headers: None,
+                storage_dir: dir.path().to_string_lossy().as_ref(),
+                url: &url,
+                persist_path: &persist,
+                max_bytes: Some(1024),
+            },
+        )
+        .await
+        .expect_err("truncated response body should fail");
+
+        assert_eq!(tokio::fs::read(&persist).await.expect("read existing cache"), b"existing cache");
+        assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+        server_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn parallel_epg_downloads_to_same_target_are_serialized_and_replace_atomically() {
+        let (addr, accepted, max_active, server_handle) =
+            match start_delayed_http_server_with_body(b"BEGIN:VCALENDAR\nEND:VCALENDAR\n").await {
+                Ok(server) => server,
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                    eprintln!(
+                        "skipping parallel_epg_downloads_to_same_target_are_serialized_and_replace_atomically: {err}"
+                    );
+                    return;
+                }
+                Err(err) => panic!("failed to start test server: {err}"),
+            };
+        let dir = tempfile::tempdir().expect("temp dir");
+        let persist = dir.path().join("cache.ics");
+        tokio::fs::write(&persist, b"existing cache").await.expect("write existing cache");
+        let url = format!("http://{addr}/calendar.ics");
+        let app_config = make_test_app_config(Config::default());
+        let client = make_epg_test_client();
+        let input = ConfigInput::default();
+        let storage_dir = dir.path().to_string_lossy();
+
+        let first = get_input_epg_content_as_file(
+            &app_config,
+            &client,
+            &input,
+            InputEpgFileRequest {
+                headers: None,
+                storage_dir: storage_dir.as_ref(),
+                url: &url,
+                persist_path: &persist,
+                max_bytes: Some(1024),
+            },
+        );
+        let second = get_input_epg_content_as_file(
+            &app_config,
+            &client,
+            &input,
+            InputEpgFileRequest {
+                headers: None,
+                storage_dir: storage_dir.as_ref(),
+                url: &url,
+                persist_path: &persist,
+                max_bytes: Some(1024),
+            },
+        );
+        let (first_result, second_result) = tokio::join!(first, second);
+
+        assert_eq!(first_result.expect("first download"), persist);
+        assert_eq!(second_result.expect("second download"), persist);
+        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            tokio::fs::read(&persist).await.expect("read refreshed cache"),
+            b"BEGIN:VCALENDAR\nEND:VCALENDAR\n"
+        );
+        assert!(atomic_download_temp_files(dir.path()).await.is_empty());
+        server_handle.abort();
     }
 
     #[test]
@@ -2964,6 +3494,52 @@ mod tests {
         });
 
         Ok((addr, accepted, handle))
+    }
+
+    async fn start_delayed_http_server_with_body(
+        body: &'static [u8],
+    ) -> std::io::Result<(
+        SocketAddr,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    )> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let accepted_clone = Arc::clone(&accepted);
+        let active_clone = Arc::clone(&active);
+        let max_active_clone = Arc::clone(&max_active);
+        let content_length = body.len();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    continue;
+                };
+                accepted_clone.fetch_add(1, Ordering::SeqCst);
+                let active = Arc::clone(&active_clone);
+                let max_active = Arc::clone(&max_active_clone);
+                tokio::spawn(async move {
+                    let active_count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(active_count, Ordering::SeqCst);
+                    let mut buf = vec![0_u8; 2048];
+                    let _ = socket.read(&mut buf).await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let response_head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = socket.write_all(response_head.as_bytes()).await;
+                    let _ = socket.write_all(body).await;
+                    let _ = socket.shutdown().await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+
+        Ok((addr, accepted, max_active, handle))
     }
 
     async fn start_plain_http_server_with_response(

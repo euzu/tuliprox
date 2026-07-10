@@ -574,14 +574,14 @@ mod platform {
             let memory_usage = query_process_memory_usage(self.process)?;
             self.networks.refresh(true);
             let (rx_bytes, tx_bytes) = super::sum_sysinfo_network_bytes(&self.networks);
-            let (net_rx_bytes_per_sec, net_tx_bytes_per_sec) = self.net_tracker.sample(rx_bytes, tx_bytes);
+            let (received_bps, sent_bps) = self.net_tracker.sample(rx_bytes, tx_bytes);
             let (disk_total_bytes, disk_free_bytes) = self.disk_probe.as_ref().map_or((0, 0), DiskProbe::sample);
             Some(SystemInfo {
                 cpu_usage: self.cpu_tracker.sample(cpu_time_secs),
                 memory_usage,
                 memory_total: self.memory_total,
-                net_rx_bytes_per_sec,
-                net_tx_bytes_per_sec,
+                net_rx_bytes_per_sec: received_bps,
+                net_tx_bytes_per_sec: sent_bps,
                 disk_total_bytes,
                 disk_free_bytes,
             })
@@ -698,14 +698,14 @@ mod platform {
             let memory_usage = query_process_memory_usage()?;
             self.networks.refresh(true);
             let (rx_bytes, tx_bytes) = super::sum_sysinfo_network_bytes(&self.networks);
-            let (net_rx_bytes_per_sec, net_tx_bytes_per_sec) = self.net_tracker.sample(rx_bytes, tx_bytes);
+            let (received_bps, sent_bps) = self.net_tracker.sample(rx_bytes, tx_bytes);
             let (disk_total_bytes, disk_free_bytes) = self.disk_probe.as_ref().map_or((0, 0), DiskProbe::sample);
             Some(SystemInfo {
                 cpu_usage: self.cpu_tracker.sample(cpu_time_secs),
                 memory_usage,
                 memory_total: self.memory_total,
-                net_rx_bytes_per_sec,
-                net_tx_bytes_per_sec,
+                net_rx_bytes_per_sec: received_bps,
+                net_tx_bytes_per_sec: sent_bps,
                 disk_total_bytes,
                 disk_free_bytes,
             })

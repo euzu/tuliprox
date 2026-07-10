@@ -23,6 +23,7 @@ blake3.workspace = true
 fastrand = { workspace = true, features = ["js"] }
 zeroize.workspace = true
 chrono.workspace = true
+chrono-tz = "0.10.4"
 bytes.workspace = true
 lz4_flex.workspace = true
 brotli.workspace = true

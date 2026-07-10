@@ -898,8 +898,8 @@ impl ConfigInputDto {
 
             epg.prepare(|| self.generate_auto_epg_url(), include_computed)?;
             epg.t_sources = {
-                let mut seen_urls = HashSet::new();
-                epg.t_sources.drain(..).filter(|src| seen_urls.insert(src.url.clone())).collect()
+                let mut seen_sources = HashSet::new();
+                epg.t_sources.drain(..).filter(|src| seen_sources.insert(src.source_identity())).collect()
             };
             self.epg = Some(epg);
         }

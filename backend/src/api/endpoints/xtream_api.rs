@@ -1700,22 +1700,189 @@ pub fn xtream_api_register() -> axum::Router<Arc<AppState>> {
 mod tests {
     use super::{
         empty_stream_info_response, get_xtream_player_api_stream_url, resolve_xtream_playback_extension,
-        ApiStreamContext, XtreamApiTimeShiftRequest,
+        xtream_get_short_epg, ApiStreamContext, XtreamApiTimeShiftRequest,
     };
-    use crate::{api::model::UserApiRequest, model::ConfigInput};
+    use crate::{
+        api::model::{
+            create_test_app_state, PlaylistStorage, PlaylistXtreamStorage, UserApiRequest,
+        },
+        model::{
+            Config, ConfigInput, ConfigTarget, Epg, IcsEpgSourceConfig, ProxyUserCredentials, TargetOutput,
+            XtreamTargetFlagsSet, XtreamTargetOutput,
+        },
+        processing::parser::ics::parse_ics_file_to_channel,
+        repository::{
+            epg_write_file, xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTree,
+            VirtualIdRecord,
+        },
+    };
+    use arc_swap::ArcSwapOption;
+    use axum::response::IntoResponse;
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
+    use shared::foundation::Filter;
     use shared::{
         model::{
-            InputType, PlaylistItemType, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
+            ClusterFlags, InputType, PlaylistItemType, ProcessingOrder, StreamProperties, UUIDType,
+            VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
         },
         utils::Internable,
     };
     use std::sync::Arc;
+    use tempfile::tempdir;
 
     async fn response_body_text(response: axum::response::Response) -> Result<String, String> {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .map_err(|err| format!("failed to read response body: {err}"))?;
         String::from_utf8(body.to_vec()).map_err(|err| format!("response body is not UTF-8: {err}"))
+    }
+
+    fn short_epg_target() -> ConfigTarget {
+        ConfigTarget {
+            id: 1,
+            enabled: true,
+            name: "ics-xtream".to_string(),
+            options: None,
+            sort: None,
+            filter: Filter::default(),
+            output: vec![TargetOutput::Xtream(XtreamTargetOutput {
+                flags: XtreamTargetFlagsSet::new(),
+                trakt: None,
+                filter: None,
+            })],
+            rename: None,
+            mapping_ids: None,
+            mapping: Arc::new(ArcSwapOption::new(None)),
+            favourites: None,
+            processing_order: ProcessingOrder::default(),
+            watch: None,
+            use_memory_cache: true,
+        }
+    }
+
+    fn short_epg_live_item() -> XtreamPlaylistItem {
+        XtreamPlaylistItem {
+            virtual_id: 100,
+            provider_id: 0,
+            name: "Formula 1".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Sports".intern(),
+            title: "".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: "http://example.invalid/live.ts".intern(),
+            epg_channel_id: Some("f1.calendar".intern()),
+            xtream_cluster: XtreamCluster::Live,
+            additional_properties: None,
+            item_type: PlaylistItemType::Live,
+            category_id: 1,
+            input_name: "local".intern(),
+            channel_no: 1,
+            source_ordinal: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn xtream_short_epg_returns_imported_ics_programme_for_matching_channel_id() {
+        let dir = tempdir().expect("temp dir");
+        let ics_path = dir.path().join("calendar.ics");
+        let start = chrono::Utc::now() + chrono::Duration::days(1);
+        let stop = start + chrono::Duration::hours(1);
+        std::fs::write(
+            &ics_path,
+            format!(
+                concat!(
+                    "BEGIN:VCALENDAR\r\n",
+                    "VERSION:2.0\r\n",
+                    "BEGIN:VEVENT\r\n",
+                    "UID:f1-qualifying\r\n",
+                    "DTSTART:{}\r\n",
+                    "DTEND:{}\r\n",
+                    "SUMMARY:Formula 1 Qualifying\r\n",
+                    "DESCRIPTION:Imported from ICS\r\n",
+                    "END:VEVENT\r\n",
+                    "END:VCALENDAR\r\n",
+                ),
+                start.format("%Y%m%dT%H%M%SZ"),
+                stop.format("%Y%m%dT%H%M%SZ"),
+            ),
+        )
+        .expect("write ICS fixture");
+        let channel = parse_ics_file_to_channel(
+            &ics_path,
+            "f1.calendar".intern(),
+            Some("Formula 1".intern()),
+            &IcsEpgSourceConfig::default(),
+        )
+        .await
+        .expect("parse ICS fixture");
+
+        let config = Config {
+            storage_dir: dir.path().to_string_lossy().into_owned(),
+            ..Config::default()
+        };
+        let target = Arc::new(short_epg_target());
+        let xtream_storage = xtream_get_storage_path(&config, &target.name).expect("xtream storage path");
+        std::fs::create_dir_all(&xtream_storage).expect("create xtream storage");
+        let epg_path = xtream_get_epg_file_path_for_target(&xtream_storage);
+        epg_write_file(
+            &target.name,
+            &Epg {
+                priority: 0,
+                logo_override: false,
+                attributes: None,
+                children: vec![Arc::new(channel)],
+            },
+            &epg_path,
+            &std::collections::HashMap::<Arc<str>, Arc<str>>::new(),
+        )
+        .expect("write target EPG");
+
+        let app_state = create_test_app_state(config);
+        let live_item = short_epg_live_item();
+        let mut live = BPlusTree::new();
+        live.insert(live_item.virtual_id, live_item.clone());
+        app_state
+            .playlists
+            .cache_playlist(
+                &target.name,
+                PlaylistStorage::XtreamPlaylist(Box::new(PlaylistXtreamStorage {
+                    live,
+                    vod: BPlusTree::new(),
+                    series: BPlusTree::new(),
+                })),
+            )
+            .await;
+        let mut id_mapping = BPlusTree::new();
+        id_mapping.insert(
+            live_item.virtual_id,
+            VirtualIdRecord::new(
+                live_item.provider_id,
+                live_item.virtual_id,
+                PlaylistItemType::Live,
+                0,
+                UUIDType::default(),
+            ),
+        );
+        app_state.playlists.cache_id_mapping(&target.name, id_mapping).await;
+
+        let mut user = ProxyUserCredentials::default();
+        user.output_clusters = ClusterFlags::all();
+        let response = xtream_get_short_epg(&app_state, &user, &target, "100", 4)
+            .await
+            .into_response();
+        let body = response_body_text(response).await.expect("read short EPG response");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("parse short EPG JSON");
+        let decode_listing_text = |field: &str| {
+            let encoded = json["epg_listings"][0][field].as_str().expect("encoded listing text");
+            String::from_utf8(BASE64_STANDARD.decode(encoded).expect("decode listing text"))
+                .expect("decoded listing text is UTF-8")
+        };
+
+        assert_eq!(json["epg_listings"][0]["channel_id"], "f1.calendar");
+        assert_eq!(decode_listing_text("title"), "Formula 1 Qualifying");
+        assert_eq!(decode_listing_text("description"), "Imported from ICS");
     }
 
     #[tokio::test]

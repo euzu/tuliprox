@@ -5,6 +5,43 @@ default_eq_fns!(
     default_epg_best_match_threshold, is_default_epg_best_match_threshold, u16, 95;
 );
 
+default_eq_fns!(
+    default_ics_dummy_days_past, is_default_ics_dummy_days_past, u16, 1;
+    default_ics_dummy_days_future, is_default_ics_dummy_days_future, u16, 14;
+    default_ics_dummy_block_hours, is_default_ics_dummy_block_hours, u8, 4;
+    default_ics_dummy_min_gap_minutes, is_default_ics_dummy_min_gap_minutes, u16, 1;
+    default_ics_max_events, is_default_ics_max_events, usize, 50_000;
+    default_ics_max_download_bytes, is_default_ics_max_download_bytes, u64, 10 * 1024 * 1024;
+    default_ics_max_decompressed_bytes, is_default_ics_max_decompressed_bytes, usize, 20 * 1024 * 1024;
+);
+
+pub const MAX_ICS_DOWNLOAD_BYTES_HARD_LIMIT: u64 = 50 * 1024 * 1024;
+pub const MAX_ICS_DECOMPRESSED_BYTES_HARD_LIMIT: usize = 100 * 1024 * 1024;
+pub const MAX_ICS_EVENTS_HARD_LIMIT: usize = 200_000;
+pub const MAX_ICS_LINE_LENGTH: usize = 128 * 1024;
+pub const MAX_ICS_PROPERTIES_PER_EVENT: usize = 256;
+pub const MAX_ICS_SUMMARY_LENGTH: usize = 4 * 1024;
+pub const MAX_ICS_DESCRIPTION_LENGTH: usize = 64 * 1024;
+pub const MAX_ICS_DAYS_PAST: u16 = 30;
+pub const MAX_ICS_DAYS_FUTURE: u16 = 366;
+
+pub const DEFAULT_ICS_TIMEZONE: &str = "UTC";
+pub const DEFAULT_ICS_EVENT_TITLE: &str = "{summary}";
+pub const DEFAULT_ICS_EVENT_DESCRIPTION: &str = "{description}";
+pub const DEFAULT_ICS_DUMMY_TITLE: &str = "No programme entry";
+
+pub fn default_ics_timezone() -> String { DEFAULT_ICS_TIMEZONE.to_string() }
+pub fn is_default_ics_timezone(value: &String) -> bool { value == DEFAULT_ICS_TIMEZONE }
+
+pub fn default_ics_event_title() -> String { DEFAULT_ICS_EVENT_TITLE.to_string() }
+pub fn is_default_ics_event_title(value: &String) -> bool { value == DEFAULT_ICS_EVENT_TITLE }
+
+pub fn default_ics_event_description() -> String { DEFAULT_ICS_EVENT_DESCRIPTION.to_string() }
+pub fn is_default_ics_event_description(value: &String) -> bool { value == DEFAULT_ICS_EVENT_DESCRIPTION }
+
+pub fn default_ics_dummy_title() -> String { DEFAULT_ICS_DUMMY_TITLE.to_string() }
+pub fn is_default_ics_dummy_title(value: &String) -> bool { value == DEFAULT_ICS_DUMMY_TITLE }
+
 pub const DEFAULT_EPG_NORMALIZE_REGEX: &str = r"[^a-zA-Z0-9\-]";
 
 pub fn default_epg_normalize_regex() -> Option<String> { Some(DEFAULT_EPG_NORMALIZE_REGEX.to_string()) }
