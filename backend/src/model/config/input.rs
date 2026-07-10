@@ -120,14 +120,14 @@ pub struct MediaServerInputConfig {
 
 #[derive(Debug, Clone)]
 pub struct ConfigInputStaged {
-    pub provider: Option<Arc<str>>,
+    pub for_input: Option<Arc<str>>,
     pub clusters: ClusterFlags,
 }
 
 impl From<&ConfigInputStagedDto> for ConfigInputStaged {
     fn from(dto: &ConfigInputStagedDto) -> Self {
         Self {
-            provider: dto.provider.clone(),
+            for_input: dto.for_input.clone(),
             clusters: dto.clusters,
         }
     }

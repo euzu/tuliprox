@@ -458,7 +458,7 @@ inputs:
     type: staged
     url: http://editor.example/provider-main-live.m3u
     staged:
-      provider: provider_main
+      for_input: provider_main
       clusters: [live]
 ```
 
@@ -472,7 +472,7 @@ inputs:
 | `username` / `password` | String |   Yes    |         | Mandatory only if `staged_type: xtream`. Not inherited from the provider input.                       |
 | `method`                | Enum   |    No    | `GET`   | HTTP request method (`GET` or `POST`). Not inherited from the provider input.                         |
 | `headers`               | Dict   |    No    |         | Custom HTTP headers for the staged download. Not inherited from the provider input.                   |
-| `staged.provider`       | String |   Yes    |         | Provider input name. Must reference a non-staged `m3u` or `xtream` input.                             |
+| `staged.for_input`      | String |   Yes    |         | Provider input name. Must reference a non-staged `m3u` or `xtream` input.                             |
 | `staged.clusters`       | List   |    No    | all     | Clusters loaded from the staged input: `live`, `vod`, `series`.                                       |
 
 #### Staged Cluster Behavior & Validation
@@ -480,7 +480,7 @@ inputs:
 `staged.clusters` is the group of clusters loaded from the staged input.
 
 * The referenced provider supplies all clusters not listed in `staged.clusters`.
-* `staged.provider` must reference an existing non-staged `m3u` or `xtream` input.
+* `staged.for_input` must reference an existing non-staged `m3u` or `xtream` input.
 * Each provider input can have at most one staged overlay.
 * `staged.clusters` must not be empty.
 * Source definitions must reference the provider input, not the staged input.

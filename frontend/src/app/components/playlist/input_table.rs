@@ -73,8 +73,8 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                     7 => {
                         html! { <RevealContent preview={ html!{translator.t("LABEL.SETTINGS")}}><InputOptions input={dto.clone()} /></RevealContent> }
                     }
-                    8 => html! { dto.priority.to_string() },
-                    9 => html! { dto.max_connections.to_string() },
+                    8 => html_if!(!dto.input_type.is_staged(), { dto.priority.to_string() }),
+                    9 => html_if!(!dto.input_type.is_staged(), { dto.max_connections.to_string() }),
                     10 => html! { dto.method.to_string() },
                     11 => html_if!(dto.epg.is_some(),
                                  { <RevealContent preview={ html!{ dto.epg.as_ref().map_or_else(|| html!{}, |e| html! {
@@ -92,7 +92,7 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                     13 => dto
                         .staged
                         .as_ref()
-                        .and_then(|staged| staged.provider.as_ref())
+                        .and_then(|staged| staged.for_input.as_ref())
                         .map_or_else(|| html! {}, |provider| html! { provider.as_ref() }),
                     14 => dto
                         .exp_date

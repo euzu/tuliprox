@@ -156,7 +156,7 @@ impl SourcesConfigDto {
             let Some(staged) = input.staged.as_ref() else {
                 continue; // already enforced in ConfigInputDto::prepare
             };
-            let Some(provider_name) = staged.provider.as_deref() else {
+            let Some(provider_name) = staged.for_input.as_deref() else {
                 continue;
             };
             if let Some(existing_staged) = staged_by_provider.insert(provider_name, input.name.as_ref()) {
@@ -236,7 +236,7 @@ mod tests {
             name: "staged".intern(),
             input_type: InputType::Staged,
             url: "http://staged.example/playlist.m3u".to_string(),
-            staged: Some(ConfigInputStagedDto { provider: Some(provider.intern()), ..Default::default() }),
+            staged: Some(ConfigInputStagedDto { for_input: Some(provider.intern()), ..Default::default() }),
             ..Default::default()
         }
     }
@@ -311,14 +311,14 @@ mod tests {
                     name: "staged_live".intern(),
                     input_type: InputType::Staged,
                     url: "http://staged.example/live.m3u".to_string(),
-                    staged: Some(ConfigInputStagedDto { provider: Some("provider".intern()), ..Default::default() }),
+                    staged: Some(ConfigInputStagedDto { for_input: Some("provider".intern()), ..Default::default() }),
                     ..Default::default()
                 },
                 ConfigInputDto {
                     name: "staged_vod".intern(),
                     input_type: InputType::Staged,
                     url: "http://staged.example/vod.m3u".to_string(),
-                    staged: Some(ConfigInputStagedDto { provider: Some("provider".intern()), ..Default::default() }),
+                    staged: Some(ConfigInputStagedDto { for_input: Some("provider".intern()), ..Default::default() }),
                     ..Default::default()
                 },
             ],
@@ -352,7 +352,7 @@ mod tests {
                     name: "provider".intern(),
                     input_type: InputType::Staged,
                     url: "http://provider.example/playlist.m3u".to_string(),
-                    staged: Some(ConfigInputStagedDto { provider: Some("root".intern()), ..Default::default() }),
+                    staged: Some(ConfigInputStagedDto { for_input: Some("root".intern()), ..Default::default() }),
                     ..Default::default()
                 },
                 staged_overlay("provider"),

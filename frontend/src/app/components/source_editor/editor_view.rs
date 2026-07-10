@@ -432,7 +432,7 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
 
         if let Some(provider_name) = provider_name {
             let staged = gen_inputs[from_input_index].staged.get_or_insert_with(ConfigInputStagedDto::default);
-            staged.provider = Some(provider_name.into());
+            staged.for_input = Some(provider_name.into());
         }
     }
 
@@ -455,7 +455,7 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
         });
         if !has_provider_link {
             if let Some(staged) = gen_inputs[*input_index].staged.as_mut() {
-                staged.provider = None;
+                staged.for_input = None;
             }
         }
     }
@@ -747,7 +747,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                                 let Some(provider_name) = input
                                     .staged
                                     .as_ref()
-                                    .and_then(|staged| staged.provider.as_deref())
+                                    .and_then(|staged| staged.for_input.as_deref())
                                     .map(str::trim)
                                     .filter(|provider| !provider.is_empty())
                                 else {
@@ -952,12 +952,12 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 let replacement = if let BlockInstance::Input(dto) = &block.instance {
                     dto.staged
                         .as_ref()
-                        .and_then(|staged| staged.provider.as_deref())
+                        .and_then(|staged| staged.for_input.as_deref())
                         .and_then(|provider| input_rename.get(provider))
                         .map(|new_provider| {
                             let mut cloned = dto.as_ref().clone();
                             if let Some(staged) = cloned.staged.as_mut() {
-                                staged.provider = Some(new_provider.clone().into());
+                                staged.for_input = Some(new_provider.clone().into());
                             }
                             BlockInstance::Input(Rc::new(cloned))
                         })

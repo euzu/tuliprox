@@ -7,7 +7,7 @@
 - **Staged inputs reworked into a first-class `staged` input type.** The old nested `staged:` block on
   provider inputs (with `enabled`, `live_source`, `vod_source`, and `series_source`) has been removed.
   A staged source is now its own input with `type: staged`. It points to one non-staged `m3u` /
-  `xtream` provider through `staged.provider`, and `staged.clusters` selects which clusters (`live`,
+  `xtream` provider through `staged.for_input`, and `staged.clusters` selects which clusters (`live`,
   `vod`, `series`) are loaded from the staged playlist. Clusters not selected there are loaded from the
   provider input itself. The merged result is stored under the provider input, so playlist delivery and
   stream/API routing continue to use the provider.

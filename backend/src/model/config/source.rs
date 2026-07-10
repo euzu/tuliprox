@@ -475,7 +475,7 @@ impl SourcesConfig {
             input
                 .staged
                 .as_ref()
-                .and_then(|staged| staged.provider.as_ref())
+                .and_then(|staged| staged.for_input.as_ref())
                 .is_some_and(|name| name == provider_name)
         })
     }

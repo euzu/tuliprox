@@ -589,7 +589,7 @@ async fn process_source(
                 let (mut playlist_groups, mut error_list) = {
                     broadcast_step("Playlist download", &format!("Downloading input '{}'", input.name));
 
-                    let (mut download_err, playlist, error) = download_input(ctx, input).await;
+                    let (mut download_err, playlist, error) = download_input(ctx, input, false).await;
 
                     if let Some(err) = error {
                         broadcast_step(
@@ -732,10 +732,16 @@ async fn load_cached_input_playlist(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn download_input(
     ctx: &PlaylistProcessingContext,
     input: &Arc<ConfigInput>,
+    allow_staged_input: bool,
 ) -> (Vec<TuliproxError>, PlaylistSource, Option<TuliproxError>) {
+    if input.staged.is_some() && !allow_staged_input {
+        return (vec![], MemoryPlaylistSource::default().into_source(), None);
+    }
+
     let staged_overlay = if input.staged.is_none() {
         let sources = ctx.config.sources.load();
         sources.get_staged_input_for_provider(&input.name).cloned()
@@ -830,7 +836,7 @@ async fn download_input(
     if let Some(staged_input) = staged_overlay.filter(|_| apply_staged_overlay) {
         let clusters = staged_input.staged.as_ref().map_or_else(ClusterFlags::all, |staged| staged.clusters);
         let (mut staged_download_err, mut staged_playlist, staged_error) =
-            Box::pin(download_input(ctx, &staged_input)).await;
+            Box::pin(download_input(ctx, &staged_input, true)).await;
         playlist_download_result.download_err.append(&mut staged_download_err);
         if let Some(staged_error) = staged_error {
             playlist_download_result.download_err.push(staged_error);

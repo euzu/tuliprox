@@ -134,8 +134,13 @@ impl StagedInputType {
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigInputStagedDto {
-    #[serde(default, skip_serializing_if = "is_blank_optional_arc_str", with = "arc_str_option_serde")]
-    pub provider: Option<Arc<str>>,
+    #[serde(
+        default,
+        alias = "provider",
+        skip_serializing_if = "is_blank_optional_arc_str",
+        with = "arc_str_option_serde"
+    )]
+    pub for_input: Option<Arc<str>>,
     #[serde(default)]
     pub clusters: ClusterFlags,
 }
@@ -636,8 +641,8 @@ impl ConfigInputDto {
                     self.name
                 )));
             };
-            if let Some(provider) = staged.provider.as_ref().map(|p| p.trim()).filter(|p| !p.is_empty()) {
-                staged.provider = Some(provider.intern());
+            if let Some(for_input) = staged.for_input.as_ref().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+                staged.for_input = Some(for_input.intern());
             } else {
                 return Err(TuliproxError::ConfigInput(format!(
                     "staged input requires a provider input (input: {})",
@@ -1507,7 +1512,7 @@ mod tests {
         let mut dto = create_test_dto();
         dto.input_type = InputType::Staged;
         dto.staged =
-            Some(ConfigInputStagedDto { provider: Some("provider_a".intern()), ..ConfigInputStagedDto::default() });
+            Some(ConfigInputStagedDto { for_input: Some("provider_a".intern()), ..ConfigInputStagedDto::default() });
         dto.url = String::new();
 
         let err = prepare_dto(&mut dto).expect_err("staged input without url must be rejected");
@@ -1519,7 +1524,7 @@ mod tests {
         let mut dto = create_test_dto();
         dto.input_type = InputType::Staged;
         dto.staged =
-            Some(ConfigInputStagedDto { provider: Some("provider_a".intern()), clusters: ClusterFlags::empty() });
+            Some(ConfigInputStagedDto { for_input: Some("provider_a".intern()), clusters: ClusterFlags::empty() });
         dto.url = "http://staged.com/playlist.m3u".to_string();
 
         let err = prepare_dto(&mut dto).expect_err("staged input without clusters must be rejected");
@@ -1532,7 +1537,7 @@ mod tests {
         dto.input_type = InputType::M3u;
         dto.url = "http://main.com/playlist.m3u".to_string();
         dto.staged =
-            Some(ConfigInputStagedDto { provider: Some("provider_a".intern()), ..ConfigInputStagedDto::default() });
+            Some(ConfigInputStagedDto { for_input: Some("provider_a".intern()), ..ConfigInputStagedDto::default() });
 
         let err = prepare_dto(&mut dto).expect_err("non-staged input with staged config must be rejected");
         assert!(err.to_string().contains("staged configuration is only allowed for staged inputs"), "Error: {err}");
@@ -1543,7 +1548,7 @@ mod tests {
         let mut dto = create_test_dto();
         dto.input_type = InputType::Staged;
         dto.staged =
-            Some(ConfigInputStagedDto { provider: Some("provider_a".intern()), ..ConfigInputStagedDto::default() });
+            Some(ConfigInputStagedDto { for_input: Some("provider_a".intern()), ..ConfigInputStagedDto::default() });
         dto.url = "http://staged.com/playlist.m3u".to_string();
         dto.media_server = Some(MediaServerInputConfigDto::default());
 
@@ -1556,12 +1561,20 @@ mod tests {
         let mut dto = create_test_dto();
         dto.input_type = InputType::Staged;
         dto.staged =
-            Some(ConfigInputStagedDto { provider: Some(" provider_a ".intern()), ..ConfigInputStagedDto::default() });
+            Some(ConfigInputStagedDto { for_input: Some(" provider_a ".intern()), ..ConfigInputStagedDto::default() });
         dto.url = "http://staged.com/playlist.m3u".to_string();
 
         prepare_dto(&mut dto).expect("valid staged input should prepare successfully");
         assert!(dto.input_type.is_staged());
-        assert_eq!(dto.staged.as_ref().and_then(|staged| staged.provider.as_deref()), Some("provider_a"));
+        assert_eq!(dto.staged.as_ref().and_then(|staged| staged.for_input.as_deref()), Some("provider_a"));
+    }
+
+    #[test]
+    fn test_staged_provider_alias_deserializes_as_for_input() {
+        let staged: ConfigInputStagedDto =
+            serde_json::from_str(r#"{"provider":"provider_a"}"#).expect("legacy provider field should deserialize");
+
+        assert_eq!(staged.for_input.as_deref(), Some("provider_a"));
     }
 
     #[test]
@@ -1570,7 +1583,7 @@ mod tests {
         dto.input_type = InputType::Staged;
         dto.url = "http://staged.com/playlist.m3u".to_string();
         dto.staged =
-            Some(ConfigInputStagedDto { provider: Some("provider_a".intern()), ..ConfigInputStagedDto::default() });
+            Some(ConfigInputStagedDto { for_input: Some("provider_a".intern()), ..ConfigInputStagedDto::default() });
         dto.priority = -10;
         dto.max_connections = 2;
         dto.cache_duration = Some("not-a-duration".to_string());
