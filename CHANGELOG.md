@@ -16,7 +16,8 @@
 ## 🌟 New Features
 
 - **ICS Calendar EPG Sources**: Import iCalendar (`.ics`) events as XMLTV EPG data with M3U and Xtream channel
-  assignment, Smart Match support, configurable four-hour dummy gap filling, and bounded atomic cache downloads.
+  assignment, Smart Match support, configurable four-hour dummy gap filling, bounded atomic cache downloads, and
+  aggregated warnings for recurring events that are detected but not expanded yet.
 
 - **Trakt Charts**: Xtream Trakt integration can now build virtual categories from public Trakt charts via `trakt.charts[]`.
   - MVP supports `movies/shows` with `trending` and `popular`.

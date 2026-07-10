@@ -332,6 +332,8 @@ keeps accidental calendar settings from changing XMLTV download or runtime behav
 #### ICS Calendar Sources
 
 ICS sources import iCalendar files and convert their `VEVENT` entries into XMLTV-compatible programme entries.
+Recurring events using `RRULE`, `RDATE`, or `EXDATE` are detected but not expanded yet; Tuliprox imports the base
+`DTSTART`/`DTEND` occurrence and logs one aggregated warning per parsed source when such entries are present.
 
 An ICS source creates exactly one virtual EPG channel. It does **not** create a playlist channel or stream. The generated
 `channel_id` must therefore be assigned to an existing playlist entry by one of the following mechanisms:

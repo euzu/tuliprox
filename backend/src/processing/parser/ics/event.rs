@@ -22,6 +22,7 @@ pub struct IcsEvent {
     pub start_display: Option<String>,
     pub stop_display: Option<String>,
     pub cancelled: bool,
+    pub unsupported_recurrence: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +51,7 @@ pub fn parse_ics_events(content: &str, config: &IcsEpgSourceConfig) -> Result<Ve
     let mut current_malformed = false;
     let mut examined_events = 0usize;
     let mut invalid_events = 0usize;
+    let mut unsupported_recurrence_events = 0usize;
     let mut event_limit_reached = false;
 
     for line in lines {
@@ -121,11 +123,13 @@ pub fn parse_ics_events(content: &str, config: &IcsEpgSourceConfig) -> Result<Ve
                     if current_malformed {
                         invalid_events += 1;
                     } else {
-                        match parse_event_lines(&current, config) {
-                            Ok(Some(event)) => events.push(event),
-                            Ok(None) => {}
-                            Err(_) => invalid_events += 1,
-                        }
+                        collect_parsed_event(
+                            &current,
+                            config,
+                            &mut events,
+                            &mut invalid_events,
+                            &mut unsupported_recurrence_events,
+                        );
                     }
                 }
                 collect_current = false;
@@ -141,9 +145,28 @@ pub fn parse_ics_events(content: &str, config: &IcsEpgSourceConfig) -> Result<Ve
     }
 
     validate_complete_calendar(calendar_state)?;
-    log_event_parse_summary(invalid_events, examined_events, event_limit_reached, config.max_events);
+    log_parse_summary(invalid_events, unsupported_recurrence_events, examined_events, event_limit_reached, config.max_events);
 
     Ok(events)
+}
+
+fn collect_parsed_event(
+    lines: &[String],
+    config: &IcsEpgSourceConfig,
+    events: &mut Vec<IcsEvent>,
+    invalid_events: &mut usize,
+    unsupported_recurrence_events: &mut usize,
+) {
+    match parse_event_lines(lines, config) {
+        Ok(Some(event)) => {
+            if event.unsupported_recurrence {
+                *unsupported_recurrence_events += 1;
+            }
+            events.push(event);
+        }
+        Ok(None) => {}
+        Err(_) => *invalid_events += 1,
+    }
 }
 
 fn validate_complete_calendar(state: CalendarState) -> Result<(), TuliproxError> {
@@ -154,8 +177,9 @@ fn validate_complete_calendar(state: CalendarState) -> Result<(), TuliproxError>
     }
 }
 
-fn log_event_parse_summary(
+fn log_parse_summary(
     invalid_events: usize,
+    unsupported_recurrence_events: usize,
     examined_events: usize,
     event_limit_reached: bool,
     max_events: usize,
@@ -165,6 +189,12 @@ fn log_event_parse_summary(
     }
     if event_limit_reached {
         warn!("ICS VEVENT processing limit {max_events} reached; additional event blocks were not examined");
+    }
+    if unsupported_recurrence_events != 0 {
+        warn!(
+            "Detected {unsupported_recurrence_events} ICS VEVENT block(s) with unsupported recurrence properties \
+             (RRULE/RDATE/EXDATE); importing only their base DTSTART/DTEND occurrence"
+        );
     }
 }
 
@@ -242,6 +272,7 @@ fn parse_event_lines(lines: &[String], config: &IcsEpgSourceConfig) -> Result<Op
             "LOCATION" => event.location = Some(unescape_ics_text(&property.value)),
             "CATEGORIES" => event.categories = Some(unescape_ics_text(&property.value)),
             "STATUS" if property.value.eq_ignore_ascii_case("CANCELLED") => event.cancelled = true,
+            "RRULE" | "RDATE" | "EXDATE" => event.unsupported_recurrence = true,
             "DTSTART" => {
                 let parsed = parse_ics_datetime(&property.params, &property.value, &config.timezone)?;
                 all_day |= parsed.all_day;
@@ -451,6 +482,16 @@ mod tests {
         let events = parse_ics_events(&content, &cfg).expect("events");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].summary.as_deref(), Some("One"));
+    }
+
+    #[test]
+    fn recurring_event_properties_are_detected_without_expansion() {
+        let content = calendar(
+            "BEGIN:VEVENT\nSUMMARY:Recurring\nDTSTART:20260306T123000Z\nDTEND:20260306T133000Z\nRRULE:FREQ=DAILY;COUNT=10\nEXDATE:20260307T123000Z\nEND:VEVENT",
+        );
+        let events = parse_ics_events(&content, &config()).expect("events");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].unsupported_recurrence);
     }
 
     #[test]
