@@ -385,6 +385,16 @@
 
 ## ⚙️ New Settings
 
+- **source.yml (target `options.epg_output`)**:
+  - Added optional `lowercase_ids` (`bool`, default `false`) to canonicalize technical EPG IDs with ASCII lowercase
+    consistently across visible M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV `<channel id>` / `<programme channel>`
+    references, EPG API responses, and target EPG storage keys after a full target refresh. Disabled targets retain
+    their existing source-case storage keys and ordering.
+  - Added optional `lowercase_xmltv_display_names` (`bool`, default `false`) to lowercase only XMLTV `<display-name>`
+    values during serialization; playlist names and programme metadata remain unchanged, and no persisted rebuild is
+    normally required.
+  - Both options are disabled by default, so existing visible outputs remain unchanged. Changing `lowercase_ids`
+    requires a full target refresh, and clients may need to re-index EPG data once after visible IDs change.
 - **config.yml (main)**:
   - Added `interner_gc_interval_secs`: interval in seconds between background string interner GC checks.
   - Added `interner_gc_min_pool_size`: minimum interned-string pool size required before background interner GC runs.

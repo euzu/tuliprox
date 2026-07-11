@@ -1016,6 +1016,9 @@ sources:
         sort: { }
         options:
           ignore_logo: false
+          epg_output:
+            lowercase_ids: false
+            lowercase_xmltv_display_names: false
           share_live_streams:
             hls: false
             mpeg_ts: false
@@ -1287,6 +1290,9 @@ targets:
         use_output: xtream
     options:
       ignore_logo: false
+      epg_output:
+        lowercase_ids: true
+        lowercase_xmltv_display_names: false
       share_live_streams:
         hls: true
         mpeg_ts: true
@@ -1295,13 +1301,15 @@ targets:
 
 #### Target Option Parameters
 
-| Parameter                    | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                                      |
-|:-----------------------------|:-----|:--------:|:--------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `ignore_logo`                | Bool | No       | `false` | Ignores `tvg-logo` and `tvg-logo-small` attributes. This reduces downstream device-side logo caching and can keep generated M3U playlists leaner for clients with limited storage or poor cache invalidation behavior.             |
-| `share_live_streams.hls`     | Bool | No       | `false` | Enables HLS live sharing for the new HLS cache proxy path. This is a configuration switch for the HLS cache feature and is independent from MPEG-TS stream sharing.                                                                |
-| `share_live_streams.mpeg_ts` | Bool | No       | `false` | Allows Tuliprox to share MPEG-TS live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel. |
-| `remove_duplicates`          | Bool | No       | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output.                                                                                    |
-| `force_redirect`             | Bool | No       | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model.                                                     |
+| Parameter                                  | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                                                  |
+|:-------------------------------------------|:-----|:--------:|:--------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ignore_logo`                              | Bool | No       | `false` | Ignores `tvg-logo` and `tvg-logo-small` attributes. This reduces downstream device-side logo caching and can keep generated M3U playlists leaner for clients with limited storage or poor cache invalidation behavior.                         |
+| `share_live_streams.hls`                   | Bool | No       | `false` | Enables HLS live sharing for the new HLS cache proxy path. This is a configuration switch for the HLS cache feature and is independent from MPEG-TS stream sharing.                                                                            |
+| `share_live_streams.mpeg_ts`               | Bool | No       | `false` | Allows Tuliprox to share MPEG-TS live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel.             |
+| `remove_duplicates`                        | Bool | No       | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output.                                                                                                |
+| `epg_output.lowercase_ids`                 | Bool | No       | `false` | Canonicalizes visible technical EPG IDs with ASCII lowercase across M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV channel/programme references, and EPG API responses. Changing this option requires a full target refresh.                     |
+| `epg_output.lowercase_xmltv_display_names` | Bool | No       | `false` | Applies Unicode lowercase exclusively to XMLTV `<display-name>` values during serialization. Playlist names, Xtream names, programme titles, and programme descriptions remain unchanged; persisted target data does not require rebuilding.   |
+| `force_redirect`                           | Bool | No       | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model.                                                                 |
 
 > **Shared HLS:** `share_live_streams.hls` requires `reverse_proxy.hls_cache` in `config.yml`.
 > Start with [Shared HLS Sessions](./shared-hls-sessions.md) for the feature overview and
@@ -1314,6 +1322,51 @@ targets:
 > regardless of the number of connected clients.
 > If the reverse-proxy buffer size is increased above `1024`, memory usage increases accordingly.
 > Example: with a buffer size of `2048`, each shared channel consumes at least **24 MB**.
+
+#### EPG Output Normalization
+
+`epg_output` applies to the entire target so every output format uses the same EPG identity space. Both options
+default to `false`; when they are omitted, Tuliprox preserves the source casing and existing output behavior.
+
+```yaml
+targets:
+  - name: sample_target
+    options:
+      epg_output:
+        lowercase_ids: true
+        lowercase_xmltv_display_names: true
+    output:
+      - type: m3u
+      - type: xtream
+```
+
+With both options enabled, neutral input values such as `Example.Channel` and `Sample Network` produce a canonical
+technical ID of `example.channel` and the following XMLTV output:
+
+```xml
+<channel id="example.channel">
+  <display-name>sample network</display-name>
+</channel>
+<programme channel="example.channel">
+  <title>Example Programme</title>
+</programme>
+```
+
+`lowercase_ids` uses ASCII lowercase for technical identifiers. Non-ASCII characters in those IDs remain unchanged.
+The canonical visible ID is used consistently for M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV `<channel id>` and
+`<programme channel>`, and Short EPG / Stream EPG responses. Target EPG database keys and API lookup keys use the same
+target output casing: source case is preserved while the option is disabled, and ASCII lowercase is used after the
+option is enabled and the target is refreshed. This keeps existing mixed-case target databases compatible while the
+two XMLTV attributes continue to use exactly the same visible value.
+
+`lowercase_xmltv_display_names` uses Unicode lowercase only while serializing XMLTV `<display-name>` values. It takes
+effect for subsequent XMLTV responses and normally does not require rebuilding persisted target data. It does not
+change playlist or Xtream names, programme titles or descriptions, input data, parser values, caches, or Smart Match
+behavior.
+
+Changing `lowercase_ids` requires a full target refresh so persisted playlist and EPG artifacts use the same visible
+IDs; a configuration hot reload alone is insufficient. Clients may need to re-index their EPG data once after the
+visible IDs change.
 
 ---
 
