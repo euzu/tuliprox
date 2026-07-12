@@ -36,15 +36,32 @@ fn authenticated_token_mac(secret: &[u8; 16], domain: &[u8], data: &[u8]) -> bla
     blake3::keyed_hash(&mac_key, data)
 }
 
+/// Derives the AES-CTR IV synthetically (SIV) from the secret, the domain and the plaintext,
+/// so that encoding the same payload twice yields the same token.
+///
+/// The IV stays unpredictable to anyone without `secret`, and distinct payloads (or domains)
+/// still get distinct IVs, so the CTR keystream is never reused across different plaintexts.
+/// Encoding the same payload twice deliberately produces an identical token: these tokens are
+/// stable per-item URLs (STRM files, M3U catchup URLs), and equality of two tokens reveals only
+/// that they point at the same item — which their surrounding filename/playlist entry already says.
+fn derive_synthetic_iv(secret: &[u8; 16], domain: &[u8], plaintext: &[u8]) -> [u8; AES_128_CTR_IV_LEN] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tuliprox.authenticated-token.siv.v1");
+    hasher.update(&(domain.len() as u64).to_be_bytes());
+    hasher.update(domain);
+    hasher.update(secret);
+    hasher.update(plaintext);
+    let mut iv = [0u8; AES_128_CTR_IV_LEN];
+    iv.copy_from_slice(&hasher.finalize().as_bytes()[..AES_128_CTR_IV_LEN]);
+    iv
+}
+
 pub fn obscure_authenticated_bytes(
     secret: &[u8; 16],
     domain: &[u8],
     plaintext: &[u8],
 ) -> Result<String, TuliproxError> {
-    let mut iv = [0u8; AES_128_CTR_IV_LEN];
-    if OsRng.try_fill_bytes(&mut iv).is_err() {
-        rand::rng().fill_bytes(&mut iv);
-    }
+    let iv = derive_synthetic_iv(secret, domain, plaintext);
 
     let data_len = 1 + AES_128_CTR_IV_LEN + plaintext.len();
     let mut out = Vec::with_capacity(data_len + BLAKE3_MAC_LEN);
@@ -128,7 +145,8 @@ pub fn deobscure_text(secret: &[u8; 16], encoded: &str) -> Result<String, Tulipr
 #[cfg(test)]
 mod tests {
     use crate::utils::crypto_utils::{
-        apply_aes_128_ctr, deobscure_authenticated_bytes, deobscure_text, obscure_authenticated_bytes, obscure_text,
+        apply_aes_128_ctr, authenticated_token_mac, deobscure_authenticated_bytes, deobscure_text,
+        obscure_authenticated_bytes, obscure_text, AES_128_CTR_IV_LEN, AUTH_TOKEN_VERSION,
     };
     use base64::{engine::general_purpose, Engine as _};
     use rand::Rng;
@@ -194,5 +212,61 @@ mod tests {
         let decoded = deobscure_authenticated_bytes(&secret, b"other-domain", &token);
 
         assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn authenticated_token_is_deterministic() {
+        let secret: [u8; 16] = rand::rng().random();
+
+        let first = obscure_authenticated_bytes(&secret, b"provider-resolve", b"payload").unwrap();
+        let second = obscure_authenticated_bytes(&secret, b"provider-resolve", b"payload").unwrap();
+
+        assert_eq!(first, second, "same payload must encode to the same token");
+    }
+
+    #[test]
+    fn authenticated_token_differs_per_payload() {
+        let secret: [u8; 16] = rand::rng().random();
+
+        let first = obscure_authenticated_bytes(&secret, b"provider-resolve", b"payload-a").unwrap();
+        let second = obscure_authenticated_bytes(&secret, b"provider-resolve", b"payload-b").unwrap();
+
+        // distinct payloads must get distinct IVs, otherwise the CTR keystream would be reused
+        let first_iv = &general_purpose::URL_SAFE_NO_PAD.decode(&first).unwrap()[1..17];
+        let second_iv = &general_purpose::URL_SAFE_NO_PAD.decode(&second).unwrap()[1..17];
+        assert_ne!(first_iv, second_iv);
+    }
+
+    #[test]
+    fn authenticated_token_differs_per_domain() {
+        let secret: [u8; 16] = rand::rng().random();
+
+        let first = obscure_authenticated_bytes(&secret, b"provider-resolve", b"payload").unwrap();
+        let second = obscure_authenticated_bytes(&secret, b"m3u-catchup", b"payload").unwrap();
+
+        assert_ne!(first, second, "domain must be bound into the IV");
+    }
+
+    #[test]
+    fn authenticated_token_still_decodes_legacy_random_iv_tokens() {
+        // Tokens minted before the synthetic IV carry a random IV in the same wire format.
+        // The decoder reads the IV out of the token, so they must keep decoding unchanged —
+        // no regeneration of already-written STRM files is required.
+        let secret: [u8; 16] = rand::rng().random();
+        let payload = b"legacy-payload";
+        let random_iv: [u8; AES_128_CTR_IV_LEN] = rand::rng().random();
+
+        let mut out = Vec::new();
+        out.push(AUTH_TOKEN_VERSION);
+        out.extend_from_slice(&random_iv);
+        out.extend_from_slice(payload);
+        apply_aes_128_ctr(&secret, &random_iv, &mut out[1 + AES_128_CTR_IV_LEN..]).unwrap();
+        let mac = authenticated_token_mac(&secret, b"provider-resolve", &out);
+        out.extend_from_slice(mac.as_bytes());
+        let legacy_token = general_purpose::URL_SAFE_NO_PAD.encode(out);
+
+        let decoded = deobscure_authenticated_bytes(&secret, b"provider-resolve", &legacy_token).unwrap();
+
+        assert_eq!(decoded, payload);
     }
 }
