@@ -232,8 +232,8 @@ mod tests {
         let second = obscure_authenticated_bytes(&secret, b"provider-resolve", b"payload-b").unwrap();
 
         // distinct payloads must get distinct IVs, otherwise the CTR keystream would be reused
-        let first_iv = &general_purpose::URL_SAFE_NO_PAD.decode(&first).unwrap()[1..17];
-        let second_iv = &general_purpose::URL_SAFE_NO_PAD.decode(&second).unwrap()[1..17];
+        let first_iv = &general_purpose::URL_SAFE_NO_PAD.decode(&first).unwrap()[1..=AES_128_CTR_IV_LEN];
+        let second_iv = &general_purpose::URL_SAFE_NO_PAD.decode(&second).unwrap()[1..=AES_128_CTR_IV_LEN];
         assert_ne!(first_iv, second_iv);
     }
 
@@ -244,7 +244,12 @@ mod tests {
         let first = obscure_authenticated_bytes(&secret, b"provider-resolve", b"payload").unwrap();
         let second = obscure_authenticated_bytes(&secret, b"m3u-catchup", b"payload").unwrap();
 
-        assert_ne!(first, second, "domain must be bound into the IV");
+        // Compare the IVs, not the whole tokens: the MAC key is already domain-separated, so the
+        // tokens would differ even if derive_synthetic_iv ignored the domain. Only asserting on the
+        // IV actually pins the domain binding in derive_synthetic_iv.
+        let first_iv = &general_purpose::URL_SAFE_NO_PAD.decode(&first).unwrap()[1..=AES_128_CTR_IV_LEN];
+        let second_iv = &general_purpose::URL_SAFE_NO_PAD.decode(&second).unwrap()[1..=AES_128_CTR_IV_LEN];
+        assert_ne!(first_iv, second_iv, "domain must be bound into the IV");
     }
 
     #[test]
