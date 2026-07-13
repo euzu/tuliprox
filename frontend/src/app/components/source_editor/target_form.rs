@@ -10,7 +10,7 @@ use crate::{
 };
 use shared::{
     error::TuliproxError,
-    model::{ClusterFlags, ConfigTargetDto, ConfigTargetOptions, ConfigTargetShareLiveStreams, ProcessingOrder},
+    model::{ClusterFlags, ConfigTargetDto, ConfigTargetOptions, ProcessingOrder},
     utils::Internable,
 };
 use std::{fmt::Display, rc::Rc, str::FromStr, sync::Arc};
@@ -104,7 +104,6 @@ impl HasFormData for ConfigTargetOptionsFormState {
 #[derive(Clone)]
 pub enum ConfigTargetOptionsFormAction {
     IgnoreLogo(bool),
-    ShareLiveStreams(bool),
     ShareLiveStreamsHls(bool),
     ShareLiveStreamsMpegTs(bool),
     RemoveDuplicates(bool),
@@ -124,10 +123,6 @@ impl yew::prelude::Reducible for ConfigTargetOptionsFormState {
         match action {
             ConfigTargetOptionsFormAction::IgnoreLogo(value) => {
                 form.ignore_logo = value;
-                modified = true;
-            }
-            ConfigTargetOptionsFormAction::ShareLiveStreams(value) => {
-                form.share_live_streams = ConfigTargetShareLiveStreams { hls: value, mpeg_ts: value };
                 modified = true;
             }
             ConfigTargetOptionsFormAction::ShareLiveStreamsHls(value) => {
@@ -288,13 +283,9 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                     <div class="tp__target-options">
                         { config_field_bool!(target_options_state.form, translate.t(LABEL_IGNORE_LOGO), ignore_logo) }
                         <div class="tp__target-options__group">
-                            { target_option_toggle(
-                                translate.t(LABEL_SHARE_LIVE_STREAMS),
-                                "CONFIG_TARGET_OPTIONS.SHARE_LIVE_STREAMS",
-                                target_options_state.form.share_live_any_enabled(),
-                                true,
-                                Callback::noop(),
-                            ) }
+                            <div class="tp__target-options__heading">
+                                <span class="tp__form-field__label">{ translate.t(LABEL_SHARE_LIVE_STREAMS) }</span>
+                            </div>
                             <div class="tp__target-options__children">
                                 { target_option_toggle(
                                     translate.t(LABEL_HLS),
@@ -330,12 +321,6 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 </Card>
             }
         } else {
-            let share_live_on_change = {
-                let target_options_state = target_options_state.clone();
-                Callback::from(move |value| {
-                    target_options_state.dispatch(ConfigTargetOptionsFormAction::ShareLiveStreams(value));
-                })
-            };
             let share_live_hls_on_change = {
                 let target_options_state = target_options_state.clone();
                 Callback::from(move |value| {
@@ -365,13 +350,9 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 <div class="tp__target-options">
                     { edit_field_bool!(target_options_state, translate.t(LABEL_IGNORE_LOGO), ignore_logo,  ConfigTargetOptionsFormAction::IgnoreLogo) }
                     <div class="tp__target-options__group">
-                        { target_option_toggle(
-                            translate.t(LABEL_SHARE_LIVE_STREAMS),
-                            "CONFIG_TARGET_OPTIONS.SHARE_LIVE_STREAMS",
-                            target_options_state.form.share_live_any_enabled(),
-                            false,
-                            share_live_on_change,
-                        ) }
+                        <div class="tp__target-options__heading">
+                            <span class="tp__form-field__label">{ translate.t(LABEL_SHARE_LIVE_STREAMS) }</span>
+                        </div>
                         <div class="tp__target-options__children">
                             { target_option_toggle(
                                 translate.t(LABEL_HLS),

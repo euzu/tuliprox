@@ -414,7 +414,7 @@ macros::try_from_impl!(SourcesConfig);
 impl TryFrom<&SourcesConfigDto> for SourcesConfig {
     type Error = TuliproxError;
     fn try_from(dto: &SourcesConfigDto) -> Result<Self, TuliproxError> {
-        let mut inputs = Vec::<Arc<ConfigInput>>::new();
+        let mut inputs = Vec::<ConfigInput>::new();
         let mut batch_files = Vec::<PathBuf>::new();
         let mut input_names = HashSet::new();
         let provider: Vec<_> = dto.provider.as_ref()
@@ -428,8 +428,21 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
                 batch_files.push(path);
             }
             input_names.insert(input.name.clone());
-            inputs.push(Arc::new(input));
+            inputs.push(input);
         }
+
+        // Resolve staged playlist inputs to their configured download type.
+        // The provider link is kept for overlay routing and must not affect staged playlist fetching.
+        if inputs.iter().any(|input| input.input_type.is_staged()) {
+            for input in &mut inputs {
+                if !input.input_type.is_staged() {
+                    continue;
+                }
+                input.resolve_staged_download_type();
+            }
+        }
+
+        let inputs: Vec<Arc<ConfigInput>> = inputs.into_iter().map(Arc::new).collect();
 
         let mut sources = Vec::new();
         for source_dto in &dto.sources {
@@ -455,6 +468,16 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
 impl SourcesConfig {
     pub(crate) fn get_source_at(&self, idx: usize) -> Option<&ConfigSource> {
         self.sources.get(idx)
+    }
+
+    pub(crate) fn get_staged_input_for_provider(&self, provider_name: &Arc<str>) -> Option<&Arc<ConfigInput>> {
+        self.inputs.iter().find(|input| {
+            input
+                .staged
+                .as_ref()
+                .and_then(|staged| staged.for_input.as_ref())
+                .is_some_and(|name| name == provider_name)
+        })
     }
 
     pub fn get_target_by_id(&self, target_id: u16) -> Option<Arc<ConfigTarget>> {

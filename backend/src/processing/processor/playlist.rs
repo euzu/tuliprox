@@ -43,9 +43,9 @@ use shared::{
     error::{get_errors_notify_message, TuliproxError},
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
-        ClusterSource, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType, ItemField,
-        PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistUpdateProgressEvent, PlaylistStats, ProcessingOrder,
-        SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
+        ClusterFlags, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType, ItemField,
+        PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, ProcessingOrder, SourceStats, StreamProperties,
+        TargetStats, UUIDType, XtreamCluster,
     },
     utils::{
         create_alias_uuid, interner_gc,
@@ -65,6 +65,7 @@ use tokio::{
     sync::{Mutex, OwnedRwLockWriteGuard, RwLock},
     task::JoinSet,
 };
+use shared::model::PlaylistUpdateProgressEvent;
 
 const PLAYLIST_UPDATE_MAX_DURATION_SECS: u64 = 3600;
 
@@ -344,44 +345,11 @@ impl PlaylistDownloadResult {
     }
 }
 
-/// Returns true when the input uses a hybrid download strategy:
-/// M3U staged providing some clusters and Xtream main providing others.
-fn is_hybrid_m3u_xtream(input: &ConfigInput) -> bool {
-    if !input.input_type.is_xtream() {
-        return false;
-    }
-    input.staged.as_ref().is_some_and(|s| s.enabled && s.input_type.is_m3u())
-}
-
 fn collect_effective_skip_clusters(input: &ConfigInput) -> Vec<XtreamCluster> {
     if !input.input_type.is_xtream() {
         return vec![];
     }
-
-    let mut skip_cluster = xtream::get_skip_cluster(input);
-    if let Some(staged) = input.staged.as_ref().filter(|staged| staged.enabled) {
-        for cluster in [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series] {
-            if staged.get_cluster_source(cluster) == ClusterSource::Skip && !skip_cluster.contains(&cluster) {
-                skip_cluster.push(cluster);
-            }
-        }
-    }
-    skip_cluster
-}
-
-fn hybrid_has_m3u_staged_cluster(input: &ConfigInput, skip_cluster: &[XtreamCluster]) -> bool {
-    if !is_hybrid_m3u_xtream(input) {
-        return false;
-    }
-
-    input.staged.as_ref().is_some_and(|staged| {
-        [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series]
-            .iter()
-            .any(|cluster| {
-                !skip_cluster.contains(cluster)
-                    && staged.get_cluster_source(*cluster) == ClusterSource::Staged
-            })
-    })
+    xtream::get_skip_cluster(input)
 }
 
 async fn download_plex_media_server_playlist(
@@ -423,6 +391,44 @@ fn filter_skipped_clusters_from_source(source: PlaylistSource, input: &ConfigInp
     PlaylistSource::filtered(source, skip_set)
 }
 
+fn cluster_selected(cluster: XtreamCluster, clusters: ClusterFlags) -> bool {
+    match cluster {
+        XtreamCluster::Live => clusters.contains(ClusterFlags::Live),
+        XtreamCluster::Video => clusters.contains(ClusterFlags::Vod),
+        XtreamCluster::Series => clusters.contains(ClusterFlags::Series),
+    }
+}
+
+fn apply_staged_overlay_groups(
+    provider_name: &Arc<str>,
+    clusters: ClusterFlags,
+    provider_groups: Vec<PlaylistGroup>,
+    staged_groups: Vec<PlaylistGroup>,
+) -> Vec<PlaylistGroup> {
+    let mut groups: Vec<PlaylistGroup> = provider_groups
+        .into_iter()
+        .filter(|group| !cluster_selected(group.xtream_cluster, clusters))
+        .collect();
+
+    groups.extend(
+        staged_groups
+            .into_iter()
+            .filter(|group| cluster_selected(group.xtream_cluster, clusters))
+            .map(|mut group| {
+                for item in &mut group.channels {
+                    item.header.input_name = Arc::clone(provider_name);
+                }
+                group
+            }),
+    );
+
+    groups
+}
+
+fn should_apply_staged_overlay(download_result: &PlaylistDownloadResult) -> bool {
+    !download_result.was_cached
+}
+
 #[allow(clippy::too_many_lines)]
 async fn playlist_download_from_input(
     client: &reqwest::Client,
@@ -450,20 +456,14 @@ async fn playlist_download_from_input(
         Ok(true) => {}
     }
 
-    let hybrid = is_hybrid_m3u_xtream(input);
     let download_input_type = input.get_download_input_type();
-    // Use per-cluster cache for effective Xtream downloads and hybrid M3U+Xtream inputs.
-    let use_per_cluster_cache = hybrid || download_input_type.is_xtream();
+    // Use per-cluster cache for effective Xtream downloads.
+    let use_per_cluster_cache = download_input_type.is_xtream();
 
     let mut xtream_clusters_to_download = Vec::new();
-    let mut needs_m3u_download = false;
     let fully_cached = if use_per_cluster_cache {
         let skip_cluster = collect_effective_skip_clusters(input);
-        let (staged_candidates, main_candidates) =
-            xtream::partition_clusters_by_source(input, None, &skip_cluster);
-
-        let mut xtream_cache_candidates = staged_candidates;
-        xtream_cache_candidates.extend(main_candidates);
+        let xtream_cache_candidates = xtream::requested_clusters(None, &skip_cluster);
 
         for cluster in xtream_cache_candidates {
             if !input_cache::is_cache_valid(&status, cluster.as_ref(), cache_duration) {
@@ -471,14 +471,7 @@ async fn playlist_download_from_input(
             }
         }
 
-        if hybrid {
-            if hybrid_has_m3u_staged_cluster(input, &skip_cluster) {
-                needs_m3u_download = !input_cache::is_cache_valid(&status, "default", cache_duration);
-            }
-            xtream_clusters_to_download.is_empty() && !needs_m3u_download
-        } else {
-            xtream_clusters_to_download.is_empty()
-        }
+        xtream_clusters_to_download.is_empty()
     } else {
         input_cache::is_cache_valid(&status, "default", cache_duration)
     };
@@ -487,53 +480,7 @@ async fn playlist_download_from_input(
         return PlaylistDownloadResult::new(vec![], vec![], true, false);
     }
 
-    let (playlist, errors, persisted, m3u_error_count, xtream_error_count) = if hybrid {
-        let mut playlist = Vec::new();
-        let mut all_errors = Vec::new();
-        let mut m3u_error_count = 0usize;
-        let mut xtream_error_count = 0usize;
-        let mut m3u_added_groups = false;
-
-        if needs_m3u_download {
-            if let Some(staged) = input.staged.as_ref() {
-            let staged_source: crate::model::InputSource = staged.into();
-            let (m3u_playlist, m3u_errors) =
-                m3u::download_m3u_playlist_from_source(app_config, client, config, input, Some(staged_source)).await;
-            m3u_error_count = m3u_errors.len();
-            m3u_added_groups = !m3u_playlist.is_empty();
-            playlist.extend(m3u_playlist);
-            all_errors.extend(m3u_errors);
-            } else {
-                warn!(
-                    "hybrid input '{}' requires a staged M3U cluster but none is present; skipping M3U download",
-                    input.name
-                );
-                m3u_error_count = 1;
-            }
-        }
-
-        let mut xtream_persisted = false;
-        if !xtream_clusters_to_download.is_empty() {
-            let (xtream_playlist, xtream_errors, persisted) = xtream::download_xtream_playlist(
-                app_config,
-                client,
-                input,
-                Some(xtream_clusters_to_download.as_slice()),
-            )
-                .await;
-            xtream_error_count = xtream_errors.len();
-            playlist.extend(xtream_playlist);
-            all_errors.extend(xtream_errors);
-            xtream_persisted = persisted;
-
-            if m3u_added_groups {
-                // Keep merged hybrid output in memory when staged M3U contributed groups.
-                xtream_persisted = false;
-            }
-        }
-
-        (playlist, all_errors, xtream_persisted, m3u_error_count, xtream_error_count)
-    } else {
+    let (playlist, errors, persisted, _m3u_error_count, _xtream_error_count) = {
         match download_input_type {
             InputType::M3u => {
                 let (p, e) = m3u::download_m3u_playlist(app_config, client, config, input).await;
@@ -569,26 +516,22 @@ async fn playlist_download_from_input(
                 0,
                 0,
             ),
+            InputType::Staged => (
+                vec![],
+                vec![TuliproxError::Download(format!(
+                    "staged input '{}' was not resolved against a parent input",
+                    input.name
+                ))],
+                false,
+                0,
+                0,
+            ),
         }
     };
 
     // Update Status
-    let mut save_status = false;
-    if hybrid {
-        if needs_m3u_download {
-            let m3u_state = if m3u_error_count == 0 { ClusterState::Ok } else { ClusterState::Failed };
-            input_cache::update_cluster_status(&mut status, "default", m3u_state);
-            save_status = true;
-        }
-
-        if !xtream_clusters_to_download.is_empty() {
-            let state = if xtream_error_count == 0 { ClusterState::Ok } else { ClusterState::Failed };
-            for cluster in &xtream_clusters_to_download {
-                input_cache::update_cluster_status(&mut status, cluster.as_ref(), state.clone());
-            }
-            save_status = true;
-        }
-    } else if errors.is_empty() {
+    let save_status;
+    if errors.is_empty() {
         if use_per_cluster_cache {
             for cluster in &xtream_clusters_to_download {
                 input_cache::update_cluster_status(&mut status, cluster.as_ref(), ClusterState::Ok);
@@ -646,7 +589,7 @@ async fn process_source(
                 let (mut playlist_groups, mut error_list) = {
                     broadcast_step("Playlist download", &format!("Downloading input '{}'", input.name));
 
-                    let (mut download_err, playlist, error) = download_input(ctx, input).await;
+                    let (mut download_err, playlist, error) = download_input(ctx, input, false).await;
 
                     if let Some(err) = error {
                         broadcast_step(
@@ -789,10 +732,23 @@ async fn load_cached_input_playlist(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn download_input(
     ctx: &PlaylistProcessingContext,
     input: &Arc<ConfigInput>,
+    allow_staged_input: bool,
 ) -> (Vec<TuliproxError>, PlaylistSource, Option<TuliproxError>) {
+    if input.staged.is_some() && !allow_staged_input {
+        return (vec![], MemoryPlaylistSource::default().into_source(), None);
+    }
+
+    let staged_overlay = if input.staged.is_none() {
+        let sources = ctx.config.sources.load();
+        sources.get_staged_input_for_provider(&input.name).cloned()
+    } else {
+        None
+    };
+
     // Coordination Logic
     let need_download = !ctx.is_input_downloaded(&input.name).await;
     // Keep this lock for the whole critical section (download + persist/load + mark processed)
@@ -860,8 +816,9 @@ async fn download_input(
             preloaded_playlist = Some((cached_playlist, None));
         }
     }
+    let apply_staged_overlay = should_apply_staged_overlay(&playlist_download_result);
 
-    let (playlist, error) = if let Some(preloaded) = preloaded_playlist {
+    let (mut playlist, mut error) = if let Some(preloaded) = preloaded_playlist {
         preloaded
     } else if playlist_download_result.was_cached || playlist_download_result.persisted {
         match load_input_playlist(ctx, input, None).await {
@@ -874,7 +831,28 @@ async fn download_input(
         (MemoryPlaylistSource::new(pl).into_source(), err)
     };
 
-    let playlist = filter_skipped_clusters_from_source(playlist, input);
+    playlist = filter_skipped_clusters_from_source(playlist, input);
+
+    if let Some(staged_input) = staged_overlay.filter(|_| apply_staged_overlay) {
+        let clusters = staged_input.staged.as_ref().map_or_else(ClusterFlags::all, |staged| staged.clusters);
+        let (mut staged_download_err, mut staged_playlist, staged_error) =
+            Box::pin(download_input(ctx, &staged_input, true)).await;
+        playlist_download_result.download_err.append(&mut staged_download_err);
+        if let Some(staged_error) = staged_error {
+            playlist_download_result.download_err.push(staged_error);
+        } else {
+            let provider_groups = playlist.take_groups();
+            let staged_groups = staged_playlist.take_groups();
+            let merged_groups = apply_staged_overlay_groups(&input.name, clusters, provider_groups, staged_groups);
+            let (merged_playlist, persist_error) = persist_input_playlist(&ctx.config, input, merged_groups).await;
+            playlist = MemoryPlaylistSource::new(merged_playlist).into_source();
+            if error.is_none() {
+                error = persist_error;
+            } else if let Some(persist_error) = persist_error {
+                playlist_download_result.download_err.push(persist_error);
+            }
+        }
+    }
 
     if mark_as_processed {
         // Mark after persist/load so other workers only see this input as ready when data is usable.
@@ -1686,9 +1664,8 @@ pub async fn exec_processing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::StagedInput;
     use shared::foundation::{get_filter, ValueProvider};
-    use shared::model::{PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster};
+    use shared::model::{ClusterFlags, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster};
     use shared::utils::Internable;
 
     fn item_with_props(props: StreamProperties) -> PlaylistItem {
@@ -1748,79 +1725,26 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_detection_requires_xtream_main_and_m3u_staged() {
-        let hybrid_input = ConfigInput {
-            name: "hybrid".intern(),
+    fn collect_effective_skip_clusters_uses_input_skip_flags() {
+        use crate::model::{ConfigInputFlags, ConfigInputOptions};
+        let input = ConfigInput {
+            name: "skip_live".intern(),
             input_type: InputType::Xtream,
-            staged: Some(StagedInput { enabled: true, input_type: InputType::M3u, ..StagedInput::default() }),
-            ..ConfigInput::default()
-        };
-        assert!(is_hybrid_m3u_xtream(&hybrid_input));
-
-        let non_hybrid_main_m3u = ConfigInput {
-            name: "main_m3u".intern(),
-            input_type: InputType::M3u,
-            staged: Some(StagedInput { enabled: true, input_type: InputType::Xtream, ..StagedInput::default() }),
-            ..ConfigInput::default()
-        };
-        assert!(!is_hybrid_m3u_xtream(&non_hybrid_main_m3u));
-    }
-
-    #[test]
-    fn collect_effective_skip_clusters_includes_staged_skip_only_when_enabled() {
-        let input_with_enabled_staged = ConfigInput {
-            name: "enabled".intern(),
-            input_type: InputType::Xtream,
-            staged: Some(StagedInput {
-                enabled: true,
-                live_source: ClusterSource::Skip,
-                vod_source: ClusterSource::Input,
-                series_source: ClusterSource::Staged,
-                ..StagedInput::default()
+            options: Some(ConfigInputOptions {
+                flags: ConfigInputFlags::XtreamSkipLive.into(),
+                ..ConfigInputOptions::defaults().clone()
             }),
             ..ConfigInput::default()
         };
-        let skip_enabled = collect_effective_skip_clusters(&input_with_enabled_staged);
-        assert!(skip_enabled.contains(&XtreamCluster::Live));
-        assert!(!skip_enabled.contains(&XtreamCluster::Video));
-        assert!(!skip_enabled.contains(&XtreamCluster::Series));
-
-        let input_with_disabled_staged = ConfigInput {
-            name: "disabled".intern(),
-            input_type: InputType::Xtream,
-            staged: Some(StagedInput {
-                enabled: false,
-                live_source: ClusterSource::Skip,
-                vod_source: ClusterSource::Skip,
-                series_source: ClusterSource::Skip,
-                ..StagedInput::default()
-            }),
-            ..ConfigInput::default()
-        };
-        assert!(collect_effective_skip_clusters(&input_with_disabled_staged).is_empty());
-    }
-
-    #[test]
-    fn hybrid_m3u_detects_any_staged_cluster_selection() {
-        let hybrid = ConfigInput {
-            name: "hybrid".intern(),
-            input_type: InputType::Xtream,
-            staged: Some(StagedInput {
-                enabled: true,
-                input_type: InputType::M3u,
-                live_source: ClusterSource::Input,
-                vod_source: ClusterSource::Staged,
-                series_source: ClusterSource::Skip,
-                ..StagedInput::default()
-            }),
-            ..ConfigInput::default()
-        };
-        assert!(hybrid_has_m3u_staged_cluster(&hybrid, &[]));
-        assert!(!hybrid_has_m3u_staged_cluster(&hybrid, &[XtreamCluster::Video]));
+        let skip = collect_effective_skip_clusters(&input);
+        assert!(skip.contains(&XtreamCluster::Live));
+        assert!(!skip.contains(&XtreamCluster::Video));
+        assert!(!skip.contains(&XtreamCluster::Series));
     }
 
     #[test]
     fn filter_skipped_clusters_removes_cached_groups() {
+        use crate::model::{ConfigInputFlags, ConfigInputOptions};
         let live_item = PlaylistItem {
             header: shared::model::PlaylistItemHeader {
                 xtream_cluster: XtreamCluster::Live,
@@ -1853,10 +1777,9 @@ mod tests {
         let input = ConfigInput {
             name: "skip_live".intern(),
             input_type: InputType::Xtream,
-            staged: Some(StagedInput {
-                enabled: true,
-                live_source: ClusterSource::Skip,
-                ..StagedInput::default()
+            options: Some(ConfigInputOptions {
+                flags: ConfigInputFlags::XtreamSkipLive.into(),
+                ..ConfigInputOptions::defaults().clone()
             }),
             ..ConfigInput::default()
         };
@@ -1865,6 +1788,56 @@ mod tests {
         let filtered_groups = filtered.take_groups();
         assert_eq!(filtered_groups.len(), 1);
         assert_eq!(filtered_groups[0].xtream_cluster, XtreamCluster::Video);
+    }
+
+    fn test_group(cluster: XtreamCluster, item_name: &str, input_name: &str) -> PlaylistGroup {
+        PlaylistGroup {
+            id: 1,
+            title: item_name.intern(),
+            xtream_cluster: cluster,
+            channels: vec![PlaylistItem {
+                header: PlaylistItemHeader {
+                    name: item_name.intern(),
+                    input_name: input_name.intern(),
+                    xtream_cluster: cluster,
+                    item_type: match cluster {
+                        XtreamCluster::Live => PlaylistItemType::Live,
+                        XtreamCluster::Video => PlaylistItemType::Video,
+                        XtreamCluster::Series => PlaylistItemType::Series,
+                    },
+                    ..Default::default()
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn staged_overlay_replaces_selected_clusters_and_rewrites_input_name() {
+        let provider_name = "provider".intern();
+        let provider_groups = vec![
+            test_group(XtreamCluster::Live, "provider-live", "provider"),
+            test_group(XtreamCluster::Video, "provider-vod", "provider"),
+        ];
+        let staged_groups = vec![
+            test_group(XtreamCluster::Live, "staged-live", "staged"),
+            test_group(XtreamCluster::Series, "staged-series", "staged"),
+        ];
+
+        let groups =
+            apply_staged_overlay_groups(&provider_name, ClusterFlags::Live, provider_groups, staged_groups);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].title.as_ref(), "provider-vod");
+        assert_eq!(groups[0].channels[0].header.input_name.as_ref(), "provider");
+        assert_eq!(groups[1].title.as_ref(), "staged-live");
+        assert_eq!(groups[1].channels[0].header.input_name.as_ref(), "provider");
+    }
+
+    #[test]
+    fn staged_overlay_is_skipped_when_provider_playlist_is_cached() {
+        let result = PlaylistDownloadResult::new(vec![], vec![], true, false);
+
+        assert!(!should_apply_staged_overlay(&result));
     }
 
 

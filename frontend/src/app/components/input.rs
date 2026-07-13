@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{resolve_field_id, AppIcon, FieldLabel, IconButton},
+    app::components::{resolve_field_id, AppIcon, FieldWrapper, IconButton},
     html_if,
 };
 use web_sys::{HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent};
@@ -29,6 +29,8 @@ pub struct InputProps {
     pub icon: Option<String>,
     #[prop_or_default]
     pub placeholder: Option<String>,
+    #[prop_or_default]
+    pub hint_key: Option<String>,
     #[prop_or_default]
     pub aria_label: Option<String>,
 }
@@ -75,36 +77,24 @@ pub fn Input(props: &InputProps) -> Html {
         if props.label.is_some() { None } else { props.aria_label.clone().or_else(|| props.placeholder.clone()) };
 
     html! {
-        <div class="tp__input">
-            { if props.label.is_some() {
-                   html! {
-                       <FieldLabel
-                           label={label_text.clone()}
-                           field_id={resolved_field_id.clone()}
-                           for_id={Some(resolved_field_id.clone())}
-                       />
-                   }
-                } else { html!{} }
-            }
-            <div class="tp__input-wrapper">
-                { html_if!(props.icon.is_some(), {
-                    <AppIcon name={props.icon.as_ref().unwrap().clone()} />
-                })}
-                <input
-                    id={resolved_field_id}
-                    ref={local_ref.clone()}
-                    type={if *hide_content { "password".to_string() } else { "text".to_string() }}
-                    name={props.name.clone()}
-                    autocomplete={if props.autocomplete { "on".to_string() } else { "off".to_string() }}
-                    onkeydown={props.onkeydown.clone()}
-                    oninput={handle_oninput}
-                    placeholder={props.placeholder.clone()}
-                    aria-label={aria_label}
-                    />
-                { html_if!(props.hidden, {
-                     <IconButton name="hide" icon="Visibility" class={if !*hide_content {"active"} else {""}} onclick={handle_hide_content} />
-                })}
-            </div>
-        </div>
+        <FieldWrapper label={props.label.clone()} field_id={resolved_field_id.clone()} hint_key={props.hint_key.clone()}>
+            { html_if!(props.icon.is_some(), {
+                <AppIcon name={props.icon.as_ref().unwrap().clone()} />
+            })}
+            <input
+                id={resolved_field_id}
+                ref={local_ref.clone()}
+                type={if *hide_content { "password".to_string() } else { "text".to_string() }}
+                name={props.name.clone()}
+                autocomplete={if props.autocomplete { "on".to_string() } else { "off".to_string() }}
+                onkeydown={props.onkeydown.clone()}
+                oninput={handle_oninput}
+                placeholder={props.placeholder.clone()}
+                aria-label={aria_label}
+                />
+            { html_if!(props.hidden, {
+                 <IconButton name="hide" icon="Visibility" class={if !*hide_content {"active"} else {""}} onclick={handle_hide_content} />
+            })}
+        </FieldWrapper>
     }
 }

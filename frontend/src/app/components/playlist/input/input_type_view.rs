@@ -20,6 +20,7 @@ pub fn InputTypeView(props: &InputTypeViewProps) -> Html {
         InputType::Emby => "LABEL.EMBY",
         InputType::Jellyfin => "LABEL.JELLYFIN",
         InputType::Plex => "LABEL.PLEX",
+        InputType::Staged => "LABEL.STAGED",
     };
 
     html! {

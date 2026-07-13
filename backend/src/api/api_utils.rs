@@ -2298,7 +2298,7 @@ async fn open_media_server_stream_for_input(
                 .provider("media-server")
                 .detail("media-server playback proxy is not implemented for this input type"));
         }
-        InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {
+        InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library | InputType::Staged => {
             return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
                 .provider("media-server")
                 .detail("playlist item is not backed by a media-server input"));
@@ -3666,7 +3666,7 @@ async fn open_media_server_image_resource(
                 .provider("media-server")
                 .detail("media-server image proxy is not implemented for this input type"));
         }
-        InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library => {
+        InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library | InputType::Staged => {
             return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
                 .provider("media-server")
                 .detail("media-server image input is not backed by a media-server input"));

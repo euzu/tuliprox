@@ -1,7 +1,7 @@
 use crate::app::components::{Block, BlockType, Connection};
 
 /// Determines whether two blocks can be connected based on explicit editor rules.
-/// Allowed: Input -> Target, Target -> Output.
+/// Allowed: Provider Input -> Target, Staged Input -> Provider Input, Target -> Output.
 /// Target can have multiple Inputs.
 /// Output can only have one Target.
 /// Target can connect to:
@@ -16,15 +16,25 @@ pub fn can_connect(from_block: &Block, to_block: &Block, connections: &[Connecti
     }
 
     // Identify block categories
-    let is_input = from_block.block_type.is_input();
+    let is_target_input = from_block.block_type.is_input() && !matches!(from_block.block_type, BlockType::InputStaged);
+    let from_is_staged = matches!(from_block.block_type, BlockType::InputStaged);
     let is_target = from_block.block_type.is_target();
     let to_is_target = to_block.block_type.is_target();
+    let to_is_child_input = to_block.block_type.is_chainable_input();
     let to_is_output = to_block.block_type.is_output();
 
-    // Only allow Input -> Target OR Target -> Output
-    let valid_direction = (is_input && to_is_target) || (is_target && to_is_output);
+    // Only allow Provider Input -> Target OR Staged Input -> Provider Input OR Target -> Output
+    let valid_direction =
+        (is_target_input && to_is_target) || (from_is_staged && to_is_child_input) || (is_target && to_is_output);
     if !valid_direction {
         return false;
+    }
+    // A provider input can have only one staged overlay connection.
+    if from_is_staged && to_is_child_input {
+        let has_stage_already = connections.iter().any(|c| c.to == to_block.id);
+        if has_stage_already {
+            return false;
+        }
     }
 
     // Prevent duplicate connection
@@ -73,4 +83,38 @@ pub fn can_connect(from_block: &Block, to_block: &Block, connections: &[Connecti
 
     // Passed all checks
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::components::BlockInstance;
+    use shared::model::{ConfigInputDto, ConfigTargetDto};
+    use std::rc::Rc;
+
+    fn block(id: u16, block_type: BlockType) -> Block {
+        let instance = if block_type.is_target() {
+            BlockInstance::Target(Rc::new(ConfigTargetDto::default()))
+        } else {
+            BlockInstance::Input(Rc::new(ConfigInputDto::default()))
+        };
+
+        Block { id, block_type, position: (0.0, 0.0), instance }
+    }
+
+    #[test]
+    fn staged_input_cannot_connect_directly_to_target() {
+        let staged = block(1, BlockType::InputStaged);
+        let target = block(2, BlockType::Target);
+
+        assert!(!can_connect(&staged, &target, &[], &[staged.clone(), target.clone()]));
+    }
+
+    #[test]
+    fn staged_input_can_connect_to_provider_input() {
+        let staged = block(1, BlockType::InputStaged);
+        let provider = block(2, BlockType::InputXtream);
+
+        assert!(can_connect(&staged, &provider, &[], &[staged.clone(), provider.clone()]));
+    }
 }

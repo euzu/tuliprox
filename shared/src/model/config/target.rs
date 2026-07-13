@@ -35,7 +35,7 @@ where
 {
     Ok(match <ConfigTargetShareLiveStreamsCompat as serde::Deserialize>::deserialize(deserializer)? {
         ConfigTargetShareLiveStreamsCompat::Legacy(enabled) => {
-            ConfigTargetShareLiveStreams { hls: enabled, mpeg_ts: enabled }
+            ConfigTargetShareLiveStreams { hls: false, mpeg_ts: enabled }
         }
         ConfigTargetShareLiveStreamsCompat::Structured(config) => config,
     })
@@ -593,8 +593,20 @@ share_live_streams: true
 
         assert!(options.is_ok(), "legacy boolean should deserialize: {options:?}");
         if let Ok(options) = options {
-            assert_eq!(options.share_live_streams, ConfigTargetShareLiveStreams { hls: true, mpeg_ts: true });
+            assert_eq!(options.share_live_streams, ConfigTargetShareLiveStreams { hls: false, mpeg_ts: true });
         }
+    }
+
+    #[test]
+    fn target_options_maps_legacy_false_share_live_streams_to_both_modes() {
+        let yaml = r#"
+share_live_streams: false
+"#;
+
+        let options: ConfigTargetOptions =
+            serde_saphyr::from_str(yaml).expect("legacy false share_live_streams should deserialize");
+
+        assert_eq!(options.share_live_streams, ConfigTargetShareLiveStreams { hls: false, mpeg_ts: false });
     }
 
     #[test]
@@ -608,6 +620,20 @@ share_live_streams: true
             !serialized.contains("share_live_streams"),
             "default share_live_streams should be omitted, got: {serialized}"
         );
+    }
+
+    #[test]
+    fn target_options_round_trips_partial_share_live_streams() {
+        let options = ConfigTargetOptions {
+            share_live_streams: ConfigTargetShareLiveStreams { hls: true, mpeg_ts: false },
+            ..ConfigTargetOptions::default()
+        };
+
+        let serialized = serde_saphyr::to_string(&options).expect("partial share_live_streams should serialize");
+        let reparsed: ConfigTargetOptions =
+            serde_saphyr::from_str(&serialized).expect("partial share_live_streams should deserialize");
+
+        assert_eq!(reparsed.share_live_streams, options.share_live_streams);
     }
 
     #[test]

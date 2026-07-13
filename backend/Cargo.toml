@@ -87,7 +87,6 @@ ipnet = "2"
 strum.workspace = true
 strum_macros.workspace = true
 
-
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 [target.'cfg(not(target_os = "linux"))'.dependencies]
