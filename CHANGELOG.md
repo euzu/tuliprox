@@ -343,6 +343,15 @@
 
 ## 🐛 Fixes
 
+- **STRM files are no longer rewritten on every playlist update**: authenticated tokens (STRM
+  `/provider/resolve/…` URLs and M3U catchup URLs) used a random IV, so re-encoding the same item produced a
+  different token every run. That made every STRM file's content differ on each update, so the existing
+  `has_strm_file_same_hash` skip in `strm_repository` never matched and the whole STRM tree was rewritten every
+  time (measured: ~28k files rewritten by a no-op update). The IV is now derived synthetically (SIV) from the
+  secret, domain and payload, so the same item always encodes to the same token and unchanged STRM files are left
+  alone. The token wire format is unchanged and the IV is still read from the token on decode, so **tokens issued
+  by older versions keep working** — no STRM regeneration required.
+
 - **Playlist Cache Load Failures No Longer Silent**: Xtream and M3U storage loads that fail due to corruption,
   version mismatch, or task panics now log an error before falling back to an empty playlist, instead of silently
   serving empty data. A genuinely missing storage file (first run) is logged at debug only, so normal startup stays
