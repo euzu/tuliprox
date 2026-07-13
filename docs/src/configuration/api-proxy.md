@@ -93,7 +93,7 @@ user:
         password: mysecurepassword
         token: auth_token_abc
         proxy: reverse
-        output_clusters: [live, vod]
+        output_clusters: "[live, vod]"
         server: default
         max_connections: 1
         epg_timeshift: Europe/Paris
@@ -102,7 +102,7 @@ user:
         priority: -10
 
       # Compact inline syntax is also supported:
-      - { username: x3452, password: p, token: 4342sd, proxy: redirect, output_clusters: [live, vod, series], server: external, epg_timeshift: -2:30 }
+      - { username: x3452, password: p, token: 4342sd, proxy: redirect, output_clusters: "[live, vod, series]", server: external, epg_timeshift: -2:30 }
 ```
 
 **Crucial Concept:** By default, Tuliprox acts purely as a stream mapper. If you want Tuliprox to actively evaluate the
@@ -199,11 +199,11 @@ user:
     credentials:
       - username: live_only
         password: secret
-        output_clusters: [live]
+        output_clusters: "[live]"
 
       - username: vod_series_only
         password: secret
-        output_clusters: [vod, series]
+        output_clusters: "[vod, series]"
 ```
 
 Behavior:

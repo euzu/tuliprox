@@ -394,6 +394,15 @@
 
 ## 🐛 Fixes
 
+- **STRM files are no longer rewritten on every playlist update**: authenticated tokens (STRM
+  `/provider/resolve/…` URLs and M3U catchup URLs) used a random IV, so re-encoding the same item produced a
+  different token every run. That made every STRM file's content differ on each update, so the existing
+  `has_strm_file_same_hash` skip in `strm_repository` never matched and the whole STRM tree was rewritten every
+  time (measured: ~28k files rewritten by a no-op update). The IV is now derived synthetically (SIV) from the
+  secret, domain and payload, so the same item always encodes to the same token and unchanged STRM files are left
+  alone. The token wire format is unchanged and the IV is still read from the token on decode, so **tokens issued
+  by older versions keep working** — no STRM regeneration required.
+
 - **Playlist Cache Load Failures No Longer Silent**: Xtream and M3U storage loads that fail due to corruption,
   version mismatch, or task panics now log an error before falling back to an empty playlist, instead of silently
   serving empty data. A genuinely missing storage file (first run) is logged at debug only, so normal startup stays
@@ -436,6 +445,16 @@
 
 ## ⚙️ New Settings
 
+- **source.yml (target `options.epg_output`)**:
+  - Added optional `lowercase_ids` (`bool`, default `false`) to canonicalize technical EPG IDs with ASCII lowercase
+    consistently across visible M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV `<channel id>` / `<programme channel>`
+    references, EPG API responses, and target EPG storage keys after a full target refresh. Disabled targets retain
+    their existing source-case storage keys and ordering.
+  - Added optional `lowercase_xmltv_display_names` (`bool`, default `false`) to lowercase only XMLTV `<display-name>`
+    values during serialization; playlist names and programme metadata remain unchanged, and no persisted rebuild is
+    normally required.
+  - Both options are disabled by default, so existing visible outputs remain unchanged. Changing `lowercase_ids`
+    requires a full target refresh, and clients may need to re-index EPG data once after visible IDs change.
 - **config.yml (main)**:
   - Added `interner_gc_interval_secs`: interval in seconds between background string interner GC checks.
   - Added `interner_gc_min_pool_size`: minimum interned-string pool size required before background interner GC runs.

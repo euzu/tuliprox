@@ -34,6 +34,9 @@ const LABEL_HLS: &str = "LABEL.HLS";
 const LABEL_MPEG_TS: &str = "LABEL.MPEG_TS";
 const LABEL_REMOVE_DUPLICATES: &str = "LABEL.REMOVE_DUPLICATES";
 const LABEL_FORCE_REDIRECT: &str = "LABEL.FORCE_REDIRECT";
+const LABEL_EPG_OUTPUT: &str = "LABEL.EPG_OUTPUT";
+const LABEL_LOWERCASE_EPG_IDS: &str = "LABEL.LOWERCASE_EPG_IDS";
+const LABEL_LOWERCASE_XMLTV_DISPLAY_NAMES: &str = "LABEL.LOWERCASE_XMLTV_DISPLAY_NAMES";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
 
@@ -104,6 +107,8 @@ pub enum ConfigTargetOptionsFormAction {
     ShareLiveStreamsHls(bool),
     ShareLiveStreamsMpegTs(bool),
     RemoveDuplicates(bool),
+    LowercaseEpgIds(bool),
+    LowercaseXmltvDisplayNames(bool),
     ForceRedirect(Option<ClusterFlags>),
     SetAll(ConfigTargetOptions),
 }
@@ -130,6 +135,14 @@ impl yew::prelude::Reducible for ConfigTargetOptionsFormState {
             }
             ConfigTargetOptionsFormAction::RemoveDuplicates(value) => {
                 form.remove_duplicates = value;
+                modified = true;
+            }
+            ConfigTargetOptionsFormAction::LowercaseEpgIds(value) => {
+                form.epg_output.lowercase_ids = value;
+                modified = true;
+            }
+            ConfigTargetOptionsFormAction::LowercaseXmltvDisplayNames(value) => {
+                form.epg_output.lowercase_xmltv_display_names = value;
                 modified = true;
             }
             ConfigTargetOptionsFormAction::ForceRedirect(value) => {
@@ -238,6 +251,32 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                     </div>
                 }
             };
+        let render_epg_output =
+            |readonly: bool, lowercase_ids_on_change: Callback<bool>, lowercase_names_on_change: Callback<bool>| {
+                html! {
+                    <div class="tp__target-options__group">
+                        <div class="tp__target-options__heading">
+                            <span class="tp__form-field__label">{ translate.t(LABEL_EPG_OUTPUT) }</span>
+                        </div>
+                        <div class="tp__target-options__children">
+                            { target_option_toggle(
+                                translate.t(LABEL_LOWERCASE_EPG_IDS),
+                                "EPG_OUTPUT_OPTIONS.LOWERCASE_IDS",
+                                target_options_state.form.epg_output.lowercase_ids,
+                                readonly,
+                                lowercase_ids_on_change,
+                            ) }
+                            { target_option_toggle(
+                                translate.t(LABEL_LOWERCASE_XMLTV_DISPLAY_NAMES),
+                                "EPG_OUTPUT_OPTIONS.LOWERCASE_XMLTV_DISPLAY_NAMES",
+                                target_options_state.form.epg_output.lowercase_xmltv_display_names,
+                                readonly,
+                                lowercase_names_on_change,
+                            ) }
+                        </div>
+                    </div>
+                }
+            };
         if !props.allow_write {
             html! {
                 <Card class="tp__config-view__card">
@@ -265,6 +304,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                             </div>
                         </div>
                         { config_field_bool!(target_options_state.form, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates) }
+                        { render_epg_output(true, Callback::noop(), Callback::noop()) }
                         <div class="tp__target-options__group">
                             <div class="tp__target-options__heading">
                                 <span class="tp__form-field__label">{ translate.t(LABEL_FORCE_REDIRECT) }</span>
@@ -293,6 +333,18 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                     target_options_state.dispatch(ConfigTargetOptionsFormAction::ShareLiveStreamsMpegTs(value));
                 })
             };
+            let lowercase_epg_ids_on_change = {
+                let target_options_state = target_options_state.clone();
+                Callback::from(move |value| {
+                    target_options_state.dispatch(ConfigTargetOptionsFormAction::LowercaseEpgIds(value));
+                })
+            };
+            let lowercase_xmltv_display_names_on_change = {
+                let target_options_state = target_options_state.clone();
+                Callback::from(move |value| {
+                    target_options_state.dispatch(ConfigTargetOptionsFormAction::LowercaseXmltvDisplayNames(value));
+                })
+            };
             html! {
                 <Card class="tp__config-view__card">
                 <div class="tp__target-options">
@@ -319,6 +371,11 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                         </div>
                     </div>
                     { edit_field_bool!(target_options_state, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates, ConfigTargetOptionsFormAction::RemoveDuplicates) }
+                    { render_epg_output(
+                        false,
+                        lowercase_epg_ids_on_change,
+                        lowercase_xmltv_display_names_on_change,
+                    ) }
                     <div class="tp__target-options__group">
                         <div class="tp__target-options__heading">
                             <span class="tp__form-field__label">{ translate.t(LABEL_FORCE_REDIRECT) }</span>
@@ -481,5 +538,35 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             { render_edit_mode() }
         </div>
     </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConfigTargetOptionsFormAction, ConfigTargetOptionsFormState};
+    use shared::model::ConfigTargetOptions;
+    use std::rc::Rc;
+    use yew::prelude::Reducible;
+
+    fn default_options_state() -> Rc<ConfigTargetOptionsFormState> {
+        ConfigTargetOptionsFormState { form: ConfigTargetOptions::default(), modified: false }.into()
+    }
+
+    #[test]
+    fn lowercase_epg_ids_action_updates_nested_option() {
+        let state = default_options_state().reduce(ConfigTargetOptionsFormAction::LowercaseEpgIds(true));
+
+        assert!(state.form.epg_output.lowercase_ids);
+        assert!(state.modified);
+        assert!(!state.form.epg_output.lowercase_xmltv_display_names);
+    }
+
+    #[test]
+    fn lowercase_xmltv_display_names_action_updates_nested_option() {
+        let state = default_options_state().reduce(ConfigTargetOptionsFormAction::LowercaseXmltvDisplayNames(true));
+
+        assert!(state.form.epg_output.lowercase_xmltv_display_names);
+        assert!(state.modified);
+        assert!(!state.form.epg_output.lowercase_ids);
     }
 }

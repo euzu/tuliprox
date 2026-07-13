@@ -6,9 +6,12 @@ use crate::{
     },
     processing::{
         parser::ics,
-        processor::{with_folded_epg_id, EpgIdCache},
+        processor::EpgIdCache,
     },
-    utils::{async_file_reader, compressed_file_reader_async::CompressedFileReaderAsync, parse_xmltv_time},
+    utils::{
+        async_file_reader, compressed_file_reader_async::CompressedFileReaderAsync, parse_xmltv_time,
+        with_folded_epg_id,
+    },
 };
 use log::error;
 use quick_xml::events::{BytesStart, BytesText, Event};

@@ -11,12 +11,14 @@ use crate::{
     auth::Fingerprint,
     model::{Config, ConfigTarget, ProxyUserCredentials, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
     repository::{
-        epg_query_channels, get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const,
-        xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream, XML_PREAMBLE,
+        epg_query_channels_by_storage_key, get_target_storage_path, m3u_get_epg_file_path_for_target,
+        storage_const, xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTreeQuery,
+        LockedReceiverStream, XML_PREAMBLE,
     },
     utils,
     utils::{
-        deobscure_text, file_exists_async, format_xmltv_time_utc, get_epg_processing_options, obscure_text,
+        canonicalize_output_epg_id, canonicalize_untrusted_epg_id, deobscure_text, file_exists_async,
+        format_xmltv_time_utc, get_epg_processing_options, lowercase_xmltv_text, obscure_text, EpgIdOutputCase,
         EpgProcessingOptions, EpgTimeShift,
     },
 };
@@ -27,16 +29,12 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use shared::{
     concat_string,
     model::{
-        EpgChannel, EpgProgramme, EpgProgrammeDto, ShortEpgDto, ShortEpgResultDto, StreamEpgEntry, StreamEpgItemRequest,
-        StreamEpgRequest, StreamEpgResponse, TargetType,
+        ConfigTargetOptions, EpgChannel, EpgProgramme, EpgProgrammeDto, ShortEpgDto, ShortEpgResultDto, StreamEpgEntry,
+        StreamEpgItemRequest, StreamEpgRequest, StreamEpgResponse, TargetType,
     },
     utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
-use std::{
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
 use tokio::{io::AsyncWriteExt, sync::mpsc, task};
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
@@ -196,6 +194,10 @@ async fn serve_epg_with_rewrites(
     }
 
     let epg_processing_options = get_epg_processing_options(app_state, user, target);
+    let lowercase_display_names = target
+        .options
+        .as_ref()
+        .is_some_and(ConfigTargetOptions::lowercase_xmltv_display_names);
 
     let server_info = app_state.app_config.get_user_server_info(user);
     let base_url =
@@ -270,7 +272,10 @@ async fn serve_epg_with_rewrites(
                 let elem = BytesStart::new("display-name");
                 continue_on_err!(writer.write_event_async(Event::Start(elem)).await);
                 let title: &str = channel.title.as_deref().unwrap_or("");
-                continue_on_err!(writer.write_event_async(Event::Text(BytesText::new(title))).await);
+                let display_name = lowercase_xmltv_text(title, lowercase_display_names);
+                continue_on_err!(writer
+                    .write_event_async(Event::Text(BytesText::new(display_name.as_ref())))
+                    .await);
 
                 let elem = BytesEnd::new("display-name");
                 continue_on_err!(writer.write_event_async(Event::End(elem)).await);
@@ -348,15 +353,20 @@ async fn serve_epg_with_rewrites(
         .body(axum::body::Body::from_stream(body_stream)))
 }
 
-async fn get_epg_channel(app_state: &Arc<AppState>, channel_id: &Arc<str>, epg_path: &Path) -> Option<EpgChannel> {
+/// Looks up an EPG channel by its exact, target-output-case storage key.
+async fn get_epg_channel_by_storage_key(
+    app_state: &Arc<AppState>,
+    storage_key: &Arc<str>,
+    epg_path: &Path,
+) -> Option<EpgChannel> {
     let file_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
     let epg_path = epg_path.to_path_buf();
-    let channel_id = Arc::clone(channel_id);
+    let storage_key = Arc::clone(storage_key);
 
     match task::spawn_blocking(move || -> Option<EpgChannel> {
         let _guard = file_lock;
         match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) {
-            Ok(mut query) => match query.query(&channel_id) {
+            Ok(mut query) => match query.query(&storage_key) {
                 Ok(Some(item)) => Some(item),
                 Ok(None) => None,
                 Err(err) => {
@@ -473,24 +483,31 @@ pub async fn serve_short_epg(
     stream_id: Arc<str>,
     limit: u32,
 ) -> axum::response::Response {
+    let lowercase_ids = target
+        .options
+        .as_ref()
+        .is_some_and(ConfigTargetOptions::lowercase_epg_ids);
+    let output_case = EpgIdOutputCase::from_lowercase(lowercase_ids);
+    let storage_key = canonicalize_output_epg_id(channel_id, output_case);
+    let response_channel_id = Arc::clone(&storage_key);
     let short_epg = {
         // It seems provider set limit to 4 if it is undefined oor 0.
         let limit = if limit > 0 { limit } else { DEFAULT_SHORT_EPG_LIMIT };
         if file_exists_async(epg_path).await {
-            if let Some(epg_channel) = get_epg_channel(app_state, channel_id, epg_path).await {
+            if let Some(epg_channel) = get_epg_channel_by_storage_key(app_state, &storage_key, epg_path).await {
                 let epg_processing_options = get_epg_processing_options(app_state, user, target);
                 ShortEpgResultDto {
                     epg_listings: if limit > 0 {
                         epg_channel
                             .get_programme_with_limit(limit)
                             .iter()
-                            .map(|p| from_programme(&stream_id, channel_id, p, &epg_processing_options))
+                            .map(|p| from_programme(&stream_id, &response_channel_id, p, &epg_processing_options))
                             .collect()
                     } else {
                         epg_channel
                             .programmes
                             .iter()
-                            .map(|p| from_programme(&stream_id, channel_id, p, &epg_processing_options))
+                            .map(|p| from_programme(&stream_id, &response_channel_id, p, &epg_processing_options))
                             .collect()
                     },
                 }
@@ -516,15 +533,38 @@ pub async fn serve_short_epg(
 /// Returns empty entries for all error/missing cases (no errors surfaced to client).
 const STREAM_EPG_ARCHIVE_WINDOW_BACK_SECS: i64 = 4 * 3600;
 const STREAM_EPG_ARCHIVE_WINDOW_FWD_SECS: i64 = 12 * 3600;
+const MAX_STREAM_EPG_ITEMS: usize = 256;
+const MAX_STREAM_EPG_CHANNEL_ID_BYTES: usize = 512;
 
-fn stream_epg_reference_map(items: &[StreamEpgItemRequest]) -> HashMap<&str, i64> {
-    let mut references = HashMap::with_capacity(items.len());
+struct PreparedStreamEpgEntry {
+    storage_key: Arc<str>,
+    reference_ts: Option<i64>,
+}
+
+struct PreparedStreamEpgRequest {
+    entries: Vec<PreparedStreamEpgEntry>,
+}
+
+fn prepare_stream_epg_request(
+    items: &[StreamEpgItemRequest],
+    output_case: EpgIdOutputCase,
+) -> PreparedStreamEpgRequest {
+    let mut entry_index_by_storage_key = HashMap::<Arc<str>, usize>::with_capacity(items.len());
+    let mut entries = Vec::<PreparedStreamEpgEntry>::with_capacity(items.len());
+
     for item in items {
-        if let Some(reference_ts) = item.reference_ts {
-            references.entry(item.epg_channel_id.as_str()).or_insert(reference_ts);
+        let storage_key = canonicalize_untrusted_epg_id(&item.epg_channel_id, output_case);
+        if let Some(entry_index) = entry_index_by_storage_key.get(storage_key.as_ref()).copied() {
+            if entries[entry_index].reference_ts.is_none() {
+                entries[entry_index].reference_ts = item.reference_ts;
+            }
+        } else {
+            entry_index_by_storage_key.insert(Arc::clone(&storage_key), entries.len());
+            entries.push(PreparedStreamEpgEntry { storage_key, reference_ts: item.reference_ts });
         }
     }
-    references
+
+    PreparedStreamEpgRequest { entries }
 }
 
 async fn serve_stream_epg(
@@ -532,46 +572,35 @@ async fn serve_stream_epg(
     user: &ProxyUserCredentials,
     target: &Arc<ConfigTarget>,
     epg_path: &Path,
-    items: Vec<StreamEpgItemRequest>,
+    prepared: PreparedStreamEpgRequest,
 ) -> StreamEpgResponse {
     let epg_processing_options = get_epg_processing_options(app_state, user, target);
     let live_now = chrono::Utc::now().timestamp();
 
-    // Deduplicate by first occurrence, preserving order
-    let unique_ids: Vec<&str> = {
-        let mut seen = HashSet::new();
-        items
-            .iter()
-            .filter_map(|item| {
-                let epg_channel_id = item.epg_channel_id.as_str();
-                seen.insert(epg_channel_id).then_some(epg_channel_id)
-            })
-            .collect()
-    };
-    let query_ids = unique_ids
+    let PreparedStreamEpgRequest { entries: prepared_entries } = prepared;
+    let storage_keys = prepared_entries
         .iter()
-        .map(|id| (*id).intern())
-        .collect::<Vec<Arc<str>>>();
+        .map(|entry| Arc::clone(&entry.storage_key))
+        .collect();
 
-    let channels = match epg_query_channels(
+    let channels: Vec<Option<EpgChannel>> = match epg_query_channels_by_storage_key(
         &app_state.app_config.file_locks,
         epg_path,
-        query_ids,
+        storage_keys,
     )
     .await
     {
-        Ok(results) => results,
+        Ok(results) => results.into_iter().map(|(_, channel)| channel).collect(),
         Err(err) => {
             error!("{err}");
-            unique_ids.into_iter().map(|id| (id.intern(), None)).collect()
+            std::iter::repeat_with(|| None).take(prepared_entries.len()).collect()
         }
     };
 
-    let reference_by_channel = stream_epg_reference_map(&items);
     let mut entries = Vec::with_capacity(channels.len());
 
-    for (epg_channel_id, channel) in channels {
-        let reference_ts = reference_by_channel.get(epg_channel_id.as_ref()).copied().unwrap_or(live_now);
+    for (channel, prepared_entry) in channels.into_iter().zip(prepared_entries) {
+        let reference_ts = prepared_entry.reference_ts.unwrap_or(live_now);
         let window_start = reference_ts.saturating_sub(STREAM_EPG_ARCHIVE_WINDOW_BACK_SECS);
         let window_end = reference_ts.saturating_add(STREAM_EPG_ARCHIVE_WINDOW_FWD_SECS);
         let programmes = match channel {
@@ -580,7 +609,7 @@ async fn serve_stream_epg(
         };
 
         entries.push(StreamEpgEntry {
-            epg_channel_id: epg_channel_id.to_string(),
+            epg_channel_id: prepared_entry.storage_key.to_string(),
             target_id: Some(target.id),
             programmes,
         });
@@ -617,15 +646,26 @@ fn stream_epg_programmes_for_channel(
 
 fn group_stream_epg_items(
     items: Vec<StreamEpgItemRequest>,
-) -> Result<Vec<(u16, Vec<StreamEpgItemRequest>)>, &'static str> {
+) -> Result<Vec<(u16, Vec<StreamEpgItemRequest>)>, String> {
     if items.is_empty() {
-        return Err("items must not be empty");
+        return Err("items must not be empty".to_string());
+    }
+    if items.len() > MAX_STREAM_EPG_ITEMS {
+        return Err(format!("items must not exceed {MAX_STREAM_EPG_ITEMS} entries"));
     }
 
     let mut groups = Vec::<(u16, Vec<StreamEpgItemRequest>)>::new();
     for item in items {
+        if item.epg_channel_id.is_empty() {
+            return Err("epg_channel_id must not be empty".to_string());
+        }
+        if item.epg_channel_id.len() > MAX_STREAM_EPG_CHANNEL_ID_BYTES {
+            return Err(format!(
+                "epg_channel_id must not exceed {MAX_STREAM_EPG_CHANNEL_ID_BYTES} bytes"
+            ));
+        }
         let Some(target_id) = item.target_id else {
-            return Err("all items must include target_id");
+            return Err("all items must include target_id".to_string());
         };
 
         if let Some((_, group_items)) = groups.iter_mut().find(|(group_target_id, _)| *group_target_id == target_id) {
@@ -638,16 +678,12 @@ fn group_stream_epg_items(
     Ok(groups)
 }
 
-fn empty_stream_epg_entries(target_id: u16, items: &[StreamEpgItemRequest]) -> Vec<StreamEpgEntry> {
-    let mut seen = HashSet::new();
-    items
+fn empty_stream_epg_entries(target_id: u16, prepared: &PreparedStreamEpgRequest) -> Vec<StreamEpgEntry> {
+    prepared
+        .entries
         .iter()
-        .filter_map(|item| {
-            let epg_channel_id = item.epg_channel_id.as_str();
-            seen.insert(epg_channel_id).then_some(epg_channel_id)
-        })
-        .map(|epg_channel_id| StreamEpgEntry {
-            epg_channel_id: epg_channel_id.to_string(),
+        .map(|entry| StreamEpgEntry {
+            epg_channel_id: entry.storage_key.to_string(),
             target_id: Some(target_id),
             programmes: Vec::new(),
         })
@@ -665,7 +701,7 @@ pub(crate) async fn stream_epg_api(
 ) -> impl IntoResponse + Send {
     let grouped_items = match group_stream_epg_items(stream_epg_req.items) {
         Ok(groups) => groups,
-        Err(message) => return stream_epg_bad_request(message),
+        Err(message) => return stream_epg_bad_request(&message),
     };
 
     let config = app_state.app_config.config.load_full();
@@ -676,13 +712,18 @@ pub(crate) async fn stream_epg_api(
         let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
             return stream_epg_bad_request(&format!("unknown target_id: {target_id}"));
         };
+        let output_case = EpgIdOutputCase::from_lowercase(target
+            .options
+            .as_ref()
+            .is_some_and(ConfigTargetOptions::lowercase_epg_ids));
+        let prepared = prepare_stream_epg_request(&items, output_case);
 
         let Some(epg_path) = get_epg_path_for_target(config.as_ref(), &target) else {
-            entries.extend(empty_stream_epg_entries(target_id, &items));
+            entries.extend(empty_stream_epg_entries(target_id, &prepared));
             continue;
         };
 
-        let result = serve_stream_epg(&app_state, &user, &target, &epg_path, items).await;
+        let result = serve_stream_epg(&app_state, &user, &target, &epg_path, prepared).await;
         entries.extend(result.entries);
     }
 
@@ -790,30 +831,43 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::{
+        empty_stream_epg_entries,
+        from_programme,
         get_epg_path_for_target,
         get_epg_path_for_target_by_type,
         group_stream_epg_items,
+        prepare_stream_epg_request,
         rewrite_epg_channel_resource_url,
         serve_epg,
+        serve_short_epg,
+        serve_stream_epg,
+        stream_epg_api,
         stream_epg_programmes_for_channel,
-        stream_epg_reference_map,
+        MAX_STREAM_EPG_CHANNEL_ID_BYTES,
+        MAX_STREAM_EPG_ITEMS,
     };
-    use crate::api::model::create_test_app_state;
-    use crate::model::{
-        Config, ConfigTarget, Epg, IcsEpgSourceConfig, M3uTargetOutput, ProxyUserCredentials, TargetOutput,
-        XtreamTargetFlagsSet, XtreamTargetOutput,
+    use crate::{
+        api::model::{create_test_app_state, AppState},
+        model::{
+            Config, ConfigTarget, Epg, IcsEpgSourceConfig, M3uTargetOutput, ProxyUserCredentials,
+            TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput,
+        },
+        processing::parser::ics::parse_ics_file_to_channel,
+        repository::{epg_write_file, BPlusTree},
+        utils::{lowercase_xmltv_text, EpgIdOutputCase, EpgProcessingOptions, EpgTimeShift},
     };
-    use crate::processing::parser::ics::parse_ics_file_to_channel;
-    use crate::repository::epg_write_file;
-    use crate::utils::{EpgProcessingOptions, EpgTimeShift};
     use arc_swap::ArcSwapOption;
+    use axum::response::IntoResponse;
+    use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
     use shared::{
         foundation::Filter,
-        model::{EpgChannel, EpgProgramme, ProcessingOrder, StreamEpgItemRequest, TargetType},
+        model::{
+            ConfigTargetOptions, EpgChannel, EpgOutputOptions, EpgProgramme, ProcessingOrder, StreamEpgItemRequest,
+            StreamEpgRequest, TargetType,
+        },
         utils::{concat_path, obfuscate_text, Internable},
     };
-    use std::{collections::HashMap, fs};
-    use std::sync::Arc;
+    use std::{collections::HashMap, fs, sync::Arc};
     use tempfile::tempdir;
 
     fn test_target_with_xtream_and_m3u() -> ConfigTarget {
@@ -877,6 +931,48 @@ mod tests {
         }
     }
 
+    fn test_app_state() -> Arc<AppState> {
+        create_test_app_state(Config::default())
+    }
+
+    fn test_target_with_epg_options(lowercase_ids: bool, lowercase_display_names: bool) -> Arc<ConfigTarget> {
+        let mut target = test_target_with_xtream_only();
+        target.options = Some(ConfigTargetOptions {
+            epg_output: EpgOutputOptions {
+                lowercase_ids,
+                lowercase_xmltv_display_names: lowercase_display_names,
+            },
+            ..ConfigTargetOptions::default()
+        });
+        Arc::new(target)
+    }
+
+    fn write_test_epg_db(path: &std::path::Path, channel: EpgChannel) {
+        write_test_epg_channels(path, [channel]);
+    }
+
+    fn write_test_epg_channels(
+        path: &std::path::Path,
+        channels: impl IntoIterator<Item = EpgChannel>,
+    ) {
+        let mut tree = BPlusTree::<Arc<str>, EpgChannel>::new();
+        for channel in channels {
+            tree.insert(Arc::clone(&channel.id), channel);
+        }
+        tree.store(path).expect("test EPG DB should be written");
+    }
+
+    fn stream_epg_item(id: impl Into<String>, target_id: Option<u16>, reference_ts: Option<i64>) -> StreamEpgItemRequest {
+        StreamEpgItemRequest { epg_channel_id: id.into(), target_id, reference_ts }
+    }
+
+    async fn response_body_text(response: axum::response::Response) -> String {
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("response body should be readable");
+        String::from_utf8(body.to_vec()).expect("response body should be UTF-8")
+    }
+
     #[tokio::test]
     async fn regular_xmltv_output_contains_imported_ics_channel_and_programme() {
         let dir = tempdir().expect("temp dir");
@@ -917,6 +1013,7 @@ mod tests {
             },
             &epg_path,
             &HashMap::<Arc<str>, Arc<str>>::new(),
+            &EpgOutputOptions::default(),
         )
         .expect("write EPG database");
 
@@ -1014,33 +1111,80 @@ mod tests {
 
     #[test]
     fn test_group_stream_epg_items_rejects_missing_target() {
-        let err = group_stream_epg_items(vec![StreamEpgItemRequest {
-            epg_channel_id: "epg-1".to_string(),
-            target_id: None,
-            reference_ts: None,
-        }])
-        .unwrap_err();
+        let err = group_stream_epg_items(vec![stream_epg_item("epg-1", None, None)]).unwrap_err();
         assert_eq!(err, "all items must include target_id");
+    }
+
+    #[test]
+    fn test_group_stream_epg_items_rejects_empty_channel_id() {
+        let err = group_stream_epg_items(vec![stream_epg_item("", Some(1), None)]).unwrap_err();
+
+        assert_eq!(err, "epg_channel_id must not be empty");
+    }
+
+    #[test]
+    fn test_group_stream_epg_items_rejects_overlong_channel_id() {
+        let err = group_stream_epg_items(vec![stream_epg_item(
+            "x".repeat(MAX_STREAM_EPG_CHANNEL_ID_BYTES + 1),
+            Some(1),
+            None,
+        )])
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            format!("epg_channel_id must not exceed {MAX_STREAM_EPG_CHANNEL_ID_BYTES} bytes")
+        );
+    }
+
+    #[test]
+    fn test_group_stream_epg_items_rejects_excessive_item_count() {
+        let items = (0..=MAX_STREAM_EPG_ITEMS)
+            .map(|index| stream_epg_item(format!("epg-{index}"), Some(1), None))
+            .collect();
+
+        let err = group_stream_epg_items(items).unwrap_err();
+
+        assert_eq!(err, format!("items must not exceed {MAX_STREAM_EPG_ITEMS} entries"));
+    }
+
+    #[test]
+    fn test_group_stream_epg_items_accepts_configured_limits() {
+        let mut items = (0..MAX_STREAM_EPG_ITEMS)
+            .map(|index| stream_epg_item(format!("epg-{index}"), Some(1), None))
+            .collect::<Vec<_>>();
+        items[0].epg_channel_id = "x".repeat(MAX_STREAM_EPG_CHANNEL_ID_BYTES);
+
+        let groups = group_stream_epg_items(items).expect("request at the configured limits should be accepted");
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].1.len(), MAX_STREAM_EPG_ITEMS);
+    }
+
+    #[tokio::test]
+    async fn stream_epg_api_returns_bad_request_for_invalid_item() {
+        let response = stream_epg_api(
+            axum::extract::State(test_app_state()),
+            axum::extract::Json(StreamEpgRequest {
+                items: vec![stream_epg_item("", Some(1), None)],
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        let body = response_body_text(response).await;
+        let error = serde_json::from_str::<serde_json::Value>(&body)
+            .expect("bad-request response should contain JSON");
+        assert_eq!(error["error"], "epg_channel_id must not be empty");
     }
 
     #[test]
     fn test_group_stream_epg_items_groups_by_target_in_input_order() {
         let groups = group_stream_epg_items(vec![
-            StreamEpgItemRequest {
-                epg_channel_id: "epg-1".to_string(),
-                target_id: Some(2),
-                reference_ts: None,
-            },
-            StreamEpgItemRequest {
-                epg_channel_id: "epg-2".to_string(),
-                target_id: Some(5),
-                reference_ts: None,
-            },
-            StreamEpgItemRequest {
-                epg_channel_id: "epg-3".to_string(),
-                target_id: Some(2),
-                reference_ts: None,
-            },
+            stream_epg_item("epg-1", Some(2), None),
+            stream_epg_item("epg-2", Some(5), None),
+            stream_epg_item("epg-3", Some(2), None),
         ])
         .unwrap();
 
@@ -1064,28 +1208,524 @@ mod tests {
     }
 
     #[test]
-    fn stream_epg_reference_map_keeps_first_reference_per_channel() {
+    fn stream_epg_request_keeps_first_available_reference_per_exact_id() {
         let items = [
-            StreamEpgItemRequest {
-                epg_channel_id: "epg-1".to_string(),
-                target_id: Some(1),
-                reference_ts: Some(100),
-            },
-            StreamEpgItemRequest {
-                epg_channel_id: "epg-1".to_string(),
-                target_id: Some(1),
-                reference_ts: Some(200),
-            },
-            StreamEpgItemRequest {
-                epg_channel_id: "epg-2".to_string(),
-                target_id: Some(1),
-                reference_ts: None,
-            },
+            stream_epg_item("epg-1", Some(1), Some(100)),
+            stream_epg_item("epg-1", Some(1), Some(200)),
+            stream_epg_item("epg-2", Some(1), None),
+            stream_epg_item("epg-2", Some(1), Some(300)),
         ];
-        let references = stream_epg_reference_map(&items);
+        let prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::Preserve);
 
-        assert_eq!(references.get("epg-1"), Some(&100));
-        assert_eq!(references.get("epg-2"), None);
+        assert_eq!(prepared.entries.len(), 2);
+        assert_eq!(prepared.entries[0].storage_key.as_ref(), "epg-1");
+        assert_eq!(prepared.entries[0].reference_ts, Some(100));
+        assert_eq!(prepared.entries[1].storage_key.as_ref(), "epg-2");
+        assert_eq!(prepared.entries[1].reference_ts, Some(300));
+    }
+
+    #[test]
+    fn stream_epg_request_canonicalizes_before_deduplication() {
+        let items = [
+            stream_epg_item("Example.Channel", Some(1), Some(100)),
+            stream_epg_item("example.CHANNEL", Some(1), Some(200)),
+            stream_epg_item("ÄBC.Id", Some(1), None),
+        ];
+
+        let prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::LowercaseAscii);
+        let storage_keys = prepared
+            .entries
+            .iter()
+            .map(|entry| entry.storage_key.as_ref())
+            .collect::<Vec<_>>();
+
+        assert_eq!(storage_keys, vec!["example.channel", "Äbc.id"]);
+        assert_eq!(prepared.entries[0].reference_ts, Some(100));
+        assert_eq!(prepared.entries[1].reference_ts, None);
+    }
+
+    #[test]
+    fn stream_epg_request_uses_non_interned_lookup_ids() {
+        let globally_interned = "request.example".intern();
+        let items = [stream_epg_item("REQUEST.Example", Some(1), None)];
+
+        let prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::LowercaseAscii);
+
+        assert_eq!(prepared.entries[0].storage_key.as_ref(), globally_interned.as_ref());
+        assert!(!Arc::ptr_eq(&prepared.entries[0].storage_key, &globally_interned));
+
+        let preserve_prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::Preserve);
+        let preserve_interned = "REQUEST.Example".intern();
+        assert_eq!(preserve_prepared.entries[0].storage_key.as_ref(), preserve_interned.as_ref());
+        assert!(!Arc::ptr_eq(&preserve_prepared.entries[0].storage_key, &preserve_interned));
+    }
+
+    #[test]
+    fn stream_epg_request_preserves_case_distinct_entries_by_default() {
+        let items = [
+            stream_epg_item("Example.Channel", Some(1), Some(100)),
+            stream_epg_item("example.CHANNEL", Some(1), Some(200)),
+        ];
+
+        let prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::Preserve);
+
+        assert_eq!(prepared.entries.len(), 2);
+        assert_eq!(prepared.entries[0].storage_key.as_ref(), "Example.Channel");
+        assert_eq!(prepared.entries[0].reference_ts, Some(100));
+        assert_eq!(prepared.entries[1].storage_key.as_ref(), "example.CHANNEL");
+        assert_eq!(prepared.entries[1].reference_ts, Some(200));
+    }
+
+    #[test]
+    fn empty_stream_epg_entries_use_prepared_canonical_ids() {
+        let items = [
+            stream_epg_item("Example.Channel", Some(7), None),
+            stream_epg_item("example.CHANNEL", Some(7), None),
+        ];
+        let prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::LowercaseAscii);
+
+        let entries = empty_stream_epg_entries(7, &prepared);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].epg_channel_id, "example.channel");
+        assert_eq!(entries[0].target_id, Some(7));
+        assert!(entries[0].programmes.is_empty());
+
+        let preserve_prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::Preserve);
+        let preserve_entries = empty_stream_epg_entries(7, &preserve_prepared);
+        assert_eq!(preserve_entries.len(), 2);
+        assert_eq!(preserve_entries[0].epg_channel_id, "Example.Channel");
+        assert_eq!(preserve_entries[1].epg_channel_id, "example.CHANNEL");
+    }
+
+    #[test]
+    fn short_epg_response_uses_canonical_id_for_both_id_fields() {
+        let stream_id = "42".intern();
+        let epg_id = "example.channel".intern();
+        let programme = EpgProgramme::new_all(
+            100,
+            200,
+            Arc::clone(&epg_id),
+            Some("News".intern()),
+            None,
+            None,
+        );
+        let options = EpgProcessingOptions {
+            rewrite_urls: false,
+            time_shift: EpgTimeShift::None,
+            encrypt_secret: [0; 16],
+        };
+
+        let result = from_programme(&stream_id, &epg_id, &programme, &options);
+
+        assert_eq!(result.epg_id.as_ref(), "example.channel");
+        assert_eq!(result.channel_id.as_ref(), "example.channel");
+    }
+
+    #[test]
+    fn lowercased_xmltv_display_name_remains_xml_escaped() {
+        let display_name = lowercase_xmltv_text("CAFÉ NETWORK & <HD>", true);
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        writer
+            .write_event(Event::Start(BytesStart::new("display-name")))
+            .expect("display-name start should serialize");
+        writer
+            .write_event(Event::Text(BytesText::new(display_name.as_ref())))
+            .expect("display-name text should serialize");
+        writer
+            .write_event(Event::End(BytesEnd::new("display-name")))
+            .expect("display-name end should serialize");
+
+        let xml = String::from_utf8(writer.into_inner()).expect("serialized XML should be UTF-8");
+
+        assert_eq!(xml, "<display-name>café network &amp; &lt;hd&gt;</display-name>");
+    }
+
+    #[tokio::test]
+    async fn xmltv_output_uses_canonical_channel_ids_and_only_lowercases_display_names() {
+        let dir = tempdir().expect("temp dir");
+        let epg_path = dir.path().join("epg.db");
+        write_test_epg_db(
+            &epg_path,
+            EpgChannel {
+                id: "example.channel".intern(),
+                title: Some("CAFÉ NETWORK & <HD>".intern()),
+                icon: None,
+                programmes: vec![EpgProgramme::new_all(
+                    100,
+                    200,
+                    "source.MixedCase".intern(),
+                    Some("News & Updates".intern()),
+                    Some("Keep <Case>".intern()),
+                    None,
+                )],
+            },
+        );
+        let app_state = test_app_state();
+        let target = test_target_with_epg_options(true, true);
+
+        let response = serve_epg(
+            &app_state,
+            &epg_path,
+            &ProxyUserCredentials::default(),
+            &target,
+            None,
+        )
+        .await;
+        let xml = response_body_text(response).await;
+
+        assert!(xml.contains(r#"<channel id="example.channel">"#), "XMLTV output: {xml}");
+        assert!(xml.contains(r#"<programme start="19700101000140 +0000" stop="19700101000320 +0000" channel="example.channel">"#));
+        assert!(xml.contains("<display-name>café network &amp; &lt;hd&gt;</display-name>"));
+        assert!(xml.contains("<title>News &amp; Updates</title>"));
+        assert!(xml.contains("<desc>Keep &lt;Case&gt;</desc>"));
+        assert!(!xml.contains("<title>news &amp; updates</title>"));
+    }
+
+    #[tokio::test]
+    async fn xmltv_output_preserves_ids_and_display_names_when_options_are_disabled() {
+        let dir = tempdir().expect("temp dir");
+        let epg_path = dir.path().join("epg.db");
+        write_test_epg_db(
+            &epg_path,
+            EpgChannel {
+                id: "Example.Channel".intern(),
+                title: Some("MixedCase Network".intern()),
+                icon: None,
+                programmes: vec![EpgProgramme::new(100, 200, "different.source.case".intern())],
+            },
+        );
+        let app_state = test_app_state();
+        let target = Arc::new(test_target_with_xtream_only());
+
+        let response = serve_epg(
+            &app_state,
+            &epg_path,
+            &ProxyUserCredentials::default(),
+            &target,
+            None,
+        )
+        .await;
+        let xml = response_body_text(response).await;
+
+        assert!(xml.contains(r#"<channel id="Example.Channel">"#));
+        assert!(xml.contains(r#"channel="Example.Channel""#));
+        assert!(xml.contains("<display-name>MixedCase Network</display-name>"));
+    }
+
+    #[tokio::test]
+    async fn xmltv_output_preserves_legacy_mixed_case_key_order_when_options_are_disabled() {
+        let dir = tempdir().expect("temp dir");
+        let epg_path = dir.path().join("epg.db");
+        write_test_epg_channels(
+            &epg_path,
+            [
+                EpgChannel {
+                    id: "Z.Channel".intern(),
+                    title: Some("First Network".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new(100, 200, "Z.Channel".intern())],
+                },
+                EpgChannel {
+                    id: "a.channel".intern(),
+                    title: Some("Second Network".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new(100, 200, "a.channel".intern())],
+                },
+            ],
+        );
+        let app_state = test_app_state();
+        let target = Arc::new(test_target_with_xtream_only());
+
+        let response = serve_epg(
+            &app_state,
+            &epg_path,
+            &ProxyUserCredentials::default(),
+            &target,
+            None,
+        )
+        .await;
+        let xml = response_body_text(response).await;
+        let first_position = xml.find(r#"<channel id="Z.Channel">"#).expect("first channel should exist");
+        let second_position = xml.find(r#"<channel id="a.channel">"#).expect("second channel should exist");
+
+        assert!(first_position < second_position, "XMLTV output should preserve legacy key order: {xml}");
+    }
+
+    #[tokio::test]
+    async fn xmltv_output_lowercases_only_display_name_when_id_option_is_disabled() {
+        let dir = tempdir().expect("temp dir");
+        let epg_path = dir.path().join("epg.db");
+        write_test_epg_db(
+            &epg_path,
+            EpgChannel {
+                id: "Example.Channel".intern(),
+                title: Some("CAFÉ NETWORK".intern()),
+                icon: None,
+                programmes: vec![EpgProgramme::new_all(
+                    100,
+                    200,
+                    "Example.Channel".intern(),
+                    Some("MixedCase Programme".intern()),
+                    Some("Keep <Case>".intern()),
+                    None,
+                )],
+            },
+        );
+        let app_state = test_app_state();
+        let target = test_target_with_epg_options(false, true);
+
+        let response = serve_epg(
+            &app_state,
+            &epg_path,
+            &ProxyUserCredentials::default(),
+            &target,
+            None,
+        )
+        .await;
+        let xml = response_body_text(response).await;
+
+        assert!(xml.contains(r#"<channel id="Example.Channel">"#));
+        assert!(xml.contains(r#"channel="Example.Channel""#));
+        assert!(xml.contains("<display-name>café network</display-name>"));
+        assert!(xml.contains("<title>MixedCase Programme</title>"));
+        assert!(xml.contains("<desc>Keep &lt;Case&gt;</desc>"));
+    }
+
+    #[tokio::test]
+    async fn xmltv_output_lowercases_only_ids_when_display_name_option_is_disabled() {
+        let dir = tempdir().expect("temp dir");
+        let epg_path = dir.path().join("epg.db");
+        write_test_epg_db(
+            &epg_path,
+            EpgChannel {
+                id: "example.channel".intern(),
+                title: Some("MixedCase Network".intern()),
+                icon: None,
+                programmes: vec![EpgProgramme::new_all(
+                    100,
+                    200,
+                    "example.channel".intern(),
+                    Some("MixedCase Programme".intern()),
+                    Some("Keep <Case>".intern()),
+                    None,
+                )],
+            },
+        );
+        let app_state = test_app_state();
+        let target = test_target_with_epg_options(true, false);
+
+        let response = serve_epg(
+            &app_state,
+            &epg_path,
+            &ProxyUserCredentials::default(),
+            &target,
+            None,
+        )
+        .await;
+        let xml = response_body_text(response).await;
+
+        assert!(xml.contains(r#"<channel id="example.channel">"#));
+        assert!(xml.contains(r#"channel="example.channel""#));
+        assert!(xml.contains("<display-name>MixedCase Network</display-name>"));
+        assert!(xml.contains("<title>MixedCase Programme</title>"));
+        assert!(xml.contains("<desc>Keep &lt;Case&gt;</desc>"));
+    }
+
+    #[tokio::test]
+    async fn short_epg_uses_target_output_case_for_legacy_and_lowercase_storage_keys() {
+        let dir = tempdir().expect("temp dir");
+        let lowercase_epg_path = dir.path().join("lowercase-epg.db");
+        let legacy_epg_path = dir.path().join("legacy-epg.db");
+        let now = chrono::Utc::now().timestamp();
+        write_test_epg_db(
+            &lowercase_epg_path,
+            EpgChannel {
+                id: "example.channel".intern(),
+                title: Some("Sample Network".intern()),
+                icon: None,
+                programmes: vec![EpgProgramme::new_all(
+                    now - 60,
+                    now + 3600,
+                    "example.channel".intern(),
+                    Some("Current".intern()),
+                    None,
+                    None,
+                )],
+            },
+        );
+        write_test_epg_db(
+            &legacy_epg_path,
+            EpgChannel {
+                id: "Example.Channel".intern(),
+                title: Some("Legacy Network".intern()),
+                icon: None,
+                programmes: vec![EpgProgramme::new_all(
+                    now - 60,
+                    now + 3600,
+                    "Example.Channel".intern(),
+                    Some("Legacy Current".intern()),
+                    None,
+                    None,
+                )],
+            },
+        );
+        let legacy_db_before = fs::read(&legacy_epg_path).expect("legacy EPG DB should be readable");
+        let app_state = test_app_state();
+        let target = test_target_with_epg_options(true, false);
+        let request_id = "Example.Channel".intern();
+
+        let response = serve_short_epg(
+            &app_state,
+            &lowercase_epg_path,
+            &ProxyUserCredentials::default(),
+            &target,
+            &request_id,
+            "42".intern(),
+            4,
+        )
+        .await;
+        let body = response_body_text(response).await;
+        let result = serde_json::from_str::<shared::model::ShortEpgResultDto>(&body)
+            .expect("short EPG response should deserialize");
+
+        assert_eq!(result.epg_listings.len(), 1);
+        assert_eq!(result.epg_listings[0].epg_id.as_ref(), "example.channel");
+        assert_eq!(result.epg_listings[0].channel_id.as_ref(), "example.channel");
+
+        let disabled_target = Arc::new(test_target_with_xtream_only());
+        let disabled_response = serve_short_epg(
+            &app_state,
+            &legacy_epg_path,
+            &ProxyUserCredentials::default(),
+            &disabled_target,
+            &request_id,
+            "42".intern(),
+            4,
+        )
+        .await;
+        let disabled_body = response_body_text(disabled_response).await;
+        let disabled_result = serde_json::from_str::<shared::model::ShortEpgResultDto>(&disabled_body)
+            .expect("disabled short EPG response should deserialize");
+        assert_eq!(disabled_result.epg_listings.len(), 1);
+        assert_eq!(disabled_result.epg_listings[0].epg_id.as_ref(), "Example.Channel");
+        assert_eq!(disabled_result.epg_listings[0].channel_id.as_ref(), "Example.Channel");
+        assert_eq!(
+            fs::read(&legacy_epg_path).expect("legacy EPG DB should remain readable"),
+            legacy_db_before,
+            "serving a legacy EPG DB must not rewrite its key schema"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_epg_lowercase_mode_deduplicates_case_variants_and_keeps_first_reference() {
+        let dir = tempdir().expect("temp dir");
+        let epg_path = dir.path().join("epg.db");
+        let first_reference = 1_700_000_000;
+        write_test_epg_db(
+            &epg_path,
+            EpgChannel {
+                id: "example.channel".intern(),
+                title: Some("Sample Network".intern()),
+                icon: None,
+                programmes: vec![EpgProgramme::new_all(
+                    first_reference - 60,
+                    first_reference + 60,
+                    "example.channel".intern(),
+                    Some("First Window".intern()),
+                    None,
+                    None,
+                )],
+            },
+        );
+        let app_state = test_app_state();
+        let target = test_target_with_epg_options(true, false);
+        let items = [
+            stream_epg_item("Example.Channel", Some(target.id), Some(first_reference)),
+            stream_epg_item(
+                "example.CHANNEL",
+                Some(target.id),
+                Some(first_reference + 7 * 24 * 3600),
+            ),
+        ];
+        let prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::LowercaseAscii);
+
+        let response = serve_stream_epg(
+            &app_state,
+            &ProxyUserCredentials::default(),
+            &target,
+            &epg_path,
+            prepared,
+        )
+        .await;
+
+        assert_eq!(response.entries.len(), 1);
+        assert_eq!(response.entries[0].epg_channel_id, "example.channel");
+        assert_eq!(response.entries[0].programmes.len(), 1);
+        assert_eq!(response.entries[0].programmes[0].title, "First Window");
+    }
+
+    #[tokio::test]
+    async fn stream_epg_preserve_mode_keeps_case_distinct_legacy_entries() {
+        let dir = tempdir().expect("temp dir");
+        let epg_path = dir.path().join("legacy-epg.db");
+        let first_reference = 1_700_000_000;
+        let second_reference = first_reference + 7 * 24 * 3600;
+        write_test_epg_channels(
+            &epg_path,
+            [
+                EpgChannel {
+                    id: "Example.Channel".intern(),
+                    title: Some("First Network".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new_all(
+                        first_reference - 60,
+                        first_reference + 60,
+                        "Example.Channel".intern(),
+                        Some("First Window".intern()),
+                        None,
+                        None,
+                    )],
+                },
+                EpgChannel {
+                    id: "example.CHANNEL".intern(),
+                    title: Some("Second Network".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new_all(
+                        second_reference - 60,
+                        second_reference + 60,
+                        "example.CHANNEL".intern(),
+                        Some("Second Window".intern()),
+                        None,
+                        None,
+                    )],
+                },
+            ],
+        );
+        let app_state = test_app_state();
+        let target = Arc::new(test_target_with_xtream_only());
+        let items = [
+            stream_epg_item("Example.Channel", Some(target.id), Some(first_reference)),
+            stream_epg_item("example.CHANNEL", Some(target.id), Some(second_reference)),
+        ];
+        let prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::Preserve);
+
+        let response = serve_stream_epg(
+            &app_state,
+            &ProxyUserCredentials::default(),
+            &target,
+            &epg_path,
+            prepared,
+        )
+        .await;
+
+        assert_eq!(response.entries.len(), 2);
+        assert_eq!(response.entries[0].epg_channel_id, "Example.Channel");
+        assert_eq!(response.entries[0].programmes.len(), 1);
+        assert_eq!(response.entries[0].programmes[0].title, "First Window");
+        assert_eq!(response.entries[1].epg_channel_id, "example.CHANNEL");
+        assert_eq!(response.entries[1].programmes.len(), 1);
+        assert_eq!(response.entries[1].programmes[0].title, "Second Window");
     }
 
     fn sample_channel(icon: Option<&str>) -> EpgChannel {

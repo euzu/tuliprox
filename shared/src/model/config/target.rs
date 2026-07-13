@@ -45,6 +45,20 @@ impl ConfigTargetShareLiveStreams {
     pub fn is_empty(&self) -> bool { !self.hls && !self.mpeg_ts }
 }
 
+/// Controls optional canonicalization of EPG data emitted for a target.
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EpgOutputOptions {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub lowercase_ids: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub lowercase_xmltv_display_names: bool,
+}
+
+impl EpgOutputOptions {
+    pub const fn is_empty(&self) -> bool { !self.lowercase_ids && !self.lowercase_xmltv_display_names }
+}
+
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigTargetOptions {
@@ -58,6 +72,8 @@ pub struct ConfigTargetOptions {
     pub share_live_streams: ConfigTargetShareLiveStreams,
     #[serde(default, skip_serializing_if = "is_false")]
     pub remove_duplicates: bool,
+    #[serde(default, skip_serializing_if = "EpgOutputOptions::is_empty")]
+    pub epg_output: EpgOutputOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_redirect: Option<ClusterFlags>,
 }
@@ -67,9 +83,14 @@ impl ConfigTargetOptions {
         !self.ignore_logo
             && self.share_live_streams.is_empty()
             && !self.remove_duplicates
+            && self.epg_output.is_empty()
             && (self.force_redirect.is_none()
                 || self.force_redirect.is_some_and(|f| f.has_full_flags() || f.is_empty()))
     }
+
+    pub const fn lowercase_epg_ids(&self) -> bool { self.epg_output.lowercase_ids }
+
+    pub const fn lowercase_xmltv_display_names(&self) -> bool { self.epg_output.lowercase_xmltv_display_names }
 
     pub fn share_live_hls_enabled(&self) -> bool { self.share_live_streams.hls }
 
@@ -475,8 +496,8 @@ impl ConfigTargetDto {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigTargetDto, ConfigTargetOptions, ConfigTargetShareLiveStreams, M3uTargetOutputDto, StrmTargetOutputDto,
-        TargetOutputDto, XtreamTargetOutputDto,
+        ConfigTargetDto, ConfigTargetOptions, ConfigTargetShareLiveStreams, EpgOutputOptions, M3uTargetOutputDto,
+        StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
     };
 
     fn target_with_outputs(output: Vec<TargetOutputDto>) -> ConfigTargetDto {
@@ -613,6 +634,68 @@ share_live_streams: false
             serde_saphyr::from_str(&serialized).expect("partial share_live_streams should deserialize");
 
         assert_eq!(reparsed.share_live_streams, options.share_live_streams);
+    }
+
+    #[test]
+    fn target_options_default_epg_output_is_disabled_and_omitted() {
+        let options = serde_saphyr::from_str::<ConfigTargetOptions>("{}")
+            .expect("target options without epg_output should deserialize");
+
+        assert!(!options.lowercase_epg_ids());
+        assert!(!options.lowercase_xmltv_display_names());
+        assert!(options.epg_output.is_empty());
+        assert!(options.is_empty());
+
+        let serialized = serde_saphyr::to_string(&options).expect("default target options should serialize");
+        assert!(!serialized.contains("epg_output"), "default epg_output should be omitted, got: {serialized}");
+    }
+
+    #[test]
+    fn target_options_epg_output_roundtrips() {
+        let yaml = r#"
+epg_output:
+  lowercase_ids: true
+  lowercase_xmltv_display_names: true
+"#;
+
+        let options =
+            serde_saphyr::from_str::<ConfigTargetOptions>(yaml).expect("configured epg_output should deserialize");
+
+        assert!(options.lowercase_epg_ids());
+        assert!(options.lowercase_xmltv_display_names());
+        assert!(!options.is_empty());
+
+        let serialized = serde_saphyr::to_string(&options).expect("configured epg_output should serialize");
+        let roundtripped = serde_saphyr::from_str::<ConfigTargetOptions>(&serialized)
+            .expect("serialized epg_output should deserialize");
+        assert_eq!(roundtripped, options);
+    }
+
+    #[test]
+    fn target_options_epg_output_makes_options_nonempty() {
+        let lowercase_ids = ConfigTargetOptions {
+            epg_output: EpgOutputOptions { lowercase_ids: true, ..EpgOutputOptions::default() },
+            ..ConfigTargetOptions::default()
+        };
+        let lowercase_display_names = ConfigTargetOptions {
+            epg_output: EpgOutputOptions { lowercase_xmltv_display_names: true, ..EpgOutputOptions::default() },
+            ..ConfigTargetOptions::default()
+        };
+
+        assert!(!lowercase_ids.is_empty());
+        assert!(!lowercase_display_names.is_empty());
+    }
+
+    #[test]
+    fn target_options_reject_unknown_epg_output_fields() {
+        let yaml = r#"
+epg_output:
+  lowercase_id: true
+"#;
+
+        let result = serde_saphyr::from_str::<ConfigTargetOptions>(yaml);
+
+        assert!(result.is_err(), "unknown epg_output fields must be rejected");
     }
 
     #[test]

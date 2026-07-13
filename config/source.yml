@@ -26,6 +26,9 @@ sources:
         filter: "!final_channel_lineup!"
         options:
           ignore_logo: false
+          epg_output:
+            lowercase_ids: false
+            lowercase_xmltv_display_names: false
           share_live_streams:
             hls: true
             mpeg_ts: true
@@ -62,6 +65,9 @@ sources:
         filter: "!final_channel_lineup!"
         options:
           ignore_logo: false
+          epg_output:
+            lowercase_ids: false
+            lowercase_xmltv_display_names: false
           share_live_streams:
             hls: true
             mpeg_ts: true
