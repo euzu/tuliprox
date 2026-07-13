@@ -99,6 +99,22 @@ const LABEL_SERVER_NAME: &str = "LABEL.SERVER_NAME";
 const LABEL_PREFER_HTTPS: &str = "LABEL.PREFER_HTTPS";
 const LABEL_ALLOW_RELAY: &str = "LABEL.ALLOW_RELAY";
 
+fn input_persist_hint_key(staged_input: bool) -> &'static str {
+    if staged_input {
+        "INPUT_FORM.STAGED_PERSIST"
+    } else {
+        "INPUT_FORM.PERSIST"
+    }
+}
+
+fn input_url_hint_key(simple_input: bool) -> &'static str {
+    if simple_input {
+        "INPUT_FORM.SIMPLE_INPUT.URL"
+    } else {
+        "INPUT_FORM.URL"
+    }
+}
+
 fn staged_type_options() -> Rc<Vec<String>> {
     Rc::new(vec![StagedInputType::M3u.to_string(), StagedInputType::Xtream.to_string()])
 }
@@ -250,17 +266,6 @@ impl Internable for InputFormPage {
             Self::Provider => Self::PROVIDER,
         }
         .intern()
-    }
-}
-
-#[cfg(test)]
-mod input_form_page_tests {
-    use super::*;
-
-    #[test]
-    fn media_server_libraries_page_round_trips() {
-        assert_eq!(InputFormPage::from_str(InputFormPage::LIBRARIES).ok(), Some(InputFormPage::Libraries));
-        assert_eq!(InputFormPage::Libraries.to_string(), InputFormPage::LIBRARIES);
     }
 }
 
@@ -932,6 +937,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let staged_type_labels = Rc::new(vec![translate.t("LABEL.M3U"), translate.t("LABEL.XTREAM")]);
         let staged_clusters = input_form_state.form.staged.as_ref().map(|staged| staged.clusters);
         let is_csv_batch = input_form_state.form.url.starts_with(BATCH_SCHEME_PREFIX);
+        let simple_input = staged_input || media_server_input;
         let input_form_state_disp = input_form_state.clone();
         let exp_date_tool_action = if input_form_state.form.input_type.is_xtream() {
             let services = services.clone();
@@ -1031,7 +1037,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                    })}
                    { html_if!(!library_input, {
                     <>
-                     { config_field!(input_form_state.form, translate.t(LABEL_URL), url) }
+                     { config_field!(input_form_state.form, translate.t(LABEL_URL), url, Some(input_url_hint_key(simple_input).to_string())) }
                      <div class="tp__config-view__cols-2">
                      { html_if!(credentials_input && !is_csv_batch, {
                        <>
@@ -1051,7 +1057,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                      })}
                      { config_field_custom!(translate.t(LABEL_FETCH_METHOD), input_form_state.form.method.to_string()) }
                      </div>
-                     { config_field_optional!(input_form_state.form, translate.t(LABEL_PERSIST), persist) }
+                     { config_field_optional!(input_form_state.form, translate.t(LABEL_PERSIST), persist, Some(input_persist_hint_key(staged_input).to_string())) }
                     </>
                    })}
                 </Card>
@@ -1100,7 +1106,20 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                })}
                { html_if!(!library_input, {
                 <>
-                 { edit_field_text!(input_form_state, translate.t(LABEL_URL),  url, ConfigInputFormAction::Url) }
+                 <div class="tp__form-field tp__form-field__text">
+                     <Input
+                        label={translate.t(LABEL_URL)}
+                        name={"url"}
+                        field_id={Some(crate::app::components::dto_field_id(&input_form_state.form, "url"))}
+                        autocomplete={true}
+                        value={input_form_state.form.url.clone()}
+                        hint_key={Some(input_url_hint_key(simple_input).to_string())}
+                        on_change={Callback::from({
+                            let input_form_state = input_form_state.clone();
+                            move |value: String| input_form_state.dispatch(ConfigInputFormAction::Url(value))
+                        })}
+                     />
+                 </div>
                  <div class="tp__config-view__cols-2">
                  { html_if!(credentials_input && !is_csv_batch, {
                    <>
@@ -1132,7 +1151,22 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     />
                  }})}
                  </div>
-                 { edit_field_text_option!(input_form_state, translate.t(LABEL_PERSIST), persist, ConfigInputFormAction::Persist) }
+                 <div class="tp__form-field tp__form-field__text">
+                     <Input
+                        label={translate.t(LABEL_PERSIST)}
+                        name={"persist"}
+                        field_id={Some(crate::app::components::dto_field_id(&input_form_state.form, "persist"))}
+                        autocomplete={true}
+                        value={input_form_state.form.persist.clone().unwrap_or_default()}
+                        hint_key={Some(input_persist_hint_key(staged_input).to_string())}
+                        on_change={Callback::from({
+                            let input_form_state = input_form_state.clone();
+                            move |value: String| {
+                                input_form_state.dispatch(ConfigInputFormAction::Persist((!value.is_empty()).then_some(value)));
+                            }
+                        })}
+                     />
+                 </div>
                 </>
                })}
             </Card>
@@ -1782,6 +1816,24 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 mod tests {
     use super::*;
     use shared::model::{MediaServerLibraryKind, MediaServerLibrarySelectorDetailsDto};
+
+    #[test]
+    fn media_server_libraries_page_round_trips() {
+        assert_eq!(InputFormPage::from_str(InputFormPage::LIBRARIES).ok(), Some(InputFormPage::Libraries));
+        assert_eq!(InputFormPage::Libraries.to_string(), InputFormPage::LIBRARIES);
+    }
+
+    #[test]
+    fn simple_inputs_use_simple_url_hint() {
+        assert_eq!(input_url_hint_key(true), "INPUT_FORM.SIMPLE_INPUT.URL");
+        assert_eq!(input_url_hint_key(false), "INPUT_FORM.URL");
+    }
+
+    #[test]
+    fn staged_inputs_use_staged_persist_hint() {
+        assert_eq!(input_persist_hint_key(true), "INPUT_FORM.STAGED_PERSIST");
+        assert_eq!(input_persist_hint_key(false), "INPUT_FORM.PERSIST");
+    }
 
     #[test]
     fn libraries_from_text_preserves_existing_detailed_selector() {

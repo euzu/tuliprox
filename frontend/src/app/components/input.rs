@@ -30,6 +30,8 @@ pub struct InputProps {
     #[prop_or_default]
     pub placeholder: Option<String>,
     #[prop_or_default]
+    pub hint_key: Option<String>,
+    #[prop_or_default]
     pub aria_label: Option<String>,
 }
 
@@ -75,7 +77,7 @@ pub fn Input(props: &InputProps) -> Html {
         if props.label.is_some() { None } else { props.aria_label.clone().or_else(|| props.placeholder.clone()) };
 
     html! {
-        <FieldWrapper label={props.label.clone()} field_id={resolved_field_id.clone()}>
+        <FieldWrapper label={props.label.clone()} field_id={resolved_field_id.clone()} hint_key={props.hint_key.clone()}>
             { html_if!(props.icon.is_some(), {
                 <AppIcon name={props.icon.as_ref().unwrap().clone()} />
             })}
