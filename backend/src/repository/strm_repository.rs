@@ -429,6 +429,36 @@ fn prepare_filename_parts(
     }
 }
 
+/// Movie folders already claimed in `flat` mode, keyed by `TMDb` id. Holds the folder itself and
+/// the file name the first item put in it.
+type FlatDedupPaths = HashMap<u32, (PathBuf, String)>;
+
+/// Points `dir_path`/`final_filename` at the flat folder for `tmdb_id`, creating it on first use.
+///
+/// Providers routinely list the same movie more than once with differently written titles. In
+/// `flat` mode those listings are deduplicated onto one folder by `TMDb` id, so every listing after
+/// the first lands in a folder that was named after *another* listing's title. Naming such a file
+/// after its own title breaks the media servers' alternate-version detection, which requires the
+/// file name to start with the name of the folder it sits in. So the first item to claim a folder
+/// also fixes the file name for everything that follows it into that folder; the differing
+/// quality suffix (or, failing that, the `[Version id#N]` collision suffix) is what keeps the
+/// versions apart.
+fn claim_flat_movie_folder(
+    flat_dedup_paths: &mut FlatDedupPaths,
+    tmdb_id: u32,
+    folder_name: &str,
+    dir_path: &mut PathBuf,
+    final_filename: &mut String,
+) {
+    if let Some((claimed_path, claimed_filename)) = flat_dedup_paths.get(&tmdb_id) {
+        dir_path.clone_from(claimed_path);
+        final_filename.clone_from(claimed_filename);
+    } else {
+        dir_path.push(folder_name);
+        flat_dedup_paths.insert(tmdb_id, (dir_path.clone(), final_filename.clone()));
+    }
+}
+
 /// Formats names according to the official Kodi documentation, with `TMDb` ID for better matching.
 /// Movie: /Movie Name (Year) {tmdb=XXXXX}/Movie Name (Year).strm
 /// Series: /Show Name (Year) {tmdb=XXXXX}/Season 01/Show Name S01E01.strm
@@ -437,7 +467,7 @@ fn format_for_kodi(
     tmdb_id: u32,
     separator: &str,
     flat: bool,
-    flat_dedup_paths: &mut HashMap<u32, PathBuf>,
+    flat_dedup_paths: &mut FlatDedupPaths,
 ) -> (PathBuf, String) {
     // Kodi ID format: {tmdb=12345}
     let parts = prepare_filename_parts(strm_item_info, tmdb_id, separator, &format!("{separator}{{tmdb={{}}}}"));
@@ -446,16 +476,17 @@ fn format_for_kodi(
     match strm_item_info.item_type {
         PlaylistItemType::Video | PlaylistItemType::LocalVideo => {
             let folder_name = format!("{}{}", parts.base_name, parts.id_string);
-            let final_filename = parts.base_name;
+            let mut final_filename = parts.base_name;
 
             if flat {
                 if tmdb_id > 0 {
-                    if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
-                        dir_path.clone_from(path);
-                    } else {
-                        dir_path.push(&folder_name);
-                        flat_dedup_paths.insert(tmdb_id, dir_path.clone());
-                    }
+                    claim_flat_movie_folder(
+                        flat_dedup_paths,
+                        tmdb_id,
+                        &folder_name,
+                        &mut dir_path,
+                        &mut final_filename,
+                    );
                 } else {
                     dir_path.push(format!("{folder_name}{separator}[{}]", parts.category));
                 }
@@ -495,7 +526,7 @@ fn format_for_emby(
     tmdb_id: u32,
     separator: &str,
     flat: bool,
-    flat_dedup_paths: &mut HashMap<u32, PathBuf>,
+    flat_dedup_paths: &mut FlatDedupPaths,
 ) -> (PathBuf, String) {
     // Emby ID format: [tmdbid=12345]
     let parts = prepare_filename_parts(strm_item_info, tmdb_id, separator, &format!("{separator}[tmdbid={{}}]"));
@@ -505,16 +536,17 @@ fn format_for_emby(
         PlaylistItemType::Video | PlaylistItemType::LocalVideo => {
             // Emby prefers the ID in the filename for movies, folder optional
             let folder_name = parts.base_name.clone(); // Folder name does not contain the ID usually, but can
-            let final_filename = format!("{}{}", parts.base_name, parts.id_string);
+            let mut final_filename = format!("{}{}", parts.base_name, parts.id_string);
 
             if flat {
                 if tmdb_id > 0 {
-                    if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
-                        dir_path.clone_from(path);
-                    } else {
-                        dir_path.push(&folder_name);
-                        flat_dedup_paths.insert(tmdb_id, dir_path.clone());
-                    }
+                    claim_flat_movie_folder(
+                        flat_dedup_paths,
+                        tmdb_id,
+                        &folder_name,
+                        &mut dir_path,
+                        &mut final_filename,
+                    );
                 } else {
                     dir_path.push(format!("{folder_name}{separator}[{}]", parts.category));
                 }
@@ -556,7 +588,7 @@ fn format_for_jellyfin(
     tmdb_id: u32,
     separator: &str,
     flat: bool,
-    flat_dedup_paths: &mut HashMap<u32, PathBuf>,
+    flat_dedup_paths: &mut FlatDedupPaths,
 ) -> (PathBuf, String) {
     // Jellyfin ID format: [tmdbid-12345]
     let parts = prepare_filename_parts(strm_item_info, tmdb_id, separator, &format!("{separator}[tmdbid-{{}}]"));
@@ -566,16 +598,17 @@ fn format_for_jellyfin(
         PlaylistItemType::Video | PlaylistItemType::LocalVideo => {
             // Jellyfin requirement: file name MUST start with parent folder name to detect versions
             let folder_name = format!("{}{}", parts.base_name, parts.id_string);
-            let final_filename = folder_name.clone();
+            let mut final_filename = folder_name.clone();
 
             if flat {
                 if tmdb_id > 0 {
-                    if let Some(path) = flat_dedup_paths.get(&tmdb_id) {
-                        dir_path.clone_from(path);
-                    } else {
-                        dir_path.push(&folder_name);
-                        flat_dedup_paths.insert(tmdb_id, dir_path.clone());
-                    }
+                    claim_flat_movie_folder(
+                        flat_dedup_paths,
+                        tmdb_id,
+                        &folder_name,
+                        &mut dir_path,
+                        &mut final_filename,
+                    );
                 } else {
                     dir_path.push(format!("{folder_name}{separator}[{}]", parts.category));
                 }
@@ -615,7 +648,7 @@ fn style_based_rename(
     style: StrmExportStyle,
     underscore_whitespace: bool,
     flat: bool,
-    flat_dedup_paths: &mut HashMap<u32, PathBuf>,
+    flat_dedup_paths: &mut FlatDedupPaths,
 ) -> (PathBuf, String) {
     let separator = if underscore_whitespace { "_" } else { " " };
 
@@ -637,7 +670,7 @@ fn prepare_strm_files(new_playlist: &mut [PlaylistGroup], strm_target_output: &S
     let mut collisions: HashSet<PathBuf> = HashSet::new();
     let mut result = Vec::with_capacity(channel_count);
 
-    let mut flat_dedup_paths = HashMap::new();
+    let mut flat_dedup_paths: FlatDedupPaths = HashMap::new();
 
     // first we create the names to identify name collisions
     for pg in new_playlist.iter_mut() {
@@ -1234,20 +1267,25 @@ async fn remove_empty_dirs(root_path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_provider_resolve_url, get_credentials_and_server_info, resolve_strm_source_url, strip_tmdb_markers,
-        strm_contains_tmdb_marker, StrmItemInfo,
+        build_provider_resolve_url, get_credentials_and_server_info, prepare_strm_files, resolve_strm_source_url,
+        strip_tmdb_markers, strm_contains_tmdb_marker, StrmFile, StrmItemInfo,
     };
     use crate::{
         model::{
             ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, ConfigProvider,
-            MediaToolCapabilities, ProxyUserCredentials, SourcesConfig, TargetUser,
+            MediaToolCapabilities, ProxyUserCredentials, SourcesConfig, StrmTargetFlags, StrmTargetFlagsSet,
+            StrmTargetOutput, TargetUser,
         },
         utils::FileLockManager,
         utils::{decode_provider_resolve_token, ProviderResolveToken, PROVIDER_RESOLVE_ROUTE_PREFIX},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::model::ConfigPaths;
-    use shared::model::{ConfigProviderDto, InputType, PlaylistItemType, ProviderUrlSelectionPolicy, ProxyType};
+    use shared::model::{
+        ConfigProviderDto, InputType, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
+        ProviderUrlSelectionPolicy, ProxyType, StreamProperties, StrmExportStyle, VideoStreamDetailProperties,
+        VideoStreamProperties, XtreamCluster,
+    };
     use std::{collections::HashMap, sync::Arc};
 
     fn make_strm_item(url: &str, input_name: &str) -> StrmItemInfo {
@@ -1441,5 +1479,217 @@ mod tests {
         let result = get_credentials_and_server_info(&app_config, Some("alice"));
 
         assert!(result.is_err());
+    }
+
+    // ---- flat/tmdb multi-version naming -------------------------------------------------
+
+    const VIDEO_1080P: &str = r#"{"codec_name":"h264","width":1920,"height":1080}"#;
+    const VIDEO_720P: &str = r#"{"codec_name":"h264","width":1280,"height":720}"#;
+    const AUDIO_EAC3_51: &str = r#"{"codec_name":"eac3","channels":6}"#;
+
+    fn make_video_pli(
+        title: &str,
+        group: &str,
+        tmdb: u32,
+        virtual_id: u32,
+        video: Option<&str>,
+        audio: Option<&str>,
+    ) -> PlaylistItem {
+        let details = if video.is_some() || audio.is_some() {
+            Some(VideoStreamDetailProperties {
+                video: video.map(Arc::from),
+                audio: audio.map(Arc::from),
+                ..Default::default()
+            })
+        } else {
+            None
+        };
+        let props = VideoStreamProperties {
+            name: Arc::from(title),
+            tmdb: Some(tmdb),
+            details,
+            ..Default::default()
+        };
+
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                title: Arc::from(title),
+                name: Arc::from(title),
+                group: Arc::from(group),
+                virtual_id,
+                item_type: PlaylistItemType::Video,
+                additional_properties: Some(StreamProperties::Video(Box::new(props))),
+                ..Default::default()
+            },
+        }
+    }
+
+    fn strm_output(style: StrmExportStyle, flags: &[StrmTargetFlags]) -> StrmTargetOutput {
+        let mut flag_set = StrmTargetFlagsSet::new();
+        for flag in flags {
+            flag_set.set(*flag);
+        }
+        StrmTargetOutput {
+            directory: String::new(),
+            username: None,
+            style,
+            flags: flag_set,
+            strm_props: None,
+            filter: None,
+            probe_probe_size_bytes: None,
+            probe_analyze_duration: None,
+        }
+    }
+
+    /// The two ways one provider spells the same film in the same category: same tmdb id,
+    /// different titles. Under `flat` they are deduped into a single folder.
+    fn duplicate_listings_of_one_movie() -> Vec<PlaylistGroup> {
+        vec![PlaylistGroup {
+            id: 1,
+            title: Arc::from("EN MOVIES"),
+            channels: vec![
+                make_video_pli(
+                    "400 Bullets [MULTI-SUB] - 2021",
+                    "EN MOVIES",
+                    788_672,
+                    11,
+                    Some(VIDEO_1080P),
+                    Some(AUDIO_EAC3_51),
+                ),
+                make_video_pli(
+                    "400 Bullets -  [Multi Sub] (2021)",
+                    "EN MOVIES",
+                    788_672,
+                    12,
+                    Some(VIDEO_720P),
+                    Some(AUDIO_EAC3_51),
+                ),
+            ],
+            xtream_cluster: XtreamCluster::Video,
+        }]
+    }
+
+    /// Port of Jellyfin's `Emby.Naming.Video.VideoListResolver.IsEligibleForMultiVersion`:
+    /// the file name must start with the folder name, and the remainder must be empty or
+    /// start with `-`, `_`, `.`, or a `[bracketed]` token. Any file in the folder failing
+    /// this makes Jellyfin abandon version grouping for the *whole* folder.
+    fn jellyfin_multi_version_eligible(folder_name: &str, file_stem: &str) -> bool {
+        if !file_stem.to_lowercase().starts_with(&folder_name.to_lowercase()) {
+            return false;
+        }
+        let rest = file_stem[folder_name.len()..].trim();
+        rest.is_empty()
+            || rest.starts_with(['-', '_', '.'])
+            || (rest.starts_with('[') && rest[1..].contains(']'))
+    }
+
+    fn assert_single_shared_folder(files: &[StrmFile]) -> String {
+        assert_eq!(files.len(), 2, "both provider listings must be exported");
+        assert_eq!(files[0].dir_path, files[1].dir_path, "same tmdb id must dedup into one folder");
+        files[0].dir_path.file_name().unwrap().to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn jellyfin_flat_names_every_version_after_the_folder_it_lands_in() {
+        let mut playlist = duplicate_listings_of_one_movie();
+        let output =
+            strm_output(StrmExportStyle::Jellyfin, &[StrmTargetFlags::Flat, StrmTargetFlags::AddQualityToFilename]);
+
+        let files = prepare_strm_files(&mut playlist, &output);
+        let folder_name = assert_single_shared_folder(&files);
+
+        for file in &files {
+            assert!(
+                jellyfin_multi_version_eligible(&folder_name, &file.file_name),
+                "Jellyfin will show this as a separate movie instead of an alternate version:\n  \
+                 folder: {folder_name}\n  file:   {}",
+                file.file_name
+            );
+        }
+        assert_ne!(files[0].file_name, files[1].file_name, "versions must not overwrite each other");
+    }
+
+    #[test]
+    fn emby_flat_names_every_version_after_the_folder_it_lands_in() {
+        let mut playlist = duplicate_listings_of_one_movie();
+        let output =
+            strm_output(StrmExportStyle::Emby, &[StrmTargetFlags::Flat, StrmTargetFlags::AddQualityToFilename]);
+
+        let files = prepare_strm_files(&mut playlist, &output);
+        let folder_name = assert_single_shared_folder(&files);
+
+        for file in &files {
+            assert!(
+                jellyfin_multi_version_eligible(&folder_name, &file.file_name),
+                "folder: {folder_name}\n  file:   {}",
+                file.file_name
+            );
+        }
+        assert_ne!(files[0].file_name, files[1].file_name);
+    }
+
+    #[test]
+    fn kodi_flat_names_every_version_after_the_folder_it_lands_in() {
+        let mut playlist = duplicate_listings_of_one_movie();
+        let output =
+            strm_output(StrmExportStyle::Kodi, &[StrmTargetFlags::Flat, StrmTargetFlags::AddQualityToFilename]);
+
+        let files = prepare_strm_files(&mut playlist, &output);
+        assert_single_shared_folder(&files);
+
+        // Kodi keeps the tmdb marker out of the file name, so compare against the shared base:
+        // both versions must be named after the same movie, not after their own provider title.
+        let base = strip_tmdb_markers(&files[0].dir_path.file_name().unwrap().to_string_lossy()).trim().to_string();
+        for file in &files {
+            assert!(file.file_name.starts_with(&base), "base: {base}\n  file: {}", file.file_name);
+        }
+        assert_ne!(files[0].file_name, files[1].file_name);
+    }
+
+    /// When both copies carry the same quality the names collide; the existing collision
+    /// handler must disambiguate them with `[Version id#N]` while keeping the shared base.
+    #[test]
+    fn jellyfin_flat_versions_with_identical_quality_get_a_version_label() {
+        let mut playlist = duplicate_listings_of_one_movie();
+        // Make the second listing report exactly the same streams as the first.
+        playlist[0].channels[1] = make_video_pli(
+            "400 Bullets -  [Multi Sub] (2021)",
+            "EN MOVIES",
+            788_672,
+            12,
+            Some(VIDEO_1080P),
+            Some(AUDIO_EAC3_51),
+        );
+        let output =
+            strm_output(StrmExportStyle::Jellyfin, &[StrmTargetFlags::Flat, StrmTargetFlags::AddQualityToFilename]);
+
+        let files = prepare_strm_files(&mut playlist, &output);
+        let folder_name = assert_single_shared_folder(&files);
+
+        for file in &files {
+            assert!(
+                jellyfin_multi_version_eligible(&folder_name, &file.file_name),
+                "folder: {folder_name}\n  file:   {}",
+                file.file_name
+            );
+            assert!(file.file_name.contains("[Version id#"), "expected a version label in {}", file.file_name);
+        }
+        assert_ne!(files[0].file_name, files[1].file_name, "versions must not overwrite each other");
+    }
+
+    /// Without `flat` there is no folder reuse: each listing keeps its own folder and name.
+    #[test]
+    fn non_flat_keeps_each_listing_in_its_own_folder() {
+        let mut playlist = duplicate_listings_of_one_movie();
+        let output = strm_output(StrmExportStyle::Jellyfin, &[StrmTargetFlags::AddQualityToFilename]);
+
+        let files = prepare_strm_files(&mut playlist, &output);
+
+        assert_eq!(files.len(), 2);
+        assert_ne!(files[0].dir_path, files[1].dir_path, "non-flat must not merge folders");
+        for file in &files {
+            let folder_name = file.dir_path.file_name().unwrap().to_string_lossy().to_string();
+            assert!(jellyfin_multi_version_eligible(&folder_name, &file.file_name));
+        }
     }
 }

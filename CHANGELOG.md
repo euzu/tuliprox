@@ -394,6 +394,18 @@
 
 ## 🐛 Fixes
 
+- **Media servers no longer show a duplicate movie for every extra provider listing (STRM `flat` mode)**: under
+  `flat: true` the movie folder is deduplicated by TMDB id, but each file was still named after *its own*
+  provider title. Providers routinely list the same film twice with the tag written differently
+  (`X [MULTI-SUB] - 2021` vs `X - 2021 [Multi Sub]`), so the second listing landed in the first one's folder
+  under a name that does not start with the folder name — exactly what Jellyfin/Emby require in order to group
+  alternate versions. Jellyfin's `VideoListResolver` then abandons version grouping for the *whole* folder and
+  shows one movie per file. Every listing that reuses a folder is now named after that folder, so the existing
+  `add_quality_to_filename` suffix (or the `[Version id#N]` collision suffix) distinguishes them and the media
+  server shows a single movie with selectable versions. Applies to the `jellyfin`, `emby` and `kodi` styles.
+  **Note:** this renames existing files in `flat` STRM trees; with `cleanup: true` the old names are removed on
+  the next update.
+
 - **STRM files are no longer rewritten on every playlist update**: authenticated tokens (STRM
   `/provider/resolve/…` URLs and M3U catchup URLs) used a random IV, so re-encoding the same item produced a
   different token every run. That made every STRM file's content differ on each update, so the existing
