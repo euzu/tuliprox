@@ -414,6 +414,12 @@
   folder unique — and they now carry it in the file name too, so the name still starts with the folder name
   (it previously did not, which quietly broke version detection for those items).
 
+- **Two STRM versions of the same movie could silently overwrite each other when the name was very long**: the
+  `[Version id#N]` suffix that tells colliding versions apart was appended last, and the writer then truncates
+  the file stem to 250 characters — so for a long title the only distinguishing part was cut off and both
+  versions resolved to the same path. The shared base is now trimmed instead, so the version label always
+  survives.
+
 - **STRM files are no longer rewritten on every playlist update**: authenticated tokens (STRM
   `/provider/resolve/…` URLs and M3U catchup URLs) used a random IV, so re-encoding the same item produced a
   different token every run. That made every STRM file's content differ on each update, so the existing

@@ -429,6 +429,10 @@ fn prepare_filename_parts(
     }
 }
 
+/// Longest file stem the writer keeps; `.strm` is appended on top, staying inside the 255-byte
+/// name limit common to ext4/APFS/NTFS.
+const MAX_STRM_FILE_STEM_LEN: usize = 250;
+
 /// Movie folders already claimed in `flat` mode, keyed by `TMDb` id. Holds the folder itself and
 /// the file name the first item put in it.
 type FlatDedupPaths = HashMap<u32, (PathBuf, String)>;
@@ -618,8 +622,8 @@ fn format_for_jellyfin(
                     // unique. The file name has to carry it too, or it no longer starts with the
                     // name of the folder it sits in.
                     let folder_with_category = format!("{folder_name}{separator}[{}]", parts.category);
-                    final_filename.clone_from(&folder_with_category);
-                    dir_path.push(folder_with_category);
+                    dir_path.push(&folder_with_category);
+                    final_filename = folder_with_category;
                 }
             } else {
                 dir_path.push(parts.category);
@@ -681,6 +685,10 @@ fn prepare_strm_files(new_playlist: &mut [PlaylistGroup], strm_target_output: &S
 
     let mut flat_dedup_paths: FlatDedupPaths = HashMap::new();
 
+    let underscore_whitespace = strm_target_output.flags.contains(StrmTargetFlags::UnderscoreWhitespace);
+    let separator = if underscore_whitespace { "_" } else { " " };
+    let flat = strm_target_output.flags.contains(StrmTargetFlags::Flat);
+
     // first we create the names to identify name collisions
     for pg in new_playlist.iter_mut() {
         for pli in pg.channels.iter_mut().filter(|c| filter_strm_item(c)) {
@@ -690,14 +698,12 @@ fn prepare_strm_files(new_playlist: &mut [PlaylistGroup], strm_target_output: &S
                 &strm_item_info,
                 pli.get_tmdb_id(),
                 strm_target_output.style,
-                strm_target_output.flags.contains(StrmTargetFlags::UnderscoreWhitespace),
-                strm_target_output.flags.contains(StrmTargetFlags::Flat),
+                underscore_whitespace,
+                flat,
                 &mut flat_dedup_paths,
             );
 
             // Conditionally generate the quality string based on the new config flag
-            let separator =
-                if strm_target_output.flags.contains(StrmTargetFlags::UnderscoreWhitespace) { "_" } else { " " };
             let quality_string = get_quality(strm_target_output, pli, separator);
 
             // No category suffix: in `flat` mode the category used to be appended to guard against
@@ -705,16 +711,14 @@ fn prepare_strm_files(new_playlist: &mut [PlaylistGroup], strm_target_output: &S
             // (same TMDB folder, same quality string), and the collision pass below separates those
             // with `[Version id#N]`. Keeping the category here would only pollute the name that
             // Jellyfin/Emby show as the *version label*, which should read as the quality alone.
-            let final_filename = format!("{strm_file_name}{quality_string}");
-            let filename = Arc::new(final_filename);
+            let filename = Arc::new(format!("{strm_file_name}{quality_string}"));
 
             // Construct the full relative path for collision checking
             let full_relative_path = dir_path.join(filename.as_str());
 
-            if all_filenames.contains(&full_relative_path) {
-                collisions.insert(full_relative_path.clone());
+            if !all_filenames.insert(full_relative_path.clone()) {
+                collisions.insert(full_relative_path);
             }
-            all_filenames.insert(full_relative_path);
             result.push(StrmFile { file_name: filename, dir_path, strm_info: strm_item_info });
         }
     }
@@ -722,24 +726,22 @@ fn prepare_strm_files(new_playlist: &mut [PlaylistGroup], strm_target_output: &S
     if !collisions.is_empty() {
         // This separator is specifically for the multi-version naming convention.
         let version_separator = " ";
-        let separator =
-            if strm_target_output.flags.contains(StrmTargetFlags::UnderscoreWhitespace) { "_" } else { " " };
 
         for s in &mut result {
-            {
-                let full_relative_path = s.dir_path.join(s.file_name.as_str());
-                if collisions.contains(&full_relative_path) {
-                    // Create a descriptive and unique identifier for this version.
-                    let version_label = format!("Version{}id#{}", separator, s.strm_info.virtual_id);
+            let full_relative_path = s.dir_path.join(s.file_name.as_str());
+            if collisions.contains(&full_relative_path) {
+                // Create a descriptive and unique identifier for this version.
+                let version_label = format!("Version{}id#{}", separator, s.strm_info.virtual_id);
+                let suffix = format!("{version_separator}[{version_label}]");
 
-                    // The base filename is the part that is identical for all versions.
-                    let base_filename = &s.file_name;
+                // The version label is the ONLY thing telling these files apart, so it has to
+                // survive the truncation the writer applies. Trim the shared base instead --
+                // truncating the tail here would collapse both versions onto one name, and the
+                // second would silently overwrite the first.
+                let budget = MAX_STRM_FILE_STEM_LEN.saturating_sub(suffix.chars().count());
+                let base_filename = truncate_string(&s.file_name, budget);
 
-                    // Apply the specific multi-version naming convention for the selected style.
-                    let new_filename = format!("{base_filename}{version_separator}[{version_label}]");
-
-                    s.file_name = Arc::new(new_filename);
-                }
+                s.file_name = Arc::new(format!("{base_filename}{suffix}"));
             }
         }
     }
@@ -852,7 +854,8 @@ pub async fn write_strm_playlist(
     for strm_file in strm_files {
         // file paths
         let output_path = truncate_filename(&root_path.join(&strm_file.dir_path), 255);
-        let file_path = output_path.join(format!("{}.strm", truncate_string(&strm_file.file_name, 250)));
+        let file_path =
+            output_path.join(format!("{}.strm", truncate_string(&strm_file.file_name, MAX_STRM_FILE_STEM_LEN)));
 
         let relative_file_path = get_relative_path_str(&file_path, &root_path);
 
@@ -1697,6 +1700,36 @@ mod tests {
         }
         assert!(files.iter().any(|f| f.file_name.ends_with("- [1080p FHD H.264 EAC3 5.1]")));
         assert!(files.iter().any(|f| f.file_name.ends_with("- [720p HD H.264 EAC3 5.1]")));
+    }
+
+    /// The writer truncates the file stem, so for two versions that differ ONLY by their version
+    /// label the label has to survive: otherwise both truncate to the same name and one silently
+    /// overwrites the other.
+    #[test]
+    fn colliding_versions_stay_distinct_after_the_writer_truncates_the_name() {
+        let long_title = format!("{} (2021)", "A".repeat(300));
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: Arc::from("EN MOVIES"),
+            channels: vec![
+                make_video_pli(&long_title, "EN MOVIES", 555, 31, Some(VIDEO_1080P), Some(AUDIO_EAC3_51)),
+                make_video_pli(&long_title, "EN MOVIES", 555, 32, Some(VIDEO_1080P), Some(AUDIO_EAC3_51)),
+            ],
+            xtream_cluster: XtreamCluster::Video,
+        }];
+        let output =
+            strm_output(StrmExportStyle::Jellyfin, &[StrmTargetFlags::Flat, StrmTargetFlags::AddQualityToFilename]);
+
+        let files = prepare_strm_files(&mut playlist, &output);
+
+        // Names as the writer will actually store them.
+        let stored: Vec<String> =
+            files.iter().map(|f| shared::utils::truncate_string(&f.file_name, super::MAX_STRM_FILE_STEM_LEN)).collect();
+
+        assert!(stored.iter().all(|n| n.chars().count() <= super::MAX_STRM_FILE_STEM_LEN));
+        assert!(stored[0].ends_with("[Version id#31]"), "version label was truncated away: {}", stored[0]);
+        assert!(stored[1].ends_with("[Version id#32]"), "version label was truncated away: {}", stored[1]);
+        assert_ne!(stored[0], stored[1], "one version would silently overwrite the other on disk");
     }
 
     /// Items without a TMDB id cannot share a deduplicated folder, so they keep the category in the
