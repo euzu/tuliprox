@@ -411,8 +411,9 @@
   same quality string), which the existing `[Version id#N]` pass already separates. Jellyfin and Emby render
   whatever follows the folder name as the *version label*, so the category leaked into the version picker; the
   label now reads as the quality alone. Items with no TMDB id still carry the category — it is what keeps their
-  folder unique — and they now carry it in the file name too, so the name still starts with the folder name
-  (it previously did not, which quietly broke version detection for those items).
+  folder unique — and for the `jellyfin` and `emby` styles they now carry it in the file name too, so the name
+  still starts with the folder name (it previously did not, which quietly broke version detection for those
+  items). `kodi` is unchanged here: it has no filename-starts-with-folder-name convention.
 
 - **Two STRM versions of the same movie could silently overwrite each other when the name was very long**: the
   `[Version id#N]` suffix that tells colliding versions apart was appended last, and the writer then truncates
