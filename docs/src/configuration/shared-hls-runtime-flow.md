@@ -9,13 +9,16 @@ reference, see [HLS Cache State Machines](./hls-cache-state-machine.md).
 
 | Identifier | Scope | Created by | Purpose |
 | :--- | :--- | :--- | :--- |
-| `HlsSessionKey` | Shared content | Built from `input_id`, the literal HLS kind, and `stream_ref`. | Stable internal key for one shared live HLS session. It does not include provider username, password, or origin URL. |
-| `proxy_session_id` | Public shared content URL | Derived from `HlsSessionKey` and the configured secret. | Opaque URL token for the shared session. The same input and stream reference produce the same public session ID while the secret stays stable. |
+| `HlsSessionKey` | Shared content | Built as `input:<input_id>\|hls\|<input_stream_id>`. | Stable internal key for one shared live HLS session. The input stream ID is captured before target mapping. |
+| `proxy_session_id` | Public shared content URL | Derived from `HlsSessionKey` and the configured secret. | Opaque URL token for the shared session. The same input and original input stream ID produce the same public session ID while the secret stays stable. |
 | `HlsPlaybackFamilyKey` | Playback family | Built from Tuliprox username and client fingerprint. | Groups related playback attempts by user and client. |
 | `hls_access_lease_id` | Per playback URL | Random server-side lease ID. | Lets exactly one playback path use the shared session after Tuliprox validates the user and lease. |
 | HLS cache user session token | Per playback admission | Generated for the Shared HLS entry request. | Connects the access lease to Tuliprox user session accounting and connection handling. |
 
-The key design point is that `proxy_session_id` is shared, but `hls_access_lease_id` is not.
+The key design point is that `proxy_session_id` is shared, but `hls_access_lease_id` is not. The `stream_ref` field used
+inside `HlsSessionKey` is exactly the original `input_stream_id`: an Xtream provider/origin stream ID as a decimal string,
+or the parser-resolved M3U ID, including alphanumeric IDs and stable URL-derived hashes. `target_id` and `virtual_id` stay
+in the routing and access context and do not affect this shared identity.
 
 ## End-to-end request flow
 
@@ -50,8 +53,9 @@ sequenceDiagram
 
 ## Step 1: Entry request
 
-The player first opens a generated Tuliprox live HLS URL. Tuliprox resolves the target, input, virtual ID, stream URL, and
-user connection permission.
+The player first opens a generated Tuliprox live HLS URL. Tuliprox resolves the target, input, virtual ID, original input
+stream ID, stream URL, and user connection permission. The original input stream ID was captured before target mapping
+and is not replaced by the target's virtual ID.
 
 If Shared HLS is enabled for the target, Tuliprox creates a fresh `Pending` `HlsAccessLease` for this playback and returns
 an HTTP `307 Temporary Redirect` to the canonical shared manifest path:
@@ -213,3 +217,8 @@ Typical outcomes are:
 - `503 Service Unavailable` with `Retry-After` when origin/cache work is temporarily not ready.
 
 Players should reopen the original generated playlist entry URL when they recover from a long pause or stale HLS path.
+
+An upgrade from `virtual_id`-based session identity also makes old canonical URLs stale when the virtual and input stream
+IDs differ. New entry requests receive the new `proxy_session_id`; old cache namespaces are left for normal garbage
+collection. Persisted M3U-to-Xtream data that lost a nonnumeric input ID as `provider_id = 0` must be refreshed before the
+entry can safely join a shared session.

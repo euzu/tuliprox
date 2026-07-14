@@ -1051,6 +1051,7 @@ mod tests {
             input_name: "input".into(),
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: "1001".into(),
         }
     }
 

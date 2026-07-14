@@ -11,7 +11,7 @@ use crate::{
         endpoints::{
             hls_api::{
                 build_virtual_hls_entry_path, handle_hls_stream_request, hls_admission_failure_manifest_response,
-                hls_custom_video_manifest_response, m3u_archive_epg_reference_ts,
+                hls_custom_video_manifest_response, m3u_archive_epg_reference_ts, HlsEntryStreamIdentity,
             },
             xtream_api::{ApiStreamContext, ApiStreamRequest},
         },
@@ -305,6 +305,8 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                     input: &input,
                     user: &user,
                     session_reservation_ttl_secs: get_session_reservation_ttl_secs(app_state, pli.item_type),
+                    content_representation:
+                        crate::api::model::ProviderContentRepresentationMode::for_playback_extension(extension),
                 },
                 None,
             )
@@ -396,6 +398,13 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     let archive_reference = m3u_archive_epg_reference_ts(&pli.url);
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
     if is_session_request && extension == shared::defaults::HLS_EXT {
+        let Some(stream_identity) = HlsEntryStreamIdentity::from_playlist_item(&pli) else {
+            error!(
+                "HLS input stream identity missing for virtual_id={}; refresh target playlist",
+                pli.virtual_id
+            );
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
         let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id);
         return handle_hls_stream_request(
             fingerprint,
@@ -405,7 +414,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             user_session.as_ref(),
             &pli.url,
             archive_reference,
-            pli.virtual_id,
+            stream_identity,
             &input,
             req_headers,
             connection_permission,

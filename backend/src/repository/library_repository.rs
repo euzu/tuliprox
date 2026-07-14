@@ -192,6 +192,7 @@ mod tests {
             input_name: "lib".intern(),
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: "1".intern(),
         }
     }
 
@@ -233,6 +234,7 @@ mod tests {
             input_name: "lib".intern(),
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: "2".intern(),
         }
     }
 

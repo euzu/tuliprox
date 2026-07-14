@@ -86,8 +86,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use shared::{
     model::{
-        ConnectFailureReason, FailureStage, InputType, PlaylistItemType, StreamChannel, StreamInfo, TargetType,
-        UserConnectionPermission, XtreamCluster,
+        ConnectFailureReason, FailureStage, InputType, PlaylistEntry, PlaylistItemType, StreamChannel, StreamInfo,
+        TargetType, UserConnectionPermission, XtreamCluster,
     },
     utils::{
         generate_random_string, is_hls_url, replace_url_extension, sanitize_sensitive_info, Internable,
@@ -2177,10 +2177,40 @@ fn is_supported_hls_origin_url(input: &ConfigInput, url: &str) -> bool {
     input.get_resolve_provider(url).is_some() || is_http_hls_origin_url(url)
 }
 
-fn hls_stream_ref_from_virtual_id(virtual_id: u32) -> String { virtual_id.to_string() }
-
 fn build_hls_origin_source(input: &ConfigInput, stream_ref: impl Into<String>) -> HlsOriginSource {
     HlsOriginSource::new(input.id, Arc::clone(&input.name), stream_ref, hls_origin_source_kind(input.input_type))
+}
+
+/// Keeps target routing identity separate from the immutable input content identity.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(in crate::api) struct HlsEntryStreamIdentity {
+    virtual_id: u32,
+    input_stream_id: Arc<str>,
+}
+
+impl HlsEntryStreamIdentity {
+    pub(in crate::api) fn new(virtual_id: u32, input_stream_id: impl Into<Arc<str>>) -> Option<Self> {
+        let input_stream_id = input_stream_id.into();
+        if input_stream_id.trim().is_empty() {
+            return None;
+        }
+        Some(Self { virtual_id, input_stream_id })
+    }
+
+    pub(in crate::api) fn from_playlist_item(item: &impl PlaylistEntry) -> Option<Self> {
+        Self::new(item.get_virtual_id(), item.get_input_stream_id()?)
+    }
+
+    pub(in crate::api) const fn virtual_id(&self) -> u32 { self.virtual_id }
+
+    fn stream_ref(&self) -> &str { self.input_stream_id.as_ref() }
+}
+
+/// Resolves the configured input together with both identities of one target entry.
+#[derive(Debug, Clone)]
+pub(in crate::api) struct HlsResolvedVirtualSource {
+    pub(in crate::api) input: Arc<ConfigInput>,
+    pub(in crate::api) stream_identity: HlsEntryStreamIdentity,
 }
 
 fn hls_origin_source_kind(input_type: InputType) -> HlsOriginSourceKind {
@@ -3838,8 +3868,9 @@ async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
     user: &ProxyUserCredentials,
     target: &Arc<ConfigTarget>,
     input: &ConfigInput,
-    virtual_id: u32,
+    stream_identity: &HlsEntryStreamIdentity,
 ) -> bool {
+    let virtual_id = stream_identity.virtual_id();
     let session_token =
         create_playback_session_fingerprint(fingerprint, &user.username, virtual_id, PlaylistItemType::LiveHls, None);
     let (connection_admission, _, _) = resolve_playback_request_admission(
@@ -3874,7 +3905,7 @@ async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
         return false;
     };
     let (shared_hls_session_owner, reservation_ttl_secs) = if hls_cache_enabled_for_target(app_state, target) {
-        let origin_source = build_hls_origin_source(input, hls_stream_ref_from_virtual_id(virtual_id));
+        let origin_source = build_hls_origin_source(input, stream_identity.stream_ref());
         let proxy_session_id = build_proxy_session_id(&origin_source.session_key(), &app_state.get_encrypt_secret());
         let reservation_ttl_secs = match app_state.hls_proxy.sessions().get_by_key(&origin_source.session_key()).await {
             Some(session) => hls_origin_account_reservation_ttl_secs_for_session(&session).await,
@@ -3912,14 +3943,14 @@ async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
 async fn mark_hls_provisioning_handoff_discontinuity(
     app_state: &Arc<AppState>,
     input: &ConfigInput,
-    virtual_id: u32,
+    stream_identity: &HlsEntryStreamIdentity,
     access_lease_id: Option<&HlsAccessLeaseId>,
     now_ms: u64,
 ) -> bool {
     if !hls_cache_configured(app_state) {
         return false;
     }
-    let origin_source = build_hls_origin_source(input, hls_stream_ref_from_virtual_id(virtual_id));
+    let origin_source = build_hls_origin_source(input, stream_identity.stream_ref());
     let Some(session) = app_state.hls_proxy.sessions().get_by_key(&origin_source.session_key()).await else {
         return false;
     };
@@ -3927,7 +3958,7 @@ async fn mark_hls_provisioning_handoff_discontinuity(
         app_state,
         &session,
         input,
-        virtual_id,
+        stream_identity.virtual_id(),
         access_lease_id,
         now_ms,
     )
@@ -4026,7 +4057,7 @@ pub(in crate::api) async fn hls_panel_provisioning_poll_manifest_response(
     user: &ProxyUserCredentials,
     target: &Arc<ConfigTarget>,
     input: &ConfigInput,
-    virtual_id: u32,
+    stream_identity: &HlsEntryStreamIdentity,
     original_hls_entry_path: &str,
     server_path: Option<&str>,
 ) -> axum::response::Response {
@@ -4036,7 +4067,7 @@ pub(in crate::api) async fn hls_panel_provisioning_poll_manifest_response(
         user,
         target,
         input,
-        virtual_id,
+        stream_identity,
         original_hls_entry_path,
         server_path,
         HlsProvisioningPollResponseKind::Legacy,
@@ -4063,11 +4094,12 @@ async fn hls_panel_provisioning_poll_response(
     user: &ProxyUserCredentials,
     target: &Arc<ConfigTarget>,
     input: &ConfigInput,
-    virtual_id: u32,
+    stream_identity: &HlsEntryStreamIdentity,
     ready_redirect_path: &str,
     server_path: Option<&str>,
     response_kind: HlsProvisioningPollResponseKind,
 ) -> axum::response::Response {
+    let virtual_id = stream_identity.virtual_id();
     let now_ms = current_time_millis();
     app_state.hls_provisioning.touch_consumer(Arc::clone(&input.name), virtual_id, now_ms);
 
@@ -4079,14 +4111,14 @@ async fn hls_panel_provisioning_poll_response(
         user,
         target,
         input,
-        virtual_id,
+        stream_identity,
     )
     .await
     {
         mark_hls_provisioning_handoff_discontinuity(
             app_state,
             input,
-            virtual_id,
+            stream_identity,
             response_kind.access_lease_id(),
             now_ms,
         )
@@ -5197,18 +5229,19 @@ pub(in crate::api) async fn handle_hls_stream_request(
     user_session: Option<&UserSession>,
     hls_url: &str,
     _archive_reference: Option<i64>,
-    virtual_id: u32,
+    stream_identity: HlsEntryStreamIdentity,
     input: &ConfigInput,
     req_headers: &HeaderMap,
     connection_permission: UserConnectionPermission,
     connection_kind: Option<crate::api::model::ConnectionKind>,
     original_hls_entry_path: &str,
 ) -> impl IntoResponse + Send {
+    let virtual_id = stream_identity.virtual_id();
     if app_state.active_users.is_user_blocked_for_stream(&user.username, virtual_id).await {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
-    let stream_ref = hls_stream_ref_from_virtual_id(virtual_id);
+    let stream_ref = stream_identity.stream_ref().to_string();
     let normalized_hls_url = normalize_xtream_live_hls_url(hls_url, input);
     if normalized_hls_url != hls_url {
         debug_if_enabled!(
@@ -5343,7 +5376,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
             None,
         );
         let hls_session_owner = if hls_cache_enabled_for_target(app_state, target) {
-            let session_key = HlsSessionKey::new(input.id, virtual_id.to_string());
+            let session_key = HlsSessionKey::new(input.id, stream_identity.stream_ref());
             let proxy_session_id = build_proxy_session_id(&session_key, &app_state.get_encrypt_secret());
             Some(build_hls_origin_session_owner(&proxy_session_id))
         } else {
@@ -5477,13 +5510,38 @@ async fn get_stream_channel(
     m3u_get_item_for_stream_id(virtual_id, app_state, target).await.ok().map(|pli| pli.to_stream_channel(target_id))
 }
 
-pub(in crate::api) async fn resolve_hls_virtual_input_for_target(
+pub(in crate::api) async fn resolve_hls_virtual_source_for_target(
     app_state: &Arc<AppState>,
     target: &Arc<ConfigTarget>,
     virtual_id: u32,
-) -> Option<Arc<ConfigInput>> {
-    let channel = get_stream_channel(app_state, target, virtual_id).await?;
-    app_state.app_config.get_input_by_name(&channel.input_name)
+) -> Result<HlsResolvedVirtualSource, StatusCode> {
+    let (input_name, stream_identity) = if target.has_output(TargetType::Xtream) {
+        if let Ok(item) = xtream_get_item_for_stream_id(virtual_id, app_state, target, None).await {
+            let stream_identity = HlsEntryStreamIdentity::from_playlist_item(&item).ok_or_else(|| {
+                warn!("HLS input stream identity missing for virtual_id={virtual_id}; refresh target playlist");
+                StatusCode::SERVICE_UNAVAILABLE
+            })?;
+            (Arc::clone(&item.input_name), stream_identity)
+        } else {
+            let item =
+                m3u_get_item_for_stream_id(virtual_id, app_state, target).await.map_err(|_| StatusCode::NOT_FOUND)?;
+            let stream_identity = HlsEntryStreamIdentity::from_playlist_item(&item).ok_or_else(|| {
+                warn!("HLS input stream identity missing for virtual_id={virtual_id}; refresh target playlist");
+                StatusCode::SERVICE_UNAVAILABLE
+            })?;
+            (Arc::clone(&item.input_name), stream_identity)
+        }
+    } else {
+        let item =
+            m3u_get_item_for_stream_id(virtual_id, app_state, target).await.map_err(|_| StatusCode::NOT_FOUND)?;
+        let stream_identity = HlsEntryStreamIdentity::from_playlist_item(&item).ok_or_else(|| {
+            warn!("HLS input stream identity missing for virtual_id={virtual_id}; refresh target playlist");
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
+        (Arc::clone(&item.input_name), stream_identity)
+    };
+    let input = app_state.app_config.get_input_by_name(&input_name).ok_or(StatusCode::NOT_FOUND)?;
+    Ok(HlsResolvedVirtualSource { input, stream_identity })
 }
 
 async fn resolve_hls_origin_playlist_url(
@@ -5893,6 +5951,17 @@ async fn hls_api_stream_resolved(
         let fallback_connection_kind = connection_kind.unwrap_or(crate::api::model::ConnectionKind::Normal);
 
         if is_hls_url(&session.stream_url) {
+            let source = match resolve_hls_virtual_source_for_target(&app_state, &target, virtual_id).await {
+                Ok(source) if source.input.id == input.id => source,
+                Ok(source) => {
+                    warn!(
+                        "HLS input context mismatch for virtual_id={virtual_id}: expected_input_id={}, resolved_input_id={}",
+                        input.id, source.input.id
+                    );
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                Err(status) => return status.into_response(),
+            };
             let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, virtual_id);
             return handle_hls_stream_request(
                 &fingerprint,
@@ -5902,7 +5971,7 @@ async fn hls_api_stream_resolved(
                 Some(session),
                 &session.stream_url,
                 archive_reference,
-                virtual_id,
+                source.stream_identity,
                 &input,
                 &req_headers,
                 connection_permission,
@@ -6026,7 +6095,15 @@ mod tests {
         response::IntoResponse,
     };
     use http_body_util::BodyExt;
-    use shared::model::{ConfigPaths, ConfigProviderDto, ConfigTargetDto, ConfigTargetOptions, ConfigTargetShareLiveStreams, HlsCacheConfigDto, HlsSegmentRepairMode, HlsStripMode, InputType, PlaylistItemType, ProviderUrlSelectionPolicy, ReverseProxyConfigDto, StreamConfigDto, TargetOutputDto, UserConnectionPermission, XtreamTargetOutputDto};
+    use shared::{
+        model::{
+            ConfigPaths, ConfigProviderDto, ConfigTargetDto, ConfigTargetOptions, ConfigTargetShareLiveStreams,
+            HlsCacheConfigDto, HlsSegmentRepairMode, HlsStripMode, InputType, M3uPlaylistItem, M3uTargetOutputDto,
+            PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProviderUrlSelectionPolicy, ReverseProxyConfigDto,
+            StreamConfigDto, TargetOutputDto, UserConnectionPermission, XtreamCluster, XtreamTargetOutputDto,
+        },
+        utils::Internable,
+    };
     use std::{collections::HashMap, fmt::Write as _, net::SocketAddr, sync::Arc, time::Duration};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -6143,6 +6220,44 @@ mod tests {
             output: vec![TargetOutputDto::Xtream(XtreamTargetOutputDto::default())],
             ..Default::default()
         })
+    }
+
+    fn test_m3u_hls_share_target() -> ConfigTarget {
+        ConfigTarget::from(&ConfigTargetDto {
+            id: 2,
+            name: "m3u-target".to_string(),
+            options: Some(ConfigTargetOptions {
+                share_live_streams: ConfigTargetShareLiveStreams { hls: true, mpeg_ts: false },
+                ..Default::default()
+            }),
+            output: vec![TargetOutputDto::M3u(M3uTargetOutputDto::default())],
+            use_memory_cache: true,
+            ..Default::default()
+        })
+    }
+
+    fn test_m3u_hls_item(input: &ConfigInput, virtual_id: u32, input_stream_id: &str, url: &str) -> M3uPlaylistItem {
+        M3uPlaylistItem::from(&PlaylistItem {
+            header: PlaylistItemHeader {
+                id: input_stream_id.intern(),
+                virtual_id,
+                input_name: Arc::clone(&input.name),
+                url: url.intern(),
+                item_type: PlaylistItemType::LiveHls,
+                xtream_cluster: XtreamCluster::Live,
+                input_stream_id: input_stream_id.intern(),
+                ..PlaylistItemHeader::default()
+            },
+        })
+    }
+
+    async fn cache_test_m3u_hls_item(app_state: &Arc<AppState>, target: &ConfigTarget, item: M3uPlaylistItem) {
+        let mut playlist = crate::repository::BPlusTree::new();
+        playlist.insert(item.virtual_id, item);
+        app_state
+            .playlists
+            .cache_playlist(&target.name, crate::api::model::PlaylistStorage::M3uPlaylist(Box::new(playlist)))
+            .await;
     }
 
     #[allow(dead_code)]
@@ -8047,6 +8162,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provisioning_handoff_finds_shared_session_by_input_stream_id_not_virtual_id() {
+        let input = single_hls_provider_input("origin-id-handoff-input");
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        enable_hls_cache(&app_state);
+        let origin_session = create_unbound_hls_test_session(&app_state, &input, "80510", 1_000).await;
+        let virtual_id_session = create_unbound_hls_test_session(&app_state, &input, "1001", 1_000).await;
+        let stream_identity = super::HlsEntryStreamIdentity::new(1001, "80510").expect("input stream identity");
+
+        assert!(
+            super::mark_hls_provisioning_handoff_discontinuity(&app_state, &input, &stream_identity, None, 2_000,)
+                .await
+        );
+
+        assert!(origin_session.read().await.pending_handoff_discontinuity_sequence.is_some());
+        assert_eq!(virtual_id_session.read().await.pending_handoff_discontinuity_sequence, None);
+    }
+
+    #[tokio::test]
     async fn shared_provisioning_handoff_continues_proxy_sequence_for_origin_segments() {
         let input = single_hls_provider_input("shared-provisioning-handoff-input");
         let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
@@ -9378,7 +9511,7 @@ mod tests {
         user.password = "hls-pass".to_string();
         let input = test_hls_input();
         let target = test_hls_share_target(true);
-        let original_hls_entry_path = super::build_virtual_hls_entry_path(&target, &input, &user, 12345);
+        let original_hls_entry_path = super::build_virtual_hls_entry_path(&target, &input, &user, 1001);
 
         let response = super::handle_hls_stream_request(
             &test_fingerprint(),
@@ -9386,9 +9519,9 @@ mod tests {
             &user,
             &target,
             None,
-            "http://origin.example.com/live/user/pass/12345.m3u8",
+            "http://origin.example.com/live/user/pass/1001.m3u8",
             None,
-            12345,
+            super::HlsEntryStreamIdentity::new(1001, "80510").expect("valid input stream identity"),
             &input,
             &HeaderMap::new(),
             UserConnectionPermission::Allowed,
@@ -9404,6 +9537,128 @@ mod tests {
         assert!(location.starts_with("/hls/shared/live/"));
         assert!(location.ends_with("/manifest.m3u8"));
         assert_eq!(app_state.hls_proxy.access_leases().read().await.len(), 1);
+
+        let proxy_session_id = ProxySessionId(proxy_session_id_from_redirect_location(location).to_string());
+        let origin_key = HlsSessionKey::new(input.id, "80510");
+        let virtual_id_key = HlsSessionKey::new(input.id, "1001");
+        assert_eq!(origin_key.stable_value(), "input:1|hls|80510");
+        assert_eq!(proxy_session_id, build_proxy_session_id(&origin_key, &app_state.get_encrypt_secret()));
+        assert_ne!(proxy_session_id, build_proxy_session_id(&virtual_id_key, &app_state.get_encrypt_secret()));
+
+        let access_lease_id = HlsAccessLeaseId(access_lease_id_from_redirect_location(location).to_string());
+        let lease = app_state
+            .hls_proxy
+            .access_leases()
+            .write()
+            .await
+            .response_snapshot(&access_lease_id, &proxy_session_id, super::current_time_millis())
+            .expect("access lease");
+        assert_eq!(lease.stream_ref, "80510");
+        assert_eq!(lease.virtual_id, 1001);
+    }
+
+    #[tokio::test]
+    async fn hls_cache_entry_shares_content_session_across_targets_but_keeps_distinct_virtual_leases() {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        configure_default_test_server(&app_state);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "hls-user".to_string();
+        user.password = "hls-pass".to_string();
+        let input = test_hls_input();
+        let first_target = test_hls_share_target(true);
+        let mut second_target = test_hls_share_target(true);
+        second_target.id = 2;
+
+        let first_response = super::handle_hls_stream_request(
+            &test_fingerprint(),
+            &app_state,
+            &user,
+            &first_target,
+            None,
+            "http://origin.example.com/live/user/pass/1001.m3u8",
+            None,
+            super::HlsEntryStreamIdentity::new(1001, "80510").expect("first input stream identity"),
+            &input,
+            &HeaderMap::new(),
+            UserConnectionPermission::Allowed,
+            Some(ConnectionKind::Normal),
+            &super::build_virtual_hls_entry_path(&first_target, &input, &user, 1001),
+        )
+        .await
+        .into_response();
+        let second_response = super::handle_hls_stream_request(
+            &test_fingerprint_with_addr(test_addr_with_port(55124)),
+            &app_state,
+            &user,
+            &second_target,
+            None,
+            "http://origin.example.com/live/user/pass/9007.m3u8",
+            None,
+            super::HlsEntryStreamIdentity::new(9007, "80510").expect("second input stream identity"),
+            &input,
+            &HeaderMap::new(),
+            UserConnectionPermission::Allowed,
+            Some(ConnectionKind::Normal),
+            &super::build_virtual_hls_entry_path(&second_target, &input, &user, 9007),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(first_response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(second_response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let first_location = first_response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("first location header");
+        let second_location = second_response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("second location header");
+        assert_eq!(
+            proxy_session_id_from_redirect_location(first_location),
+            proxy_session_id_from_redirect_location(second_location)
+        );
+        assert_ne!(
+            access_lease_id_from_redirect_location(first_location),
+            access_lease_id_from_redirect_location(second_location)
+        );
+
+        let proxy_session_id = ProxySessionId(proxy_session_id_from_redirect_location(first_location).to_string());
+        let first_lease_id = HlsAccessLeaseId(access_lease_id_from_redirect_location(first_location).to_string());
+        let second_lease_id = HlsAccessLeaseId(access_lease_id_from_redirect_location(second_location).to_string());
+        let now_ms = super::current_time_millis();
+        let mut leases = app_state.hls_proxy.access_leases().write().await;
+        let first_lease =
+            leases.response_snapshot(&first_lease_id, &proxy_session_id, now_ms).expect("first access lease");
+        let second_lease =
+            leases.response_snapshot(&second_lease_id, &proxy_session_id, now_ms).expect("second access lease");
+        assert_eq!(first_lease.virtual_id, 1001);
+        assert_eq!(second_lease.virtual_id, 9007);
+        assert_eq!(first_lease.stream_ref, "80510");
+        assert_eq!(second_lease.stream_ref, "80510");
+    }
+
+    #[tokio::test]
+    async fn hls_virtual_source_resolver_rejects_missing_input_stream_id_with_service_unavailable() {
+        let input = single_hls_provider_input("missing-origin-id-input");
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        let target = Arc::new(test_m3u_hls_share_target());
+        let item = test_m3u_hls_item(
+            &input,
+            1001,
+            "",
+            "http://account.example.com/live/account-user/account-pass/channel.m3u8",
+        );
+        cache_test_m3u_hls_item(&app_state, &target, item).await;
+
+        let status = super::resolve_hls_virtual_source_for_target(&app_state, &target, 1001)
+            .await
+            .expect_err("missing input stream identity must fail safely");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -9426,7 +9681,7 @@ mod tests {
             None,
             "http://origin.example.com/live/user/pass/12345.m3u8",
             None,
-            12345,
+            super::HlsEntryStreamIdentity::new(12345, "80510").expect("valid input stream identity"),
             &input,
             &HeaderMap::new(),
             UserConnectionPermission::Allowed,
@@ -9720,6 +9975,53 @@ mod tests {
             )
             .await;
         assert!(same_owner_handle.is_some(), "reserved provider must be reusable by the same HLS session owner");
+        app_state.connection_manager.release_provider_handle(same_owner_handle).await;
+    }
+
+    #[tokio::test]
+    async fn hls_virtual_entry_reservation_uses_input_stream_id_for_shared_session_owner() {
+        let input = single_hls_provider_input("origin-id-reservation-input");
+        let app_state = test_app_state_with_inputs(vec![Arc::new(input.clone())]);
+        enable_hls_cache(&app_state);
+        let target = Arc::new(test_m3u_hls_share_target());
+        let item = test_m3u_hls_item(
+            &input,
+            1001,
+            "80510",
+            "http://account.example.com/live/account-user/account-pass/80510.m3u8",
+        );
+        cache_test_m3u_hls_item(&app_state, &target, item).await;
+        let stream_identity = super::HlsEntryStreamIdentity::new(1001, "80510").expect("input stream identity");
+        let mut user = ProxyUserCredentials::default();
+        user.username = "hls-user".to_string();
+
+        assert!(
+            super::try_reserve_hls_virtual_entry_origin_account_for_redirect(
+                &app_state,
+                &test_fingerprint(),
+                &user,
+                &target,
+                &input,
+                &stream_identity,
+            )
+            .await
+        );
+
+        let expected_key = HlsSessionKey::new(input.id, "80510");
+        let expected_proxy_session_id = build_proxy_session_id(&expected_key, &app_state.get_encrypt_secret());
+        let expected_owner = crate::api::model::build_hls_origin_session_owner(&expected_proxy_session_id);
+        let same_owner_handle = app_state
+            .active_provider
+            .acquire_connection_with_grace_for_session(
+                &input.name,
+                &test_addr_with_port(55253),
+                false,
+                0,
+                ConnectionKind::Normal,
+                Some(&expected_owner),
+            )
+            .await;
+        assert!(same_owner_handle.is_some(), "reservation must be owned by input:1|hls|80510, not virtual_id=1001");
         app_state.connection_manager.release_provider_handle(same_owner_handle).await;
     }
 

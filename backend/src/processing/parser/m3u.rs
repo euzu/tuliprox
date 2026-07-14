@@ -428,6 +428,7 @@ fn process_header_internal(
         }
     }
 
+    plih.freeze_input_stream_id();
     plih
 }
 

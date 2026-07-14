@@ -5,13 +5,23 @@ const PROXY_SESSION_ID_LEN: usize = 22;
 const PROXY_SESSION_ID_KEY_CONTEXT: &str = "tuliprox:hls-cache:proxy-session-id-key:v1";
 
 /// Stable Tuliprox content identity for a live HLS source.
+///
+/// `stream_ref` is the immutable input-stream ID captured before target mapping.
+/// Together with `input_id`, it identifies the origin content across targets;
+/// target IDs and virtual IDs must never be used as `stream_ref`.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct HlsSessionKey {
+    /// Internal ID of the configured Tuliprox input.
     pub input_id: u16,
+    /// Exact, non-empty origin/provider stream ID represented as a string.
     pub stream_ref: String,
 }
 
 impl HlsSessionKey {
+    /// Creates a key from the configured input ID and its immutable input-stream ID.
+    ///
+    /// Callers must pass the origin/provider ID captured before target mapping, not
+    /// a target-specific or virtual ID.
     pub fn new(input_id: u16, stream_ref: impl Into<String>) -> Self {
         Self { input_id, stream_ref: stream_ref.into() }
     }
@@ -54,6 +64,14 @@ mod tests {
 
         assert_ne!(first, different_input);
         assert_ne!(first, different_stream);
+    }
+
+    #[test]
+    fn live_hls_session_key_preserves_alphanumeric_input_stream_id() {
+        let key = HlsSessionKey::new(7, "m3u-channel_A42");
+
+        assert_eq!(key.stream_ref, "m3u-channel_A42");
+        assert_eq!(key.stable_value(), "input:7|hls|m3u-channel_A42");
     }
 
     #[test]

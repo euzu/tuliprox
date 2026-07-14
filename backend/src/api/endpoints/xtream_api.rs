@@ -16,7 +16,7 @@ use crate::{
         endpoints::{
             hls_api::{
                 build_virtual_hls_entry_path, handle_hls_stream_request, hls_admission_failure_manifest_response,
-                hls_custom_video_manifest_response,
+                hls_custom_video_manifest_response, HlsEntryStreamIdentity,
             },
             xmltv_api::{get_empty_epg_response, get_epg_path_for_target_by_type, serve_short_epg},
         },
@@ -483,6 +483,8 @@ async fn xtream_player_api_stream(
                     input: &input,
                     user: &user,
                     session_reservation_ttl_secs: get_session_reservation_ttl_secs(app_state, item_type),
+                    content_representation:
+                        crate::api::model::ProviderContentRepresentationMode::for_playback_extension(playback_ext),
                 },
                 None,
             )
@@ -576,6 +578,13 @@ async fn xtream_player_api_stream(
     let is_session_request = is_session_based_playback(item_type, Some(playback_ext));
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
     if is_session_request && playback_ext == shared::defaults::HLS_EXT {
+        let Some(stream_identity) = HlsEntryStreamIdentity::from_playlist_item(&pli) else {
+            error!(
+                "HLS input stream identity missing for virtual_id={}; refresh target playlist",
+                pli.virtual_id
+            );
+            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
         let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id);
         return handle_hls_stream_request(
             fingerprint,
@@ -585,7 +594,7 @@ async fn xtream_player_api_stream(
             user_session.as_ref(),
             &stream_url,
             None,
-            pli.virtual_id,
+            stream_identity,
             &input,
             req_headers,
             connection_permission,
@@ -747,6 +756,10 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
 
         // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
         if is_session_request && playback_ext == Some(shared::defaults::HLS_EXT) {
+            let Some(stream_identity) = HlsEntryStreamIdentity::from_playlist_item(&pli) else {
+                error!("HLS input stream identity missing for virtual_id={virtual_id}; refresh target playlist");
+                return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+            };
             let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, virtual_id);
             return handle_hls_stream_request(
                 fingerprint,
@@ -756,7 +769,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
                 None,
                 &pli.url,
                 None,
-                virtual_id,
+                stream_identity,
                 &input,
                 req_headers,
                 UserConnectionPermission::Allowed,
@@ -1780,6 +1793,7 @@ mod tests {
             input_name: "local".intern(),
             channel_no: 1,
             source_ordinal: 0,
+            input_stream_id: "".intern(),
         }
     }
 
@@ -1930,6 +1944,7 @@ mod tests {
             input_name: "strong".intern(),
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: "813563".intern(),
         }
     }
 

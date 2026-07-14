@@ -440,6 +440,7 @@ mod tests {
             t_catchup_mode: None,
             source_ordinal: 0,
             additional_properties: None,
+            input_stream_id: "813294".intern(),
         }
     }
 

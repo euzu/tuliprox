@@ -8870,6 +8870,7 @@ mod tests {
             input_name: "provider_with_flag".intern(),
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: "1".intern(),
         };
 
         let hls_ext = shared::defaults::HLS_EXT.to_string();
