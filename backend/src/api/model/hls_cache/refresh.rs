@@ -1544,6 +1544,7 @@ mod tests {
             AppConfig, Config, ConfigProvider, HlsManifestRecoveryBurstConfig, HlsSegmentRepairConfig,
             ReverseProxyDisabledHeaderConfig, SourcesConfig, StripConfig,
         },
+        utils::content_coding::{ContentCoding, ContentCodingError},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
@@ -1551,9 +1552,12 @@ mod tests {
         ConfigPaths, ConfigProviderDto, HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripMode,
         ProviderUrlSelectionPolicy,
     };
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
+    use std::{
+        io,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -1742,6 +1746,72 @@ mod tests {
         assert!(manifest_hard_fetch_error(&OriginManifestFetchError::ProviderUnavailable(
             HlsBoundAccountAcquireErrorKind::Expired,
         )));
+    }
+
+    #[test]
+    fn manifest_content_failures_have_explicit_hard_and_temporary_classification() {
+        let errors = vec![
+            (
+                "invalid content-coding header",
+                OriginManifestFetchError::ContentCoding(ContentCodingError::InvalidHeader),
+                true,
+            ),
+            (
+                "unsupported content coding",
+                OriginManifestFetchError::ContentCoding(ContentCodingError::Unsupported("unknown".to_string())),
+                true,
+            ),
+            (
+                "encoded partial content",
+                OriginManifestFetchError::ContentCoding(ContentCodingError::EncodedPartialContent),
+                true,
+            ),
+            (
+                "content-coding prefix read",
+                OriginManifestFetchError::ContentCoding(ContentCodingError::PrefixRead(io::Error::other(
+                    "prefix read failed",
+                ))),
+                false,
+            ),
+            (
+                "gzip decoding",
+                OriginManifestFetchError::ContentDecoding { coding: ContentCoding::Gzip },
+                false,
+            ),
+            (
+                "deflate decoding",
+                OriginManifestFetchError::ContentDecoding { coding: ContentCoding::Deflate },
+                false,
+            ),
+            (
+                "brotli decoding",
+                OriginManifestFetchError::ContentDecoding { coding: ContentCoding::Brotli },
+                false,
+            ),
+            (
+                "zstandard decoding",
+                OriginManifestFetchError::ContentDecoding { coding: ContentCoding::Zstd },
+                false,
+            ),
+            (
+                "decoded body limit",
+                OriginManifestFetchError::DecodedBodyLimitExceeded { limit: 1024 },
+                true,
+            ),
+            (
+                "invalid utf-8",
+                OriginManifestFetchError::InvalidUtf8 { valid_up_to: 7, error_len: Some(1) },
+                true,
+            ),
+        ];
+
+        for (label, error, expected_hard) in errors {
+            assert_eq!(manifest_hard_fetch_error(&error), expected_hard, "unexpected hard classification: {label}");
+            assert!(
+                manifest_temporary_failure_kind(&error).is_none(),
+                "content failure must not affect the temporary host-switch counter: {label}"
+            );
+        }
     }
 
     #[test]

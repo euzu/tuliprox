@@ -18,8 +18,8 @@ use crate::{
         },
         debug_if_enabled,
         request::{
-            get_request_headers, preview_request_diagnostics_for_logging, preview_request_target_for_logging,
-            send_with_retry_and_provider_policy,
+            get_request_headers, is_safe_cross_origin_redirect_header, preview_request_diagnostics_for_logging,
+            preview_request_target_for_logging, send_with_retry_and_provider_policy,
         },
     },
 };
@@ -548,8 +548,18 @@ fn prepare_client(
 }
 
 fn remove_sensitive_headers(headers: &mut axum::http::HeaderMap) {
-    headers.remove(axum::http::header::AUTHORIZATION);
-    headers.remove(axum::http::header::COOKIE);
+    let names_to_remove = headers
+        .keys()
+        .filter(|name| !is_safe_cross_origin_redirect_header(name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in names_to_remove {
+        headers.remove(name);
+    }
+}
+
+fn provider_headers_require_manual_redirects(headers: &HeaderMap) -> bool {
+    headers.keys().any(|name| !is_safe_cross_origin_redirect_header(name.as_str()))
 }
 
 fn same_origin(lhs: &Url, rhs: &Url) -> bool {
@@ -809,16 +819,18 @@ async fn provider_stream_request(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, ProviderStreamRequestFailure> {
+    let use_manual_redirects = app_state.should_use_manual_redirects()
+        || provider_headers_require_manual_redirects(stream_options.get_headers());
     if log_enabled!(log::Level::Debug) {
         let diagnostics =
             preview_request_diagnostics_for_logging(stream_options.get_url(), stream_options.get_provider());
         debug!(
             "Provider request diagnostics: manual_redirects={}, {}",
-            app_state.should_use_manual_redirects(),
+            use_manual_redirects,
             sanitize_sensitive_info(&diagnostics)
         );
     }
-    let response_result = if app_state.should_use_manual_redirects() {
+    let response_result = if use_manual_redirects {
         let client_no_redirect = app_state.http_client_no_redirect.load();
         send_with_manual_redirects(&client_no_redirect, stream_options, &app_state.app_config).await
     } else {
@@ -1681,6 +1693,68 @@ mod tests {
             options.get_headers().get(axum::http::header::COOKIE).and_then(|value| value.to_str().ok()),
             Some("sid=abc; pref=1")
         );
+    }
+
+    #[test]
+    fn cross_origin_provider_requests_keep_only_redirect_safe_headers() {
+        let stream_url = Url::parse("http://provider-a.example/live/segment.ts").unwrap();
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(reqwest::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+        req_headers.insert(reqwest::header::RANGE, "bytes=17-".parse().unwrap());
+        req_headers.insert(reqwest::header::USER_AGENT, "test-agent".parse().unwrap());
+        req_headers.insert(reqwest::header::AUTHORIZATION, "Bearer client".parse().unwrap());
+        req_headers.insert(reqwest::header::COOKIE, "client=1".parse().unwrap());
+        req_headers.insert(reqwest::header::PROXY_AUTHORIZATION, "Basic proxy-secret".parse().unwrap());
+        let input_headers = HashMap::from([
+            ("X-API-Key".to_string(), "api-secret".to_string()),
+            ("X-Provider-Token".to_string(), "provider-secret".to_string()),
+        ]);
+        let options = test_options(
+            ProviderContentRepresentationMode::PreserveOrigin,
+            &stream_url,
+            &req_headers,
+            Some(&input_headers),
+            None,
+        );
+        assert!(provider_headers_require_manual_redirects(options.get_headers()));
+
+        let mut safe_headers = HeaderMap::new();
+        safe_headers.insert(reqwest::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
+        safe_headers.insert(reqwest::header::RANGE, "bytes=17-".parse().unwrap());
+        let safe_options =
+            test_options(ProviderContentRepresentationMode::PreserveOrigin, &stream_url, &safe_headers, None, None);
+        assert!(!provider_headers_require_manual_redirects(safe_options.get_headers()));
+
+        let client = reqwest::Client::new();
+        let sensitive_headers = ["authorization", "cookie", "proxy-authorization", "x-api-key", "x-provider-token"];
+
+        let same_origin = Url::parse("http://provider-a.example/live/failover.ts").unwrap();
+        let same_origin_request = prepare_client(
+            &client,
+            &options,
+            Some(&same_origin),
+            ProviderRequestCredentialState::OriginalOrigin,
+        )
+        .0
+        .build()
+        .unwrap();
+        for name in sensitive_headers {
+            assert!(same_origin_request.headers().contains_key(name), "same-origin request lost {name}");
+        }
+
+        let cross_origin = Url::parse("http://provider-b.example/live/segment.ts").unwrap();
+        for (target, credential_state) in [
+            (Some(&cross_origin), ProviderRequestCredentialState::OriginalOrigin),
+            (None, ProviderRequestCredentialState::Scrubbed),
+        ] {
+            let request = prepare_client(&client, &options, target, credential_state).0.build().unwrap();
+            for name in sensitive_headers {
+                assert!(!request.headers().contains_key(name), "cross-origin request retained {name}");
+            }
+            assert_eq!(request.headers()[reqwest::header::ACCEPT_ENCODING], "gzip");
+            assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=17-");
+            assert_eq!(request.headers()[reqwest::header::USER_AGENT], "test-agent");
+        }
     }
 
     #[test]

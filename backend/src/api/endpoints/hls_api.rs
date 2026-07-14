@@ -5424,6 +5424,16 @@ async fn get_stream_channel(
     m3u_get_item_for_stream_id(virtual_id, app_state, target).await.ok().map(|pli| pli.to_stream_channel(target_id))
 }
 
+fn hls_stream_identity_or_unavailable(
+    item: &impl PlaylistEntry,
+    virtual_id: u32,
+) -> Result<HlsEntryStreamIdentity, StatusCode> {
+    HlsEntryStreamIdentity::from_playlist_item(item).ok_or_else(|| {
+        warn!("HLS input stream identity missing for virtual_id={virtual_id}; refresh target playlist");
+        StatusCode::SERVICE_UNAVAILABLE
+    })
+}
+
 pub(in crate::api) async fn resolve_hls_virtual_source_for_target(
     app_state: &Arc<AppState>,
     target: &Arc<ConfigTarget>,
@@ -5431,27 +5441,18 @@ pub(in crate::api) async fn resolve_hls_virtual_source_for_target(
 ) -> Result<HlsResolvedVirtualSource, StatusCode> {
     let (input_name, stream_identity) = if target.has_output(TargetType::Xtream) {
         if let Ok(item) = xtream_get_item_for_stream_id(virtual_id, app_state, target, None).await {
-            let stream_identity = HlsEntryStreamIdentity::from_playlist_item(&item).ok_or_else(|| {
-                warn!("HLS input stream identity missing for virtual_id={virtual_id}; refresh target playlist");
-                StatusCode::SERVICE_UNAVAILABLE
-            })?;
+            let stream_identity = hls_stream_identity_or_unavailable(&item, virtual_id)?;
             (Arc::clone(&item.input_name), stream_identity)
         } else {
             let item =
                 m3u_get_item_for_stream_id(virtual_id, app_state, target).await.map_err(|_| StatusCode::NOT_FOUND)?;
-            let stream_identity = HlsEntryStreamIdentity::from_playlist_item(&item).ok_or_else(|| {
-                warn!("HLS input stream identity missing for virtual_id={virtual_id}; refresh target playlist");
-                StatusCode::SERVICE_UNAVAILABLE
-            })?;
+            let stream_identity = hls_stream_identity_or_unavailable(&item, virtual_id)?;
             (Arc::clone(&item.input_name), stream_identity)
         }
     } else {
         let item =
             m3u_get_item_for_stream_id(virtual_id, app_state, target).await.map_err(|_| StatusCode::NOT_FOUND)?;
-        let stream_identity = HlsEntryStreamIdentity::from_playlist_item(&item).ok_or_else(|| {
-            warn!("HLS input stream identity missing for virtual_id={virtual_id}; refresh target playlist");
-            StatusCode::SERVICE_UNAVAILABLE
-        })?;
+        let stream_identity = hls_stream_identity_or_unavailable(&item, virtual_id)?;
         (Arc::clone(&item.input_name), stream_identity)
     };
     let input = app_state.app_config.get_input_by_name(&input_name).ok_or(StatusCode::NOT_FOUND)?;

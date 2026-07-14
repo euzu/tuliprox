@@ -2340,7 +2340,8 @@ fn same_origin(lhs: &Url, rhs: &Url) -> bool {
         && lhs.port_or_known_default() == rhs.port_or_known_default()
 }
 
-fn is_safe_cross_origin_redirect_header(key: &str) -> bool {
+/// Reports whether a request header may be retained when the target origin changes.
+pub(crate) fn is_safe_cross_origin_redirect_header(key: &str) -> bool {
     key.eq_ignore_ascii_case("accept")
         || key.eq_ignore_ascii_case("accept-encoding")
         || key.eq_ignore_ascii_case("accept-language")

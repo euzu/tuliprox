@@ -1740,6 +1740,20 @@ mod tests {
         assert_eq!(rematerialized_m3u_item.get_input_stream_id(), None);
         assert_eq!(rematerialized_xtream_item.provider_id, 0);
         assert_eq!(rematerialized_xtream_item.get_input_stream_id(), None);
+
+        xtream_item.input_stream_id = "explicit-origin-alpha".intern();
+        assert_eq!(xtream_item.get_input_stream_id().as_deref(), Some("explicit-origin-alpha"));
+        let identified_common_item = PlaylistItem::from(&xtream_item);
+        assert_eq!(identified_common_item.header.input_stream_id.as_ref(), "explicit-origin-alpha");
+        assert_eq!(identified_common_item.get_input_stream_id().as_deref(), Some("explicit-origin-alpha"));
+
+        let identified_m3u_item = M3uPlaylistItem::from(&identified_common_item);
+        let identified_xtream_item = XtreamPlaylistItem::from(&identified_common_item);
+        assert_eq!(identified_m3u_item.input_stream_id.as_ref(), "explicit-origin-alpha");
+        assert_eq!(identified_m3u_item.get_input_stream_id().as_deref(), Some("explicit-origin-alpha"));
+        assert_eq!(identified_xtream_item.provider_id, 0);
+        assert_eq!(identified_xtream_item.input_stream_id.as_ref(), "explicit-origin-alpha");
+        assert_eq!(identified_xtream_item.get_input_stream_id().as_deref(), Some("explicit-origin-alpha"));
     }
 
     #[test]
