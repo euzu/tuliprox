@@ -1,7 +1,79 @@
 use super::{HlsAccessLeaseId, HlsSessionKey, ProxySessionId};
+use crate::utils::content_coding::ContentCodingObservation;
+use log::debug;
 use sha2::{Digest, Sha256};
-use shared::utils::sanitize_sensitive_info;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Fixed HLS object classes allowed in content-coding diagnostics.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum HlsOriginContentCodingObjectKind {
+    Manifest,
+    Segment,
+    Map,
+    Key,
+    Part,
+    Other,
+}
+
+impl HlsOriginContentCodingObjectKind {
+    const fn as_log_value(self) -> &'static str {
+        match self {
+            Self::Manifest => "manifest",
+            Self::Segment => "segment",
+            Self::Map => "map",
+            Self::Key => "key",
+            Self::Part => "part",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Fixed Tuliprox HLS stacks allowed in content-coding diagnostics.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum HlsOriginContentCodingSource {
+    Legacy,
+    Shared,
+}
+
+impl HlsOriginContentCodingSource {
+    const fn as_log_value(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Shared => "shared",
+        }
+    }
+}
+
+/// Logs a prepared origin-coding normalization using fixed or numeric fields only.
+pub(crate) fn log_hls_origin_content_coding(
+    observation: ContentCodingObservation,
+    object_kind: HlsOriginContentCodingObjectKind,
+    range_requested: bool,
+    source: HlsOriginContentCodingSource,
+) {
+    debug!(
+        "HLS origin content coding normalization prepared: {}",
+        hls_origin_content_coding_log_fields(observation, object_kind, range_requested, source)
+    );
+}
+
+fn hls_origin_content_coding_log_fields(
+    observation: ContentCodingObservation,
+    object_kind: HlsOriginContentCodingObjectKind,
+    range_requested: bool,
+    source: HlsOriginContentCodingSource,
+) -> String {
+    let content_length = observation.content_length.map_or_else(|| "unknown".to_string(), |value| value.to_string());
+    format!(
+        "object_kind={} content_encoding={} status={} requested_accept_encoding=identity decoded_to_identity=true content_length={} range_requested={} source={}",
+        object_kind.as_log_value(),
+        observation.content_encoding,
+        observation.status.as_u16(),
+        content_length,
+        range_requested,
+        source.as_log_value()
+    )
+}
 
 /// In-memory counters for the live HLS cache path.
 #[derive(Debug, Default)]
@@ -120,7 +192,7 @@ pub fn safe_user_session_token(session_token: &str) -> String { short_hash(sessi
 
 pub fn safe_proxy_session_id(proxy_session_id: &ProxySessionId) -> String { short_hash(&proxy_session_id.0) }
 
-pub fn safe_origin_log_value(value: impl AsRef<str>) -> String { sanitize_sensitive_info(value.as_ref()).into_owned() }
+pub fn safe_origin_log_value(value: impl AsRef<str>) -> String { format!("origin#{}", short_hash(value.as_ref())) }
 
 fn increment(counter: &AtomicU64, count: u64) { counter.fetch_add(count, Ordering::Relaxed); }
 
@@ -134,12 +206,20 @@ fn short_hash(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{safe_origin_log_value, safe_proxy_session_id, safe_session_key, HlsCacheMetrics};
-    use crate::api::model::{HlsSessionKey, ProxySessionId};
+    use super::{
+        hls_origin_content_coding_log_fields, safe_origin_log_value, safe_proxy_session_id, safe_session_key,
+        HlsCacheMetrics, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource,
+    };
+    use crate::{
+        api::model::{HlsSessionKey, ProxySessionId},
+        utils::content_coding::ContentCodingObservation,
+    };
+    use reqwest::StatusCode;
 
     #[test]
     fn safe_log_helpers_do_not_emit_credentials_or_full_proxy_session_id() {
         let sanitized = safe_origin_log_value("http://user:password@example.com/live/user/password/123.ts");
+        assert!(sanitized.starts_with("origin#"));
         assert!(!sanitized.contains("user:password"));
         assert!(!sanitized.contains("/user/password/"));
 
@@ -170,5 +250,48 @@ mod tests {
         assert_eq!(snapshot.sessions_created, 1);
         assert_eq!(snapshot.prefetch_queued, 2);
         assert_eq!(snapshot.prefetch_skipped, 3);
+    }
+
+    #[test]
+    fn content_coding_log_fields_are_fixed_redacted_and_complete() {
+        let fields = hls_origin_content_coding_log_fields(
+            ContentCodingObservation {
+                content_encoding: "multiple",
+                status: StatusCode::OK,
+                content_length: Some(321),
+            },
+            HlsOriginContentCodingObjectKind::Manifest,
+            false,
+            HlsOriginContentCodingSource::Legacy,
+        );
+
+        assert_eq!(
+            fields,
+            "object_kind=manifest content_encoding=multiple status=200 requested_accept_encoding=identity decoded_to_identity=true content_length=321 range_requested=false source=legacy"
+        );
+        for sensitive_marker in ["http", "?", "cookie", "manifest-body", "signed-token"] {
+            assert!(!fields.contains(sensitive_marker));
+        }
+
+        let unknown_length = hls_origin_content_coding_log_fields(
+            ContentCodingObservation {
+                content_encoding: "gzip",
+                status: StatusCode::PARTIAL_CONTENT,
+                content_length: None,
+            },
+            HlsOriginContentCodingObjectKind::Segment,
+            true,
+            HlsOriginContentCodingSource::Shared,
+        );
+        assert!(unknown_length.contains("content_length=unknown"));
+        assert!(unknown_length.contains("range_requested=true source=shared"));
+
+        let part = hls_origin_content_coding_log_fields(
+            ContentCodingObservation { content_encoding: "br", status: StatusCode::OK, content_length: Some(17) },
+            HlsOriginContentCodingObjectKind::Part,
+            false,
+            HlsOriginContentCodingSource::Shared,
+        );
+        assert!(part.starts_with("object_kind=part content_encoding=br status=200 "));
     }
 }

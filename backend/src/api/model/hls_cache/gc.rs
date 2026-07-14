@@ -1,8 +1,7 @@
 use super::{
     renderer_candidate_window_proxy_seqs, safe_proxy_session_id, CacheInvalidationOutcome, HlsCacheMetrics,
-    HlsSegmentCache, HlsSession, HlsExpiredSessionReason, HlsSessionHandle, HlsSessionStore, MapCacheKey,
-    MapCacheStatus, ProxyMapId,
-    ProxySessionId, SegmentCacheKey, SegmentCacheStatus, TransientObjectCacheKey,
+    HlsExpiredSessionReason, HlsSegmentCache, HlsSession, HlsSessionHandle, HlsSessionStore, MapCacheKey,
+    MapCacheStatus, ProxyMapId, ProxySessionId, SegmentCacheKey, SegmentCacheStatus, TransientObjectCacheKey,
 };
 use crate::{api::model::AppState, model::HlsCacheConfig};
 use arc_swap::ArcSwap;
@@ -203,10 +202,8 @@ impl HlsGarbageCollector {
         for session in &sessions {
             active_session_ids.insert(session.read().await.proxy_session_id.clone());
         }
-        report.orphan_session_dirs_deleted = self
-            .cache
-            .delete_orphan_session_dirs(&active_session_ids, gc_start)
-            .await?;
+        report.orphan_session_dirs_deleted =
+            self.cache.delete_orphan_session_dirs(&active_session_ids, gc_start).await?;
         let mut pending_deletions = Vec::new();
         for session in &sessions {
             let mut session = session.write().await;

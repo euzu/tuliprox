@@ -5,8 +5,12 @@ use crate::{
 };
 use log::debug;
 use shared::utils::sanitize_sensitive_info;
-use std::{fmt, net::SocketAddr, sync::Arc};
-use std::time::{Duration, Instant};
+use std::{
+    fmt,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{
     sync::{Mutex, Notify},
     time::timeout,
@@ -140,11 +144,7 @@ impl HlsAccountOverlapTiming {
     }
 
     pub fn reservation_ttl_secs(self) -> u64 {
-        self.hard_active_window_ms
-            .saturating_add(self.soft_active_window_ms)
-            .saturating_add(999)
-            / 1_000
-            + 1
+        self.hard_active_window_ms.saturating_add(self.soft_active_window_ms).saturating_add(999) / 1_000 + 1
     }
 }
 
@@ -627,9 +627,7 @@ async fn reserve_hls_origin_account_io_slot(
                     if now >= deadline {
                         return Err(HlsBoundAccountAcquireErrorKind::WaitTimedOut);
                     }
-                    let wait_for = deadline
-                        .saturating_duration_since(now)
-                        .min(HLS_ORIGIN_ACCOUNT_IO_WAIT_RECHECK);
+                    let wait_for = deadline.saturating_duration_since(now).min(HLS_ORIGIN_ACCOUNT_IO_WAIT_RECHECK);
                     tokio::select! {
                         () = notify.notified() => {}
                         () = tokio::time::sleep(wait_for) => {}

@@ -43,9 +43,9 @@ mod headers;
 mod ids;
 mod lease;
 mod lifecycle;
+mod manager;
 mod manifest_commit;
 mod manifest_fetch;
-mod manager;
 mod map;
 mod map_fetcher;
 mod observability;
@@ -55,8 +55,8 @@ mod playback;
 mod prefetch;
 mod qos;
 mod refresh;
-mod resource_fetch;
 mod renderer;
+mod resource_fetch;
 mod response;
 mod segment_fetcher;
 mod segment_repair;
@@ -87,22 +87,18 @@ pub use self::{
     ids::{build_proxy_session_id, HlsSessionKey, ProxySessionId},
     lease::{
         new_hls_access_lease_id, HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseChannelUnavailableReason,
-        HlsAccessLeaseId, HlsAccessLeaseIdleRelease, HlsAccessLeaseLifecycleSnapshot,
-        HlsAccessLeasePendingDeadline, HlsAccessLeaseResponseFlag, HlsAccessLeaseSessionSnapshot,
-        HlsAccessLeaseState, HlsAccessLeaseStore, HlsAccessLeaseTiming, HlsAccessLeaseTouch,
-        HlsFreshManifestRequiredReason, HlsPlaybackFamilyKey,
+        HlsAccessLeaseId, HlsAccessLeaseIdleRelease, HlsAccessLeaseLifecycleSnapshot, HlsAccessLeasePendingDeadline,
+        HlsAccessLeaseResponseFlag, HlsAccessLeaseSessionSnapshot, HlsAccessLeaseState, HlsAccessLeaseStore,
+        HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsFreshManifestRequiredReason, HlsPlaybackFamilyKey,
     },
     lifecycle::{HlsLifecycleEvent, HlsLifecycleEventKey, HlsLifecycleManager},
+    manager::{exec_hls_lifecycle, HlsProxyManager},
     manifest_commit::{
         hls_cached_manifest_options_for_requirement, hls_committed_manifest_body_for_request,
         hls_manifest_commit_requirement, hls_should_wait_for_initial_manifest_commit, HlsCachedManifestOptions,
         HlsCommittedManifestBody,
     },
-    manifest_fetch::{
-        classify_origin_manifest_status, LiveHlsOriginEntry, OriginManifestFetchError, OriginManifestStatusClass,
-        RetryPolicy,
-    },
-    manager::{exec_hls_lifecycle, HlsProxyManager},
+    manifest_fetch::{classify_origin_manifest_status, LiveHlsOriginEntry, OriginManifestStatusClass, RetryPolicy},
     map::{MapCacheStatus, MapEntry, OriginMapFetchRef, OriginMapKey, ProxyMapId},
     map_fetcher::{HlsMapWorkerPool, MapFetchContext},
     observability::{
@@ -130,20 +126,16 @@ pub use self::{
         cold_start_retry_after_seconds, maybe_trigger_origin_refresh, trigger_origin_refresh_sync,
         HlsManifestCommitRequirement, OriginRefreshRequest, OriginRefreshState,
     },
-    resource_fetch::{
-        build_hls_origin_resource_headers, build_hls_origin_resource_headers_with_client_range,
-        classify_hls_resource_status, fetch_hls_origin_resource_response, log_hls_resource_attempt_started,
-        log_hls_resource_attempt_succeeded, log_hls_resource_fetch_failed, log_hls_resource_retry_scheduled,
-        log_hls_resource_timeout, retry_after_secs_from_ms, run_hls_origin_resource_retry_loop,
-        run_hls_origin_resource_retry_loop_with_attempt_prepare, HlsOriginByteRangeExpectation,
-        HlsOriginResourceAttemptCleanupFuture, HlsOriginResourceAttemptPrepareFuture, HlsOriginResourceClients,
-        HlsOriginResourceCommitFuture, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget,
-        HlsResourceFetchAttempt, HlsResourceFetchKind, HlsResourceFetchLogContext, HlsResourceFetchLogStatus,
-        HlsResourceFetchSource, HlsResourceStatusClass,
-    },
     renderer::{
         renderer_candidate_window_proxy_seqs, HlsManifestRenderer, RenderError, RenderPolicy, RenderedManifest,
         RenderedManifestStoreOutcome, RenderedManifestStoreRejectReason,
+    },
+    resource_fetch::{
+        build_hls_origin_resource_headers, build_hls_origin_resource_headers_with_client_range,
+        retry_after_secs_from_ms, run_hls_origin_resource_retry_loop_with_attempt_prepare,
+        HlsOriginByteRangeExpectation, HlsOriginResourceBodyDeadline, HlsOriginResourceClients,
+        HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchAttempt, HlsResourceFetchKind,
+        HlsResourceFetchSource,
     },
     response::{
         serve_hls_map_cache_outcome, serve_hls_map_cache_response, serve_hls_segment_cache_outcome,
@@ -163,14 +155,12 @@ pub use self::{
         TransientPassthroughReason,
     },
     session_store::{
-        HlsExpiredSessionMarker, HlsExpiredSessionReason, HlsSessionHandle, HlsSessionStore,
-        HlsSessionStoreOutcome,
+        HlsExpiredSessionMarker, HlsExpiredSessionReason, HlsSessionHandle, HlsSessionStore, HlsSessionStoreOutcome,
     },
     timeline::{
-        default_content_type_for_segment_ext, CacheAccessState, OriginSegmentFetchRef, OriginSegmentKey,
-        is_hls_provisioning_gap_segment, is_hls_provisioning_segment, SegmentCacheStatus, SegmentEntry,
-        TimelineMapError, HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH,
-        HLS_PROVISIONING_SEGMENT_DURATION_MS,
+        default_content_type_for_segment_ext, is_hls_provisioning_gap_segment, is_hls_provisioning_segment,
+        CacheAccessState, OriginSegmentFetchRef, OriginSegmentKey, SegmentCacheStatus, SegmentEntry, TimelineMapError,
+        HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH, HLS_PROVISIONING_SEGMENT_DURATION_MS,
         HLS_PROVISIONING_TARGET_DURATION_SECS,
     },
     transient::{
@@ -183,9 +173,15 @@ pub use self::{
         fetch_and_commit_hls_transient_origin_response_with_attempt_prepare,
         fetch_hls_transient_origin_response_with_attempt_prepare, hls_transient_object_fetch_failure,
         hls_transient_origin_response, hls_transient_resource_fetch_kind,
-        is_hls_transient_full_object_cacheable_request, resolve_hls_transient_object_cache_action,
-        HlsTransientCacheCommitContext, HlsTransientObjectCacheAction, HlsTransientObjectCacheResolution,
-        HlsTransientObjectFetchFailure, HlsTransientObjectFetchFinalizer, HlsTransientOriginCacheFetchRequest,
-        HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard,
+        is_hls_transient_full_object_cacheable_request, record_successful_transient_segment_fetch,
+        record_temporary_transient_segment_fetch_failure, resolve_hls_transient_object_cache_action,
+        HlsTransientCacheCommitContext, HlsTransientDecodedOriginResponse, HlsTransientDirectResponseContext,
+        HlsTransientObjectCacheAction, HlsTransientObjectCacheResolution, HlsTransientObjectFetchFailure,
+        HlsTransientObjectFetchFinalizer, HlsTransientOriginCacheFetchRequest, HlsTransientOriginFetchRequest,
+        HlsTransientOriginIoGuard,
     },
+};
+pub(crate) use self::{
+    manifest_fetch::MAX_HLS_MANIFEST_BYTES,
+    observability::{log_hls_origin_content_coding, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource},
 };

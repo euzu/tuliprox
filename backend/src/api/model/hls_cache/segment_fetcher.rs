@@ -2,30 +2,30 @@
 
 use super::{
     begin_hls_origin_account_io_bounded, build_hls_origin_resource_headers, classify_hls_backpressure,
-    finish_hls_origin_account_io, hls_object_body_deadline,
-    run_hls_origin_resource_retry_loop_with_attempt_prepare, CachedSegmentMetadata,
-    HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseId, HlsAccessLeaseStore, HlsBackpressureState,
-    HlsBoundAccountAcquireErrorKind, HlsCacheMetrics, HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation,
-    HlsOriginIoContext, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget,
-    HlsRepairRenderedObjectId, HlsResourceFetchKind, HlsResourceFetchSource, HlsSegmentCache, HlsSegmentFailureObject,
-    HlsSegmentFailureTransition, HlsSegmentFile, HlsSegmentRepairManager, HlsSegmentRepairObjectContext,
-    HlsSegmentRepairSource, HlsSessionHandle, OriginSegmentFetchRef, SegmentCacheKey, SegmentCacheStatus,
-    SegmentFetchPriority,
+    finish_hls_origin_account_io, hls_object_body_deadline, run_hls_origin_resource_retry_loop_with_attempt_prepare,
+    CachedSegmentMetadata, HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseId, HlsAccessLeaseStore,
+    HlsBackpressureState, HlsBoundAccountAcquireErrorKind, HlsCacheMetrics, HlsOriginAccountIoLeaseGuard,
+    HlsOriginByteRangeExpectation, HlsOriginIoContext, HlsOriginResourceBodyDeadline, HlsOriginResourceClients,
+    HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsRepairRenderedObjectId, HlsResourceFetchKind,
+    HlsResourceFetchSource, HlsSegmentCache, HlsSegmentFailureObject, HlsSegmentFailureTransition, HlsSegmentFile,
+    HlsSegmentRepairManager, HlsSegmentRepairObjectContext, HlsSegmentRepairSource, HlsSessionHandle,
+    OriginSegmentFetchRef, SegmentCacheKey, SegmentCacheStatus, SegmentFetchPriority,
 };
-use crate::model::HlsCacheConfig;
-use crate::processing::parser::hls::origin_manifest::ParsedByteRange;
-use shared::model::{HlsSegmentRepairMode, HlsStripMode};
+use crate::{
+    model::HlsCacheConfig, processing::parser::hls::origin_manifest::ParsedByteRange,
+    utils::content_coding::DecodedHttpResponse,
+};
 use arc_swap::ArcSwap;
 use axum::http::HeaderMap;
-use futures::{FutureExt, TryStreamExt};
+use futures::FutureExt;
 use log::{debug, warn};
 use reqwest::Client;
-use std::{fmt, io, sync::Arc, time::Duration};
+use shared::model::{HlsSegmentRepairMode, HlsStripMode};
+use std::{fmt, sync::Arc, time::Duration};
 use tokio::{
     sync::{OwnedSemaphorePermit, RwLock, Semaphore},
     time::timeout,
 };
-use tokio_util::io::StreamReader;
 
 const DEFAULT_MAX_GLOBAL_SEGMENT_FETCHES: usize = 64;
 const DEFAULT_MAX_SESSION_SEGMENT_FETCHES: usize = 2;
@@ -483,14 +483,12 @@ impl HlsSegmentWorkerPool {
                                     threshold
                                 );
                                 invalidate_queued_origin_work = true;
-                                response_flag_reason = Some(HlsAccessLeaseChannelUnavailableReason::SegmentTemporaryFailureThreshold {
-                                    failures,
-                                    threshold,
-                                });
-                                SegmentCacheStatus::FailedPermanent {
-                                    failed_at_ms: finished_at_ms,
-                                    status: None,
-                                }
+                                response_flag_reason =
+                                    Some(HlsAccessLeaseChannelUnavailableReason::SegmentTemporaryFailureThreshold {
+                                        failures,
+                                        threshold,
+                                    });
+                                SegmentCacheStatus::FailedPermanent { failed_at_ms: finished_at_ms, status: None }
                             }
                         }
                     } else {
@@ -508,10 +506,8 @@ impl HlsSegmentWorkerPool {
                     if invalidate_queued_origin_work {
                         session.invalidate_queued_origin_work();
                         if let Some(entry) = session.segments.get_mut(&snapshot.proxy_seq) {
-                            entry.status = SegmentCacheStatus::FailedPermanent {
-                                failed_at_ms: finished_at_ms,
-                                status: None,
-                            };
+                            entry.status =
+                                SegmentCacheStatus::FailedPermanent { failed_at_ms: finished_at_ms, status: None };
                         }
                     }
                 }
@@ -553,10 +549,7 @@ impl HlsSegmentWorkerPool {
         reason: HlsAccessLeaseChannelUnavailableReason,
     ) -> usize {
         let proxy_session_id = session.read().await.proxy_session_id.clone();
-        self.access_leases
-            .write()
-            .await
-            .mark_channel_unavailable_for_session(&proxy_session_id, now_ms, reason)
+        self.access_leases.write().await.mark_channel_unavailable_for_session(&proxy_session_id, now_ms, reason)
     }
 }
 
@@ -700,7 +693,6 @@ async fn fetch_segment_with_retries_into_cache(
     let session_log_id = context.session.read().await.proxy_session_id.0.clone();
     let context = context.clone();
     let snapshot = snapshot.clone();
-    let commit_policy = policy.clone();
     let policy_for_prepare = policy.clone();
     let prepare_context = context.clone();
     let cleanup_context = context.clone();
@@ -721,12 +713,12 @@ async fn fetch_segment_with_retries_into_cache(
             }
             .boxed()
         },
-        move |response, _attempt, guard| {
+        move |response, _attempt, body_deadline, guard| {
             let context = context.clone();
             let snapshot = snapshot.clone();
-            let policy = commit_policy.clone();
             async move {
-                let commit_result = commit_segment_response_into_cache(&context, &snapshot, &policy, response).await;
+                let commit_result =
+                    commit_segment_response_into_cache(&context, &snapshot, response, body_deadline).await;
                 let origin_work = finish_segment_origin_attempt(context, guard).await;
                 commit_result.map(|metadata| SegmentFetchCommit {
                     content_length: metadata.size,
@@ -742,11 +734,9 @@ async fn fetch_segment_with_retries_into_cache(
 async fn commit_segment_response_into_cache(
     context: &SegmentFetchContext,
     snapshot: &SegmentFetchSnapshot,
-    policy: &SegmentFetchPolicy,
-    response: reqwest::Response,
+    response: DecodedHttpResponse,
+    body_deadline: HlsOriginResourceBodyDeadline,
 ) -> Result<CachedSegmentMetadata, SegmentFetchError> {
-    let deadline = hls_object_body_deadline(policy.origin_segment_timeout_ms);
-    let stream_reader = StreamReader::new(response.bytes_stream().map_err(io::Error::other));
     let proxy_session_id = context.session.read().await.proxy_session_id.clone();
     let repair_context = HlsSegmentRepairObjectContext {
         source: HlsSegmentRepairSource::Normal,
@@ -765,15 +755,15 @@ async fn commit_segment_response_into_cache(
     };
     context
         .segment_repair
-        .commit_origin_response(&context.segment_cache, &snapshot.cache_key, stream_reader, deadline, repair_context)
+        .commit_origin_response(
+            &context.segment_cache,
+            &snapshot.cache_key,
+            response.body,
+            body_deadline.deadline(),
+            repair_context,
+        )
         .await
-        .map_err(|err| {
-            if err.kind() == io::ErrorKind::TimedOut {
-                SegmentFetchError::Timeout
-            } else {
-                SegmentFetchError::cache_commit(&err)
-            }
-        })
+        .map_err(|err| SegmentFetchError::cache_body(&err))
 }
 
 fn build_segment_origin_headers(
@@ -798,9 +788,13 @@ mod tests {
         model::HlsSegmentRepairConfig,
         processing::parser::hls::origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome},
     };
+    use async_compression::tokio::bufread::{BrotliEncoder, DeflateEncoder, GzipEncoder, ZstdEncoder};
     use axum::http::{header, HeaderMap, HeaderValue};
+    use shared::model::HlsSegmentRepairMode;
     use std::{
         collections::VecDeque,
+        io::Cursor,
+        path::{Path, PathBuf},
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc,
@@ -808,11 +802,10 @@ mod tests {
         time::Duration,
     };
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
+        io::{AsyncReadExt, AsyncWriteExt, BufReader},
         net::TcpListener,
         sync::Mutex,
     };
-    use shared::model::HlsSegmentRepairMode;
 
     const BASE_URL: &str = "http://origin.example.com/live/final/index.m3u8";
 
@@ -913,10 +906,8 @@ mod tests {
             origin_io: None,
         };
 
-        let snapshot = worker
-            .next_fetch_snapshot(&context, 11, &SegmentFetchPolicy::default())
-            .await
-            .expect("segment snapshot");
+        let snapshot =
+            worker.next_fetch_snapshot(&context, 11, &SegmentFetchPolicy::default()).await.expect("segment snapshot");
 
         assert_eq!(snapshot.fetch_ref.resolved_origin_url, "https://cdn.example.net/live/redirected/media/seg001.ts");
         assert_eq!(snapshot.fetch_ref.byte_range, None);
@@ -932,6 +923,128 @@ mod tests {
 
     impl Drop for TestSegmentServer {
         fn drop(&mut self) { self.task.abort(); }
+    }
+
+    #[derive(Clone)]
+    struct TestOriginResponse {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    impl TestOriginResponse {
+        fn encoded(content_encoding: &str, body: Vec<u8>) -> Self {
+            Self { status: 200, headers: vec![("Content-Encoding".to_string(), content_encoding.to_string())], body }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum TestContentEncoding {
+        Gzip,
+        RawDeflate,
+        Brotli,
+        Zstd,
+    }
+
+    impl TestContentEncoding {
+        const fn header_value(self) -> &'static str {
+            match self {
+                Self::Gzip => "gzip",
+                Self::RawDeflate => "deflate",
+                Self::Brotli => "br",
+                Self::Zstd => "zstd",
+            }
+        }
+    }
+
+    async fn encode_test_body(body: &[u8], encoding: TestContentEncoding) -> Vec<u8> {
+        let reader = BufReader::new(Cursor::new(body.to_vec()));
+        let mut encoded = Vec::new();
+        match encoding {
+            TestContentEncoding::Gzip => GzipEncoder::new(reader).read_to_end(&mut encoded).await,
+            TestContentEncoding::RawDeflate => DeflateEncoder::new(reader).read_to_end(&mut encoded).await,
+            TestContentEncoding::Brotli => BrotliEncoder::new(reader).read_to_end(&mut encoded).await,
+            TestContentEncoding::Zstd => ZstdEncoder::new(reader).read_to_end(&mut encoded).await,
+        }
+        .expect("test body encodes");
+        encoded
+    }
+
+    async fn spawn_sequence_response_server(responses: Vec<TestOriginResponse>) -> TestSegmentServer {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
+        let addr = listener.local_addr().expect("local addr");
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+        let task_active = Arc::clone(&active);
+        let task_max = Arc::clone(&max_active);
+        let task_requests = Arc::clone(&requests);
+        let task_responses = Arc::clone(&responses);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let active = Arc::clone(&task_active);
+                let max_active = Arc::clone(&task_max);
+                let requests = Arc::clone(&task_requests);
+                let responses = Arc::clone(&task_responses);
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let mut chunk = [0_u8; 2048];
+                        let Ok(read) = socket.read(&mut chunk).await else {
+                            return;
+                        };
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                    }
+                    requests.lock().await.push(String::from_utf8_lossy(&request).to_string());
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(current, Ordering::SeqCst);
+                    let response = responses.lock().await.pop_front().unwrap_or(TestOriginResponse {
+                        status: 500,
+                        headers: Vec::new(),
+                        body: Vec::new(),
+                    });
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    let reason = if response.status == 200 { "OK" } else { "Status" };
+                    let mut head =
+                        format!("HTTP/1.1 {} {reason}\r\nContent-Length: {}\r\n", response.status, response.body.len());
+                    for (name, value) in response.headers {
+                        head.push_str(&format!("{name}: {value}\r\n"));
+                    }
+                    head.push_str("Connection: close\r\n\r\n");
+                    let _ = socket.write_all(head.as_bytes()).await;
+                    let _ = socket.write_all(&response.body).await;
+                });
+            }
+        });
+
+        TestSegmentServer { base_url: format!("http://{addr}"), max_active, requests, task }
+    }
+
+    fn temp_cache_files(root: &Path) -> Vec<PathBuf> {
+        fn visit(path: &Path, found: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(path) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    visit(&path, found);
+                } else if path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.contains(".tmp.")) {
+                    found.push(path);
+                }
+            }
+        }
+
+        let mut found = Vec::new();
+        visit(root, &mut found);
+        found
     }
 
     async fn spawn_segment_server(delay_ms: u64) -> TestSegmentServer {
@@ -1189,6 +1302,21 @@ mod tests {
         }
     }
 
+    async fn committed_segment(
+        context: &SegmentFetchContext,
+        proxy_seq: u64,
+    ) -> (crate::api::model::SegmentCacheKey, Vec<u8>) {
+        let cache_key = context.session.read().await.segments.get(&proxy_seq).expect("segment").cache_key.clone();
+        let metadata = context
+            .segment_cache
+            .metadata(&cache_key)
+            .await
+            .expect("cache metadata reads")
+            .expect("cache object exists");
+        let bytes = tokio::fs::read(metadata.path).await.expect("cache object reads");
+        (cache_key, bytes)
+    }
+
     #[tokio::test]
     async fn demand_fetch_writes_cache_and_sets_ready_after_commit() {
         let server = spawn_segment_server(0).await;
@@ -1205,6 +1333,133 @@ mod tests {
         assert_eq!(outcome, super::SegmentDemandFetchOutcome::Ready);
         let session = context.session.read().await;
         assert!(matches!(session.segments.get(&1).expect("segment").status, SegmentCacheStatus::Ready { .. }));
+    }
+
+    #[tokio::test]
+    async fn segment_declared_codings_decode_to_identity_before_cache_and_preserve_opaque_bytes() {
+        let identity_bytes = b"\x00\xffopaque-hls-ciphertext\x1f\x8bmedia".to_vec();
+
+        for encoding in [
+            TestContentEncoding::Gzip,
+            TestContentEncoding::RawDeflate,
+            TestContentEncoding::Brotli,
+            TestContentEncoding::Zstd,
+        ] {
+            let encoded = encode_test_body(&identity_bytes, encoding).await;
+            let server =
+                spawn_sequence_response_server(vec![TestOriginResponse::encoded(encoding.header_value(), encoded)])
+                    .await;
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let policy = SegmentFetchPolicy {
+                retry_delays_ms: [0, 0, 0, 0, 0],
+                retry_jitter_max_ms: 0,
+                ..SegmentFetchPolicy::default()
+            };
+            let (worker, context, segment_file) = fetch_context(&server, &temp_dir, &policy).await;
+            clear_scheduled_prefetch(&context, &policy).await;
+
+            let outcome = worker.demand_fetch_and_wait(context.clone(), &segment_file, 20).await;
+
+            assert_eq!(outcome, super::SegmentDemandFetchOutcome::Ready, "failed for {encoding:?}");
+            let (cache_key, cached) = committed_segment(&context, 1).await;
+            assert_eq!(cached, identity_bytes, "cache retained HTTP coding for {encoding:?}");
+            let mut range = context.segment_cache.open_range(&cache_key, 5).await.expect("cache range opens");
+            let mut ranged = Vec::new();
+            range.read_to_end(&mut ranged).await.expect("cache range reads");
+            assert_eq!(ranged, identity_bytes[5..], "range did not address Identity bytes for {encoding:?}");
+            let requests = server.requests.lock().await;
+            assert_eq!(requests.len(), 1, "unexpected retries for {encoding:?}");
+            assert!(
+                requests[0].to_ascii_lowercase().contains("accept-encoding: identity"),
+                "request did not enforce identity for {encoding:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn segment_decoder_failure_retries_then_commits_and_cleans_temp_file() {
+        let identity_bytes = b"identity-media-after-retry".to_vec();
+        let valid = encode_test_body(&identity_bytes, TestContentEncoding::Gzip).await;
+        let mut corrupt = valid.clone();
+        corrupt.truncate(corrupt.len() / 2);
+        let server = spawn_sequence_response_server(vec![
+            TestOriginResponse::encoded("gzip", corrupt),
+            TestOriginResponse::encoded("gzip", valid),
+        ])
+        .await;
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let policy = SegmentFetchPolicy {
+            retry_delays_ms: [0, 0, 0, 0, 0],
+            retry_jitter_max_ms: 0,
+            ..SegmentFetchPolicy::default()
+        };
+        let (worker, context, segment_file) = fetch_context(&server, &temp_dir, &policy).await;
+        clear_scheduled_prefetch(&context, &policy).await;
+
+        let outcome = worker.demand_fetch_and_wait(context.clone(), &segment_file, 20).await;
+
+        assert_eq!(outcome, super::SegmentDemandFetchOutcome::Ready);
+        assert_eq!(committed_segment(&context, 1).await.1, identity_bytes);
+        let requests = server.requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.to_ascii_lowercase().contains("accept-encoding: identity")));
+        drop(requests);
+        assert!(!context.segment_cache.has_active_temp_files().await);
+        assert!(temp_cache_files(temp_dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn segment_decoder_failure_exhausts_attempt_budget_without_cache_or_temp_file() {
+        let valid = encode_test_body(b"never committed", TestContentEncoding::Gzip).await;
+        let mut corrupt = valid;
+        corrupt.truncate(corrupt.len() / 2);
+        let server = spawn_sequence_response_server(
+            (0..5).map(|_| TestOriginResponse::encoded("gzip", corrupt.clone())).collect(),
+        )
+        .await;
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let policy = SegmentFetchPolicy {
+            retry_delays_ms: [0, 0, 0, 0, 0],
+            retry_jitter_max_ms: 0,
+            ..SegmentFetchPolicy::default()
+        };
+        let (worker, context, segment_file) = fetch_context(&server, &temp_dir, &policy).await;
+        clear_scheduled_prefetch(&context, &policy).await;
+
+        let outcome = worker.demand_fetch_and_wait(context.clone(), &segment_file, 20).await;
+
+        assert_eq!(outcome, super::SegmentDemandFetchOutcome::TimedOut);
+        assert_eq!(server.requests.lock().await.len(), 5);
+        let cache_key = context.session.read().await.segments.get(&1).expect("segment").cache_key.clone();
+        assert!(context.segment_cache.metadata(&cache_key).await.expect("metadata reads").is_none());
+        assert!(!context.segment_cache.has_active_temp_files().await);
+        assert!(temp_cache_files(temp_dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn segment_decoded_object_limit_is_authoritative_and_non_retryable() {
+        let identity_bytes = vec![b'x'; 512];
+        let encoded = encode_test_body(&identity_bytes, TestContentEncoding::Gzip).await;
+        assert!(encoded.len() < 64, "fixture must be smaller on the wire than the decoded limit");
+        let server = spawn_sequence_response_server(vec![TestOriginResponse::encoded("gzip", encoded)]).await;
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let policy = SegmentFetchPolicy {
+            retry_delays_ms: [0, 0, 0, 0, 0],
+            retry_jitter_max_ms: 0,
+            ..SegmentFetchPolicy::default()
+        };
+        let (worker, context, segment_file) = fetch_context(&server, &temp_dir, &policy).await;
+        context.segment_cache.update_cache_limits(64, 64);
+        clear_scheduled_prefetch(&context, &policy).await;
+
+        let outcome = worker.demand_fetch_and_wait(context.clone(), &segment_file, 20).await;
+
+        assert_eq!(outcome, super::SegmentDemandFetchOutcome::Unavailable);
+        assert_eq!(server.requests.lock().await.len(), 1);
+        let cache_key = context.session.read().await.segments.get(&1).expect("segment").cache_key.clone();
+        assert!(context.segment_cache.metadata(&cache_key).await.expect("metadata reads").is_none());
+        assert!(!context.segment_cache.has_active_temp_files().await);
+        assert!(temp_cache_files(temp_dir.path()).is_empty());
     }
 
     #[tokio::test]

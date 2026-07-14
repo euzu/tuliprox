@@ -1,8 +1,5 @@
 use super::{HlsAccessLeaseId, ProxySessionId};
-use crate::{
-    api::model::StreamMeterHandle,
-    model::AppConfig,
-};
+use crate::{api::model::StreamMeterHandle, model::AppConfig};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 
@@ -18,9 +15,7 @@ impl HlsQosRuntimeConfig {
         let Some(reverse_proxy) = config.reverse_proxy.as_ref() else {
             return Self::default();
         };
-        Self {
-            live_metering_enabled: reverse_proxy.stream.as_ref().is_some_and(|stream| stream.metrics_enabled),
-        }
+        Self { live_metering_enabled: reverse_proxy.stream.as_ref().is_some_and(|stream| stream.metrics_enabled) }
     }
 }
 
@@ -44,13 +39,12 @@ struct HlsAccessLeaseQosState {
 }
 
 impl HlsAccessLeaseQosState {
-    fn registration(&self, emit_connect_record: bool, register_meter: Option<Arc<StreamMeterHandle>>) -> HlsQosRegistration {
-        HlsQosRegistration {
-            meter_uid: self.meter_uid,
-            meter: self.meter.clone(),
-            register_meter,
-            emit_connect_record,
-        }
+    fn registration(
+        &self,
+        emit_connect_record: bool,
+        register_meter: Option<Arc<StreamMeterHandle>>,
+    ) -> HlsQosRegistration {
+        HlsQosRegistration { meter_uid: self.meter_uid, meter: self.meter.clone(), register_meter, emit_connect_record }
     }
 }
 
@@ -74,11 +68,7 @@ impl HlsQosRegistry {
 
         let (meter_uid, meter) = meter_init.map_or((0, None), |init| (init.meter_uid, Some(init.meter)));
         let register_meter = meter.clone();
-        let state = HlsAccessLeaseQosState {
-            proxy_session_id: proxy_session_id.clone(),
-            meter_uid,
-            meter,
-        };
+        let state = HlsAccessLeaseQosState { proxy_session_id: proxy_session_id.clone(), meter_uid, meter };
         let registration = state.registration(true, register_meter);
         states.insert(lease_id.clone(), state);
         registration
@@ -94,10 +84,7 @@ impl HlsQosRegistry {
 
     pub async fn remove_access_leases(&self, lease_ids: &[HlsAccessLeaseId]) -> usize {
         let mut states = self.states.write().await;
-        lease_ids
-            .iter()
-            .filter(|lease_id| states.remove(*lease_id).is_some())
-            .count()
+        lease_ids.iter().filter(|lease_id| states.remove(*lease_id).is_some()).count()
     }
 
     pub async fn remove_proxy_session_state(&self, proxy_session_id: &ProxySessionId) -> usize {
@@ -122,8 +109,7 @@ impl HlsQosRegistry {
 #[cfg(test)]
 mod tests {
     use super::{HlsQosMeterInit, HlsQosRegistry};
-    use crate::api::model::{EventManager, StreamMeterHandle};
-    use crate::api::model::{HlsAccessLeaseId, ProxySessionId};
+    use crate::api::model::{EventManager, HlsAccessLeaseId, ProxySessionId, StreamMeterHandle};
     use std::sync::Arc;
 
     #[tokio::test]

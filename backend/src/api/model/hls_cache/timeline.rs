@@ -271,10 +271,10 @@ impl TimelineDraft {
         self.target_duration = manifest.target_duration;
         self.independent_segments = manifest.independent_segments;
         self.apply_forward_jump(manifest)?;
-        let epoch_transition_discontinuity = self.apply_origin_epoch_transition_for_manifest(manifest, origin_epoch_handoff)?;
+        let epoch_transition_discontinuity =
+            self.apply_origin_epoch_transition_for_manifest(manifest, origin_epoch_handoff)?;
 
-        let mut mark_handoff_discontinuity =
-            handoff_discontinuity_sequence.is_some() || epoch_transition_discontinuity;
+        let mut mark_handoff_discontinuity = handoff_discontinuity_sequence.is_some() || epoch_transition_discontinuity;
         let mut manifest_head_proxy_seq = None;
         let mut manifest_tail_proxy_seq = None;
         for parsed in &manifest.segments {
@@ -295,19 +295,15 @@ impl TimelineDraft {
         origin_epoch_handoff: bool,
     ) -> Result<bool, TimelineMapError> {
         if origin_epoch_handoff && self.should_start_new_origin_epoch_for_handoff(manifest) {
-            let next_origin_seq = manifest
-                .segments
-                .first()
-                .map_or(manifest.origin_manifest_sequence, |segment| segment.origin_seq);
+            let next_origin_seq =
+                manifest.segments.first().map_or(manifest.origin_manifest_sequence, |segment| segment.origin_seq);
             self.start_new_origin_epoch(next_origin_seq, OriginEpochTransitionReason::Handoff)?;
             return Ok(true);
         }
 
         if self.should_start_new_origin_epoch_for_rollover(manifest) {
-            let next_origin_seq = manifest
-                .segments
-                .first()
-                .map_or(manifest.origin_manifest_sequence, |segment| segment.origin_seq);
+            let next_origin_seq =
+                manifest.segments.first().map_or(manifest.origin_manifest_sequence, |segment| segment.origin_seq);
             self.start_new_origin_epoch(next_origin_seq, OriginEpochTransitionReason::Rollover)?;
             return Ok(true);
         }
@@ -484,9 +480,7 @@ fn proxy_extension_from_url(url: &str, allowed_extensions: &[&str]) -> Option<St
 mod tests {
     use super::{SegmentCacheStatus, TimelineMapError};
     use crate::{
-        api::model::{
-            HlsSession, HlsSessionKey, MapCacheStatus, OriginSegmentKey, ProxyMapId, SegmentFetchPriority,
-        },
+        api::model::{HlsSession, HlsSessionKey, MapCacheStatus, OriginSegmentKey, ProxyMapId, SegmentFetchPriority},
         processing::parser::hls::origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome},
     };
 
@@ -654,9 +648,7 @@ mod tests {
     #[test]
     fn host_handoff_starts_new_epoch_when_range_overlaps_highwater() {
         let mut session = session();
-        let first = normal_manifest(
-            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4.0,\n100.ts\n#EXTINF:4.0,\n101.ts\n",
-        );
+        let first = normal_manifest("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4.0,\n100.ts\n#EXTINF:4.0,\n101.ts\n");
         let second = normal_manifest(
             "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:99\n#EXTINF:4.0,\n99.ts\n#EXTINF:4.0,\n100.ts\n#EXTINF:4.0,\n101.ts\n",
         );

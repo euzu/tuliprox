@@ -1,5 +1,8 @@
-use crate::api::model::proxy::header_policy::{HeaderProtocol, HopByHopHeader};
-use crate::model::ReverseProxyDisabledHeaderConfig;
+use crate::{
+    api::model::proxy::header_policy::{HeaderProtocol, HopByHopHeader},
+    model::ReverseProxyDisabledHeaderConfig,
+    utils::content_coding::force_accept_encoding_identity,
+};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue};
 use std::collections::HashMap;
 
@@ -25,10 +28,8 @@ pub fn scrub_hls_origin_headers(headers: &mut HeaderMap, disabled_headers: Optio
         .flat_map(|value| value.split(','))
         .filter_map(|name| HeaderName::from_bytes(name.trim().as_bytes()).ok())
         .collect::<Vec<_>>();
-    names.extend(headers
-        .keys()
-        .filter(|name| should_remove_hls_origin_header(name.as_str(), disabled_headers))
-        .cloned()
+    names.extend(
+        headers.keys().filter(|name| should_remove_hls_origin_header(name.as_str(), disabled_headers)).cloned(),
     );
     for name in names {
         headers.remove(name);
@@ -55,9 +56,8 @@ pub fn extract_hls_provider_session_header_map(headers: &HeaderMap) -> HeaderMap
         .collect::<Vec<_>>();
 
     let mut session_headers = HeaderMap::new();
-    if let Some(cookie_header) = (!cookies.is_empty())
-        .then(|| cookies.join("; "))
-        .and_then(|value| HeaderValue::from_str(&value).ok())
+    if let Some(cookie_header) =
+        (!cookies.is_empty()).then(|| cookies.join("; ")).and_then(|value| HeaderValue::from_str(&value).ok())
     {
         session_headers.insert(header::COOKIE, cookie_header);
     }
@@ -91,7 +91,7 @@ pub fn hls_origin_headers_with_provider_session(
 
 pub fn force_identity_without_range(headers: &mut HeaderMap) {
     headers.remove(header::RANGE);
-    headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    force_accept_encoding_identity(headers);
 }
 
 #[cfg(test)]

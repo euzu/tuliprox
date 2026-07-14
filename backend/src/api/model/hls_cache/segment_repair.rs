@@ -5,11 +5,11 @@ use super::{
     CachedSegmentMetadata, HlsAccessLeaseId, HlsCacheObjectKey, HlsSegmentCache, ProxySessionId, StagedCacheObject,
 };
 use crate::model::{HlsCorruptSegmentWatchdogConfig, HlsSegmentRepairConfig};
-use shared::model::{HlsSegmentRepairExecutionPlan, HlsSegmentRepairMode};
 use arc_swap::ArcSwap;
 use log::{debug, warn};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use shared::model::{HlsSegmentRepairExecutionPlan, HlsSegmentRepairMode};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt, io,
@@ -542,14 +542,14 @@ impl HlsSegmentRepairManager {
         segment_cache: &HlsSegmentCache,
         key: &K,
         reader: R,
-        deadline: Duration,
+        deadline: tokio::time::Instant,
         context: HlsSegmentRepairObjectContext,
     ) -> io::Result<CachedSegmentMetadata>
     where
         K: HlsCacheObjectKey,
         R: AsyncRead + Unpin,
     {
-        let raw = segment_cache.stage_temp_with_timeout(key, reader, deadline).await?;
+        let raw = segment_cache.stage_temp_with_deadline(key, reader, deadline).await?;
         let runtime = self.runtime.load_full();
         if !runtime.postprocessing_enabled() {
             return segment_cache.commit_staged(key, raw).await;
@@ -940,7 +940,8 @@ impl HlsSegmentRepairManager {
                 return Ok(None);
             }
         };
-        let validation = validate_repair(&runtime.config, codec, &raw_scan, &fixed_scan, executed_level, &stream_selection);
+        let validation =
+            validate_repair(&runtime.config, codec, &raw_scan, &fixed_scan, executed_level, &stream_selection);
         if let Err(reason) = validation {
             debug_repair_event(context, executed_level, "validation failed", Some(&reason));
             let _ = fs::remove_file(&fixed_path).await;
@@ -1176,10 +1177,7 @@ struct RepairRemuxStreamSelection {
 #[cfg(test)]
 impl RepairRemuxStreamSelection {
     fn preserve_all(probe: &SegmentProbe) -> Self {
-        Self {
-            mapped_streams: probe.streams.iter().map(|stream| stream.index).collect(),
-            dropped_streams: Vec::new(),
-        }
+        Self { mapped_streams: probe.streams.iter().map(|stream| stream.index).collect(), dropped_streams: Vec::new() }
     }
 }
 
@@ -1774,10 +1772,8 @@ fn parse_probe(json: &str, warnings: WarningCounters) -> Result<SegmentProbe, St
             .get("extradata_size")
             .and_then(Value::as_u64)
             .or_else(|| stream.get("extradata_size").and_then(Value::as_str).and_then(|value| value.parse().ok()));
-        let stream_index = stream
-            .get("index")
-            .and_then(parse_u32_value)
-            .map_or(probe.streams.len(), |value| value as usize);
+        let stream_index =
+            stream.get("index").and_then(parse_u32_value).map_or(probe.streams.len(), |value| value as usize);
         let probe_stream = SegmentProbeStream {
             index: stream_index,
             stream_type: match codec_type {
@@ -1839,18 +1835,12 @@ fn select_repair_remux_streams(probe: &SegmentProbe) -> Result<RepairRemuxStream
             SegmentProbeStreamType::Audio if valid_audio_stream(stream) => {
                 mapped_streams.push(stream.index);
             }
-            SegmentProbeStreamType::Video => dropped_streams.push(RepairRemuxDroppedStream {
-                index: stream.index,
-                reason: "invalid-video-parameters",
-            }),
-            SegmentProbeStreamType::Audio => dropped_streams.push(RepairRemuxDroppedStream {
-                index: stream.index,
-                reason: "invalid-audio-parameters",
-            }),
-            SegmentProbeStreamType::Other => dropped_streams.push(RepairRemuxDroppedStream {
-                index: stream.index,
-                reason: "unsupported-stream-type",
-            }),
+            SegmentProbeStreamType::Video => dropped_streams
+                .push(RepairRemuxDroppedStream { index: stream.index, reason: "invalid-video-parameters" }),
+            SegmentProbeStreamType::Audio => dropped_streams
+                .push(RepairRemuxDroppedStream { index: stream.index, reason: "invalid-audio-parameters" }),
+            SegmentProbeStreamType::Other => dropped_streams
+                .push(RepairRemuxDroppedStream { index: stream.index, reason: "unsupported-stream-type" }),
         }
     }
     if !has_video {
@@ -2001,10 +1991,10 @@ impl fmt::Display for RepairStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_video_codec, parse_ffmpeg_warnings, parse_probe, repair_object_metadata_key, select_repair_remux_streams,
-        sha256_file, validate_repair, HlsRepairObjectMetadata, HlsRepairRenderedObjectId, HlsSegmentRepairManager,
-        HlsSegmentRepairObjectContext, HlsSegmentRepairSource, RepairIdentity, RepairRemuxStreamSelection,
-        RepairStatus, RepairVideoCodec, WarningCounters, REPAIR_METADATA_MAX_ENTRIES,
+        detect_video_codec, parse_ffmpeg_warnings, parse_probe, repair_object_metadata_key,
+        select_repair_remux_streams, sha256_file, validate_repair, HlsRepairObjectMetadata, HlsRepairRenderedObjectId,
+        HlsSegmentRepairManager, HlsSegmentRepairObjectContext, HlsSegmentRepairSource, RepairIdentity,
+        RepairRemuxStreamSelection, RepairStatus, RepairVideoCodec, WarningCounters, REPAIR_METADATA_MAX_ENTRIES,
     };
     use crate::{
         api::model::{
@@ -2013,8 +2003,8 @@ mod tests {
         },
         model::HlsSegmentRepairConfig,
     };
-    use std::sync::Arc;
     use shared::model::HlsSegmentRepairMode;
+    use std::sync::Arc;
 
     fn repair_config(mode: HlsSegmentRepairMode, apply_to_first_segments: u8) -> HlsSegmentRepairConfig {
         HlsSegmentRepairConfig {
@@ -2550,10 +2540,7 @@ mod tests {
 
         assert_eq!(selected_repair_mode(&manager, &first).await, Some(HlsSegmentRepairMode::Low));
         assert_eq!(selected_repair_mode(&manager, &same_rendered_object_other_fetch_uri).await, None);
-        assert_eq!(
-            selected_repair_mode(&manager, &second_rendered_object).await,
-            Some(HlsSegmentRepairMode::Low)
-        );
+        assert_eq!(selected_repair_mode(&manager, &second_rendered_object).await, Some(HlsSegmentRepairMode::Low));
     }
 
     #[tokio::test]

@@ -2,11 +2,11 @@ use crate::{
     api::{
         api_utils::get_stream_options,
         model::{
-            AppState, BoxedProviderStream, CleanupEvent, ConnectionManager, CustomVideoStreamType, EventManager,
-            MeteringStream, PendingProviderWakeSource, ProviderHandle, ProviderStreamFactoryOptions, StreamDetails,
-            StreamError, StreamMeterHandle, TimedClientStream, TransportStreamBuffer,
             connection_manager::{PROVIDER_END_CLOSED, PROVIDER_END_ERROR, PROVIDER_END_NOT_SET},
-            create_provider_stream, uses_direct_body_idle_timeout,
+            create_provider_stream, uses_direct_body_idle_timeout, AppState, BoxedProviderStream, CleanupEvent,
+            ConnectionManager, CustomVideoStreamType, EventManager, MeteringStream, PendingProviderWakeSource,
+            ProviderHandle, ProviderStreamFactoryOptions, StreamDetails, StreamError, StreamMeterHandle,
+            TimedClientStream, TransportStreamBuffer,
         },
         panel_api::{can_provision_on_exhausted, find_input_by_provider_name, run_panel_api_provisioning_probe},
     },
@@ -14,22 +14,20 @@ use crate::{
     model::{ConfigInput, ProxyUserCredentials},
     utils::debug_if_enabled,
 };
-use axum::http::{HeaderMap, header::USER_AGENT};
+use axum::http::{header::USER_AGENT, HeaderMap};
 use bytes::Bytes;
-use futures::{Future, Stream, StreamExt, task::AtomicWaker};
+use futures::{task::AtomicWaker, Future, Stream, StreamExt};
 use log::{error, info, warn};
-use shared::model::FailureStage;
-use shared::utils::Internable;
 use shared::{
-    model::{StreamChannel, UserConnectionPermission, VirtualId},
-    utils::sanitize_sensitive_info,
+    model::{FailureStage, StreamChannel, UserConnectionPermission, VirtualId},
+    utils::{sanitize_sensitive_info, Internable},
 };
 use std::{
     net::SocketAddr,
     pin::Pin,
     sync::{
-        Arc,
         atomic::{AtomicU8, Ordering},
+        Arc,
     },
     task::{Context, Poll},
 };
@@ -170,9 +168,7 @@ impl DirectBodyIdleTimeout {
         Self { enabled: false, deadline: None, sleep: None, last_socket_activity_touch: None }
     }
 
-    const fn enabled() -> Self {
-        Self { enabled: true, deadline: None, sleep: None, last_socket_activity_touch: None }
-    }
+    const fn enabled() -> Self { Self { enabled: true, deadline: None, sleep: None, last_socket_activity_touch: None } }
 
     fn mark_progress(&mut self) -> bool {
         if !self.enabled {
@@ -528,7 +524,11 @@ fn wrap_timed_client_stream_if_needed(
         None => stream,
         Some(mins) => {
             let secs = u32::try_from((u64::from(mins) * 60).min(u64::from(u32::MAX))).unwrap_or(0);
-            if secs > 0 { TimedClientStream::new(app_state, stream, secs, addr, virtual_id).boxed() } else { stream }
+            if secs > 0 {
+                TimedClientStream::new(app_state, stream, secs, addr, virtual_id).boxed()
+            } else {
+                stream
+            }
         }
     }
 }
@@ -567,7 +567,9 @@ fn create_deferred_provider_open_future(
             client_ip: Some(&fingerprint.client_ip),
             stream_channel: Some(stream_channel),
             connect_failure_stage: Some(FailureStage::ProviderOpen),
-        });
+            content_representation: stream_details.content_representation,
+        })
+        .for_deferred_open();
     provider_stream_factory_options.set_provider(input.get_resolve_provider(stream_url.as_ref()));
 
     Some(DeferredProviderOpenState::Pending(Box::new(DeferredProviderOpenContext {
@@ -797,9 +799,7 @@ impl Stream for ActiveClientStream {
 }
 
 impl Drop for ActiveClientStream {
-    fn drop(&mut self) {
-        self.state.release_stream_and_provider_handle_once();
-    }
+    fn drop(&mut self) { self.state.release_stream_and_provider_handle_once(); }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1334,18 +1334,20 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
 #[cfg(test)]
 mod tests {
     use super::{
-        ActiveClientStream, ActiveClientStreamParams, ActiveClientStreamState, CustomVideoBuffers,
-        DIRECT_BODY_IDLE_TIMEOUT_SECS, DeferredProviderOpenOutcome, DeferredProviderOpenState, DirectBodyIdleTimeout,
-        GracePeriodParams, StreamMode, TimedStreamContext, create_active_client_stream,
-        should_use_direct_body_idle_timeout, stream_grace_period,
+        create_active_client_stream, create_deferred_provider_open_future, should_use_direct_body_idle_timeout,
+        stream_grace_period, ActiveClientStream, ActiveClientStreamParams, ActiveClientStreamState, CustomVideoBuffers,
+        DeferredProviderOpenOutcome, DeferredProviderOpenState, DirectBodyIdleTimeout, GracePeriodParams, StreamMode,
+        TimedStreamContext, DIRECT_BODY_IDLE_TIMEOUT_SECS,
     };
-    use crate::api::api_utils::GraceResolutionContext;
-    use crate::api::model::connection_manager::PROVIDER_END_NOT_SET;
     use crate::{
-        api::model::{
-            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager,
-            CreateUserSessionParams, CustomVideoStreamType, DownloadQueue, EventManager, MetadataUpdateManager,
-            PlaylistStorageState, SharedStreamManager, StreamDetails, StreamError, UpdateGuard,
+        api::{
+            api_utils::GraceResolutionContext,
+            model::{
+                connection_manager::PROVIDER_END_NOT_SET, ActiveProviderManager, ActiveUserManager, AppState,
+                CancelTokens, ConnectionManager, CreateUserSessionParams, CustomVideoStreamType, DownloadQueue,
+                EventManager, MetadataUpdateManager, PlaylistStorageState, ProviderContentRepresentationMode,
+                SharedStreamManager, StreamDetails, StreamError, UpdateGuard,
+            },
         },
         auth::Fingerprint,
         model::{
@@ -1357,7 +1359,7 @@ mod tests {
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::http::HeaderMap;
     use bytes::Bytes;
-    use futures::{StreamExt, pin_mut};
+    use futures::{pin_mut, StreamExt};
     use reqwest::Client;
     use shared::{
         model::{
@@ -1369,8 +1371,8 @@ mod tests {
     use std::{
         collections::HashMap,
         sync::{
-            Arc,
             atomic::{AtomicU8, Ordering},
+            Arc,
         },
         time::Duration,
     };
@@ -1610,15 +1612,12 @@ mod tests {
             provider_name: Some(Arc::clone(provider_name)),
             request_url: Some("http://provider-1.example/live/1".intern()),
             session_headers: None,
-            grace_period: GracePeriodOptions {
-                period_millis: 100,
-                timeout_secs: 0,
-                hold_stream: true,
-            },
+            grace_period: GracePeriodOptions { period_millis: 100, timeout_secs: 0, hold_stream: true },
             provider_grace_active: true,
             disable_provider_grace: false,
             reconnect_flag: None,
             provider_handle: Some(provider_handle),
+            content_representation: ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
         }
     }
@@ -1977,6 +1976,49 @@ mod tests {
         assert_eq!(session.permission, UserConnectionPermission::GracePeriod);
 
         app_state.connection_manager.release_provider_handle(Some(deferred_handle)).await;
+    }
+
+    #[tokio::test]
+    async fn deferred_provider_open_forces_identity_when_original_mode_preserves_origin() {
+        let app_state = create_test_app_state();
+        let provider_name = "provider_1".intern();
+        let addr = "127.0.0.1:55015".parse().unwrap();
+        let provider_handle = app_state
+            .active_provider
+            .acquire_exact_connection_with_grace(
+                &provider_name,
+                &addr,
+                true,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
+            .await
+            .expect("deferred provider allocation");
+        let stream_details = create_deferred_provider_grace_details(&provider_name, provider_handle.clone());
+        assert_eq!(stream_details.content_representation, ProviderContentRepresentationMode::PreserveOrigin);
+        let fingerprint = create_test_fingerprint(addr);
+        let mut stream_channel = create_test_stream_channel(1, "http://provider-1.example/live/1");
+        stream_channel.item_type = PlaylistItemType::Catchup;
+
+        let deferred = create_deferred_provider_open_future(
+            &app_state,
+            &stream_details,
+            &fingerprint,
+            &stream_channel,
+            &HeaderMap::new(),
+        )
+        .expect("deferred provider open context");
+
+        let DeferredProviderOpenState::Pending(context) = deferred else {
+            panic!("new deferred open must start pending")
+        };
+        assert_eq!(
+            context.provider_stream_factory_options.content_representation(),
+            ProviderContentRepresentationMode::Identity
+        );
+        assert!(!context.provider_stream_factory_options.response_head_is_available());
+        drop(context);
+        app_state.connection_manager.release_provider_handle(Some(provider_handle)).await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -2472,15 +2514,12 @@ mod tests {
             provider_name: Some(provider_name),
             request_url: Some("http://provider-1.example/live/2.ts".intern()),
             session_headers: None,
-            grace_period: GracePeriodOptions {
-                period_millis: 100,
-                timeout_secs: 0,
-                hold_stream: true,
-            },
+            grace_period: GracePeriodOptions { period_millis: 100, timeout_secs: 0, hold_stream: true },
             provider_grace_active: false,
             disable_provider_grace: false,
             reconnect_flag: None,
             provider_handle: None,
+            content_representation: ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: Some(grace_context.clone()),
         };
 

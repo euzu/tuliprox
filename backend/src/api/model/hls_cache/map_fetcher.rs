@@ -2,20 +2,19 @@ use super::{
     begin_hls_origin_account_io_bounded, build_hls_origin_resource_headers, finish_hls_origin_account_io,
     hls_object_body_deadline, run_hls_origin_resource_retry_loop_with_attempt_prepare, CachedSegmentMetadata,
     HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseStore, HlsBoundAccountAcquireErrorKind,
-    HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation, HlsOriginIoContext, HlsOriginResourceClients,
-    HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchKind, HlsResourceFetchSource,
-    HlsSegmentCache,
-    HlsSessionHandle, MapCacheKey, MapCacheStatus, OriginMapFetchRef, ProxyMapId, SegmentFetchPolicy,
+    HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation, HlsOriginIoContext, HlsOriginResourceBodyDeadline,
+    HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchKind,
+    HlsResourceFetchSource, HlsSegmentCache, HlsSessionHandle, MapCacheKey, MapCacheStatus, OriginMapFetchRef,
+    ProxyMapId, SegmentFetchPolicy,
 };
-use crate::processing::parser::hls::origin_manifest::ParsedByteRange;
+use crate::{processing::parser::hls::origin_manifest::ParsedByteRange, utils::content_coding::DecodedHttpResponse};
 use arc_swap::ArcSwap;
 use axum::http::HeaderMap;
-use futures::{FutureExt, TryStreamExt};
+use futures::FutureExt;
 use log::debug;
 use reqwest::Client;
-use std::{fmt, io, sync::Arc};
+use std::{fmt, sync::Arc};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
-use tokio_util::io::StreamReader;
 
 /// Shared context required to schedule EXT-X-MAP origin fetches without holding session locks.
 #[derive(Clone)]
@@ -174,12 +173,7 @@ impl HlsMapWorkerPool {
             proxy_map_id_log
         );
 
-        Some(MapFetchSnapshot {
-            proxy_map_id,
-            proxy_map_id_log,
-            cache_key,
-            fetch_ref,
-        })
+        Some(MapFetchSnapshot { proxy_map_id, proxy_map_id_log, cache_key, fetch_ref })
     }
 
     async fn fetch_one_map(
@@ -216,8 +210,10 @@ impl HlsMapWorkerPool {
                             response_flag_reason = Some(HlsAccessLeaseChannelUnavailableReason::MapPermanentFailure {
                                 status: err.permanent_status(),
                             });
-                            entry.status =
-                                MapCacheStatus::FailedPermanent { failed_at_ms: finished_at_ms, status: err.permanent_status() };
+                            entry.status = MapCacheStatus::FailedPermanent {
+                                failed_at_ms: finished_at_ms,
+                                status: err.permanent_status(),
+                            };
                         }
                     }
                 }
@@ -248,10 +244,7 @@ impl HlsMapWorkerPool {
         reason: HlsAccessLeaseChannelUnavailableReason,
     ) -> usize {
         let proxy_session_id = session.read().await.proxy_session_id.clone();
-        self.access_leases
-            .write()
-            .await
-            .mark_channel_unavailable_for_session(&proxy_session_id, now_ms, reason)
+        self.access_leases.write().await.mark_channel_unavailable_for_session(&proxy_session_id, now_ms, reason)
     }
 
     fn schedule_wake(self: &Arc<Self>, context: MapFetchContext, now_ms: u64) {
@@ -396,7 +389,6 @@ async fn fetch_map_with_retries_into_cache(
     let session_log_id = context.session.read().await.proxy_session_id.0.clone();
     let context = context.clone();
     let snapshot = snapshot.clone();
-    let commit_policy = policy.clone();
     let policy_for_prepare = policy.clone();
     let prepare_context = context.clone();
     let cleanup_context = context.clone();
@@ -417,12 +409,11 @@ async fn fetch_map_with_retries_into_cache(
             }
             .boxed()
         },
-        move |response, _attempt, guard| {
+        move |response, _attempt, body_deadline, guard| {
             let context = context.clone();
             let snapshot = snapshot.clone();
-            let policy = commit_policy.clone();
             async move {
-                let commit_result = commit_map_response_into_cache(&context, &snapshot, &policy, response).await;
+                let commit_result = commit_map_response_into_cache(&context, &snapshot, response, body_deadline).await;
                 let origin_work = finish_map_origin_attempt(context, guard).await;
                 commit_result.map(|metadata| MapFetchCommit {
                     content_length: metadata.size,
@@ -438,24 +429,14 @@ async fn fetch_map_with_retries_into_cache(
 async fn commit_map_response_into_cache(
     context: &MapFetchContext,
     snapshot: &MapFetchSnapshot,
-    policy: &SegmentFetchPolicy,
-    response: reqwest::Response,
+    response: DecodedHttpResponse,
+    body_deadline: HlsOriginResourceBodyDeadline,
 ) -> Result<CachedSegmentMetadata, MapFetchError> {
-    let deadline = hls_object_body_deadline(policy.origin_segment_timeout_ms);
-    let stream_reader = StreamReader::new(response.bytes_stream().map_err(io::Error::other));
     context
         .segment_cache
-        .write_temp_and_commit_with_timeout(&snapshot.cache_key, stream_reader, deadline)
+        .write_temp_and_commit_with_deadline(&snapshot.cache_key, response.body, body_deadline.deadline())
         .await
-        .map_err(
-            |err| {
-                if err.kind() == io::ErrorKind::TimedOut {
-                    MapFetchError::Timeout
-                } else {
-                    MapFetchError::cache_commit(&err)
-                }
-            },
-        )
+        .map_err(|err| MapFetchError::cache_body(&err))
 }
 
 fn build_map_origin_headers(
@@ -481,7 +462,8 @@ mod tests {
         },
     };
     use axum::http::{header, HeaderMap};
-    use std::{sync::Arc, time::Duration};
+    use flate2::{write::GzEncoder, Compression};
+    use std::{io::Write, sync::Arc, time::Duration};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -526,7 +508,7 @@ mod tests {
             &HeaderMap::new(),
             Some(ParsedByteRange { offset: 10, length: 5 }),
         )
-            .expect("headers should build");
+        .expect("headers should build");
 
         assert_eq!(headers.get(header::RANGE).expect("range"), "bytes=10-14");
         assert_eq!(headers.get(header::ACCEPT_ENCODING).expect("encoding"), "identity");
@@ -610,6 +592,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gzip_fmp4_map_fetch_commits_identity_representation() {
+        const FMP4_MAP: &[u8] = b"\0\0\0\x18ftypisom\0\0\x02\0isomiso2";
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(FMP4_MAP).expect("gzip fixture should encode");
+        let encoded_map = encoder.finish().expect("gzip fixture should finish");
+        let encoded_len = encoded_map.len();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0_u8; 2048];
+            let read = socket.read(&mut buf).await.expect("request reads");
+            let request = String::from_utf8_lossy(&buf[..read]);
+            assert!(
+                request.to_ascii_lowercase().contains("accept-encoding: identity"),
+                "map origin request must enforce identity"
+            );
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Encoding: gzip\r\nContent-Length: {encoded_len}\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(headers.as_bytes()).await.expect("response headers write");
+            socket.write_all(&encoded_map).await.expect("response body writes");
+        });
+        let base_url = format!("http://{addr}/live/index.m3u8");
+        let manifest = normal_manifest("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\n1.m4s\n", &base_url);
+        let store = HlsSessionStore::new();
+        let session = store.get_or_create_session(HlsSessionKey::new(1, "1"), b"secret", 0).await;
+        {
+            let mut session = session.write().await;
+            session.apply_origin_manifest(&manifest).expect("manifest maps");
+            session.queue_map_fetch_candidates(1);
+        }
+
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache = Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path().to_path_buf()));
+        let worker = Arc::new(HlsMapWorkerPool::new(SegmentFetchPolicy {
+            retry_jitter_max_ms: 0,
+            origin_segment_timeout_ms: 1_000,
+            ..SegmentFetchPolicy::default()
+        }));
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        grant_usable_map_access_lease(&worker, &proxy_session_id).await;
+        worker
+            .wake_scheduler(
+                MapFetchContext {
+                    session: Arc::clone(&session),
+                    segment_cache: Arc::clone(&cache),
+                    headers: HeaderMap::new(),
+                    origin_provider_session_headers: HeaderMap::new(),
+                    client: reqwest::Client::new(),
+                    no_redirect_client: reqwest::Client::new(),
+                    use_manual_redirects: false,
+                    origin_io: None,
+                },
+                2,
+            )
+            .await;
+
+        for _ in 0..50 {
+            if matches!(
+                session.read().await.maps.values().next().map(|map| &map.status),
+                Some(MapCacheStatus::Ready { .. })
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let cache_key = {
+            let session = session.read().await;
+            let map = session.maps.values().next().expect("map");
+            assert!(matches!(
+                &map.status,
+                MapCacheStatus::Ready { content_length, .. }
+                    if *content_length == u64::try_from(FMP4_MAP.len()).expect("fixture length fits u64")
+            ));
+            map.cache_key.clone()
+        };
+        let metadata = cache.metadata(&cache_key).await.expect("metadata reads").expect("map is committed");
+        let cached_map = tokio::fs::read(metadata.path).await.expect("cached map reads");
+        assert_eq!(cached_map, FMP4_MAP);
+        assert!(!cached_map.starts_with(&[0x1f, 0x8b]));
+        assert!(!cache.has_active_temp_files().await);
+        server.await.expect("server joins");
+    }
+
+    #[tokio::test]
     async fn map_fetch_snapshot_uses_concrete_final_map_fetch_url() {
         let manifest = normal_manifest(
             "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\",BYTERANGE=\"5@10\"\n#EXTINF:4.0,\n1.m4s\n",
@@ -638,10 +711,8 @@ mod tests {
             origin_io: None,
         };
 
-        let snapshot = worker
-            .next_fetch_snapshot(&context, 2, &SegmentFetchPolicy::default())
-            .await
-            .expect("map snapshot");
+        let snapshot =
+            worker.next_fetch_snapshot(&context, 2, &SegmentFetchPolicy::default()).await.expect("map snapshot");
 
         assert_eq!(snapshot.fetch_ref.resolved_origin_url, "https://cdn.example.net/live/redirected/init.mp4");
         assert_eq!(snapshot.fetch_ref.byte_range, Some(ParsedByteRange { length: 5, offset: 10 }));

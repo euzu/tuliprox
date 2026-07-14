@@ -8,9 +8,9 @@ use super::{
     CachedSegmentMetadata, HlsCacheObjectKey, HlsSegmentCache, StagedCacheObject,
 };
 use crate::model::HlsCorruptSegmentWatchdogConfig;
-use shared::model::HlsCorruptSegmentWatchdogMode;
 use log::debug;
 use serde_json::Value;
+use shared::model::HlsCorruptSegmentWatchdogMode;
 use std::{
     collections::{HashMap, VecDeque},
     ffi::OsString,
@@ -261,7 +261,12 @@ impl HlsCorruptSegmentWatchdogManager {
                 Some(format!("unsupported_container:{extension}")),
             )
             .await;
-            debug_watchdog_event(context, config.mode, "detected corrupt", Some("action=raw_commit reason=unsupported_container"));
+            debug_watchdog_event(
+                context,
+                config.mode,
+                "detected corrupt",
+                Some("action=raw_commit reason=unsupported_container"),
+            );
             return segment_cache.commit_staged(key, raw).await;
         }
         let fixed_path = watchdog_output_path(&raw.path);

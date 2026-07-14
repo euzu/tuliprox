@@ -73,7 +73,7 @@ dashmap.workspace = true
 hyper = "1.10.1"
 hyper-util = "0.1.20"
 socket2 = { version = "0.6.4", features = ["all"] }
-async-compression = { version = "0.4.42", features = ["tokio", "gzip", "zlib"] }
+async-compression = { version = "0.4.42", features = ["tokio", "brotli", "deflate", "gzip", "zlib", "zstd"] }
 chrono-tz = "0.10.4"
 zeroize.workspace = true
 uuid = { version = "1.23.3", features = ["v4"] }

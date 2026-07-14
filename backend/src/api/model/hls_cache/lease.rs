@@ -98,11 +98,8 @@ impl HlsAccessLeasePendingDeadline {
     }
 
     const fn tightened_with(self, candidate: Self) -> Self {
-        let deadline_ms = if self.deadline_ms() <= candidate.deadline_ms() {
-            self.deadline_ms()
-        } else {
-            candidate.deadline_ms()
-        };
+        let deadline_ms =
+            if self.deadline_ms() <= candidate.deadline_ms() { self.deadline_ms() } else { candidate.deadline_ms() };
         match (self, candidate) {
             (Self::FollowUp { .. }, _) | (_, Self::FollowUp { .. }) => Self::FollowUp { deadline_ms },
             (Self::Bootstrap { .. }, Self::Bootstrap { .. }) => Self::Bootstrap { deadline_ms },
@@ -302,10 +299,7 @@ impl HlsAccessLeaseStore {
             .filter(|lease| lease.proxy_session_id == *proxy_session_id)
             .map(|lease| lease.lease_id.clone())
             .collect::<Vec<_>>();
-        lease_ids
-            .into_iter()
-            .filter_map(|lease_id| self.by_lease_id.remove(&lease_id))
-            .collect()
+        lease_ids.into_iter().filter_map(|lease_id| self.by_lease_id.remove(&lease_id)).collect()
     }
 
     pub fn clear(&mut self) -> usize {
@@ -325,7 +319,12 @@ impl HlsAccessLeaseStore {
             .map(|lease| lease.username.clone())
     }
 
-    pub fn response_snapshot(&mut self, lease_id: &HlsAccessLeaseId, path_proxy_session_id: &ProxySessionId, now_ms: u64) -> Option<HlsAccessLease> {
+    pub fn response_snapshot(
+        &mut self,
+        lease_id: &HlsAccessLeaseId,
+        path_proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) -> Option<HlsAccessLease> {
         let lease = self.by_lease_id.get_mut(lease_id)?;
         if &lease.proxy_session_id != path_proxy_session_id {
             return None;
@@ -347,10 +346,8 @@ impl HlsAccessLeaseStore {
             }
             lease.refresh_validity(now_ms);
             if lease_state_allows_use(lease.state) {
-                lease.response_flag = Some(HlsAccessLeaseResponseFlag::ChannelUnavailable {
-                    reason,
-                    set_at_ms: now_ms,
-                });
+                lease.response_flag =
+                    Some(HlsAccessLeaseResponseFlag::ChannelUnavailable { reason, set_at_ms: now_ms });
                 marked += 1;
             }
         }
@@ -819,9 +816,7 @@ mod tests {
         let marked = store.mark_channel_unavailable_for_session(
             &proxy_session_id,
             17_000,
-            HlsAccessLeaseChannelUnavailableReason::SegmentPermanentFailure {
-                status: Some(StatusCode::NOT_FOUND),
-            },
+            HlsAccessLeaseChannelUnavailableReason::SegmentPermanentFailure { status: Some(StatusCode::NOT_FOUND) },
         );
 
         assert_eq!(marked, 1);
@@ -865,11 +860,7 @@ mod tests {
                 set_at_ms: 2_000
             })
         ));
-        assert!(store
-            .response_snapshot(&other_lease_id, &proxy_session_id, 2_000)
-            .unwrap()
-            .response_flag
-            .is_none());
+        assert!(store.response_snapshot(&other_lease_id, &proxy_session_id, 2_000).unwrap().response_flag.is_none());
     }
 
     #[test]
@@ -1147,9 +1138,7 @@ mod tests {
         store.prepare_access_lease(lease(activated_id.clone(), &proxy_session_id.0, 1_000));
         store.prepare_access_lease(lease(denied_id.clone(), &proxy_session_id.0, 1_000));
         store.prepare_access_lease(lease(expired_id.clone(), &proxy_session_id.0, 1_000));
-        assert!(store
-            .activate_access_lease(&idle_id, &proxy_session_id, 2_000, timing(1_000, 15_000))
-            .is_activated());
+        assert!(store.activate_access_lease(&idle_id, &proxy_session_id, 2_000, timing(1_000, 15_000)).is_activated());
         assert!(store
             .activate_access_lease(&activated_id, &proxy_session_id, 2_000, timing(5_000, 15_000))
             .is_activated());

@@ -2,11 +2,10 @@
 
 use super::{
     hls_client_body_send_deadline, refresh_hls_client_body_send_deadline, safe_hls_access_lease_id,
-    safe_proxy_session_id, CacheAccessState,
-    HlsAccessLeaseId, HlsCacheMetrics, HlsMapFile, HlsProxyManager, HlsRepairRenderedObjectId, HlsSegmentCache,
-    HlsSegmentFile, HlsSegmentRepairManager, HlsSegmentRepairObjectContext, HlsSegmentRepairSource,
-    HlsSessionHandle, MapCacheKey, MapCacheStatus, ProxyMapId, SegmentCacheKey, SegmentCacheStatus,
-    TransientObjectCacheKey, TransientResourceFile, TransientResourceKind,
+    safe_proxy_session_id, CacheAccessState, HlsAccessLeaseId, HlsCacheMetrics, HlsMapFile, HlsProxyManager,
+    HlsRepairRenderedObjectId, HlsSegmentCache, HlsSegmentFile, HlsSegmentRepairManager, HlsSegmentRepairObjectContext,
+    HlsSegmentRepairSource, HlsSessionHandle, MapCacheKey, MapCacheStatus, ProxyMapId, SegmentCacheKey,
+    SegmentCacheStatus, TransientObjectCacheKey, TransientResourceFile, TransientResourceKind,
 };
 use crate::api::{api_utils::mark_response_as_uncompressed, model::StreamMeterHandle};
 use arc_swap::ArcSwapOption;
@@ -19,8 +18,8 @@ use bytes::Bytes;
 use futures::Stream;
 use log::debug;
 use std::{
-    io,
     future::Future,
+    io,
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -29,8 +28,10 @@ use std::{
     task::{Context, Poll},
     time::{Duration, Instant},
 };
-use tokio::io::AsyncReadExt;
-use tokio::time::{sleep, Sleep};
+use tokio::{
+    io::AsyncReadExt,
+    time::{sleep, Sleep},
+};
 use tokio_util::io::ReaderStream;
 
 const ACCEPT_RANGES_VALUE: &str = "bytes";
@@ -123,9 +124,7 @@ impl HlsCacheResponseContext {
         }
     }
 
-    pub fn set_qos_meter(&self, qos_meter: Option<Arc<StreamMeterHandle>>) {
-        self.qos_meter.store(qos_meter);
-    }
+    pub fn set_qos_meter(&self, qos_meter: Option<Arc<StreamMeterHandle>>) { self.qos_meter.store(qos_meter); }
 }
 
 #[derive(Clone)]
@@ -196,15 +195,15 @@ pub async fn serve_hls_segment_cache_outcome(
     context: &HlsCacheResponseContext,
 ) -> HlsResourceServeOutcome {
     match lookup_segment_cache_object(&session, &segment_file, &context.hls_access_lease_id).await {
-        CacheObjectLookup::Ready(object) => {
-            HlsResourceServeOutcome::Ready(serve_cache_object(
+        CacheObjectLookup::Ready(object) => HlsResourceServeOutcome::Ready(
+            serve_cache_object(
                 segment_cache,
                 object,
                 range_header,
                 CacheObjectServeContext::from_response_context(context),
             )
-            .await)
-        }
+            .await,
+        ),
         CacheObjectLookup::Failure(failure) => HlsResourceServeOutcome::Failure(failure),
     }
 }
@@ -232,15 +231,15 @@ pub async fn serve_hls_map_cache_outcome(
     context: &HlsCacheResponseContext,
 ) -> HlsResourceServeOutcome {
     match lookup_map_cache_object(&session, &map_file, &context.hls_access_lease_id).await {
-        CacheObjectLookup::Ready(object) => {
-            HlsResourceServeOutcome::Ready(serve_cache_object(
+        CacheObjectLookup::Ready(object) => HlsResourceServeOutcome::Ready(
+            serve_cache_object(
                 segment_cache,
                 object,
                 range_header,
                 CacheObjectServeContext::from_response_context(context),
             )
-            .await)
-        }
+            .await,
+        ),
         CacheObjectLookup::Failure(failure) => HlsResourceServeOutcome::Failure(failure),
     }
 }
@@ -270,15 +269,15 @@ pub async fn serve_hls_transient_object_cache_outcome(
     match lookup_transient_object_cache_object(&session, &resource_file, &context.hls_access_lease_id, context.now_ms)
         .await
     {
-        CacheObjectLookup::Ready(object) => {
-            HlsResourceServeOutcome::Ready(serve_cache_object(
+        CacheObjectLookup::Ready(object) => HlsResourceServeOutcome::Ready(
+            serve_cache_object(
                 segment_cache,
                 object,
                 range_header,
                 CacheObjectServeContext::from_response_context(context),
             )
-            .await)
-        }
+            .await,
+        ),
         CacheObjectLookup::Failure(failure) => HlsResourceServeOutcome::Failure(failure),
     }
 }
@@ -305,10 +304,8 @@ where
 {
     let guard = CacheReadGuard::new(Arc::clone(&object.access), context.now_ms);
     if let Some(repair_context) = object.repair_context.clone() {
-        if let Err(err) = context
-            .segment_repair
-            .repair_ready_cache_hit(&segment_cache, &object.key, repair_context)
-            .await
+        if let Err(err) =
+            context.segment_repair.repair_ready_cache_hit(&segment_cache, &object.key, repair_context).await
         {
             debug!(
                 "HLS segment repair skipped for ready cache hit: session={} resource={} error={err}",
@@ -425,9 +422,7 @@ async fn lookup_segment_cache_object(
     }
     match entry.status {
         SegmentCacheStatus::Ready { .. } => {}
-        SegmentCacheStatus::Fetching { .. }
-        | SegmentCacheStatus::Queued { .. }
-        | SegmentCacheStatus::Discovered => {
+        SegmentCacheStatus::Fetching { .. } | SegmentCacheStatus::Queued { .. } | SegmentCacheStatus::Discovered => {
             return CacheObjectLookup::Failure(HlsResourceServeFailure::TemporaryUnavailable {
                 retry_after_ms: NOT_READY_RETRY_AFTER_MS,
             });
@@ -446,13 +441,13 @@ async fn lookup_segment_cache_object(
         key: entry.cache_key.clone(),
         access: Arc::clone(&entry.access),
         content_type: entry.content_type.clone(),
-            log_context: CacheObjectLogContext {
-                lease: safe_hls_access_lease_id(hls_access_lease_id),
-                session: safe_proxy_session_id(&session.proxy_session_id),
-                resource_id: format!("{:06}", segment_file.proxy_seq),
-                object_kind: "Segment",
-                body_source: "normal",
-            },
+        log_context: CacheObjectLogContext {
+            lease: safe_hls_access_lease_id(hls_access_lease_id),
+            session: safe_proxy_session_id(&session.proxy_session_id),
+            resource_id: format!("{:06}", segment_file.proxy_seq),
+            object_kind: "Segment",
+            body_source: "normal",
+        },
         repair_context: Some(HlsSegmentRepairObjectContext {
             source: HlsSegmentRepairSource::Normal,
             proxy_session_id: session.proxy_session_id.clone(),
@@ -492,9 +487,7 @@ async fn lookup_map_cache_object(
     }
     match entry.status {
         MapCacheStatus::Ready { .. } => {}
-        MapCacheStatus::Fetching { .. }
-        | MapCacheStatus::Queued { .. }
-        | MapCacheStatus::Discovered => {
+        MapCacheStatus::Fetching { .. } | MapCacheStatus::Queued { .. } | MapCacheStatus::Discovered => {
             return CacheObjectLookup::Failure(HlsResourceServeFailure::TemporaryUnavailable {
                 retry_after_ms: NOT_READY_RETRY_AFTER_MS,
             });
@@ -620,11 +613,7 @@ fn service_unavailable_not_ready_response(retry_after_ms: u64) -> Response<Body>
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
     let headers = response.headers_mut();
-    insert_header_value(
-        headers,
-        header::RETRY_AFTER,
-        &super::retry_after_secs_from_ms(retry_after_ms).to_string(),
-    );
+    insert_header_value(headers, header::RETRY_AFTER, &super::retry_after_secs_from_ms(retry_after_ms).to_string());
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     mark_response_as_uncompressed(&mut response);
     response
@@ -777,10 +766,7 @@ impl Stream for ActiveReaderStream {
         if self.send_deadline.as_mut().poll(cx).is_ready() {
             self.finished = true;
             self.log_completed("timeout");
-            return Poll::Ready(Some(Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "hls client body send timed out",
-            ))));
+            return Poll::Ready(Some(Err(io::Error::new(io::ErrorKind::TimedOut, "hls client body send timed out"))));
         }
         match self.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
@@ -849,9 +835,13 @@ fn transient_body_object_kind(resource_kind: Option<TransientResourceKind>, exte
     match resource_kind {
         Some(TransientResourceKind::Key) => "Key",
         Some(TransientResourceKind::Map) => "Map",
-        Some(TransientResourceKind::Segment | TransientResourceKind::Other) => "Segment",
+        Some(TransientResourceKind::Segment | TransientResourceKind::Part | TransientResourceKind::Other) => "Segment",
         None => {
-            if extension.eq_ignore_ascii_case("key") { "Key" } else { "Segment" }
+            if extension.eq_ignore_ascii_case("key") {
+                "Key"
+            } else {
+                "Segment"
+            }
         }
     }
 }
@@ -880,9 +870,9 @@ mod tests {
     use axum::http::{header, HeaderValue, StatusCode};
     use bytes::Bytes;
     use http_body_util::BodyExt;
+    use shared::model::HlsSegmentRepairMode;
     use std::{sync::Arc, time::Duration};
     use tokio::sync::RwLock;
-    use shared::model::HlsSegmentRepairMode;
 
     fn header(value: &str) -> HeaderValue { HeaderValue::from_str(value).expect("valid header") }
 
@@ -941,6 +931,7 @@ mod tests {
         assert_eq!(transient_body_object_kind(Some(TransientResourceKind::Key), "bin"), "Key");
         assert_eq!(transient_body_object_kind(Some(TransientResourceKind::Map), "bin"), "Map");
         assert_eq!(transient_body_object_kind(Some(TransientResourceKind::Segment), "key"), "Segment");
+        assert_eq!(transient_body_object_kind(Some(TransientResourceKind::Part), "m4s"), "Segment");
         assert_eq!(transient_body_object_kind(Some(TransientResourceKind::Other), "bin"), "Segment");
     }
 

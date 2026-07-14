@@ -39,6 +39,7 @@ pub enum TransientResourceKind {
     Segment,
     Key,
     Map,
+    Part,
     Other,
 }
 
@@ -230,12 +231,7 @@ impl TransientPassthroughState {
         self.last_manifest_valid_until_ms = None;
     }
 
-    pub fn replace_manifest_with_validity(
-        &mut self,
-        body: String,
-        rendered_at_ms: u64,
-        playlist_duration_ms: u64,
-    ) {
+    pub fn replace_manifest_with_validity(&mut self, body: String, rendered_at_ms: u64, playlist_duration_ms: u64) {
         self.last_manifest_body = Some(body);
         self.last_manifest_rendered_at_ms = Some(rendered_at_ms);
         self.last_manifest_playlist_duration_ms = Some(playlist_duration_ms);

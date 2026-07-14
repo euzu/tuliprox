@@ -5,6 +5,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 pub enum StreamError {
     Reqwest { message: String, class: &'static str, status: Option<u16> },
     StdIo(String),
+    ContentDecoding(String),
     // ReceiverClosed,
     ReceiverError(BroadcastStreamRecvError),
     LockError(String),
@@ -81,6 +82,7 @@ impl StreamError {
         match self {
             Self::Reqwest { class, .. } => class,
             Self::StdIo(_) => "io",
+            Self::ContentDecoding(_) => "content_decoding",
             Self::ReceiverError(_) => "receiver",
             Self::LockError(_) => "lock",
             Self::Stream(_) => "stream",
@@ -105,6 +107,7 @@ impl std::fmt::Display for StreamError {
         match self {
             StreamError::Reqwest { message, .. } => write!(f, "Reqwest error: {message}"),
             StreamError::StdIo(e) => write!(f, "IO error: {e}"),
+            StreamError::ContentDecoding(e) => write!(f, "Content decoding error: {e}"),
             // StreamError::ReceiverClosed =>  write!(f, "Receiver closed"),
             StreamError::ReceiverError(e) => write!(f, "Receiver error {e}"),
             StreamError::Stream(e) => write!(f, "Stream: {e}"),

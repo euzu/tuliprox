@@ -4074,6 +4074,7 @@ pub fn create_panel_api_provisioning_stream_details(
             disable_provider_grace: true,
             reconnect_flag: None,
             provider_handle: None,
+            content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
         };
     }
@@ -4100,6 +4101,7 @@ pub fn create_panel_api_provisioning_stream_details(
         disable_provider_grace: true,
         reconnect_flag: None,
         provider_handle: None,
+        content_representation: crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
         grace_resolution_context: None,
     }
 }

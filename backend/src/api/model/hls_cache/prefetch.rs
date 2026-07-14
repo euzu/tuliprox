@@ -222,8 +222,7 @@ impl HlsSession {
             return report;
         }
 
-        let tail_index =
-            known_sequences.len().saturating_sub(1).saturating_sub(self.initial_prefetch_gap_segments);
+        let tail_index = known_sequences.len().saturating_sub(1).saturating_sub(self.initial_prefetch_gap_segments);
         let render_window_len = known_sequences.len().min(6).min(tail_index.saturating_add(1));
         let render_start_index = tail_index.saturating_add(1).saturating_sub(render_window_len);
 
@@ -260,13 +259,7 @@ impl HlsSession {
     pub fn configure_segment_prefetch_queue(&mut self, max_prefetch_depth: usize) {
         for proxy_seq in self.segment_prefetch_queue.set_max_prefetch_depth(max_prefetch_depth) {
             if let Some(entry) = self.segments.get_mut(&proxy_seq) {
-                if matches!(
-                    entry.status,
-                    SegmentCacheStatus::Queued {
-                        priority: SegmentFetchPriority::Prefetch,
-                        ..
-                    }
-                ) {
+                if matches!(entry.status, SegmentCacheStatus::Queued { priority: SegmentFetchPriority::Prefetch, .. }) {
                     entry.status = SegmentCacheStatus::Discovered;
                 }
             }
@@ -395,13 +388,7 @@ mod tests {
 
         session.configure_segment_prefetch_queue(1);
 
-        assert!(matches!(
-            session.segments.get(&4).expect("trimmed segment").status,
-            SegmentCacheStatus::Discovered
-        ));
-        assert!(matches!(
-            session.segments.get(&5).expect("trimmed segment").status,
-            SegmentCacheStatus::Discovered
-        ));
+        assert!(matches!(session.segments.get(&4).expect("trimmed segment").status, SegmentCacheStatus::Discovered));
+        assert!(matches!(session.segments.get(&5).expect("trimmed segment").status, SegmentCacheStatus::Discovered));
     }
 }
