@@ -548,7 +548,11 @@ fn format_for_emby(
                         &mut final_filename,
                     );
                 } else {
-                    dir_path.push(format!("{folder_name}{separator}[{}]", parts.category));
+                    // See format_for_jellyfin: without a TMDB id the category keeps the folder
+                    // unique, so the file name must carry it as well.
+                    let folder_with_category = format!("{folder_name}{separator}[{}]", parts.category);
+                    final_filename = format!("{folder_with_category}{}", parts.id_string);
+                    dir_path.push(folder_with_category);
                 }
             } else {
                 dir_path.push(parts.category);
@@ -610,7 +614,12 @@ fn format_for_jellyfin(
                         &mut final_filename,
                     );
                 } else {
-                    dir_path.push(format!("{folder_name}{separator}[{}]", parts.category));
+                    // No TMDB id to deduplicate on, so the category is what keeps this folder
+                    // unique. The file name has to carry it too, or it no longer starts with the
+                    // name of the folder it sits in.
+                    let folder_with_category = format!("{folder_name}{separator}[{}]", parts.category);
+                    final_filename.clone_from(&folder_with_category);
+                    dir_path.push(folder_with_category);
                 }
             } else {
                 dir_path.push(parts.category);
@@ -691,18 +700,12 @@ fn prepare_strm_files(new_playlist: &mut [PlaylistGroup], strm_target_output: &S
                 if strm_target_output.flags.contains(StrmTargetFlags::UnderscoreWhitespace) { "_" } else { " " };
             let quality_string = get_quality(strm_target_output, pli, separator);
 
-            // Add category suffix for flat movie structure to avoid collisions
-            let category_suffix = if strm_target_output.flags.contains(StrmTargetFlags::Flat)
-                && pli.get_tmdb_id().is_some()
-                && pli.header.item_type == PlaylistItemType::Video
-            {
-                let cat = sanitize_for_filename(&strm_item_info.group, false);
-                format!("{separator}[{cat}]")
-            } else {
-                String::new()
-            };
-
-            let final_filename = format!("{strm_file_name}{quality_string}{category_suffix}");
+            // No category suffix: in `flat` mode the category used to be appended to guard against
+            // collisions, but the only files that can now collide are versions of the same movie
+            // (same TMDB folder, same quality string), and the collision pass below separates those
+            // with `[Version id#N]`. Keeping the category here would only pollute the name that
+            // Jellyfin/Emby show as the *version label*, which should read as the quality alone.
+            let final_filename = format!("{strm_file_name}{quality_string}");
             let filename = Arc::new(final_filename);
 
             // Construct the full relative path for collision checking
@@ -1675,6 +1678,44 @@ mod tests {
             assert!(file.file_name.contains("[Version id#"), "expected a version label in {}", file.file_name);
         }
         assert_ne!(files[0].file_name, files[1].file_name, "versions must not overwrite each other");
+    }
+
+    /// Jellyfin/Emby show whatever follows the folder name as the *version label*, so in `flat`
+    /// mode it must be the quality string alone — not the provider's category.
+    #[test]
+    fn flat_version_label_is_the_quality_alone() {
+        let mut playlist = duplicate_listings_of_one_movie();
+        let output =
+            strm_output(StrmExportStyle::Jellyfin, &[StrmTargetFlags::Flat, StrmTargetFlags::AddQualityToFilename]);
+
+        let files = prepare_strm_files(&mut playlist, &output);
+        let folder_name = assert_single_shared_folder(&files);
+
+        for file in &files {
+            let label = file.file_name[folder_name.len()..].trim();
+            assert!(!label.contains("EN MOVIES"), "category leaked into the version label: {label}");
+        }
+        assert!(files.iter().any(|f| f.file_name.ends_with("- [1080p FHD H.264 EAC3 5.1]")));
+        assert!(files.iter().any(|f| f.file_name.ends_with("- [720p HD H.264 EAC3 5.1]")));
+    }
+
+    /// Items without a TMDB id cannot share a deduplicated folder, so they keep the category in the
+    /// *directory* name to stay unique.
+    #[test]
+    fn flat_without_tmdb_keeps_the_category_in_the_directory() {
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: Arc::from("EN MOVIES"),
+            channels: vec![make_video_pli("Some Obscure Film (1999)", "EN MOVIES", 0, 21, Some(VIDEO_720P), None)],
+            xtream_cluster: XtreamCluster::Video,
+        }];
+        let output = strm_output(StrmExportStyle::Jellyfin, &[StrmTargetFlags::Flat]);
+
+        let files = prepare_strm_files(&mut playlist, &output);
+
+        let dir = files[0].dir_path.to_string_lossy();
+        assert!(dir.contains("[EN MOVIES]"), "expected the category in the directory name, got {dir}");
+        assert!(files[0].file_name.starts_with(dir.as_ref()), "file must still start with its folder name");
     }
 
     /// Without `flat` there is no folder reuse: each listing keeps its own folder and name.

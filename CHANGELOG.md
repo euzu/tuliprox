@@ -406,6 +406,14 @@
   **Note:** this renames existing files in `flat` STRM trees; with `cleanup: true` the old names are removed on
   the next update.
 
+- **The provider category is no longer appended to STRM movie file names in `flat` mode**: it was added as a
+  collision guard, but the only files that can now collide are versions of the same movie (same TMDB folder,
+  same quality string), which the existing `[Version id#N]` pass already separates. Jellyfin and Emby render
+  whatever follows the folder name as the *version label*, so the category leaked into the version picker; the
+  label now reads as the quality alone. Items with no TMDB id still carry the category — it is what keeps their
+  folder unique — and they now carry it in the file name too, so the name still starts with the folder name
+  (it previously did not, which quietly broke version detection for those items).
+
 - **STRM files are no longer rewritten on every playlist update**: authenticated tokens (STRM
   `/provider/resolve/…` URLs and M3U catchup URLs) used a random IV, so re-encoding the same item produced a
   different token every run. That made every STRM file's content differ on each update, so the existing
