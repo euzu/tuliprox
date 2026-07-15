@@ -394,6 +394,7 @@
 
 ## 🐛 Fixes
 
+
 - **Media servers no longer show a duplicate movie for every extra provider listing (STRM `flat` mode)**: under
   `flat: true` the movie folder is deduplicated by TMDB id, but each file was still named after *its own*
   provider title. Providers routinely list the same film twice with the tag written differently
@@ -420,6 +421,12 @@
   the file stem to 250 characters — so for a long title the only distinguishing part was cut off and both
   versions resolved to the same path. The shared base is now trimmed instead, so the version label always
   survives.
+
+- **Quality tags no longer demote widescreen films a resolution tier**: `MediaQuality` classified the
+  resolution from the frame *height* alone. A letterboxed 2.40:1 film mastered at 1080p is 1920x796, so it was
+  tagged `720p HD`; a 2.40:1 UHD master (3840x1600) was tagged `1440p QHD`. Resolution is now taken from the
+  higher of the width-derived and height-derived tier, so scope films land in the tier they were mastered at.
+  Height alone still decides when the width is unknown. Affects `add_quality_to_filename` STRM names.
 
 - **STRM files are no longer rewritten on every playlist update**: authenticated tokens (STRM
   `/provider/resolve/…` URLs and M3U catchup URLs) used a random IV, so re-encoding the same item produced a
