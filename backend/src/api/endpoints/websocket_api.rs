@@ -119,6 +119,26 @@ fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &Eve
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum MainEventReceiveErrorAction {
+    Continue,
+    ResyncStatus,
+    Terminate,
+}
+
+fn main_event_receive_error_action(
+    handler: &ProtocolHandler,
+    error: &tokio::sync::broadcast::error::RecvError,
+) -> MainEventReceiveErrorAction {
+    match error {
+        tokio::sync::broadcast::error::RecvError::Lagged(_) if matches!(handler, ProtocolHandler::Default(mem) if mem.permissions.contains(Permission::SystemRead)) => {
+            MainEventReceiveErrorAction::ResyncStatus
+        }
+        tokio::sync::broadcast::error::RecvError::Lagged(_) => MainEventReceiveErrorAction::Continue,
+        tokio::sync::broadcast::error::RecvError::Closed => MainEventReceiveErrorAction::Terminate,
+    }
+}
+
 fn get_secret_key(app_state: &AppState, auth: bool) -> Option<Vec<u8>> {
     if !auth {
         return None;
@@ -457,10 +477,30 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
                             break;
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        trace!("Main websocket event receiver lagged by {skipped} messages");
+                    Err(error) => {
+                        if let tokio::sync::broadcast::error::RecvError::Lagged(skipped) = &error {
+                            trace!("Main websocket event receiver lagged by {skipped} messages");
+                        }
+                        match main_event_receive_error_action(&handler, &error) {
+                            MainEventReceiveErrorAction::Continue => {}
+                            MainEventReceiveErrorAction::ResyncStatus => {
+                                // Drop retained pre-snapshot deltas so they cannot be replayed after the authoritative state.
+                                event_rx = app_state.event_manager.get_event_channel();
+                                let status = create_status_check(&app_state).await;
+                                if let Err(e) = send_event_response(
+                                    &mut socket,
+                                    ProtocolMessage::StatusResponse(status),
+                                    "Status resync after lagged main websocket event receiver",
+                                )
+                                .await
+                                {
+                                    trace!("Failed to send ws status resync: {e}");
+                                    break;
+                                }
+                            }
+                            MainEventReceiveErrorAction::Terminate => break,
+                        }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
 
@@ -514,13 +554,57 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::websocket_can_receive_runtime_events;
+    use super::{main_event_receive_error_action, websocket_can_receive_runtime_events, MainEventReceiveErrorAction};
     use crate::api::model::EventMessage;
     use shared::model::{
         DownloadsDelta, DownloadsResponse, FileDownloadDto, LibraryScanProgressEvent, LibraryScanSummary,
-        LibraryScanSummaryStatus, Permission, PlaylistUpdateProgressEvent, ProtocolHandlerMemory, TaskKindDto,
-        TaskPriorityDto, TransferStatusDto, UserRole,
+        LibraryScanSummaryStatus, Permission, PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory,
+        TaskKindDto, TaskPriorityDto, TransferStatusDto, UserRole, PROTOCOL_VERSION,
     };
+    use tokio::sync::broadcast::error::RecvError;
+
+    #[test]
+    fn lagged_main_event_receiver_resyncs_authorized_system_reader() {
+        let handler = ProtocolHandler::Default(ProtocolHandlerMemory {
+            token: Some("token".to_string()),
+            permissions: Permission::SystemRead.into(),
+            role: UserRole::User,
+            ..ProtocolHandlerMemory::default()
+        });
+
+        assert_eq!(
+            main_event_receive_error_action(&handler, &RecvError::Lagged(3)),
+            MainEventReceiveErrorAction::ResyncStatus
+        );
+    }
+
+    #[test]
+    fn closed_main_event_receiver_terminates() {
+        let handler = ProtocolHandler::Default(ProtocolHandlerMemory {
+            permissions: Permission::SystemRead.into(),
+            ..ProtocolHandlerMemory::default()
+        });
+
+        assert_eq!(
+            main_event_receive_error_action(&handler, &RecvError::Closed),
+            MainEventReceiveErrorAction::Terminate
+        );
+    }
+
+    #[test]
+    fn lagged_main_event_receiver_does_not_resync_before_handshake_or_authorization() {
+        let version_handler = ProtocolHandler::Version(PROTOCOL_VERSION);
+        let unauthorized_handler = ProtocolHandler::Default(ProtocolHandlerMemory::default());
+
+        assert_eq!(
+            main_event_receive_error_action(&version_handler, &RecvError::Lagged(1)),
+            MainEventReceiveErrorAction::Continue
+        );
+        assert_eq!(
+            main_event_receive_error_action(&unauthorized_handler, &RecvError::Lagged(1)),
+            MainEventReceiveErrorAction::Continue
+        );
+    }
 
     #[test]
     fn test_websocket_runtime_events_allowed_for_admin() {

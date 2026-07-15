@@ -170,3 +170,68 @@ impl Stream for BufferedStream {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::BufferedStream;
+    use crate::api::model::StreamError;
+    use bytes::Bytes;
+    use futures::Stream;
+    use std::{future::Future, pin::Pin, task::{Context, Poll}, time::Duration};
+    use tokio::sync::oneshot;
+    use tokio_util::sync::CancellationToken;
+
+    struct GatedDropProbeStream {
+        gate: oneshot::Receiver<()>,
+        dropped: Option<oneshot::Sender<()>>,
+        yielded: bool,
+    }
+
+    impl Stream for GatedDropProbeStream {
+        type Item = Result<Bytes, StreamError>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if self.yielded {
+                return Poll::Pending;
+            }
+            match Pin::new(&mut self.gate).poll(cx) {
+                Poll::Ready(Ok(())) => {
+                    self.yielded = true;
+                    Poll::Ready(Some(Ok(Bytes::from_static(b"chunk"))))
+                }
+                Poll::Ready(Err(_)) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+    }
+
+    impl Drop for GatedDropProbeStream {
+        fn drop(&mut self) {
+            if let Some(dropped) = self.dropped.take() {
+                let _ = dropped.send(());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_consumer_cancels_and_terminates_buffered_producer() {
+        let (gate_tx, gate_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let cancel = CancellationToken::new();
+        let upstream = GatedDropProbeStream {
+            gate: gate_rx,
+            dropped: Some(dropped_tx),
+            yielded: false,
+        };
+        let buffered = BufferedStream::new(Box::pin(upstream), 1, cancel.clone(), "test");
+
+        drop(buffered);
+        gate_tx.send(()).expect("producer should still own the gated upstream");
+
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("producer should stop after sending to the closed consumer")
+            .expect("upstream Drop probe should be delivered");
+        assert!(cancel.is_cancelled(), "closed receiver must cancel the buffered producer token");
+    }
+}
