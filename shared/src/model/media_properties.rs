@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 use std::fmt;
 
 // Enum for Video Resolution
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum VideoResolution {
     #[default]
     Unknown,
@@ -13,6 +13,39 @@ pub enum VideoResolution {
     P1440,
     P2160, // 4K
     P4320, // 8K
+}
+
+impl VideoResolution {
+    /// Classifies a frame by the tier its *widest* dimension reaches.
+    ///
+    /// A tier is named after the height of its 16:9 frame, but wider aspect ratios keep the full
+    /// raster width and encode fewer active lines: a 2.40:1 scope film mastered at 1080p is
+    /// 1920x796. Going by height alone demotes it to 720p, so we classify both axes and keep the
+    /// higher tier. Height still decides on its own when the width is unknown, and it also covers
+    /// anamorphic frames that are narrow for their tier (1440x1080).
+    fn from_dimensions(width: Option<u64>, height: Option<u64>) -> Self {
+        // Thresholds sit well below each tier's nominal size so that cropped or slightly
+        // non-standard encodes still land in the right bucket.
+        let by_width = width.map(|w| match w {
+            7000.. => Self::P4320,
+            3500..7000 => Self::P2160,
+            2400..3500 => Self::P1440,
+            1700..2400 => Self::P1080,
+            1200..1700 => Self::P720,
+            ..1200 => Self::SD,
+        });
+
+        let by_height = height.map(|h| match h {
+            4300.. => Self::P4320,
+            2100..4300 => Self::P2160,
+            1400..2100 => Self::P1440,
+            1000..1400 => Self::P1080,
+            700..1000 => Self::P720,
+            ..700 => Self::SD,
+        });
+
+        by_width.max(by_height).unwrap_or_default()
+    }
 }
 
 impl fmt::Display for VideoResolution {
@@ -225,18 +258,10 @@ impl MediaQuality {
     ) -> Option<(VideoResolution, VideoCodec, VideoDynamicRange, VideoBitDepth)> {
         let video_info = video.and_then(|v| serde_json::from_str::<Map<String, Value>>(v).ok())?;
 
-        // 1. Classify video resolution from height
-        let resolution = get_value(&video_info, &["height", "coded_height"]).and_then(|v| v.as_u64()).map_or(
-            VideoResolution::default(),
-            |h| match h {
-                _ if h >= 4300 => VideoResolution::P4320,
-                _ if h >= 2100 => VideoResolution::P2160,
-                _ if h >= 1400 => VideoResolution::P1440,
-                _ if h >= 1000 => VideoResolution::P1080,
-                _ if h >= 700 => VideoResolution::P720,
-                _ => VideoResolution::SD,
-            },
-        );
+        // 1. Classify video resolution from the frame dimensions
+        let width = get_value(&video_info, &["width", "coded_width"]).and_then(|v| v.as_u64());
+        let height = get_value(&video_info, &["height", "coded_height"]).and_then(|v| v.as_u64());
+        let resolution = VideoResolution::from_dimensions(width, height);
 
         // 2. Classify video codec
         let video_codec = get_value(&video_info, &["codec_name"])
@@ -338,4 +363,54 @@ fn get_value(obj: &Map<String, Value>, fields: &[&str]) -> Option<Value> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MediaQuality, VideoResolution};
+
+    fn resolution_of(width: u32, height: u32) -> VideoResolution {
+        let video = format!(r#"{{"codec_name":"h264","width":{width},"height":{height}}}"#);
+        MediaQuality::from_ffprobe_info(None, Some(&video)).unwrap().resolution
+    }
+
+    #[test]
+    fn resolution_is_classified_from_the_full_frame_not_just_its_height() {
+        // Letterboxed scope (2.35:1 / 2.40:1) releases keep the full raster width but encode
+        // fewer active lines. Classifying on height alone demotes them a whole tier.
+        let cases = [
+            // (width, height, expected)
+            (1920, 1080, VideoResolution::P1080), // 16:9 FHD
+            (1920, 816, VideoResolution::P1080),  // 2.35:1 FHD
+            (1920, 796, VideoResolution::P1080),  // 2.40:1 FHD
+            (1440, 1080, VideoResolution::P1080), // anamorphic FHD
+            (1280, 720, VideoResolution::P720),   // 16:9 HD
+            (1280, 536, VideoResolution::P720),   // 2.39:1 HD
+            (3840, 2160, VideoResolution::P2160), // 16:9 UHD
+            (3840, 1600, VideoResolution::P2160), // 2.40:1 UHD
+            (2560, 1440, VideoResolution::P1440),
+            (7680, 4320, VideoResolution::P4320),
+            (720, 576, VideoResolution::SD), // PAL
+            (1024, 576, VideoResolution::SD),
+        ];
+
+        for (width, height, expected) in cases {
+            assert_eq!(resolution_of(width, height), expected, "{width}x{height} misclassified");
+        }
+    }
+
+    #[test]
+    fn resolution_falls_back_to_height_when_width_is_absent() {
+        let video = r#"{"codec_name":"h264","height":1080}"#;
+        let quality = MediaQuality::from_ffprobe_info(None, Some(video)).unwrap();
+        assert_eq!(quality.resolution, VideoResolution::P1080);
+    }
+
+    #[test]
+    fn scope_film_is_labelled_1080p_in_the_filename() {
+        let video = r#"{"codec_name":"h264","width":1920,"height":796}"#;
+        let audio = r#"{"codec_name":"eac3","channels":6}"#;
+        let quality = MediaQuality::from_ffprobe_info(Some(audio), Some(video)).unwrap();
+        assert_eq!(quality.format_for_filename(" "), "1080p FHD H.264 EAC3 5.1");
+    }
 }
