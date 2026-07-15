@@ -247,7 +247,7 @@ Generate all four formats simultaneously from the same source — one setup, eve
 ### 16. Operations & Deployment
 
 - **Docker**: Alpine and Scratch images — minimal image size
-- **Docker Compose templates**: traefik, crowdsec, gluetun/socks5 templates ready to use
+- **Docker Compose templates**: traefik, crowdsec, gluetun/socks5, iptv-org/epg templates ready to use
 - **Zero-downtime config reload**: `ArcSwap<Config>` for atomic configuration swaps without interruption
 - **Disk-based processing**: Playlist processing from disk instead of RAM — massively reduced memory consumption
 - **CLI mode**: One-shot processing without a server — ideal for scripting and CI/CD
@@ -274,7 +274,7 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - Runs on Raspberry Pi and tiny VPS instances
 - Minimal resource usage thanks to Rust and disk-based processing
 - **Runs 24/7 for months with rock-solid stability and near-zero maintenance**
-- Traefik/Crowdsec/Gluetun templates ready to deploy
+- Traefik/Crowdsec/Gluetun/IPTV-org-epg templates ready to deploy
 
 ### For Multi-User Operations
 
@@ -294,10 +294,11 @@ Generate all four formats simultaneously from the same source — one setup, eve
 
 ## 🐋 Docker Container Templates
 
-- traefik template
-- crowdsec template
-- gluetun/socks5 template
-- tuliprox (incl. traefik) template
+- [traefik](docker/container-templates/traefik/) template
+- [crowdsec](docker/container-templates/crowdsec/) template
+- [gluetun/socks5](docker/container-templates/gluetun/) template
+- [iptv-org-epg](docker/container-templates/iptv-org/) template
+- [tuliprox](docker/container-templates/tuliprox/) (incl. traefik) template
 
 `> ./docker/container-templates`
 

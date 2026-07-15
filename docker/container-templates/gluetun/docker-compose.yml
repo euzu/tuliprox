@@ -1,8 +1,8 @@
 services:
-  gluetun-01:
+  gluetun:
     image: qmcgaw/gluetun:latest
-    container_name: gluetun-01
-    restart: on-failure
+    container_name: gluetun
+    restart: unless-stopped
     security_opt:
       - apparmor=docker-default  # security_opts are optional
     networks:
@@ -17,9 +17,10 @@ services:
     cap_add:
       - NET_ADMIN
     env_file:
-      - ../.env.http-proxy
-      - ../.env.ss-proxy
-      - .env.wg-01
+      - .env.http-proxy
+      - .env.socks5-proxy
+      - .env.ss-proxy
+      - .env.wg
     volumes:
       - ./conf:/gluetun/
     devices:
@@ -33,19 +34,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 1
-
-  socks5-01:
-    image: serjs/go-socks5-proxy:latest
-    container_name: socks5-01
-    restart: on-failure
-    security_opt:
-      - apparmor=docker-default  # security_opts are optional
-    network_mode: service:gluetun-01
-    env_file: ../.env.socks5-proxy
-    depends_on:
-      gluetun-01:
-        condition: service_healthy
-        restart: true
 
 networks:
   proxy-net:

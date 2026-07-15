@@ -212,13 +212,15 @@ In the repository under `docker/container-templates/`, you will find ready-to-us
 
 ### Components of the Stack
 
-1. **Traefik (Reverse Proxy):** Handles incoming port 443 traffic, auto-renews Let's Encrypt certificates (via Cloudflare DNS-01 challenge), and
+1. **Traefik (Reverse Proxy Ingress):** Handles incoming port 443 traffic, auto-renews Let's Encrypt certificates (via Cloudflare DNS-01 challenge), and
    applies strict Content-Security-Policy headers.
-2. **Gluetun (VPN Egress):** A WireGuard/OpenVPN client container. It connects to Mullvad/ProtonVPN. We attach a **Socks5 Sidecar** to its network
-   namespace. Tuliprox can then be configured to route its upstream provider requests through this Socks5 proxy, completely hiding your server's IP
+2. **Gluetun (VPN Egress):** A WireGuard/OpenVPN client container. It connects e.g. to Mullvad or Proton VPN.
+   Tuliprox can then be configured to route its upstream provider requests through this Socks5 proxy, completely hiding your server's IP
    from the IPTV provider.
 3. **CrowdSec (WAF & Bouncer):** Analyzes Traefik access logs in real-time. If someone tries to brute-force your Tuliprox Web UI or run
    path-traversal attacks, CrowdSec instructs the Traefik Bouncer plugin to drop their IP at the edge.
+4. **IPTV-org-epg (EPG guide):** Generates a local XMLTV guide for the selected channels and makes it available to
+   Tuliprox.
 
 ### How to wire it up
 
@@ -230,7 +232,7 @@ docker network create crowdsec-net
 ```
 
 **2. Configure Gluetun & Socks5:**
-In `container-templates/gluetun/gluetun-01/.env.wg-01`, add your Wireguard details.
+In `container-templates/gluetun/.env.wg`, add your Wireguard details.
 In `container-templates/gluetun/.env.socks5-proxy`, set user/pass for the proxy.
 Start it: `docker-compose up -d`. It exposes port 1388 internally.
 
@@ -239,7 +241,7 @@ In your `config.yml`, point the global proxy setting to the Socks5 container:
 
 ```yaml
 proxy:
-  url: socks5://socks5-01:1388
+  url: socks5://gluetun:1388
   username: "<socks5-proxy-user>"
   password: "<socks5-proxy-password>"
 ```
@@ -263,3 +265,23 @@ In your Tuliprox `docker-compose.yml`, add the Traefik labels to route traffic s
 
 This architecture ensures your IPTV provider only sees the VPN IP, your clients only see your secure `tv.yourdomain.com` domain, and malicious
 bots are blocked instantly by CrowdSec before they even reach the Rust backend.
+
+>**⚠️ Important:** make sure you add
+>[tuliprox-cover-whitelist.yaml](../../docker/container-templates/crowdsec/crowdsec/config/parsers/s02-enrich/tuliprox-cover-whitelist.yaml)  
+> to `crowdsec/config/parsers/s02-enrich/tuliprox-cover-whitelist.yaml` in your Crowdsec instance.  
+> Otherwise, you could quickly end up banning yourself.
+
+**5. Configure IPTV-org-epg:**
+Copy the desired channel entries from the IPTV-org `sites` files to
+`container-templates/iptv-org/data/channels.xml`. For every channel, `xmltv_id` must exactly match the
+corresponding `@epg_channel_id` in Tuliprox. For example, `xmltv_id="BBCOne.uk@LondonHD"` matches
+`@epg_channel_id = "BBCOne.uk@LondonHD"`. If necessary, adjust `xmltv_id` in `channels.xml` or set the corresponding
+`@epg_channel_id` in `mapping.yml`.
+
+Start it: `docker-compose up -d`. Add the generated guide to the corresponding input in your `source.yml`:
+
+```yaml
+epg:
+  sources:
+    - url: http://iptv-org-epg:3000/guide.xml
+```

@@ -1,0 +1,32 @@
+---
+services:
+  iptv-org-epg:
+    container_name: iptv-org-epg
+    image: ghcr.io/knylbyte/epg:latest
+    restart: unless-stopped
+    security_opt:
+      - apparmor=docker-default
+    networks:
+      - proxy-net
+    expose:
+      - 3000
+    volumes:
+      - ./data:/epg/public
+      # If you want to use your own channel list instead of SITE,
+      # create a local ./channels.xml and activate the line below.
+      # - ./channels.xml:/epg/public/channels.xml:ro
+    environment:
+      TZ: Europe/Paris                # time zone for correct scheduling
+      CRON_SCHEDULE: "0 0,12 * * *"   # daily 12:00 a.m.
+      RUN_AT_STARTUP: true            # execute once directly at startup
+      MAX_CONNECTIONS: 1              # performance/output options (supported by the grabber)
+      GZIP: false                     # additionally generate guide.xml.gz if "true"
+      DAYS: 7                         # overwrite number of days
+      CURL: false                     # output requests as curl
+      TIMEOUT: 30000                  # request-Timeout (ms)
+      FILL_GAPS: true                 # fill gaps in the EPG data
+
+networks:
+  proxy-net:
+    external: true
+    name: proxy-net

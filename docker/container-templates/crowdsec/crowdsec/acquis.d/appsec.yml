@@ -1,3 +1,4 @@
+---
 appsec_config: crowdsecurity/appsec-default
 labels:
   type: appsec
