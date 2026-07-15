@@ -394,6 +394,39 @@
 
 ## 🐛 Fixes
 
+- **Media servers no longer show a duplicate movie for every extra provider listing (STRM `flat` mode)**: under
+  `flat: true` the movie folder is deduplicated by TMDB id, but each file was still named after *its own*
+  provider title. Providers routinely list the same film twice with the tag written differently
+  (`X [MULTI-SUB] - 2021` vs `X - 2021 [Multi Sub]`), so the second listing landed in the first one's folder
+  under a name that does not start with the folder name — exactly what Jellyfin/Emby require in order to group
+  alternate versions. Jellyfin's `VideoListResolver` then abandons version grouping for the *whole* folder and
+  shows one movie per file. Every listing that reuses a folder is now named after that folder, so the existing
+  `add_quality_to_filename` suffix (or the `[Version id#N]` collision suffix) distinguishes them and the media
+  server shows a single movie with selectable versions. Applies to the `jellyfin`, `emby` and `kodi` styles.
+  **Note:** this renames existing files in `flat` STRM trees; with `cleanup: true` the old names are removed on
+  the next update.
+
+- **The provider category is no longer appended to STRM movie file names in `flat` mode**: it was added as a
+  collision guard, but the only files that can now collide are versions of the same movie (same TMDB folder,
+  same quality string), which the existing `[Version id#N]` pass already separates. Jellyfin and Emby render
+  whatever follows the folder name as the *version label*, so the category leaked into the version picker; the
+  label now reads as the quality alone. Items with no TMDB id still carry the category — it is what keeps their
+  folder unique — and for the `jellyfin` and `emby` styles they now carry it in the file name too, so the name
+  still starts with the folder name (it previously did not, which quietly broke version detection for those
+  items). `kodi` is unchanged here: it has no filename-starts-with-folder-name convention.
+
+- **Two STRM versions of the same movie could silently overwrite each other when the name was very long**: the
+  `[Version id#N]` suffix that tells colliding versions apart was appended last, and the writer then truncates
+  the file stem to 250 characters — so for a long title the only distinguishing part was cut off and both
+  versions resolved to the same path. The shared base is now trimmed instead, so the version label always
+  survives.
+
+- **Quality tags no longer demote widescreen films a resolution tier**: `MediaQuality` classified the
+  resolution from the frame *height* alone. A letterboxed 2.40:1 film mastered at 1080p is 1920x796, so it was
+  tagged `720p HD`; a 2.40:1 UHD master (3840x1600) was tagged `1440p QHD`. Resolution is now taken from the
+  higher of the width-derived and height-derived tier, so scope films land in the tier they were mastered at.
+  Height alone still decides when the width is unknown. Affects `add_quality_to_filename` STRM names.
+
 - **STRM files are no longer rewritten on every playlist update**: authenticated tokens (STRM
   `/provider/resolve/…` URLs and M3U catchup URLs) used a random IV, so re-encoding the same item produced a
   different token every run. That made every STRM file's content differ on each update, so the existing
@@ -1493,24 +1526,24 @@ target output type `xtream`:
 
 target output type `m3u`:
 
-- `filename`: _optional_
+- `filename`: *optional*
 - `include_type_in_url`: `true`|`false`,
 - `mask_redirect_url`: `true`|`false`,
 
 target output type `strm`:
 
-- `directory`: _mandatory_,
-- `username`: _optional_,
+- `directory`: *mandatory*,
+- `username`: *optional*,
 - `underscore_whitespace`: `true`|`false`,
 - `cleanup`: `true`|`false`,
 - `kodi_style`: `true`|`false`,
-- `strm_props`: _optional_,  list of strings,
+- `strm_props`: *optional*,  list of strings,
 
 target output type `hdhomerun`:
 
-- `device`: _mandatory_,
-- `username`: _mandatory_,
-- `use_output`: _optional_, `m3u`|`xtream`
+- `device`: *mandatory*,
+- `username`: *mandatory*,
+- `use_output`: *optional*, `m3u`|`xtream`
 
 Example:
 
@@ -1656,9 +1689,9 @@ messaging:
 - Watch files are now moved inside the `target` folder. Move them manually from `watch_<target_name>_<watched_group>.bin` to
   `<target_name>/watch_<watched_group>.bin`
 - No error log for xtream api when content is skipped with options `xtream_skip_[live|vod|series]`
-- _experimental_:  added live channel connection sharing in reverse proxy mode. To activate set `share_live_streams` in target options.
+- *experimental*:  added live channel connection sharing in reverse proxy mode. To activate set `share_live_streams` in target options.
 - Added `info` and `tmdb-id` caching for vod and series with options `xtream_resolve_(series|vod)`.
-- The `kodi` format for movies can contain the `tmdb-id` (_optional_). To add the `tmdb-id` you can set now `kodi_style`,  `xtream_resolve_vod`,
+- The `kodi` format for movies can contain the `tmdb-id` (*optional*). To add the `tmdb-id` you can set now `kodi_style`,  `xtream_resolve_vod`,
   `xtream_resolve_vod_delay`, `xtream_resolve_series` and  `xtream_resolve_series_delay` to target options.
 - `kodi` output can now have `username` attribute to use reverse proxy mode when combined with `xtream` output.
 - Fixed webUI manual update for selected targets
