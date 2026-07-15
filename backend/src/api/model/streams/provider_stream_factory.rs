@@ -521,9 +521,7 @@ fn prepare_client(
         }
     }
 
-    if matches!(credential_state, ProviderRequestCredentialState::Scrubbed)
-        || url_override.is_some_and(|url| !same_origin(original_url, url))
-    {
+    if matches!(credential_state, ProviderRequestCredentialState::Scrubbed) {
         remove_sensitive_headers(&mut headers);
     }
     prepare_default_headers(&mut headers, stream_options);
@@ -636,10 +634,7 @@ async fn send_with_manual_redirects(
             provider.as_ref(),
             true,
             stream_options.should_retry_provider_request(),
-            |resolved_url| {
-                credential_state.observe_target(stream_options.get_url(), resolved_url);
-                prepare_client(request_client, stream_options, Some(resolved_url), credential_state).0
-            },
+            |resolved_url| prepare_client(request_client, stream_options, Some(resolved_url), credential_state).0,
         )
         .await;
 
@@ -672,6 +667,7 @@ async fn send_with_manual_redirects(
             let Ok(next_url) = next_url else {
                 return Ok(response);
             };
+            credential_state.observe_target(&response_url, &next_url);
             current_url = next_url;
             remaining_redirects = remaining_redirects.saturating_sub(1);
             continue;
@@ -1744,7 +1740,7 @@ mod tests {
 
         let cross_origin = Url::parse("http://provider-b.example/live/segment.ts").unwrap();
         for (target, credential_state) in [
-            (Some(&cross_origin), ProviderRequestCredentialState::OriginalOrigin),
+            (Some(&cross_origin), ProviderRequestCredentialState::Scrubbed),
             (None, ProviderRequestCredentialState::Scrubbed),
         ] {
             let request = prepare_client(&client, &options, target, credential_state).0.build().unwrap();
@@ -1755,6 +1751,33 @@ mod tests {
             assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=17-");
             assert_eq!(request.headers()[reqwest::header::USER_AGENT], "test-agent");
         }
+    }
+
+    #[test]
+    fn provider_scheme_resolution_keeps_configured_headers_before_redirect() {
+        let stream_url = Url::parse("provider://mirrors/live/segment.ts").unwrap();
+        let req_headers = HeaderMap::new();
+        let input_headers = HashMap::from([("X-API-Key".to_string(), "api-secret".to_string())]);
+        let options = test_options(
+            ProviderContentRepresentationMode::PreserveOrigin,
+            &stream_url,
+            &req_headers,
+            Some(&input_headers),
+            None,
+        );
+        let resolved_url = Url::parse("https://mirror-a.example/live/segment.ts").unwrap();
+
+        let request = prepare_client(
+            &reqwest::Client::new(),
+            &options,
+            Some(&resolved_url),
+            ProviderRequestCredentialState::OriginalOrigin,
+        )
+        .0
+        .build()
+        .unwrap();
+
+        assert_eq!(request.headers()["x-api-key"], "api-secret");
     }
 
     #[test]
@@ -1779,7 +1802,12 @@ mod tests {
         let same_origin = Url::parse("http://provider-a.example/live/failover.ts").unwrap();
         let cross_origin = Url::parse("http://provider-b.example/live/segment.ts").unwrap();
         for target in [None, Some(&same_origin), Some(&cross_origin)] {
-            let request = prepare_client(&client, &options, target, ProviderRequestCredentialState::OriginalOrigin)
+            let credential_state = if target == Some(&cross_origin) {
+                ProviderRequestCredentialState::Scrubbed
+            } else {
+                ProviderRequestCredentialState::OriginalOrigin
+            };
+            let request = prepare_client(&client, &options, target, credential_state)
                 .0
                 .build()
                 .unwrap();
