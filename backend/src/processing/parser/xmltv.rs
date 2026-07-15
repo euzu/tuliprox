@@ -623,7 +623,7 @@ fn collect_tag_attributes(e: &BytesStart) -> HashMap<Arc<str>, Arc<str>> {
             let key_binding = a.key;
             let key_raw = String::from_utf8_lossy(key_binding.as_ref());
             let key = key_raw.intern();
-            if let Ok(value) = a.unescape_value().as_ref() {
+            if let Ok(value) = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).as_ref() {
                 if value.is_empty() {
                     None
                 } else {

@@ -13,7 +13,7 @@ shared = { version = "3", path = "../shared" }
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
-quick-xml = { version = "0.39.4", features = ["async-tokio", "serialize"] }
+quick-xml = { version = "0.41", features = ["async-tokio", "serialize"] }
 regex.workspace = true
 clap = { version = "4.6.1", features = ["derive"] }
 reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
@@ -26,7 +26,7 @@ serde_html_form = "0.4.0"
 tower = "0.5.3"
 tower-http = { version = "0.6.11", features = ["cors", "auth", "fs", "compression-full", "trace"] }
 tower_governor = { version = "0.8.0", features = ["axum"] }
-jsonwebtoken = { version = "10.4.0", features = ["rust_crypto"] }
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 rust-argon2 = "3.0.0"
 futures.workspace = true
 path-clean.workspace = true
@@ -64,7 +64,7 @@ indexmap.workspace = true
 parking_lot = "0.12.5"
 lz4_flex.workspace = true
 brotli.workspace = true
-memmap2 = "0.9.10"
+memmap2 = "0.9.11"
 smallvec = "1.15.1"
 fs2 = "0.4.3"
 notify = "8.2.0"
@@ -82,7 +82,7 @@ mime_guess = "2.0.5"
 crc32fast = "1.5.0"
 memchr = "2.8.1"
 http-body-util = "0.1.3"
-lru = "0.12"
+lru = "0.16.3"
 ipnet = "2"
 strum.workspace = true
 strum_macros.workspace = true
