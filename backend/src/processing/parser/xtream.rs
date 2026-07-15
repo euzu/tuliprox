@@ -105,7 +105,7 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
             }
 
 
-            PlaylistItem {
+            let mut item = PlaylistItem {
                 header: PlaylistItemHeader {
                     uuid: generate_provider_playlist_uuid(&input.name, &episode_id, PlaylistItemType::Series),
                     id: episode_id.into(),
@@ -124,8 +124,10 @@ pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStre
                     // Keep episode ordering tied to its parent SeriesInfo to avoid cross-series ordinal overlap.
                     source_ordinal: parent_source_ordinal,
                     ..Default::default()
-                }
-            }
+                },
+            };
+            item.header.freeze_input_stream_id();
+            item
         }).collect();
         return if result.is_empty() { None } else { Some(result) };
     }
@@ -199,7 +201,7 @@ pub async fn parse_xtream(input: &ConfigInput,
                         let category_name = &group.category_name;
                         let stream_url = create_xtream_url(xtream_cluster, url, username, password, &stream, live_stream_use_prefix, live_stream_without_extension);
                         let item_type = PlaylistItemType::from(xtream_cluster);
-                        let item = PlaylistItem {
+                        let mut item = PlaylistItem {
                             header: PlaylistItemHeader {
                                 id: stream.get_stream_id().intern(),
                                 uuid: generate_provider_playlist_uuid(&input_name, &stream.get_stream_id().to_string(), item_type),
@@ -217,6 +219,7 @@ pub async fn parse_xtream(input: &ConfigInput,
                                 ..Default::default()
                             },
                         };
+                        item.header.freeze_input_stream_id();
                         group.add(item);
                     }
 
@@ -371,7 +374,7 @@ where
     let stream_url = create_xtream_url(cluster, url, username, password, &stream, live_stream_use_prefix, live_stream_without_extension);
 
     let item_type = PlaylistItemType::from(cluster);
-    let item = PlaylistItem {
+    let mut item = PlaylistItem {
         header: PlaylistItemHeader {
             id: stream.get_stream_id().intern(),
             uuid: generate_provider_playlist_uuid(input_name, &stream.get_stream_id().to_string(), item_type),
@@ -390,6 +393,7 @@ where
             ..Default::default()
         },
     };
+    item.header.freeze_input_stream_id();
 
     // if let Some(StreamProperties::Series(props)) = item.header.additional_properties.as_mut() {
     //      // We need to set category_id for Series properties just like parse_xtream might expect or use?

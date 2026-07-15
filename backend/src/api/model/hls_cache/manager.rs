@@ -1,19 +1,17 @@
 use super::{
-    build_rewrite_secret_fingerprint, safe_proxy_session_id, safe_session_key, GarbageCollectionPolicy,
-    HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseId,
-    HlsAccessLeaseLifecycleSnapshot, HlsAccessLeasePendingDeadline, HlsAccessLeaseSessionSnapshot,
-    HlsAccessLeaseState, HlsAccessLeaseStore, HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsCacheMetrics,
-    HlsExpiredSessionMarker, HlsExpiredSessionReason, HlsGarbageCollector, HlsLifecycleEvent, HlsLifecycleEventKey,
-    HlsLifecycleManager, HlsMapWorkerPool,
-    HlsOriginSource, HlsQosRegistry, HlsSegmentCache, HlsSegmentRepairManager, HlsSegmentWorkerPool, HlsSessionHandle,
-    HlsSessionKey, HlsSessionStore, HlsSessionStoreOutcome, ProxySessionId, SegmentFetchPolicy,
+    build_rewrite_secret_fingerprint, safe_proxy_session_id, safe_session_key, GarbageCollectionPolicy, HlsAccessLease,
+    HlsAccessLeaseActivation, HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseId,
+    HlsAccessLeaseLifecycleSnapshot, HlsAccessLeasePendingDeadline, HlsAccessLeaseSessionSnapshot, HlsAccessLeaseState,
+    HlsAccessLeaseStore, HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsCacheMetrics, HlsExpiredSessionMarker,
+    HlsExpiredSessionReason, HlsGarbageCollector, HlsLifecycleEvent, HlsLifecycleEventKey, HlsLifecycleManager,
+    HlsMapWorkerPool, HlsOriginSource, HlsQosRegistry, HlsSegmentCache, HlsSegmentRepairManager, HlsSegmentWorkerPool,
+    HlsSessionHandle, HlsSessionKey, HlsSessionStore, HlsSessionStoreOutcome, ProxySessionId, SegmentFetchPolicy,
     TransientResourceStore,
 };
 use crate::{
     api::model::{ActiveProviderManager, ActiveUserManager, AppState},
-    model::{AppConfig, HlsCacheConfig, StripConfig},
+    model::{AppConfig, HlsCacheConfig, HlsManifestRecoveryBurstConfig, StripConfig},
 };
-use crate::model::HlsManifestRecoveryBurstConfig;
 use arc_swap::ArcSwap;
 use log::{debug, error, info};
 use shared::utils::sanitize_sensitive_info;
@@ -82,10 +80,7 @@ fn hls_pending_manifest_follow_up_window_ms(target_duration: Option<u32>) -> u64
     target_duration_secs.saturating_mul(2_000).max(10_000)
 }
 
-fn hls_pending_manifest_follow_up_deadline(
-    now_ms: u64,
-    target_duration: Option<u32>,
-) -> HlsAccessLeasePendingDeadline {
+fn hls_pending_manifest_follow_up_deadline(now_ms: u64, target_duration: Option<u32>) -> HlsAccessLeasePendingDeadline {
     HlsAccessLeasePendingDeadline::FollowUp {
         deadline_ms: now_ms.saturating_add(hls_pending_manifest_follow_up_window_ms(target_duration)),
     }
@@ -219,11 +214,7 @@ impl HlsProxyManager {
         Self::with_hls_cache_config_and_secret_enabled(config, rewrite_secret, true)
     }
 
-    fn with_hls_cache_config_and_secret_enabled(
-        config: &HlsCacheConfig,
-        rewrite_secret: &[u8],
-        enabled: bool,
-    ) -> Self {
+    fn with_hls_cache_config_and_secret_enabled(config: &HlsCacheConfig, rewrite_secret: &[u8], enabled: bool) -> Self {
         let segment_fetch_policy = SegmentFetchPolicy::from_config(config);
         let global_fetch_semaphore = Arc::new(Semaphore::new(segment_fetch_policy.max_global_segment_fetches));
         let sessions = Arc::new(HlsSessionStore::new());
@@ -320,10 +311,8 @@ impl HlsProxyManager {
         account_name: &Arc<str>,
         now_ms: u64,
     ) -> bool {
-        let key = HlsAccountOverlapCooldownKey {
-            input_name: Arc::clone(input_name),
-            account_name: Arc::clone(account_name),
-        };
+        let key =
+            HlsAccountOverlapCooldownKey { input_name: Arc::clone(input_name), account_name: Arc::clone(account_name) };
         let mut cooldowns = self.account_overlap_cooldowns.write().await;
         let Some(cooldown) = cooldowns.get(&key).copied() else {
             return false;
@@ -382,10 +371,7 @@ impl HlsProxyManager {
             return;
         }
         let key = HlsAccountOverlapCooldownKey { input_name, account_name };
-        self.account_overlap_cooldowns
-            .write()
-            .await
-            .insert(key.clone(), HlsAccountOverlapCooldown { until_ms });
+        self.account_overlap_cooldowns.write().await.insert(key.clone(), HlsAccountOverlapCooldown { until_ms });
         debug!(
             "HLS account overlap cooldown set for input {} account {} until {} ms after {}",
             sanitize_sensitive_info(key.input_name.as_ref()),
@@ -402,11 +388,8 @@ impl HlsProxyManager {
                 .reverse_proxy
                 .as_ref()
                 .map_or(app_config.encrypt_secret, |reverse_proxy| reverse_proxy.rewrite_secret);
-            let hls_config = config
-                .reverse_proxy
-                .as_ref()
-                .and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref())
-                .cloned();
+            let hls_config =
+                config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref()).cloned();
             let enabled = hls_config.is_some();
             let hls_config =
                 hls_config.unwrap_or_else(|| HlsCacheConfig::from(&shared::model::HlsCacheConfigDto::default()));
@@ -483,10 +466,7 @@ impl HlsProxyManager {
         now_ms: u64,
         reason: HlsAccessLeaseChannelUnavailableReason,
     ) -> usize {
-        self.access_leases
-            .write()
-            .await
-            .mark_channel_unavailable_for_session(proxy_session_id, now_ms, reason)
+        self.access_leases.write().await.mark_channel_unavailable_for_session(proxy_session_id, now_ms, reason)
     }
 
     pub async fn mark_access_lease_channel_unavailable(
@@ -560,11 +540,12 @@ impl HlsProxyManager {
         target_duration: Option<u32>,
     ) -> bool {
         let deadline = hls_pending_manifest_follow_up_deadline(now_ms, target_duration);
-        let lease = self
-            .access_leases
-            .write()
-            .await
-            .mark_pending_manifest_follow_up_for_lease(lease_id, proxy_session_id, now_ms, deadline);
+        let lease = self.access_leases.write().await.mark_pending_manifest_follow_up_for_lease(
+            lease_id,
+            proxy_session_id,
+            now_ms,
+            deadline,
+        );
         if let Some(lease) = lease {
             self.schedule_access_lease_validity(&lease).await;
             debug!(
@@ -585,11 +566,11 @@ impl HlsProxyManager {
         target_duration: Option<u32>,
     ) -> usize {
         let deadline = hls_pending_manifest_follow_up_deadline(now_ms, target_duration);
-        let leases = self
-            .access_leases
-            .write()
-            .await
-            .mark_pending_manifest_follow_up_for_session(proxy_session_id, now_ms, deadline);
+        let leases = self.access_leases.write().await.mark_pending_manifest_follow_up_for_session(
+            proxy_session_id,
+            now_ms,
+            deadline,
+        );
         for lease in &leases {
             self.schedule_access_lease_validity(lease).await;
         }
@@ -690,11 +671,7 @@ impl HlsProxyManager {
         now_ms: u64,
     ) -> Option<HlsExpiredSessionMarker> {
         self.sessions
-            .expired_session_marker(
-                proxy_session_id,
-                now_ms,
-                self.session_idle_timeout_ms().saturating_mul(2).max(1),
-            )
+            .expired_session_marker(proxy_session_id, now_ms, self.session_idle_timeout_ms().saturating_mul(2).max(1))
             .await
     }
 
@@ -789,9 +766,7 @@ impl HlsProxyManager {
         }
         if snapshot.state != HlsAccessLeaseState::Expired && snapshot.state != HlsAccessLeaseState::Denied {
             let due_at_ms = if snapshot.state == HlsAccessLeaseState::Pending {
-                snapshot
-                    .pending_deadline
-                    .map_or(snapshot.valid_until_ms, HlsAccessLeasePendingDeadline::deadline_ms)
+                snapshot.pending_deadline.map_or(snapshot.valid_until_ms, HlsAccessLeasePendingDeadline::deadline_ms)
             } else {
                 snapshot.valid_until_ms
             };
@@ -1129,7 +1104,10 @@ mod tests {
         utils::FileLockManager,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
-    use shared::model::{ConfigPaths, HlsCacheConfigDto, HlsManifestRecoveryBurstLevel, HlsStripConfigDto, HlsStripMode, ReverseProxyConfigDto};
+    use shared::model::{
+        ConfigPaths, HlsCacheConfigDto, HlsManifestRecoveryBurstLevel, HlsStripConfigDto, HlsStripMode,
+        ReverseProxyConfigDto,
+    };
     use std::sync::Arc;
 
     fn empty_paths() -> ConfigPaths {
@@ -1207,10 +1185,7 @@ mod tests {
         assert_eq!(manager.cache_duration_seconds(), 99);
         assert_eq!(manager.transient_resource_ttl_ms(), 99_000);
         assert_eq!(manager.session_idle_timeout_ms(), 55_000);
-        assert_eq!(
-            manager.manifest_recovery_burst().level,
-            HlsManifestRecoveryBurstLevel::Balanced
-        );
+        assert_eq!(manager.manifest_recovery_burst().level, HlsManifestRecoveryBurstLevel::Balanced);
         assert_eq!(manager.strip().mode, HlsStripMode::Seconds);
         assert_eq!(manager.strip().value, 7);
         assert_eq!(session.read().await.segment_prefetch_queue.max_prefetch_depth(), 4);
@@ -1222,10 +1197,7 @@ mod tests {
 
         assert!(!manager.is_enabled());
         assert_eq!(
-            manager
-                .run_garbage_collection_once(1_000)
-                .await
-                .expect("disabled gc should no-op"),
+            manager.run_garbage_collection_once(1_000).await.expect("disabled gc should no-op"),
             super::super::GarbageCollectionReport::default()
         );
 

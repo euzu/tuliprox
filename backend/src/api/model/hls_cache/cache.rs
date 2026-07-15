@@ -7,13 +7,13 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, RwLock as StdRwLock,
     },
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 use tokio::{
     fs::{self, File, OpenOptions},
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
     sync::{Mutex, RwLock},
-    time::timeout,
+    time::{timeout_at, Instant},
 };
 
 pub const DEFAULT_HLS_CACHE_PATH: &str = "/tmp/tuliprox/cache/hls";
@@ -173,6 +173,31 @@ pub struct StagedCacheObject {
     pub size: u64,
 }
 
+/// Typed source used to distinguish a decoded-object size violation from a filesystem failure.
+#[derive(Debug, thiserror::Error)]
+#[error("hls cache object exceeds configured size limit {limit}")]
+pub(crate) struct HlsCacheObjectLimitError {
+    limit: u64,
+}
+
+impl HlsCacheObjectLimitError {
+    pub(crate) fn limit(&self) -> u64 { self.limit }
+}
+
+pub(crate) fn hls_cache_object_limit_from_io(error: &io::Error) -> Option<&HlsCacheObjectLimitError> {
+    let mut source: &(dyn std::error::Error + 'static) = error.get_ref()?;
+    loop {
+        if let Some(limit_error) = source.downcast_ref::<HlsCacheObjectLimitError>() {
+            return Some(limit_error);
+        }
+        source = source.source()?;
+    }
+}
+
+fn cache_object_limit_error(limit: u64) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, HlsCacheObjectLimitError { limit })
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CacheInvalidationOutcome {
     Invalidated,
@@ -258,11 +283,11 @@ impl HlsSegmentCache {
         self.write_temp_and_commit_inner(key, &mut reader, None).await
     }
 
-    pub async fn write_temp_and_commit_with_timeout<K, R>(
+    pub async fn write_temp_and_commit_with_deadline<K, R>(
         &self,
         key: &K,
         mut reader: R,
-        deadline: Duration,
+        deadline: Instant,
     ) -> io::Result<CachedSegmentMetadata>
     where
         K: HlsCacheObjectKey,
@@ -271,11 +296,11 @@ impl HlsSegmentCache {
         self.write_temp_and_commit_inner(key, &mut reader, Some(deadline)).await
     }
 
-    pub async fn stage_temp_with_timeout<K, R>(
+    pub async fn stage_temp_with_deadline<K, R>(
         &self,
         key: &K,
         mut reader: R,
-        deadline: Duration,
+        deadline: Instant,
     ) -> io::Result<StagedCacheObject>
     where
         K: HlsCacheObjectKey,
@@ -301,8 +326,9 @@ impl HlsSegmentCache {
         K: HlsCacheObjectKey,
     {
         self.ensure_cache_root_marker().await?;
-        if staged.size > self.max_object_bytes.load(Ordering::Acquire) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "hls cache object exceeds configured size limit"));
+        let max_object_bytes = self.max_object_bytes.load(Ordering::Acquire);
+        if staged.size > max_object_bytes {
+            return Err(cache_object_limit_error(max_object_bytes));
         }
         let final_path = self.path_for_key(key);
         let Some(parent) = final_path.parent() else {
@@ -314,12 +340,8 @@ impl HlsSegmentCache {
         let mut capacity = self.capacity.lock().await;
         if !capacity.initialized || capacity.cache_path != cache_path {
             let (total_bytes, session_bytes) = scan_committed_cache_usage(&cache_path).await?;
-            *capacity = CacheCapacityState {
-                cache_path: cache_path.clone(),
-                initialized: true,
-                total_bytes,
-                session_bytes,
-            };
+            *capacity =
+                CacheCapacityState { cache_path: cache_path.clone(), initialized: true, total_bytes, session_bytes };
         }
         let old_size = match fs::metadata(&final_path).await {
             Ok(metadata) => metadata.len(),
@@ -360,7 +382,7 @@ impl HlsSegmentCache {
         &self,
         key: &K,
         reader: &mut R,
-        deadline: Option<Duration>,
+        deadline: Option<Instant>,
     ) -> io::Result<CachedSegmentMetadata>
     where
         K: HlsCacheObjectKey,
@@ -374,12 +396,15 @@ impl HlsSegmentCache {
         &self,
         key: &K,
         reader: &mut R,
-        deadline: Option<Duration>,
+        deadline: Option<Instant>,
     ) -> io::Result<StagedCacheObject>
     where
         K: HlsCacheObjectKey,
         R: AsyncRead + Unpin,
     {
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "hls cache object write timed out"));
+        }
         self.ensure_cache_root_marker().await?;
         let final_path = self.path_for_key(key);
         let Some(parent) = final_path.parent() else {
@@ -388,19 +413,25 @@ impl HlsSegmentCache {
         fs::create_dir_all(parent).await?;
 
         let (temp_path, mut temp_file) = self.create_temp_file(key).await?;
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            drop(temp_file);
+            let _ = fs::remove_file(&temp_path).await;
+            self.unregister_temp_file(&temp_path).await;
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "hls cache object write timed out"));
+        }
         let copy = async {
             let max_object_bytes = self.max_object_bytes.load(Ordering::Acquire);
             let mut limited = reader.take(max_object_bytes.saturating_add(1));
             let size = tokio::io::copy(&mut limited, &mut temp_file).await?;
             if size > max_object_bytes {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "hls cache object exceeds configured size limit"));
+                return Err(cache_object_limit_error(max_object_bytes));
             }
             temp_file.flush().await?;
             drop(temp_file);
             Ok::<u64, io::Error>(size)
         };
         let copy_result = if let Some(deadline) = deadline {
-            if let Ok(result) = timeout(deadline, copy).await {
+            if let Ok(result) = timeout_at(deadline, copy).await {
                 result
             } else {
                 let _ = fs::remove_file(&temp_path).await;
@@ -436,11 +467,7 @@ impl HlsSegmentCache {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(err),
         };
-        if result.is_ok()
-            && size > 0
-            && capacity.initialized
-            && capacity.cache_path == self.cache_path_snapshot()
-        {
+        if result.is_ok() && size > 0 && capacity.initialized && capacity.cache_path == self.cache_path_snapshot() {
             capacity.total_bytes = capacity.total_bytes.saturating_sub(size);
             let session_component = key.session_path_component();
             if let Some(session_bytes) = capacity.session_bytes.get_mut(&session_component) {
@@ -610,13 +637,7 @@ impl HlsSegmentCache {
 
     async fn ensure_cache_root_marker(&self) -> io::Result<()> {
         let cache_path = self.cache_path_snapshot();
-        if self
-            .marker_path
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            == Some(&cache_path)
-        {
+        if self.marker_path.read().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() == Some(&cache_path) {
             return Ok(());
         }
         ensure_not_root_like_cache_path(&cache_path)?;
@@ -744,9 +765,17 @@ impl Default for HlsSegmentCache {
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheInvalidationOutcome, HlsSegmentCache, MapCacheKey, SegmentCacheKey, TransientObjectCacheKey};
-    use crate::api::model::{build_transient_resource_id, ProxySessionId};
-    use std::{collections::HashSet, io, sync::Arc, time::{Duration, SystemTime}};
+    use super::{
+        hls_cache_object_limit_from_io, CacheInvalidationOutcome, HlsSegmentCache, MapCacheKey, SegmentCacheKey,
+        TransientObjectCacheKey,
+    };
+    use crate::api::model::{build_transient_resource_id, HlsOriginResourceFetchError, ProxySessionId};
+    use std::{
+        collections::HashSet,
+        io,
+        sync::Arc,
+        time::{Duration, SystemTime},
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn cache_key() -> SegmentCacheKey { SegmentCacheKey::new(ProxySessionId("proxy_session".to_string()), 123, "ts") }
@@ -817,17 +846,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_temp_and_commit_with_timeout_cleans_active_temp_file() {
+    async fn write_temp_and_commit_with_deadline_cleans_active_temp_file() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let cache = HlsSegmentCache::with_cache_path(temp_dir.path());
         let key = cache_key();
         let (_writer, reader) = tokio::io::duplex(64);
 
-        let result = cache.write_temp_and_commit_with_timeout(&key, reader, Duration::from_millis(1)).await;
+        let result = cache
+            .write_temp_and_commit_with_deadline(&key, reader, tokio::time::Instant::now() + Duration::from_millis(1))
+            .await;
 
         assert_eq!(result.expect_err("commit should time out").kind(), io::ErrorKind::TimedOut);
         assert!(!cache.has_active_temp_files().await);
         assert_eq!(cache.metadata(&key).await.expect("metadata should read"), None);
+    }
+
+    #[tokio::test]
+    async fn exhausted_write_deadline_rejects_even_an_immediately_available_body() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache = HlsSegmentCache::with_cache_path(temp_dir.path());
+        let key = cache_key();
+
+        let result = cache.write_temp_and_commit_with_deadline(&key, &b"ready"[..], tokio::time::Instant::now()).await;
+
+        assert_eq!(result.expect_err("expired deadline must time out").kind(), io::ErrorKind::TimedOut);
+        assert!(!cache.has_active_temp_files().await);
+        assert_eq!(cache.metadata(&key).await.expect("metadata should read"), None);
+        assert_eq!(std::fs::read_dir(temp_dir.path()).expect("cache root reads").count(), 0);
     }
 
     #[tokio::test]
@@ -839,8 +884,15 @@ mod tests {
 
         let result = cache.write_bytes_and_commit(&key, b"four").await;
 
-        assert!(result.is_err());
+        let error = result.expect_err("decoded object above the configured limit must fail");
+        let limit_error = hls_cache_object_limit_from_io(&error).expect("typed object-limit source");
+        assert_eq!(limit_error.limit(), 3);
+        assert!(matches!(
+            HlsOriginResourceFetchError::cache_body(&error),
+            HlsOriginResourceFetchError::CacheObjectLimit { limit: 3 }
+        ));
         assert!(cache.metadata(&key).await.expect("metadata").is_none());
+        assert!(!cache.has_active_temp_files().await);
     }
 
     #[tokio::test]
@@ -854,10 +906,7 @@ mod tests {
         tokio::fs::create_dir_all(temp_dir.path().join("orphan")).await.expect("orphan dir");
         let cutoff = SystemTime::now();
 
-        let removed = cache
-            .delete_orphan_session_dirs(&HashSet::from([active]), cutoff)
-            .await
-            .expect("cleanup");
+        let removed = cache.delete_orphan_session_dirs(&HashSet::from([active]), cutoff).await.expect("cleanup");
 
         assert_eq!(removed, 1);
         assert!(temp_dir.path().join("active").exists());
@@ -880,10 +929,7 @@ mod tests {
         filetime::set_file_mtime(temp_dir.path().join(fresh.0.clone()), filetime::FileTime::from_system_time(future))
             .expect("set fresh mtime");
 
-        let removed = cache
-            .delete_orphan_session_dirs(&HashSet::new(), cutoff)
-            .await
-            .expect("cleanup");
+        let removed = cache.delete_orphan_session_dirs(&HashSet::new(), cutoff).await.expect("cleanup");
 
         assert_eq!(removed, 1, "stale orphan dir should be removed");
         assert!(!temp_dir.path().join(stale.0).exists());

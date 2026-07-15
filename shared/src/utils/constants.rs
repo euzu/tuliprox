@@ -15,9 +15,6 @@ pub const DEFAULT_HOME_ENV_VAR: &str = "TULIPROX_HOME";
 pub const DEFAULT_WEB_ROOT_ENV_VAR: &str = "TULIPROX_WEB_ROOT";
 pub const DNS_RESOLVED_FILE: &str = "provider_dns_resolved.json";
 
-pub const ENCODING_GZIP: &str = "gzip";
-pub const ENCODING_DEFLATE: &str = "deflate";
-
 pub const FILENAME_TRIM_PATTERNS: &[char] = &['.', '-', '_'];
 
 const SUPPORTED_RESPONSE_HEADERS: &[&str] = &[
@@ -27,7 +24,6 @@ const SUPPORTED_RESPONSE_HEADERS: &[&str] = &[
     "content-length",
     "content-range",
     "vary",
-    "transfer-encoding",
     //"connection",
     "access-control-allow-origin",
     "access-control-allow-credentials",

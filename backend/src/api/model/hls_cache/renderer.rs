@@ -64,10 +64,7 @@ pub enum RenderedManifestStoreOutcome {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum RenderedManifestStoreRejectReason {
-    RegressiveMediaSequence {
-        previous_first_proxy_seq: u64,
-        candidate_first_proxy_seq: u64,
-    },
+    RegressiveMediaSequence { previous_first_proxy_seq: u64, candidate_first_proxy_seq: u64 },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -164,10 +161,7 @@ fn select_window(session: &HlsSession, render_gap_segments: usize) -> Option<Vec
 
     let current_origin_window_len = tail_seq.saturating_sub(head_seq).saturating_add(1);
     let target_window_len = current_origin_window_len.min(u64::try_from(TARGET_VISIBLE_SEGMENTS).ok()?);
-    let start_seq = tail_seq
-        .saturating_add(1)
-        .saturating_sub(target_window_len)
-        .max(head_seq);
+    let start_seq = tail_seq.saturating_add(1).saturating_sub(target_window_len).max(head_seq);
     let mut window = Vec::new();
     let mut not_ready_count = 0_usize;
 
@@ -188,7 +182,8 @@ fn select_window(session: &HlsSession, render_gap_segments: usize) -> Option<Vec
     if window.len() < MIN_VISIBLE_SEGMENTS {
         return None;
     }
-    if session.render_policy.initial_render_gap_segments == 0 && !window_contains_provisioning_segment(session, &window) {
+    if session.render_policy.initial_render_gap_segments == 0 && !window_contains_provisioning_segment(session, &window)
+    {
         let target_duration_ms = u64::from(resolve_target_duration(session, &window)).saturating_mul(1_000);
         if playlist_duration_ms(session, &window) < target_duration_ms.saturating_mul(3) {
             return None;
@@ -220,8 +215,7 @@ fn render_window(
     }
     writeln!(body, "#EXT-X-TARGETDURATION:{target_duration}").map_err(|_| RenderError::InvalidState)?;
     writeln!(body, "#EXT-X-MEDIA-SEQUENCE:{first_proxy_seq}").map_err(|_| RenderError::InvalidState)?;
-    writeln!(body, "#EXT-X-DISCONTINUITY-SEQUENCE:{discontinuity_sequence}")
-        .map_err(|_| RenderError::InvalidState)?;
+    writeln!(body, "#EXT-X-DISCONTINUITY-SEQUENCE:{discontinuity_sequence}").map_err(|_| RenderError::InvalidState)?;
 
     let mut current_map_ref = None;
     let contains_provisioning = window_contains_provisioning_segment(session, window);
@@ -236,8 +230,7 @@ fn render_window(
             body.push('\n');
         }
         if let Some(program_date_time) = &entry.program_date_time {
-            writeln!(body, "#EXT-X-PROGRAM-DATE-TIME:{program_date_time}")
-                .map_err(|_| RenderError::InvalidState)?;
+            writeln!(body, "#EXT-X-PROGRAM-DATE-TIME:{program_date_time}").map_err(|_| RenderError::InvalidState)?;
         }
         if entry.discontinuity_before {
             if contains_provisioning {
@@ -263,8 +256,7 @@ fn render_window(
             }
             current_map_ref = entry.map_ref;
         }
-        writeln!(body, "#EXTINF:{},", format_duration_ms(entry.duration_ms))
-            .map_err(|_| RenderError::InvalidState)?;
+        writeln!(body, "#EXTINF:{},", format_duration_ms(entry.duration_ms)).map_err(|_| RenderError::InvalidState)?;
         if is_local_provisioning_segment(entry) {
             writeln!(
                 body,
@@ -345,10 +337,7 @@ fn resolve_target_duration(session: &HlsSession, window: &[u64]) -> u32 {
 }
 
 fn window_contains_provisioning_segment(session: &HlsSession, window: &[u64]) -> bool {
-    window
-        .iter()
-        .filter_map(|proxy_seq| session.segments.get(proxy_seq))
-        .any(is_local_provisioning_segment)
+    window.iter().filter_map(|proxy_seq| session.segments.get(proxy_seq)).any(is_local_provisioning_segment)
 }
 
 fn window_contains_origin_segment(session: &HlsSession, window: &[u64]) -> bool {
@@ -380,7 +369,6 @@ fn format_duration_ms(duration_ms: u64) -> String { format!("{}.{:03}", duration
 
 #[cfg(test)]
 mod tests {
-    use shared::model::HlsStripMode;
     use super::{
         HlsManifestRenderer, RenderError, RenderPolicy, RenderedManifest, RenderedManifestStoreOutcome,
         RenderedManifestStoreRejectReason,
@@ -390,6 +378,7 @@ mod tests {
         model::StripConfig,
         processing::parser::hls::origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome},
     };
+    use shared::model::HlsStripMode;
 
     const BASE_URL: &str = "http://origin.example.com/live/final/index.m3u8";
 
@@ -433,9 +422,8 @@ mod tests {
     fn rendering_an_empty_internal_window_does_not_panic() {
         let session = session();
 
-        let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            super::render_window(&session, &[], 0, 0)
-        }));
+        let rendered =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| super::render_window(&session, &[], 0, 0)));
 
         assert!(rendered.is_ok());
     }

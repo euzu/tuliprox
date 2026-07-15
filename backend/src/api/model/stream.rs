@@ -5,7 +5,10 @@ use crate::{
 use axum::http::StatusCode;
 use bytes::Bytes;
 use futures::stream::BoxStream;
-use shared::model::{PlaylistItemType, StreamChannel};
+use shared::{
+    defaults::HLS_EXT,
+    model::{PlaylistItemType, StreamChannel},
+};
 use std::{collections::HashMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -17,6 +20,24 @@ pub type ProviderStreamInfo = Option<(ProviderStreamHeader, StatusCode, Option<U
 pub type ProviderStreamResponse = (Option<BoxedProviderStream>, ProviderStreamInfo);
 
 pub type ProviderStreamFactoryResponse = (BoxedProviderStream, ProviderStreamInfo);
+
+/// Controls whether a provider stream preserves its origin representation or normalizes it to identity bytes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ProviderContentRepresentationMode {
+    #[default]
+    PreserveOrigin,
+    Identity,
+}
+
+impl ProviderContentRepresentationMode {
+    pub(crate) fn for_playback_extension(extension: &str) -> Self {
+        if extension.eq_ignore_ascii_case(HLS_EXT) {
+            Self::Identity
+        } else {
+            Self::PreserveOrigin
+        }
+    }
+}
 
 pub(crate) fn uses_direct_body_idle_timeout(stream_channel: &StreamChannel) -> bool {
     !stream_channel.shared
@@ -39,10 +60,7 @@ pub enum ProviderStreamCustomReason {
 }
 
 pub enum ProviderStreamState {
-    Custom {
-        response: ProviderStreamResponse,
-        reason: ProviderStreamCustomReason,
-    },
+    Custom { response: ProviderStreamResponse, reason: ProviderStreamCustomReason },
     Available(Option<ProviderName>, StreamUrl),
     GracePeriod(Option<ProviderName>, StreamUrl),
 }
@@ -58,6 +76,7 @@ pub struct StreamDetails {
     pub disable_provider_grace: bool,
     pub reconnect_flag: Option<CancellationToken>,
     pub provider_handle: Option<ProviderHandle>,
+    pub(crate) content_representation: ProviderContentRepresentationMode,
     /// Set when the stream was admitted via a user-grace strategy. Carried through to
     /// `stream_grace_period` so remaining strategies can be evaluated if the grace fails.
     pub(crate) grace_resolution_context: Option<crate::api::api_utils::GraceResolutionContext>,
@@ -79,6 +98,7 @@ impl Clone for StreamDetails {
             disable_provider_grace: self.disable_provider_grace,
             reconnect_flag: self.reconnect_flag.clone(),
             provider_handle: self.provider_handle.clone(),
+            content_representation: self.content_representation,
             grace_resolution_context: self.grace_resolution_context.clone(),
         }
     }
@@ -97,6 +117,7 @@ impl StreamDetails {
             disable_provider_grace: false,
             reconnect_flag: None,
             provider_handle: None,
+            content_representation: ProviderContentRepresentationMode::PreserveOrigin,
             grace_resolution_context: None,
         }
     }
@@ -121,4 +142,27 @@ pub struct StreamingStrategy {
     pub provider_handle: Option<ProviderHandle>,
     pub provider_stream_state: ProviderStreamState,
     pub input_headers: Option<HashMap<String, String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderContentRepresentationMode;
+
+    #[test]
+    fn provider_representation_mode_uses_hls_extension_not_playlist_item_type() {
+        assert_eq!(
+            ProviderContentRepresentationMode::for_playback_extension(".m3u8"),
+            ProviderContentRepresentationMode::Identity
+        );
+        assert_eq!(
+            ProviderContentRepresentationMode::for_playback_extension(".M3U8"),
+            ProviderContentRepresentationMode::Identity
+        );
+        for extension in [".ts", ".mp4", ".mkv", ""] {
+            assert_eq!(
+                ProviderContentRepresentationMode::for_playback_extension(extension),
+                ProviderContentRepresentationMode::PreserveOrigin
+            );
+        }
+    }
 }

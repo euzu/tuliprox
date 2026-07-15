@@ -1,11 +1,12 @@
 use super::rewrite_hls_url;
-use crate::api::model::{
-    ProxySessionId, TransientResourceId, TransientResourceKind, TransientResourceRef,
-    HLS_ACCESS_LEASE_ID_PLACEHOLDER,
+use crate::{
+    api::model::{
+        ProxySessionId, TransientResourceId, TransientResourceKind, TransientResourceRef,
+        HLS_ACCESS_LEASE_ID_PLACEHOLDER,
+    },
+    model::StripConfig,
 };
-use crate::model::StripConfig;
-use shared::model::HlsStripMode;
-use shared::utils::CONSTANTS;
+use shared::{model::HlsStripMode, utils::CONSTANTS};
 use std::{collections::HashMap, time::Duration};
 use url::Url;
 
@@ -83,20 +84,14 @@ impl TransientManifestRewriter {
         }
 
         if body.is_empty() {
-            return TransientRewriteResult {
-                body: rewritten_body,
-                resources: Vec::new(),
-            };
+            return TransientRewriteResult { body: rewritten_body, resources: Vec::new() };
         }
 
         if let Some(discontinuity_sequence) = options.handoff_discontinuity_sequence {
             rewritten_body = apply_handoff_discontinuity_boundary(&rewritten_body, discontinuity_sequence);
         }
 
-        TransientRewriteResult {
-            body: rewritten_body,
-            resources: resources.into_values().collect(),
-        }
+        TransientRewriteResult { body: rewritten_body, resources: resources.into_values().collect() }
     }
 }
 
@@ -142,12 +137,8 @@ pub fn materialize_transient_provisioning_handoff_view(
         &previous_units,
         previous_units.len().saturating_sub(selected_previous_units.len()),
     );
-    let mut rewritten = String::with_capacity(
-        origin_body
-            .len()
-            .saturating_add(previous_provisioning_body.len())
-            .saturating_add(64),
-    );
+    let mut rewritten =
+        String::with_capacity(origin_body.len().saturating_add(previous_provisioning_body.len()).saturating_add(64));
     for line in &origin_lines[..first_origin_unit.start] {
         if line.line.trim().starts_with("#EXT-X-MEDIA-SEQUENCE:") {
             if let Some(media_sequence) = media_sequence {
@@ -213,19 +204,12 @@ pub fn apply_transient_discontinuity_sequence(body: &str, discontinuity_sequence
 }
 
 pub fn transient_discontinuity_sequence(body: &str) -> Option<u64> {
-    manifest_lines(body)
-        .iter()
-        .find_map(|line| parse_discontinuity_sequence(line.line))
+    manifest_lines(body).iter().find_map(|line| parse_discontinuity_sequence(line.line))
 }
 
 pub fn transient_visible_discontinuity_count(body: &str) -> u64 {
-    u64::try_from(
-        manifest_lines(body)
-            .iter()
-            .filter(|line| is_discontinuity_tag(line.line.trim()))
-            .count(),
-    )
-    .unwrap_or(u64::MAX)
+    u64::try_from(manifest_lines(body).iter().filter(|line| is_discontinuity_tag(line.line.trim())).count())
+        .unwrap_or(u64::MAX)
 }
 
 fn rewrite_line(
@@ -265,6 +249,21 @@ fn rewrite_line(
             ttl_ms,
             resources,
             TransientResourceKind::Map,
+        );
+    }
+
+    if trimmed.starts_with("#EXT-X-PART:")
+        || (trimmed.starts_with("#EXT-X-PRELOAD-HINT:") && trimmed.contains("TYPE=PART"))
+    {
+        return rewrite_uri_attribute(
+            line,
+            final_manifest_url,
+            proxy_session_id,
+            reverse_proxy_rewrite_secret,
+            now_ms,
+            ttl_ms,
+            resources,
+            TransientResourceKind::Part,
         );
     }
 
@@ -323,10 +322,7 @@ fn rewrite_uri_attribute(
         resources,
         kind,
     );
-    CONSTANTS
-        .re_hls_uri
-        .replace(line, format!(r#"URI="{proxy_uri}""#))
-        .to_string()
+    CONSTANTS.re_hls_uri.replace(line, format!(r#"URI="{proxy_uri}""#)).to_string()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -353,10 +349,7 @@ fn rewrite_resource_uri(
         Some(extension.clone()),
     );
     let resource_id = resource.id.clone();
-    resources
-        .entry(resource_id.clone())
-        .and_modify(|existing| *existing = resource.clone())
-        .or_insert(resource);
+    resources.entry(resource_id.clone()).and_modify(|existing| *existing = resource.clone()).or_insert(resource);
     (
         format!(
             "/hls/shared/live/{}/{}/r/{}.{}",
@@ -381,12 +374,8 @@ fn extract_extension(resolved_origin_uri: &str) -> Option<String> {
             .filter(|extension| !extension.is_empty());
     }
 
-    let without_query = resolved_origin_uri
-        .split_once('?')
-        .map_or(resolved_origin_uri, |(path, _)| path);
-    let without_fragment = without_query
-        .split_once('#')
-        .map_or(without_query, |(path, _)| path);
+    let without_query = resolved_origin_uri.split_once('?').map_or(resolved_origin_uri, |(path, _)| path);
+    let without_fragment = without_query.split_once('#').map_or(without_query, |(path, _)| path);
     without_fragment
         .rsplit_once('.')
         .map(|(_, extension)| extension.to_string())
@@ -397,7 +386,7 @@ fn fallback_extension(kind: TransientResourceKind) -> &'static str {
     match kind {
         TransientResourceKind::Key => "key",
         TransientResourceKind::Map => "mp4",
-        TransientResourceKind::Segment | TransientResourceKind::Other => "bin",
+        TransientResourceKind::Segment | TransientResourceKind::Part | TransientResourceKind::Other => "bin",
     }
 }
 
@@ -516,12 +505,7 @@ fn append_media_unit_with_duration_override(
     }
 }
 
-fn append_gap_media_unit(
-    output: &mut String,
-    lines: &[ManifestLine<'_>],
-    unit: MediaSegmentUnit,
-    duration_ms: u64,
-) {
+fn append_gap_media_unit(output: &mut String, lines: &[ManifestLine<'_>], unit: MediaSegmentUnit, duration_ms: u64) {
     output.push_str("#EXT-X-GAP\n");
     let uri_index = lines[unit.start..=unit.end]
         .iter()
@@ -551,9 +535,7 @@ fn append_manifest_block_separator(output: &mut String) {
 }
 
 fn media_unit_has_discontinuity(lines: &[ManifestLine<'_>], unit: MediaSegmentUnit) -> bool {
-    lines[unit.start..=unit.end]
-        .iter()
-        .any(|line| is_discontinuity_tag(line.line.trim()))
+    lines[unit.start..=unit.end].iter().any(|line| is_discontinuity_tag(line.line.trim()))
 }
 
 fn handoff_provisioning_media_sequence(
@@ -576,12 +558,9 @@ fn format_duration_ms(duration_ms: u64) -> String { format!("{}.{:03}", duration
 
 fn apply_handoff_discontinuity_boundary(body: &str, handoff_discontinuity_sequence: u64) -> String {
     let lines = manifest_lines(body);
-    let origin_discontinuity_sequence = lines
-        .iter()
-        .find_map(|line| parse_discontinuity_sequence(line.line))
-        .unwrap_or(0);
-    let effective_discontinuity_sequence =
-        origin_discontinuity_sequence.saturating_add(handoff_discontinuity_sequence);
+    let origin_discontinuity_sequence =
+        lines.iter().find_map(|line| parse_discontinuity_sequence(line.line)).unwrap_or(0);
+    let effective_discontinuity_sequence = origin_discontinuity_sequence.saturating_add(handoff_discontinuity_sequence);
     let existing_sequence_index = lines.iter().position(|line| is_discontinuity_sequence_tag(line.line.trim()));
     let insert_sequence_index = existing_sequence_index.unwrap_or_else(|| discontinuity_sequence_insert_index(&lines));
     let first_segment = first_media_segment_boundary(&lines);
@@ -656,9 +635,7 @@ fn parse_discontinuity_sequence(line: &str) -> Option<u64> {
     line.trim().strip_prefix("#EXT-X-DISCONTINUITY-SEQUENCE:")?.trim().parse().ok()
 }
 
-fn is_discontinuity_sequence_tag(line: &str) -> bool {
-    line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:")
-}
+fn is_discontinuity_sequence_tag(line: &str) -> bool { line.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:") }
 
 fn is_discontinuity_tag(line: &str) -> bool { line == "#EXT-X-DISCONTINUITY" }
 
@@ -670,9 +647,7 @@ fn duration_ms_from_extinf(value: &str) -> Option<u64> {
     u64::try_from(Duration::from_secs_f64(seconds).as_millis()).ok()
 }
 
-fn is_segment_unit_tag(line: &str) -> bool {
-    is_media_segment_unit_tag(line)
-}
+fn is_segment_unit_tag(line: &str) -> bool { is_media_segment_unit_tag(line) }
 
 fn is_media_segment_unit_tag(line: &str) -> bool {
     line.starts_with("#EXTINF:")
@@ -694,14 +669,23 @@ mod tests {
         apply_transient_discontinuity_sequence, materialize_transient_provisioning_handoff_view,
         transient_discontinuity_sequence, TransientManifestRewriter, TransientRewriteOptions,
     };
-    use crate::api::model::{build_transient_resource_id, ProxySessionId, TransientResourceKind};
-    use crate::model::StripConfig;
-use shared::model::HlsStripMode;
+    use crate::{
+        api::model::{build_transient_resource_id, ProxySessionId, TransientResourceKind},
+        model::StripConfig,
+    };
+    use shared::model::HlsStripMode;
 
     const BASE_URL: &str = "http://origin.example.com/live/final/index.m3u8";
 
     fn rewrite(body: &str) -> crate::processing::parser::hls::transient_manifest::TransientRewriteResult {
-        TransientManifestRewriter::rewrite(body, BASE_URL, &ProxySessionId("proxy-id".to_string()), b"secret", 100, 1_000)
+        TransientManifestRewriter::rewrite(
+            body,
+            BASE_URL,
+            &ProxySessionId("proxy-id".to_string()),
+            b"secret",
+            100,
+            1_000,
+        )
     }
 
     fn rewrite_with_handoff(body: &str) -> crate::processing::parser::hls::transient_manifest::TransientRewriteResult {
@@ -712,9 +696,7 @@ use shared::model::HlsStripMode;
             b"secret",
             100,
             1_000,
-            TransientRewriteOptions {
-                handoff_discontinuity_sequence: Some(0),
-            },
+            TransientRewriteOptions { handoff_discontinuity_sequence: Some(0) },
         )
     }
 
@@ -722,7 +704,9 @@ use shared::model::HlsStripMode;
     fn ext_x_key_uri_is_rewritten_without_changing_other_attributes() {
         let result = rewrite("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"keys/key.bin\",IV=0x1\n#EXTINF:4.0,\nseg.ts\n");
 
-        assert!(result.body.contains("#EXT-X-KEY:METHOD=AES-128,URI=\"/hls/shared/live/proxy-id/__hls_access_lease_id__/r/"));
+        assert!(result
+            .body
+            .contains("#EXT-X-KEY:METHOD=AES-128,URI=\"/hls/shared/live/proxy-id/__hls_access_lease_id__/r/"));
         assert!(result.body.contains(".bin\",IV=0x1"));
         assert!(!result.body.contains("keys/key.bin"));
     }
@@ -767,12 +751,16 @@ use shared::model::HlsStripMode;
     }
 
     #[test]
-    fn unsupported_uri_attributes_are_rewritten_to_transient_resources() {
+    fn low_latency_part_uri_is_rewritten_with_part_diagnostics_kind() {
         let result = rewrite("#EXTM3U\n#EXT-X-PART:DURATION=1.0,URI=\"parts/part001.m4s\"\n");
 
-        assert!(result.body.contains("#EXT-X-PART:DURATION=1.0,URI=\"/hls/shared/live/proxy-id/__hls_access_lease_id__/r/"));
+        assert!(result
+            .body
+            .contains("#EXT-X-PART:DURATION=1.0,URI=\"/hls/shared/live/proxy-id/__hls_access_lease_id__/r/"));
         assert!(result.body.contains(".m4s\""));
         assert!(!result.body.contains("parts/part001.m4s"));
+        assert_eq!(result.resources.len(), 1);
+        assert_eq!(result.resources[0].kind, TransientResourceKind::Part);
     }
 
     #[test]
@@ -888,7 +876,9 @@ use shared::model::HlsStripMode;
         assert!(body.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0\n\n#EXTINF:2.000,"));
         assert_eq!(body.matches("#EXTINF:").count(), 6);
         assert!(body.contains("#EXTINF:2.000,\n/hls/shared/live/proxy-id/__hls_access_lease_id__/000002.ts?pseq=2"));
-        assert!(body.contains("\n#EXT-X-GAP\n#EXTINF:2.000,\n/hls/shared/live/proxy-id/__hls_access_lease_id__/000003.ts?pseq=3"));
+        assert!(body.contains(
+            "\n#EXT-X-GAP\n#EXTINF:2.000,\n/hls/shared/live/proxy-id/__hls_access_lease_id__/000003.ts?pseq=3"
+        ));
         assert!(body.contains("\n#EXT-X-DISCONTINUITY\n#EXTINF:1.92,"));
         let gap = body.find("\n#EXT-X-GAP\n").expect("gap tag");
         let discontinuity = body.find("\n#EXT-X-DISCONTINUITY\n#EXTINF:1.92,").expect("handoff discontinuity");
@@ -907,5 +897,4 @@ use shared::model::HlsStripMode;
     }
 
     fn strip_segments(value: u64) -> StripConfig { StripConfig { mode: HlsStripMode::Segments, value } }
-
 }

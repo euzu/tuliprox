@@ -1,22 +1,30 @@
 use super::{
-    build_hls_origin_resource_headers_with_client_range,
-    finish_hls_origin_account_io, hls_client_body_send_deadline, hls_object_body_deadline,
+    build_hls_origin_resource_headers_with_client_range, finish_hls_origin_account_io, hls_client_body_send_deadline,
     refresh_hls_client_body_send_deadline,
-    log_hls_resource_timeout, run_hls_origin_resource_retry_loop_with_attempt_prepare, CacheAccessState,
-    HlsAccessLeaseId, HlsMediaActivityMarker, HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation,
-    HlsOriginIoContext, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget,
-    HlsRepairRenderedObjectId, HlsResourceFetchAttempt, HlsResourceFetchKind, HlsResourceFetchLogContext,
-    HlsResourceFetchSource, HlsSegmentCache, HlsSegmentRepairManager, HlsSegmentRepairObjectContext,
-    HlsSegmentRepairSource, HlsSessionHandle, ProxySessionId, SegmentFetchPolicy, TransientObjectCacheKey,
-    TransientObjectFetchDecision, TransientPassthroughState, TransientResourceFile, TransientResourceKind,
-    TransientResourceRef,
+    resource_fetch::{log_hls_resource_body_failure, HlsResourceFetchLogContext},
+    run_hls_origin_resource_retry_loop_with_attempt_prepare, safe_proxy_session_id, CacheAccessState,
+    HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseId, HlsMediaActivityMarker, HlsOriginAccountIoLeaseGuard,
+    HlsOriginByteRangeExpectation, HlsOriginIoContext, HlsOriginResourceBodyDeadline, HlsOriginResourceClients,
+    HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsProxyManager, HlsRepairRenderedObjectId,
+    HlsResourceFetchAttempt, HlsResourceFetchKind, HlsResourceFetchSource, HlsSegmentCache, HlsSegmentFailureObject,
+    HlsSegmentFailureTransition, HlsSegmentRepairManager, HlsSegmentRepairObjectContext, HlsSegmentRepairSource,
+    HlsSessionHandle, ProxySessionId, SegmentFetchPolicy, TransientObjectCacheKey, TransientObjectFetchDecision,
+    TransientPassthroughState, TransientResourceFile, TransientResourceKind, TransientResourceRef,
 };
-use crate::api::api_utils::try_unwrap_body;
-use axum::{body::Body, http::{header, HeaderMap, HeaderValue, StatusCode}, response::IntoResponse};
-use futures::{future::BoxFuture, FutureExt, StreamExt, TryStreamExt};
+use crate::{
+    api::api_utils::{mark_response_as_uncompressed, try_unwrap_body},
+    utils::content_coding::DecodedHttpResponse,
+};
+use axum::{
+    body::Body,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::IntoResponse,
+};
+use futures::{future::BoxFuture, FutureExt, StreamExt};
+use log::{debug, warn};
 use std::{io, sync::Arc};
 use tokio::{sync::Notify, time::sleep};
-use tokio_util::io::StreamReader;
+use tokio_util::io::ReaderStream;
 
 pub enum HlsTransientObjectFetchFailure {
     Retryable,
@@ -24,26 +32,13 @@ pub enum HlsTransientObjectFetchFailure {
 }
 
 pub fn hls_transient_object_fetch_failure(error: &HlsOriginResourceFetchError) -> HlsTransientObjectFetchFailure {
-    match error {
-        HlsOriginResourceFetchError::PermanentStatus(status)
-        | HlsOriginResourceFetchError::NonRetryableStatus(status) => {
-            HlsTransientObjectFetchFailure::Permanent { status: Some(*status) }
-        }
-        HlsOriginResourceFetchError::InvalidOriginUrl
-        | HlsOriginResourceFetchError::InvalidByteRange
-        | HlsOriginResourceFetchError::UnexpectedByteRangeStatus => {
-            HlsTransientObjectFetchFailure::Permanent { status: None }
-        }
-        HlsOriginResourceFetchError::RetryableStatus(_)
-        | HlsOriginResourceFetchError::Transport(_)
-        | HlsOriginResourceFetchError::Redirect
-        | HlsOriginResourceFetchError::Timeout
-        | HlsOriginResourceFetchError::CacheCommit(_) => HlsTransientObjectFetchFailure::Retryable,
-        HlsOriginResourceFetchError::ProviderUnavailable(kind) if kind.is_retryable_resource_failure() => {
-            HlsTransientObjectFetchFailure::Retryable
-        }
-        HlsOriginResourceFetchError::ProviderUnavailable(_) => HlsTransientObjectFetchFailure::Permanent { status: None },
+    if let Some(status) = error.permanent_status() {
+        return HlsTransientObjectFetchFailure::Permanent { status: Some(status) };
     }
+    if !error.retryable_failure() {
+        return HlsTransientObjectFetchFailure::Permanent { status: None };
+    }
+    HlsTransientObjectFetchFailure::Retryable
 }
 
 pub fn hls_transient_resource_fetch_kind(resource_kind: TransientResourceKind) -> HlsResourceFetchKind {
@@ -51,6 +46,7 @@ pub fn hls_transient_resource_fetch_kind(resource_kind: TransientResourceKind) -
         TransientResourceKind::Key => HlsResourceFetchKind::Key,
         TransientResourceKind::Map => HlsResourceFetchKind::Map,
         TransientResourceKind::Segment => HlsResourceFetchKind::Segment,
+        TransientResourceKind::Part => HlsResourceFetchKind::Part,
         TransientResourceKind::Other => HlsResourceFetchKind::Other,
     }
 }
@@ -59,11 +55,17 @@ fn build_hls_transient_resource_fetch_target(
     resolved_origin_uri: &str,
     origin_headers: &HeaderMap,
     origin_provider_session_headers: &HeaderMap,
-    range_header: Option<HeaderValue>,
+    mode: HlsTransientOriginFetchMode,
     resource_id: &str,
     resource_kind: TransientResourceKind,
-) -> HlsOriginResourceFetchTarget {
-    HlsOriginResourceFetchTarget {
+) -> Result<HlsOriginResourceFetchTarget, HlsOriginResourceFetchError> {
+    let (range_header, byte_range_expectation) = match mode {
+        HlsTransientOriginFetchMode::CacheFullObject => (None, HlsOriginByteRangeExpectation::FullObject),
+        HlsTransientOriginFetchMode::DirectPassthrough { client_range } => {
+            (client_range, HlsOriginByteRangeExpectation::AnySuccess)
+        }
+    };
+    Ok(HlsOriginResourceFetchTarget {
         kind: hls_transient_resource_fetch_kind(resource_kind),
         source: HlsResourceFetchSource::Transient,
         object_id: resource_id.to_string(),
@@ -72,9 +74,15 @@ fn build_hls_transient_resource_fetch_target(
             origin_headers,
             origin_provider_session_headers,
             range_header,
-        ),
-        byte_range_expectation: HlsOriginByteRangeExpectation::AnySuccess,
-    }
+        )?,
+        byte_range_expectation,
+    })
+}
+
+/// Keeps full-object cache fills separate from decoded client-range passthrough.
+enum HlsTransientOriginFetchMode {
+    CacheFullObject,
+    DirectPassthrough { client_range: Option<HeaderValue> },
 }
 
 pub struct HlsTransientOriginFetchRequest {
@@ -89,10 +97,18 @@ pub struct HlsTransientOriginFetchRequest {
     pub session_log_id: String,
 }
 
+/// A decoded direct-origin response together with the attempt and guards that own its origin work.
+pub struct HlsTransientDecodedOriginResponse<G> {
+    pub decoded: DecodedHttpResponse,
+    pub body_deadline: HlsOriginResourceBodyDeadline,
+    pub attempt: HlsResourceFetchAttempt,
+    pub guard: G,
+}
+
 pub async fn fetch_hls_transient_origin_response_with_attempt_prepare<G, P>(
     request: HlsTransientOriginFetchRequest,
     prepare_attempt: P,
-) -> Result<(reqwest::Response, G), HlsOriginResourceFetchError>
+) -> Result<HlsTransientDecodedOriginResponse<G>, HlsOriginResourceFetchError>
 where
     G: Send + 'static,
     P: FnMut(HlsResourceFetchAttempt) -> BoxFuture<'static, Result<G, HlsOriginResourceFetchError>>,
@@ -101,10 +117,10 @@ where
         &request.resolved_origin_uri,
         &request.origin_headers,
         &request.origin_provider_session_headers,
-        request.range_header,
+        HlsTransientOriginFetchMode::DirectPassthrough { client_range: request.range_header },
         request.resource_file.resource_id.0.as_str(),
         request.resource_kind,
-    );
+    )?;
     run_hls_origin_resource_retry_loop_with_attempt_prepare(
         target,
         request.clients,
@@ -112,7 +128,9 @@ where
         &request.session_log_id,
         prepare_attempt,
         |guard| async move { drop(guard) }.boxed(),
-        |response, _attempt, guard| async move { Ok((response, guard)) }.boxed(),
+        |decoded, attempt, body_deadline, guard| {
+            async move { Ok(HlsTransientDecodedOriginResponse { decoded, body_deadline, attempt, guard }) }.boxed()
+        },
     )
     .await
 }
@@ -182,8 +200,11 @@ fn transient_object_cache_action(
     if matches!(resource.kind, TransientResourceKind::Key) {
         return HlsTransientObjectCacheAction::PassthroughNoCache;
     }
-    let cache_key =
-        TransientPassthroughState::transient_object_key(proxy_session_id, &resource.id, resource_file.extension.clone());
+    let cache_key = TransientPassthroughState::transient_object_key(
+        proxy_session_id,
+        &resource.id,
+        resource_file.extension.clone(),
+    );
     if session.transient.ready_object(&cache_key, now_ms).is_some() {
         return HlsTransientObjectCacheAction::ServeReady;
     }
@@ -255,9 +276,7 @@ pub struct HlsTransientCacheCommitContext {
     pub resource: TransientResourceRef,
     pub resource_file: TransientResourceFile,
     pub cache_key: TransientObjectCacheKey,
-    pub range_header: Option<HeaderValue>,
     pub cache_duration_ms: u64,
-    pub origin_segment_timeout_ms: u64,
 }
 
 pub struct HlsTransientOriginCacheFetchRequest {
@@ -277,10 +296,10 @@ where
         &request.fetch.resolved_origin_uri,
         &request.fetch.origin_headers,
         &request.fetch.origin_provider_session_headers,
-        request.fetch.range_header,
+        HlsTransientOriginFetchMode::CacheFullObject,
         request.fetch.resource_file.resource_id.0.as_str(),
         request.fetch.resource_kind,
-    );
+    )?;
     let commit = request.commit;
     run_hls_origin_resource_retry_loop_with_attempt_prepare(
         target,
@@ -289,10 +308,10 @@ where
         &request.fetch.session_log_id,
         prepare_attempt,
         |guard| async move { drop(guard) }.boxed(),
-        move |response, _attempt, guard| {
+        move |decoded, _attempt, body_deadline, guard| {
             let commit = commit.clone();
             async move {
-                let result = commit_hls_transient_origin_response_attempt(commit, response).await;
+                let result = commit_hls_transient_origin_response_attempt(commit, decoded, body_deadline).await;
                 drop(guard);
                 result
             }
@@ -304,17 +323,16 @@ where
 
 async fn commit_hls_transient_origin_response_attempt(
     context: HlsTransientCacheCommitContext,
-    response: reqwest::Response,
+    decoded: DecodedHttpResponse,
+    body_deadline: HlsOriginResourceBodyDeadline,
 ) -> Result<(), HlsOriginResourceFetchError> {
-    let response_headers = response.headers().clone();
-    let content_type = response_headers
+    let content_type = decoded
+        .headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .or_else(|| context.resource.content_type_hint.clone())
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    let deadline = hls_object_body_deadline(context.origin_segment_timeout_ms);
-    let stream_reader = StreamReader::new(response.bytes_stream().map_err(io::Error::other));
     let repair_context = HlsSegmentRepairObjectContext {
         source: HlsSegmentRepairSource::Transient,
         proxy_session_id: context.session.read().await.proxy_session_id.clone(),
@@ -327,27 +345,24 @@ async fn commit_hls_transient_origin_response_attempt(
         origin_fetch_uri_for_diagnostics: context.resource.resolved_origin_uri.clone(),
         media_sequence: None,
         discontinuity_sequence: None,
-        complete_object: is_hls_transient_full_object_cacheable_request(context.range_header.as_ref()),
+        complete_object: true,
         encrypted: context.resource.kind == TransientResourceKind::Key,
         custom_response: false,
     };
     let commit = Box::pin(context.segment_repair.commit_origin_response(
         &context.segment_cache,
         &context.cache_key,
-        stream_reader,
-        deadline,
+        decoded.body,
+        body_deadline.deadline(),
         repair_context,
     ))
     .await;
     let ready_at_ms = current_time_millis();
     let metadata = match commit {
         Ok(metadata) => metadata,
-        Err(err) if err.kind() == io::ErrorKind::TimedOut => return Err(HlsOriginResourceFetchError::Timeout),
-        Err(err) => return Err(HlsOriginResourceFetchError::cache_commit(&err)),
+        Err(err) => return Err(HlsOriginResourceFetchError::cache_body(&err)),
     };
-    let expires_at_ms = ready_at_ms
-        .saturating_add(context.cache_duration_ms)
-        .max(context.resource.expires_at_ms);
+    let expires_at_ms = ready_at_ms.saturating_add(context.cache_duration_ms).max(context.resource.expires_at_ms);
     context.session.write().await.transient.mark_object_ready(
         &context.cache_key,
         content_type,
@@ -358,20 +373,110 @@ async fn commit_hls_transient_origin_response_attempt(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Context retained until a direct transient response body reaches one terminal outcome.
+pub struct HlsTransientDirectResponseContext {
+    pub hls_proxy: Arc<HlsProxyManager>,
+    pub session: HlsSessionHandle,
+    pub resource: TransientResourceRef,
+    pub policy: SegmentFetchPolicy,
+    pub media_activity_marker: Option<HlsMediaActivityMarker>,
+    pub now_ms: u64,
+    pub proxy_session_id: ProxySessionId,
+}
+
+#[derive(Clone, Copy)]
+enum HlsTransientDirectStreamOutcome {
+    CleanEof,
+    OriginBodyFailure,
+    ClientAborted,
+}
+
+// Sole owner of the direct-body outcome: EOF is success, origin read failures
+// count as segment failures, and downstream cancellation remains neutral.
+struct HlsTransientDirectResponseFinalizer {
+    context: Option<HlsTransientDirectResponseLifecycleContext>,
+}
+
+struct HlsTransientDirectResponseLifecycleContext {
+    hls_proxy: Arc<HlsProxyManager>,
+    session: HlsSessionHandle,
+    resource: TransientResourceRef,
+    policy: SegmentFetchPolicy,
+    proxy_session_id: ProxySessionId,
+}
+
+impl HlsTransientDirectResponseFinalizer {
+    fn new(context: HlsTransientDirectResponseLifecycleContext) -> Self {
+        let context = (context.resource.kind == TransientResourceKind::Segment).then_some(context);
+        Self { context }
+    }
+
+    async fn finish(&mut self, outcome: HlsTransientDirectStreamOutcome) {
+        let Some(completion) = self.begin_finish(outcome) else {
+            return;
+        };
+        if let Err(error) = completion.await {
+            warn!(
+                "HLS transient direct lifecycle task failed: cancelled={} panic={}",
+                error.is_cancelled(),
+                error.is_panic()
+            );
+        }
+    }
+
+    fn begin_finish(&mut self, outcome: HlsTransientDirectStreamOutcome) -> Option<tokio::task::JoinHandle<()>> {
+        let context = self.context.take()?;
+        if matches!(outcome, HlsTransientDirectStreamOutcome::ClientAborted) {
+            return None;
+        }
+        // Once EOF or an origin-body failure has been observed, its state transition
+        // must survive cancellation of the downstream body poll.
+        Some(tokio::spawn(async move {
+            match outcome {
+                HlsTransientDirectStreamOutcome::CleanEof => {
+                    record_successful_transient_segment_fetch(&context.session, &context.resource).await;
+                }
+                HlsTransientDirectStreamOutcome::OriginBodyFailure => {
+                    let failed_at_ms = current_time_millis();
+                    if let Some(reason) = record_temporary_transient_segment_fetch_failure(
+                        &context.session,
+                        &context.resource,
+                        &context.policy,
+                        failed_at_ms,
+                    )
+                    .await
+                    {
+                        context
+                            .hls_proxy
+                            .mark_access_leases_channel_unavailable_for_session(
+                                &context.proxy_session_id,
+                                failed_at_ms,
+                                reason,
+                            )
+                            .await;
+                    }
+                }
+                HlsTransientDirectStreamOutcome::ClientAborted => {}
+            }
+        }))
+    }
+
+    fn finish_client_aborted(&mut self) { self.context.take(); }
+}
+
+impl Drop for HlsTransientDirectResponseFinalizer {
+    fn drop(&mut self) {
+        // A body dropped before EOF is a downstream abort. It must release the
+        // retained guards without changing provider/segment failure state.
+        self.finish_client_aborted();
+    }
+}
+
 pub fn hls_transient_origin_response(
-    response: reqwest::Response,
-    access: Arc<CacheAccessState>,
-    origin_io_guard: Option<HlsTransientOriginIoGuard>,
-    media_activity_marker: Option<HlsMediaActivityMarker>,
-    now_ms: u64,
-    proxy_session_id: String,
-    resource_id: String,
-    resource_kind: TransientResourceKind,
-    origin_url: String,
-    origin_segment_timeout_ms: u64,
+    response: HlsTransientDecodedOriginResponse<Option<HlsTransientOriginIoGuard>>,
+    context: HlsTransientDirectResponseContext,
 ) -> axum::response::Response {
-    let mut builder = axum::response::Response::builder().status(response.status());
+    let mut builder = axum::response::Response::builder().status(response.decoded.status);
     for header_name in [
         header::CONTENT_TYPE,
         header::CONTENT_LENGTH,
@@ -381,83 +486,187 @@ pub fn hls_transient_origin_response(
         header::ETAG,
         header::LAST_MODIFIED,
     ] {
-        if let Some(value) = response.headers().get(&header_name) {
+        if let Some(value) = response.decoded.headers.get(&header_name) {
             builder = builder.header(header_name, value.clone());
         }
     }
 
-    let guard = HlsTransientReadGuard::new(access, now_ms);
+    let mut response = try_unwrap_body!(builder.body(hls_transient_direct_body(response, context)));
+    mark_response_as_uncompressed(&mut response);
+    response
+}
+
+fn hls_transient_direct_body(
+    response: HlsTransientDecodedOriginResponse<Option<HlsTransientOriginIoGuard>>,
+    context: HlsTransientDirectResponseContext,
+) -> Body {
+    let HlsTransientDecodedOriginResponse { decoded, body_deadline, attempt, guard: origin_io_guard } = response;
+    let HlsTransientDirectResponseContext {
+        hls_proxy,
+        session,
+        resource,
+        policy,
+        media_activity_marker,
+        now_ms,
+        proxy_session_id,
+    } = context;
+
+    let guard = HlsTransientReadGuard::new(Arc::clone(&resource.access), now_ms);
     let media_activity_guard = HlsTransientMediaActivityGuard::new(media_activity_marker, now_ms);
-    let deadline = hls_object_body_deadline(origin_segment_timeout_ms);
+    let finalizer = HlsTransientDirectResponseFinalizer::new(HlsTransientDirectResponseLifecycleContext {
+        hls_proxy,
+        session,
+        resource: resource.clone(),
+        policy,
+        proxy_session_id: proxy_session_id.clone(),
+    });
+    let resource_id = resource.id.0.clone();
+    let resource_kind = resource.kind;
     let stream = futures::stream::unfold(
         (
-            response.bytes_stream(),
+            ReaderStream::new(decoded.body),
             Some(guard),
             origin_io_guard,
             Some(media_activity_guard),
+            finalizer,
             Box::pin(sleep(hls_client_body_send_deadline())),
             false,
         ),
-        move |(mut stream, guard, origin_io_guard, media_activity_guard, mut send_deadline, finished)| {
-            let proxy_session_id = proxy_session_id.clone();
+        move |(
+            mut stream,
+            guard,
+            origin_io_guard,
+            media_activity_guard,
+            mut finalizer,
+            mut send_deadline,
+            finished,
+        )| {
+            let proxy_session_id = proxy_session_id.0.clone();
             let resource_id = resource_id.clone();
-            let origin_url = origin_url.clone();
             async move {
                 if finished {
                     return None;
                 }
                 let next_chunk = tokio::select! {
                     () = send_deadline.as_mut() => {
-                        log_hls_resource_timeout(
-                            &proxy_session_id,
-                            HlsResourceFetchLogContext {
-                                kind: hls_transient_resource_fetch_kind(resource_kind),
-                                source: HlsResourceFetchSource::Transient,
-                                object_id: &resource_id,
-                                origin_url: Some(&origin_url),
-                            },
-                            HlsResourceFetchAttempt { attempt_index: 0, attempts: 1 },
-                            hls_client_body_send_deadline().as_millis(),
-                        );
+                        finalizer.finish(HlsTransientDirectStreamOutcome::ClientAborted).await;
                         return Some((
                             Err(io::Error::new(io::ErrorKind::TimedOut, "hls client body send timed out")),
-                            (stream, guard, origin_io_guard, media_activity_guard, send_deadline, true),
+                            (stream, None, None, None, finalizer, send_deadline, true),
                         ));
                     }
-                    next_chunk = tokio::time::timeout(deadline, stream.next()) => next_chunk,
+                    // Decoder setup is bounded by the absolute attempt deadline before this
+                    // response is built. Once handed to the client, retain the existing
+                    // per-chunk origin-body idle timeout instead of imposing a total-body limit.
+                    next_chunk = tokio::time::timeout(body_deadline.timeout(), stream.next()) => next_chunk,
                 };
                 match next_chunk {
                     Ok(Some(Ok(chunk))) => {
                         refresh_hls_client_body_send_deadline(send_deadline.as_mut());
-                        Some((Ok(chunk), (stream, guard, origin_io_guard, media_activity_guard, send_deadline, false)))
-                    }
-                    Ok(Some(Err(err))) => Some((
-                        Err(io::Error::other(err)),
-                        (stream, guard, origin_io_guard, media_activity_guard, send_deadline, true),
-                    )),
-                    Ok(None) => None,
-                    Err(_) => {
-                        log_hls_resource_timeout(
-                            &proxy_session_id,
-                            HlsResourceFetchLogContext {
-                                kind: hls_transient_resource_fetch_kind(resource_kind),
-                                source: HlsResourceFetchSource::Transient,
-                                object_id: &resource_id,
-                                origin_url: Some(&origin_url),
-                            },
-                            HlsResourceFetchAttempt { attempt_index: 0, attempts: 1 },
-                            deadline.as_millis(),
-                        );
                         Some((
-                            Err(io::Error::new(io::ErrorKind::TimedOut, "transient passthrough body timed out")),
-                            (stream, guard, origin_io_guard, media_activity_guard, send_deadline, true),
+                            Ok(chunk),
+                            (stream, guard, origin_io_guard, media_activity_guard, finalizer, send_deadline, false),
                         ))
+                    }
+                    Ok(Some(Err(err))) => {
+                        log_hls_resource_body_failure(
+                            &proxy_session_id,
+                            hls_transient_direct_log_context(&resource_id, resource_kind),
+                            attempt,
+                            &err,
+                            body_deadline.timeout().as_millis(),
+                        );
+                        finalizer.finish(HlsTransientDirectStreamOutcome::OriginBodyFailure).await;
+                        Some((Err(err), (stream, None, None, None, finalizer, send_deadline, true)))
+                    }
+                    Ok(None) => {
+                        finalizer.finish(HlsTransientDirectStreamOutcome::CleanEof).await;
+                        None
+                    }
+                    Err(_) => {
+                        let error = io::Error::new(io::ErrorKind::TimedOut, "transient passthrough body timed out");
+                        log_hls_resource_body_failure(
+                            &proxy_session_id,
+                            hls_transient_direct_log_context(&resource_id, resource_kind),
+                            attempt,
+                            &error,
+                            body_deadline.timeout().as_millis(),
+                        );
+                        finalizer.finish(HlsTransientDirectStreamOutcome::OriginBodyFailure).await;
+                        Some((Err(error), (stream, None, None, None, finalizer, send_deadline, true)))
                     }
                 }
             }
         },
     );
-    try_unwrap_body!(builder.body(Body::from_stream(stream)))
+    Body::from_stream(stream)
+}
+
+fn hls_transient_direct_log_context(
+    resource_id: &str,
+    resource_kind: TransientResourceKind,
+) -> HlsResourceFetchLogContext<'_> {
+    HlsResourceFetchLogContext {
+        kind: hls_transient_resource_fetch_kind(resource_kind),
+        source: HlsResourceFetchSource::Transient,
+        object_id: resource_id,
+        origin_url: None,
+    }
+}
+
+pub async fn record_successful_transient_segment_fetch(session: &HlsSessionHandle, resource: &TransientResourceRef) {
+    if resource.kind != TransientResourceKind::Segment {
+        return;
+    }
+    let mut session = session.write().await;
+    if let Some(reset_failures) = session.record_successful_segment_fetch() {
+        debug!(
+            "HLS segment temporary failure counter reset: session={} previous_failures={reset_failures}",
+            safe_proxy_session_id(&session.proxy_session_id)
+        );
+    }
+}
+
+pub async fn record_temporary_transient_segment_fetch_failure(
+    session: &HlsSessionHandle,
+    resource: &TransientResourceRef,
+    policy: &SegmentFetchPolicy,
+    now_ms: u64,
+) -> Option<HlsAccessLeaseChannelUnavailableReason> {
+    if resource.kind != TransientResourceKind::Segment {
+        return None;
+    }
+    let mut session = session.write().await;
+    let threshold = session.segment_temporary_failure_threshold(policy.permanent_failure_segment_threshold);
+    match session.record_temporary_segment_fetch_failure(
+        now_ms,
+        HlsSegmentFailureObject::Transient { resource_id: resource.id.0.clone() },
+        threshold,
+    ) {
+        HlsSegmentFailureTransition::StillRetryable { failures, threshold } => {
+            debug!(
+                "HLS segment temporary failure counted: session={} object={} failures={} threshold={}",
+                safe_proxy_session_id(&session.proxy_session_id),
+                resource.id.0,
+                failures,
+                threshold
+            );
+            None
+        }
+        HlsSegmentFailureTransition::BecamePermanentlyFailed { failures, threshold } => {
+            warn!(
+                "HLS segment temporary failure threshold reached: session={} failures={} threshold={}",
+                safe_proxy_session_id(&session.proxy_session_id),
+                failures,
+                threshold
+            );
+            session.invalidate_queued_origin_work();
+            Some(HlsAccessLeaseChannelUnavailableReason::TransientObjectTemporaryFailureThreshold {
+                failures,
+                threshold,
+            })
+        }
+    }
 }
 
 struct HlsTransientReadGuard {
@@ -480,9 +689,7 @@ struct HlsTransientMediaActivityGuard {
 }
 
 impl HlsTransientMediaActivityGuard {
-    fn new(marker: Option<HlsMediaActivityMarker>, _now_ms: u64) -> Self {
-        Self { marker }
-    }
+    fn new(marker: Option<HlsMediaActivityMarker>, _now_ms: u64) -> Self { Self { marker } }
 }
 
 impl Drop for HlsTransientMediaActivityGuard {
@@ -525,7 +732,9 @@ impl Drop for HlsTransientOriginIoGuard {
                 session.finish_origin_work(started_generation)
             };
             let refresh_reservation = if generation_valid {
-                session.read().await.should_refresh_origin_reservation(chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default())
+                session.read().await.should_refresh_origin_reservation(
+                    chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default(),
+                )
             } else {
                 false
             };
@@ -543,3 +752,994 @@ impl Drop for HlsTransientOriginIoGuard {
 }
 
 fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        super::resource_fetch::take_body_failure_log_attempts,
+        fetch_and_commit_hls_transient_origin_response_with_attempt_prepare,
+        fetch_hls_transient_origin_response_with_attempt_prepare, hls_transient_object_fetch_failure,
+        hls_transient_origin_response, record_temporary_transient_segment_fetch_failure,
+        HlsTransientCacheCommitContext, HlsTransientDecodedOriginResponse, HlsTransientDirectResponseContext,
+        HlsTransientDirectResponseFinalizer, HlsTransientDirectResponseLifecycleContext,
+        HlsTransientDirectStreamOutcome, HlsTransientObjectFetchFailure, HlsTransientOriginCacheFetchRequest,
+        HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard,
+    };
+    use crate::{
+        api::{
+            api_utils::should_compress_response,
+            model::{
+                HlsAccessLeaseId, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsProxyManager,
+                HlsSegmentCache, HlsSegmentFailureObject, HlsSegmentRepairManager, HlsSession, HlsSessionHandle,
+                HlsSessionKey, HlsSessionStore, ProxySessionId, SegmentFetchPolicy, TransientObjectCacheKey,
+                TransientObjectCacheStatus, TransientObjectFetchDecision, TransientResourceFile, TransientResourceKind,
+                TransientResourceRef,
+            },
+        },
+        model::HlsSegmentRepairConfig,
+    };
+    use async_compression::tokio::write::{BrotliEncoder, GzipEncoder, ZstdEncoder};
+    use axum::{
+        body::to_bytes,
+        http::{header, HeaderMap, HeaderValue, StatusCode},
+    };
+    use futures::FutureExt;
+    use shared::model::HlsSegmentRepairMode;
+    use std::{
+        io,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::{Mutex, RwLock},
+    };
+
+    struct TestOrigin {
+        base_url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for TestOrigin {
+        fn drop(&mut self) { self.task.abort(); }
+    }
+
+    #[test]
+    fn storage_full_transient_cache_failure_is_permanent() {
+        let error = HlsOriginResourceFetchError::cache_commit(&io::Error::from_raw_os_error(28));
+
+        assert!(matches!(
+            hls_transient_object_fetch_failure(&error),
+            HlsTransientObjectFetchFailure::Permanent { status: None }
+        ));
+    }
+
+    async fn spawn_test_origin(
+        status_line: &'static str,
+        response_headers: Vec<(&'static str, &'static str)>,
+        body: Vec<u8>,
+    ) -> TestOrigin {
+        spawn_test_origin_in_chunks(status_line, response_headers, vec![body], Duration::ZERO).await
+    }
+
+    async fn spawn_test_origin_in_chunks(
+        status_line: &'static str,
+        response_headers: Vec<(&'static str, &'static str)>,
+        body_chunks: Vec<Vec<u8>>,
+        inter_chunk_delay: Duration,
+    ) -> TestOrigin {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
+        let addr = listener.local_addr().expect("test origin address");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let task_requests = Arc::clone(&requests);
+        let body_chunks = Arc::new(body_chunks);
+        let content_length = body_chunks.iter().map(Vec::len).sum::<usize>();
+        let response_headers = Arc::new(response_headers);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let requests = Arc::clone(&task_requests);
+                let body_chunks = Arc::clone(&body_chunks);
+                let response_headers = Arc::clone(&response_headers);
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let mut chunk = [0_u8; 2048];
+                        let Ok(read) = socket.read(&mut chunk).await else {
+                            return;
+                        };
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                    }
+                    requests.lock().await.push(String::from_utf8_lossy(&request).to_string());
+                    let mut response = format!("HTTP/1.1 {status_line}\r\nContent-Length: {content_length}\r\n");
+                    for (name, value) in response_headers.iter() {
+                        response.push_str(name);
+                        response.push_str(": ");
+                        response.push_str(value);
+                        response.push_str("\r\n");
+                    }
+                    response.push_str("Connection: close\r\n\r\n");
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    for (index, chunk) in body_chunks.iter().enumerate() {
+                        if index > 0 && !inter_chunk_delay.is_zero() {
+                            tokio::time::sleep(inter_chunk_delay).await;
+                        }
+                        if socket.write_all(chunk).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+
+        TestOrigin { base_url: format!("http://{addr}"), requests, task }
+    }
+
+    async fn spawn_retry_then_body_origin(
+        response_headers: Vec<(&'static str, &'static str)>,
+        body: Vec<u8>,
+    ) -> TestOrigin {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
+        let addr = listener.local_addr().expect("test origin address");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let task_requests = Arc::clone(&requests);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let task_attempts = Arc::clone(&attempts);
+        let body = Arc::new(body);
+        let response_headers = Arc::new(response_headers);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let requests = Arc::clone(&task_requests);
+                let attempts = Arc::clone(&task_attempts);
+                let body = Arc::clone(&body);
+                let response_headers = Arc::clone(&response_headers);
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        let mut chunk = [0_u8; 2048];
+                        let Ok(read) = socket.read(&mut chunk).await else {
+                            return;
+                        };
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                    }
+                    requests.lock().await.push(String::from_utf8_lossy(&request).to_string());
+                    if attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+                        return;
+                    }
+                    let mut response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n", body.len());
+                    for (name, value) in response_headers.iter() {
+                        response.push_str(name);
+                        response.push_str(": ");
+                        response.push_str(value);
+                        response.push_str("\r\n");
+                    }
+                    response.push_str("Connection: close\r\n\r\n");
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.write_all(&body).await;
+                });
+            }
+        });
+
+        TestOrigin { base_url: format!("http://{addr}"), requests, task }
+    }
+
+    async fn spawn_zstd_origin(body: Vec<u8>) -> TestOrigin {
+        spawn_test_origin(
+            "200 OK",
+            vec![("Content-Encoding", "zstd"), ("Content-Type", "application/octet-stream")],
+            body,
+        )
+        .await
+    }
+
+    async fn gzip_encode(body: &[u8]) -> Vec<u8> {
+        let mut encoder = GzipEncoder::new(Vec::new());
+        encoder.write_all(body).await.expect("test body encodes");
+        encoder.shutdown().await.expect("test encoder finishes");
+        encoder.into_inner()
+    }
+
+    async fn brotli_encode(body: &[u8]) -> Vec<u8> {
+        let mut encoder = BrotliEncoder::new(Vec::new());
+        encoder.write_all(body).await.expect("test body encodes");
+        encoder.shutdown().await.expect("test encoder finishes");
+        encoder.into_inner()
+    }
+
+    async fn zstd_encode(body: &[u8]) -> Vec<u8> {
+        let mut encoder = ZstdEncoder::new(Vec::new());
+        encoder.write_all(body).await.expect("test body encodes");
+        encoder.shutdown().await.expect("test encoder finishes");
+        encoder.into_inner()
+    }
+
+    async fn fetch_direct_decoded(
+        origin_url: String,
+        resource_kind: TransientResourceKind,
+        range_header: Option<HeaderValue>,
+    ) -> Result<HlsTransientDecodedOriginResponse<Option<HlsTransientOriginIoGuard>>, HlsOriginResourceFetchError> {
+        fetch_direct_decoded_with_timeout(origin_url, resource_kind, range_header, 1_000).await
+    }
+
+    async fn fetch_direct_decoded_with_timeout(
+        origin_url: String,
+        resource_kind: TransientResourceKind,
+        range_header: Option<HeaderValue>,
+        origin_segment_timeout_ms: u64,
+    ) -> Result<HlsTransientDecodedOriginResponse<Option<HlsTransientOriginIoGuard>>, HlsOriginResourceFetchError> {
+        let resource = TransientResourceRef::new(
+            resource_kind,
+            origin_url,
+            b"rewrite-secret",
+            10,
+            60_000,
+            Some("bin".to_string()),
+        );
+        let request = HlsTransientOriginFetchRequest {
+            resolved_origin_uri: resource.resolved_origin_uri.clone(),
+            origin_headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
+            range_header,
+            resource_file: TransientResourceFile { resource_id: resource.id, extension: "bin".to_string() },
+            resource_kind,
+            clients: HlsOriginResourceClients {
+                client: reqwest::Client::new(),
+                no_redirect_client: reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .expect("no-redirect client builds"),
+                use_manual_redirects: false,
+            },
+            policy: SegmentFetchPolicy {
+                origin_segment_timeout_ms,
+                retry_delays_ms: [0; 5],
+                retry_jitter_max_ms: 0,
+                ..SegmentFetchPolicy::default()
+            },
+            session_log_id: "direct-transient-content-coding-test".to_string(),
+        };
+        fetch_hls_transient_origin_response_with_attempt_prepare(request, |_| async { Ok(None) }.boxed()).await
+    }
+
+    fn direct_client_response(
+        response: HlsTransientDecodedOriginResponse<Option<HlsTransientOriginIoGuard>>,
+        resource_kind: TransientResourceKind,
+    ) -> axum::response::Response {
+        TestDirectResponseFixture::new(resource_kind, "http://127.0.0.1/origin").response(response)
+    }
+
+    struct TestDirectResponseFixture {
+        hls_proxy: Arc<HlsProxyManager>,
+        session: HlsSessionHandle,
+        resource: TransientResourceRef,
+        policy: SegmentFetchPolicy,
+        proxy_session_id: ProxySessionId,
+    }
+
+    impl TestDirectResponseFixture {
+        fn new(resource_kind: TransientResourceKind, origin_url: impl Into<String>) -> Self {
+            let resource = TransientResourceRef::new(
+                resource_kind,
+                origin_url,
+                b"rewrite-secret",
+                10,
+                60_000,
+                Some("bin".to_string()),
+            );
+            let policy =
+                SegmentFetchPolicy { retry_delays_ms: [0; 5], retry_jitter_max_ms: 0, ..SegmentFetchPolicy::default() };
+            let session = HlsSession::new(HlsSessionKey::new(1, "direct-test"), b"rewrite-secret", 10);
+            let proxy_session_id = session.proxy_session_id.clone();
+            Self {
+                hls_proxy: Arc::new(HlsProxyManager::new()),
+                session: Arc::new(RwLock::new(session)),
+                resource,
+                policy,
+                proxy_session_id,
+            }
+        }
+
+        fn response(
+            &self,
+            response: HlsTransientDecodedOriginResponse<Option<HlsTransientOriginIoGuard>>,
+        ) -> axum::response::Response {
+            hls_transient_origin_response(response, self.response_context())
+        }
+
+        fn response_context(&self) -> HlsTransientDirectResponseContext {
+            HlsTransientDirectResponseContext {
+                hls_proxy: Arc::clone(&self.hls_proxy),
+                session: Arc::clone(&self.session),
+                resource: self.resource.clone(),
+                policy: self.policy.clone(),
+                media_activity_marker: None,
+                now_ms: 10,
+                proxy_session_id: self.proxy_session_id.clone(),
+            }
+        }
+
+        fn lifecycle_context(&self) -> HlsTransientDirectResponseLifecycleContext {
+            HlsTransientDirectResponseLifecycleContext {
+                hls_proxy: Arc::clone(&self.hls_proxy),
+                session: Arc::clone(&self.session),
+                resource: self.resource.clone(),
+                policy: self.policy.clone(),
+                proxy_session_id: self.proxy_session_id.clone(),
+            }
+        }
+
+        async fn seed_segment_failure(&self) {
+            assert!(record_temporary_transient_segment_fetch_failure(&self.session, &self.resource, &self.policy, 9)
+                .await
+                .is_none());
+        }
+
+        async fn segment_failure_count(&self) -> u32 {
+            self.session.read().await.segment_failure_tracker.consecutive_temporary_failures
+        }
+
+        async fn wait_for_segment_failure_count(&self, expected: u32) {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if self.segment_failure_count().await == expected {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("segment failure state reaches expected value");
+        }
+
+        async fn last_segment_failure(&self) -> Option<HlsSegmentFailureObject> {
+            self.session.read().await.segment_failure_tracker.last_failed_object.clone()
+        }
+    }
+
+    struct TestTransientCacheFixture {
+        _temp_dir: tempfile::TempDir,
+        segment_cache: Arc<HlsSegmentCache>,
+        segment_repair: Arc<HlsSegmentRepairManager>,
+        session: HlsSessionHandle,
+        proxy_session_id: ProxySessionId,
+        resource: TransientResourceRef,
+        resource_file: TransientResourceFile,
+        cache_key: TransientObjectCacheKey,
+    }
+
+    impl TestTransientCacheFixture {
+        async fn new(origin_url: String) -> Self {
+            let resource = TransientResourceRef::new(
+                TransientResourceKind::Segment,
+                origin_url,
+                b"rewrite-secret",
+                10,
+                60_000,
+                Some("ts".to_string()),
+            );
+            let resource_file = TransientResourceFile { resource_id: resource.id.clone(), extension: "ts".to_string() };
+            let store = HlsSessionStore::new();
+            let session = store.get_or_create_session(HlsSessionKey::new(1, "1"), b"rewrite-secret", 10).await;
+            let proxy_session_id = session.read().await.proxy_session_id.clone();
+            let cache_key = {
+                let mut session = session.write().await;
+                match session.transient.begin_object_fetch(&proxy_session_id, &resource, "ts", 10, 60_000) {
+                    TransientObjectFetchDecision::Fetch(cache_key) => cache_key,
+                    TransientObjectFetchDecision::Ready | TransientObjectFetchDecision::Wait(_) => {
+                        panic!("new transient resource should start a cache fetch")
+                    }
+                }
+            };
+            let temp_dir = tempfile::tempdir().expect("tempdir");
+            let segment_cache = Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path()));
+            let segment_repair = Arc::new(HlsSegmentRepairManager::new(HlsSegmentRepairConfig {
+                max_level: HlsSegmentRepairMode::Off,
+                apply_to_first_segments: 1,
+                max_parallel_repairs: 1,
+                ..Default::default()
+            }));
+            Self {
+                _temp_dir: temp_dir,
+                segment_cache,
+                segment_repair,
+                session,
+                proxy_session_id,
+                resource,
+                resource_file,
+                cache_key,
+            }
+        }
+
+        fn request(&self, range_header: Option<HeaderValue>) -> HlsTransientOriginCacheFetchRequest {
+            HlsTransientOriginCacheFetchRequest {
+                fetch: HlsTransientOriginFetchRequest {
+                    resolved_origin_uri: self.resource.resolved_origin_uri.clone(),
+                    origin_headers: HeaderMap::new(),
+                    origin_provider_session_headers: HeaderMap::new(),
+                    range_header,
+                    resource_file: self.resource_file.clone(),
+                    resource_kind: self.resource.kind,
+                    clients: HlsOriginResourceClients {
+                        client: reqwest::Client::new(),
+                        no_redirect_client: reqwest::Client::builder()
+                            .redirect(reqwest::redirect::Policy::none())
+                            .build()
+                            .expect("no-redirect client builds"),
+                        use_manual_redirects: false,
+                    },
+                    policy: SegmentFetchPolicy {
+                        origin_segment_timeout_ms: 1_000,
+                        retry_delays_ms: [0; 5],
+                        retry_jitter_max_ms: 0,
+                        ..SegmentFetchPolicy::default()
+                    },
+                    session_log_id: self.proxy_session_id.0.clone(),
+                },
+                commit: HlsTransientCacheCommitContext {
+                    segment_cache: Arc::clone(&self.segment_cache),
+                    segment_repair: Arc::clone(&self.segment_repair),
+                    session: Arc::clone(&self.session),
+                    access_lease_id: HlsAccessLeaseId("transient-content-coding-test".to_string()),
+                    resource: self.resource.clone(),
+                    resource_file: self.resource_file.clone(),
+                    cache_key: self.cache_key.clone(),
+                    cache_duration_ms: 60_000,
+                },
+            }
+        }
+    }
+
+    struct DropCounter(Arc<AtomicUsize>);
+
+    impl Drop for DropCounter {
+        fn drop(&mut self) { self.0.fetch_add(1, Ordering::Relaxed); }
+    }
+
+    #[tokio::test]
+    async fn direct_key_decodes_declared_gzip_brotli_and_zstd_to_exact_identity_bytes() {
+        let identity = b"\x00\xffdirect-key-identity\x10\x80";
+        let encoded_bodies = [
+            ("gzip", gzip_encode(identity).await),
+            ("br", brotli_encode(identity).await),
+            ("zstd", zstd_encode(identity).await),
+        ];
+
+        for (encoding, encoded) in encoded_bodies {
+            let origin = spawn_test_origin(
+                "200 OK",
+                vec![("Content-Encoding", encoding), ("Content-Type", "application/octet-stream")],
+                encoded,
+            )
+            .await;
+            let decoded =
+                fetch_direct_decoded(format!("{}/key.bin", origin.base_url), TransientResourceKind::Key, None)
+                    .await
+                    .expect("declared direct key coding decodes");
+            let response = direct_client_response(decoded, TransientResourceKind::Key);
+
+            assert!(!should_compress_response(&response));
+            assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+            assert!(response.headers().get(header::CONTENT_LENGTH).is_none());
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.expect("decoded key body streams"),
+                identity.as_slice()
+            );
+
+            let requests = origin.requests.lock().await;
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].to_ascii_lowercase().contains("accept-encoding: identity"));
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_map_and_part_or_other_resources_decode_to_identity() {
+        let identity = b"shared-direct-map-part-other";
+        for (resource_kind, encoding, encoded) in [
+            (TransientResourceKind::Map, "gzip", gzip_encode(identity).await),
+            (TransientResourceKind::Part, "br", brotli_encode(identity).await),
+            (TransientResourceKind::Other, "zstd", zstd_encode(identity).await),
+        ] {
+            let origin = spawn_test_origin(
+                "200 OK",
+                vec![("Content-Encoding", encoding), ("Content-Type", "application/octet-stream")],
+                encoded,
+            )
+            .await;
+            let decoded = fetch_direct_decoded(format!("{}/object.bin", origin.base_url), resource_kind, None)
+                .await
+                .expect("declared direct resource coding decodes");
+            let response = direct_client_response(decoded, resource_kind);
+
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.expect("decoded resource body streams"),
+                identity.as_slice()
+            );
+            assert_eq!(origin.requests.lock().await.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_binary_declared_only_leaves_headerless_gzip_magic_unchanged() {
+        let identity = b"headerless-gzip-representation";
+        let headerless_encoded = gzip_encode(identity).await;
+        let random_magic = vec![0x1f, 0x8b, 0x11, 0x00, 0xff, 0x42, 0x7e];
+
+        for body in [headerless_encoded, random_magic] {
+            let origin =
+                spawn_test_origin("200 OK", vec![("Content-Type", "application/octet-stream")], body.clone()).await;
+            let decoded =
+                fetch_direct_decoded(format!("{}/key.bin", origin.base_url), TransientResourceKind::Key, None)
+                    .await
+                    .expect("headerless binary is not inspected");
+            let response = direct_client_response(decoded, TransientResourceKind::Key);
+
+            assert_eq!(to_bytes(response.into_body(), usize::MAX).await.expect("headerless binary streams"), body);
+            assert_eq!(origin.requests.lock().await.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn decoded_direct_response_normalizes_headers_and_disables_tower_compression() {
+        let identity = b"normalized-direct-response";
+        let encoded = gzip_encode(identity).await;
+        let origin = spawn_test_origin(
+            "200 OK",
+            vec![
+                ("Content-Encoding", "gzip"),
+                ("Content-Type", "application/octet-stream"),
+                ("Content-Range", "bytes 0-9/10"),
+                ("Accept-Ranges", "bytes"),
+                ("Cache-Control", "private, max-age=5"),
+                ("ETag", "strong-origin-representation"),
+                ("Last-Modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+                ("Set-Cookie", "provider_session=secret"),
+                ("X-Provider-Secret", "do-not-forward"),
+            ],
+            encoded,
+        )
+        .await;
+        let decoded = fetch_direct_decoded(format!("{}/key.bin", origin.base_url), TransientResourceKind::Key, None)
+            .await
+            .expect("direct response decodes");
+        let response = direct_client_response(decoded, TransientResourceKind::Key);
+        let headers = response.headers();
+
+        assert!(!should_compress_response(&response));
+        for removed in [
+            header::CONTENT_ENCODING,
+            header::CONTENT_LENGTH,
+            header::CONTENT_RANGE,
+            header::ACCEPT_RANGES,
+            header::ETAG,
+            header::TRANSFER_ENCODING,
+            header::SET_COOKIE,
+        ] {
+            assert!(headers.get(&removed).is_none(), "{removed} must not describe the decoded response");
+        }
+        assert!(headers.get("x-provider-secret").is_none());
+        assert_eq!(headers.get(header::CONTENT_TYPE).expect("content type"), "application/octet-stream");
+        assert_eq!(headers.get(header::CACHE_CONTROL).expect("cache control"), "private, max-age=5");
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.expect("normalized body streams"),
+            identity.as_slice()
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_encoded_partial_content_is_rejected_before_client_response() {
+        let encoded = zstd_encode(b"encoded-range").await;
+        let origin = spawn_test_origin(
+            "206 Partial Content",
+            vec![
+                ("Content-Encoding", "zstd"),
+                ("Content-Type", "application/octet-stream"),
+                ("Content-Range", "bytes 2-5/16"),
+            ],
+            encoded,
+        )
+        .await;
+
+        let result = fetch_direct_decoded(
+            format!("{}/key.bin", origin.base_url),
+            TransientResourceKind::Key,
+            Some(HeaderValue::from_static("bytes=2-5")),
+        )
+        .await;
+
+        assert!(matches!(result, Err(HlsOriginResourceFetchError::ContentCoding(_))));
+        let requests = origin.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        let request = requests[0].to_ascii_lowercase();
+        assert!(request.contains("accept-encoding: identity"));
+        assert!(request.contains("range: bytes=2-5"));
+    }
+
+    #[tokio::test]
+    async fn direct_identity_partial_content_preserves_consistent_range_headers() {
+        let identity = b"part";
+        let origin = spawn_test_origin(
+            "206 Partial Content",
+            vec![
+                ("Content-Type", "application/octet-stream"),
+                ("Content-Range", "bytes 2-5/16"),
+                ("Accept-Ranges", "bytes"),
+            ],
+            identity.to_vec(),
+        )
+        .await;
+        let decoded = fetch_direct_decoded(
+            format!("{}/key.bin", origin.base_url),
+            TransientResourceKind::Key,
+            Some(HeaderValue::from_static("bytes=2-5")),
+        )
+        .await
+        .expect("identity partial response is allowed");
+        let response = direct_client_response(decoded, TransientResourceKind::Key);
+
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers().get(header::CONTENT_LENGTH).expect("content length"), "4");
+        assert_eq!(response.headers().get(header::CONTENT_RANGE).expect("content range"), "bytes 2-5/16");
+        assert_eq!(response.headers().get(header::ACCEPT_RANGES).expect("accept ranges"), "bytes");
+        assert!(!should_compress_response(&response));
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.expect("identity partial body streams"),
+            identity.as_slice()
+        );
+        assert_eq!(origin.requests.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_fetch_propagates_retry_attempt_and_identity_to_client_response() {
+        let identity = b"successful-second-attempt";
+        let origin =
+            spawn_retry_then_body_origin(vec![("Content-Type", "application/octet-stream")], identity.to_vec()).await;
+        let origin_url = format!("{}/segment.ts", origin.base_url);
+        let decoded = fetch_direct_decoded(origin_url.clone(), TransientResourceKind::Segment, None)
+            .await
+            .expect("second origin attempt succeeds");
+
+        assert_eq!(decoded.attempt.attempt_index, 1);
+        assert_eq!(decoded.attempt.attempts, 5);
+
+        let fixture = TestDirectResponseFixture::new(TransientResourceKind::Segment, origin_url);
+        let response = fixture.response(decoded);
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.expect("retried response body streams"),
+            identity.as_slice()
+        );
+
+        let requests = origin.requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.to_ascii_lowercase().contains("accept-encoding: identity")));
+    }
+
+    #[tokio::test]
+    async fn direct_segment_success_resets_failure_state_only_after_clean_eof() {
+        let identity = b"complete-segment";
+        let origin =
+            spawn_test_origin("200 OK", vec![("Content-Type", "application/octet-stream")], identity.to_vec()).await;
+        let origin_url = format!("{}/segment.ts", origin.base_url);
+        let fixture = TestDirectResponseFixture::new(TransientResourceKind::Segment, origin_url.clone());
+        fixture.seed_segment_failure().await;
+        let decoded = fetch_direct_decoded(origin_url, TransientResourceKind::Segment, None)
+            .await
+            .expect("direct response setup succeeds");
+        let response = fixture.response(decoded);
+
+        assert_eq!(fixture.segment_failure_count().await, 1, "headers alone must not report body success");
+        assert_eq!(fixture.resource.access.active_readers(), 1);
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.expect("complete segment streams"),
+            identity.as_slice()
+        );
+        fixture.wait_for_segment_failure_count(0).await;
+        assert_eq!(fixture.resource.access.active_readers(), 0);
+    }
+
+    #[tokio::test]
+    async fn direct_terminal_transition_survives_dropped_completion_waiter() {
+        let fixture =
+            TestDirectResponseFixture::new(TransientResourceKind::Segment, "http://127.0.0.1/cancelled-body-poll.ts");
+        fixture.seed_segment_failure().await;
+        let session_lock = fixture.session.write().await;
+        let mut finalizer = HlsTransientDirectResponseFinalizer::new(fixture.lifecycle_context());
+
+        let transition = finalizer
+            .begin_finish(HlsTransientDirectStreamOutcome::CleanEof)
+            .expect("clean EOF starts an owned transition");
+        drop(finalizer);
+        drop(transition);
+        drop(session_lock);
+
+        fixture.wait_for_segment_failure_count(0).await;
+    }
+
+    #[tokio::test]
+    async fn direct_segment_decoder_failure_after_retry_uses_selected_attempt_once() {
+        let _ = take_body_failure_log_attempts();
+        let mut truncated = gzip_encode(b"decoder failure after response headers").await;
+        truncated.truncate(truncated.len().saturating_sub(8));
+        let origin = spawn_retry_then_body_origin(
+            vec![("Content-Encoding", "gzip"), ("Content-Type", "application/octet-stream")],
+            truncated,
+        )
+        .await;
+        let origin_url = format!("{}/segment.ts", origin.base_url);
+        let fixture = TestDirectResponseFixture::new(TransientResourceKind::Segment, origin_url.clone());
+        let decoded = fetch_direct_decoded(origin_url, TransientResourceKind::Segment, None)
+            .await
+            .expect("decoder setup succeeds before streaming");
+        assert_eq!(decoded.attempt.attempt_index, 1);
+        assert_eq!(decoded.attempt.attempts, 5);
+        let response = fixture.response(decoded);
+
+        assert!(to_bytes(response.into_body(), usize::MAX).await.is_err());
+        fixture.wait_for_segment_failure_count(1).await;
+        assert_eq!(
+            fixture.last_segment_failure().await,
+            Some(HlsSegmentFailureObject::Transient { resource_id: fixture.resource.id.0.clone() })
+        );
+        tokio::task::yield_now().await;
+        assert_eq!(fixture.segment_failure_count().await, 1, "terminal body failure must not finalize twice");
+        assert_eq!(fixture.resource.access.active_readers(), 0);
+        assert_eq!(origin.requests.lock().await.len(), 2, "streaming failure must not trigger a hidden retry");
+        assert_eq!(
+            take_body_failure_log_attempts(),
+            vec![(1, 5)],
+            "test hook intentionally records the zero-based raw index of the selected second attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_non_segment_finalizers_do_not_start_lifecycle_tasks() {
+        for kind in [
+            TransientResourceKind::Key,
+            TransientResourceKind::Map,
+            TransientResourceKind::Part,
+            TransientResourceKind::Other,
+        ] {
+            for outcome in
+                [HlsTransientDirectStreamOutcome::CleanEof, HlsTransientDirectStreamOutcome::OriginBodyFailure]
+            {
+                let fixture = TestDirectResponseFixture::new(kind, "http://127.0.0.1/non-segment.bin");
+                let mut finalizer = HlsTransientDirectResponseFinalizer::new(fixture.lifecycle_context());
+
+                assert!(finalizer.begin_finish(outcome).is_none(), "{kind:?} must not start a segment lifecycle task");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_segment_origin_idle_timeout_is_counted_exactly_once() {
+        let origin = spawn_test_origin_in_chunks(
+            "200 OK",
+            vec![("Content-Type", "application/octet-stream")],
+            vec![b"first".to_vec(), b"late".to_vec()],
+            Duration::from_millis(200),
+        )
+        .await;
+        let origin_url = format!("{}/segment.ts", origin.base_url);
+        let fixture = TestDirectResponseFixture::new(TransientResourceKind::Segment, origin_url.clone());
+        let decoded = fetch_direct_decoded_with_timeout(origin_url, TransientResourceKind::Segment, None, 50)
+            .await
+            .expect("direct response setup succeeds");
+        let response = fixture.response(decoded);
+
+        assert!(to_bytes(response.into_body(), usize::MAX).await.is_err());
+        fixture.wait_for_segment_failure_count(1).await;
+        tokio::task::yield_now().await;
+        assert_eq!(fixture.segment_failure_count().await, 1);
+        assert_eq!(fixture.resource.access.active_readers(), 0);
+    }
+
+    #[tokio::test]
+    async fn dropping_direct_segment_body_is_client_abort_without_state_transition() {
+        let _ = take_body_failure_log_attempts();
+        let origin = spawn_test_origin(
+            "200 OK",
+            vec![("Content-Type", "application/octet-stream")],
+            b"unconsumed-segment".to_vec(),
+        )
+        .await;
+        let origin_url = format!("{}/segment.ts", origin.base_url);
+        let fixture = TestDirectResponseFixture::new(TransientResourceKind::Segment, origin_url.clone());
+        fixture.seed_segment_failure().await;
+        let decoded = fetch_direct_decoded(origin_url, TransientResourceKind::Segment, None)
+            .await
+            .expect("direct response setup succeeds");
+        let response = fixture.response(decoded);
+        assert_eq!(fixture.resource.access.active_readers(), 1);
+
+        drop(response);
+
+        assert_eq!(fixture.segment_failure_count().await, 1);
+        assert_eq!(fixture.resource.access.active_readers(), 0);
+        assert_eq!(origin.requests.lock().await.len(), 1);
+        assert!(take_body_failure_log_attempts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_non_segment_body_failures_are_failure_tracker_neutral() {
+        for kind in [
+            TransientResourceKind::Key,
+            TransientResourceKind::Map,
+            TransientResourceKind::Part,
+            TransientResourceKind::Other,
+        ] {
+            let mut truncated = gzip_encode(b"non-segment decoder failure").await;
+            truncated.truncate(truncated.len().saturating_sub(8));
+            let origin = spawn_test_origin(
+                "200 OK",
+                vec![("Content-Encoding", "gzip"), ("Content-Type", "application/octet-stream")],
+                truncated,
+            )
+            .await;
+            let origin_url = format!("{}/object.bin", origin.base_url);
+            let fixture = TestDirectResponseFixture::new(kind, origin_url.clone());
+            let decoded =
+                fetch_direct_decoded(origin_url, kind, None).await.expect("decoder setup succeeds before streaming");
+            let response = fixture.response(decoded);
+
+            assert!(to_bytes(response.into_body(), usize::MAX).await.is_err());
+            assert_eq!(fixture.segment_failure_count().await, 0, "{kind:?} must not affect segment failure state");
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_stream_decoder_failure_aborts_body_without_origin_retry() {
+        let mut truncated = gzip_encode(b"decoder failure after response headers").await;
+        truncated.truncate(truncated.len().saturating_sub(8));
+        let origin = spawn_test_origin(
+            "200 OK",
+            vec![("Content-Encoding", "gzip"), ("Content-Type", "application/octet-stream")],
+            truncated,
+        )
+        .await;
+        let decoded = fetch_direct_decoded(format!("{}/key.bin", origin.base_url), TransientResourceKind::Key, None)
+            .await
+            .expect("decoder setup succeeds before streaming");
+        let response = direct_client_response(decoded, TransientResourceKind::Key);
+
+        assert!(to_bytes(response.into_body(), usize::MAX).await.is_err());
+        assert_eq!(origin.requests.lock().await.len(), 1, "streaming errors must not trigger a hidden retry");
+    }
+
+    #[tokio::test]
+    async fn direct_stream_refreshes_origin_body_idle_deadline_after_each_chunk() {
+        const BODY_IDLE_TIMEOUT_MS: u64 = 500;
+        let chunks = [b"slow-".to_vec(), b"but-".to_vec(), b"continuous-".to_vec(), b"body".to_vec()];
+        let expected = chunks.concat();
+        let origin = spawn_test_origin_in_chunks(
+            "200 OK",
+            vec![("Content-Type", "application/octet-stream")],
+            chunks.into(),
+            Duration::from_millis(200),
+        )
+        .await;
+        let decoded = fetch_direct_decoded_with_timeout(
+            format!("{}/key.bin", origin.base_url),
+            TransientResourceKind::Key,
+            None,
+            BODY_IDLE_TIMEOUT_MS,
+        )
+        .await
+        .expect("direct response setup succeeds");
+        let response = direct_client_response(decoded, TransientResourceKind::Key);
+
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.expect("progressing body outlives total timeout"),
+            expected
+        );
+        assert_eq!(origin.requests.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cacheable_transient_rejects_identity_partial_response_before_commit_and_cleans_guard() {
+        let origin = spawn_test_origin(
+            "206 Partial Content",
+            vec![("Content-Type", "video/mp2t"), ("Content-Range", "bytes 0-3/10")],
+            b"part".to_vec(),
+        )
+        .await;
+        let fixture = TestTransientCacheFixture::new(format!("{}/partial.ts", origin.base_url)).await;
+        let dropped_guards = Arc::new(AtomicUsize::new(0));
+        let dropped_guards_for_prepare = Arc::clone(&dropped_guards);
+
+        let result =
+            fetch_and_commit_hls_transient_origin_response_with_attempt_prepare(fixture.request(None), move |_| {
+                let dropped_guards = Arc::clone(&dropped_guards_for_prepare);
+                async move { Ok(DropCounter(dropped_guards)) }.boxed()
+            })
+            .await;
+
+        assert!(matches!(result, Err(HlsOriginResourceFetchError::UnexpectedByteRangeStatus)));
+        assert_eq!(dropped_guards.load(Ordering::Relaxed), 1);
+        assert!(fixture.segment_cache.metadata(&fixture.cache_key).await.expect("cache metadata reads").is_none());
+        assert!(!fixture.segment_cache.has_active_temp_files().await);
+        assert_eq!(std::fs::read_dir(fixture._temp_dir.path()).expect("cache root reads").count(), 0);
+        let session = fixture.session.read().await;
+        let entry = session.transient.object_cache.get(&fixture.cache_key).expect("fetching cache entry remains");
+        assert!(!matches!(entry.status, TransientObjectCacheStatus::Ready { .. }));
+        drop(session);
+
+        let requests = origin.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        let request = requests[0].to_ascii_lowercase();
+        assert!(request.contains("accept-encoding: identity"));
+        assert!(!request.contains("\r\nrange:"));
+    }
+
+    #[tokio::test]
+    async fn cacheable_transient_without_range_decodes_to_identity_before_cache_and_range_reads() {
+        let ciphertext =
+            vec![0x00, 0xff, 0x92, 0x10, 0x7e, 0x33, 0xc4, 0x81, 0xa8, 0x09, 0x5d, 0xe2, 0x44, 0x17, 0xb0, 0x6f];
+        assert!(std::str::from_utf8(&ciphertext).is_err());
+        let encoded = zstd_encode(&ciphertext).await;
+        assert_ne!(encoded, ciphertext);
+        let origin = spawn_zstd_origin(encoded).await;
+        let fixture = TestTransientCacheFixture::new(format!("{}/cipher.ts", origin.base_url)).await;
+
+        fetch_and_commit_hls_transient_origin_response_with_attempt_prepare(fixture.request(None), |_| {
+            async { Ok(()) }.boxed()
+        })
+        .await
+        .expect("encoded transient cache fetch succeeds");
+
+        let metadata = fixture
+            .segment_cache
+            .metadata(&fixture.cache_key)
+            .await
+            .expect("cache metadata reads")
+            .expect("decoded object is cached");
+        assert_eq!(metadata.size, ciphertext.len() as u64);
+        assert_eq!(tokio::fs::read(&metadata.path).await.expect("cache body reads"), ciphertext);
+        let mut range = Vec::new();
+        fixture
+            .segment_cache
+            .open_range(&fixture.cache_key, 5)
+            .await
+            .expect("decoded cache range opens")
+            .take(4)
+            .read_to_end(&mut range)
+            .await
+            .expect("decoded cache range reads");
+        assert_eq!(range, ciphertext[5..9]);
+
+        let session = fixture.session.read().await;
+        let entry = session.transient.object_cache.get(&fixture.cache_key).expect("transient cache entry");
+        assert!(matches!(
+            entry.status,
+            TransientObjectCacheStatus::Ready { content_length, .. }
+                if content_length == ciphertext.len() as u64
+        ));
+        assert_eq!(entry.content_type, "application/octet-stream");
+        drop(session);
+
+        let requests = origin.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        let request = requests[0].to_ascii_lowercase();
+        assert!(request.contains("accept-encoding: identity"));
+        assert!(!request.contains("\r\nrange:"));
+    }
+}

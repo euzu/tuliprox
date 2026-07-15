@@ -1,6 +1,6 @@
 use super::{cache::MapCacheKey, ids::ProxySessionId, session::HlsSession, timeline::CacheAccessState};
-use axum::http::StatusCode;
 use crate::processing::parser::hls::origin_manifest::ParsedByteRange;
+use axum::http::StatusCode;
 use std::{
     fmt,
     hash::{Hash, Hasher},

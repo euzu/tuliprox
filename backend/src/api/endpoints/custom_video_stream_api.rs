@@ -3,7 +3,7 @@ use crate::{
         api_utils::{create_api_proxy_user, mark_response_as_uncompressed},
         endpoints::hls_api::{
             build_virtual_hls_entry_path, hls_panel_provisioning_poll_manifest_response,
-            resolve_hls_virtual_input_for_target,
+            resolve_hls_virtual_source_for_target,
         },
         model::{
             create_custom_video_stream_response, hls_custom_video_manifest_response_with_virtual_id,
@@ -410,19 +410,20 @@ async fn cvs_provisioning_manifest_api(
         Err(response) => return *response,
     };
 
-    let Some(input) = resolve_hls_virtual_input_for_target(&app_state, &target, query.id).await else {
-        return StatusCode::NOT_FOUND.into_response();
+    let source = match resolve_hls_virtual_source_for_target(&app_state, &target, query.id).await {
+        Ok(source) => source,
+        Err(status) => return status.into_response(),
     };
 
-    let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, query.id);
+    let original_hls_entry_path = build_virtual_hls_entry_path(&target, &source.input, &user, query.id);
     let server_path = app_state.app_config.get_user_server_info(&user).and_then(|server| server.path);
     hls_panel_provisioning_poll_manifest_response(
         &app_state,
         &fingerprint,
         &user,
         &target,
-        &input,
-        query.id,
+        &source.input,
+        &source.stream_identity,
         &original_hls_entry_path,
         server_path.as_deref(),
     )

@@ -335,6 +335,7 @@ mod tests {
             input_name: "input".intern(),
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: "52568".intern(),
         };
 
         let value = to_human_readable_json_value(&item).expect("dump value should serialize");

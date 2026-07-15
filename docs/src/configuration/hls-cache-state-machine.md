@@ -23,11 +23,20 @@ For an operator-friendly introduction, see [Shared HLS Sessions](./shared-hls-se
 
 | Identifier | Scope | Meaning |
 | :--- | :--- | :--- |
-| `HlsSessionKey` | Shared content | Stable tuple of `input_id`, HLS kind, and `stream_ref`. It does not include the origin URL, provider URL, username, or password. |
+| `HlsSessionKey` | Shared content | Stable tuple of `input_id`, the literal HLS kind, and `stream_ref`, where `stream_ref` is the unchanged original `input_stream_id`. |
 | `proxy_session_id` | Shared public URL identity | Opaque token derived from `HlsSessionKey` and the configured secret. It identifies the shared content session in canonical URLs. |
 | `HlsPlaybackFamilyKey` | User/client family | Tuple of Tuliprox username and client fingerprint key. It groups playback attempts by user and client. |
 | `hls_access_lease_id` | Per playback URL identity | Random lookup key for one server-side `HlsAccessLease`. It is not a shared-content identity. |
 | HLS cache user session token | Per playback admission | Internal Tuliprox user-session token associated with an access lease. |
+
+The canonical internal key is `input:<input_id>|hls|<input_stream_id>`. The input stream ID is captured from the input
+playlist item before target mapping: the provider/origin stream ID as a decimal string for Xtream, or the parser-resolved
+string ID for M3U. The latter can be alphanumeric or a stable URL-derived hash. `target_id`, `virtual_id`, origin URLs,
+credentials, and provider mirrors do not participate in session identity. Therefore, different targets reuse one
+`HlsSession` when both `input_id` and `input_stream_id` match, while their access leases remain separate.
+
+The runtime assumes that `(input_id, input_stream_id)` uniquely identifies one input stream. A missing input stream ID is
+not replaced with `virtual_id`; the Shared HLS entry fails instead of joining an ambiguously identified session.
 
 The public canonical paths are:
 

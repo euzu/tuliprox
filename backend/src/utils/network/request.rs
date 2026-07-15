@@ -1,64 +1,114 @@
+pub use super::DynReader;
 use crate::{
-    api::model::{persist_pipe_stream::tee_dyn_reader, AppState, STREAM_IDLE_TIMEOUT},
+    api::model::{
+        log_hls_origin_content_coding, persist_pipe_stream::tee_dyn_reader, AppState, HlsOriginContentCodingObjectKind,
+        HlsOriginContentCodingSource, STREAM_IDLE_TIMEOUT,
+    },
     model::{
         resolve_provider_scheme_url_with_provider_index, AppConfig, Config, ConfigInput, ConfigProvider, InputSource,
         ResourceRetryConfig, ReverseProxyDisabledHeaderConfig,
     },
     utils::{
         async_file_reader, async_file_writer,
-        compression::compression_utils::{is_deflate, is_gzip},
+        compression::compression_utils::is_gzip,
+        content_coding::{
+            apply_outbound_content_coding_policy, content_decoding_error_from_io, decode_response_to_identity,
+            is_http_body_transport_error, read_utf8_limited, ContentBodyReadError, ContentCodingDetection,
+            ContentCodingError, OutboundContentCodingPolicy,
+        },
         debug_if_enabled, get_file_path, persist_file,
     },
 };
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use log::{debug, error, log_enabled, trace, warn, Level};
 use regex::Regex;
 use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue, CONTENT_ENCODING, HOST},
+    header::{HeaderMap, HeaderName, HeaderValue, HOST},
     redirect::Policy,
     StatusCode,
 };
 use shared::{
+    defaults::DEFAULT_USER_AGENT,
     error::{string_to_io_error, TuliproxError},
     model::{format_elapsed_time, InputFetchMethod, OnConnectErrorPolicy, ProviderUrlSelectionPolicy},
-    utils::{
-        filter_request_header, human_readable_byte_size, sanitize_sensitive_info, CONTENT_TYPE_JSON, ENCODING_DEFLATE,
-        ENCODING_GZIP,
-    },
-    defaults::{DEFAULT_USER_AGENT}
+    utils::{filter_request_header, human_readable_byte_size, sanitize_sensitive_info, CONTENT_TYPE_JSON},
 };
 use std::{
     collections::{HashMap, HashSet},
     io::{Error, ErrorKind},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
-    pin::Pin,
     sync::{Arc, Once},
     time::Duration,
 };
 use tokio::{
     fs::File,
-    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt},
     time::sleep,
 };
-use tokio_util::io::StreamReader;
 use url::Url;
 
 static PROXY_DIAGNOSTICS_ONCE: Once = Once::new();
 
+/// Options applied at the final boundary of every physical request attempt.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RequestFetchOptions {
     pub attempt_idle_timeout: Option<Duration>,
+    content_coding: OutboundContentCodingPolicy,
+    resource_retry: ResourceRetryExecution,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ResourceRetryExecution {
+    #[default]
+    Configured,
+    ProviderFailoverOnly,
 }
 
 impl RequestFetchOptions {
     pub fn with_attempt_idle_timeout(timeout: Duration) -> Self {
-        Self { attempt_idle_timeout: Some(timeout.max(Duration::from_millis(1))) }
+        Self { attempt_idle_timeout: Some(timeout.max(Duration::from_millis(1))), ..Self::default() }
+    }
+
+    pub(crate) const fn with_content_coding(mut self, content_coding: OutboundContentCodingPolicy) -> Self {
+        self.content_coding = content_coding;
+        self
+    }
+
+    /// Leaves bounded provider failover intact while assigning retry rounds to the caller.
+    pub(crate) const fn without_resource_retries(mut self) -> Self {
+        self.resource_retry = ResourceRetryExecution::ProviderFailoverOnly;
+        self
     }
 
     fn attempt_idle_timeout_or_default(self) -> Duration {
         self.attempt_idle_timeout.unwrap_or_else(|| Duration::from_secs(STREAM_IDLE_TIMEOUT))
     }
+
+    const fn uses_provider_failover_only(self) -> bool {
+        matches!(self.resource_retry, ResourceRetryExecution::ProviderFailoverOnly)
+    }
+}
+
+fn apply_request_fetch_options(request: &mut reqwest::Request, options: RequestFetchOptions) {
+    if let Some(timeout) = options.attempt_idle_timeout {
+        *request.timeout_mut() = Some(timeout);
+    }
+    apply_outbound_content_coding_policy(request.headers_mut(), options.content_coding);
+}
+
+fn prepare_physical_request_attempt(
+    request_builder: reqwest::RequestBuilder,
+    target: &AttemptTarget,
+    options: RequestFetchOptions,
+) -> Result<(reqwest::Client, reqwest::Request), std::io::Error> {
+    let (base_client, request_result) = request_builder.build_split();
+    let mut request = request_result.map_err(|error| {
+        string_to_io_error(format!("Failed to build request: {}", sanitize_sensitive_info(error.to_string().as_str())))
+    })?;
+    apply_attempt_to_request(&mut request, target)?;
+    apply_request_fetch_options(&mut request, options);
+    Ok((base_client, request))
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -258,11 +308,8 @@ fn resolve_attempt_target_with_dns_mode(
         return target;
     }
 
-    let connect_ip = if preview_dns_selection {
-        provider.preview_ip_for_host(host)
-    } else {
-        provider.select_ip_for_host(host)
-    };
+    let connect_ip =
+        if preview_dns_selection { provider.preview_ip_for_host(host) } else { provider.select_ip_for_host(host) };
     let Some(connect_ip) = connect_ip else {
         return target;
     };
@@ -351,7 +398,8 @@ fn rotate_to_next_provider_url(
     start_provider_index: usize,
     reason: &str,
 ) -> bool {
-    let Some(next_index) = next_provider_url_index(*provider_url_index, provider.urls.len(), start_provider_index) else {
+    let Some(next_index) = next_provider_url_index(*provider_url_index, provider.urls.len(), start_provider_index)
+    else {
         return false;
     };
 
@@ -433,10 +481,7 @@ fn should_try_next_ip_on_connect_error(
     total_ips > attempted_ips.len()
 }
 
-fn apply_attempt_to_request(
-    request: &mut reqwest::Request,
-    target: &AttemptTarget,
-) -> Result<(), std::io::Error> {
+fn apply_attempt_to_request(request: &mut reqwest::Request, target: &AttemptTarget) -> Result<(), std::io::Error> {
     if request.url().as_str() != target.effective_url.as_str() {
         *request.url_mut() = target.effective_url.clone();
     }
@@ -481,34 +526,30 @@ async fn execute_attempt_request(
 }
 
 /// Response returned after applying provider URL failover without applying the generic resource retry policy.
-pub struct ProviderFailoverResponse {
-    pub response: reqwest::Response,
-    pub provider_url_index: Option<usize>,
+pub(crate) struct ProviderFailoverResponse {
+    pub(crate) response: reqwest::Response,
+    pub(crate) provider_url_index: Option<usize>,
 }
 
-/// Sends one logical request while allowing one bounded provider URL failover cycle.
-///
-/// This reuses provider URL resolution, provider DNS handling, global client/proxy configuration and failover status
-/// classification, but deliberately does not apply `reverse_proxy.resource_retry` attempts or backoff.
 #[allow(clippy::too_many_lines)]
-pub async fn send_with_provider_failover_only(
+async fn send_with_provider_failover_only_with_options(
     app_config: &Arc<AppConfig>,
     url: &Url,
     provider: Option<&Arc<ConfigProvider>>,
     allow_redirects: bool,
+    options: RequestFetchOptions,
     mut send: impl FnMut(&Url) -> reqwest::RequestBuilder,
 ) -> Result<ProviderFailoverResponse, std::io::Error> {
-    let failover_patterns = app_config
-        .config
-        .load()
-        .reverse_proxy
-        .as_ref()
-        .map_or_else(|| ResourceRetryConfig::default().failover_redirect_patterns, |rp| {
-            rp.resource_retry.failover_redirect_patterns.clone()
-        });
+    let failover_patterns = app_config.config.load().reverse_proxy.as_ref().map_or_else(
+        || ResourceRetryConfig::default().failover_redirect_patterns,
+        |rp| rp.resource_retry.failover_redirect_patterns.clone(),
+    );
 
     let start_provider_index = provider_start_index(provider);
     let mut provider_url_index = start_provider_index;
+    let idle_timeout = options.attempt_idle_timeout_or_default();
+    let idle = sleep(idle_timeout);
+    tokio::pin!(idle);
 
     'provider_loop: loop {
         let mut attempted_dns_ips = HashSet::new();
@@ -528,14 +569,43 @@ pub async fn send_with_provider_failover_only(
                 }
             }
 
-            let request_builder = send(&attempt_target.request_url);
-            let (base_client, request_result) = request_builder.build_split();
-            let mut request = request_result.map_err(|err| {
-                string_to_io_error(format!("Failed to build request: {}", sanitize_sensitive_info(err.to_string().as_str())))
-            })?;
-            apply_attempt_to_request(&mut request, &attempt_target)?;
+            idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+            let (base_client, request) =
+                prepare_physical_request_attempt(send(&attempt_target.request_url), &attempt_target, options)?;
 
-            match execute_attempt_request(app_config, base_client, request, &attempt_target).await {
+            tokio::select! {
+                () = &mut idle => {
+                    if should_try_next_ip_on_connect_error(provider, &attempt_target, &mut attempted_dns_ips) {
+                        continue 'ip_loop;
+                    }
+
+                    let last_provider_failure = format!(
+                        "idle timeout while trying {}",
+                        sanitize_sensitive_info(attempt_target.request_url.as_str())
+                    );
+                    if let Some(current_provider) = provider {
+                        if rotate_to_next_provider_url(
+                            current_provider.as_ref(),
+                            &mut provider_url_index,
+                            start_provider_index,
+                            "idle timeout",
+                        ) {
+                            continue 'provider_loop;
+                        }
+                        log_provider_cycle_exhausted(
+                            current_provider.as_ref(),
+                            start_provider_index,
+                            provider_url_index,
+                            &last_provider_failure,
+                        );
+                    }
+
+                    return Err(Error::new(
+                        ErrorKind::TimedOut,
+                        format!("Request timed out: {}", sanitize_sensitive_info(url.as_str())),
+                    ));
+                }
+                result = execute_attempt_request(app_config, base_client, request, &attempt_target) => match result {
                 Ok(response) => {
                     let status = response.status();
                     if allow_redirects && status.is_redirection() {
@@ -589,7 +659,7 @@ pub async fn send_with_provider_failover_only(
                         response,
                         provider_url_index: provider.map(|_| provider_url_index),
                     });
-                }
+                },
                 Err(err) => {
                     if (err.is_timeout() || err.is_connect())
                         && should_try_next_ip_on_connect_error(provider, &attempt_target, &mut attempted_dns_ips)
@@ -622,10 +692,15 @@ pub async fn send_with_provider_failover_only(
                         }
                     }
 
-                    return Err(string_to_io_error(format!(
-                        "Request error: {}",
-                        sanitize_sensitive_info(err.to_string().as_str())
-                    )));
+                    let message = format!("Request error: {}", sanitize_sensitive_info(err.to_string().as_str()));
+                    return Err(if err.is_timeout() {
+                        Error::new(ErrorKind::TimedOut, message)
+                    } else if err.is_connect() {
+                        Error::new(ErrorKind::ConnectionRefused, message)
+                    } else {
+                        string_to_io_error(message)
+                    });
+                },
                 }
             }
         }
@@ -700,7 +775,7 @@ pub async fn send_with_retry_and_provider_policy(
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn send_with_retry_and_provider_policy_with_options(
+async fn send_with_retry_and_provider_policy_with_options(
     app_config: &Arc<AppConfig>,
     url: &Url, // Used primarily for logging/context
     provider: Option<&Arc<ConfigProvider>>,
@@ -723,7 +798,7 @@ pub async fn send_with_retry_and_provider_policy_with_options(
 }
 
 #[allow(clippy::too_many_lines)]
-pub async fn send_with_retry_and_provider_policy_with_options_result(
+async fn send_with_retry_and_provider_policy_with_options_result(
     app_config: &Arc<AppConfig>,
     url: &Url, // Used primarily for logging/context
     provider: Option<&Arc<ConfigProvider>>,
@@ -732,6 +807,18 @@ pub async fn send_with_retry_and_provider_policy_with_options_result(
     options: RequestFetchOptions,
     mut send: impl FnMut(&Url) -> reqwest::RequestBuilder,
 ) -> Result<ProviderFailoverResponse, std::io::Error> {
+    if options.uses_provider_failover_only() {
+        return send_with_provider_failover_only_with_options(
+            app_config,
+            url,
+            provider,
+            allow_redirects,
+            options,
+            send,
+        )
+        .await;
+    }
+
     let config = app_config.config.load();
     let (max_attempts, backoff_ms, backoff_multiplier, failover_patterns) = config.reverse_proxy.as_ref().map_or_else(
         || {
@@ -777,15 +864,8 @@ pub async fn send_with_retry_and_provider_policy_with_options_result(
                 // Reset the idle timer for a new attempt
                 idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
 
-                let request_builder = send(&attempt_target.request_url);
-                let (base_client, request_result) = request_builder.build_split();
-                let mut request = request_result.map_err(|err| {
-                    string_to_io_error(format!("Failed to build request: {}", sanitize_sensitive_info(&err.to_string())))
-                })?;
-                apply_attempt_to_request(&mut request, &attempt_target)?;
-                if let Some(timeout) = options.attempt_idle_timeout {
-                    *request.timeout_mut() = Some(timeout);
-                }
+                let (base_client, request) =
+                    prepare_physical_request_attempt(send(&attempt_target.request_url), &attempt_target, options)?;
 
                 tokio::select! {
                     () = &mut idle => {
@@ -830,7 +910,13 @@ pub async fn send_with_retry_and_provider_policy_with_options_result(
                             }
                         }
 
-                        return Err(string_to_io_error(format!("Request timed out and no retries left: {}", sanitize_sensitive_info(url.as_str()))));
+                        return Err(Error::new(
+                            ErrorKind::TimedOut,
+                            format!(
+                                "Request timed out and no retries left: {}",
+                                sanitize_sensitive_info(url.as_str())
+                            ),
+                        ));
                     }
 
                     result = execute_attempt_request(app_config, base_client, request, &attempt_target) => {
@@ -959,7 +1045,15 @@ pub async fn send_with_retry_and_provider_policy_with_options_result(
                                     }
                                 }
 
-                                return Err(string_to_io_error(format!("Request error: {}", sanitize_sensitive_info(&err.to_string()))));
+                                let error_message = format!(
+                                    "Request error: {}",
+                                    sanitize_sensitive_info(&err.to_string())
+                                );
+                                return Err(if err.is_timeout() {
+                                    Error::new(ErrorKind::TimedOut, error_message)
+                                } else {
+                                    string_to_io_error(error_message)
+                                });
                             }
                         }
                     }
@@ -980,7 +1074,8 @@ pub async fn send_with_retry_and_provider_policy_with_options_result(
                 }
 
                 if max_provider_attempts > 0 {
-                    let last_failure = last_provider_failure.as_deref().unwrap_or("all attempts and providers exhausted");
+                    let last_failure =
+                        last_provider_failure.as_deref().unwrap_or("all attempts and providers exhausted");
                     log_provider_cycle_exhausted(
                         current_provider.as_ref(),
                         start_provider_index,
@@ -1026,7 +1121,7 @@ fn prepare_input_request_headers(
 }
 
 #[allow(clippy::implicit_hasher)]
-pub async fn send_input_with_retry_and_provider_policy_with_options_result(
+pub(crate) async fn send_input_with_retry_and_provider_policy_with_options_result(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &InputSource,
@@ -1058,7 +1153,7 @@ pub async fn send_input_with_retry_and_provider_policy_with_options_result(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::implicit_hasher)]
-pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
+pub(crate) async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &InputSource,
@@ -1068,17 +1163,20 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
     options: RequestFetchOptions,
 ) -> Result<ProviderFailoverResponse, Error> {
     let config = app_config.config.load();
-    let (max_attempts, backoff_ms, backoff_multiplier, failover_patterns) = config.reverse_proxy.as_ref().map_or_else(
-        || {
-            let (a, b, c) = ResourceRetryConfig::get_default_retry_values();
-            (a, b, c, ResourceRetryConfig::default().failover_redirect_patterns)
-        },
-        |rp| {
-            let (a, b, c) = rp.resource_retry.get_retry_values();
-            (a, b, c, rp.resource_retry.failover_redirect_patterns.clone())
-        },
-    );
+    let (configured_max_attempts, backoff_ms, backoff_multiplier, failover_patterns) =
+        config.reverse_proxy.as_ref().map_or_else(
+            || {
+                let (a, b, c) = ResourceRetryConfig::get_default_retry_values();
+                (a, b, c, ResourceRetryConfig::default().failover_redirect_patterns)
+            },
+            |rp| {
+                let (a, b, c) = rp.resource_retry.get_retry_values();
+                (a, b, c, rp.resource_retry.failover_redirect_patterns.clone())
+            },
+        );
     drop(config);
+    let provider_failover_only = options.uses_provider_failover_only();
+    let max_attempts = if provider_failover_only { 1 } else { configured_max_attempts };
 
     let (base_headers, default_user_agent) = prepare_input_request_headers(app_config, input, headers);
     let provider = input.get_provider();
@@ -1098,7 +1196,8 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
             let mut attempted_dns_ips = HashSet::new();
 
             'redirect_loop: loop {
-                let attempt_target = resolve_attempt_target_at_provider_index(&current_url, provider, provider_url_index);
+                let attempt_target =
+                    resolve_attempt_target_at_provider_index(&current_url, provider, provider_url_index);
                 if log_enabled!(Level::Debug) {
                     if let Some(current_provider) = provider {
                         let attempt_target_log = format_request_target_for_logging(&attempt_target);
@@ -1122,14 +1221,8 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                     None,
                     default_user_agent.as_deref(),
                 );
-                let (base_client, request_result) = request_builder.build_split();
-                let mut request = request_result.map_err(|err| {
-                    string_to_io_error(format!("Failed to build request: {}", sanitize_sensitive_info(err.to_string().as_str())))
-                })?;
-                apply_attempt_to_request(&mut request, &attempt_target)?;
-                if let Some(timeout) = options.attempt_idle_timeout {
-                    *request.timeout_mut() = Some(timeout);
-                }
+                let (base_client, request) =
+                    prepare_physical_request_attempt(request_builder, &attempt_target, options)?;
 
                 tokio::select! {
                     () = &mut idle => {
@@ -1164,7 +1257,13 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                             continue 'attempt_loop;
                         }
 
-                        return Err(string_to_io_error(format!("Request timed out and no retries left: {}", sanitize_sensitive_info(url.as_str()))));
+                        return Err(Error::new(
+                            ErrorKind::TimedOut,
+                            format!(
+                                "Request timed out and no retries left: {}",
+                                sanitize_sensitive_info(url.as_str())
+                            ),
+                        ));
                     }
 
                     result = execute_attempt_request(app_config, base_client, request, &attempt_target) => {
@@ -1263,6 +1362,13 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                                     }
                                 }
 
+                                if provider_failover_only {
+                                    return Ok(ProviderFailoverResponse {
+                                        response,
+                                        provider_url_index: provider.map(|_| provider_url_index),
+                                    });
+                                }
+
                                 return Err(string_to_io_error(format!(
                                     "Request failed ({}): {}",
                                     format_http_status(status),
@@ -1316,10 +1422,17 @@ pub async fn send_input_with_retry_and_provider_policy_with_manual_redirects_and
                                     }
                                 }
 
-                                return Err(string_to_io_error(format!(
+                                let error_message = format!(
                                     "Request error: {}",
                                     sanitize_sensitive_info(err.to_string().as_str())
-                                )));
+                                );
+                                return Err(if err.is_timeout() {
+                                    Error::new(ErrorKind::TimedOut, error_message)
+                                } else if err.is_connect() {
+                                    Error::new(ErrorKind::ConnectionRefused, error_message)
+                                } else {
+                                    string_to_io_error(error_message)
+                                });
                             }
                         }
                     }
@@ -1377,13 +1490,7 @@ pub async fn get_input_epg_content_as_file(
     input: &ConfigInput,
     request: InputEpgFileRequest<'_>,
 ) -> Result<PathBuf, TuliproxError> {
-    let InputEpgFileRequest {
-        headers,
-        storage_dir,
-        url: url_str,
-        persist_path,
-        max_bytes,
-    } = request;
+    let InputEpgFileRequest { headers, storage_dir, url: url_str, persist_path, max_bytes } = request;
     debug_if_enabled!(
         "getting input epg content storage_dir: {}, url: {}",
         storage_dir,
@@ -1450,11 +1557,7 @@ pub async fn get_input_text_content(
         match download_text_content(&app_state.app_config, client, input, None, persist_filepath, false).await {
             Ok((content, _response_url)) => Ok(content),
             Err(e) => {
-                error!(
-                    "Failed to download input '{}': {}",
-                    input.name,
-                    sanitize_sensitive_info(&e.to_string())
-                );
+                error!("Failed to download input '{}': {}", input.name, sanitize_sensitive_info(&e.to_string()));
                 Err(TuliproxError::RepositoryNetwork(format!(
                     "Failed to download input '{}': {}",
                     input.name,
@@ -1470,7 +1573,11 @@ pub async fn get_input_text_content(
                         let to_file = &persist_file_value;
                         if let Err(e) = tokio::fs::copy(&filepath, to_file).await {
                             error!("can't persist to: {}  => {}", to_file.to_str().unwrap_or("?"), e);
-                            return Err(TuliproxError::RepositoryNetwork(format!("Failed to persist: {}  => {}", to_file.to_str().unwrap_or("?"), e)));
+                            return Err(TuliproxError::RepositoryNetwork(format!(
+                                "Failed to persist: {}  => {}",
+                                to_file.to_str().unwrap_or("?"),
+                                e
+                            )));
                         }
                     }
 
@@ -1514,11 +1621,7 @@ pub async fn get_input_text_content_as_stream(
         match download_text_content_as_stream(app_config, client, input, persist_filepath).await {
             Ok((content, _response_url)) => Ok(content),
             Err(e) => {
-                error!(
-                    "Failed to download input '{}': {}",
-                    input.name,
-                    sanitize_sensitive_info(&e.to_string())
-                );
+                error!("Failed to download input '{}': {}", input.name, sanitize_sensitive_info(&e.to_string()));
                 Err(TuliproxError::RepositoryNetwork(format!(
                     "Failed to download input '{}': {}",
                     input.name,
@@ -1540,7 +1643,7 @@ pub async fn get_input_text_content_as_stream(
                                         debug_if_enabled!("Persisted {} bytes", human_readable_byte_size(size as u64));
                                     })),
                                 )
-                                    .await;
+                                .await;
                                 Some(tee)
                             } else {
                                 Some(content)
@@ -1847,35 +1950,160 @@ pub async fn get_remote_content_as_file_with_options(
     Ok(file_path.to_path_buf())
 }
 
-pub type DynReader = Pin<Box<dyn AsyncRead + Send>>;
+/// Controls decoding and bounded consumption of a fully buffered text response.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TextContentBodyOptions {
+    detection: ContentCodingDetection,
+    max_decoded_bytes: Option<usize>,
+    deadline: Option<Duration>,
+    retry_owner: TextContentRetryOwner,
+}
 
-async fn build_decoded_stream_reader(response: reqwest::Response) -> Result<DynReader, std::io::Error> {
-    let headers = response.headers();
-    let header_value = headers.get(CONTENT_ENCODING);
-    let mut encoding = header_value.and_then(|h| h.to_str().ok()).map(ToString::to_string);
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum TextContentRetryOwner {
+    #[default]
+    RequestStack,
+    DecodedBodyConsumer,
+}
 
-    let stream_reader = StreamReader::new(response.bytes_stream().map_err(std::io::Error::other));
-    let mut buf_reader = async_file_reader(stream_reader);
+impl Default for TextContentBodyOptions {
+    fn default() -> Self {
+        Self {
+            detection: ContentCodingDetection::DeclaredOrLegacyTextMagic,
+            max_decoded_bytes: None,
+            deadline: None,
+            retry_owner: TextContentRetryOwner::RequestStack,
+        }
+    }
+}
 
-    let peek = buf_reader.fill_buf().await?;
-
-    if peek.len() >= 2 {
-        if is_gzip(&peek[0..2]) {
-            encoding = Some(ENCODING_GZIP.to_string());
-        } else if is_deflate(&peek[0..2]) {
-            encoding = Some(ENCODING_DEFLATE.to_string());
+impl TextContentBodyOptions {
+    /// Selects the narrowly scoped HLS-manifest fallback detection and decoded-size limit.
+    pub(crate) fn hls_manifest(max_decoded_bytes: usize, deadline: Duration) -> Self {
+        Self {
+            detection: ContentCodingDetection::DeclaredOrKnownHlsManifestMagic,
+            max_decoded_bytes: Some(max_decoded_bytes),
+            deadline: Some(deadline.max(Duration::from_millis(1))),
+            retry_owner: TextContentRetryOwner::DecodedBodyConsumer,
         }
     }
 
-    let reader: DynReader = if encoding.as_ref().is_some_and(|e| e.eq_ignore_ascii_case(ENCODING_GZIP)) {
-        Box::pin(async_compression::tokio::bufread::GzipDecoder::new(buf_reader))
-    } else if encoding.as_ref().is_some_and(|e| e.eq_ignore_ascii_case(ENCODING_DEFLATE)) {
-        Box::pin(async_compression::tokio::bufread::ZlibDecoder::new(buf_reader))
-    } else {
-        Box::pin(buf_reader)
+    fn legacy_text_with_deadline(deadline: Option<Duration>) -> Self {
+        Self { deadline: deadline.map(|value| value.max(Duration::from_millis(1))), ..Self::default() }
+    }
+}
+
+/// Groups request-boundary and decoded-text-consumer options for one text fetch.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct TextContentFetchOptions {
+    request: RequestFetchOptions,
+    body: TextContentBodyOptions,
+}
+
+impl TextContentFetchOptions {
+    pub(crate) const fn new(request: RequestFetchOptions, body: TextContentBodyOptions) -> Self {
+        Self { request, body }
+    }
+
+    fn with_request_options(request: RequestFetchOptions) -> Self {
+        Self { body: TextContentBodyOptions::legacy_text_with_deadline(request.attempt_idle_timeout), request }
+    }
+}
+
+async fn build_decoded_stream_reader(response: reqwest::Response) -> Result<DynReader, std::io::Error> {
+    decode_response_to_identity(response, ContentCodingDetection::DeclaredOrLegacyTextMagic)
+        .await
+        .map(|decoded| decoded.body)
+        .map_err(content_coding_error_to_io)
+}
+
+fn content_coding_error_to_io(error: ContentCodingError) -> Error {
+    let kind = match &error {
+        ContentCodingError::PrefixRead(source) => source.kind(),
+        ContentCodingError::InvalidHeader
+        | ContentCodingError::Unsupported(_)
+        | ContentCodingError::EncodedPartialContent => ErrorKind::Other,
+    };
+    Error::new(kind, error)
+}
+
+fn content_body_read_error_to_io(error: ContentBodyReadError) -> Error {
+    match error {
+        ContentBodyReadError::Io(error) => error,
+        error @ ContentBodyReadError::LimitExceeded { .. } => Error::other(error),
+        error @ ContentBodyReadError::InvalidUtf8 { .. } => Error::new(ErrorKind::InvalidData, error),
+    }
+}
+
+/// Builds a fixed/numeric text-response diagnostic without origin-controlled content.
+pub(crate) fn text_response_error_log_label(error: &Error) -> String {
+    if let Some(error) = content_decoding_error_from_io(error) {
+        return format!("content_decoding coding={}", error.coding.as_http_token());
+    }
+    if let Some(error) = error.get_ref().and_then(|source| source.downcast_ref::<ContentBodyReadError>()) {
+        return match error {
+            ContentBodyReadError::LimitExceeded { limit } => format!("decoded_body_limit limit={limit}"),
+            ContentBodyReadError::InvalidUtf8 { valid_up_to, error_len } => {
+                format!("invalid_utf8 valid_up_to={valid_up_to} error_len={error_len:?}")
+            }
+            ContentBodyReadError::Io(error) => format!("io kind={:?}", error.kind()),
+        };
+    }
+    if let Some(error) = error.get_ref().and_then(|source| source.downcast_ref::<ContentCodingError>()) {
+        return match error {
+            ContentCodingError::InvalidHeader => "content_coding class=invalid_header".to_string(),
+            ContentCodingError::Unsupported(_) => "content_coding class=unsupported".to_string(),
+            ContentCodingError::EncodedPartialContent => "content_coding class=encoded_partial_content".to_string(),
+            ContentCodingError::PrefixRead(_) => "content_coding class=prefix_read".to_string(),
+        };
+    }
+    if error.kind() == ErrorKind::TimedOut {
+        return "timeout".to_string();
+    }
+    if is_http_body_transport_error(error) {
+        return "transport".to_string();
+    }
+    format!("io kind={:?}", error.kind())
+}
+
+async fn read_text_response_with_body_options(
+    response: reqwest::Response,
+    body_options: TextContentBodyOptions,
+) -> Result<(String, String, HeaderMap), Error> {
+    let request_url = response.url().to_string();
+    let read = async move {
+        let mut decoded =
+            decode_response_to_identity(response, body_options.detection).await.map_err(content_coding_error_to_io)?;
+        if let (ContentCodingDetection::DeclaredOrKnownHlsManifestMagic, Some(observation)) =
+            (body_options.detection, decoded.content_coding_observation())
+        {
+            log_hls_origin_content_coding(
+                observation,
+                HlsOriginContentCodingObjectKind::Manifest,
+                false,
+                HlsOriginContentCodingSource::Legacy,
+            );
+        }
+        let content = if let Some(max_decoded_bytes) = body_options.max_decoded_bytes {
+            read_utf8_limited(&mut decoded.body, max_decoded_bytes).await.map_err(content_body_read_error_to_io)?
+        } else {
+            let mut content = String::new();
+            decoded.body.read_to_string(&mut content).await.map_err(|error| Error::new(error.kind(), error))?;
+            content
+        };
+        Ok((content, decoded.final_url.to_string(), decoded.headers))
     };
 
-    Ok(reader)
+    if let Some(deadline) = body_options.deadline {
+        tokio::time::timeout(deadline, read).await.map_err(|_| {
+            Error::new(
+                ErrorKind::TimedOut,
+                format!("Timed out reading content body: {}", sanitize_sensitive_info(&request_url)),
+            )
+        })?
+    } else {
+        read.await
+    }
 }
 
 #[allow(clippy::implicit_hasher)]
@@ -1909,56 +2137,57 @@ async fn get_remote_content_as_stream_with_options(
     Ok((reader, response_url))
 }
 
-async fn read_stream_to_string_with_options(
-    stream: &mut DynReader,
-    response_url: &str,
-    options: RequestFetchOptions,
-) -> Result<String, Error> {
-    let mut content = String::new();
-    if let Some(timeout) = options.attempt_idle_timeout {
-        tokio::time::timeout(timeout, stream.read_to_string(&mut content))
-            .await
-            .map_err(|_| {
-                Error::new(
-                    ErrorKind::TimedOut,
-                    format!(
-                    "Timed out reading content body: {}",
-                    sanitize_sensitive_info(response_url)
-                    ),
-                )
-            })?
-            .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
-    } else {
-        stream
-            .read_to_string(&mut content)
-            .await
-            .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
-    }
-    Ok(content)
-}
-
-fn text_body_retry_values(app_config: &Arc<AppConfig>, options: RequestFetchOptions) -> (u32, u64, f64) {
-    if options.attempt_idle_timeout.is_none() {
+fn text_body_retry_values(app_config: &Arc<AppConfig>, body_options: TextContentBodyOptions) -> (u32, u64, f64) {
+    if body_options.retry_owner != TextContentRetryOwner::DecodedBodyConsumer {
         return (1, 0, 1.0);
     }
     let config = app_config.config.load();
-    let values = config.reverse_proxy.as_ref().map_or_else(
-        ResourceRetryConfig::get_default_retry_values,
-        |rp| rp.resource_retry.get_retry_values(),
-    );
+    let values = config
+        .reverse_proxy
+        .as_ref()
+        .map_or_else(ResourceRetryConfig::get_default_retry_values, |rp| rp.resource_retry.get_retry_values());
     drop(config);
     values
+}
+
+fn should_retry_text_body_error(error: &Error) -> bool {
+    matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::ConnectionRefused)
+        || content_decoding_error_from_io(error).is_some()
+        || is_http_body_transport_error(error)
+        || error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<ContentCodingError>())
+            .is_some_and(|error| matches!(error, ContentCodingError::PrefixRead(_)))
 }
 
 async fn sleep_before_text_body_retry(attempt: u32, backoff_ms: u64, backoff_multiplier: f64, err: &Error) {
     let delay = calculate_retry_backoff(backoff_ms, backoff_multiplier, attempt);
     warn!(
-        "Text response body timed out, retrying in {}ms (attempt {}): {}",
+        "Text response body failed retryably, retrying in {}ms (attempt {}): {}",
         delay,
         attempt + 1,
-        sanitize_sensitive_info(err.to_string().as_str())
+        text_response_error_log_label(err)
     );
     tokio::time::sleep(Duration::from_millis(delay)).await;
+}
+
+fn is_retryable_text_response_status(status: StatusCode) -> bool {
+    status.is_server_error()
+        || matches!(
+            status,
+            StatusCode::PROXY_AUTHENTICATION_REQUIRED
+                | StatusCode::REQUEST_TIMEOUT
+                | StatusCode::TOO_EARLY
+                | StatusCode::TOO_MANY_REQUESTS
+        )
+}
+
+fn text_response_status_error(status: StatusCode, url: &Url) -> Error {
+    string_to_io_error(format!(
+        "Request failed ({}): {}",
+        format_http_status(status),
+        sanitize_sensitive_info(url.as_str())
+    ))
 }
 
 async fn get_remote_content_with_options(
@@ -1969,71 +2198,66 @@ async fn get_remote_content_with_options(
     url: &Url,
     options: RequestFetchOptions,
 ) -> Result<(String, String), Error> {
-    let (max_attempts, backoff_ms, backoff_multiplier) = text_body_retry_values(app_config, options);
-    for attempt in 0..max_attempts {
-        let (mut stream, response_url) = get_remote_content_as_stream_with_options(app_config, client, input, headers, url, options)
-            .await
-            .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
-        match read_stream_to_string_with_options(&mut stream, response_url.as_str(), options).await {
-            Ok(content) => return Ok((content, response_url)),
-            Err(err) if err.kind() == ErrorKind::TimedOut && attempt + 1 < max_attempts => {
-                sleep_before_text_body_retry(attempt, backoff_ms, backoff_multiplier, &err).await;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Err(string_to_io_error("Text response body retry attempts exhausted"))
+    get_remote_content_with_headers_and_options(
+        app_config,
+        client,
+        input,
+        headers,
+        url,
+        TextContentFetchOptions::with_request_options(options),
+    )
+    .await
+    .map(|(content, response_url, _)| (content, response_url))
 }
 
-async fn get_remote_content_with_headers(
+async fn get_remote_content_with_headers_and_options(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &InputSource,
     headers: Option<&HeaderMap>,
     url: &Url,
+    options: TextContentFetchOptions,
 ) -> Result<(String, String, HeaderMap), Error> {
-    let custom_headers = headers
-        .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
+    let (max_attempts, backoff_ms, backoff_multiplier) = text_body_retry_values(app_config, options.body);
+    let attempt_options = if max_attempts > 1 { options.request.without_resource_retries() } else { options.request };
 
-    let config = app_config.config.load();
-    let default_user_agent = config.default_user_agent.clone();
-    let disabled_headers = config.get_disabled_headers();
-    drop(config);
-
-    let merged = get_request_headers(
-        Some(&input.headers),
-        custom_headers.as_ref(),
-        disabled_headers.as_ref(),
-        default_user_agent.as_deref(),
-    );
-
-    let headers: HashMap<String, String> = merged
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
-        .collect();
-
-    let response = send_with_retry_and_provider(app_config, url, input.get_provider(), false, |resolved_url| {
-        get_client_request(
+    // This consumer owns the logical attempt budget whenever decoded-body retries are enabled. Provider failover
+    // and redirect hops remain bounded subrequests, but the configured retry count is not applied again below it.
+    for attempt in 0..max_attempts {
+        let response = match send_input_with_retry_and_provider_policy_with_options_result(
+            app_config,
             client,
-            input.method,
-            Some(&headers),
-            resolved_url,
-            None,
-            None,
-            default_user_agent.as_deref(),
+            input,
+            headers,
+            url,
+            attempt_options,
         )
-    })
-    .await?;
-
-    let response_url = response.url().to_string();
-    let response_headers = response.headers().clone();
-    let mut stream = build_decoded_stream_reader(response).await?;
-    let mut content = String::new();
-    stream
-        .read_to_string(&mut content)
         .await
-        .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
-    Ok((content, response_url, response_headers))
+        {
+            Ok(result) => result.response,
+            Err(error) if should_retry_text_body_error(&error) && attempt + 1 < max_attempts => {
+                sleep_before_text_body_retry(attempt, backoff_ms, backoff_multiplier, &error).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let status = response.status();
+        if !status.is_success() {
+            if is_retryable_text_response_status(status) && attempt + 1 < max_attempts {
+                perform_backoff(attempt, backoff_ms, backoff_multiplier, &response).await;
+                continue;
+            }
+            return Err(text_response_status_error(status, url));
+        }
+        match read_text_response_with_body_options(response, options.body).await {
+            Ok(result) => return Ok(result),
+            Err(error) if should_retry_text_body_error(&error) && attempt + 1 < max_attempts => {
+                sleep_before_text_body_retry(attempt, backoff_ms, backoff_multiplier, &error).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(string_to_io_error("Text response body retry attempts exhausted"))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2046,126 +2270,68 @@ async fn get_remote_content_with_manual_redirects_and_options(
     max_redirects: usize,
     options: RequestFetchOptions,
 ) -> Result<(String, String), Error> {
-    let (max_body_attempts, backoff_ms, backoff_multiplier) = text_body_retry_values(app_config, options);
-
-    for body_attempt in 0..max_body_attempts {
-        let response = send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
-            app_config,
-            client,
-            input,
-            headers,
-            url,
-            max_redirects,
-            options,
-        )
-        .await?
-        .response;
-        let response_url = response.url().to_string();
-        let mut stream = build_decoded_stream_reader(response).await?;
-        match read_stream_to_string_with_options(&mut stream, response_url.as_str(), options).await {
-            Ok(content) => return Ok((content, response_url)),
-            Err(err) if err.kind() == ErrorKind::TimedOut && body_attempt + 1 < max_body_attempts => {
-                sleep_before_text_body_retry(body_attempt, backoff_ms, backoff_multiplier, &err).await;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Err(string_to_io_error("Text response body retry attempts exhausted"))
+    get_remote_content_with_manual_redirects_and_headers_and_options(
+        app_config,
+        client,
+        input,
+        headers,
+        url,
+        max_redirects,
+        TextContentFetchOptions::with_request_options(options),
+    )
+    .await
+    .map(|(content, response_url, _)| (content, response_url))
 }
 
-async fn get_remote_content_with_manual_redirects_and_headers(
+async fn get_remote_content_with_manual_redirects_and_headers_and_options(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     input: &InputSource,
     headers: Option<&HeaderMap>,
     url: &Url,
     max_redirects: usize,
+    options: TextContentFetchOptions,
 ) -> Result<(String, String, HeaderMap), Error> {
-    let custom_headers = headers
-        .map(|h| h.iter().map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec())).collect::<HashMap<_, _>>());
+    let (max_attempts, backoff_ms, backoff_multiplier) = text_body_retry_values(app_config, options.body);
+    let attempt_options = if max_attempts > 1 { options.request.without_resource_retries() } else { options.request };
 
-    let config = app_config.config.load();
-    let default_user_agent = config.default_user_agent.clone();
-    let disabled_headers = config.get_disabled_headers();
-    drop(config);
-
-    let merged = get_request_headers(
-        Some(&input.headers),
-        custom_headers.as_ref(),
-        disabled_headers.as_ref(),
-        default_user_agent.as_deref(),
-    );
-
-    let headers: HashMap<String, String> = merged
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
-        .collect();
-
-    let mut current_url = url.clone();
-    let mut current_headers = headers;
-    let mut remaining_redirects = max_redirects;
-    loop {
-        let response =
-            send_with_retry_and_provider(app_config, &current_url, input.get_provider(), true, |resolved_url| {
-                get_client_request(
-                    client,
-                    input.method,
-                    Some(&current_headers),
-                    resolved_url,
-                    None,
-                    None,
-                    default_user_agent.as_deref(),
-                )
-            })
-            .await?;
-        let response_base_url = response.url().clone();
-
-        if response.status().is_redirection() {
-            if remaining_redirects == 0 {
-                return Err(string_to_io_error(format!(
-                    "Too many redirects while requesting {}",
-                    sanitize_sensitive_info(url.as_str())
-                )));
+    // Manual redirects retain their own credential-scrubbing loop inside each caller-owned logical attempt.
+    for attempt in 0..max_attempts {
+        let response = match send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
+            app_config,
+            client,
+            input,
+            headers,
+            url,
+            max_redirects,
+            attempt_options,
+        )
+        .await
+        {
+            Ok(result) => result.response,
+            Err(error) if should_retry_text_body_error(&error) && attempt + 1 < max_attempts => {
+                sleep_before_text_body_retry(attempt, backoff_ms, backoff_multiplier, &error).await;
+                continue;
             }
-
-            let Some(location) = response.headers().get(reqwest::header::LOCATION) else {
-                return Err(string_to_io_error(format!(
-                    "Redirect response missing location header for {}",
-                    sanitize_sensitive_info(current_url.as_str())
-                )));
-            };
-            let Ok(location_str) = location.to_str() else {
-                return Err(string_to_io_error(format!(
-                    "Redirect response contains invalid location header for {}",
-                    sanitize_sensitive_info(current_url.as_str())
-                )));
-            };
-            let next_url =
-                response_base_url.join(location_str).or_else(|_| Url::parse(location_str)).map_err(|_| {
-                    string_to_io_error(format!(
-                        "Redirect response contains invalid location URL for {}",
-                        sanitize_sensitive_info(current_url.as_str())
-                    ))
-                })?;
-
-            if !same_origin(&response_base_url, &next_url) {
-                strip_sensitive_headers_for_cross_origin_redirect(&mut current_headers);
+            Err(error) => return Err(error),
+        };
+        let status = response.status();
+        if !status.is_success() {
+            if is_retryable_text_response_status(status) && attempt + 1 < max_attempts {
+                perform_backoff(attempt, backoff_ms, backoff_multiplier, &response).await;
+                continue;
             }
-            current_url = next_url;
-            remaining_redirects = remaining_redirects.saturating_sub(1);
-            continue;
+            return Err(text_response_status_error(status, url));
         }
-
-        let response_url = response.url().to_string();
-        let response_headers = response.headers().clone();
-        let mut stream = build_decoded_stream_reader(response).await?;
-        let mut content = String::new();
-        stream
-            .read_to_string(&mut content)
-            .await
-            .map_err(|e| string_to_io_error(format!("Failed to read content: {e}")))?;
-        return Ok((content, response_url, response_headers));
+        match read_text_response_with_body_options(response, options.body).await {
+            Ok(result) => return Ok(result),
+            Err(error) if should_retry_text_body_error(&error) && attempt + 1 < max_attempts => {
+                sleep_before_text_body_retry(attempt, backoff_ms, backoff_multiplier, &error).await;
+            }
+            Err(error) => return Err(error),
+        }
     }
+    Err(string_to_io_error("Text response body retry attempts exhausted"))
 }
 
 fn same_origin(lhs: &Url, rhs: &Url) -> bool {
@@ -2174,7 +2340,8 @@ fn same_origin(lhs: &Url, rhs: &Url) -> bool {
         && lhs.port_or_known_default() == rhs.port_or_known_default()
 }
 
-fn is_safe_cross_origin_redirect_header(key: &str) -> bool {
+/// Reports whether a request header may be retained when the target origin changes.
+pub(crate) fn is_safe_cross_origin_redirect_header(key: &str) -> bool {
     key.eq_ignore_ascii_case("accept")
         || key.eq_ignore_ascii_case("accept-encoding")
         || key.eq_ignore_ascii_case("accept-language")
@@ -2189,14 +2356,8 @@ fn strip_sensitive_headers_for_cross_origin_redirect(headers: &mut HashMap<Strin
 }
 
 fn create_atomic_download_file(file_path: &Path) -> Result<(tempfile::NamedTempFile, File), Error> {
-    let parent = file_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let temp_file = tempfile::Builder::new()
-        .prefix(".tuliprox-download-")
-        .suffix(".tmp")
-        .tempfile_in(parent)?;
+    let parent = file_path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let temp_file = tempfile::Builder::new().prefix(".tuliprox-download-").suffix(".tmp").tempfile_in(parent)?;
     let output_file = File::from_std(temp_file.reopen()?);
     Ok((temp_file, output_file))
 }
@@ -2224,14 +2385,11 @@ async fn copy_local_epg_file_to_persist(
         if read == 0 {
             break;
         }
-        copied = copied.checked_add(read as u64).ok_or_else(|| {
-            string_to_io_error(format!("Local EPG file size overflow for {}", file_path.display()))
-        })?;
+        copied = copied
+            .checked_add(read as u64)
+            .ok_or_else(|| string_to_io_error(format!("Local EPG file size overflow for {}", file_path.display())))?;
         if max_bytes.is_some_and(|max| copied > max) {
-            return Err(string_to_io_error(format!(
-                "Local EPG file {} exceeds configured limit",
-                file_path.display()
-            )));
+            return Err(string_to_io_error(format!("Local EPG file {} exceeds configured limit", file_path.display())));
         }
         writer.write_all(&buffer[..read]).await?;
     }
@@ -2257,10 +2415,7 @@ async fn download_epg_content_as_file(
         match url.scheme() {
             "file" => {
                 let file_path = url.to_file_path().map_err(|()| {
-                    Error::new(
-                        ErrorKind::Unsupported,
-                        format!("Unknown file {}", sanitize_sensitive_info(url_str)),
-                    )
+                    Error::new(ErrorKind::Unsupported, format!("Unknown file {}", sanitize_sensitive_info(url_str)))
                 })?;
                 if file_path.exists() {
                     copy_local_epg_file_to_persist(&file_path, persist_filepath, max_bytes).await
@@ -2276,10 +2431,7 @@ async fn download_epg_content_as_file(
                     headers,
                     &url,
                     persist_filepath,
-                    FileDownloadOptions {
-                        max_bytes,
-                        atomic_write: true,
-                    },
+                    FileDownloadOptions { max_bytes, atomic_write: true },
                 )
                 .await
             }
@@ -2301,7 +2453,7 @@ pub async fn download_text_content(
     persist_filepath: Option<PathBuf>,
     trace_log: bool,
 ) -> Result<(String, String), Error> {
-    download_text_content_with_options(
+    Box::pin(download_text_content_with_options(
         app_config,
         client,
         input,
@@ -2309,7 +2461,7 @@ pub async fn download_text_content(
         persist_filepath,
         trace_log,
         RequestFetchOptions::default(),
-    )
+    ))
     .await
 }
 
@@ -2367,15 +2519,36 @@ pub async fn download_text_content_with_headers(
     headers: Option<&HeaderMap>,
     trace_log: bool,
 ) -> Result<(String, String, HeaderMap), Error> {
+    Box::pin(download_text_content_with_headers_and_options(
+        app_config,
+        client,
+        input,
+        headers,
+        trace_log,
+        TextContentFetchOptions::default(),
+    ))
+    .await
+}
+
+pub(crate) async fn download_text_content_with_headers_and_options(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &InputSource,
+    headers: Option<&HeaderMap>,
+    trace_log: bool,
+    options: TextContentFetchOptions,
+) -> Result<(String, String, HeaderMap), Error> {
     let start_time = tokio::time::Instant::now();
     let result = if let Ok(url) = input.url.parse::<url::Url>() {
         let result = if url.scheme() == "file" {
             match url.to_file_path() {
-                Ok(file_path) => get_local_file_content(&file_path).await.map(|content| (content, url.to_string(), HeaderMap::new())),
+                Ok(file_path) => {
+                    get_local_file_content(&file_path).await.map(|content| (content, url.to_string(), HeaderMap::new()))
+                }
                 Err(()) => Err(string_to_io_error(format!("Unknown file {}", sanitize_sensitive_info(&input.url)))),
             }
         } else {
-            get_remote_content_with_headers(app_config, client, input, headers, &url).await
+            get_remote_content_with_headers_and_options(app_config, client, input, headers, &url, options).await
         };
         result
     } else {
@@ -2406,7 +2579,7 @@ pub async fn download_text_content_with_manual_redirects(
     trace_log: bool,
     max_redirects: usize,
 ) -> Result<(String, String), Error> {
-    download_text_content_with_manual_redirects_and_options(
+    Box::pin(download_text_content_with_manual_redirects_and_options(
         app_config,
         client,
         input,
@@ -2415,7 +2588,7 @@ pub async fn download_text_content_with_manual_redirects(
         trace_log,
         max_redirects,
         RequestFetchOptions::default(),
-    )
+    ))
     .await
 }
 
@@ -2485,15 +2658,47 @@ pub async fn download_text_content_with_manual_redirects_and_headers(
     trace_log: bool,
     max_redirects: usize,
 ) -> Result<(String, String, HeaderMap), Error> {
+    Box::pin(download_text_content_with_manual_redirects_and_headers_and_options(
+        app_config,
+        client,
+        input,
+        headers,
+        trace_log,
+        max_redirects,
+        TextContentFetchOptions::default(),
+    ))
+    .await
+}
+
+pub(crate) async fn download_text_content_with_manual_redirects_and_headers_and_options(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    input: &InputSource,
+    headers: Option<&HeaderMap>,
+    trace_log: bool,
+    max_redirects: usize,
+    options: TextContentFetchOptions,
+) -> Result<(String, String, HeaderMap), Error> {
     let start_time = tokio::time::Instant::now();
     let result = if let Ok(url) = input.url.parse::<url::Url>() {
         let result = if url.scheme() == "file" {
             match url.to_file_path() {
-                Ok(file_path) => get_local_file_content(&file_path).await.map(|content| (content, url.to_string(), HeaderMap::new())),
+                Ok(file_path) => {
+                    get_local_file_content(&file_path).await.map(|content| (content, url.to_string(), HeaderMap::new()))
+                }
                 Err(()) => Err(string_to_io_error(format!("Unknown file {}", sanitize_sensitive_info(&input.url)))),
             }
         } else {
-            get_remote_content_with_manual_redirects_and_headers(app_config, client, input, headers, &url, max_redirects).await
+            get_remote_content_with_manual_redirects_and_headers_and_options(
+                app_config,
+                client,
+                input,
+                headers,
+                &url,
+                max_redirects,
+                options,
+            )
+            .await
         };
         result
     } else {
@@ -2540,7 +2745,7 @@ pub async fn download_text_content_as_stream(
                             debug!("Persisted {size} bytes");
                         })),
                     )
-                        .await;
+                    .await;
                     Ok((tee_reader, response_url))
                 } else {
                     Ok((content, response_url))
@@ -2737,33 +2942,46 @@ pub fn should_trigger_failover(status: StatusCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_safe_cross_origin_redirect_header,
-        get_input_epg_content_as_file, next_provider_url_index, preview_request_diagnostics_for_logging, preview_request_target_for_logging,
-        resolve_attempt_target, same_origin, send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result,
-        send_with_retry_and_provider, send_with_retry_and_provider_policy, should_try_next_ip_on_connect_error,
-        strip_sensitive_headers_for_cross_origin_redirect, InputEpgFileRequest, RequestFetchOptions,
+        download_text_content, download_text_content_with_headers_and_options, get_input_epg_content_as_file,
+        get_remote_content_as_stream, is_safe_cross_origin_redirect_header, next_provider_url_index,
+        preview_request_diagnostics_for_logging, preview_request_target_for_logging, resolve_attempt_target,
+        same_origin, send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result,
+        send_input_with_retry_and_provider_policy_with_options_result, send_with_retry_and_provider,
+        send_with_retry_and_provider_policy, should_retry_text_body_error, should_try_next_ip_on_connect_error,
+        strip_sensitive_headers_for_cross_origin_redirect, text_response_error_log_label, InputEpgFileRequest,
+        RequestFetchOptions, TextContentBodyOptions, TextContentFetchOptions,
     };
     use crate::{
         model::{
             AppConfig, Config, ConfigInput, ConfigProvider, InputSource, MediaToolCapabilities, ResourceRetryConfig,
             ReverseProxyConfig, SourcesConfig,
         },
-        utils::{FileLockManager},
+        utils::{
+            content_coding::{ContentCoding, ContentCodingError, ContentDecodingIoError, OutboundContentCodingPolicy},
+            FileLockManager,
+        },
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
-    use shared::model::{
-        ConfigPaths, ConfigProviderDto, DnsScheme, InputFetchMethod, OnConnectErrorPolicy, ProviderDnsDto,
-        ProviderUrlSelectionPolicy,
+    use flate2::{
+        write::{GzEncoder, ZlibEncoder},
+        Compression,
     };
-    use shared::utils::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info};
-    use shared::defaults::{DEFAULT_USER_AGENT};
-
+    use reqwest::header::{HeaderMap, HeaderValue, ACCEPT_ENCODING, COOKIE};
+    use shared::{
+        defaults::DEFAULT_USER_AGENT,
+        model::{
+            ConfigPaths, ConfigProviderDto, DnsScheme, InputFetchMethod, OnConnectErrorPolicy, ProviderDnsDto,
+            ProviderUrlSelectionPolicy,
+        },
+        utils::{get_base_url_from_str, replace_url_extension, sanitize_sensitive_info},
+    };
     use std::{
         collections::{HashMap, HashSet},
+        io::{Error, ErrorKind, Write},
         net::SocketAddr,
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
         },
         time::Duration,
@@ -2771,6 +2989,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
+        sync::{oneshot, Mutex},
     };
     use url::Url;
 
@@ -2839,11 +3058,12 @@ mod tests {
         assert!(atomic_download_temp_files(dir.path()).await.is_empty());
     }
 
-    fn make_provider_with_dns(keep_vhost: bool, on_connect_error: OnConnectErrorPolicy, ips: Vec<&str>) -> Arc<ConfigProvider> {
-        let parsed_ips = ips
-            .into_iter()
-            .map(|raw| raw.parse().expect("ip must parse"))
-            .collect::<Vec<_>>();
+    fn make_provider_with_dns(
+        keep_vhost: bool,
+        on_connect_error: OnConnectErrorPolicy,
+        ips: Vec<&str>,
+    ) -> Arc<ConfigProvider> {
+        let parsed_ips = ips.into_iter().map(|raw| raw.parse().expect("ip must parse")).collect::<Vec<_>>();
         let dto = ConfigProviderDto {
             name: "provider-a".into(),
             urls: vec!["http://example.com".into()],
@@ -3007,9 +3227,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let source = dir.path().join("source.ics");
         let persist = dir.path().join("cache.ics");
-        tokio::fs::write(&source, b"BEGIN:VCALENDAR\nEND:VCALENDAR\n")
-            .await
-            .expect("write source");
+        tokio::fs::write(&source, b"BEGIN:VCALENDAR\nEND:VCALENDAR\n").await.expect("write source");
         tokio::fs::write(&persist, b"old cache").await.expect("write old cache");
         let source_url = Url::from_file_path(&source).expect("file url");
         let app_config = make_test_app_config(Config::default());
@@ -3076,9 +3294,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let source = dir.path().join("source.ics");
         let persist = dir.path().join("cache.ics");
-        tokio::fs::write(&source, b"BEGIN:VCALENDAR\nEND:VCALENDAR\n")
-            .await
-            .expect("write source");
+        tokio::fs::write(&source, b"BEGIN:VCALENDAR\nEND:VCALENDAR\n").await.expect("write source");
         tokio::fs::create_dir(&persist).await.expect("create conflicting destination");
         let app_config = make_test_app_config(Config::default());
         let client = make_epg_test_client();
@@ -3167,9 +3383,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let source = dir.path().join("source.ics");
         let persist = dir.path().join("cache.ics");
-        tokio::fs::write(&source, b"BEGIN:VCALENDAR\nEND:VCALENDAR\n")
-            .await
-            .expect("write source");
+        tokio::fs::write(&source, b"BEGIN:VCALENDAR\nEND:VCALENDAR\n").await.expect("write source");
         let app_config = make_test_app_config(Config::default());
         let client = make_epg_test_client();
         let input = ConfigInput::default();
@@ -3324,10 +3538,7 @@ mod tests {
         assert_eq!(second_result.expect("second download"), persist);
         assert_eq!(accepted.load(Ordering::SeqCst), 2);
         assert_eq!(max_active.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            tokio::fs::read(&persist).await.expect("read refreshed cache"),
-            b"BEGIN:VCALENDAR\nEND:VCALENDAR\n"
-        );
+        assert_eq!(tokio::fs::read(&persist).await.expect("read refreshed cache"), b"BEGIN:VCALENDAR\nEND:VCALENDAR\n");
         assert!(atomic_download_temp_files(dir.path()).await.is_empty());
         server_handle.abort();
     }
@@ -3409,7 +3620,8 @@ mod tests {
 
     #[test]
     fn test_try_next_ip_policy_uses_next_ip_until_exhausted() {
-        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1", "192.168.0.2"]);
+        let provider =
+            make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1", "192.168.0.2"]);
         let url = Url::parse("http://example.com/live").expect("url parse should work");
         let mut tried = HashSet::new();
 
@@ -3422,7 +3634,8 @@ mod tests {
 
     #[test]
     fn test_preview_request_target_for_logging_does_not_advance_dns_rotation() {
-        let provider = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1", "192.168.0.2"]);
+        let provider =
+            make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1", "192.168.0.2"]);
         let url = Url::parse("http://example.com/live").expect("url parse should work");
 
         let preview = preview_request_target_for_logging(&url, Some(&provider));
@@ -3433,7 +3646,8 @@ mod tests {
         assert_eq!(first.connect_ip.map(|ip| ip.to_string()), Some("192.168.0.1".to_string()));
         assert_eq!(second.connect_ip.map(|ip| ip.to_string()), Some("192.168.0.2".to_string()));
 
-        let provider_https = make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1", "192.168.0.2"]);
+        let provider_https =
+            make_provider_with_dns(false, OnConnectErrorPolicy::TryNextIp, vec!["192.168.0.1", "192.168.0.2"]);
         let https_url = Url::parse("https://example.com/live").expect("url parse should work");
 
         let https_preview = preview_request_target_for_logging(&https_url, Some(&provider_https));
@@ -3449,10 +3663,7 @@ mod tests {
     fn test_preview_request_target_for_logging_uses_preferred_provider_index() {
         let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
             name: "provider-a".into(),
-            urls: vec![
-                "http://provider-a.example".into(),
-                "http://provider-b.example".into(),
-            ],
+            urls: vec!["http://provider-a.example".into(), "http://provider-b.example".into()],
             provider_url_selection_policy: ProviderUrlSelectionPolicy::default(),
             dns: None,
         }));
@@ -3483,9 +3694,8 @@ mod tests {
                 tokio::spawn(async move {
                     let mut buf = vec![0_u8; 2048];
                     let _ = socket.read(&mut buf).await;
-                    let response_head = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
-                    );
+                    let response_head =
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n");
                     let _ = socket.write_all(response_head.as_bytes()).await;
                     let _ = socket.write_all(body).await;
                     let _ = socket.shutdown().await;
@@ -3498,12 +3708,7 @@ mod tests {
 
     async fn start_delayed_http_server_with_body(
         body: &'static [u8],
-    ) -> std::io::Result<(
-        SocketAddr,
-        Arc<AtomicUsize>,
-        Arc<AtomicUsize>,
-        tokio::task::JoinHandle<()>,
-    )> {
+    ) -> std::io::Result<(SocketAddr, Arc<AtomicUsize>, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let accepted = Arc::new(AtomicUsize::new(0));
@@ -3528,9 +3733,8 @@ mod tests {
                     let mut buf = vec![0_u8; 2048];
                     let _ = socket.read(&mut buf).await;
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    let response_head = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
-                    );
+                    let response_head =
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n");
                     let _ = socket.write_all(response_head.as_bytes()).await;
                     let _ = socket.write_all(body).await;
                     let _ = socket.shutdown().await;
@@ -3573,6 +3777,596 @@ mod tests {
         start_plain_http_server_with_body(b"ok").await
     }
 
+    async fn start_recording_http_server(
+        responses: Vec<String>,
+    ) -> std::io::Result<(SocketAddr, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>)> {
+        start_recording_http_byte_server(responses.into_iter().map(String::into_bytes).collect()).await
+    }
+
+    async fn start_recording_http_byte_server(
+        responses: Vec<Vec<u8>>,
+    ) -> std::io::Result<(SocketAddr, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let task_requests = Arc::clone(&requests);
+        let responses = Arc::new(responses);
+        let response_index = Arc::new(AtomicUsize::new(0));
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let requests = Arc::clone(&task_requests);
+                let responses = Arc::clone(&responses);
+                let response_index = Arc::clone(&response_index);
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    loop {
+                        let mut chunk = [0_u8; 2048];
+                        let Ok(read) = socket.read(&mut chunk).await else {
+                            return;
+                        };
+                        if read == 0 {
+                            return;
+                        }
+                        request.extend_from_slice(&chunk[..read]);
+                        if request.windows(4).any(|window| window == b"\r\n\r\n") || request.len() >= 16 * 1024 {
+                            break;
+                        }
+                    }
+                    requests.lock().await.push(String::from_utf8_lossy(&request).into_owned());
+                    let index = response_index.fetch_add(1, Ordering::SeqCst);
+                    let Some(response) = responses.get(index).or_else(|| responses.last()) else {
+                        return;
+                    };
+                    let _ = socket.write_all(response).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        Ok((addr, requests, handle))
+    }
+
+    async fn start_hanging_http_server(
+    ) -> std::io::Result<(SocketAddr, oneshot::Receiver<()>, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let (request_seen_tx, request_seen_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 2048];
+                let Ok(read) = socket.read(&mut chunk).await else {
+                    return;
+                };
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let _ = request_seen_tx.send(());
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+
+        Ok((addr, request_seen_rx, handle))
+    }
+
+    fn response_with_body(status: &str, body: &str) -> String {
+        format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    fn response_with_byte_body(status: &str, body: &[u8]) -> Vec<u8> {
+        let mut response =
+            format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
+        response.extend_from_slice(body);
+        response
+    }
+
+    fn gzip_encoded(body: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(body).expect("gzip input");
+        encoder.finish().expect("gzip output")
+    }
+
+    fn zlib_encoded(body: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(body).expect("zlib input");
+        encoder.finish().expect("zlib output")
+    }
+
+    fn request_header_value<'a>(request: &'a str, expected_name: &str) -> Option<&'a str> {
+        request.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case(expected_name).then_some(value.trim())
+        })
+    }
+
+    fn test_retry_config(max_attempts: u32) -> Arc<AppConfig> {
+        let mut config = Config { connect_timeout_secs: 1, ..Config::default() };
+        config.reverse_proxy = Some(ReverseProxyConfig {
+            resource_rewrite_disabled: false,
+            rewrite_secret: [0; 16],
+            resource_retry: ResourceRetryConfig {
+                max_attempts,
+                backoff_millis: 1,
+                backoff_multiplier: 1.0,
+                ..ResourceRetryConfig::default()
+            },
+            disabled_header: None,
+            stream: None,
+            cache: None,
+            rate_limit: None,
+            geoip: None,
+            stream_history: None,
+            qos_aggregation: None,
+            hls_cache: None,
+        });
+        make_test_app_config(config)
+    }
+
+    fn identity_fetch_options() -> RequestFetchOptions {
+        RequestFetchOptions::with_attempt_idle_timeout(Duration::from_secs(1))
+            .with_content_coding(OutboundContentCodingPolicy::Identity)
+    }
+
+    #[test]
+    fn physical_request_attempt_applies_target_and_final_content_coding_options() {
+        let client = reqwest::Client::builder().no_proxy().build().expect("test client");
+        let request_url = Url::parse("http://origin.example/manifest.m3u8").expect("request URL");
+        let effective_url = Url::parse("http://127.0.0.1/manifest.m3u8").expect("effective URL");
+        let target = super::AttemptTarget {
+            request_url: request_url.clone(),
+            effective_url: effective_url.clone(),
+            host_header: Some("origin.example".to_string()),
+            sni_host: None,
+            connect_ip: Some("127.0.0.1".parse().expect("connect IP")),
+            dns_host: Some("origin.example".to_string()),
+        };
+        let builder =
+            client.get(request_url).header(ACCEPT_ENCODING, "gzip").header(reqwest::header::HOST, "wrong.example");
+
+        let (_, request) = super::prepare_physical_request_attempt(builder, &target, identity_fetch_options())
+            .expect("physical request should build");
+
+        assert_eq!(request.url(), &effective_url);
+        assert_eq!(request.headers()[reqwest::header::HOST], "origin.example");
+        assert_eq!(request.headers()[ACCEPT_ENCODING], "identity");
+        assert_eq!(request.timeout(), Some(&Duration::from_secs(1)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn provider_failover_only_default_options_keep_default_idle_timeout() {
+        let (addr, request_seen, server) = start_hanging_http_server().await.expect("hanging origin should start");
+        let url = Url::parse(&format!("http://{addr}/manifest.m3u8")).expect("origin URL");
+        let input = test_input_source(url.to_string(), None);
+        let app_config = test_retry_config(5);
+        let client = reqwest::Client::builder().no_proxy().build().expect("test client");
+        let request_url = url.clone();
+        let request = tokio::spawn(async move {
+            send_input_with_retry_and_provider_policy_with_options_result(
+                &app_config,
+                &client,
+                &input,
+                None,
+                &request_url,
+                RequestFetchOptions::default().without_resource_retries(),
+            )
+            .await
+        });
+
+        // A ready task prevents Tokio's paused clock from auto-advancing through the default timeout while the local
+        // TCP handshake is still in progress. After the request arrives, this guard stops and the test advances time
+        // explicitly to the production deadline.
+        let hold_virtual_time = Arc::new(AtomicBool::new(true));
+        let hold_virtual_time_for_task = Arc::clone(&hold_virtual_time);
+        let virtual_time_guard = tokio::spawn(async move {
+            while hold_virtual_time_for_task.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        });
+        let request_seen = request_seen.await;
+        hold_virtual_time.store(false, Ordering::SeqCst);
+        virtual_time_guard.await.expect("virtual time guard should stop");
+        request_seen.expect("origin should receive the request");
+        tokio::time::advance(Duration::from_secs(crate::api::model::STREAM_IDLE_TIMEOUT + 1)).await;
+        tokio::task::yield_now().await;
+        if !request.is_finished() {
+            request.abort();
+            panic!("provider-only request lost the default idle-timeout guard");
+        }
+
+        let error = match request.await.expect("request task should join") {
+            Ok(_) => panic!("hanging request must time out"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        server.abort();
+    }
+
+    #[test]
+    fn content_coding_prefix_read_error_is_retryable_but_unsupported_coding_is_not() {
+        let prefix_read =
+            Error::other(ContentCodingError::PrefixRead(Error::new(ErrorKind::UnexpectedEof, "prefix truncated")));
+        let unsupported = Error::other(ContentCodingError::Unsupported("compress".to_string()));
+
+        assert!(should_retry_text_body_error(&prefix_read));
+        assert!(!should_retry_text_body_error(&unsupported));
+    }
+
+    #[test]
+    fn text_response_error_log_labels_never_expose_origin_controlled_details() {
+        let unsupported = Error::other(ContentCodingError::Unsupported("signed-token-secret".to_string()));
+        assert_eq!(text_response_error_log_label(&unsupported), "content_coding class=unsupported");
+        assert!(!text_response_error_log_label(&unsupported).contains("signed-token-secret"));
+
+        let decoding = Error::new(ErrorKind::InvalidData, ContentDecodingIoError { coding: ContentCoding::Zstd });
+        assert_eq!(text_response_error_log_label(&decoding), "content_decoding coding=zstd");
+    }
+
+    fn test_input_source(url: String, provider: Option<Arc<ConfigProvider>>) -> InputSource {
+        InputSource {
+            name: Arc::from("test"),
+            url,
+            provider,
+            username: None,
+            password: None,
+            method: InputFetchMethod::GET,
+            headers: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn text_content_download_decodes_headerless_gzip_and_zlib() {
+        const TEXT: &[u8] = b"headerless legacy text\n";
+
+        for (label, encoded) in [("gzip", gzip_encoded(TEXT)), ("zlib", zlib_encoded(TEXT))] {
+            let (addr, requests, handle) =
+                start_recording_http_byte_server(vec![response_with_byte_body("200 OK", &encoded)])
+                    .await
+                    .expect("recording origin should start");
+            let url = Url::parse(&format!("http://{addr}/guide.xml")).expect("origin URL");
+            let input = test_input_source(url.to_string(), None);
+
+            let (content, _) =
+                download_text_content(&test_retry_config(1), &make_epg_test_client(), &input, None, None, false)
+                    .await
+                    .unwrap_or_else(|error| panic!("headerless {label} text should decode: {error}"));
+
+            assert_eq!(content.as_bytes(), TEXT, "failed for {label}");
+            assert_eq!(requests.lock().await.len(), 1);
+            handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn text_content_stream_decodes_headerless_gzip_and_zlib() {
+        const TEXT: &[u8] = b"streamed legacy text\n";
+
+        for (label, encoded) in [("gzip", gzip_encoded(TEXT)), ("zlib", zlib_encoded(TEXT))] {
+            let (addr, requests, handle) =
+                start_recording_http_byte_server(vec![response_with_byte_body("200 OK", &encoded)])
+                    .await
+                    .expect("recording origin should start");
+            let url = Url::parse(&format!("http://{addr}/guide.xml")).expect("origin URL");
+            let input = test_input_source(url.to_string(), None);
+
+            let (mut reader, _) =
+                get_remote_content_as_stream(&test_retry_config(1), &make_epg_test_client(), &input, None, &url)
+                    .await
+                    .unwrap_or_else(|error| panic!("headerless {label} stream should decode: {error}"));
+            let mut content = Vec::new();
+            reader.read_to_end(&mut content).await.expect("read decoded stream");
+
+            assert_eq!(content, TEXT, "failed for {label}");
+            assert_eq!(requests.lock().await.len(), 1);
+            handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn content_coding_identity_wins_after_input_and_client_header_merge() {
+        let (addr, requests, handle) = start_recording_http_server(vec![response_with_body("200 OK", "ok")])
+            .await
+            .expect("recording origin should start");
+        let url = Url::parse(&format!("http://{addr}/manifest.m3u8")).expect("origin URL");
+        let mut input = test_input_source(url.to_string(), None);
+        input.headers.insert("Accept-Encoding".to_string(), "gzip".to_string());
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("br"));
+
+        let response = send_input_with_retry_and_provider_policy_with_options_result(
+            &test_retry_config(1),
+            &make_epg_test_client(),
+            &input,
+            Some(&client_headers),
+            &url,
+            identity_fetch_options(),
+        )
+        .await
+        .expect("origin request should succeed");
+        drop(response);
+
+        let captured = requests.lock().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(request_header_value(&captured[0], "accept-encoding"), Some("identity"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn content_coding_identity_is_reapplied_for_retry() {
+        let responses = vec![response_with_body("500 Internal Server Error", ""), response_with_body("200 OK", "ok")];
+        let (addr, requests, handle) =
+            start_recording_http_server(responses).await.expect("recording origin should start");
+        let url = Url::parse(&format!("http://{addr}/manifest.m3u8")).expect("origin URL");
+        let input = test_input_source(url.to_string(), None);
+
+        send_input_with_retry_and_provider_policy_with_options_result(
+            &test_retry_config(2),
+            &make_epg_test_client(),
+            &input,
+            None,
+            &url,
+            identity_fetch_options(),
+        )
+        .await
+        .expect("retry should reach successful response");
+
+        let captured = requests.lock().await;
+        assert_eq!(captured.len(), 2);
+        assert!(captured.iter().all(|request| request_header_value(request, "accept-encoding") == Some("identity")));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn content_coding_identity_manifest_retries_temporary_body_transport_error() {
+        let truncated = "HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: close\r\n\r\n#EXTM3U\n";
+        let responses = vec![truncated.to_string(), response_with_body("200 OK", "#EXTM3U\nsegment.ts\n")];
+        let (addr, requests, handle) =
+            start_recording_http_server(responses).await.expect("recording origin should start");
+        let url = Url::parse(&format!("http://{addr}/manifest.m3u8")).expect("origin URL");
+        let input = test_input_source(url.to_string(), None);
+
+        let (manifest, _, _) = download_text_content_with_headers_and_options(
+            &test_retry_config(2),
+            &make_epg_test_client(),
+            &input,
+            None,
+            false,
+            TextContentFetchOptions::new(
+                identity_fetch_options(),
+                TextContentBodyOptions::hls_manifest(1024, Duration::from_secs(1)),
+            ),
+        )
+        .await
+        .expect("temporary body transport failure should retry");
+
+        assert_eq!(manifest, "#EXTM3U\nsegment.ts\n");
+        let captured = requests.lock().await;
+        assert_eq!(captured.len(), 2);
+        assert!(captured.iter().all(|request| request_header_value(request, "accept-encoding") == Some("identity")));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn text_content_manifest_uses_one_budget_for_status_decoder_and_success() {
+        let corrupt_gzip =
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 7\r\nConnection: close\r\n\r\ncorrupt";
+        let responses = vec![
+            response_with_body("503 Service Unavailable", ""),
+            corrupt_gzip.to_string(),
+            response_with_body("200 OK", "#EXTM3U\nsegment.ts\n"),
+        ];
+        let (addr, requests, handle) =
+            start_recording_http_server(responses).await.expect("recording origin should start");
+        let url = Url::parse(&format!("http://{addr}/manifest.m3u8")).expect("origin URL");
+        let input = test_input_source(url.to_string(), None);
+        let options = TextContentFetchOptions::new(
+            identity_fetch_options(),
+            TextContentBodyOptions::hls_manifest(1024, Duration::from_secs(1)),
+        );
+
+        let (manifest, _, _) = download_text_content_with_headers_and_options(
+            &test_retry_config(3),
+            &make_epg_test_client(),
+            &input,
+            None,
+            false,
+            options,
+        )
+        .await
+        .expect("third logical attempt should succeed");
+
+        assert_eq!(manifest, "#EXTM3U\nsegment.ts\n");
+        let captured = requests.lock().await;
+        assert_eq!(captured.len(), 3);
+        assert!(captured.iter().all(|request| request_header_value(request, "accept-encoding") == Some("identity")));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn text_content_manifest_retry_budget_is_not_multiplied_by_inner_status_retries() {
+        let corrupt_gzip =
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 7\r\nConnection: close\r\n\r\ncorrupt";
+        let responses = vec![
+            response_with_body("503 Service Unavailable", ""),
+            response_with_body("502 Bad Gateway", ""),
+            corrupt_gzip.to_string(),
+            response_with_body("200 OK", "#EXTM3U\nsegment.ts\n"),
+        ];
+        let (addr, requests, handle) =
+            start_recording_http_server(responses).await.expect("recording origin should start");
+        let url = Url::parse(&format!("http://{addr}/manifest.m3u8")).expect("origin URL");
+        let input = test_input_source(url.to_string(), None);
+        let options = TextContentFetchOptions::new(
+            identity_fetch_options(),
+            TextContentBodyOptions::hls_manifest(1024, Duration::from_secs(1)),
+        );
+
+        download_text_content_with_headers_and_options(
+            &test_retry_config(3),
+            &make_epg_test_client(),
+            &input,
+            None,
+            false,
+            options,
+        )
+        .await
+        .expect_err("three logical failures must exhaust the configured budget");
+
+        let captured = requests.lock().await;
+        assert_eq!(captured.len(), 3, "the fourth success response must not be requested");
+        assert!(captured.iter().all(|request| request_header_value(request, "accept-encoding") == Some("identity")));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn text_content_manifest_repeated_decoder_failures_stop_at_configured_budget() {
+        let corrupt_gzip =
+            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 7\r\nConnection: close\r\n\r\ncorrupt";
+        let (addr, requests, handle) =
+            start_recording_http_server(vec![corrupt_gzip.to_string()]).await.expect("recording origin should start");
+        let url = Url::parse(&format!("http://{addr}/manifest.m3u8")).expect("origin URL");
+        let input = test_input_source(url.to_string(), None);
+        let options = TextContentFetchOptions::new(
+            identity_fetch_options(),
+            TextContentBodyOptions::hls_manifest(1024, Duration::from_secs(1)),
+        );
+
+        download_text_content_with_headers_and_options(
+            &test_retry_config(3),
+            &make_epg_test_client(),
+            &input,
+            None,
+            false,
+            options,
+        )
+        .await
+        .expect_err("decoder failures must exhaust the configured budget");
+
+        let captured = requests.lock().await;
+        assert_eq!(captured.len(), 3);
+        assert!(captured.iter().all(|request| request_header_value(request, "accept-encoding") == Some("identity")));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn content_coding_identity_is_reapplied_after_provider_url_switch() {
+        let (first_addr, first_requests, first_handle) =
+            start_recording_http_server(vec![response_with_body("502 Bad Gateway", "")])
+                .await
+                .expect("first provider origin should start");
+        let (second_addr, second_requests, second_handle) =
+            start_recording_http_server(vec![response_with_body("200 OK", "ok")])
+                .await
+                .expect("second provider origin should start");
+        let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {
+            name: "provider-a".into(),
+            urls: vec![format!("http://{first_addr}").into(), format!("http://{second_addr}").into()],
+            provider_url_selection_policy: ProviderUrlSelectionPolicy::RestartFromFirst,
+            dns: None,
+        }));
+        let url = Url::parse("provider://provider-a/manifest.m3u8").expect("provider URL");
+        let input = test_input_source(url.to_string(), Some(provider));
+
+        send_input_with_retry_and_provider_policy_with_options_result(
+            &test_retry_config(1),
+            &make_epg_test_client(),
+            &input,
+            None,
+            &url,
+            identity_fetch_options(),
+        )
+        .await
+        .expect("provider failover should reach successful response");
+
+        let first = first_requests.lock().await;
+        let second = second_requests.lock().await;
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(request_header_value(&first[0], "accept-encoding"), Some("identity"));
+        assert_eq!(request_header_value(&second[0], "accept-encoding"), Some("identity"));
+        first_handle.abort();
+        second_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn content_coding_identity_is_reapplied_for_same_origin_manual_redirect() {
+        let redirect = "HTTP/1.1 302 Found\r\nLocation: /final.m3u8\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (addr, requests, handle) =
+            start_recording_http_server(vec![redirect.to_string(), response_with_body("200 OK", "ok")])
+                .await
+                .expect("recording origin should start");
+        let url = Url::parse(&format!("http://{addr}/entry.m3u8")).expect("origin URL");
+        let input = test_input_source(url.to_string(), None);
+
+        send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
+            &test_retry_config(1),
+            &make_epg_test_client(),
+            &input,
+            None,
+            &url,
+            2,
+            identity_fetch_options(),
+        )
+        .await
+        .expect("same-origin redirect should succeed");
+
+        let captured = requests.lock().await;
+        assert_eq!(captured.len(), 2);
+        assert!(captured.iter().all(|request| request_header_value(request, "accept-encoding") == Some("identity")));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn content_coding_identity_survives_cross_origin_redirect_credential_scrubbing() {
+        let (target_addr, target_requests, target_handle) =
+            start_recording_http_server(vec![response_with_body("200 OK", "ok")])
+                .await
+                .expect("redirect target should start");
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/final.m3u8\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        let (entry_addr, entry_requests, entry_handle) =
+            start_recording_http_server(vec![redirect]).await.expect("redirect entry should start");
+        let url = Url::parse(&format!("http://{entry_addr}/entry.m3u8")).expect("entry URL");
+        let mut input = test_input_source(url.to_string(), None);
+        input.headers.insert("Authorization".to_string(), "Bearer input-secret".to_string());
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert(COOKIE, HeaderValue::from_static("sid=client-secret"));
+
+        send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
+            &test_retry_config(1),
+            &make_epg_test_client(),
+            &input,
+            Some(&client_headers),
+            &url,
+            2,
+            identity_fetch_options(),
+        )
+        .await
+        .expect("cross-origin redirect should succeed");
+
+        let entry = entry_requests.lock().await;
+        assert_eq!(entry.len(), 1);
+        assert_eq!(request_header_value(&entry[0], "authorization"), Some("Bearer input-secret"));
+        assert_eq!(request_header_value(&entry[0], "cookie"), Some("sid=client-secret"));
+        drop(entry);
+        let target = target_requests.lock().await;
+        assert_eq!(target.len(), 1);
+        assert_eq!(request_header_value(&target[0], "accept-encoding"), Some("identity"));
+        assert!(request_header_value(&target[0], "authorization").is_none());
+        assert!(request_header_value(&target[0], "cookie").is_none());
+        entry_handle.abort();
+        target_handle.abort();
+    }
+
     #[tokio::test]
     async fn manual_redirect_provider_failover_restarts_from_provider_entry() {
         let (redirect_addr, redirect_hits, redirect_handle) = match start_plain_http_server_with_response(
@@ -3588,26 +4382,19 @@ mod tests {
             Err(err) => panic!("failed to start redirect target server: {err}"),
         };
         let redirect_url = format!("http://127.0.0.1:{}/redirected", redirect_addr.port());
-        let provider_a_response = format!(
-            "HTTP/1.1 302 Found\r\nLocation: {redirect_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        );
+        let provider_a_response =
+            format!("HTTP/1.1 302 Found\r\nLocation: {redirect_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         let provider_entrypoint = start_plain_http_server_with_response(provider_a_response)
             .await
             .expect("provider a test server should start");
         let successful_mirror =
             start_plain_http_server_with_body(b"provider-b").await.expect("provider b test server should start");
 
-        let mut cfg = Config {
-            connect_timeout_secs: 1,
-            ..Config::default()
-        };
+        let mut cfg = Config { connect_timeout_secs: 1, ..Config::default() };
         cfg.reverse_proxy = Some(ReverseProxyConfig {
             resource_rewrite_disabled: false,
             rewrite_secret: [0; 16],
-            resource_retry: ResourceRetryConfig {
-                max_attempts: 1,
-                ..ResourceRetryConfig::default()
-            },
+            resource_retry: ResourceRetryConfig { max_attempts: 1, ..ResourceRetryConfig::default() },
             disabled_header: None,
             stream: None,
             cache: None,
@@ -3675,26 +4462,18 @@ mod tests {
         let (addr_b, accepted_b, handle_b) = match start_plain_http_server_with_body(b"b").await {
             Ok(server) => server,
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!(
-                    "skipping test_provider_request_chain_starts_from_last_successful_url: {err}"
-                );
+                eprintln!("skipping test_provider_request_chain_starts_from_last_successful_url: {err}");
                 return;
             }
             Err(err) => panic!("failed to start test http server: {err}"),
         };
 
-        let mut cfg = Config {
-            connect_timeout_secs: 1,
-            ..Config::default()
-        };
+        let mut cfg = Config { connect_timeout_secs: 1, ..Config::default() };
         cfg.accept_insecure_ssl_certificates = true;
         cfg.reverse_proxy = Some(ReverseProxyConfig {
             resource_rewrite_disabled: false,
             rewrite_secret: [0; 16],
-            resource_retry: ResourceRetryConfig {
-                max_attempts: 1,
-                ..ResourceRetryConfig::default()
-            },
+            resource_retry: ResourceRetryConfig { max_attempts: 1, ..ResourceRetryConfig::default() },
             disabled_header: None,
             stream: None,
             cache: None,
@@ -3757,10 +4536,7 @@ mod tests {
             Err(err) => panic!("failed to start test http server: {err}"),
         };
 
-        let mut cfg = Config {
-            connect_timeout_secs: 1,
-            ..Config::default()
-        };
+        let mut cfg = Config { connect_timeout_secs: 1, ..Config::default() };
         cfg.accept_insecure_ssl_certificates = true;
         cfg.reverse_proxy = Some(ReverseProxyConfig {
             resource_rewrite_disabled: false,
@@ -3794,10 +4570,11 @@ mod tests {
         }));
 
         let url = Url::parse("provider://provider-a/live").expect("provider url should parse");
-        let result = send_with_retry_and_provider_policy(&app_config, &url, Some(&provider), false, false, |resolved_url| {
-            client.get(resolved_url.clone())
-        })
-        .await;
+        let result =
+            send_with_retry_and_provider_policy(&app_config, &url, Some(&provider), false, false, |resolved_url| {
+                client.get(resolved_url.clone())
+            })
+            .await;
 
         assert!(result.is_err(), "retry disabled must not fail over to the second provider URL");
         assert_eq!(accepted_b.load(Ordering::SeqCst), 0, "fallback provider URL must not be contacted");
@@ -3819,18 +4596,12 @@ mod tests {
             Err(err) => panic!("failed to start test http server: {err}"),
         };
 
-        let mut cfg = Config {
-            connect_timeout_secs: 1,
-            ..Config::default()
-        };
+        let mut cfg = Config { connect_timeout_secs: 1, ..Config::default() };
         cfg.accept_insecure_ssl_certificates = true;
         cfg.reverse_proxy = Some(ReverseProxyConfig {
             resource_rewrite_disabled: false,
             rewrite_secret: [0; 16],
-            resource_retry: ResourceRetryConfig {
-                max_attempts: 1,
-                ..ResourceRetryConfig::default()
-            },
+            resource_retry: ResourceRetryConfig { max_attempts: 1, ..ResourceRetryConfig::default() },
             disabled_header: None,
             stream: None,
             cache: None,
@@ -3903,18 +4674,12 @@ mod tests {
             Err(err) => panic!("failed to start test http server: {err}"),
         };
 
-        let mut cfg = Config {
-            connect_timeout_secs: 1,
-            ..Config::default()
-        };
+        let mut cfg = Config { connect_timeout_secs: 1, ..Config::default() };
         cfg.accept_insecure_ssl_certificates = true;
         cfg.reverse_proxy = Some(ReverseProxyConfig {
             resource_rewrite_disabled: false,
             rewrite_secret: [0; 16],
-            resource_retry: ResourceRetryConfig {
-                max_attempts: 1,
-                ..ResourceRetryConfig::default()
-            },
+            resource_retry: ResourceRetryConfig { max_attempts: 1, ..ResourceRetryConfig::default() },
             disabled_header: None,
             stream: None,
             cache: None,
@@ -3935,9 +4700,10 @@ mod tests {
 
         let provider_rotate =
             make_provider_with_dns(false, OnConnectErrorPolicy::RotateProviderUrl, vec!["192.168.0.1", "127.0.0.1"]);
-        let result_rotate = send_with_retry_and_provider(&app_config, &url, Some(&provider_rotate), false, |resolved_url| {
-            client.get(resolved_url.clone())
-        })
+        let result_rotate =
+            send_with_retry_and_provider(&app_config, &url, Some(&provider_rotate), false, |resolved_url| {
+                client.get(resolved_url.clone())
+            })
             .await;
         assert!(result_rotate.is_err(), "without try_next_ip policy the request should fail");
 
@@ -3947,7 +4713,7 @@ mod tests {
             send_with_retry_and_provider(&app_config, &url, Some(&provider_try_next), false, |resolved_url| {
                 client.get(resolved_url.clone())
             })
-                .await;
+            .await;
         assert!(result_try_next.is_ok(), "try_next_ip should succeed by trying the second IP");
         assert_eq!(accepted.load(Ordering::SeqCst), 1, "server should be reached exactly once");
 

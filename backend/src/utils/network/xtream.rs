@@ -618,6 +618,7 @@ mod tests {
             input_name: "provider".intern(),
             channel_no: 1,
             source_ordinal: 1,
+            input_stream_id: "813563".intern(),
         }
     }
 

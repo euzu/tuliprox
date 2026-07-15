@@ -43,13 +43,33 @@ separate `share_live_streams.mpeg_ts` option.
 
 | Shared between viewers | Still separate per viewer |
 | :--- | :--- |
-| The stable `HlsSession` for the same input and live stream reference. | The `hls_access_lease_id` in the user-facing URL. |
+| The stable `HlsSession` for the same input and original input stream ID. | The `hls_access_lease_id` in the user-facing URL. |
 | Origin manifest refreshes and origin segment fetches when the cache can reuse them. | Tuliprox username, client fingerprint, and access checks. |
 | Cached HLS segments and HLS MAP objects. | User connection admission and stream reservation lifecycle. |
 | Transient HLS resource handling when the manifest requires it. | User-visible error handling and custom video redirects. |
 
 This means the feature is not a bypass for user limits. It is a way to avoid duplicated upstream HLS work after Tuliprox
 has accepted each viewer.
+
+## How is a shared session identified?
+
+Tuliprox builds the shared content identity as:
+
+```text
+input:<input_id>|hls|<input_stream_id>
+```
+
+`input_id` identifies the configured Tuliprox input. `input_stream_id` is the original stream ID captured from the input
+playlist item before target mapping. For Xtream inputs, it is the provider/origin stream ID rendered as a decimal string.
+For M3U inputs, it is the exact ID resolved by the parser, which can also be alphanumeric or a stable URL-derived hash.
+
+The target ID and `virtual_id` are not part of this key. Consequently, two targets with different virtual IDs share the
+same content session when they refer to the same `input_id` and `input_stream_id`. Their access leases, routing context,
+and user admission remain separate. Origin credentials, direct origin URLs, and the currently selected provider mirror
+also do not change the shared session identity.
+
+The pair `(input_id, input_stream_id)` must uniquely identify one stream within the processed inputs. Target mapping must
+not change the captured input stream ID.
 
 ## Requirements
 
@@ -98,7 +118,8 @@ targets:
 ## Request flow in plain language
 
 1. A player opens the normal generated Tuliprox HLS live URL.
-2. Tuliprox authenticates the user and checks whether this target allows Shared HLS.
+2. Tuliprox authenticates the user, resolves the unchanged input stream ID, and checks whether this target allows Shared
+   HLS.
 3. Tuliprox creates a new access lease for that playback.
 4. Tuliprox returns an HTTP `307 Temporary Redirect` to the canonical shared HLS manifest URL.
 5. The player follows the redirect and requests `/hls/shared/live/.../manifest.m3u8`.

@@ -13,8 +13,7 @@ use axum::response::IntoResponse;
 use log::trace;
 use reqwest::StatusCode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use shared::error::TuliproxError;
-use shared::model::PlaylistItemType;
+use shared::{error::TuliproxError, model::PlaylistItemType};
 use std::{fmt, net::SocketAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
@@ -87,7 +86,8 @@ fn prepare_video_headers(headers: &[(String, String)]) -> Vec<(String, String)> 
                 || key.eq_ignore_ascii_case("content-length")
                 || key.eq_ignore_ascii_case("range")
                 || key.eq_ignore_ascii_case("content-range")
-                || key.eq_ignore_ascii_case("accept-ranges"))
+                || key.eq_ignore_ascii_case("accept-ranges")
+                || key.eq_ignore_ascii_case("transfer-encoding"))
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
@@ -146,12 +146,11 @@ fn create_video_stream(
     }
     if let Some(video) = video_buffer {
         trace!("{log_message}");
-        let stream =
-            apply_custom_stream_timeout(cfg, Box::pin(ThrottledStream::new(CustomVideoStream::new(video.clone()), 8000)));
-        (
-            Some(stream),
-            Some((prepare_video_headers(headers), status, None, Some(stream_type))),
-        )
+        let stream = apply_custom_stream_timeout(
+            cfg,
+            Box::pin(ThrottledStream::new(CustomVideoStream::new(video.clone()), 8000)),
+        );
+        (Some(stream), Some((prepare_video_headers(headers), status, None, Some(stream_type))))
     } else {
         (None, None)
     }
@@ -190,10 +189,7 @@ pub fn create_channel_unavailable_stream(
 /// and human-readable description.
 macro_rules! ok_custom_stream_factory {
     ($fn_name:ident, $field:ident, $stream_type:expr, $description:expr) => {
-        pub fn $fn_name(
-            cfg: &AppConfig,
-            headers: &[(String, String)],
-        ) -> ProviderStreamResponse {
+        pub fn $fn_name(cfg: &AppConfig, headers: &[(String, String)]) -> ProviderStreamResponse {
             let custom_stream_response = cfg.custom_stream_response.load();
             let video = custom_stream_response.as_ref().and_then(|c| c.$field.as_ref());
             create_ok_video_stream(cfg, $stream_type, video, headers, $description)
@@ -273,9 +269,7 @@ pub fn create_custom_video_stream_response(
 ) -> impl axum::response::IntoResponse + Send {
     let config = &app_state.app_config;
     if let (Some(stream), Some((headers, status_code, _, _))) = match video_response {
-        CustomVideoStreamType::ChannelUnavailable => {
-            create_channel_unavailable_stream(config, &[], StatusCode::OK)
-        }
+        CustomVideoStreamType::ChannelUnavailable => create_channel_unavailable_stream(config, &[], StatusCode::OK),
         CustomVideoStreamType::UserConnectionsExhausted => create_user_connections_exhausted_stream(config, &[]),
         CustomVideoStreamType::ProviderConnectionsExhausted => {
             create_provider_connections_exhausted_stream(config, &[])
@@ -316,8 +310,8 @@ pub fn get_header_filter_for_item_type(item_type: PlaylistItemType) -> HeaderFil
 #[cfg(test)]
 mod tests {
     use super::{
-        create_channel_unavailable_stream, is_custom_video_stream_enabled, get_custom_stream_response_error_status,
-        CustomVideoStreamType,
+        create_channel_unavailable_stream, get_custom_stream_response_error_status, is_custom_video_stream_enabled,
+        prepare_video_headers, CustomVideoStreamType,
     };
     use crate::{
         api::model::TransportStreamBuffer,
@@ -351,7 +345,10 @@ mod tests {
         let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
 
         let app_cfg = AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(Config { custom_stream_response_enabled: true, ..Config::default()})),
+            config: Arc::new(ArcSwap::from_pointee(Config {
+                custom_stream_response_enabled: true,
+                ..Config::default()
+            })),
             sources: Arc::new(ArcSwap::from_pointee(sources)),
             hdhomerun: Arc::new(ArcSwapOption::default()),
             api_proxy: Arc::new(ArcSwapOption::default()),
@@ -402,6 +399,17 @@ mod tests {
         let parsed = CustomVideoStreamType::from_str("hls_session_or_lease_expired")
             .expect("hls_session_or_lease_expired should parse as custom video type");
         assert_eq!(parsed.to_string(), "hls_session_or_lease_expired");
+    }
+
+    #[test]
+    fn custom_video_headers_drop_transfer_encoding() {
+        let headers = prepare_video_headers(&[
+            ("Transfer-Encoding".to_string(), "chunked".to_string()),
+            ("cache-control".to_string(), "no-store".to_string()),
+        ]);
+
+        assert!(headers.iter().all(|(name, _)| !name.eq_ignore_ascii_case("transfer-encoding")));
+        assert!(headers.iter().any(|(name, value)| name == "cache-control" && value == "no-store"));
     }
 
     #[tokio::test]

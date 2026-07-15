@@ -1158,6 +1158,7 @@ mod tests {
             input_name: Arc::clone(&input_name),
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: "9001".intern(),
         };
         let provider_parent_code = xtream_series_info.get_uuid().intern();
         let xtream_provider_episode = XtreamPlaylistItem {
@@ -1179,6 +1180,7 @@ mod tests {
             input_name,
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: "201".intern(),
         };
         let provider_episode = PlaylistItem::from(&xtream_provider_episode);
         let mut series_info = PlaylistItem::from(&xtream_series_info);

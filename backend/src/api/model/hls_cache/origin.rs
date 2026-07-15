@@ -5,8 +5,12 @@ use crate::{
 };
 use log::debug;
 use shared::utils::sanitize_sensitive_info;
-use std::{fmt, net::SocketAddr, sync::Arc};
-use std::time::{Duration, Instant};
+use std::{
+    fmt,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{
     sync::{Mutex, Notify},
     time::timeout,
@@ -16,15 +20,26 @@ const HLS_ACCOUNT_OVERLAP_FALLBACK_TARGET_DURATION_MS: u64 = 15_000;
 const HLS_ORIGIN_ACCOUNT_IO_WAIT_RECHECK: Duration = Duration::from_millis(25);
 
 /// Stable source metadata for one shared live-HLS session.
+///
+/// Session identity is derived only from `input_id` and the immutable input
+/// origin ID in `stream_ref`; target IDs, virtual IDs, and resolved origin URLs
+/// are deliberately excluded.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct HlsOriginSource {
+    /// Internal ID of the configured Tuliprox input.
     pub input_id: u16,
+    /// Input name used to resolve the current origin account or alias.
     pub input_name: Arc<str>,
+    /// Exact, non-empty origin/provider stream ID captured before target mapping.
     pub stream_ref: String,
     pub source_kind: HlsOriginSourceKind,
 }
 
 impl HlsOriginSource {
+    /// Creates source metadata from an immutable input-stream identity.
+    ///
+    /// `stream_ref` must be the origin/provider ID, never a target-specific or
+    /// virtual ID.
     pub fn new(
         input_id: u16,
         input_name: Arc<str>,
@@ -129,11 +144,7 @@ impl HlsAccountOverlapTiming {
     }
 
     pub fn reservation_ttl_secs(self) -> u64 {
-        self.hard_active_window_ms
-            .saturating_add(self.soft_active_window_ms)
-            .saturating_add(999)
-            / 1_000
-            + 1
+        self.hard_active_window_ms.saturating_add(self.soft_active_window_ms).saturating_add(999) / 1_000 + 1
     }
 }
 
@@ -616,9 +627,7 @@ async fn reserve_hls_origin_account_io_slot(
                     if now >= deadline {
                         return Err(HlsBoundAccountAcquireErrorKind::WaitTimedOut);
                     }
-                    let wait_for = deadline
-                        .saturating_duration_since(now)
-                        .min(HLS_ORIGIN_ACCOUNT_IO_WAIT_RECHECK);
+                    let wait_for = deadline.saturating_duration_since(now).min(HLS_ORIGIN_ACCOUNT_IO_WAIT_RECHECK);
                     tokio::select! {
                         () = notify.notified() => {}
                         () = tokio::time::sleep(wait_for) => {}
@@ -844,6 +853,15 @@ mod tests {
         let direct = HlsOriginSource::new(7, Arc::from("input"), "80510", HlsOriginSourceKind::XtreamLive);
 
         assert_eq!(direct.session_key().stable_value(), "input:7|hls|80510");
+    }
+
+    #[test]
+    fn origin_source_preserves_alphanumeric_input_stream_id() {
+        let source =
+            HlsOriginSource::new(7, Arc::from("input"), "m3u-channel_A42", HlsOriginSourceKind::M3uMediaPlaylist);
+
+        assert_eq!(source.stream_ref, "m3u-channel_A42");
+        assert_eq!(source.session_key().stable_value(), "input:7|hls|m3u-channel_A42");
     }
 
     #[test]

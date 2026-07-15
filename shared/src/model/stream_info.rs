@@ -383,6 +383,7 @@ mod tests {
             input_name: "demo".intern(),
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: "1".intern(),
         };
 
         let stream_channel = create_stream_channel_with_type(1, &playlist_item, PlaylistItemType::Video);
@@ -412,6 +413,7 @@ mod tests {
             input_name: "provider-input".intern(),
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: "1".intern(),
         };
 
         let stream_channel = playlist_item.to_stream_channel(1);
@@ -444,6 +446,7 @@ mod tests {
             t_catchup_mode: None,
             source_ordinal: 0,
             additional_properties: None,
+            input_stream_id: "42".intern(),
         };
 
         let channel = pli.to_stream_channel(7).with_epg_reference_ts(Some(1_700_000_000));
@@ -479,6 +482,7 @@ mod tests {
             t_catchup_mode: None,
             source_ordinal: 0,
             additional_properties: None,
+            input_stream_id: "42".intern(),
         };
 
         // to_stream_channel() defaults to None, and with_epg_reference_ts(None)

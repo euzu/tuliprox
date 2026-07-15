@@ -1,6 +1,7 @@
 use super::{
-    extract_hls_provider_session_header_map, safe_origin_log_value, safe_session_key, HlsAccountBindingProtection,
-    HlsBoundAccountAcquireErrorKind, HlsSessionHandle, HlsSessionMode, TimelineMapError,
+    extract_hls_provider_session_header_map, log_hls_origin_content_coding, safe_origin_log_value, safe_session_key,
+    HlsAccountBindingProtection, HlsBoundAccountAcquireErrorKind, HlsOriginContentCodingObjectKind,
+    HlsOriginContentCodingSource, HlsSessionHandle, HlsSessionMode, TimelineMapError,
 };
 use crate::{
     model::{
@@ -11,20 +12,26 @@ use crate::{
         parse_manifest_timing, parse_origin_manifest_timeline, parse_origin_media_manifest, OriginManifestParseOutcome,
         ParsedOriginManifestTimeline,
     },
-    utils::request::{
-        send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result,
-        send_input_with_retry_and_provider_policy_with_options_result, RequestFetchOptions,
+    utils::{
+        content_coding::{
+            apply_outbound_content_coding_policy, content_decoding_error_from_io, decode_response_to_identity,
+            is_http_body_transport_error, read_utf8_limited, ContentBodyReadError, ContentCoding,
+            ContentCodingDetection, ContentCodingError, OutboundContentCodingPolicy,
+        },
+        request::{
+            send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result,
+            send_input_with_retry_and_provider_policy_with_options_result, RequestFetchOptions,
+        },
     },
 };
 use axum::http::{header, HeaderMap, StatusCode};
-use futures::StreamExt;
 use log::{debug, warn};
 use reqwest::Client;
 use shared::{
-    model::{HlsManifestRecoveryBurstLevel, HlsManifestRecoveryBurstPlan, InputFetchMethod, HlsStripMode},
+    model::{HlsManifestRecoveryBurstLevel, HlsManifestRecoveryBurstPlan, HlsStripMode, InputFetchMethod},
     utils::sanitize_sensitive_info,
 };
-use std::{collections::HashMap, fmt, future::Future, sync::Arc, time::Duration};
+use std::{collections::HashMap, fmt, future::Future, io, sync::Arc, time::Duration};
 use tokio::{task::JoinSet, time::timeout};
 use url::Url;
 
@@ -33,7 +40,7 @@ const DEFAULT_HLS_TARGET_DURATION_SECS: u32 = 15;
 const HLS_MANIFEST_HOST_SWITCH_BASE_WINDOW_SEGMENTS: u32 = 3;
 const HLS_MANIFEST_HOST_SWITCH_MAX_FAILURE_THRESHOLD: u32 = 5;
 const DEFAULT_HLS_SESSION_IDLE_TIMEOUT_SECS: u64 = 300;
-const MAX_HLS_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
+pub(crate) const MAX_HLS_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
 
 /// Origin manifest entrypoint snapshot for live HLS refreshes.
 #[derive(Clone)]
@@ -137,16 +144,64 @@ pub fn classify_origin_manifest_status(status: StatusCode) -> OriginManifestStat
     OriginManifestStatusClass::NonRetryableFailure
 }
 
-#[derive(Debug)]
-pub enum OriginManifestFetchError {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OriginManifestFetchError {
+    #[error("origin manifest returned permanent status {0}")]
     PermanentStatus(StatusCode),
+    #[error("origin manifest returned retryable status {0}, retry_after_ms={1:?}")]
     RetryableStatus(StatusCode, Option<u64>),
+    #[error("origin manifest retry attempts exhausted")]
     RetryExhausted,
+    #[error("origin manifest returned non-retryable status {0}")]
     NonRetryableStatus(StatusCode),
+    #[error("origin manifest request failed: {0}")]
     Request(String),
+    #[error("origin manifest redirect failed: {0}")]
     Redirect(String),
+    #[error("origin manifest request timed out")]
     Timeout,
+    #[error("origin provider unavailable: {0:?}")]
     ProviderUnavailable(HlsBoundAccountAcquireErrorKind),
+    #[error("origin manifest content coding failed: {0}")]
+    ContentCoding(ContentCodingError),
+    #[error("origin manifest decoding failed: coding={coding:?}")]
+    ContentDecoding { coding: ContentCoding },
+    #[error("decoded origin manifest exceeds configured limit {limit}")]
+    DecodedBodyLimitExceeded { limit: usize },
+    #[error("decoded origin manifest is not valid UTF-8: valid_up_to={valid_up_to} error_len={error_len:?}")]
+    InvalidUtf8 { valid_up_to: usize, error_len: Option<usize> },
+}
+
+impl OriginManifestFetchError {
+    /// Returns a fixed/numeric diagnostic label without origin-controlled strings.
+    pub(crate) fn log_label(&self) -> String {
+        match self {
+            Self::PermanentStatus(status) => format!("permanent_status status={}", status.as_u16()),
+            Self::RetryableStatus(status, _) => format!("retryable_status status={}", status.as_u16()),
+            Self::RetryExhausted => "retry_exhausted".to_string(),
+            Self::NonRetryableStatus(status) => format!("non_retryable_status status={}", status.as_u16()),
+            Self::Request(_) => "request".to_string(),
+            Self::Redirect(_) => "redirect".to_string(),
+            Self::Timeout => "timeout".to_string(),
+            Self::ProviderUnavailable(kind) => format!("provider_unavailable kind={}", kind.as_log_label()),
+            Self::ContentCoding(error) => match error {
+                ContentCodingError::InvalidHeader => "content_coding class=invalid_header".to_string(),
+                ContentCodingError::Unsupported(_) => "content_coding class=unsupported".to_string(),
+                ContentCodingError::EncodedPartialContent => "content_coding class=encoded_partial_content".to_string(),
+                ContentCodingError::PrefixRead(error) => content_decoding_error_from_io(error).map_or_else(
+                    || "content_coding class=prefix_read".to_string(),
+                    |error| format!("content_decoding coding={}", error.coding.as_http_token()),
+                ),
+            },
+            Self::ContentDecoding { coding, .. } => {
+                format!("content_decoding coding={}", coding.as_http_token())
+            }
+            Self::DecodedBodyLimitExceeded { limit } => format!("decoded_body_limit limit={limit}"),
+            Self::InvalidUtf8 { valid_up_to, error_len } => {
+                format!("invalid_utf8 valid_up_to={valid_up_to} error_len={error_len:?}")
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -482,40 +537,85 @@ async fn fetch_hls_origin_manifest_initial_global_policy(
     );
     let fetch_options = RequestFetchOptions::with_attempt_idle_timeout(Duration::from_millis(
         context.origin_manifest_timeout_ms.max(1),
-    ));
-    let response_result = if context.use_manual_redirects {
-        send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
-            &context.app_config,
-            &context.no_redirect_client,
-            &input_source,
-            Some(&context.headers),
-            context.origin_entry.url(),
-            MAX_MANUAL_REDIRECTS,
-            fetch_options,
-        )
-        .await
-    } else {
-        send_input_with_retry_and_provider_policy_with_options_result(
-            &context.app_config,
-            &context.client,
-            &input_source,
-            Some(&context.headers),
-            context.origin_entry.url(),
-            fetch_options,
-        )
-        .await
-    };
-    let response_result = response_result.map_err(|err| origin_manifest_fetch_error_from_request_error(&err))?;
-    let provider_url_index = response_result.provider_url_index;
-    let resolved_request_url =
-        resolved_hls_manifest_request_url_from_input(&input_source, provider_url_index, context.origin_entry.url());
-    response_to_fetched_manifest(
-        response_result.response,
-        provider_url_index,
-        resolved_request_url,
-        context.origin_manifest_timeout_ms,
-    )
-    .await
+    ))
+    .with_content_coding(OutboundContentCodingPolicy::Identity)
+    .without_resource_retries();
+    let attempts = context.retry_policy.attempt_count();
+
+    // This HLS loop owns the logical manifest-attempt budget. Each iteration may traverse one bounded provider URL
+    // failover cycle and redirect chain, but the generic resource-retry counter is not nested beneath it.
+    for attempt_index in 0..attempts {
+        let response_result = if context.use_manual_redirects {
+            send_input_with_retry_and_provider_policy_with_manual_redirects_and_options_result(
+                &context.app_config,
+                &context.no_redirect_client,
+                &input_source,
+                Some(&context.headers),
+                context.origin_entry.url(),
+                MAX_MANUAL_REDIRECTS,
+                fetch_options,
+            )
+            .await
+        } else {
+            send_input_with_retry_and_provider_policy_with_options_result(
+                &context.app_config,
+                &context.client,
+                &input_source,
+                Some(&context.headers),
+                context.origin_entry.url(),
+                fetch_options,
+            )
+            .await
+        };
+        let fetch_result = match response_result {
+            Ok(response_result) => {
+                let provider_url_index = response_result.provider_url_index;
+                let resolved_request_url = resolved_hls_manifest_request_url_from_input(
+                    &input_source,
+                    provider_url_index,
+                    context.origin_entry.url(),
+                );
+                response_to_fetched_manifest(
+                    response_result.response,
+                    provider_url_index,
+                    resolved_request_url,
+                    context.origin_manifest_timeout_ms,
+                )
+                .await
+            }
+            Err(err) => Err(origin_manifest_fetch_error_from_io_error(&err)),
+        };
+        match fetch_result {
+            Ok(fetched) => return Ok(fetched.with_attempts(attempt_index + 1)),
+            Err(err) if is_hls_retryable_initial_manifest_fetch_error(&err) && attempt_index + 1 < attempts => {
+                let retry_after_ms = match &err {
+                    OriginManifestFetchError::RetryableStatus(_, retry_after_ms) => *retry_after_ms,
+                    _ => None,
+                };
+                let jitter_ms = if retry_after_ms.is_some() || context.retry_policy.jitter_max_ms == 0 {
+                    0
+                } else {
+                    fastrand::u64(0..=context.retry_policy.jitter_max_ms)
+                };
+                let delay_ms = next_retry_delay_ms(&context.retry_policy, attempt_index, retry_after_ms, jitter_ms);
+                log_manifest_retry_scheduled(
+                    context,
+                    ManifestRetryLogKind::InitialFetch,
+                    attempt_index,
+                    attempts,
+                    delay_ms,
+                    None,
+                    Some(&err),
+                )
+                .await;
+                if delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(OriginManifestFetchError::RetryExhausted)
 }
 
 pub(crate) async fn score_hls_manifest_candidate_for_selection_log(
@@ -578,9 +678,10 @@ where
             HlsManifestRecoveryAttemptError::Rejected(reason) if attempt_index + 1 < attempts => {
                 log_manifest_retry_scheduled(
                     context,
+                    ManifestRetryLogKind::PinnedHostRecovery,
                     attempt_index,
                     attempts,
-                    next_retry_delay_ms(&context.retry_policy, attempt_index, None),
+                    next_retry_delay_ms(&context.retry_policy, attempt_index, None, 0),
                     Some(&reason),
                     None,
                 )
@@ -596,9 +697,10 @@ where
             {
                 log_manifest_retry_scheduled(
                     context,
+                    ManifestRetryLogKind::PinnedHostRecovery,
                     attempt_index,
                     attempts,
-                    next_retry_delay_ms(&context.retry_policy, attempt_index, None),
+                    next_retry_delay_ms(&context.retry_policy, attempt_index, None, 0),
                     None,
                     Some(&err),
                 )
@@ -1301,15 +1403,34 @@ pub(crate) fn fetched_effective_manifest_host(fetched: &FetchedOriginManifest) -
     Url::parse(&fetched.resolved_request_url).ok().and_then(|url| url.host_str().map(str::to_string))
 }
 
-fn is_hls_retryable_manifest_reject_fetch_error(err: &OriginManifestFetchError) -> bool {
+fn is_hls_retryable_initial_manifest_fetch_error(err: &OriginManifestFetchError) -> bool {
     matches!(
         err,
         OriginManifestFetchError::RetryableStatus(_, _)
             | OriginManifestFetchError::Request(_)
             | OriginManifestFetchError::Redirect(_)
             | OriginManifestFetchError::Timeout
-            | OriginManifestFetchError::RetryExhausted
+            | OriginManifestFetchError::ContentDecoding { .. }
+            | OriginManifestFetchError::ContentCoding(ContentCodingError::PrefixRead(_))
     )
+}
+
+fn is_hls_retryable_manifest_reject_fetch_error(err: &OriginManifestFetchError) -> bool {
+    match err {
+        OriginManifestFetchError::RetryableStatus(_, _)
+        | OriginManifestFetchError::Request(_)
+        | OriginManifestFetchError::Redirect(_)
+        | OriginManifestFetchError::Timeout
+        | OriginManifestFetchError::RetryExhausted
+        | OriginManifestFetchError::ContentDecoding { .. }
+        | OriginManifestFetchError::ContentCoding(ContentCodingError::PrefixRead(_)) => true,
+        OriginManifestFetchError::PermanentStatus(_)
+        | OriginManifestFetchError::NonRetryableStatus(_)
+        | OriginManifestFetchError::ProviderUnavailable(_)
+        | OriginManifestFetchError::ContentCoding(_)
+        | OriginManifestFetchError::DecodedBodyLimitExceeded { .. }
+        | OriginManifestFetchError::InvalidUtf8 { .. } => false,
+    }
 }
 
 pub(crate) fn commit_error_to_fetch_error(err: &HlsManifestCommitError) -> OriginManifestFetchError {
@@ -1347,12 +1468,25 @@ pub(crate) fn next_committed_origin_highwater(
     }
 }
 
-fn next_retry_delay_ms(retry_policy: &RetryPolicy, attempt_index: usize, retry_after_ms: Option<u64>) -> u64 {
-    retry_after_ms.unwrap_or_else(|| retry_policy.delays_ms.get(attempt_index + 1).copied().unwrap_or_default())
+fn next_retry_delay_ms(
+    retry_policy: &RetryPolicy,
+    attempt_index: usize,
+    retry_after_ms: Option<u64>,
+    jitter_ms: u64,
+) -> u64 {
+    retry_after_ms
+        .unwrap_or_else(|| retry_policy.delay_for_attempt_ms(attempt_index + 1, jitter_ms).unwrap_or_default())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestRetryLogKind {
+    InitialFetch,
+    PinnedHostRecovery,
 }
 
 async fn log_manifest_retry_scheduled(
     context: &HlsOriginManifestFetchContext,
+    retry_kind: ManifestRetryLogKind,
     attempt_index: usize,
     attempts: usize,
     delay_ms: u64,
@@ -1363,7 +1497,7 @@ async fn log_manifest_retry_scheduled(
         let session = context.session.read().await;
         safe_session_key(&session.key)
     };
-    let status = manifest_retry_status_label(reject_reason, fetch_error);
+    let status = manifest_retry_status_label(retry_kind, reject_reason, fetch_error);
     warn!(
         "Manifest '{}' retry scheduled: status {} attempt {} of {} next_delay_ms={delay_ms}",
         session_label,
@@ -1374,16 +1508,21 @@ async fn log_manifest_retry_scheduled(
 }
 
 fn manifest_retry_status_label(
+    retry_kind: ManifestRetryLogKind,
     reject_reason: Option<&HlsManifestRejectLogReason>,
     fetch_error: Option<&OriginManifestFetchError>,
 ) -> String {
-    match (reject_reason, fetch_error) {
-        (Some(reason), Some(err)) => {
-            format!("{} error={}", reason.status_label(), safe_origin_log_value(format!("{err:?}")))
+    match (retry_kind, reject_reason, fetch_error) {
+        (_, Some(reason), Some(err)) => format!("{} error={}", reason.status_label(), err.log_label()),
+        (_, Some(reason), None) => reason.status_label(),
+        (ManifestRetryLogKind::InitialFetch, None, Some(err)) => {
+            format!("initial-fetch error={}", err.log_label())
         }
-        (Some(reason), None) => reason.status_label(),
-        (None, Some(err)) => format!("pinned-host-recovery error={}", safe_origin_log_value(format!("{err:?}"))),
-        (None, None) => "pinned-host-recovery".to_string(),
+        (ManifestRetryLogKind::InitialFetch, None, None) => "initial-fetch".to_string(),
+        (ManifestRetryLogKind::PinnedHostRecovery, None, Some(err)) => {
+            format!("pinned-host-recovery error={}", err.log_label())
+        }
+        (ManifestRetryLogKind::PinnedHostRecovery, None, None) => "pinned-host-recovery".to_string(),
     }
 }
 
@@ -1406,12 +1545,14 @@ async fn fetch_origin_manifest_once(
         )
         .await
     } else {
+        let mut request_headers = headers.clone();
+        apply_outbound_content_coding_policy(&mut request_headers, OutboundContentCodingPolicy::Identity);
         let response = client
             .get(entry_url.clone())
-            .headers(headers.clone())
+            .headers(request_headers)
             .send()
             .await
-            .map_err(|err| origin_manifest_fetch_error_from_request_error(&err))?;
+            .map_err(|err| origin_manifest_fetch_error_from_reqwest_error(&err))?;
         response_to_fetched_manifest(response, provider_url_index, entry_url.clone(), origin_manifest_timeout_ms).await
     }
 }
@@ -1428,12 +1569,14 @@ async fn fetch_origin_manifest_with_manual_redirects(
     let mut remaining_redirects = MAX_MANUAL_REDIRECTS;
 
     loop {
+        let mut request_headers = current_headers.clone();
+        apply_outbound_content_coding_policy(&mut request_headers, OutboundContentCodingPolicy::Identity);
         let response = client
             .get(current_url.clone())
-            .headers(current_headers.clone())
+            .headers(request_headers)
             .send()
             .await
-            .map_err(|err| origin_manifest_fetch_error_from_request_error(&err))?;
+            .map_err(|err| origin_manifest_fetch_error_from_reqwest_error(&err))?;
         if !response.status().is_redirection() {
             return response_to_fetched_manifest(
                 response,
@@ -1544,18 +1687,17 @@ async fn response_to_fetched_manifest(
     );
     match classify_origin_manifest_status(status) {
         OriginManifestStatusClass::Success => {
-            let final_url = response.url().clone();
-            let redirect_host = hls_manifest_redirect_host(&resolved_request_url, &final_url);
-            let provider_session_headers = extract_hls_provider_session_header_map(response.headers());
-            let body = read_origin_manifest_body(response, origin_manifest_timeout_ms).await?;
+            let (decoded, body) = read_origin_manifest_body(response, origin_manifest_timeout_ms).await?;
+            let redirect_host = hls_manifest_redirect_host(&resolved_request_url, &decoded.final_url);
+            let provider_session_headers = extract_hls_provider_session_header_map(&decoded.headers);
             Ok(FetchedOriginManifest {
                 body,
-                final_manifest_url: final_url.to_string(),
+                final_manifest_url: decoded.final_url.to_string(),
                 resolved_request_url: resolved_request_url.to_string(),
                 redirect_host,
                 provider_url_index,
                 provider_session_headers,
-                status,
+                status: decoded.status,
                 attempts: 1,
             })
         }
@@ -1567,35 +1709,64 @@ async fn response_to_fetched_manifest(
     }
 }
 
-fn manifest_body_size_after_chunk(current: usize, chunk: usize) -> Option<usize> {
-    current.checked_add(chunk).filter(|size| *size <= MAX_HLS_MANIFEST_BYTES)
-}
-
 async fn read_origin_manifest_body(
     response: reqwest::Response,
     origin_manifest_timeout_ms: u64,
-) -> Result<String, OriginManifestFetchError> {
-    if response.content_length().is_some_and(|size| size > MAX_HLS_MANIFEST_BYTES as u64) {
-        return Err(OriginManifestFetchError::NonRetryableStatus(StatusCode::PAYLOAD_TOO_LARGE));
-    }
+) -> Result<(crate::utils::content_coding::DecodedHttpResponse, String), OriginManifestFetchError> {
     let read = async move {
-        let capacity = response.content_length().map_or(0, |size| {
-            usize::try_from(size.min(MAX_HLS_MANIFEST_BYTES as u64)).unwrap_or(MAX_HLS_MANIFEST_BYTES)
-        });
-        let mut body = Vec::with_capacity(capacity);
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|err| origin_manifest_fetch_error_from_request_error(&err))?;
-            if manifest_body_size_after_chunk(body.len(), chunk.len()).is_none() {
-                return Err(OriginManifestFetchError::NonRetryableStatus(StatusCode::PAYLOAD_TOO_LARGE));
-            }
-            body.extend_from_slice(&chunk);
+        let mut decoded =
+            decode_response_to_identity(response, ContentCodingDetection::DeclaredOrKnownHlsManifestMagic)
+                .await
+                .map_err(origin_manifest_content_coding_error)?;
+        if let Some(observation) = decoded.content_coding_observation() {
+            log_hls_origin_content_coding(
+                observation,
+                HlsOriginContentCodingObjectKind::Manifest,
+                false,
+                HlsOriginContentCodingSource::Shared,
+            );
         }
-        String::from_utf8(body).map_err(|_| OriginManifestFetchError::Request("origin manifest is not UTF-8".to_string()))
+        let body = read_utf8_limited(&mut decoded.body, MAX_HLS_MANIFEST_BYTES)
+            .await
+            .map_err(origin_manifest_body_read_error)?;
+        Ok((decoded, body))
     };
     timeout(Duration::from_millis(origin_manifest_timeout_ms.max(1)), read)
         .await
         .map_err(|_| OriginManifestFetchError::Timeout)?
+}
+
+fn origin_manifest_content_coding_error(error: ContentCodingError) -> OriginManifestFetchError {
+    match error {
+        ContentCodingError::PrefixRead(io_error) => {
+            if let Some(decoding_error) = content_decoding_error_from_io(&io_error) {
+                OriginManifestFetchError::ContentDecoding { coding: decoding_error.coding }
+            } else if io_error.kind() == io::ErrorKind::TimedOut {
+                OriginManifestFetchError::Timeout
+            } else if is_http_body_transport_error(&io_error) {
+                origin_manifest_fetch_error_from_io_error(&io_error)
+            } else {
+                OriginManifestFetchError::ContentCoding(ContentCodingError::PrefixRead(io_error))
+            }
+        }
+        error => OriginManifestFetchError::ContentCoding(error),
+    }
+}
+
+fn origin_manifest_body_read_error(error: ContentBodyReadError) -> OriginManifestFetchError {
+    match error {
+        ContentBodyReadError::LimitExceeded { limit } => OriginManifestFetchError::DecodedBodyLimitExceeded { limit },
+        ContentBodyReadError::InvalidUtf8 { valid_up_to, error_len } => {
+            OriginManifestFetchError::InvalidUtf8 { valid_up_to, error_len }
+        }
+        ContentBodyReadError::Io(io_error) => {
+            if let Some(decoding_error) = content_decoding_error_from_io(&io_error) {
+                OriginManifestFetchError::ContentDecoding { coding: decoding_error.coding }
+            } else {
+                origin_manifest_fetch_error_from_io_error(&io_error)
+            }
+        }
+    }
 }
 
 pub(crate) fn hls_manifest_redirect_host(resolved_request_url: &Url, final_url: &Url) -> Option<String> {
@@ -1646,6 +1817,22 @@ fn origin_manifest_fetch_error_from_request_error(err: &impl ToString) -> Origin
         OriginManifestStatusClass::Retryable => OriginManifestFetchError::RetryableStatus(status, None),
         OriginManifestStatusClass::PermanentFailure => OriginManifestFetchError::PermanentStatus(status),
         OriginManifestStatusClass::NonRetryableFailure => OriginManifestFetchError::NonRetryableStatus(status),
+    }
+}
+
+fn origin_manifest_fetch_error_from_reqwest_error(err: &reqwest::Error) -> OriginManifestFetchError {
+    if err.is_timeout() {
+        OriginManifestFetchError::Timeout
+    } else {
+        origin_manifest_fetch_error_from_request_error(err)
+    }
+}
+
+fn origin_manifest_fetch_error_from_io_error(err: &io::Error) -> OriginManifestFetchError {
+    if err.kind() == io::ErrorKind::TimedOut {
+        OriginManifestFetchError::Timeout
+    } else {
+        origin_manifest_fetch_error_from_request_error(err)
     }
 }
 
@@ -1730,7 +1917,7 @@ pub(crate) async fn refresh_from_live_hls_entrypoint_with_retries(
                 log_origin_refresh_retry_scheduled(
                     origin_entry,
                     attempt_index,
-                    next_retry_delay_ms(retry_policy, attempt_index, retry_after_ms),
+                    next_retry_delay_ms(retry_policy, attempt_index, retry_after_ms, 0),
                     format!("status={}", status.as_u16()),
                 );
                 retry_after_delay_ms = retry_after_ms;
@@ -1742,8 +1929,22 @@ pub(crate) async fn refresh_from_live_hls_entrypoint_with_retries(
                 log_origin_refresh_retry_scheduled(
                     origin_entry,
                     attempt_index,
-                    next_retry_delay_ms(retry_policy, attempt_index, None),
-                    format!("error={}", safe_origin_log_value(&err)),
+                    next_retry_delay_ms(retry_policy, attempt_index, None, 0),
+                    "error=request".to_string(),
+                );
+            }
+            Ok(Err(
+                err @ (OriginManifestFetchError::ContentDecoding { .. }
+                | OriginManifestFetchError::ContentCoding(ContentCodingError::PrefixRead(_))),
+            )) => {
+                if attempt_index + 1 == attempts {
+                    return Err(err);
+                }
+                log_origin_refresh_retry_scheduled(
+                    origin_entry,
+                    attempt_index,
+                    next_retry_delay_ms(retry_policy, attempt_index, None, 0),
+                    format!("error={}", err.log_label()),
                 );
             }
             Ok(Err(err @ (OriginManifestFetchError::Redirect(_) | OriginManifestFetchError::Timeout))) => {
@@ -1753,14 +1954,19 @@ pub(crate) async fn refresh_from_live_hls_entrypoint_with_retries(
                 log_origin_refresh_retry_scheduled(
                     origin_entry,
                     attempt_index,
-                    next_retry_delay_ms(retry_policy, attempt_index, None),
-                    format!("error={}", safe_origin_log_value(format!("{err:?}"))),
+                    next_retry_delay_ms(retry_policy, attempt_index, None, 0),
+                    format!("error={}", err.log_label()),
                 );
             }
             Ok(Err(OriginManifestFetchError::RetryExhausted)) => return Err(OriginManifestFetchError::RetryExhausted),
             Ok(Err(OriginManifestFetchError::ProviderUnavailable(kind))) => {
                 return Err(OriginManifestFetchError::ProviderUnavailable(kind));
             }
+            Ok(Err(
+                err @ (OriginManifestFetchError::ContentCoding(_)
+                | OriginManifestFetchError::DecodedBodyLimitExceeded { .. }
+                | OriginManifestFetchError::InvalidUtf8 { .. }),
+            )) => return Err(err),
             Err(OriginManifestFetchError::Timeout) => {
                 if attempt_index + 1 == attempts {
                     return Err(OriginManifestFetchError::Timeout);
@@ -1768,7 +1974,7 @@ pub(crate) async fn refresh_from_live_hls_entrypoint_with_retries(
                 log_origin_refresh_retry_scheduled(
                     origin_entry,
                     attempt_index,
-                    next_retry_delay_ms(retry_policy, attempt_index, None),
+                    next_retry_delay_ms(retry_policy, attempt_index, None, 0),
                     "error=timeout",
                 );
             }
@@ -1797,10 +2003,130 @@ fn log_origin_refresh_retry_scheduled(
 #[cfg(test)]
 mod tests {
     use super::{
-        manifest_body_size_after_chunk, origin_manifest_fetch_error_from_request_error, request_failed_status_from_message,
-        OriginManifestFetchError, MAX_HLS_MANIFEST_BYTES,
+        fetch_origin_manifest_once, origin_manifest_content_coding_error, origin_manifest_fetch_error_from_io_error,
+        origin_manifest_fetch_error_from_request_error, request_failed_status_from_message, ManifestRetryLogKind,
+        OriginManifestFetchError, RetryPolicy, MAX_HLS_MANIFEST_BYTES,
     };
-    use axum::http::StatusCode;
+    use crate::utils::content_coding::{ContentCoding, ContentCodingError};
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+    use flate2::{
+        write::{DeflateEncoder, GzEncoder},
+        Compression,
+    };
+    use reqwest::{redirect::Policy, Client};
+    use std::{io, io::Write, time::Duration};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::oneshot,
+    };
+    use url::Url;
+
+    const TEST_MANIFEST: &[u8] = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nsegment.ts\n";
+
+    struct TestOriginResponse {
+        status: &'static str,
+        headers: Vec<(&'static str, String)>,
+        body: Vec<u8>,
+        body_delay: Duration,
+    }
+
+    impl TestOriginResponse {
+        fn ok(body: Vec<u8>) -> Self {
+            Self { status: "200 OK", headers: Vec::new(), body, body_delay: Duration::ZERO }
+        }
+
+        fn with_header(mut self, name: &'static str, value: impl Into<String>) -> Self {
+            self.headers.push((name, value.into()));
+            self
+        }
+    }
+
+    async fn spawn_test_origin(response: TestOriginResponse) -> (Url, oneshot::Receiver<String>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind test origin");
+        let address = listener.local_addr().expect("test origin address");
+        let (request_sender, request_receiver) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept test request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).await.expect("read test request");
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let _ = request_sender.send(String::from_utf8_lossy(&request).into_owned());
+
+            let mut response_head = format!(
+                "HTTP/1.1 {}\r\nConnection: close\r\nContent-Length: {}\r\n",
+                response.status,
+                response.body.len()
+            );
+            for (name, value) in response.headers {
+                response_head.push_str(name);
+                response_head.push_str(": ");
+                response_head.push_str(&value);
+                response_head.push_str("\r\n");
+            }
+            response_head.push_str("\r\n");
+            socket.write_all(response_head.as_bytes()).await.expect("write test response headers");
+            if !response.body_delay.is_zero() {
+                tokio::time::sleep(response.body_delay).await;
+            }
+            let _ = socket.write_all(&response.body).await;
+        });
+        (Url::parse(&format!("http://{address}/manifest.m3u8")).expect("test origin URL"), request_receiver)
+    }
+
+    fn gzip(input: &[u8]) -> Vec<u8> {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(input).expect("gzip input");
+        encoder.finish().expect("finish gzip")
+    }
+
+    fn raw_deflate(input: &[u8]) -> Vec<u8> {
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(input).expect("raw-deflate input");
+        encoder.finish().expect("finish raw-deflate")
+    }
+
+    fn brotli(input: &[u8]) -> Vec<u8> {
+        let mut output = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut output, 4096, 5, 22);
+            encoder.write_all(input).expect("brotli input");
+        }
+        output
+    }
+
+    async fn zstd(input: &[u8]) -> Vec<u8> {
+        let (writer, mut reader) = tokio::io::duplex(64 * 1024);
+        let input = input.to_vec();
+        let encoder_task = tokio::spawn(async move {
+            let mut encoder = async_compression::tokio::write::ZstdEncoder::new(writer);
+            encoder.write_all(&input).await.expect("zstd input");
+            encoder.shutdown().await.expect("finish zstd");
+        });
+        let mut output = Vec::new();
+        reader.read_to_end(&mut output).await.expect("read zstd output");
+        encoder_task.await.expect("join zstd encoder");
+        output
+    }
+
+    fn captured_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+        request.lines().skip(1).find_map(|line| {
+            let (header_name, value) = line.split_once(':')?;
+            header_name.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+    }
+
+    fn test_clients() -> (Client, Client) {
+        let client = Client::builder().build().expect("test client");
+        let no_redirect_client = Client::builder().redirect(Policy::none()).build().expect("no-redirect client");
+        (client, no_redirect_client)
+    }
 
     #[test]
     fn request_failed_status_is_extracted_from_global_provider_policy_error() {
@@ -1813,9 +2139,42 @@ mod tests {
     }
 
     #[test]
+    fn initial_manifest_retry_delay_uses_next_slot_bounded_jitter_and_retry_after_override() {
+        let retry_policy = RetryPolicy { delays_ms: [0, 100, 250, 500, 750], jitter_max_ms: 25 };
+
+        assert_eq!(super::next_retry_delay_ms(&retry_policy, 0, None, 17), 117);
+        assert_eq!(super::next_retry_delay_ms(&retry_policy, 0, None, 100), 125);
+        assert_eq!(super::next_retry_delay_ms(&retry_policy, 1, None, 10), 260);
+        assert_eq!(super::next_retry_delay_ms(&retry_policy, 0, Some(3_000), 25), 3_000);
+    }
+
+    #[test]
+    fn initial_manifest_retry_status_is_not_labeled_as_recovery() {
+        let error = OriginManifestFetchError::Timeout;
+
+        let initial = super::manifest_retry_status_label(ManifestRetryLogKind::InitialFetch, None, Some(&error));
+        let recovery = super::manifest_retry_status_label(ManifestRetryLogKind::PinnedHostRecovery, None, Some(&error));
+
+        assert!(initial.starts_with("initial-fetch error="));
+        assert!(!initial.contains("pinned-host-recovery"));
+        assert!(recovery.starts_with("pinned-host-recovery error="));
+    }
+
+    #[test]
+    fn manifest_content_coding_log_labels_never_include_origin_controlled_details() {
+        let unsupported =
+            OriginManifestFetchError::ContentCoding(ContentCodingError::Unsupported("signed-token-secret".to_string()));
+        assert_eq!(unsupported.log_label(), "content_coding class=unsupported");
+        assert!(!unsupported.log_label().contains("signed-token-secret"));
+
+        let decoding = OriginManifestFetchError::ContentDecoding { coding: ContentCoding::Brotli };
+        assert_eq!(decoding.log_label(), "content_decoding coding=br");
+    }
+
+    #[test]
     fn request_failed_407_maps_to_retryable_manifest_status() {
-        let err = origin_manifest_fetch_error_from_request_error(&
-            "Request failed (407 Proxy Authentication Required): provider://demo/live/u/p/1.m3u8",
+        let err = origin_manifest_fetch_error_from_request_error(
+            &"Request failed (407 Proxy Authentication Required): provider://demo/live/u/p/1.m3u8",
         );
         assert!(matches!(
             err,
@@ -1839,20 +2198,211 @@ mod tests {
 
     #[test]
     fn request_failed_404_maps_to_permanent_manifest_status() {
-        let err =
-            origin_manifest_fetch_error_from_request_error(&"Request failed (404 Not Found): http://example.test/live.m3u8");
+        let err = origin_manifest_fetch_error_from_request_error(
+            &"Request failed (404 Not Found): http://example.test/live.m3u8",
+        );
         assert!(matches!(err, OriginManifestFetchError::PermanentStatus(StatusCode::NOT_FOUND)));
     }
 
     #[test]
     fn transport_error_without_http_status_stays_request_error() {
         let err = origin_manifest_fetch_error_from_request_error(&"error sending request for url");
-        assert!(matches!(err, OriginManifestFetchError::Request(message) if message == "error sending request for url"));
+        assert!(
+            matches!(err, OriginManifestFetchError::Request(message) if message == "error sending request for url")
+        );
     }
 
     #[test]
-    fn manifest_body_limit_rejects_the_first_byte_above_the_limit() {
-        assert_eq!(manifest_body_size_after_chunk(MAX_HLS_MANIFEST_BYTES - 1, 1), Some(MAX_HLS_MANIFEST_BYTES));
-        assert_eq!(manifest_body_size_after_chunk(MAX_HLS_MANIFEST_BYTES, 1), None);
+    fn io_timeout_maps_to_structured_manifest_timeout() {
+        let error = io::Error::new(io::ErrorKind::TimedOut, "origin body timed out");
+        assert!(matches!(origin_manifest_fetch_error_from_io_error(&error), OriginManifestFetchError::Timeout));
+        let prefix_timeout =
+            ContentCodingError::PrefixRead(io::Error::new(io::ErrorKind::TimedOut, "origin prefix timed out"));
+        assert!(matches!(origin_manifest_content_coding_error(prefix_timeout), OriginManifestFetchError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn shared_manifest_decodes_supported_origin_content_codings_and_keeps_provider_cookie() {
+        let encoded_bodies = [
+            ("gzip", gzip(TEST_MANIFEST)),
+            ("deflate", raw_deflate(TEST_MANIFEST)),
+            ("br", brotli(TEST_MANIFEST)),
+            ("zstd", zstd(TEST_MANIFEST).await),
+        ];
+
+        for (coding, encoded_body) in encoded_bodies {
+            let response = TestOriginResponse::ok(encoded_body)
+                .with_header("Content-Encoding", coding)
+                .with_header("Set-Cookie", format!("sid={coding}; Path=/"));
+            let (entry_url, request_receiver) = spawn_test_origin(response).await;
+            let (client, no_redirect_client) = test_clients();
+            let mut headers = HeaderMap::new();
+            headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("br"));
+
+            let fetched =
+                fetch_origin_manifest_once(&entry_url, &headers, &client, &no_redirect_client, false, None, 1_000)
+                    .await
+                    .unwrap_or_else(|error| panic!("decode {coding} manifest: {error:?}"));
+
+            assert_eq!(fetched.body.as_bytes(), TEST_MANIFEST, "coding={coding}");
+            assert_eq!(
+                fetched
+                    .provider_session_headers
+                    .get(header::COOKIE)
+                    .expect("provider cookie")
+                    .to_str()
+                    .expect("provider cookie text"),
+                format!("sid={coding}"),
+                "coding={coding}"
+            );
+            let request = request_receiver.await.expect("captured request");
+            assert_eq!(captured_header(&request, "accept-encoding"), Some("identity"), "coding={coding}");
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_manifest_magic_sniffs_gzip_only_in_manifest_mode() {
+        let (entry_url, _) = spawn_test_origin(TestOriginResponse::ok(gzip(TEST_MANIFEST))).await;
+        let (client, no_redirect_client) = test_clients();
+
+        let fetched =
+            fetch_origin_manifest_once(&entry_url, &HeaderMap::new(), &client, &no_redirect_client, false, None, 1_000)
+                .await
+                .expect("decode magic-sniffed gzip manifest");
+
+        assert_eq!(fetched.body.as_bytes(), TEST_MANIFEST);
+    }
+
+    #[tokio::test]
+    async fn direct_manual_redirect_reapplies_identity_after_cross_origin_scrubbing() {
+        let (target_url, target_request_receiver) =
+            spawn_test_origin(TestOriginResponse::ok(TEST_MANIFEST.to_vec())).await;
+        let redirect_response = TestOriginResponse {
+            status: "302 Found",
+            headers: vec![("Location", target_url.to_string())],
+            body: Vec::new(),
+            body_delay: Duration::ZERO,
+        };
+        let (entry_url, redirect_request_receiver) = spawn_test_origin(redirect_response).await;
+        let (client, no_redirect_client) = test_clients();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("br"));
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer secret"));
+        headers.insert(header::COOKIE, HeaderValue::from_static("sid=secret"));
+
+        let fetched = fetch_origin_manifest_once(&entry_url, &headers, &client, &no_redirect_client, true, None, 1_000)
+            .await
+            .expect("follow manual manifest redirect");
+        assert_eq!(fetched.body.as_bytes(), TEST_MANIFEST);
+
+        let redirect_request = redirect_request_receiver.await.expect("captured redirect request");
+        let target_request = target_request_receiver.await.expect("captured target request");
+        assert_eq!(captured_header(&redirect_request, "accept-encoding"), Some("identity"));
+        assert_eq!(captured_header(&target_request, "accept-encoding"), Some("identity"));
+        assert!(captured_header(&target_request, "authorization").is_none());
+        assert!(captured_header(&target_request, "cookie").is_none());
+    }
+
+    #[tokio::test]
+    async fn shared_manifest_limit_applies_after_decompression() {
+        let decoded_body = vec![b'x'; MAX_HLS_MANIFEST_BYTES + 1];
+        let response = TestOriginResponse::ok(gzip(&decoded_body)).with_header("Content-Encoding", "gzip");
+        let (entry_url, _) = spawn_test_origin(response).await;
+        let (client, no_redirect_client) = test_clients();
+
+        let error =
+            fetch_origin_manifest_once(&entry_url, &HeaderMap::new(), &client, &no_redirect_client, false, None, 2_000)
+                .await
+                .expect_err("decoded manifest above limit must fail");
+
+        assert!(matches!(
+            error,
+            OriginManifestFetchError::DecodedBodyLimitExceeded { limit } if limit == MAX_HLS_MANIFEST_BYTES
+        ));
+    }
+
+    #[tokio::test]
+    async fn shared_manifest_deadline_includes_magic_prefix_read() {
+        let response = TestOriginResponse {
+            body_delay: Duration::from_millis(100),
+            ..TestOriginResponse::ok(TEST_MANIFEST.to_vec())
+        };
+        let (entry_url, _) = spawn_test_origin(response).await;
+        let (client, no_redirect_client) = test_clients();
+
+        let error =
+            fetch_origin_manifest_once(&entry_url, &HeaderMap::new(), &client, &no_redirect_client, false, None, 10)
+                .await
+                .expect_err("prefix read must honor manifest deadline");
+
+        assert!(matches!(error, OriginManifestFetchError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn shared_manifest_encoded_body_timeout_stays_structured_timeout() {
+        let response = TestOriginResponse {
+            body_delay: Duration::from_millis(100),
+            ..TestOriginResponse::ok(gzip(TEST_MANIFEST)).with_header("Content-Encoding", "gzip")
+        };
+        let (entry_url, _) = spawn_test_origin(response).await;
+        let (client, no_redirect_client) = test_clients();
+
+        let error =
+            fetch_origin_manifest_once(&entry_url, &HeaderMap::new(), &client, &no_redirect_client, false, None, 10)
+                .await
+                .expect_err("encoded body read must honor manifest deadline");
+
+        assert!(matches!(error, OriginManifestFetchError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn shared_manifest_distinguishes_invalid_utf8_from_decoder_failure() {
+        let (invalid_utf8_url, _) = spawn_test_origin(TestOriginResponse::ok(vec![0xff])).await;
+        let corrupt_gzip = TestOriginResponse::ok(vec![0x1f, 0x8b, 0x08, 0x00]).with_header("Content-Encoding", "gzip");
+        let (corrupt_gzip_url, _) = spawn_test_origin(corrupt_gzip).await;
+        let (client, no_redirect_client) = test_clients();
+
+        let invalid_utf8 = fetch_origin_manifest_once(
+            &invalid_utf8_url,
+            &HeaderMap::new(),
+            &client,
+            &no_redirect_client,
+            false,
+            None,
+            1_000,
+        )
+        .await
+        .expect_err("invalid UTF-8 must fail");
+        let decoder_failure = fetch_origin_manifest_once(
+            &corrupt_gzip_url,
+            &HeaderMap::new(),
+            &client,
+            &no_redirect_client,
+            false,
+            None,
+            1_000,
+        )
+        .await
+        .expect_err("corrupt gzip must fail");
+
+        assert!(matches!(invalid_utf8, OriginManifestFetchError::InvalidUtf8 { .. }));
+        assert!(matches!(decoder_failure, OriginManifestFetchError::ContentDecoding { .. }));
+    }
+
+    #[tokio::test]
+    async fn shared_manifest_rejects_encoded_partial_content() {
+        let response = TestOriginResponse {
+            status: "206 Partial Content",
+            ..TestOriginResponse::ok(gzip(TEST_MANIFEST)).with_header("Content-Encoding", "gzip")
+        };
+        let (entry_url, _) = spawn_test_origin(response).await;
+        let (client, no_redirect_client) = test_clients();
+
+        let error =
+            fetch_origin_manifest_once(&entry_url, &HeaderMap::new(), &client, &no_redirect_client, false, None, 1_000)
+                .await
+                .expect_err("encoded partial manifest must fail");
+
+        assert!(matches!(error, OriginManifestFetchError::ContentCoding(ContentCodingError::EncodedPartialContent)));
     }
 }

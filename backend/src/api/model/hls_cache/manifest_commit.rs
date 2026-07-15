@@ -1,6 +1,6 @@
 use super::{
-    HlsAccountBindingProtection, HlsFreshManifestRequiredReason, HlsManifestCommitRequirement,
-    HlsOriginAccountBinding, HlsSession, HlsSessionHandle, HlsSessionMode, HlsSessionStoreOutcome,
+    HlsAccountBindingProtection, HlsFreshManifestRequiredReason, HlsManifestCommitRequirement, HlsOriginAccountBinding,
+    HlsSession, HlsSessionHandle, HlsSessionMode, HlsSessionStoreOutcome,
 };
 use std::time::Duration;
 
@@ -78,7 +78,7 @@ pub fn hls_committed_manifest_body_for_request(
             candidate.rendered_at_ms >= started_at_ms,
             now_ms,
         ) && manifest_rendered_after_required_boundary(Some(candidate.rendered_at_ms), options))
-            .then_some(candidate.body)
+        .then_some(candidate.body)
     })
 }
 
@@ -109,9 +109,7 @@ pub async fn hls_manifest_commit_requirement(
         };
     }
     if matches!(session_outcome, HlsSessionStoreOutcome::Created) {
-        return HlsManifestCommitRequirement::FreshCommitRequired {
-            reason: HlsFreshManifestRequiredReason::ColdStart,
-        };
+        return HlsManifestCommitRequirement::FreshCommitRequired { reason: HlsFreshManifestRequiredReason::ColdStart };
     }
 
     let session = session.read().await;
@@ -181,10 +179,12 @@ fn can_serve_committed_manifest(
             matches!(policy, HlsCachedManifestPolicy::AllowInitialNoMediaYet)
                 && committed_manifest_valid_at(candidate, now_ms)
         }
-        HlsAccountBindingProtection::Expired => matches!(policy, HlsCachedManifestPolicy::AllowInitialNoMediaYet)
-            && (refreshed_after_wait_started
-                || (session.origin_account_binding.as_ref().is_some_and(HlsOriginAccountBinding::is_active)
-                    && committed_manifest_valid_at(candidate, now_ms))),
+        HlsAccountBindingProtection::Expired => {
+            matches!(policy, HlsCachedManifestPolicy::AllowInitialNoMediaYet)
+                && (refreshed_after_wait_started
+                    || (session.origin_account_binding.as_ref().is_some_and(HlsOriginAccountBinding::is_active)
+                        && committed_manifest_valid_at(candidate, now_ms)))
+        }
     }
 }
 
