@@ -35,6 +35,9 @@ pub enum StalkerError {
     #[error("stalker portal returned an empty body for {action}")]
     EmptyBody { action: String },
 
+    #[error("stalker {portal_type} catalog is incomplete: {reason}")]
+    CatalogIncomplete { portal_type: &'static str, reason: String },
+
     #[error("stalker portal response status {status} for {action}")]
     BadStatus { status: u16, action: String, body_snippet: String },
 

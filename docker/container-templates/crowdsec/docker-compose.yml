@@ -8,15 +8,16 @@ services:
       - 127.0.0.1:8080:8080
     security_opt:
       - apparmor=docker-default   # security_opts are optional
-    restart: on-failure
+    restart: unless-stopped
     environment:
       TZ: America/Chicago
       GID: "${GID:-1000}"
       COLLECTIONS: >
         crowdsecurity/linux
-        crowdsecurity/iptables
+        crowdsecurity/iptables 
         crowdsecurity/http-cve
         crowdsecurity/base-http-scenarios
+        crowdsecurity/nginx
         crowdsecurity/traefik
         crowdsecurity/whitelist-good-actors
         crowdsecurity/sshd
@@ -53,7 +54,7 @@ services:
     depends_on:
       crowdsec:
         condition: service_healthy
-    restart: on-failure
+    restart: unless-stopped
     security_opt:
       - apparmor=docker-default   # security_opts are optional
     env_file:
@@ -62,7 +63,7 @@ services:
   firewall-bouncer:
     image: ghcr.io/knylbyte/cs-firewall-bouncer:latest
     container_name: cs-bouncer-firewall
-    restart: on-failure
+    restart: unless-stopped
     network_mode: host
     cap_add:
       - NET_ADMIN

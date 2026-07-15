@@ -1,3 +1,4 @@
+---
 mode: iptables
 update_frequency: 10s
 log_mode: stdout  # file, stdout, syslog

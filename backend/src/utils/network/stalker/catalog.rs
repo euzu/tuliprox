@@ -443,12 +443,12 @@ fn extract_items_array(value: &Value) -> &Value {
     }
 }
 
+fn catalog_js(value: &Value) -> &Value {
+    value.as_object().and_then(|map| map.get("js")).unwrap_or(value)
+}
+
 fn extract_total_items(value: &Value) -> Option<u32> {
-    let js = match value {
-        Value::Object(map) => map.get("js").cloned().unwrap_or_else(|| value.clone()),
-        other => other.clone(),
-    };
-    if let Some(obj) = js.as_object() {
+    if let Some(obj) = catalog_js(value).as_object() {
         return obj
             .get("total_items")
             .and_then(Value::as_u64)
@@ -458,11 +458,7 @@ fn extract_total_items(value: &Value) -> Option<u32> {
 }
 
 fn extract_max_page_items(value: &Value) -> Option<u32> {
-    let js = match value {
-        Value::Object(map) => map.get("js").cloned().unwrap_or_else(|| value.clone()),
-        other => other.clone(),
-    };
-    js.as_object().and_then(|obj| {
+    catalog_js(value).as_object().and_then(|obj| {
         obj.get("max_page_items")
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
@@ -472,11 +468,7 @@ fn extract_max_page_items(value: &Value) -> Option<u32> {
 /// `max_page` is the total page count, not the page size — keep it strictly separate
 /// from `max_page_items`.
 fn extract_max_page(value: &Value) -> Option<u32> {
-    let js = match value {
-        Value::Object(map) => map.get("js").cloned().unwrap_or_else(|| value.clone()),
-        other => other.clone(),
-    };
-    js.as_object().and_then(|obj| {
+    catalog_js(value).as_object().and_then(|obj| {
         obj.get("max_page")
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
@@ -589,8 +581,8 @@ pub async fn get_live_streams_page(
     page: u32,
 ) -> StalkerResult<StalkerCatalogPage<StalkerRawItem>> {
     let value = get_catalog_value(client, handshake, "itv", "get_ordered_list", Some(page)).await?;
-    let mut response = parse_item_catalog_page(&value, page)?;
-    apply_page_limit(&mut response, page, client.catalog_max_pages(), "itv");
+    let response = parse_item_catalog_page(&value, page)?;
+    apply_page_limit(&response, page, client.catalog_max_pages(), "itv")?;
     Ok(response)
 }
 
@@ -600,8 +592,8 @@ pub async fn get_vod_streams_page(
     page: u32,
 ) -> StalkerResult<StalkerCatalogPage<StalkerRawItem>> {
     let value = get_catalog_value(client, handshake, "vod", "get_ordered_list", Some(page)).await?;
-    let mut response = parse_item_catalog_page(&value, page)?;
-    apply_page_limit(&mut response, page, client.catalog_max_pages(), "vod");
+    let response = parse_item_catalog_page(&value, page)?;
+    apply_page_limit(&response, page, client.catalog_max_pages(), "vod")?;
     Ok(response)
 }
 
@@ -611,16 +603,25 @@ pub async fn get_series_list_page(
     page: u32,
 ) -> StalkerResult<StalkerCatalogPage<StalkerRawSeriesItem>> {
     let value = get_catalog_value(client, handshake, "series", "get_ordered_list", Some(page)).await?;
-    let mut response = parse_series_catalog_page(&value, page)?;
-    apply_page_limit(&mut response, page, client.catalog_max_pages(), "series");
+    let response = parse_series_catalog_page(&value, page)?;
+    apply_page_limit(&response, page, client.catalog_max_pages(), "series")?;
     Ok(response)
 }
 
-fn apply_page_limit<T>(response: &mut StalkerCatalogPage<T>, page: u32, limit: u32, portal_type: &str) {
+fn apply_page_limit<T>(
+    response: &StalkerCatalogPage<T>,
+    page: u32,
+    limit: u32,
+    portal_type: &'static str,
+) -> StalkerResult<()> {
     if response.next_page.is_some() && page >= limit {
         warn!("Stalker {portal_type}/get_ordered_list stopped at configured page limit {limit}");
-        response.next_page = None;
+        return Err(StalkerError::CatalogIncomplete {
+            portal_type,
+            reason: format!("configured page limit {limit} reached at page {page}"),
+        });
     }
+    Ok(())
 }
 
 pub async fn get_live_categories(client: &StalkerApiClient, handshake: &StalkerHandshake) -> StalkerResult<Vec<StalkerCategory>> {
@@ -1005,12 +1006,13 @@ mod tests {
     }
 
     #[test]
-    fn configured_page_limit_forces_a_terminal_page() {
-        let mut response = StalkerCatalogPage { items: vec![1_u8], next_page: Some(6), total: None };
+    fn configured_page_limit_rejects_an_incomplete_catalog() {
+        let response = StalkerCatalogPage { items: vec![1_u8], next_page: Some(6), total: None };
 
-        apply_page_limit(&mut response, 5, 5, "vod");
+        let result = apply_page_limit(&response, 5, 5, "vod");
 
-        assert_eq!(response.next_page, None);
+        assert!(matches!(result, Err(StalkerError::CatalogIncomplete { .. })));
+        assert_eq!(response.next_page, Some(6));
     }
 
     #[test]

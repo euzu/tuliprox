@@ -30,7 +30,9 @@ use crate::repository::stalker_repository::{
     ensure_stalker_storage_path, load_stalker_items_at, read_stalker_item_at,
 };
 use crate::repository::stalker_generation_repository::{load_active_manifest, load_checkpoint};
-use super::stalker_refresh::{advance_stalker_refresh, StalkerRefreshMode, StalkerRefreshOutcome};
+use super::stalker_refresh::{
+    advance_stalker_refresh, StalkerClusterSelection, StalkerRefreshMode, StalkerRefreshOutcome,
+};
 use crate::utils::network::stalker::client::StalkerApiClient;
 use crate::utils::network::stalker::error::StalkerError;
 
@@ -54,6 +56,7 @@ static RUNTIME_STALKER_CLIENTS: LazyLock<Mutex<LruCache<String, Arc<StalkerApiCl
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct RuntimeLinkKey {
     fingerprint: u64,
+    generation: u64,
     provider_id: u32,
     kind: StalkerStreamKind,
 }
@@ -141,6 +144,7 @@ pub async fn download_stalker_playlist(
         info!("Stalker input '{}' has all clusters skipped", input.name);
         return (vec![], vec![], false, false);
     }
+    let refresh_selection = StalkerClusterSelection::requested(input, &resolved_clusters);
 
     let portal_url = match resolve_stalker_portal_url(input) {
         Ok(url) => url,
@@ -198,7 +202,7 @@ pub async fn download_stalker_playlist(
                 app_config,
                 api_client.as_ref(),
                 &handshake,
-                input,
+                refresh_selection,
                 &storage_path,
                 identity_fingerprint,
                 refresh_mode.budget(),
@@ -422,18 +426,20 @@ pub async fn re_resolve_stalker_url(
     })?;
     let portal_url = resolve_stalker_portal_url(input)?;
     let identity_fingerprint = stalker_cfg.identity_fingerprint(&portal_url);
-    let link_key = RuntimeLinkKey { fingerprint: identity_fingerprint, provider_id, kind };
+    let storage_path = ensure_stalker_storage_path(app_config, &input.name).await?;
+    let manifest = load_active_manifest(&storage_path, identity_fingerprint).await?;
+    let generation_and_path = match kind {
+        StalkerStreamKind::Live | StalkerStreamKind::Archive => {
+            manifest.live.as_ref().map(|files| (files.generation, &files.data))
+        }
+        StalkerStreamKind::Movie => manifest.vod.as_ref().map(|files| (files.generation, &files.data)),
+        StalkerStreamKind::Episode => manifest.series.as_ref().map(|files| (files.generation, &files.episodes)),
+    };
+    let Some((generation, item_path)) = generation_and_path else { return Ok(None) };
+    let link_key = RuntimeLinkKey { fingerprint: identity_fingerprint, generation, provider_id, kind };
     if let Some(url) = cached_resolved_link(link_key, force_refresh) {
         return Ok(Some(url));
     }
-    let storage_path = ensure_stalker_storage_path(app_config, &input.name).await?;
-    let manifest = load_active_manifest(&storage_path, identity_fingerprint).await?;
-    let item_path = match kind {
-        StalkerStreamKind::Live | StalkerStreamKind::Archive => manifest.live.as_ref().map(|files| &files.data),
-        StalkerStreamKind::Movie => manifest.vod.as_ref().map(|files| &files.data),
-        StalkerStreamKind::Episode => manifest.series.as_ref().map(|files| &files.episodes),
-    };
-    let Some(item_path) = item_path else { return Ok(None) };
     let Some(item) = read_stalker_item_at(app_config, item_path, provider_id).await? else {
         return Ok(None);
     };
@@ -568,10 +574,18 @@ mod tests {
 
     #[test]
     fn resolved_link_cache_can_be_forced_stale() {
-        let key = RuntimeLinkKey { fingerprint: 7, provider_id: 42, kind: StalkerStreamKind::Live };
+        let key = RuntimeLinkKey { fingerprint: 7, generation: 1, provider_id: 42, kind: StalkerStreamKind::Live };
         cache_resolved_link(key, "http://stream.example/live".into());
         assert_eq!(cached_resolved_link(key, false).as_deref(), Some("http://stream.example/live"));
         assert!(cached_resolved_link(key, true).is_none());
+    }
+
+    #[test]
+    fn resolved_link_cache_is_scoped_to_the_published_generation() {
+        let old = RuntimeLinkKey { fingerprint: 7, generation: 1, provider_id: 42, kind: StalkerStreamKind::Live };
+        let current = RuntimeLinkKey { generation: 2, ..old };
+        cache_resolved_link(old, "http://stream.example/old".into());
+        assert!(cached_resolved_link(current, false).is_none());
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -23,6 +23,7 @@ use crate::utils::network::stalker::catalog::{StalkerCategory, StalkerRawItem};
 use crate::utils::network::stalker::client::StalkerApiClient;
 use crate::utils::network::stalker::error::StalkerError;
 use crate::utils::network::stalker::profile::StalkerHandshake;
+use super::stalker::StalkerCluster;
 
 const MAX_RETRIES: u8 = 3;
 const SKIPPED_SAMPLE_LIMIT: usize = 32;
@@ -102,6 +103,26 @@ impl From<&ConfigInput> for StalkerClusterSelection {
     }
 }
 
+impl StalkerClusterSelection {
+    pub fn requested(input: &ConfigInput, requested: &[StalkerCluster]) -> Self {
+        let configured = Self::from(input);
+        let live = configured.live && requested.contains(&StalkerCluster::Live);
+        Self {
+            live,
+            vod: configured.vod && requested.contains(&StalkerCluster::Vod),
+            series: configured.series && requested.contains(&StalkerCluster::Series),
+            epg: configured.epg && live,
+        }
+    }
+
+    fn mask(self) -> u8 {
+        u8::from(self.live)
+            | (u8::from(self.vod) << 1)
+            | (u8::from(self.series) << 2)
+            | (u8::from(self.epg) << 3)
+    }
+}
+
 fn first_phase(selection: StalkerClusterSelection) -> StalkerRefreshPhase {
     if selection.live {
         StalkerRefreshPhase::LiveBulk
@@ -157,6 +178,12 @@ fn category_map(categories: Vec<StalkerCategory>) -> HashMap<u32, StalkerCategor
         .collect()
 }
 
+fn category_map_result(
+    result: Result<Vec<StalkerCategory>, StalkerError>,
+) -> Result<HashMap<u32, StalkerCategory>, TuliproxError> {
+    result.map(category_map).map_err(|err| provider_error(&err))
+}
+
 fn map_items(
     raw_items: &[StalkerRawItem],
     categories: &HashMap<u32, StalkerCategory>,
@@ -182,6 +209,22 @@ fn catalog_page_signature<'a>(ids: impl Iterator<Item = Option<&'a str>>) -> u64
             (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
         })
     })
+}
+
+fn ensure_page_advanced(
+    next_page: Option<u32>,
+    previous_signature: Option<u64>,
+    signature: u64,
+    page: u32,
+    portal_type: &'static str,
+) -> Result<(), TuliproxError> {
+    if next_page.is_some() && previous_signature == Some(signature) {
+        return Err(provider_error(&StalkerError::CatalogIncomplete {
+            portal_type,
+            reason: format!("page {page} repeated"),
+        }));
+    }
+    Ok(())
 }
 
 fn provider_error(err: &StalkerError) -> TuliproxError {
@@ -213,22 +256,28 @@ pub async fn advance_stalker_refresh(
     app_config: &Arc<AppConfig>,
     api_client: &StalkerApiClient,
     handshake: &StalkerHandshake,
-    input: &ConfigInput,
+    selection: StalkerClusterSelection,
     storage_path: &Path,
     identity_fingerprint: u64,
     mut budget: StalkerRefreshBudget,
 ) -> Result<StalkerRefreshOutcome, TuliproxError> {
-    let selection = StalkerClusterSelection::from(input);
     let mut checkpoint = match load_checkpoint(storage_path, identity_fingerprint).await? {
-        Some(state) if !matches!(state.phase, StalkerRefreshPhase::Complete | StalkerRefreshPhase::Terminal) => state,
+        Some(state)
+            if state.selection_mask == selection.mask()
+                && !matches!(state.phase, StalkerRefreshPhase::Complete | StalkerRefreshPhase::Terminal) => state,
         _ => {
-            let mut state = StalkerCheckpoint::new(identity_fingerprint, generation_id());
+            let mut state = StalkerCheckpoint::new(
+                identity_fingerprint,
+                generation_id(),
+                selection.mask(),
+                chrono::Utc::now().timestamp(),
+            );
             state.phase = first_phase(selection);
             save_checkpoint(storage_path, &state).await?;
             state
         }
     };
-    let added_at = chrono::Utc::now().timestamp();
+    let added_at = checkpoint.started_at;
     let mut live_categories = None;
     let mut vod_categories = None;
     let mut series_categories = None;
@@ -248,9 +297,10 @@ pub async fn advance_stalker_refresh(
                 let categories = if let Some(categories) = &live_categories {
                     categories
                 } else {
-                    live_categories.insert(category_map(
-                        api_client.get_live_categories(handshake).await.unwrap_or_default(),
-                    ))
+                    match category_map_result(api_client.get_live_categories(handshake).await) {
+                        Ok(categories) => live_categories.insert(categories),
+                        Err(err) => return yield_after_error(storage_path, checkpoint, err).await,
+                    }
                 };
                 match api_client.get_all_channels(handshake).await {
                     Ok(raw) if raw.is_empty() => {
@@ -282,18 +332,24 @@ pub async fn advance_stalker_refresh(
                 let categories = if let Some(categories) = &live_categories {
                     categories
                 } else {
-                    live_categories.insert(category_map(
-                        api_client.get_live_categories(handshake).await.unwrap_or_default(),
-                    ))
+                    match category_map_result(api_client.get_live_categories(handshake).await) {
+                        Ok(categories) => live_categories.insert(categories),
+                        Err(err) => return yield_after_error(storage_path, checkpoint, err).await,
+                    }
                 };
-                let mut response = match api_client.get_live_streams_page(handshake, page).await {
+                let response = match api_client.get_live_streams_page(handshake, page).await {
                     Ok(response) => response,
                     Err(err) => return yield_after_error(storage_path, checkpoint, provider_error(&err)).await,
                 };
                 let signature = catalog_page_signature(response.items.iter().map(|item| item.id.as_deref()));
-                if response.next_page.is_some() && checkpoint.page_signature == Some(signature) {
-                    log::warn!("Stalker live pagination repeated page {page}; treating it as terminal");
-                    response.next_page = None;
+                if let Err(err) = ensure_page_advanced(
+                    response.next_page,
+                    checkpoint.page_signature,
+                    signature,
+                    page,
+                    "itv",
+                ) {
+                    return yield_after_error(storage_path, checkpoint, err).await;
                 }
                 let items = map_items(&response.items, categories, StalkerStreamKind::Live, added_at);
                 let path = generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::Live);
@@ -318,18 +374,24 @@ pub async fn advance_stalker_refresh(
                 let categories = if let Some(categories) = &vod_categories {
                     categories
                 } else {
-                    vod_categories.insert(category_map(
-                        api_client.get_vod_categories(handshake).await.unwrap_or_default(),
-                    ))
+                    match category_map_result(api_client.get_vod_categories(handshake).await) {
+                        Ok(categories) => vod_categories.insert(categories),
+                        Err(err) => return yield_after_error(storage_path, checkpoint, err).await,
+                    }
                 };
-                let mut response = match api_client.get_vod_streams_page(handshake, page).await {
+                let response = match api_client.get_vod_streams_page(handshake, page).await {
                     Ok(response) => response,
                     Err(err) => return yield_after_error(storage_path, checkpoint, provider_error(&err)).await,
                 };
                 let signature = catalog_page_signature(response.items.iter().map(|item| item.id.as_deref()));
-                if response.next_page.is_some() && checkpoint.page_signature == Some(signature) {
-                    log::warn!("Stalker VOD pagination repeated page {page}; treating it as terminal");
-                    response.next_page = None;
+                if let Err(err) = ensure_page_advanced(
+                    response.next_page,
+                    checkpoint.page_signature,
+                    signature,
+                    page,
+                    "vod",
+                ) {
+                    return yield_after_error(storage_path, checkpoint, err).await;
                 }
                 let items = map_items(&response.items, categories, StalkerStreamKind::Movie, added_at);
                 let path = generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::Vod);
@@ -354,18 +416,24 @@ pub async fn advance_stalker_refresh(
                 let categories = if let Some(categories) = &series_categories {
                     categories
                 } else {
-                    series_categories.insert(category_map(
-                        api_client.get_series_categories(handshake).await.unwrap_or_default(),
-                    ))
+                    match category_map_result(api_client.get_series_categories(handshake).await) {
+                        Ok(categories) => series_categories.insert(categories),
+                        Err(err) => return yield_after_error(storage_path, checkpoint, err).await,
+                    }
                 };
-                let mut response = match api_client.get_series_list_page(handshake, page).await {
+                let response = match api_client.get_series_list_page(handshake, page).await {
                     Ok(response) => response,
                     Err(err) => return yield_after_error(storage_path, checkpoint, provider_error(&err)).await,
                 };
                 let signature = catalog_page_signature(response.items.iter().map(|item| item.id.as_deref()));
-                if response.next_page.is_some() && checkpoint.page_signature == Some(signature) {
-                    log::warn!("Stalker series pagination repeated page {page}; treating it as terminal");
-                    response.next_page = None;
+                if let Err(err) = ensure_page_advanced(
+                    response.next_page,
+                    checkpoint.page_signature,
+                    signature,
+                    page,
+                    "series",
+                ) {
+                    return yield_after_error(storage_path, checkpoint, err).await;
                 }
                 let roots: Vec<_> = response
                     .items
@@ -424,9 +492,7 @@ pub async fn advance_stalker_refresh(
                         } else {
                             used_episode_ids.insert(
                                 prepare_stalker_episode_series_at(app_config, &path, series_id)
-                                    .await?
-                                    .into_iter()
-                                    .collect::<HashSet<_>>(),
+                                    .await?,
                             )
                         };
                         let episodes = parser::map_stalker_series_details(&details, &root, added_at, used);
@@ -497,7 +563,7 @@ pub async fn advance_stalker_refresh(
             StalkerRefreshPhase::Terminal => {
                 clear_checkpoint(storage_path).await?;
                 return Ok(StalkerRefreshOutcome::Terminal(TuliproxError::ProviderConnection(
-                    format!("Stalker refresh for '{}' reached a terminal state", input.name),
+                    "Stalker refresh reached a terminal state".to_string(),
                 )));
             }
         }
@@ -523,5 +589,27 @@ mod tests {
         let selection = StalkerClusterSelection { live: false, vod: true, series: false, epg: false };
         assert_eq!(next_phase_after_live(selection), StalkerRefreshPhase::Vod { page: 1 });
         assert_eq!(next_phase_after_vod(selection), StalkerRefreshPhase::Complete);
+    }
+
+    #[test]
+    fn requested_clusters_limit_the_refresh_selection() {
+        let input = ConfigInput::default();
+        let selection = StalkerClusterSelection::requested(&input, &[StalkerCluster::Series]);
+        assert!(!selection.live);
+        assert!(!selection.vod);
+        assert!(selection.series);
+        assert!(!selection.epg);
+    }
+
+    #[test]
+    fn category_errors_are_not_silently_downgraded() {
+        let result = category_map_result(Err(StalkerError::BodyDecode { message: "broken".to_string() }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn repeated_page_is_rejected_while_more_pages_are_advertised() {
+        assert!(ensure_page_advanced(Some(3), Some(17), 17, 2, "vod").is_err());
+        assert!(ensure_page_advanced(None, Some(17), 17, 2, "vod").is_ok());
     }
 }
