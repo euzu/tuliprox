@@ -887,6 +887,11 @@ impl ProviderLineupManager {
         }
     }
 
+    pub fn find_provider_config(&self, provider_name: &Arc<str>) -> Option<Arc<ProviderConfig>> {
+        let snapshot = self.snapshot.load_full();
+        Self::get_provider_config_by_name(provider_name, &snapshot.providers).map(|(_, config)| config.config())
+    }
+
     pub fn provider_names_for_input(&self, input_name: &Arc<str>) -> Vec<Arc<str>> {
         let snapshot = self.snapshot.load_full();
         Self::get_provider_config_by_name(input_name, &snapshot.providers)
@@ -990,6 +995,7 @@ mod tests {
     };
     use std::sync::atomic::AtomicU16;
     use tokio::time::{sleep, Duration};
+    use shared::model::StagedInputType;
 
     macro_rules! should_available {
         ($lineup:expr, $provider_id:expr, $grace_period_timeout_secs: expr) => {
@@ -1050,6 +1056,7 @@ mod tests {
             headers: HashMap::default(),
             options: None,
             method: InputFetchMethod::default(),
+            staged_type: StagedInputType::default(),
             staged: None,
             exp_date: None,
             t_batch_url: None,

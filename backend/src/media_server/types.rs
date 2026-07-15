@@ -36,7 +36,10 @@ impl TryFrom<InputType> for MediaServerKind {
             | InputType::XtreamBatch
             | InputType::Stalker
             | InputType::StalkerBatch
-            | InputType::Library => Err("input type is not a media-server input"),
+            | InputType::Library
+            | InputType::Staged => {
+                Err("input type is not a media-server input")
+            }
         }
     }
 }

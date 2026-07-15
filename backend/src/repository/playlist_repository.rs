@@ -9,22 +9,18 @@ use crate::repository::{ensure_target_storage_path, get_input_storage_path, get_
 use crate::repository::{load_input_local_library_playlist, persist_input_library_playlist};
 use crate::repository::{load_input_m3u_playlist, m3u_get_file_path_for_db, m3u_write_playlist, persist_input_m3u_playlist};
 use crate::repository::{load_input_xtream_playlist, persist_input_xtream_playlist, xtream_get_file_path, xtream_get_storage_path, xtream_write_playlist};
-use crate::repository::stalker_repository::{
-    get_stalker_storage_path, iter_stalker_items, iter_stalker_series_roots,
-};
+use crate::repository::stalker_repository::get_stalker_storage_path;
 use crate::repository::BPlusTree;
 use crate::repository::{
     LocalLibraryDiskPlaylistSource, M3uDiskPlaylistSource, MemoryPlaylistSource, PlaylistSource,
     MediaServerDiskPlaylistSource, StalkerDiskPlaylistSource, XtreamDiskPlaylistSource,
 };
 use crate::repository::{TargetIdMapping, VirtualIdRecord};
-use crate::utils;
-use crate::utils::normalized_source_ordinal;
+use crate::utils::{self, fold_epg_id_arc, normalized_source_ordinal};
 use log::{debug, info, warn};
 use shared::error::{ TuliproxError};
-use shared::model::stalker::StalkerStreamKind;
 use shared::model::xtream_const::XTREAM_CLUSTER;
-use shared::model::{InputPersistence, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem};
+use shared::model::{ConfigTargetOptions, InputPersistence, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem};
 use shared::utils::{is_dash_url, is_hls_url, Internable};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -38,6 +34,28 @@ struct LocalEpisodeKey {
 pub struct ProviderEpisodeKey {
     pub(crate) provider_id: u32,
     pub(crate) virtual_id: u32,
+}
+
+fn normalize_target_playlist_epg_ids(
+    playlist: &mut [PlaylistGroup],
+    target_options: Option<&ConfigTargetOptions>,
+) {
+    if !target_options.is_some_and(ConfigTargetOptions::lowercase_epg_ids) {
+        return;
+    }
+
+    for group in playlist {
+        for channel in &mut group.channels {
+            let Some(epg_id) = channel.header.epg_channel_id.as_mut() else {
+                continue;
+            };
+            if epg_id.is_empty() {
+                continue;
+            }
+
+            *epg_id = fold_epg_id_arc(epg_id);
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -113,6 +131,8 @@ pub async fn persist_playlist(app_config: &Arc<AppConfig>, playlist: &mut [Playl
     drop(local_library_series);
     drop(provider_series);
     drop(media_server_series);
+
+    normalize_target_playlist_epg_ids(playlist, target.options.as_ref());
 
     for output in &target.output {
         let mut filtered: Option<Vec<PlaylistGroup>> =
@@ -719,15 +739,35 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
         }
         InputPersistence::Stalker => {
             let clusters_to_load = clusters.unwrap_or(&XTREAM_CLUSTER);
+            let stalker_path = get_stalker_storage_path(&storage_path);
+            let stalker_config = input.stalker.as_ref().ok_or_else(|| {
+                TuliproxError::ConfigInput(format!("Stalker input '{}' has no Stalker configuration", input.name))
+            })?;
+            let portal_url = input.resolve_url(&input.url)?.into_owned();
+            let manifest = crate::repository::stalker_generation_repository::load_active_manifest(
+                &stalker_path,
+                stalker_config.identity_fingerprint(&portal_url),
+            )
+            .await?;
             if disk_based_processing {
-                let stalker_path = get_stalker_storage_path(&storage_path);
                 let source = PlaylistSource::stalker_disk(
-                    StalkerDiskPlaylistSource::new(app_config, &stalker_path, Arc::clone(&input.name)).await,
+                    StalkerDiskPlaylistSource::new(
+                        app_config,
+                        &stalker_path,
+                        Arc::clone(&input.name),
+                        manifest,
+                    )
+                    .await,
                 );
                 Ok(PlaylistSource::filtered(source, skipped_clusters(clusters_to_load)))
             } else {
-                let groups =
-                    load_input_stalker_playlist(app_config, &storage_path, &input.name, clusters_to_load).await?;
+                let groups = load_input_stalker_playlist(
+                    app_config,
+                    &input.name,
+                    clusters_to_load,
+                    &manifest,
+                )
+                .await?;
                 Ok(MemoryPlaylistSource::new(groups).into_source())
             }
         }
@@ -770,31 +810,34 @@ pub fn get_input_media_server_playlist_file_path(storage_path: &Path, input_name
 /// the download path.
 pub async fn load_input_stalker_playlist(
     app_config: &Arc<AppConfig>,
-    storage_path: &Path,
     input_name: &str,
     clusters: &[XtreamCluster],
+    manifest: &crate::repository::stalker_generation_repository::StalkerActiveManifest,
 ) -> Result<Vec<PlaylistGroup>, TuliproxError> {
-    use futures::StreamExt;
-    let stalker_path = get_stalker_storage_path(storage_path);
     let mut groups_map: indexmap::IndexMap<(XtreamCluster, u32), PlaylistGroup> =
         indexmap::IndexMap::new();
     for &cluster in clusters {
-        let kind = match cluster {
-            XtreamCluster::Live => StalkerStreamKind::Live,
-            XtreamCluster::Video => StalkerStreamKind::Movie,
-            XtreamCluster::Series => StalkerStreamKind::Episode,
-        };
-        let mut streams = Vec::new();
-        if cluster == XtreamCluster::Series {
-            if let Some(stream) = iter_stalker_series_roots(app_config, &stalker_path).await? {
-                streams.push(stream);
+        let mut batches = Vec::new();
+        match cluster {
+            XtreamCluster::Live => {
+                if let Some(files) = manifest.live.as_ref() {
+                    batches.push(crate::repository::stalker_repository::load_stalker_items_at(app_config, &files.data).await?);
+                }
+            }
+            XtreamCluster::Video => {
+                if let Some(files) = manifest.vod.as_ref() {
+                    batches.push(crate::repository::stalker_repository::load_stalker_items_at(app_config, &files.data).await?);
+                }
+            }
+            XtreamCluster::Series => {
+                if let Some(files) = manifest.series.as_ref() {
+                    batches.push(crate::repository::stalker_repository::load_stalker_items_at(app_config, &files.roots).await?);
+                    batches.push(crate::repository::stalker_repository::load_stalker_items_at(app_config, &files.episodes).await?);
+                }
             }
         }
-        if let Some(stream) = iter_stalker_items(app_config, &stalker_path, kind).await? {
-            streams.push(stream);
-        }
-        for mut stream in streams {
-            while let Some(item) = stream.next().await {
+        for batch in batches {
+            for item in batch {
                 let category_id = item.category_id;
                 let playlist_item = PlaylistItem::from_stalker(&item, input_name);
                 groups_map
@@ -845,14 +888,16 @@ mod tests {
     use super::{
         assign_local_series_info_episode_key, assign_media_server_series_info_episode,
         get_input_media_server_playlist_file_path, materialize_media_server_series_info_episodes,
-        rewrite_local_series_info_episode_virtual_id, rewrite_series_episode_parent_virtual_ids,
-        rewrite_series_info_episode_virtual_id, skipped_clusters, LocalEpisodeKey, ProviderEpisodeKey,
+        normalize_target_playlist_epg_ids, rewrite_local_series_info_episode_virtual_id,
+        rewrite_series_episode_parent_virtual_ids, rewrite_series_info_episode_virtual_id, skipped_clusters,
+        LocalEpisodeKey, ProviderEpisodeKey,
     };
     use crate::repository::{BPlusTreeQuery, TargetIdMapping, VirtualIdRecord};
     use shared::model::{
-        EpisodeStreamProperties, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
-        SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties,
-        SeriesStreamProperties, StreamProperties, UUIDType, XtreamCluster, XtreamPlaylistItem,
+        ConfigTargetOptions, EpgOutputOptions, EpisodeStreamProperties, M3uPlaylistItem, PlaylistEntry, PlaylistGroup,
+        PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
+        SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties,
+        UUIDType, XtreamCluster, XtreamPlaylistItem,
     };
     use shared::utils::Internable;
     use std::{collections::HashMap, sync::Arc};
@@ -872,6 +917,78 @@ mod tests {
 
         assert_eq!(skipped.len(), 1);
         assert!(skipped.contains(&XtreamCluster::Video));
+    }
+
+    fn epg_normalization_options(enabled: bool) -> ConfigTargetOptions {
+        ConfigTargetOptions {
+            epg_output: EpgOutputOptions { lowercase_ids: enabled, ..EpgOutputOptions::default() },
+            ..ConfigTargetOptions::default()
+        }
+    }
+
+    fn epg_normalization_playlist() -> Vec<PlaylistGroup> {
+        let channel = |epg_channel_id: Option<&str>, name: &str| PlaylistItem {
+            header: PlaylistItemHeader {
+                name: name.intern(),
+                title: "Visible Title".intern(),
+                group: "Visible Group".intern(),
+                epg_channel_id: epg_channel_id.map(Internable::intern),
+                item_type: PlaylistItemType::Live,
+                xtream_cluster: XtreamCluster::Live,
+                ..PlaylistItemHeader::default()
+            },
+        };
+
+        vec![PlaylistGroup {
+            id: 1,
+            title: "Live".intern(),
+            channels: vec![
+                channel(Some("Example.Channel"), "Mixed Case"),
+                channel(Some("already.lower"), "Lowercase"),
+                channel(Some(""), "Empty"),
+                channel(None, "Missing"),
+            ],
+            xtream_cluster: XtreamCluster::Live,
+        }]
+    }
+
+    #[test]
+    fn target_playlist_epg_normalization_is_consistent_for_m3u_and_xtream() {
+        let options = epg_normalization_options(true);
+        let mut playlist = epg_normalization_playlist();
+        let lowercase_id = Arc::clone(
+            playlist[0].channels[1].header.epg_channel_id.as_ref().expect("lowercase EPG ID should exist"),
+        );
+
+        normalize_target_playlist_epg_ids(&mut playlist, Some(&options));
+
+        let mixed = &playlist[0].channels[0];
+        assert_eq!(mixed.header.epg_channel_id.as_deref(), Some("example.channel"));
+        assert_eq!(mixed.header.name.as_ref(), "Mixed Case");
+        assert_eq!(mixed.header.title.as_ref(), "Visible Title");
+        assert_eq!(mixed.header.group.as_ref(), "Visible Group");
+        assert!(Arc::ptr_eq(
+            playlist[0].channels[1].header.epg_channel_id.as_ref().expect("lowercase EPG ID should remain"),
+            &lowercase_id,
+        ));
+        assert_eq!(playlist[0].channels[2].header.epg_channel_id.as_deref(), Some(""));
+        assert!(playlist[0].channels[3].header.epg_channel_id.is_none());
+
+        let m3u = M3uPlaylistItem::from(mixed);
+        let xtream = XtreamPlaylistItem::from(mixed);
+        assert_eq!(m3u.epg_channel_id.as_deref(), Some("example.channel"));
+        assert_eq!(xtream.epg_channel_id.as_deref(), Some("example.channel"));
+        assert!(m3u.to_m3u(None, false).contains(r#"tvg-id="example.channel""#));
+    }
+
+    #[test]
+    fn target_playlist_epg_normalization_preserves_ids_when_disabled() {
+        let options = epg_normalization_options(false);
+        let mut playlist = epg_normalization_playlist();
+
+        normalize_target_playlist_epg_ids(&mut playlist, Some(&options));
+
+        assert_eq!(playlist[0].channels[0].header.epg_channel_id.as_deref(), Some("Example.Channel"));
     }
 
     fn make_local_series_info(series_uuid: &str, episodes: Vec<(u32, &str, &str)>) -> PlaylistItem {
@@ -1151,6 +1268,7 @@ mod tests {
             input_name: Arc::clone(&input_name),
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: "9001".intern(),
         };
         let provider_parent_code = xtream_series_info.get_uuid().intern();
         let xtream_provider_episode = XtreamPlaylistItem {
@@ -1172,6 +1290,7 @@ mod tests {
             input_name,
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: "201".intern(),
         };
         let provider_episode = PlaylistItem::from(&xtream_provider_episode);
         let mut series_info = PlaylistItem::from(&xtream_series_info);

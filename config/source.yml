@@ -24,7 +24,14 @@ sources:
             username: local
             device: hdhr1
         filter: "!final_channel_lineup!"
-        options: { ignore_logo: false, share_live_streams: true }
+        options:
+          ignore_logo: false
+          epg_output:
+            lowercase_ids: false
+            lowercase_xmltv_display_names: false
+          share_live_streams:
+            hls: true
+            mpeg_ts: true
         mapping:
           - iptv-org
       - name: iptv-trakt-example
@@ -56,4 +63,11 @@ sources:
                   content_type: "both"
                   fuzzy_match_threshold: 80
         filter: "!final_channel_lineup!"
-        options: { ignore_logo: false, share_live_streams: true }
+        options:
+          ignore_logo: false
+          epg_output:
+            lowercase_ids: false
+            lowercase_xmltv_display_names: false
+          share_live_streams:
+            hls: true
+            mpeg_ts: true

@@ -99,6 +99,10 @@ macro_rules! check_input_credentials {
                 // Media-server credentials live in the dedicated media_server block; detailed
                 // validation happens in ConfigInputDto/ConfigInput prepare methods.
             }
+            InputType::Staged => {
+                // Staged credentials belong to the staged playlist source itself.
+                // validation happens in ConfigInputDto/ConfigInput prepare methods.
+            }
         }
     };
 }
@@ -156,6 +160,7 @@ macro_rules! check_input_connections {
                 }
             }
             InputType::Library | InputType::Emby | InputType::Jellyfin | InputType::Plex => {}
+            InputType::Staged => {}
         }
     };
 }

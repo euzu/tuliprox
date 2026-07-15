@@ -3,3 +3,4 @@ pub mod stalker;
 pub mod xtream;
 pub mod xmltv;
 pub mod hls;
+pub mod ics;

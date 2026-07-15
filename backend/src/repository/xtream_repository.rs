@@ -1716,6 +1716,7 @@ mod tests {
             input_name: "input_a".intern(),
             channel_no: 0,
             source_ordinal: 0,
+            input_stream_id: provider_id.to_string().intern(),
         }
     }
 

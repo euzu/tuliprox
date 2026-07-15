@@ -79,7 +79,7 @@ fn build_rewritten_url(
 
     if append_extension {
         extract_extension_from_url(source_url)
-            .map(|ext| shared::concat_string!(&rewritten_url, &ext))
+            .map(|ext| shared::concat_string!(&rewritten_url, ext))
             .unwrap_or(rewritten_url)
     } else {
         rewritten_url
@@ -440,6 +440,7 @@ mod tests {
             t_catchup_mode: None,
             source_ordinal: 0,
             additional_properties: None,
+            input_stream_id: "813294".intern(),
         }
     }
 

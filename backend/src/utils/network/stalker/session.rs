@@ -50,7 +50,7 @@ fn now_epoch_secs() -> u64 {
 /// How long a `StalkerSession` should be considered fresh. The portal invalidates tokens
 /// aggressively (typically after 5–30 minutes of inactivity); the client treats a session
 /// older than this as a hint to re-handshake before issuing any new calls.
-pub const STALKER_SESSION_TTL: Duration = Duration::from_secs(15 * 60);
+pub const STALKER_SESSION_TTL: Duration = Duration::from_mins(15);
 
 #[cfg(test)]
 mod tests {

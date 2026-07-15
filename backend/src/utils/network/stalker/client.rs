@@ -164,6 +164,21 @@ impl StalkerApiClient {
         catalog::get_live_streams_paginated(self, handshake).await
     }
 
+    pub async fn get_all_channels(
+        &self,
+        handshake: &StalkerHandshake,
+    ) -> StalkerResult<Vec<catalog::StalkerRawItem>> {
+        catalog::get_all_channels(self, handshake).await
+    }
+
+    pub async fn get_live_streams_page(
+        &self,
+        handshake: &StalkerHandshake,
+        page: u32,
+    ) -> StalkerResult<catalog::StalkerCatalogPage<catalog::StalkerRawItem>> {
+        catalog::get_live_streams_page(self, handshake, page).await
+    }
+
     pub async fn get_vod_categories(
         &self,
         handshake: &StalkerHandshake,
@@ -178,6 +193,14 @@ impl StalkerApiClient {
         catalog::get_vod_streams_paginated(self, handshake).await
     }
 
+    pub async fn get_vod_streams_page(
+        &self,
+        handshake: &StalkerHandshake,
+        page: u32,
+    ) -> StalkerResult<catalog::StalkerCatalogPage<catalog::StalkerRawItem>> {
+        catalog::get_vod_streams_page(self, handshake, page).await
+    }
+
     pub async fn get_series_categories(
         &self,
         handshake: &StalkerHandshake,
@@ -190,6 +213,14 @@ impl StalkerApiClient {
         handshake: &StalkerHandshake,
     ) -> StalkerResult<Vec<catalog::StalkerRawSeriesItem>> {
         catalog::get_series_list_paginated(self, handshake).await
+    }
+
+    pub async fn get_series_list_page(
+        &self,
+        handshake: &StalkerHandshake,
+        page: u32,
+    ) -> StalkerResult<catalog::StalkerCatalogPage<catalog::StalkerRawSeriesItem>> {
+        catalog::get_series_list_page(self, handshake, page).await
     }
 
     pub async fn get_series_details(
@@ -209,16 +240,18 @@ impl StalkerApiClient {
         epg::get_short_epg(self, handshake, channel_id, hours).await
     }
 
-    pub async fn stream_bulk_epg<F>(
+    pub async fn stream_bulk_epg<F, Fut>(
         &self,
         handshake: &StalkerHandshake,
         period_hours: u32,
-        mut on_program: F,
+        batch_size: usize,
+        on_batch: F,
     ) -> StalkerResult<()>
     where
-        F: FnMut(epg::StalkerProgramRecord),
+        F: FnMut(Vec<epg::StalkerProgramRecord>) -> Fut,
+        Fut: std::future::Future<Output = StalkerResult<()>>,
     {
-        epg::stream_bulk_epg(self, handshake, period_hours, &mut on_program).await
+        epg::stream_bulk_epg(self, handshake, period_hours, batch_size, on_batch).await
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -1,9 +1,16 @@
 use crate::model::ProxyUserCredentials;
 use shared::concat_string;
-use shared::utils::{deobfuscate_text, extract_extension_from_url, obfuscate_text, CONSTANTS, HLS_PREFIX};
+use shared::{
+    utils::{deobfuscate_text, extract_extension_from_url, obfuscate_text, CONSTANTS},
+    defaults::{HLS_PREFIX}
+};
 use std::borrow::Cow;
 use std::str;
 use url::Url;
+
+pub mod origin_manifest;
+pub mod initial_strip;
+pub mod transient_manifest;
 
 const TOKEN_SEPARATOR: char = '\x1F';
 const TOKEN_SEPARATOR_STR: &str = "\x1F";
@@ -11,7 +18,7 @@ const TOKEN_SEPARATOR_STR: &str = "\x1F";
 fn create_hls_session_token_and_url(secret: &[u8], session_token: &str, stream_url: &str) -> String {
     let cookie_value = obfuscate_text(secret, &concat_string!(session_token, TOKEN_SEPARATOR_STR, stream_url));
     if let Some(ext) = extract_extension_from_url(stream_url) {
-        return concat_string!(&cookie_value, &ext);
+        return concat_string!(&cookie_value, ext);
     }
     cookie_value
 }
@@ -19,7 +26,7 @@ fn create_hls_session_token_and_url(secret: &[u8], session_token: &str, stream_u
 fn create_hls_url_without_session_token(secret: &[u8], stream_url: &str) -> String {
     let token = obfuscate_text(secret, stream_url);
     if let Some(ext) = extract_extension_from_url(stream_url) {
-        return concat_string!(&token, &ext);
+        return concat_string!(&token, ext);
     }
     token
 }
@@ -148,7 +155,8 @@ mod test {
         get_hls_session_token_and_url_from_token, rewrite_hls, rewrite_hls_url, RewriteHlsProps,
     };
     use rand::RngCore;
-    use shared::utils::{u32_to_base64, HLS_PREFIX};
+    use shared::utils::{u32_to_base64};
+    use shared::defaults::{HLS_PREFIX};
 
     #[test]
     fn test_token_size() {

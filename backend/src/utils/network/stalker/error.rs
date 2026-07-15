@@ -80,6 +80,18 @@ impl StalkerError {
             _ => false,
         }
     }
+
+    pub fn is_unsupported_catalog_action(&self) -> bool {
+        match self {
+            Self::BodyDecode { .. } | Self::HtmlResponse { .. } => true,
+            Self::EmptyBody { action } => action == "get_all_channels",
+            Self::BadStatus { status, action, .. } => {
+                action == "get_all_channels" && matches!(*status, 400 | 404 | 405 | 501)
+            }
+            Self::PortalBodyError { action, .. } => action == "get_all_channels" && !self.is_token_rejected(),
+            _ => false,
+        }
+    }
 }
 
 pub type StalkerResult<T> = Result<T, StalkerError>;

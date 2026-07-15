@@ -331,6 +331,10 @@
       "USE_MEMORY_CACHE": "Если включено, плейлист кэшируется в оперативной памяти для уменьшения нагрузки на диск (увеличивает использование памяти).",
       "WATCH": "Список шаблонов групп для мониторинга изменений. Уведомления отправляются через настроенный мессенджер."
     },
+    "EPG_OUTPUT_OPTIONS": {
+      "LOWERCASE_IDS": "Преобразует технические идентификаторы EPG в нижний регистр ASCII во всех выходах M3U, Xtream, XMLTV и API EPG. После изменения этой опции требуется полное обновление целевого плейлиста.",
+      "LOWERCASE_XMLTV_DISPLAY_NAMES": "Преобразует в нижний регистр Unicode только текст display-name XMLTV. Имена плейлиста и названия программ остаются без изменений."
+    },
     "CONTENT_SECURITY_POLICY_CONFIG": {
       "CUSTOM_ATTRIBUTES": "Дополнительные атрибуты CSP, добавляемые к стандартной политике.",
       "ENABLED": "Включает или отключает заголовки Content Security Policy для веб-интерфейса."
@@ -442,7 +446,14 @@
       "HEADERS": "Пользовательские HTTP-заголовки, отправляемые при получении плейлиста ввода.",
       "INPUT_TYPE": "Определяет протокол потоковой передачи или формат источника (например, xtream, m3u).",
       "LIVE_SOURCE": "Селектор источника для кластера Live, когда включен промежуточный ввод (`default`, `staged`, `input`, `skip`).",
-      "PROVIDERS": "Профили провайдера определяют повторно используемые upstream URL и поведение DNS, на которые может ссылаться этот ввод."
+      "PERSIST": "Необязательный путь к файлу для сохранения или повторного использования загруженного плейлиста ввода.",
+      "PROVIDERS": "Профили провайдера определяют повторно используемые upstream URL и поведение DNS, на которые может ссылаться этот ввод.",
+      "SIMPLE_INPUT": {
+        "URL": "URL источника для этого ввода. Поддерживаются только URL `file://`, `http://` и `https://`."
+      },
+      "STAGED_CLUSTERS": "Кластеры, которые этот промежуточный ввод переопределяет для подключенного ввода провайдера.",
+      "STAGED_PERSIST": "Необязательный путь к файлу для сохранения или повторного использования загруженного промежуточного плейлиста.",
+      "URL": "URL источника для этого ввода."
     ,
       "SERIES_SOURCE": "Селектор источника для кластера Series, когда включен промежуточный ввод (`default`, `staged`, `input`, `skip`).",
       "VOD_SOURCE": "Селектор источника для кластера VOD, когда включен промежуточный ввод (`default`, `staged`, `input`, `skip`)."
@@ -976,6 +987,7 @@
     "EPG": "Epg",
     "EDIT_EPG_SMART_MATCH": "Редактировать интеллектуальное сопоставление EPG",
     "EPG_LOGO_OVERRIDE": "Замена логотипа",
+    "EPG_OUTPUT": "Вывод EPG",
     "EPG_REQUEST_TIMESHIFT": "Сдвиг времени запроса Epg",
     "EPG_SMART_MATCH": "Интеллектуальное сопоставление EPG",
     "EPG_SOURCES": "Источники EPG",
@@ -1058,6 +1070,8 @@
     "LOG_ACTIVE_USER": "Логировать активного пользователя",
     "LOG_CONFIG": "Лог",
     "LOG_LEVEL": "Уровень логирования",
+    "LOWERCASE_EPG_IDS": "Идентификаторы EPG в нижнем регистре",
+    "LOWERCASE_XMLTV_DISPLAY_NAMES": "Отображаемые имена XMLTV в нижнем регистре",
     "M3U": "m3u",
     "M3U_BATCH": "m3u batch",
     "MAIN": "Главное",
@@ -1288,6 +1302,7 @@
     "SPECIFIC_TEMPLATES": "Конкретные шаблоны",
     "SSDP_DISCOVERY": "Обнаружение SSDP",
     "STAGED": "Промежуточный",
+    "CHILD": "Дочерний",
     "LIVE_SOURCE": "Источник Live",
     "VOD_SOURCE": "Источник VOD",
     "SERIES_SOURCE": "Источник сериалов",
@@ -1432,13 +1447,12 @@
     "STALKER_CREATE_LINK_KB": "Лимит create_link (КБ)",
     "STALKER_ORDERED_LIST_MB": "Лимит ordered_list (МБ)",
     "STALKER_GET_EPG_MB": "Лимит get_epg (МБ)",
+    "STALKER_BULK_EPG": "Загружать EPG пакетно",
     "STALKER_DEVICE_PROFILE": "Профиль устройства",
     "STALKER_SERIAL_NUMBER": "Серийный номер",
     "STALKER_DEVICE_ID": "ID устройства",
     "STALKER_DEVICE_ID2": "ID устройства 2",
     "STALKER_SIGNATURE": "Подпись",
-    "STALKER_PRE_RESOLVE": "Разрешать URL воспроизведения при обновлении",
-    "STALKER_RUNTIME_RESOLVE": "Обновлять URL воспроизведения после ошибки 4xx",
     "XC": "xc",
     "XTREAM": "xtream",
     "XTREAM_BATCH": "xc batch",
@@ -1696,6 +1710,7 @@
     "BRICK_InputJellyfin": "Jellyfin",
     "BRICK_InputLibrary": "Библиотека",
     "BRICK_InputM3u": "M3u",
+    "BRICK_InputStaged": "Промежуточный",
     "BRICK_InputPlex": "Plex",
     "BRICK_InputXtream": "Xtream",
     "BRICK_OutputHdHomeRun": "HDHR",

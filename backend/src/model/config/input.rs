@@ -6,13 +6,14 @@ use shared::foundation::Filter;
 use shared::{apply_flags, create_bitset};
 use shared::error::TuliproxError;
 use shared::model::{
-    ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, InputFetchMethod, InputType,
+    ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, InputFetchMethod,
+    InputType,
     MediaServerCatalogConfigDto, MediaServerImagePolicy, MediaServerInputConfigDto, MediaServerLibrarySelector,
-    MediaServerPlaybackConfigDto, StagedInputDto, StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference,
-    StalkerInputConfigDto, StalkerMagPreset, XtreamCluster,
+    MediaServerPlaybackConfigDto, StagedInputType, StalkerAuthMode, StalkerDeviceProfileDto,
+    StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
 };
 use shared::utils::{
-    get_credentials_from_url, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable,
+    get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable,
     BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
 };
 use shared::{check_input_connections, write_if_some};
@@ -39,8 +40,6 @@ create_bitset!(
     ProbeSeries,
     ProbeVod,
     ProbeLive,
-    StalkerPreResolvePlayback,
-    StalkerRuntimeResolvePlayback,
     StalkerBulkEpg
 );
 
@@ -91,8 +90,6 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             (probe_series, ProbeSeries),
             (probe_vod, ProbeVod),
             (probe_live, ProbeLive),
-            (stalker_pre_resolve_playback, StalkerPreResolvePlayback),
-            (stalker_runtime_resolve_playback, StalkerRuntimeResolvePlayback),
             (stalker_bulk_epg, StalkerBulkEpg),
         );
 
@@ -124,6 +121,21 @@ pub struct MediaServerInputConfig {
     pub server_name: Option<String>,
     pub prefer_https: bool,
     pub allow_relay: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigInputStaged {
+    pub for_input: Option<Arc<str>>,
+    pub clusters: ClusterFlags,
+}
+
+impl From<&ConfigInputStagedDto> for ConfigInputStaged {
+    fn from(dto: &ConfigInputStagedDto) -> Self {
+        Self {
+            for_input: dto.for_input.clone(),
+            clusters: dto.clusters,
+        }
+    }
 }
 
 impl From<&MediaServerInputConfigDto> for MediaServerInputConfig {
@@ -262,6 +274,46 @@ impl StalkerInputConfig {
         self.password = password.cloned();
         self
     }
+
+    pub fn identity_fingerprint(&self, portal_url: &str) -> u64 {
+        use std::fmt::Write;
+        let mut identity = String::with_capacity(256);
+        let _ = write!(
+            identity,
+            "{portal_url}|auth={:?}|preset={:?}|endpoint={:?}|pages={:?}",
+            self.auth_mode, self.mag_preset, self.endpoint_preference, self.catalog_max_pages
+        );
+        if let Some(caps) = self.size_caps.as_ref() {
+            let _ = write!(
+                identity,
+                "|caps={}:{}:{}",
+                caps.create_link_kb, caps.ordered_list_mb, caps.get_epg_mb
+            );
+        }
+        if let Some(device) = self.device.as_ref() {
+            let _ = write!(
+                identity,
+                "|dev={}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                device.mac_address.as_deref().unwrap_or_default(),
+                device.device_profile.as_deref().unwrap_or_default(),
+                device.serial_number.as_deref().unwrap_or_default(),
+                device.device_id.as_deref().unwrap_or_default(),
+                device.device_id2.as_deref().unwrap_or_default(),
+                device.signature.as_deref().unwrap_or_default(),
+                device.timezone.as_deref().unwrap_or_default(),
+                device.locale.as_deref().unwrap_or_default(),
+                device.user_agent.as_deref().unwrap_or_default(),
+                device.x_user_agent.as_deref().unwrap_or_default(),
+            );
+        }
+        let credentials = format!(
+            "{}\n{}",
+            self.username.as_deref().unwrap_or_default(),
+            self.password.as_deref().unwrap_or_default()
+        );
+        let _ = write!(identity, "|credentials={}", shared::utils::short_hash(&credentials));
+        u64::from_str_radix(&shared::utils::short_hash(&identity), 16).unwrap_or_default()
+    }
 }
 
 /// Simple body-size cap struct used at runtime (DTO has the same fields but
@@ -297,85 +349,6 @@ impl From<&StalkerInputConfigDto> for StalkerInputConfig {
             // `with_credentials`.
             username: None,
             password: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct StagedInput {
-    pub enabled: bool,
-    pub name: Arc<str>,
-    pub url: String,
-    pub username: Option<String>,
-    pub password: Option<String>,
-    pub method: InputFetchMethod,
-    pub input_type: InputType,
-    pub headers: HashMap<String, String>,
-    /// Provider configuration for failover support when using `provider://` scheme.
-    pub provider_config: Option<Arc<ConfigProvider>>,
-    pub live_source: ClusterSource,
-    pub vod_source: ClusterSource,
-    pub series_source: ClusterSource,
-    pub cluster_sources_configured: bool,
-}
-
-impl Default for StagedInput {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            name: Arc::default(),
-            url: String::new(),
-            username: None,
-            password: None,
-            method: InputFetchMethod::default(),
-            input_type: InputType::default(),
-            headers: HashMap::default(),
-            provider_config: None,
-            live_source: ClusterSource::Staged,
-            vod_source: ClusterSource::Input,
-            series_source: ClusterSource::Input,
-            cluster_sources_configured: false,
-        }
-    }
-}
-
-impl StagedInput {
-    /// Returns the `ClusterSource` for the given `XtreamCluster`.
-    pub fn get_cluster_source(&self, cluster: XtreamCluster) -> ClusterSource {
-        match cluster {
-            XtreamCluster::Live => self.live_source,
-            XtreamCluster::Video => self.vod_source,
-            XtreamCluster::Series => self.series_source,
-        }
-    }
-}
-
-macros::from_impl!(StagedInput);
-impl From<&StagedInputDto> for StagedInput {
-    fn from(dto: &StagedInputDto) -> Self {
-        let resolve = |opt: Option<ClusterSource>, default: ClusterSource| -> ClusterSource {
-            opt.unwrap_or(default)
-        };
-        let (live_default, vod_default, series_default) = if dto.input_type.is_m3u() {
-            (ClusterSource::Staged, ClusterSource::Input, ClusterSource::Input)
-        } else {
-            (ClusterSource::Staged, ClusterSource::Staged, ClusterSource::Staged)
-        };
-
-        Self {
-            enabled: dto.enabled,
-            name: dto.name.clone(),
-            input_type: dto.input_type,
-            url: dto.url.clone(),
-            username: dto.username.clone(),
-            password: dto.password.clone(),
-            method: dto.method,
-            headers: dto.headers.clone(),
-            provider_config: None, // Resolved later in ConfigInput::prepare()
-            live_source: resolve(dto.live_source, live_default),
-            vod_source: resolve(dto.vod_source, vod_default),
-            series_source: resolve(dto.series_source, series_default),
-            cluster_sources_configured: dto.live_source.is_some() || dto.vod_source.is_some() || dto.series_source.is_some(),
         }
     }
 }
@@ -433,7 +406,8 @@ pub struct ConfigInput {
     pub priority: i16,
     pub max_connections: u16,
     pub method: InputFetchMethod,
-    pub staged: Option<StagedInput>,
+    pub staged_type: StagedInputType,
+    pub staged: Option<ConfigInputStaged>,
     pub exp_date: Option<i64>,
     pub t_batch_url: Option<String>,
     pub panel_api: Option<PanelApiConfig>,
@@ -458,71 +432,6 @@ impl ConfigInput {
             .find(|p| p.name.as_ref() == host)
             .cloned()
             .ok_or_else(|| TuliproxError::ConfigInput(format!("Failed to resolve provider config for {}", sanitize_sensitive_info(url))))
-    }
-
-    fn prepare_staged_input(
-        &mut self,
-        provider_configs: &[Arc<ConfigProvider>],
-        used_provider_configs: &mut Vec<Arc<ConfigProvider>>,
-        skip_live: bool,
-        skip_vod: bool,
-        skip_series: bool,
-    ) -> Result<(), TuliproxError> {
-        if let Some(staged_input) = &mut self.staged {
-            if staged_input.enabled {
-                if staged_input.url.starts_with(PROVIDER_SCHEME_PREFIX) {
-                    let provider_cfg = Self::resolve_provider_config(&staged_input.url, provider_configs)?;
-                    staged_input.provider_config = Some(provider_cfg.clone());
-                    used_provider_configs.push(provider_cfg);
-                }
-
-                check_input_credentials!(staged_input, staged_input.input_type, false, true);
-                if !matches!(staged_input.input_type, InputType::M3u | InputType::Xtream) {
-                    return Err(TuliproxError::ConfigInput(format!(
-                        "Staged input can only be from type m3u or xtream (input: {}, staged: {})",
-                        self.name,
-                        staged_input.name
-                    )));
-                }
-
-                if self.input_type.is_xtream() {
-                    let live_uses_staged = matches!(staged_input.live_source, ClusterSource::Staged) && !skip_live;
-                    let vod_uses_staged = matches!(staged_input.vod_source, ClusterSource::Staged) && !skip_vod;
-                    let series_uses_staged = matches!(staged_input.series_source, ClusterSource::Staged) && !skip_series;
-
-                    if !live_uses_staged && !vod_uses_staged && !series_uses_staged {
-                        return Err(TuliproxError::ConfigInput(format!(
-                            "Staged input is enabled but no cluster source uses 'staged'; set at least one of live_source/vod_source/series_source to 'staged' (input: {}, staged: {})",
-                            self.name,
-                            staged_input.name
-                        )));
-                    }
-
-                    if staged_input.input_type.is_m3u() && (vod_uses_staged || series_uses_staged) {
-                        return Err(TuliproxError::ConfigInput(format!(
-                            "Staged M3U input cannot provide VOD or Series clusters; use 'input' or 'skip' (input: {}, staged: {})",
-                            self.name,
-                            staged_input.name
-                        )));
-                    }
-                }
-
-                if self.input_type.is_m3u() {
-                    if staged_input.cluster_sources_configured {
-                        warn!(
-                            "Input '{}': cluster source fields (live_source/vod_source/series_source) are ignored for M3U main inputs",
-                            self.name
-                        );
-                    }
-                    staged_input.live_source = ClusterSource::Staged;
-                    staged_input.vod_source = ClusterSource::Staged;
-                    staged_input.series_source = ClusterSource::Staged;
-                    staged_input.cluster_sources_configured = false;
-                }
-            }
-        }
-
-        Ok(())
     }
 
     fn prepare_aliases(
@@ -566,10 +475,20 @@ impl ConfigInput {
 
     #[inline]
     pub fn get_download_input_type(&self) -> InputType {
-        self.staged
-            .as_ref()
-            .filter(|staged| staged.enabled)
-            .map_or(self.input_type, |staged| staged.input_type)
+        self.input_type
+    }
+
+    pub fn resolve_staged_download_type(&mut self) {
+        self.input_type = self.staged_type.input_type();
+
+        // For m3u inputs credentials may live in the URL itself.
+        let (username, password) = get_credentials_from_url_str(&self.url);
+        if username.is_some() {
+            self.username = username;
+        }
+        if password.is_some() {
+            self.password = password;
+        }
     }
 
     #[inline]
@@ -621,12 +540,6 @@ impl ConfigInput {
         if self.aliases.as_ref().is_some_and(|aliases| !aliases.is_empty()) {
             return Err(TuliproxError::ConfigInput(format!(
                 "media-server input does not support aliases (input: {})",
-                self.name
-            )));
-        }
-        if self.staged.as_ref().is_some_and(|staged| staged.enabled) {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media-server input does not support staged inputs (input: {})",
                 self.name
             )));
         }
@@ -694,7 +607,8 @@ impl ConfigInput {
             | InputType::XtreamBatch
             | InputType::Stalker
             | InputType::StalkerBatch
-            | InputType::Library => {}
+            | InputType::Library
+            | InputType::Staged => {}
         }
         Ok(())
     }
@@ -765,10 +679,6 @@ impl ConfigInput {
         if self.enabled {
             check_input_credentials!(self, self.input_type, false, false);
             check_input_connections!(self, self.input_type, false);
-            let skip_live = self.has_flag(ConfigInputFlags::SkipLive);
-            let skip_vod = self.has_flag(ConfigInputFlags::SkipVod);
-            let skip_series = self.has_flag(ConfigInputFlags::SkipSeries);
-            self.prepare_staged_input(provider_configs, &mut used_provider_configs, skip_live, skip_vod, skip_series)?;
             self.apply_expiration();
             self.prepare_aliases(provider_configs, &mut used_provider_configs)?;
 
@@ -869,6 +779,7 @@ impl ConfigInput {
             priority: alias.priority,
             max_connections: alias.max_connections,
             method: self.method,
+            staged_type: self.staged_type,
             staged: None,
             exp_date: None,
             t_batch_url: None,
@@ -968,8 +879,9 @@ impl From<&ConfigInputDto> for ConfigInput {
             priority: dto.priority,
             max_connections: dto.max_connections,
             method: dto.method,
+            staged_type: dto.staged_type,
             exp_date: dto.exp_date,
-            staged: dto.staged.as_ref().map(StagedInput::from),
+            staged: dto.staged.as_ref().map(ConfigInputStaged::from),
             t_batch_url: None,
             panel_api: dto.panel_api.as_ref().map(PanelApiConfig::from),
             cache_duration_seconds: dto.cache_duration_seconds,
@@ -1400,49 +1312,6 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_fails_on_malformed_provider_url_in_staged_input() {
-        let mut input = ConfigInput {
-            name: "test_input".into(),
-            input_type: InputType::M3u,
-            url: "http://example.com/playlist.m3u".to_string(),
-            enabled: true,
-            staged: Some(StagedInput {
-                enabled: true,
-                name: "staged".into(),
-                input_type: InputType::M3u,
-                url: "provider:///bad".to_string(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let err = input.prepare(&[]).unwrap_err();
-        assert!(err.to_string().contains("Malformed provider URL"));
-    }
-
-    #[test]
-    fn test_prepare_ignores_disabled_staged_provider_url() {
-        let mut input = ConfigInput {
-            name: "test_input".into(),
-            input_type: InputType::M3u,
-            url: "http://example.com/playlist.m3u".to_string(),
-            enabled: true,
-            staged: Some(StagedInput {
-                enabled: false,
-                name: "staged".into(),
-                input_type: InputType::M3u,
-                url: "provider:///bad".to_string(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        input
-            .prepare(&[])
-            .expect("disabled staged input should not enforce provider URL validation");
-    }
-
-    #[test]
     fn test_prepare_fails_on_malformed_provider_url_in_alias() {
         let mut input = ConfigInput {
             name: "test_input".into(),
@@ -1469,209 +1338,76 @@ mod tests {
     }
 
     #[test]
-    fn test_get_download_input_type_uses_staged_when_enabled() {
-        let input = ConfigInput {
-            input_type: InputType::Xtream,
-            staged: Some(StagedInput {
-                enabled: true,
-                input_type: InputType::M3u,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        assert_eq!(input.get_download_input_type(), InputType::M3u);
-    }
-
-    #[test]
-    fn test_get_download_input_type_uses_primary_when_staged_disabled() {
-        let input = ConfigInput {
-            input_type: InputType::Xtream,
-            staged: Some(StagedInput {
-                enabled: false,
-                input_type: InputType::M3u,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
+    fn test_get_download_input_type_returns_input_type() {
+        let input = ConfigInput { input_type: InputType::Xtream, ..Default::default() };
         assert_eq!(input.get_download_input_type(), InputType::Xtream);
     }
 
     #[test]
-    fn test_staged_from_dto_defaults_m3u() {
-        let dto = StagedInputDto {
-            input_type: InputType::M3u,
-            ..StagedInputDto::default()
-        };
-        let staged = StagedInput::from(&dto);
-        assert_eq!(staged.live_source, ClusterSource::Staged);
-        assert_eq!(staged.vod_source, ClusterSource::Input);
-        assert_eq!(staged.series_source, ClusterSource::Input);
-    }
-
-    #[test]
-    fn test_staged_from_dto_defaults_xtream() {
-        let dto = StagedInputDto {
-            input_type: InputType::Xtream,
-            ..StagedInputDto::default()
-        };
-        let staged = StagedInput::from(&dto);
-        assert_eq!(staged.live_source, ClusterSource::Staged);
-        assert_eq!(staged.vod_source, ClusterSource::Staged);
-        assert_eq!(staged.series_source, ClusterSource::Staged);
-    }
-
-    #[test]
-    fn test_staged_from_dto_explicit_overrides() {
-        let dto = StagedInputDto {
-            input_type: InputType::Xtream,
-            live_source: Some(ClusterSource::Input),
-            vod_source: Some(ClusterSource::Skip),
-            series_source: Some(ClusterSource::Staged),
-            ..StagedInputDto::default()
-        };
-        let staged = StagedInput::from(&dto);
-        assert_eq!(staged.live_source, ClusterSource::Input);
-        assert_eq!(staged.vod_source, ClusterSource::Skip);
-        assert_eq!(staged.series_source, ClusterSource::Staged);
-    }
-
-    #[test]
-    fn test_get_cluster_source() {
-        let staged = StagedInput {
-            live_source: ClusterSource::Staged,
-            vod_source: ClusterSource::Input,
-            series_source: ClusterSource::Skip,
-            ..Default::default()
-        };
-        assert_eq!(staged.get_cluster_source(XtreamCluster::Live), ClusterSource::Staged);
-        assert_eq!(staged.get_cluster_source(XtreamCluster::Video), ClusterSource::Input);
-        assert_eq!(staged.get_cluster_source(XtreamCluster::Series), ClusterSource::Skip);
-    }
-
-    #[test]
-    fn test_staged_from_dto_tracks_cluster_sources_configured_flag() {
-        let dto = StagedInputDto {
-            input_type: InputType::Xtream,
-            live_source: Some(ClusterSource::Input),
-            ..StagedInputDto::default()
-        };
-        let staged = StagedInput::from(&dto);
-        assert!(staged.cluster_sources_configured);
-    }
-
-    #[test]
-    fn test_prepare_m3u_main_input_ignores_cluster_sources() {
-        let mut input = ConfigInput {
-            name: "m3u_main".into(),
-            input_type: InputType::M3u,
-            url: "http://main.example/playlist.m3u".to_string(),
-            enabled: true,
-            staged: Some(StagedInput {
-                enabled: true,
-                input_type: InputType::Xtream,
-                url: "http://staged.example".to_string(),
-                username: Some("u".to_string()),
-                password: Some("p".to_string()),
-                live_source: ClusterSource::Input,
-                vod_source: ClusterSource::Skip,
-                series_source: ClusterSource::Input,
-                cluster_sources_configured: true,
-                ..StagedInput::default()
-            }),
+    fn test_resolve_staged_download_type_does_not_inherit_provider_connection_profile() {
+        let mut staged = ConfigInput {
+            name: "staged_a".into(),
+            input_type: InputType::Staged,
+            url: "http://staged.example".to_string(),
             ..Default::default()
         };
 
-        input.prepare(&[]).expect("prepare should succeed");
+        staged.resolve_staged_download_type();
 
-        let staged = input.staged.expect("staged should exist");
-        assert_eq!(staged.live_source, ClusterSource::Staged);
-        assert_eq!(staged.vod_source, ClusterSource::Staged);
-        assert_eq!(staged.series_source, ClusterSource::Staged);
-        assert!(!staged.cluster_sources_configured);
+        assert_eq!(staged.input_type, InputType::M3u);
+        assert_eq!(staged.username, None);
+        assert_eq!(staged.password, None);
+        assert!(staged.headers.is_empty());
+        assert!(InputFetchMethod::is_default(&staged.method));
+        assert_eq!(staged.url, "http://staged.example");
     }
 
     #[test]
-    fn test_prepare_enabled_staged_requires_at_least_one_staged_cluster_source() {
-        let mut input = ConfigInput {
-            name: "xtream_main".into(),
-            input_type: InputType::Xtream,
-            url: "http://main.example".to_string(),
-            username: Some("main_user".to_string()),
-            password: Some("main_pass".to_string()),
-            enabled: true,
-            staged: Some(StagedInput {
-                enabled: true,
-                input_type: InputType::Xtream,
-                url: "http://staged.example".to_string(),
-                username: Some("staged_user".to_string()),
-                password: Some("staged_pass".to_string()),
-                live_source: ClusterSource::Input,
-                vod_source: ClusterSource::Skip,
-                series_source: ClusterSource::Input,
-                ..StagedInput::default()
-            }),
+    fn test_resolve_staged_download_type_preserves_xtream_staged_type() {
+        let mut staged = ConfigInput {
+            name: "staged_a".into(),
+            input_type: InputType::Staged,
+            staged_type: StagedInputType::Xtream,
+            url: "http://staged.example".to_string(),
             ..Default::default()
         };
 
-        let err = input
-            .prepare(&[])
-            .expect_err("expected validation error for staged source selection");
-        assert!(err.to_string().contains("no cluster source uses 'staged'"));
+        staged.resolve_staged_download_type();
+
+        assert_eq!(staged.input_type, InputType::Xtream);
     }
 
     #[test]
-    fn test_prepare_staged_m3u_rejects_vod_series_staged() {
-        let mut input = ConfigInput {
-            name: "xtream_main".into(),
-            input_type: InputType::Xtream,
-            url: "http://main.example".to_string(),
-            username: Some("main_user".to_string()),
-            password: Some("main_pass".to_string()),
-            enabled: true,
-            staged: Some(StagedInput {
-                enabled: true,
-                input_type: InputType::M3u,
-                url: "http://staged.example/playlist.m3u".to_string(),
-                vod_source: ClusterSource::Staged,
-                ..StagedInput::default()
-            }),
+    fn test_resolve_staged_download_type_keeps_own_credentials() {
+        let mut staged = ConfigInput {
+            name: "staged_a".into(),
+            input_type: InputType::Staged,
+            url: "http://staged.example".to_string(),
+            username: Some("own_user".to_string()),
+            password: Some("own_pass".to_string()),
             ..Default::default()
         };
 
-        let err = input
-            .prepare(&[])
-            .expect_err("expected staged M3U validation error for vod_source=staged");
-        assert!(err.to_string().contains("Staged M3U input cannot provide VOD or Series"));
+        staged.resolve_staged_download_type();
+
+        assert_eq!(staged.username.as_deref(), Some("own_user"));
+        assert_eq!(staged.password.as_deref(), Some("own_pass"));
     }
 
     #[test]
-    fn test_prepare_staged_m3u_vod_staged_allowed_when_vod_skipped() {
-        let mut input = ConfigInput {
-            name: "xtream_main".into(),
-            input_type: InputType::Xtream,
-            url: "http://main.example".to_string(),
-            username: Some("main_user".to_string()),
-            password: Some("main_pass".to_string()),
-            enabled: true,
-            options: Some(ConfigInputOptions::from(&ConfigInputOptionsDto {
-                skip_vod: true,
-                ..ConfigInputOptionsDto::default()
-            })),
-            staged: Some(StagedInput {
-                enabled: true,
-                input_type: InputType::M3u,
-                url: "http://staged.example/playlist.m3u".to_string(),
-                vod_source: ClusterSource::Staged,
-                ..StagedInput::default()
-            }),
+    fn test_resolve_staged_download_type_m3u_extracts_url_credentials() {
+        let mut staged = ConfigInput {
+            name: "staged_a".into(),
+            input_type: InputType::Staged,
+            url: "http://staged.example/get.php?username=urluser&password=urlpass".to_string(),
             ..Default::default()
         };
 
-        input
-            .prepare(&[])
-            .expect("staged M3U vod_source=staged is valid when VOD is skipped");
+        staged.resolve_staged_download_type();
+
+        assert_eq!(staged.input_type, InputType::M3u);
+        assert_eq!(staged.username.as_deref(), Some("urluser"));
+        assert_eq!(staged.password.as_deref(), Some("urlpass"));
     }
 
     #[test]

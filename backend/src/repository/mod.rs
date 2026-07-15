@@ -21,6 +21,7 @@ mod provider_dns_repository;
 mod stream_history;
 mod qos_snapshot_repository;
 pub mod stalker_repository;
+pub mod stalker_generation_repository;
 
 pub use storage::*;
 pub use target_id_mapping::*;

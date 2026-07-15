@@ -121,28 +121,27 @@ inputs:
     options: { }
     epg: { }
     aliases: [ ]
-    staged: { }
     panel_api: { }
 ```
 
 ### Input Base Parameters
 
-| Parameter               | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                            |
-|:------------------------|:-------|:--------:|:--------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `name`                  | String |   Yes    |         | Internal reference ID for Tuliprox. Must be strictly unique. Critical for persistent UUID generation!                                                                                                                                                                                                                                                                                                                                    |
-| `type`                  | Enum   |    No    | `m3u`   | Allowed: `m3u`, `xtream`, `stalker`, `library` (Local files) and `m3u_batch`, `xtream_batch` (CSV offloading). Stalker inputs use the portal handshake/catalog flow instead of a plain playlist download.                                                                                                                                                                                                                                |
-| `url`                   | String |   Yes    |         | The Provider URL. Tuliprox supports magic scheme prefixes: `http(s)://`, `file://`, `batch://`, and **`provider://my_failover_provider`** (for the Failover System above).                                                                                                                                                                                                                                                               |
-| `username` / `password` | String |  Often   |         | Mandatory if `type` = `xtream`.                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `enabled`               | Bool   |    No    | `true`  | If `false`, this input is completely ignored in all processing.                                                                                                                                                                                                                                                                                                                                                                          |
-| `cache_duration`        | String |    No    | `0`     | **Crucial:** Determines how often Tuliprox actually downloads the raw list from the provider. At `1d` (1 day), Tuliprox serves from its local `.db` for 24 hours, even if you trigger hourly updates. This heavily protects against provider bans! Supported units are `s`, `m`, `h`, and `d`. If `cache_duration` is set, the cached provider playlist stored on disk is reused for subsequent updates instead of downloading it again. |
-| `persist`               | String |    No    |         | Optional path template (e.g., `./playlist_{}.m3u`) to permanently store the downloaded raw provider list locally on your disk. The `{}` in the filename is filled with the current timestamp. For `m3u` use a full filename. For `xtream` use a prefix like `./playlist_`.                                                                                                                                                               |
-| `method`                | Enum   |    No    | `GET`   | HTTP Request method for playlist downloads (`GET` or `POST`).                                                                                                                                                                                                                                                                                                                                                                            |
-| `exp_date`              | Mixed  |    No    |         | Expiration date as `"YYYY-MM-DD HH:MM:SS"` or Unix timestamp. Used for status tracking and Panel API logic.                                                                                                                                                                                                                                                                                                                              |
-| `headers`               | Dict   |    No    |         | Custom HTTP headers for the download (e.g., `User-Agent: My-Player`).                                                                                                                                                                                                                                                                                                                                                                    |
-| `epg`                   | Object |    No    |         | Allows mapping of external XMLTV files (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                    |
-| `aliases`               | List   |    No    |         | Connection pooling / Sub-accounts (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                         |
-| `staged`                | Object |    No    |         | Hybrid architecture feature (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                               |
-| `panel_api`             | Object |    No    |         | Automated reseller account generation (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                     |
+| Parameter               | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                             |
+|:------------------------|:-------|:--------:|:--------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `name`                  | String |   Yes    |         | Internal reference ID for Tuliprox. Must be strictly unique. Critical for persistent UUID generation!                                                                                                                                                                                                                                                                                                                                     |
+| `type`                  | Enum   |    No    | `m3u`   | Allowed: `m3u`, `xtream`, `stalker`, `library`, `staged`, `emby`, `jellyfin`, `plex`, and `m3u_batch` / `xtream_batch` / `stalker_batch` (CSV offloading). Stalker inputs use the portal handshake/catalog flow instead of a plain playlist download.                                                                                                                                                                                     |
+| `url`                   | String |   Yes    |         | The Provider URL. Tuliprox supports magic scheme prefixes: `http(s)://`, `file://`, `batch://`, and **`provider://my_failover_provider`** (for the Failover System above).                                                                                                                                                                                                                                                                |
+| `username` / `password` | String |  Often   |         | Mandatory if `type` = `xtream`.                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `enabled`               | Bool   |    No    | `true`  | If `false`, this input is completely ignored in all processing.                                                                                                                                                                                                                                                                                                                                                                           |
+| `cache_duration`        | String |    No    | `0`     | **Crucial:** Determines how often Tuliprox actually downloads the raw list from the provider. At `1d` (1 day), Tuliprox serves from its local `.db` for 24 hours, even if you trigger hourly updates. This heavily protects against provider bans! Supported units are `s`, `m`, `h`, and `d`. If `cache_duration` is set, the cached provider playlist stored on disk is reused for subsequent updates instead of downloading it again.  |
+| `persist`               | String |    No    |         | Optional path template (e.g., `./playlist_{}.m3u`) to permanently store the downloaded raw provider list locally on your disk. The `{}` in the filename is filled with the current timestamp. For `m3u` use a full filename. For `xtream` use a prefix like `./playlist_`.                                                                                                                                                                |
+| `method`                | Enum   |    No    | `GET`   | HTTP Request method for playlist downloads (`GET` or `POST`).                                                                                                                                                                                                                                                                                                                                                                             |
+| `exp_date`              | Mixed  |    No    |         | Expiration date as `"YYYY-MM-DD HH:MM:SS"` or Unix timestamp. Used for status tracking and Panel API logic.                                                                                                                                                                                                                                                                                                                               |
+| `headers`               | Dict   |    No    |         | Custom HTTP headers for the download (e.g., `User-Agent: My-Player`).                                                                                                                                                                                                                                                                                                                                                                     |
+| `epg`                   | Object |    No    |         | Allows mapping of external XMLTV files (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                     |
+| `aliases`               | List   |    No    |         | Connection pooling / Sub-accounts (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                          |
+| `staged`                | Object |    No    |         | Staged overlay settings. Only valid when `type: staged` (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                    |
+| `panel_api`             | Object |    No    |         | Automated reseller account generation (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                      |
 
 #### Minimal Stalker Input Example
 
@@ -157,8 +156,8 @@ inputs:
       stalker_runtime_resolve_playback: true
 ```
 
-Use `stalker_pre_resolve_playback: true` if you want Tuliprox to materialize playback URLs during refresh whenever the portal already grants them.  
-Keep `stalker_runtime_resolve_playback: true` when the portal uses expiring or session-bound temp links that may need a fresh `create_link`  
+Use `stalker_pre_resolve_playback: true` if you want Tuliprox to materialize playback URLs during refresh whenever the portal already grants them.
+Keep `stalker_runtime_resolve_playback: true` when the portal uses expiring or session-bound temp links that may need a fresh `create_link`
 call later during playback.
 
 #### Input URL Schemes (`inputs[].url`)
@@ -192,7 +191,7 @@ logic.
 | `options`   | Behavior controls for metadata resolution, stream probing, and skip logic. | [See Options](#22-input-options-options)           |
 | `epg`       | XMLTV source management and Smart Match fuzzy logic settings.              | [See EPG](#23-epg-assignment--smart-match-epg)     |
 | `aliases`   | Connection pooling for multiple subscriptions from the same provider.      | [See Aliases](#24-provider-aliases-aliases--batch) |
-| `staged`    | Hybrid architecture for sideloading external playlists into an input.      | [See Staged](#25-staged-sources-staged)            |
+| `staged`    | Overlay settings for first-class staged inputs.                            | [See Staged](#25-staged-sources-staged)            |
 | `panel_api` | Automated reseller panel integration (provisioning/renewal).               | [See Panel API](#26-provider-panel-api-panel_api)  |
 
 ---
@@ -249,70 +248,402 @@ specific provider.
 * `stalker_pre_resolve_playback` and `stalker_runtime_resolve_playback` are complementary:
   * `stalker_pre_resolve_playback: true` tries to turn portal `cmd` values into concrete playback URLs during refresh.
   * `stalker_runtime_resolve_playback: true` retries `create_link` later if the stored playback URL is stale, temp-link based, or rejected after processing.
-* Temp-link variants (`nginx_secure_link`, `flussonic_tmp_link`, `wowza_tmp_link`) are persisted as explicit playback modes  
+* Temp-link variants (`nginx_secure_link`, `flussonic_tmp_link`, `wowza_tmp_link`) are persisted as explicit playback modes
   and reused during runtime refresh, instead of being flattened into a generic direct-URL path.
-* When pre-resolve does not materialize a URL, Tuliprox keeps the Stalker item metadata and playback descriptor but does  
+* When pre-resolve does not materialize a URL, Tuliprox keeps the Stalker item metadata and playback descriptor but does
   not leak the raw `cmd` into the exported playlist URL field.
-* If pre-resolve is disabled or the portal refuses to resolve a specific item during refresh, the item can still remain playable  
+* If pre-resolve is disabled or the portal refuses to resolve a specific item during refresh, the item can still remain playable
   later through runtime resolution, assuming the reverse-proxy path is used and runtime resolve is enabled.
-* Runtime refresh reuses a cached Stalker client per input configuration and treats the session TTL as a soft re-handshake boundary.  
+* Runtime refresh reuses a cached Stalker client per input configuration and treats the session TTL as a soft re-handshake boundary.
   If refresh still cannot resolve a playable URL, Tuliprox invalidates the stale persisted URL instead of continuing to serve it indefinitely.
 * Stalker EPG import now also consumes the portal bulk-EPG endpoint during processing when Stalker playback pre-resolve is enabled.
-* The bulk-EPG path is streamed and batch-persisted to reduce peak memory pressure on large portals, but portal-specific  
+* The bulk-EPG path is streamed and batch-persisted to reduce peak memory pressure on large portals, but portal-specific
   tuning for pathological datasets is still a separate follow-up topic.
-* Supported Stalker playback transports are currently `http` and `https` only. `rtmp://` / `rtsp://` commands are rejected  
+* Supported Stalker playback transports are currently `http` and `https` only. `rtmp://` / `rtsp://` commands are rejected
   explicitly because Tuliprox's reverse-proxy path does not relay those schemes.
-* Fresh temp-link resolution is implemented. The still-open edge case is whether a specific portal also requires extra forwarded  
+* Fresh temp-link resolution is implemented. The still-open edge case is whether a specific portal also requires extra forwarded
   cookies or headers on the final media request after temp-link resolution.
 
 ---
 
 ### 2.3 EPG Assignment & Smart Match (`epg`)
 
-Tuliprox can load external XMLTV files and map them intelligently using advanced fuzzy matching to streams that are
+Tuliprox can load external EPG sources and map them intelligently using advanced fuzzy matching to streams that are
 missing a valid EPG ID.
-Within the `epg` block, you can define multiple XMLTV providers.
-Tuliprox aggregates these sources and assigns EPG data based on priority and matching rules.
+
+The `epg.sources` list supports the following source types:
+
+* **XMLTV** sources, which provide complete XMLTV channel and programme data.
+* **ICS calendar** sources, which import iCalendar events and convert them into a virtual XMLTV-compatible EPG channel.
+
+Tuliprox aggregates all configured EPG sources and assigns EPG data based on priority and matching rules.
 
 #### Example Configuration
 
 ```yaml
 epg:
   sources:
-    - url: "auto"           # Automatically generated provider URL
-      priority: -2          # High priority
-      logo_override: true   # Replaces provider logos with EPG icons
+    - url: "auto" # Automatically generated provider XMLTV URL
+      priority: -2 # High priority
+      logo_override: true # Replaces provider logos with EPG icons
+
     - url: "http://localhost:3001/xmltv.php?epg_id=1"
       priority: -1
+
     - url: "http://localhost:3001/xmltv.php?epg_id=2"
       priority: 3
-    - url: "http://localhost:3001/xmltv.php?epg_id=3"
-      priority: 0
+
+    - type: ics
+      url: "https://files-f1.motorsportcalendars.com/f1-calendar_p1_p2_p3_qualifying_sprint_gp.ics"
+      channel_id: "f1.calendar"
+      channel_title: "Formula 1"
+      priority: -10
+      ics:
+        timezone: "Europe/Budapest"
+        event:
+          title: "{summary}"
+          description: "{description}"
+          include_location: true
+          include_categories: true
+        dummy:
+          enabled: true
+          title: "No Formula 1 session"
+          description: "There is currently no scheduled Formula 1 session."
+          days_past: 1
+          days_future: 30
+          block_hours: 4
+          min_gap_minutes: 1
+
   smart_match:
     enabled: true
     fuzzy_matching: true
     match_threshold: 80
     best_match_threshold: 99
     name_prefix: { suffix: "." }
-    name_prefix_separator: [ ':', '|', '-' ]
-    strip: [ "3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw" ]
+    name_prefix_separator: [":", "|", "-"]
+    strip: ["3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw"]
     normalize_regex: '[^a-zA-Z0-9\-]'
 ```
 
 #### EPG Source Parameters (`sources`)
 
-| Parameter           | Type   | Required | Default | Technical Impact & Background                                                                                                                                         |
-|:--------------------|:-------|:--------:|:--------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **`url`**           | String |   Yes    |         | The XMLTV endpoint. Use **`auto`** for Xtream inputs to automatically generate the native XMLTV URL using your credentials. Supports local paths and `http(s)` links. |
-| **`priority`**      | Int    |    No    | `0`     | Determines the lookup order. **Lower numbers have higher priority.** For example, `-2` is processed before `0`. Use negative numbers for primary sources.             |
-| **`logo_override`** | Bool   |    No    | `false` | If set to `true`, channel logos from the provider are replaced by the icons found in the XMLTV file.                                                                  |
+| Parameter           | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                          |
+| :------------------ | :----- | :------: | :------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`type`**          | Enum   |    No    | `xmltv` | Defines the source format. Supported values are `xmltv` and `ics`. Existing configurations without `type` are treated as `xmltv`.                                                                                      |
+| **`url`**           | String |   Yes    |         | The EPG source URL or local path. For XMLTV sources, use **`auto`** with Xtream inputs to automatically generate the native XMLTV URL using your credentials. For ICS sources, this points to an `.ics` calendar file. |
+| **`priority`**      | Int    |    No    | `0`     | Determines the lookup order. **Lower numbers have higher priority.** For example, `-2` is processed before `0`. Use negative numbers for primary sources.                                                              |
+| **`logo_override`** | Bool   |    No    | `false` | If set to `true`, channel logos from the provider are replaced by icons found in the EPG source. This mainly applies to XMLTV sources.                                                                                 |
+| **`channel_id`**    | String | ICS only |         | Required for `type: ics`. Defines the generated XMLTV channel ID for the imported calendar. Playlist entries can reference this value through their EPG ID or receive it through Smart Match.                          |
+| **`channel_title`** | String |    No    |         | Optional display name for the generated ICS EPG channel. If omitted, `channel_id` is used as fallback. This value is also used as a Smart Match candidate.                                                             |
+| **`match_names`**   | List   |    No    | `[]`    | Optional additional names for matching the generated ICS channel to playlist entries. Useful when the playlist channel name differs from the calendar title, for example `F1`, `Formula One`, or `Formel 1`.           |
+| **`ics`**           | Object | ICS only |         | Additional configuration for `type: ics`. See [ICS Calendar Source Parameters](#ics-calendar-source-parameters-ics).                                                                                                   |
+
+#### XMLTV Sources
+
+XMLTV is the default source type. Existing configurations remain valid and do not need to be changed.
+
+```yaml
+epg:
+  sources:
+    - url: "auto"
+      priority: -2
+      logo_override: true
+
+    - url: "https://example.org/xmltv.xml"
+      priority: 0
+```
+
+The following configuration is equivalent:
+
+```yaml
+epg:
+  sources:
+    - type: xmltv
+      url: "https://example.org/xmltv.xml"
+      priority: 0
+```
+
+For Xtream inputs, `url: "auto"` automatically generates the provider's native XMLTV endpoint from the configured
+input URL, username, and password.
+
+The ICS-only fields `channel_id`, `channel_title`, `match_names`, and `ics` are rejected on `type: xmltv` sources. This
+keeps accidental calendar settings from changing XMLTV download or runtime behavior.
+
+#### ICS Calendar Sources
+
+ICS sources import iCalendar files and convert their `VEVENT` entries into XMLTV-compatible programme entries.
+Recurring events using `RRULE`, `RDATE`, or `EXDATE` are detected but not expanded yet; Tuliprox imports the base
+`DTSTART`/`DTEND` occurrence and logs one aggregated warning per parsed source when such entries are present.
+
+An ICS source creates exactly one virtual EPG channel. It does **not** create a playlist channel or stream. The generated
+`channel_id` must therefore be assigned to an existing playlist entry by one of the following mechanisms:
+
+* the playlist entry already uses the same EPG ID,
+* a mapper rule assigns the EPG ID,
+* Smart Match matches the playlist channel name against `channel_id`, `channel_title`, or `match_names`.
+
+The generated programmes are written into the regular XMLTV output. M3U and Xtream use the same internal
+`epg_channel_id` assignment, so the same `channel_id` works for both input types. If an Xtream provider supplies a valid
+but unwanted EPG ID, use a mapping rule to overwrite the stream's EPG ID with the ICS `channel_id`.
+
+Example using the public Formula 1 calendar:
+
+```yaml
+epg:
+  sources:
+    - type: ics
+      url: "https://files-f1.motorsportcalendars.com/f1-calendar_p1_p2_p3_qualifying_sprint_gp.ics"
+      channel_id: "f1.calendar"
+      channel_title: "Formula 1"
+      priority: -10
+      match_names:
+        - "F1"
+        - "Formula One"
+        - "Formel 1"
+      ics:
+        timezone: "Europe/Budapest"
+        event:
+          title: "{summary}"
+          description: "{description}"
+          include_location: true
+          include_categories: true
+        dummy:
+          enabled: true
+          title: "No Formula 1 session"
+          description: "There is currently no scheduled Formula 1 session."
+          days_past: 1
+          days_future: 30
+          block_hours: 4
+          min_gap_minutes: 1
+```
+
+A playlist channel can then be linked explicitly by using the generated EPG channel ID:
+
+```m3u
+#EXTINF:-1 tvg-id="f1.calendar" tvg-name="Formula 1",Formula 1
+http://example.org/live/f1/index.m3u8
+```
+
+Alternatively, Smart Match can match playlist names such as `Formula 1`, `F1`, or `Formel 1` when the corresponding
+values are configured through `channel_title` or `match_names`.
+
+#### ICS Calendar Source Parameters (`ics`)
+
+| Parameter                    | Type   | Required | Default    | Technical Impact & Background                                                                                                                                    |
+| :--------------------------- | :----- | :------: | :--------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`timezone`**               | String |    No    | `UTC`      | Fallback timezone for floating ICS timestamps and the local dummy block calculation. Use an IANA zone such as `Europe/Budapest`, `UTC`, or `America/New_York`.   |
+| **`event`**                  | Object |    No    |            | Controls how calendar events are mapped to programme title and description. See [ICS Event Mapping](#ics-event-mapping-event).                                   |
+| **`dummy`**                  | Object |    No    |            | Controls optional gap filling with generated dummy programme entries. See [ICS Dummy Gap Filling](#ics-dummy-gap-filling-dummy).                                 |
+| **`include_cancelled`**      | Bool   |    No    | `false`    | If set to `true`, calendar events with `STATUS:CANCELLED` are imported. By default, cancelled events are skipped.                                                |
+| **`max_events`**             | Int    |    No    | `50000`    | Safety budget for encountered `VEVENT` blocks, including invalid or skipped events. Parsing stops when the budget is exhausted. Hard cap: `200000`.              |
+| **`max_download_bytes`**     | Int    |    No    | `10485760` | Maximum downloaded ICS size in bytes. The default is 10 MiB. Hard cap: `52428800` (50 MiB).                                                                      |
+| **`max_decompressed_bytes`** | Int    |    No    | `20971520` | Maximum decompressed ICS size in bytes. The default is 20 MiB. Hard cap: `104857600` (100 MiB).                                                                  |
+
+`timezone` must be a valid IANA timezone known to Tuliprox, for example `UTC`, `Europe/Budapest`, or
+`America/New_York`.
+
+#### ICS Event Mapping (`event`)
+
+The `event` block controls how ICS `VEVENT` properties are converted into EPG programme fields.
+
+```yaml
+ics:
+  event:
+    title: "{summary}"
+    description: "{description}"
+    include_location: true
+    include_categories: true
+```
+
+| Parameter                | Type   | Required | Default         | Technical Impact & Background                                                           |
+| :----------------------- | :----- | :------: | :-------------- | :-------------------------------------------------------------------------------------- |
+| **`title`**              | String |    No    | `{summary}`     | Template used for the generated programme title.                                        |
+| **`description`**        | String |    No    | `{description}` | Template used for the generated programme description.                                  |
+| **`include_location`**   | Bool   |    No    | `false`         | Appends the ICS `LOCATION` value to the generated programme description when available. |
+| **`include_categories`** | Bool   |    No    | `false`         | Appends ICS `CATEGORIES` to the generated programme description when available.         |
+
+Supported template variables:
+
+| Variable            | Description                                       |
+| :------------------ | :------------------------------------------------ |
+| **`{summary}`**     | The ICS `SUMMARY` value. Usually the event title. |
+| **`{description}`** | The ICS `DESCRIPTION` value.                      |
+| **`{location}`**    | The ICS `LOCATION` value.                         |
+| **`{categories}`**  | The ICS `CATEGORIES` value.                       |
+| **`{uid}`**         | The ICS `UID` value.                              |
+| **`{start}`**       | The localized event start time.                   |
+| **`{end}`**         | The localized event end time.                     |
+
+Example:
+
+```yaml
+ics:
+  event:
+    title: "Formula 1: {summary}"
+    description: "{description}"
+    include_location: true
+    include_categories: true
+```
+
+#### ICS Time Handling
+
+Tuliprox converts all imported calendar events into the internal EPG time format.
+
+Supported ICS time forms:
+
+| ICS Time Form                                  | Behavior                                                                 |
+| :--------------------------------------------- | :----------------------------------------------------------------------- |
+| `DTSTART:20260306T123000Z`                     | Treated as UTC.                                                          |
+| `DTSTART;TZID=Europe/Berlin:20260306T1230`     | Interpreted in the specified `TZID` timezone and converted internally.   |
+| `DTSTART:20260306T123000`                      | Treated as a floating timestamp and interpreted using `ics.timezone`.    |
+| `DTSTART;VALUE=DATE:20260306`                  | All-day events. These are ignored.                                       |
+
+For regular programme entries, an ICS event must provide a valid start and end time. `DTEND` is preferred. If `DTEND`
+is missing, Tuliprox may use `DURATION` when present. Events without a usable end time are skipped. For template
+variables, `{start}` and `{end}` are formatted consistently; when `DURATION` supplies the end time, `{end}` uses the
+same display timezone as `DTSTART`.
+
+#### ICS Dummy Gap Filling (`dummy`)
+
+ICS calendars often only contain real events, for example race sessions, meetings, or special broadcasts. This may leave
+large gaps in the EPG. The optional dummy gap filler can create placeholder programmes for these gaps.
+
+Dummy entries are generated in local day blocks. By default, the block size is 4 hours:
+
+```text
+00:00 - 04:00
+04:00 - 08:00
+08:00 - 12:00
+12:00 - 16:00
+16:00 - 20:00
+20:00 - 24:00
+```
+
+Example:
+
+```yaml
+ics:
+  timezone: "UTC"
+  dummy:
+    enabled: true
+    title: "No Formula 1 session"
+    description: "There is currently no scheduled Formula 1 session."
+    days_past: 1
+    days_future: 30
+    block_hours: 4
+    min_gap_minutes: 1
+```
+
+| Parameter             | Type   | Required | Default              | Technical Impact & Background                                                                                                                                      |
+| :-------------------- | :----- | :------: | :------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`enabled`**         | Bool   |    No    | `false`              | Enables generation of dummy programme entries for gaps without real events.                                                                                        |
+| **`title`**           | String |    No    | `No programme entry` | Programme title for generated dummy entries.                                                                                                                       |
+| **`description`**     | String |    No    | empty                | Programme description for generated dummy entries.                                                                                                                 |
+| **`days_past`**       | Int    |    No    | `1`                  | Number of days before the current day for which dummy entries are generated.                                                                                       |
+| **`days_future`**     | Int    |    No    | `14`                 | Number of days after the current day for which dummy entries are generated.                                                                                        |
+| **`block_hours`**     | Int    |    No    | `4`                  | Size of the local dummy blocks in hours. The value must divide 24 evenly. For example: `1`, `2`, `3`, `4`, `6`, `8`, or `12`.                                      |
+| **`min_gap_minutes`** | Int    |    No    | `1`                  | Minimum gap length required to generate a dummy entry. Smaller gaps are ignored to avoid tiny placeholder programmes caused by second-level timestamp differences. |
+
+Dummy entries never replace real programme entries. They only fill uncovered time ranges.
+
+`days_past` is capped at `30`; `days_future` is capped at `366`. Dummy titles use the same length cap as event summaries
+and dummy descriptions use the same length cap as event descriptions.
+
+Example with one real event from `03:30` to `05:00`:
+
+```text
+00:00 - 03:30  No Formula 1 session
+03:30 - 05:00  Real calendar event
+05:00 - 08:00  No Formula 1 session
+08:00 - 12:00  No Formula 1 session
+...
+```
+
+Example with an event aligned to a block boundary:
+
+```text
+00:00 - 04:00  No Formula 1 session
+04:00 - 06:00  Real calendar event
+06:00 - 08:00  No Formula 1 session
+08:00 - 12:00  No Formula 1 session
+...
+```
+
+If two events are adjacent, no dummy programme is inserted between them:
+
+```text
+10:00 - 11:00  Real calendar event
+11:00 - 12:00  Real calendar event
+12:00 - 16:00  No Formula 1 session
+```
+
+Dummy block boundaries are calculated in `ics.timezone`. Around daylight saving time changes, the local block labels
+remain stable, for example `00:00 - 04:00`, `04:00 - 08:00`, and so on, while the corresponding UTC duration may differ.
+If a local boundary does not exist during a spring-forward transition, it maps to the first real instant after the gap.
+If a boundary is ambiguous during a fall-back transition, the earlier occurrence is used. Any resulting zero-length or
+negative UTC interval is omitted, so generated dummy programmes remain ordered, non-overlapping, and continuous over
+the real local day.
+
+#### ICS Download and Security Notes
+
+ICS sources use the same download infrastructure as playlist and XMLTV EPG downloads. This means that input-level
+headers, disabled headers, default user-agent handling, cache handling, retry behavior, provider failover, and sanitized
+error logging are applied consistently.
+
+Supported URL forms for ICS sources:
+
+| URL Form         | Description                                                               |
+| :--------------- | :------------------------------------------------------------------------ |
+| `https://...`    | Recommended for remote calendar files.                                    |
+| `http://...`     | Supported when explicitly needed.                                         |
+| `webcal://...`   | Normalized internally to `https://...`.                                   |
+| `provider://...` | Uses a configured Tuliprox provider failover definition.                  |
+| `file://...`     | Reads a local calendar file from the host filesystem.                     |
+| local path       | Reads a local relative or absolute file path, subject to path validation. |
+
+Unsupported or unsafe schemes such as `data:`, `ftp:`, `gopher:`, `javascript:`, `mailto:`, or `ssh:` are rejected.
+
+Tuliprox does not load external resources referenced inside the ICS file. Fields such as `ATTACH`, `URL`, `ORGANIZER`,
+`ATTENDEE`, or `IMAGE` are treated as metadata only and must not trigger additional network requests.
+
+To protect the server, ICS imports are bounded by safety limits such as maximum download size and maximum event count.
+Sensitive request data, such as credentials and authorization headers, is sanitized in logs and error messages.
+
+Additional parser limits are enforced regardless of the configured values:
+
+| Limit | Hard Cap |
+| :---- | :------- |
+| Physical or unfolded ICS line length | 128 KiB |
+| Properties per `VEVENT` | 256 |
+| Imported `SUMMARY` text | 4 KiB, truncated at a UTF-8 boundary |
+| Imported `DESCRIPTION` text | 64 KiB, truncated at a UTF-8 boundary |
+
+If the file itself is unreadable, too large, not valid UTF-8, violates the line-length limit, or does not contain one
+complete, correctly nested `VCALENDAR` envelope, the source fails. A correctly wrapped calendar without events is
+valid. If a single `VEVENT` inside that envelope is malformed, has too many properties, has an unknown event `TZID`, or
+lacks a usable
+`DTSTART`/`DTEND`/`DURATION`, that event is skipped and the remaining events continue to be imported. The Web UI EPG
+preview uses the same merged output behavior as the client XMLTV output, including ICS dummy gap filling. If a cached
+`.ics` file cannot be parsed in preview, Tuliprox ignores the cached file and downloads the source again through the
+normal EPG download path.
+
+The graphical source editor currently preserves existing ICS fields when editing an input, but full creation and editing
+of every ICS-specific field is YAML-first. Configure new ICS sources in `source.yml`.
 
 #### Smart Match Parameters (`smart_match`)
 
 The fuzzy matching logic attempts to "guess" the EPG ID by generating search keys based on the channel name.
 
+For XMLTV sources, Tuliprox uses the channel IDs and display names from the XMLTV file.
+
+For ICS sources, Tuliprox uses the generated virtual channel metadata:
+
+* `channel_id`
+* `channel_title`
+* `match_names`
+
 | Parameter               | Type   | Default            | Technical Impact                                                                                                     |
-|:------------------------|:-------|:-------------------|:---------------------------------------------------------------------------------------------------------------------|
+| :---------------------- | :----- | :----------------- | :------------------------------------------------------------------------------------------------------------------- |
 | `enabled`               | Bool   | `false`            | Activates the Smart Match engine for streams without a fixed `tvg-id`.                                               |
 | `fuzzy_matching`        | Bool   | `false`            | Fallback to phonetic and Jaro-Winkler similarity matching if exact ID match fails.                                   |
 | `match_threshold`       | Int    | `80`               | Minimum similarity score (10-100) required to accept a fuzzy match.                                                  |
@@ -334,10 +665,33 @@ If a stream is missing the `tvg-id`, Tuliprox performs the following steps:
 4. **Reconstruction:** Using `name_prefix.suffix` (`.`), the country code is appended to the name. The target search key
    becomes `hbo.us`.
 5. **Phonetic Matching:** The engine uses **Double Metaphone** phonetic encoding to search for the ID `hbo.us` in the
-   aggregated XMLTV database.
+   aggregated EPG database.
+
+For an ICS source, the generated EPG channel participates in the same matching process. For example, this configuration:
+
+```yaml
+epg:
+  sources:
+    - type: ics
+      url: "https://files-f1.motorsportcalendars.com/f1-calendar_p1_p2_p3_qualifying_sprint_gp.ics"
+      channel_id: "f1.calendar"
+      channel_title: "Formula 1"
+      match_names:
+        - "F1"
+        - "Formel 1"
+```
+
+can match playlist channel names such as:
+
+```text
+Formula 1
+F1
+Formel 1
+```
 
 > **Note:** Lower `match_threshold` values increase the chance of EPG assignment but may lead to incorrect matches for
 > channels with very similar names.
+
 ---
 
 ### 2.4 Provider Aliases (`aliases` & `batch://`)
@@ -467,86 +821,66 @@ http://p2.com/get.php?username=u2&password=p2;1;5;true
 
 ### 2.5 Staged Sources (`staged`)
 
-The **"Staged Source"** acts as a structural template for an input's playlist.
-Instead of manually mapping and sorting channels within Tuliprox, this feature allows you to "inject" a pre-configured
-external playlist
-(e.g., from a GitHub repository or a third-party playlist editor) to define the layout while keeping the actual delivery
-linked to your main provider.
+The **staged input** is a first-class input type for pre-formatted playlists. Tuliprox reads the selected playlist
+clusters from the staged source, then stores the merged result in the linked provider input. Stream delivery and API
+requests continue to use that provider input.
 
-**The Hybrid Mechanism:**
+This is useful when an external playlist editor already has the desired channel order, groups, and original stream IDs.
+For example, an IPTV editor can provide the Live playlist layout while the actual streams are still opened against the
+Xtream or M3U provider.
 
-* **Structure Provider (Staged):** The external source dictates the channel order, selection, and group naming during
-  the update process.
-  It is used **temporarily** only for updating the playlist structure.
-* **Data Provider (Main Input):** Regular queries (streaming, authentication, EPG mapping, and metadata fetching)
-  still go through the main provider defined in the root of the input.
+**Data flow:**
 
-**Use Case:**
+* `staged input -> provider input`: the staged input is an overlay for that provider. Clusters listed in
+  `staged.clusters` are loaded from the staged input; the remaining clusters are loaded from the provider input itself.
+  The merged playlist is persisted under the provider input, and streaming/API requests still target the provider input.
+* `staged input -> target` is not supported. Use a normal `m3u` or `xtream` input if the source should be connected
+  directly to a target.
 
-If you have a perfectly maintained playlist in another online tool or want to bypass Tuliprox's internal mapping for a
-specific provider,
-you can "plug in" that playlist as a staged source. It won’t replace your main provider; it simply acts as a blueprint
-for the update cycle.
+#### Configuration Example (Provider With Staged Live Overlay)
 
-#### Configuration Example (Xtream Main + Staged Xtream)
-
-In this setup, Tuliprox uses an external provider's structure for Live-TV,
-but keeps the local provider's data for VOD and ignores the series section entirely.
+In this setup, Live-TV comes from the external staged playlist, while VOD and Series come from the original Xtream
+provider.
 
 ```yaml
 inputs:
   - name: provider_main
     type: xtream
-    url: [ http://provider-a.example:8080 ](http://provider-a.example:8080)
+    url: http://provider-a.example:8080
     username: main_user
     password: main_pass
-    options:
-      skip_live: false
-      skip_vod: false
-      skip_series: false
+  - name: provider_main_editor_live
+    type: staged
+    url: http://editor.example/provider-main-live.m3u
     staged:
-      enabled: true
-      type: xtream
-      url: [ http://provider-b.example:8080 ](http://provider-b.example:8080)
-      username: staged_user
-      password: staged_pass
-      live_source: staged
-      vod_source: input
-      series_source: skip
+      for_input: provider_main
+      clusters: [live]
 ```
 
 #### Parameters
 
-| Parameter               | Type   | Required | Default    | Technical Impact & Background                                                                         |
-|:------------------------|:-------|:--------:|:-----------|:------------------------------------------------------------------------------------------------------|
-| `enabled`               | Bool   |    No    | `false`    | Master switch for the hybrid staged architecture.                                                     |
-| `type`                  | Enum   |    No    | `m3u`      | Format of the staged source. Allowed: `m3u`, `xtream`.                                                |
-| `url`                   | String |   Yes    |            | Download URL (HTTP/HTTPS) or local file path (can be gzip). For `xtream`, use the base hostname:port. |
-| `username` / `password` | String |   Yes    |            | Mandatory only if staged `type` is `xtream`.                                                          |
-| `method`                | Enum   |    No    | `GET`      | HTTP request method (`GET` or `POST`).                                                                |
-| `headers`               | Dict   |    No    |            | Custom HTTP headers for the staged download.                                                          |
-| `live_source`           | Enum   |    No    | `staged`   | Source for the Live-TV section: `staged`, `input`, or `skip`.                                         |
-| `vod_source`            | Enum   |    No    | *(Varies)* | Source for the VOD section: `staged`, `input`, or `skip`.                                             |
-| `series_source`         | Enum   |    No    | *(Varies)* | Source for the Series section: `staged`, `input`, or `skip`.                                          |
+| Parameter               | Type   | Required | Default | Technical Impact & Background                                                                         |
+|:------------------------|:-------|:--------:|:--------|:------------------------------------------------------------------------------------------------------|
+| `type`                  | Enum   |   Yes    |         | Must be `staged`.                                                                                     |
+| `staged_type`           | Enum   |    No    | `m3u`   | Format of the staged source. Allowed: `m3u`, `xtream`.                                                |
+| `url`                   | String |   Yes    |         | Download URL (HTTP/HTTPS) or local file path. For `staged_type: xtream`, use the base hostname:port.  |
+| `username` / `password` | String |   Yes    |         | Mandatory only if `staged_type: xtream`. Not inherited from the provider input.                       |
+| `method`                | Enum   |    No    | `GET`   | HTTP request method (`GET` or `POST`). Not inherited from the provider input.                         |
+| `headers`               | Dict   |    No    |         | Custom HTTP headers for the staged download. Not inherited from the provider input.                   |
+| `staged.for_input`      | String |   Yes    |         | Provider input name. Must reference a non-staged `m3u` or `xtream` input.                             |
+| `staged.clusters`       | List   |    No    | all     | Clusters loaded from the staged input: `live`, `vod`, `series`.                                       |
 
-#### Staged Cluster Source Behavior & Logic
+#### Staged Cluster Behavior & Validation
 
-The selection of data sources for different clusters (Live, VOD, Series) follows specific validation and priority rules:
+`staged.clusters` is the group of clusters loaded from the staged input.
 
-1. **Global Skip Priority:** If `input.options.skip_live|skip_vod|skip_series` is set to `true`, that section is skipped
-   entirely,
-   regardless of the `staged` settings.
-2. **Xtream Main Inputs:**
-    * At least one cluster (`live`, `vod`, or `series`) must be set to `staged`.
-      If all effective values resolve to `input` or `skip`, the configuration is considered invalid.
-    * **Default Behavior:** If staged `type` is `xtream`, all clusters default to `staged`.
-3. **M3U Staged Sources:**
-    * M3U sources cannot provide structured VOD or Series metadata for Xtream clusters.
-      Therefore, `vod_source: staged` and `series_source: staged` are **invalid** if the staged type is `m3u`.
-    * **Default Behavior:** If staged `type` is `m3u`, it defaults to `live_source: staged`, `vod_source: input`, and
-      `series_source: input`.
-4. **M3U Main Inputs:** If the primary input `type` is `m3u`, the cluster source fields (`live_source`, etc.) are
-   ignored.
+* The referenced provider supplies all clusters not listed in `staged.clusters`.
+* `staged.for_input` must reference an existing non-staged `m3u` or `xtream` input.
+* Each provider input can have at most one staged overlay.
+* `staged.clusters` must not be empty.
+* Source definitions must reference the provider input, not the staged input.
+* Staged inputs do not use `priority`, `max_connections`, or `cache_duration`. The linked provider input controls
+  stream limits and refresh cadence. If the provider input is still cached, Tuliprox does not query the staged input.
 
 #### File Persistence (`persist`)
 
@@ -702,7 +1036,12 @@ sources:
         sort: { }
         options:
           ignore_logo: false
-          share_live_streams: false
+          epg_output:
+            lowercase_ids: false
+            lowercase_xmltv_display_names: false
+          share_live_streams:
+            hls: false
+            mpeg_ts: false
           remove_duplicates: false
         output:
           - type: xtream
@@ -771,7 +1110,7 @@ Valid values are:
 The target-level `filter` is a string-based expression using Tuliprox's filter DSL.
 It defines which entries remain in the final target after the selected processing stages have been applied.
 
-You can define complex strings or regex patterns exactly once in [template.yml](./configuration/template.md)
+You can define complex strings or regex patterns exactly once in [template.yml](./template.md)
 and call them by wrapping the template name in exclamation marks: `!MACRO_NAME!`.
 For less verbose expression definitions, inline filter definitions are also supported.
 
@@ -971,23 +1310,83 @@ targets:
         use_output: xtream
     options:
       ignore_logo: false
-      share_live_streams: true
+      epg_output:
+        lowercase_ids: true
+        lowercase_xmltv_display_names: false
+      share_live_streams:
+        hls: true
+        mpeg_ts: true
       remove_duplicates: false
 ```
 
 #### Target Option Parameters
 
-| Parameter            | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                              |
-|:---------------------|:-----|:--------:|:--------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `ignore_logo`        | Bool |    No    | `false` | Ignores `tvg-logo` and `tvg-logo-small` attributes. This reduces downstream device-side logo caching and can keep generated M3U playlists leaner for clients with limited storage or poor cache invalidation behavior.     |
-| `share_live_streams` | Bool |    No    | `false` | Allows Tuliprox to share live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel. |
-| `remove_duplicates`  | Bool |    No    | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output.                                                                            |
-| `force_redirect`     | Bool |    No    | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model.                                             |
+| Parameter                                  | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                                                  |
+|:-------------------------------------------|:-----|:--------:|:--------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ignore_logo`                              | Bool | No       | `false` | Ignores `tvg-logo` and `tvg-logo-small` attributes. This reduces downstream device-side logo caching and can keep generated M3U playlists leaner for clients with limited storage or poor cache invalidation behavior.                         |
+| `share_live_streams.hls`                   | Bool | No       | `false` | Enables HLS live sharing for the new HLS cache proxy path. This is a configuration switch for the HLS cache feature and is independent from MPEG-TS stream sharing.                                                                            |
+| `share_live_streams.mpeg_ts`               | Bool | No       | `false` | Allows Tuliprox to share MPEG-TS live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel.             |
+| `remove_duplicates`                        | Bool | No       | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output.                                                                                                |
+| `epg_output.lowercase_ids`                 | Bool | No       | `false` | Canonicalizes visible technical EPG IDs with ASCII lowercase across M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV channel/programme references, and EPG API responses. Changing this option requires a full target refresh.                     |
+| `epg_output.lowercase_xmltv_display_names` | Bool | No       | `false` | Applies Unicode lowercase exclusively to XMLTV `<display-name>` values during serialization. Playlist names, Xtream names, programme titles, and programme descriptions remain unchanged; persisted target data does not require rebuilding.   |
+| `force_redirect`                           | Bool | No       | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model.                                                                 |
 
-> **⚠️ Warning:** When `share_live_streams` is enabled, each shared channel consumes at least **12 MB** of memory,
+> **Shared HLS:** `share_live_streams.hls` requires `reverse_proxy.hls_cache` in `config.yml`.
+> Start with [Shared HLS Sessions](./shared-hls-sessions.md) for the feature overview and
+> [Shared HLS Configuration](./shared-hls-configuration.md) for the full setup checklist.
+>
+> Use the object form shown above. The old boolean style `share_live_streams: true` is not valid for this configuration,
+> because HLS sharing and MPEG-TS sharing are independent switches.
+>
+> **⚠️ Warning:** When `share_live_streams.mpeg_ts` is enabled, each shared channel consumes at least **12 MB** of memory,
 > regardless of the number of connected clients.
 > If the reverse-proxy buffer size is increased above `1024`, memory usage increases accordingly.
 > Example: with a buffer size of `2048`, each shared channel consumes at least **24 MB**.
+
+#### EPG Output Normalization
+
+`epg_output` applies to the entire target so every output format uses the same EPG identity space. Both options
+default to `false`; when they are omitted, Tuliprox preserves the source casing and existing output behavior.
+
+```yaml
+targets:
+  - name: sample_target
+    options:
+      epg_output:
+        lowercase_ids: true
+        lowercase_xmltv_display_names: true
+    output:
+      - type: m3u
+      - type: xtream
+```
+
+With both options enabled, neutral input values such as `Example.Channel` and `Sample Network` produce a canonical
+technical ID of `example.channel` and the following XMLTV output:
+
+```xml
+<channel id="example.channel">
+  <display-name>sample network</display-name>
+</channel>
+<programme channel="example.channel">
+  <title>Example Programme</title>
+</programme>
+```
+
+`lowercase_ids` uses ASCII lowercase for technical identifiers. Non-ASCII characters in those IDs remain unchanged.
+The canonical visible ID is used consistently for M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV `<channel id>` and
+`<programme channel>`, and Short EPG / Stream EPG responses. Target EPG database keys and API lookup keys use the same
+target output casing: source case is preserved while the option is disabled, and ASCII lowercase is used after the
+option is enabled and the target is refreshed. This keeps existing mixed-case target databases compatible while the
+two XMLTV attributes continue to use exactly the same visible value.
+
+`lowercase_xmltv_display_names` uses Unicode lowercase only while serializing XMLTV `<display-name>` values. It takes
+effect for subsequent XMLTV responses and normally does not require rebuilding persisted target data. It does not
+change playlist or Xtream names, programme titles or descriptions, input data, parser values, caches, or Smart Match
+behavior.
+
+Changing `lowercase_ids` requires a full target refresh so persisted playlist and EPG artifacts use the same visible
+IDs; a configuration hot reload alone is insufficient. Clients may need to re-index their EPG data once after the
+visible IDs change.
 
 ---
 
@@ -1177,9 +1576,9 @@ The following attributes are recognized and preserved during M3U import and expo
 
 **Proxy Behavior:**
 
-* **Direct Output:** When Tuliprox outputs streams directly (e.g., when not using proxy rewrite), it preserves the original provider  
+* **Direct Output:** When Tuliprox outputs streams directly (e.g., when not using proxy rewrite), it preserves the original provider
   metadata exactly as received.
-* **Rewritten Output (Reverse Proxy):** When Tuliprox rewrites URLs to act as a reverse proxy, it generates authenticated local Tuliprox  
+* **Rewritten Output (Reverse Proxy):** When Tuliprox rewrites URLs to act as a reverse proxy, it generates authenticated local Tuliprox
   archive URLs instead of leaking the provider's upstream archive URLs.
 
 **Supported Modes:**

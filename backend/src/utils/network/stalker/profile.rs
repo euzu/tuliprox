@@ -108,7 +108,7 @@ impl StalkerProviderProfile {
     /// Soft TTL the client uses to decide whether a fresh `get_profile` is required before
     /// a new download batch. The portal will eventually invalidate the session anyway, so
     /// the TTL is intentionally conservative.
-    pub fn profile_freshness_window() -> Duration { Duration::from_secs(10 * 60) }
+    pub fn profile_freshness_window() -> Duration { Duration::from_mins(10) }
 }
 
 /// A fully-typed `create_link` result: a playable URL plus the chain of command variants

@@ -15,7 +15,8 @@ use shared::{
         Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserRole, WsCloseCode,
         PERM_ALL, PROTOCOL_VERSION, ROLE_ADMIN,
     },
-    utils::{concat_path_leading_slash, default_kick_secs},
+    utils::{concat_path_leading_slash},
+    defaults::{default_kick_secs},
 };
 use std::{fmt, io, sync::Arc};
 

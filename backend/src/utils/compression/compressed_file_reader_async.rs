@@ -1,12 +1,16 @@
-use crate::utils::async_file_reader;
-use crate::utils::compression::compression_utils::{is_deflate, is_gzip};
+use crate::utils::{
+    async_file_reader,
+    compression::compression_utils::{is_gzip, is_zlib_header},
+};
 use async_compression::tokio::bufread::{GzipDecoder, ZlibDecoder};
-use std::path::Path;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use tokio::fs::File;
-use tokio::io::{
-    self, AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf,
+use std::{
+    path::Path,
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tokio::{
+    fs::File,
+    io::{self, AsyncRead, AsyncReadExt, AsyncSeekExt, ReadBuf},
 };
 
 pub struct CompressedFileReaderAsync {
@@ -24,7 +28,7 @@ impl CompressedFileReaderAsync {
 
         if is_gzip(&header) {
             Ok(Self { reader: Box::new(GzipDecoder::new(buffered_file)) })
-        } else if is_deflate(&header) {
+        } else if is_zlib_header(&header) {
             Ok(Self { reader: Box::new(ZlibDecoder::new(buffered_file)) })
         } else {
             Ok(Self { reader: Box::new(buffered_file) })
@@ -33,12 +37,7 @@ impl CompressedFileReaderAsync {
 }
 
 impl AsyncRead for CompressedFileReaderAsync {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.reader).poll_read(cx, buf)
     }
 }
-

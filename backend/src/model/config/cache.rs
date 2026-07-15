@@ -1,5 +1,4 @@
-use shared::model::CacheConfigDto;
-use shared::utils::parse_size_base_2;
+use shared::model::{ByteSize, CacheConfigDto};
 use crate::model::macros;
 
 #[derive(Debug, Clone)]
@@ -7,7 +6,7 @@ pub struct CacheConfig {
     pub enabled: bool,
     pub directory: String,
     pub size: usize,
-    pub size_str: Option<String>,
+    pub size_str: Option<ByteSize>,
 }
 
 macros::from_impl!(CacheConfig);
@@ -39,7 +38,7 @@ fn get_size(dto: &CacheConfigDto) -> usize {
     match dto.size.as_ref() {
         None => return 1024,
         Some(val) => {
-            if let Ok(size) = parse_size_base_2(val) {
+            if let Ok(size) = val.parse_bytes() {
                 if let Ok(value) = usize::try_from(size) {
                     return value;
                 }

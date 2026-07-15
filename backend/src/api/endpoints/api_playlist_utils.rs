@@ -26,6 +26,16 @@ fn stalker_cluster(cluster: XtreamCluster) -> StalkerCluster {
     }
 }
 
+fn stalker_refresh_pending_response(accept: Option<&str>) -> axum::response::Response {
+    let items: Vec<UiPlaylistItem> = Vec::new();
+    let mut response = json_or_bin_response(accept, &items).into_response();
+    response.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-tuliprox-refresh-state"),
+        axum::http::HeaderValue::from_static("in-progress"),
+    );
+    response
+}
+
 pub(in crate::api::endpoints) async fn get_playlist_for_target(
     cfg_target: Option<&ConfigTarget>,
     app_state: &Arc<AppState>,
@@ -126,9 +136,20 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
             // TODO refactor
             let stalker_cluster = stalker_cluster(cluster);
             let client = app_state.http_client.load();
-            let (groups, errors, _) =
-                download_stalker_playlist(&app_state.app_config, client.as_ref(), input, Some(&[stalker_cluster])).await;
+            let (groups, errors, _, partial) =
+                download_stalker_playlist(
+                    &app_state.app_config,
+                    client.as_ref(),
+                    input,
+                    Some(&[stalker_cluster]),
+                    crate::processing::processor::StalkerRefreshMode::ServerSlice,
+                    true,
+                )
+                .await;
             if groups.is_empty() {
+                if partial && errors.is_empty() {
+                    return stalker_refresh_pending_response(accept);
+                }
                 let error_strings: Vec<String> = errors.iter().map(ToString::to_string).collect();
                 return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": error_strings.join(", ")})))
                     .into_response();
@@ -152,14 +173,16 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
     let cfg = app_state.app_config.config.load();
     match cfg_input {
         Some(input) => {
-            let (result, errors) = match input.get_download_input_type().persistence() {
+            let (result, errors, partial) = match input.get_download_input_type().persistence() {
                 InputPersistence::M3u => {
-                    m3u::download_m3u_playlist(&app_state.app_config, client, &cfg, input).await
+                    let (playlist, errors) =
+                        m3u::download_m3u_playlist(&app_state.app_config, client, &cfg, input).await;
+                    (playlist, errors, false)
                 }
                 InputPersistence::Xtream => {
                     let (pl, err, _) =
                         xtream::download_xtream_playlist(&app_state.app_config, client, input, Some(&[cluster])).await;
-                    (pl, err)
+                    (pl, err, false)
                 }
                 InputPersistence::Library => {
                     return (
@@ -181,17 +204,22 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                     // `PlaylistGroup`s for the requested cluster only. The third
                     // tuple element (`use_disk_based_processing`) is irrelevant for
                     // a live preview — we always surface the in-memory items here.
-                    let (groups, errs, _) = download_stalker_playlist(
+                    let (groups, errs, _, partial) = download_stalker_playlist(
                         &app_state.app_config,
                         client,
                         input,
                         Some(&[stalker_cluster]),
+                        crate::processing::processor::StalkerRefreshMode::ServerSlice,
+                        true,
                     )
                     .await;
-                    (groups, errs)
+                    (groups, errs, partial)
                 }
             };
             if result.is_empty() {
+                if partial && errors.is_empty() {
+                    return stalker_refresh_pending_response(accept);
+                }
                 let error_strings: Vec<String> = errors.iter().map(ToString::to_string).collect();
                 (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": error_strings.join(", ")})))
                     .into_response()
@@ -212,7 +240,7 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_resource_url;
+    use super::{rewrite_resource_url, stalker_refresh_pending_response};
     use shared::{
         model::{PlaylistItemType, UiPlaylistItem, XtreamCluster},
         utils::{obfuscate_text, Internable},
@@ -234,6 +262,16 @@ mod tests {
             input_name: "test".intern(),
             epg_channel_id: None,
         }
+    }
+
+    #[test]
+    fn pending_stalker_preview_keeps_array_contract_and_marks_progress() {
+        let response = stalker_refresh_pending_response(None);
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            response.headers().get("x-tuliprox-refresh-state").and_then(|value| value.to_str().ok()),
+            Some("in-progress")
+        );
     }
 
     #[test]

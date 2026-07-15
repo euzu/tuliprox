@@ -58,6 +58,7 @@ strsim = "0.11.1"
 rphonetic = "3.0.6"
 rayon = "1.12.0"
 base64.workspace = true
+sha2.workspace = true
 paste.workspace = true
 indexmap.workspace = true
 parking_lot = "0.12.5"
@@ -72,7 +73,7 @@ dashmap.workspace = true
 hyper = "1.10.1"
 hyper-util = "0.1.20"
 socket2 = { version = "0.6.4", features = ["all"] }
-async-compression = { version = "0.4.42", features = ["tokio", "gzip", "zlib"] }
+async-compression = { version = "0.4.42", features = ["tokio", "brotli", "deflate", "gzip", "zlib", "zstd"] }
 chrono-tz = "0.10.4"
 zeroize.workspace = true
 uuid = { version = "1.23.3", features = ["v4"] }
@@ -85,7 +86,6 @@ lru = "0.12"
 ipnet = "2"
 strum.workspace = true
 strum_macros.workspace = true
-
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

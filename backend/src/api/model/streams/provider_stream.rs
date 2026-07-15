@@ -13,10 +13,9 @@ use axum::response::IntoResponse;
 use log::trace;
 use reqwest::StatusCode;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use shared::model::PlaylistItemType;
+use shared::{error::TuliproxError, model::PlaylistItemType};
 use std::{fmt, net::SocketAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;
-use shared::error::TuliproxError;
 
 #[derive(Debug, Copy, Clone, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub enum CustomVideoStreamType {
@@ -26,6 +25,7 @@ pub enum CustomVideoStreamType {
     LowPriorityPreempted,
     UserAccountExpired,
     Provisioning,
+    HlsSessionOrLeaseExpired,
 }
 
 impl fmt::Display for CustomVideoStreamType {
@@ -37,6 +37,7 @@ impl fmt::Display for CustomVideoStreamType {
             CustomVideoStreamType::LowPriorityPreempted => "low_priority_preempted",
             CustomVideoStreamType::UserAccountExpired => "user_account_expired",
             CustomVideoStreamType::Provisioning => "provisioning",
+            CustomVideoStreamType::HlsSessionOrLeaseExpired => "hls_session_or_lease_expired",
         };
         write!(f, "{s}")
     }
@@ -53,6 +54,7 @@ impl FromStr for CustomVideoStreamType {
             "low_priority_preempted" => Ok(Self::LowPriorityPreempted),
             "user_account_expired" => Ok(Self::UserAccountExpired),
             "provisioning" => Ok(Self::Provisioning),
+            "hls_session_or_lease_expired" => Ok(Self::HlsSessionOrLeaseExpired),
             _ => Err(TuliproxError::Config(format!("Unknown stream type: {s}"))),
         }
     }
@@ -84,7 +86,8 @@ fn prepare_video_headers(headers: &[(String, String)]) -> Vec<(String, String)> 
                 || key.eq_ignore_ascii_case("content-length")
                 || key.eq_ignore_ascii_case("range")
                 || key.eq_ignore_ascii_case("content-range")
-                || key.eq_ignore_ascii_case("accept-ranges"))
+                || key.eq_ignore_ascii_case("accept-ranges")
+                || key.eq_ignore_ascii_case("transfer-encoding"))
         })
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
@@ -106,10 +109,10 @@ fn apply_custom_stream_timeout(cfg: &AppConfig, stream: BoxedProviderStream) -> 
 }
 
 /// Returns the value of `custom_stream_response_enabled` from the main config.
-/// When `false`, the 6 custom-video factories (`channel_unavailable`,
+/// When `false`, the custom-video factories (`channel_unavailable`,
 /// `user_connections_exhausted`, `provider_connections_exhausted`,
-/// `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`) skip
-/// the configured MPEG-TS video and the call sites return
+/// `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`,
+/// `hls_session_or_lease_expired`) skip the configured MPEG-TS video and the call sites return
 /// `custom_stream_response_error_status` instead. This allows a downstream Nginx
 /// with `proxy_intercept_errors on;` to sever the socket instead of seeing an
 /// infinite 200 OK loop.
@@ -143,12 +146,11 @@ fn create_video_stream(
     }
     if let Some(video) = video_buffer {
         trace!("{log_message}");
-        let stream =
-            apply_custom_stream_timeout(cfg, Box::pin(ThrottledStream::new(CustomVideoStream::new(video.clone()), 8000)));
-        (
-            Some(stream),
-            Some((prepare_video_headers(headers), status, None, Some(stream_type))),
-        )
+        let stream = apply_custom_stream_timeout(
+            cfg,
+            Box::pin(ThrottledStream::new(CustomVideoStream::new(video.clone()), 8000)),
+        );
+        (Some(stream), Some((prepare_video_headers(headers), status, None, Some(stream_type))))
     } else {
         (None, None)
     }
@@ -187,10 +189,7 @@ pub fn create_channel_unavailable_stream(
 /// and human-readable description.
 macro_rules! ok_custom_stream_factory {
     ($fn_name:ident, $field:ident, $stream_type:expr, $description:expr) => {
-        pub fn $fn_name(
-            cfg: &AppConfig,
-            headers: &[(String, String)],
-        ) -> ProviderStreamResponse {
+        pub fn $fn_name(cfg: &AppConfig, headers: &[(String, String)]) -> ProviderStreamResponse {
             let custom_stream_response = cfg.custom_stream_response.load();
             let video = custom_stream_response.as_ref().and_then(|c| c.$field.as_ref());
             create_ok_video_stream(cfg, $stream_type, video, headers, $description)
@@ -233,6 +232,13 @@ ok_custom_stream_factory!(
     "Streaming response panel api provisioning"
 );
 
+ok_custom_stream_factory!(
+    create_hls_session_or_lease_expired_stream,
+    hls_session_or_lease_expired,
+    CustomVideoStreamType::HlsSessionOrLeaseExpired,
+    "Streaming response hls session or lease expired"
+);
+
 pub fn create_panel_api_provisioning_stream_with_stop(
     cfg: &AppConfig,
     headers: &[(String, String)],
@@ -263,9 +269,7 @@ pub fn create_custom_video_stream_response(
 ) -> impl axum::response::IntoResponse + Send {
     let config = &app_state.app_config;
     if let (Some(stream), Some((headers, status_code, _, _))) = match video_response {
-        CustomVideoStreamType::ChannelUnavailable => {
-            create_channel_unavailable_stream(config, &[], StatusCode::BAD_REQUEST)
-        }
+        CustomVideoStreamType::ChannelUnavailable => create_channel_unavailable_stream(config, &[], StatusCode::OK),
         CustomVideoStreamType::UserConnectionsExhausted => create_user_connections_exhausted_stream(config, &[]),
         CustomVideoStreamType::ProviderConnectionsExhausted => {
             create_provider_connections_exhausted_stream(config, &[])
@@ -273,6 +277,7 @@ pub fn create_custom_video_stream_response(
         CustomVideoStreamType::LowPriorityPreempted => create_low_priority_preempted_stream(config, &[]),
         CustomVideoStreamType::UserAccountExpired => create_user_account_expired_stream(config, &[]),
         CustomVideoStreamType::Provisioning => create_panel_api_provisioning_stream(config, &[]),
+        CustomVideoStreamType::HlsSessionOrLeaseExpired => create_hls_session_or_lease_expired_stream(config, &[]),
     } {
         app_state.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProviderConnection {
             addr: *addr,
@@ -305,8 +310,8 @@ pub fn get_header_filter_for_item_type(item_type: PlaylistItemType) -> HeaderFil
 #[cfg(test)]
 mod tests {
     use super::{
-        create_channel_unavailable_stream, is_custom_video_stream_enabled, get_custom_stream_response_error_status,
-        CustomVideoStreamType,
+        create_channel_unavailable_stream, get_custom_stream_response_error_status, is_custom_video_stream_enabled,
+        prepare_video_headers, CustomVideoStreamType,
     };
     use crate::{
         api::model::TransportStreamBuffer,
@@ -340,7 +345,10 @@ mod tests {
         let sources = SourcesConfig { inputs: vec![input], ..SourcesConfig::default() };
 
         let app_cfg = AppConfig {
-            config: Arc::new(ArcSwap::from_pointee(Config { custom_stream_response_enabled: true, ..Config::default()})),
+            config: Arc::new(ArcSwap::from_pointee(Config {
+                custom_stream_response_enabled: true,
+                ..Config::default()
+            })),
             sources: Arc::new(ArcSwap::from_pointee(sources)),
             hdhomerun: Arc::new(ArcSwapOption::default()),
             api_proxy: Arc::new(ArcSwapOption::default()),
@@ -373,6 +381,8 @@ mod tests {
             low_priority_preempted: None,
             user_account_expired: None,
             panel_api_provisioning: None,
+            hls_session_or_lease_expired: None,
+            panel_api_provisioning_hls_segments: Vec::new(),
         })));
         app_cfg
     }
@@ -385,7 +395,25 @@ mod tests {
     }
 
     #[test]
-    fn test_channel_unavailable_preserves_supplied_status_code() {
+    fn test_hls_session_or_lease_expired_custom_video_type_roundtrip() {
+        let parsed = CustomVideoStreamType::from_str("hls_session_or_lease_expired")
+            .expect("hls_session_or_lease_expired should parse as custom video type");
+        assert_eq!(parsed.to_string(), "hls_session_or_lease_expired");
+    }
+
+    #[test]
+    fn custom_video_headers_drop_transfer_encoding() {
+        let headers = prepare_video_headers(&[
+            ("Transfer-Encoding".to_string(), "chunked".to_string()),
+            ("cache-control".to_string(), "no-store".to_string()),
+        ]);
+
+        assert!(headers.iter().all(|(name, _)| !name.eq_ignore_ascii_case("transfer-encoding")));
+        assert!(headers.iter().any(|(name, value)| name == "cache-control" && value == "no-store"));
+    }
+
+    #[tokio::test]
+    async fn test_channel_unavailable_preserves_supplied_status_code() {
         let app_cfg = create_test_app_config_with_channel_unavailable();
 
         let (_stream, info) = create_channel_unavailable_stream(&app_cfg, &[], StatusCode::SERVICE_UNAVAILABLE);
@@ -399,8 +427,8 @@ mod tests {
     /// each (field, stream type, description) tuple. Pick one representative
     /// factory — `create_user_connections_exhausted_stream` — and verify the
     /// macro forwards the correct `CustomVideoStreamType` to the stream info.
-    #[test]
-    fn test_ok_custom_stream_factory_macro_forwards_video_type() {
+    #[tokio::test]
+    async fn test_ok_custom_stream_factory_macro_forwards_video_type() {
         use super::create_user_connections_exhausted_stream;
         use crate::api::model::TransportStreamBuffer;
 
@@ -476,7 +504,8 @@ mod tests {
 
     /// The centralisation in `create_video_stream` must apply to the macro-generated
     /// factories as well (`user_connections_exhausted`, `provider_connections_exhausted`,
-    /// `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`).
+    /// `low_priority_preempted`, `user_account_expired`, `panel_api_provisioning`,
+    /// `hls_session_or_lease_expired`).
     #[test]
     fn test_hiding_custom_video_streams_applies_to_macro_factory() {
         use super::create_user_connections_exhausted_stream;
@@ -498,8 +527,8 @@ mod tests {
 
     /// Regression guard: when `custom_stream_response_enabled` is true (the default), the
     /// factory must still return the configured video with the supplied status code.
-    #[test]
-    fn test_displaying_custom_video_streams_serves_video_with_supplied_status() {
+    #[tokio::test]
+    async fn test_displaying_custom_video_streams_serves_video_with_supplied_status() {
         let app_cfg = create_test_app_config_with_channel_unavailable();
         let (stream, info) = create_channel_unavailable_stream(&app_cfg, &[], StatusCode::SERVICE_UNAVAILABLE);
         assert!(stream.is_some(), "stream must be produced when custom_stream_response_enabled is true");

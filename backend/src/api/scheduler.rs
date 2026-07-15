@@ -155,7 +155,20 @@ async fn run_playlist_update_worker(
                     break; // Sender dropped (scheduler task exited)
                 }
                 run_playlist_update_inner(&client, &app_state, schedule_target_names.as_ref()).await;
+                if !drain_pending_playlist_triggers(&mut rx) {
+                    break;
+                }
             }
+        }
+    }
+}
+
+fn drain_pending_playlist_triggers(rx: &mut mpsc::Receiver<()>) -> bool {
+    loop {
+        match rx.try_recv() {
+            Ok(()) => {}
+            Err(mpsc::error::TryRecvError::Empty) => return true,
+            Err(mpsc::error::TryRecvError::Disconnected) => return false,
         }
     }
 }
@@ -165,6 +178,10 @@ async fn run_playlist_update_inner(
     app_state: &Arc<AppState>,
     schedule_target_names: Option<&Vec<String>>,
 ) {
+    let Some(permit) = app_state.update_guard.try_playlist() else {
+        log::debug!("Scheduled playlist update coalesced with an update already in progress");
+        return;
+    };
     // Re-resolve targets from the CURRENT sources and forced_targets each time,
     // so that input/target ID changes from hot-reloads are picked up.
     let targets = get_process_targets(
@@ -184,7 +201,7 @@ async fn run_playlist_update_inner(
         Some(Arc::clone(&app_state.active_provider)),
         Some(Arc::clone(&app_state.metadata_manager)),
         None,
-        None,
+        Some(permit),
     )
     .await;
 }
@@ -325,13 +342,28 @@ pub fn exec_interner_prune(app_state: &Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::scheduler::datetime_to_instant;
+    use crate::api::scheduler::{datetime_to_instant, drain_pending_playlist_triggers};
     use chrono::Local;
     use cron::Schedule;
     use std::{
         str::FromStr,
         sync::atomic::{AtomicU8, Ordering},
     };
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn drops_triggers_accumulated_during_update() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(()).await.expect("initial trigger");
+        assert!(rx.recv().await.is_some());
+        assert!(tx.try_send(()).is_ok());
+
+        assert!(drain_pending_playlist_triggers(&mut rx));
+        assert!(matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+
+        assert!(tx.try_send(()).is_ok());
+        assert!(rx.recv().await.is_some());
+    }
 
     #[tokio::test]
     async fn test_run_scheduler() {

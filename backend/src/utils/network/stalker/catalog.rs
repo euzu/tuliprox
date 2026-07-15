@@ -234,6 +234,13 @@ pub struct StalkerRawSeriesDetails {
     pub seasons: Vec<StalkerRawSeriesSeason>,
 }
 
+#[derive(Debug)]
+pub struct StalkerCatalogPage<T> {
+    pub items: Vec<T>,
+    pub next_page: Option<u32>,
+    pub total: Option<u32>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct StalkerRawSeriesSeason {
     #[serde(default)]
@@ -474,6 +481,146 @@ fn extract_max_page(value: &Value) -> Option<u32> {
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
     })
+}
+
+fn catalog_data(value: &Value) -> Option<&Value> {
+    let js = value.as_object().and_then(|map| map.get("js")).unwrap_or(value);
+    match js {
+        Value::Array(_) => Some(js),
+        Value::Object(map) => map.get("data").filter(|data| matches!(data, Value::Array(_) | Value::Object(_))).or_else(|| {
+            (!map.is_empty() && map.values().all(Value::is_object)).then_some(js)
+        }),
+        _ => None,
+    }
+}
+
+fn parse_all_channels(value: &Value) -> StalkerResult<Vec<StalkerRawItem>> {
+    let data = catalog_data(value).ok_or_else(|| StalkerError::BodyDecode {
+        message: "get_all_channels response contained no channel collection".to_string(),
+    })?;
+    let (items, _, _, _) = parse_items_page(data);
+    let source_len = match data {
+        Value::Array(entries) => entries.len(),
+        Value::Object(entries) => entries.len(),
+        _ => 0,
+    };
+    if source_len > 0 && items.is_empty() {
+        return Err(StalkerError::BodyDecode {
+            message: "get_all_channels response contained no decodable channels".to_string(),
+        });
+    }
+    Ok(items)
+}
+
+fn parse_item_catalog_page(value: &Value, current_page: u32) -> StalkerResult<StalkerCatalogPage<StalkerRawItem>> {
+    catalog_data(value).ok_or_else(|| StalkerError::BodyDecode {
+        message: "get_ordered_list response contained no item collection".to_string(),
+    })?;
+    let (items, total, max_page_items, max_page) = parse_items_page(value);
+    let terminal = items.is_empty()
+        || max_page.is_some_and(|last| current_page >= last)
+        || max_page_items.is_some_and(|size| items.len() < usize::try_from(size).unwrap_or(usize::MAX))
+        || total.is_some_and(|count| {
+            max_page_items.is_some_and(|size| current_page.saturating_mul(size) >= count)
+        });
+    let next_page = (!terminal).then(|| current_page.checked_add(1)).flatten();
+    Ok(StalkerCatalogPage { items, next_page, total })
+}
+
+fn parse_series_catalog_page(
+    value: &Value,
+    current_page: u32,
+) -> StalkerResult<StalkerCatalogPage<StalkerRawSeriesItem>> {
+    catalog_data(value).ok_or_else(|| StalkerError::BodyDecode {
+        message: "get_ordered_list response contained no series collection".to_string(),
+    })?;
+    let (items, total, max_page_items, max_page) = parse_series_page(value);
+    let terminal = items.is_empty()
+        || max_page.is_some_and(|last| current_page >= last)
+        || max_page_items.is_some_and(|size| items.len() < usize::try_from(size).unwrap_or(usize::MAX))
+        || total.is_some_and(|count| {
+            max_page_items.is_some_and(|size| current_page.saturating_mul(size) >= count)
+        });
+    let next_page = (!terminal).then(|| current_page.checked_add(1)).flatten();
+    Ok(StalkerCatalogPage { items, next_page, total })
+}
+
+async fn get_catalog_value(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+    portal_type: &'static str,
+    action: &'static str,
+    page: Option<u32>,
+) -> StalkerResult<Value> {
+    let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
+    let mut last_err = None;
+    for load_url in client.load_url_candidates() {
+        let mut query = vec![
+            ("type", portal_type.to_string()),
+            ("action", action.to_string()),
+            ("JsHttpRequest", "1-xml".to_string()),
+            ("HttpRequest", "1-xml".to_string()),
+        ];
+        if let Some(page) = page {
+            query.push(("p", page.to_string()));
+        }
+        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(load_url)).query(&query);
+        builder = client.apply_mac_query(builder);
+        builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
+        match client.send_json::<Value>(builder, action).await {
+            Ok(value) => return Ok(value),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: client.portal_url().to_string() }))
+}
+
+pub async fn get_all_channels(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+) -> StalkerResult<Vec<StalkerRawItem>> {
+    let value = get_catalog_value(client, handshake, "itv", "get_all_channels", None).await?;
+    parse_all_channels(&value)
+}
+
+pub async fn get_live_streams_page(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+    page: u32,
+) -> StalkerResult<StalkerCatalogPage<StalkerRawItem>> {
+    let value = get_catalog_value(client, handshake, "itv", "get_ordered_list", Some(page)).await?;
+    let mut response = parse_item_catalog_page(&value, page)?;
+    apply_page_limit(&mut response, page, client.catalog_max_pages(), "itv");
+    Ok(response)
+}
+
+pub async fn get_vod_streams_page(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+    page: u32,
+) -> StalkerResult<StalkerCatalogPage<StalkerRawItem>> {
+    let value = get_catalog_value(client, handshake, "vod", "get_ordered_list", Some(page)).await?;
+    let mut response = parse_item_catalog_page(&value, page)?;
+    apply_page_limit(&mut response, page, client.catalog_max_pages(), "vod");
+    Ok(response)
+}
+
+pub async fn get_series_list_page(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+    page: u32,
+) -> StalkerResult<StalkerCatalogPage<StalkerRawSeriesItem>> {
+    let value = get_catalog_value(client, handshake, "series", "get_ordered_list", Some(page)).await?;
+    let mut response = parse_series_catalog_page(&value, page)?;
+    apply_page_limit(&mut response, page, client.catalog_max_pages(), "series");
+    Ok(response)
+}
+
+fn apply_page_limit<T>(response: &mut StalkerCatalogPage<T>, page: u32, limit: u32, portal_type: &str) {
+    if response.next_page.is_some() && page >= limit {
+        warn!("Stalker {portal_type}/get_ordered_list stopped at configured page limit {limit}");
+        response.next_page = None;
+    }
 }
 
 pub async fn get_live_categories(client: &StalkerApiClient, handshake: &StalkerHandshake) -> StalkerResult<Vec<StalkerCategory>> {
@@ -826,6 +973,58 @@ fn parse_series_page(value: &Value) -> (Vec<StalkerRawSeriesItem>, Option<u32>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_channels_accepts_valid_empty_data() -> StalkerResult<()> {
+        let value = serde_json::json!({"js": {"data": []}});
+        assert!(parse_all_channels(&value)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn all_channels_rejects_missing_catalog_container() {
+        let value = serde_json::json!({"js": {"status": "ok"}});
+        assert!(matches!(parse_all_channels(&value), Err(StalkerError::BodyDecode { .. })));
+    }
+
+    #[test]
+    fn catalog_page_uses_explicit_last_page() -> StalkerResult<()> {
+        let value = serde_json::json!({
+            "js": {
+                "total_items": 2,
+                "max_page_items": 1,
+                "max_page": 2,
+                "data": [{"id": "2", "name": "B"}]
+            }
+        });
+        let page = parse_item_catalog_page(&value, 2)?;
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.total, Some(2));
+        assert_eq!(page.next_page, None);
+        Ok(())
+    }
+
+    #[test]
+    fn configured_page_limit_forces_a_terminal_page() {
+        let mut response = StalkerCatalogPage { items: vec![1_u8], next_page: Some(6), total: None };
+
+        apply_page_limit(&mut response, 5, 5, "vod");
+
+        assert_eq!(response.next_page, None);
+    }
+
+    #[test]
+    fn catalog_page_ends_on_short_page_without_total() -> StalkerResult<()> {
+        let value = serde_json::json!({
+            "js": {
+                "max_page_items": 14,
+                "data": [{"id": "1", "name": "A"}]
+            }
+        });
+        let page = parse_item_catalog_page(&value, 4)?;
+        assert_eq!(page.next_page, None);
+        Ok(())
+    }
 
     #[test]
     fn category_from_js_value_parses_minimal() {

@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use shared::foundation::ValueProvider;
-use shared::utils::default_probe_user_priority;
+use shared::defaults::default_probe_user_priority;
 
 create_resolve_options_function_for_xtream_target!(vod);
 

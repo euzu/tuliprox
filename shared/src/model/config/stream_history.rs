@@ -1,10 +1,10 @@
 use crate::{
-    error::TuliproxError,
-    utils::{
+    defaults::{
         default_stream_history_batch_size, default_stream_history_retention_days, is_blank_stream_history_directory,
         is_default_stream_history_batch_size, is_default_stream_history_retention_days, is_false,
         DEFAULT_STREAM_HISTORY_DIR,
     },
+    error::TuliproxError,
 };
 use std::path::PathBuf;
 

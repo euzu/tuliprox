@@ -1,5 +1,5 @@
 use crate::model::AppConfig;
-use crate::repository::stalker_repository::{get_stalker_file_path, get_stalker_series_root_file_path};
+use crate::repository::stalker_generation_repository::StalkerActiveManifest;
 use crate::repository::BPlusTreeQuery;
 use crate::repository::xtream_get_file_path;
 use crate::utils::{normalized_source_ordinal, FileReadGuard};
@@ -8,7 +8,6 @@ use indexmap::IndexMap;
 use log::{error, warn};
 use serde::{Deserialize, Serialize};
 use shared::error::TuliproxError;
-use shared::model::stalker::StalkerStreamKind;
 use shared::model::stalker_item::StalkerPlaylistItem;
 use shared::model::{M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, XtreamCluster, XtreamPlaylistItem};
 use shared::model::UUIDType;
@@ -744,6 +743,7 @@ pub struct StalkerDiskPlaylistSource {
     /// Name of the owning input — seeds the canonical `PlaylistItem::from_stalker`
     /// conversion so disk-loaded items carry the same identity as the download path.
     input_name: Arc<str>,
+    manifest: StalkerActiveManifest,
     live: Option<StalkerQueryHandle>,
     vod: Option<StalkerQueryHandle>,
     series_roots: Option<StalkerQueryHandle>,
@@ -751,11 +751,17 @@ pub struct StalkerDiskPlaylistSource {
 }
 
 impl StalkerDiskPlaylistSource {
-    pub(crate) async fn new(app_config: &Arc<AppConfig>, storage_path: &Path, input_name: Arc<str>) -> Self {
+    pub(crate) async fn new(
+        app_config: &Arc<AppConfig>,
+        storage_path: &Path,
+        input_name: Arc<str>,
+        manifest: StalkerActiveManifest,
+    ) -> Self {
         let mut source = StalkerDiskPlaylistSource {
             app_config: Arc::clone(app_config),
             storage_path: storage_path.to_path_buf(),
             input_name,
+            manifest,
             live: None,
             vod: None,
             series_roots: None,
@@ -767,24 +773,28 @@ impl StalkerDiskPlaylistSource {
 
     async fn reload(&mut self) {
         if self.live.is_none() {
-            let live_path = get_stalker_file_path(&self.storage_path, StalkerStreamKind::Live);
-            self.live = load_bplustree_query::<u32, StalkerPlaylistItem>(&self.app_config, &live_path).await
-                .map(|(query, guard)| (query, Arc::new(guard)));
+            if let Some(files) = self.manifest.live.as_ref() {
+                self.live = load_bplustree_query::<u32, StalkerPlaylistItem>(&self.app_config, &files.data).await
+                    .map(|(query, guard)| (query, Arc::new(guard)));
+            }
         }
         if self.vod.is_none() {
-            let vod_path = get_stalker_file_path(&self.storage_path, StalkerStreamKind::Movie);
-            self.vod = load_bplustree_query::<u32, StalkerPlaylistItem>(&self.app_config, &vod_path).await
-                .map(|(query, guard)| (query, Arc::new(guard)));
+            if let Some(files) = self.manifest.vod.as_ref() {
+                self.vod = load_bplustree_query::<u32, StalkerPlaylistItem>(&self.app_config, &files.data).await
+                    .map(|(query, guard)| (query, Arc::new(guard)));
+            }
         }
         if self.series.is_none() {
-            let series_path = get_stalker_file_path(&self.storage_path, StalkerStreamKind::Episode);
-            self.series = load_bplustree_query::<u32, StalkerPlaylistItem>(&self.app_config, &series_path).await
-                .map(|(query, guard)| (query, Arc::new(guard)));
+            if let Some(files) = self.manifest.series.as_ref() {
+                self.series = load_bplustree_query::<u32, StalkerPlaylistItem>(&self.app_config, &files.episodes).await
+                    .map(|(query, guard)| (query, Arc::new(guard)));
+            }
         }
         if self.series_roots.is_none() {
-            let series_root_path = get_stalker_series_root_file_path(&self.storage_path);
-            self.series_roots = load_bplustree_query::<u32, StalkerPlaylistItem>(&self.app_config, &series_root_path).await
-                .map(|(query, guard)| (query, Arc::new(guard)));
+            if let Some(files) = self.manifest.series.as_ref() {
+                self.series_roots = load_bplustree_query::<u32, StalkerPlaylistItem>(&self.app_config, &files.roots).await
+                    .map(|(query, guard)| (query, Arc::new(guard)));
+            }
         }
     }
 }
@@ -982,6 +992,7 @@ impl PlaylistSourceOps for StalkerDiskPlaylistSource {
             app_config: Arc::clone(&self.app_config),
             storage_path: self.storage_path.clone(),
             input_name: Arc::clone(&self.input_name),
+            manifest: self.manifest.clone(),
             live,
             vod,
             series_roots,

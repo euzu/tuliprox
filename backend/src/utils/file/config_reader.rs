@@ -15,13 +15,16 @@ use arc_swap::{ArcSwap, ArcSwapAny};
 use chrono::Local;
 use log::{error, info, warn};
 use serde::Serialize;
-use shared::error::TuliproxError;
-use shared::foundation::prepare_templates;
-use shared::model::{
-    ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType,
-    MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
+use shared::{
+    error::TuliproxError,
+    foundation::prepare_templates,
+    model::{
+        ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType,
+        MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
+    },
+    utils::{CONSTANTS, PROVIDER_SCHEME_PREFIX},
+    defaults::{generate_default_access_secret, generate_default_encrypt_secret, TEMPLATE_FILE},
 };
-use shared::utils::{generate_default_access_secret, generate_default_encrypt_secret, CONSTANTS, PROVIDER_SCHEME_PREFIX, TEMPLATE_FILE};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
@@ -517,7 +520,7 @@ pub async fn get_batch_aliases(
     input_type: InputType,
     url: &str,
 ) -> Result<Option<(PathBuf, Vec<ConfigInputAliasDto>)>, TuliproxError> {
-    if input_type == InputType::M3uBatch || input_type == InputType::XtreamBatch {
+    if matches!(input_type, InputType::M3uBatch | InputType::XtreamBatch | InputType::StalkerBatch) {
         if url.starts_with(PROVIDER_SCHEME_PREFIX) {
             return Err(TuliproxError::Config(format!(
                 "Batch input type '{input_type}' does not support provider:// URLs. \
@@ -647,8 +650,8 @@ pub async fn read_initial_app_config(
         paths: Arc::new(ArcSwap::from_pointee(paths.clone())),
         file_locks: Arc::new(FileLockManager::default()),
         custom_stream_response: Arc::new(ArcSwapAny::default()),
-        access_token_secret: generate_default_access_secret(),
-        encrypt_secret: generate_default_encrypt_secret(),
+        access_token_secret: generate_default_access_secret()?,
+        encrypt_secret: generate_default_encrypt_secret()?,
         media_tools: Arc::new(MediaToolCapabilities::new()),
     };
     app_config.prepare(include_computed)?;
@@ -971,7 +974,7 @@ pub async fn sanitize_sources_for_persist(mut source_config: SourcesConfigDto) -
         }
         if matches!(
             input.input_type,
-            InputType::XtreamBatch | InputType::M3uBatch
+            InputType::XtreamBatch | InputType::M3uBatch | InputType::StalkerBatch
         ) && is_csv_file(input.url.as_str())
         {
             if let Some(aliases) = &input.aliases {
@@ -1094,9 +1097,13 @@ async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template:
 
 #[cfg(test)]
 mod tests {
-    use super::prepare_sources_batch;
+    use super::{prepare_sources_batch, sanitize_sources_for_persist};
     use crate::utils::{file::config_reader::get_batch_aliases, resolve_env_var};
-    use shared::{model::{ConfigInputDto, InputType, SourcesConfigDto}, utils::Internable};
+    use shared::{
+        model::{ConfigInputAliasDto, ConfigInputDto, InputType, SourcesConfigDto},
+        utils::Internable,
+    };
+    use tempfile::tempdir;
 
     #[test]
     #[allow(clippy::manual_unwrap_or_default)]
@@ -1138,6 +1145,36 @@ mod tests {
             .expect("non-batch URL must not be treated as CSV batch source");
 
         assert_eq!(sources.inputs[0].input_type, InputType::Xtream);
+    }
+
+    #[tokio::test]
+    async fn stalker_batch_loads_and_persists_csv_aliases() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("stalker.csv");
+        std::fs::write(
+            &path,
+            "#name;username;password;url;max_connections\nalias;user;pass;http://portal.example;1\n",
+        )
+        .expect("write csv");
+
+        let (_, aliases) = get_batch_aliases(InputType::StalkerBatch, path.to_string_lossy().as_ref())
+            .await
+            .expect("read batch")
+            .expect("stalker batch aliases");
+        assert_eq!(aliases.len(), 1);
+
+        let sources = SourcesConfigDto {
+            inputs: vec![ConfigInputDto {
+                input_type: InputType::StalkerBatch,
+                url: path.to_string_lossy().into_owned(),
+                aliases: Some(vec![ConfigInputAliasDto { name: "updated".intern(), ..Default::default() }]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let sanitized = sanitize_sources_for_persist(sources).await;
+        assert!(sanitized.inputs[0].aliases.is_none());
+        assert!(std::fs::read_to_string(path).expect("read persisted csv").contains("updated"));
     }
 
 }

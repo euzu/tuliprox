@@ -7,7 +7,7 @@ use crate::{
         },
         ConfigContext, PlaylistContext,
     },
-    hooks::use_service_context,
+    hooks::{is_text_input_focused, use_key_down, use_service_context},
     i18n::use_translation,
     model::DialogResult,
     services::DialogService,
@@ -15,8 +15,9 @@ use crate::{
 use gloo_timers::callback::Timeout;
 use shared::{
     model::{
-        permission::Permission, ConfigInputDto, ConfigSourceDto, ConfigTargetDto, HdHomeRunTargetOutputDto, InputType,
-        M3uTargetOutputDto, SourcesConfigDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
+        permission::Permission, ConfigInputDto, ConfigInputStagedDto, ConfigSourceDto, ConfigTargetDto,
+        HdHomeRunTargetOutputDto, InputType, M3uTargetOutputDto, SourcesConfigDto, StrmTargetOutputDto,
+        TargetOutputDto, XtreamTargetOutputDto,
     },
     utils::BATCH_SCHEME_PREFIX,
 };
@@ -26,7 +27,7 @@ use std::{
     rc::Rc,
 };
 use wasm_bindgen::{prelude::Closure, JsCast};
-use web_sys::{window, Element, Event, HtmlElement, MouseEvent, TouchEvent, WheelEvent};
+use web_sys::{window, Element, Event, HtmlElement, KeyboardEvent, MouseEvent, TouchEvent, WheelEvent};
 use yew::{platform::spawn_local, prelude::*};
 
 const PENDING_LINE: &str = "pending-line";
@@ -34,6 +35,7 @@ const SELECTION_RECT: &str = "selection-rect";
 
 const BLOCK_MIDDLE_Y: f32 = (BLOCK_HEIGHT + BLOCK_HEADER_HEIGHT + BLOCK_PORT_HEIGHT) / 2.0;
 const PORT_SNAP_THRESHOLD: f32 = 100.0;
+const CLONE_OFFSET: f32 = 30.0;
 const MIN_ZOOM_FACTOR: f32 = 0.5;
 const MAX_ZOOM_FACTOR: f32 = 1.0;
 const ZOOM_INDICATOR_TIMEOUT_MS: u32 = 900;
@@ -250,6 +252,14 @@ fn world_from_screen(position: Position, canvas_offset: Position, zoom_factor: f
 
 fn clamp_zoom_factor(zoom_factor: f32) -> f32 { zoom_factor.clamp(MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR) }
 
+fn initial_layout_view_transform() -> (Position, f32) { ((0.0, 0.0), 1.0) }
+
+fn reset_layout_view(editor_state: &mut EditorState) {
+    let (offset, zoom) = initial_layout_view_transform();
+    editor_state.canvas_offset = offset;
+    editor_state.zoom_factor = zoom;
+}
+
 fn apply_zoom_at_screen_point(editor_state: &mut EditorState, next_zoom: f32, anchor_screen: Position) -> bool {
     let next_zoom = clamp_zoom_factor(next_zoom);
     if (next_zoom - editor_state.zoom_factor).abs() < f32::EPSILON {
@@ -272,6 +282,7 @@ fn create_instance(block_type: BlockType) -> BlockInstance {
         BlockType::InputJellyfin => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Jellyfin))),
         BlockType::InputPlex => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Plex))),
         BlockType::InputStalker => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Stalker))),
+        BlockType::InputStaged => BlockInstance::Input(Rc::new(ConfigInputDto::new_with_type(InputType::Staged))),
         BlockType::Target => {
             let dto = ConfigTargetDto {
                 name: String::new(),
@@ -333,7 +344,37 @@ fn normalize_input_type_by_url(input: &mut ConfigInputDto, block_type: BlockType
         BlockType::InputPlex => {
             input.input_type = InputType::Plex;
         }
+        BlockType::InputStaged => {
+            input.input_type = InputType::Staged;
+        }
         _ => {}
+    }
+}
+
+fn is_valid_staged_provider_block_type(block_type: BlockType) -> bool { block_type.is_chainable_input() }
+
+fn is_staged_provider_connection(from_block: &Block, to_block: &Block) -> bool {
+    matches!(from_block.block_type, BlockType::InputStaged) && is_valid_staged_provider_block_type(to_block.block_type)
+}
+
+/// Builds a collision-free `<base>_copy` name (then `_copy_2`, `_copy_3`, ...) for a duplicated block.
+/// Returns an empty string for an empty base so unnamed blocks stay unnamed.
+fn unique_copy_name(base: &str, existing: &HashSet<String>) -> String {
+    let base = base.trim();
+    if base.is_empty() {
+        return String::new();
+    }
+    let first = format!("{base}_copy");
+    if !existing.contains(&first) {
+        return first;
+    }
+    let mut counter = 2;
+    loop {
+        let candidate = format!("{base}_copy_{counter}");
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+        counter += 1;
     }
 }
 
@@ -351,6 +392,7 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
     let mut sources_config = base_sources.clone();
     let mut gen_sources: Vec<ConfigSourceDto> = Vec::new();
     let mut gen_inputs: Vec<ConfigInputDto> = Vec::new();
+    let mut input_index_by_block_id: HashMap<BlockId, usize> = HashMap::new();
 
     // find all input blocks first
     let input_blocks: Vec<&Block> = editor_state.blocks.iter().filter(|b| b.block_type.is_input()).collect();
@@ -358,7 +400,64 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
         if let BlockInstance::Input(input) = &block.instance {
             let mut normalized_input = input.as_ref().clone();
             normalize_input_type_by_url(&mut normalized_input, block.block_type);
+            let next_index = gen_inputs.len();
             gen_inputs.push(normalized_input);
+            input_index_by_block_id.insert(block.id, next_index);
+        }
+    }
+
+    // Staged provider relation is driven by staged-input -> provider-input graph links.
+    for conn in &editor_state.connections {
+        let (Some(from_block), Some(to_block)) = (editor_state.get_block(conn.from), editor_state.get_block(conn.to))
+        else {
+            continue;
+        };
+        if !is_staged_provider_connection(from_block, to_block) {
+            continue;
+        }
+
+        let Some(from_input_index) = input_index_by_block_id.get(&from_block.id).copied() else {
+            continue;
+        };
+
+        let provider_name = if let BlockInstance::Input(provider_input) = &to_block.instance {
+            let name = provider_input.name.trim();
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        } else {
+            None
+        };
+
+        if let Some(provider_name) = provider_name {
+            let staged = gen_inputs[from_input_index].staged.get_or_insert_with(ConfigInputStagedDto::default);
+            staged.for_input = Some(provider_name.into());
+        }
+    }
+
+    // If a staged input has no provider link, clear the provider to keep UI graph authoritative.
+    for (block_id, input_index) in &input_index_by_block_id {
+        let Some(block) = editor_state.get_block(*block_id) else {
+            continue;
+        };
+        if !matches!(block.block_type, BlockType::InputStaged) {
+            continue;
+        }
+        let has_provider_link = editor_state.connections.iter().any(|conn| {
+            if conn.from != *block_id {
+                return false;
+            }
+            let Some(to_block) = editor_state.get_block(conn.to) else {
+                return false;
+            };
+            is_staged_provider_connection(block, to_block)
+        });
+        if !has_provider_link {
+            if let Some(staged) = gen_inputs[*input_index].staged.as_mut() {
+                staged.for_input = None;
+            }
         }
     }
 
@@ -372,7 +471,9 @@ fn editor_state_to_sources_config(base_sources: &SourcesConfigDto, editor_state:
             for conn in &editor_state.connections {
                 if conn.to == target_block.id {
                     if let Some(input_block) = editor_state.get_block(conn.from) {
-                        if input_block.block_type.is_input() {
+                        if input_block.block_type.is_input()
+                            && !matches!(input_block.block_type, BlockType::InputStaged)
+                        {
                             if let BlockInstance::Input(input_dto) = &input_block.instance {
                                 source_dto.inputs.push(input_dto.name.clone());
                             }
@@ -621,13 +722,62 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             }
                         }
 
+                        // Rebuild staged provider links from config (staged input -> provider input).
+                        let input_name_to_id: HashMap<String, BlockId> = gen_blocks
+                            .iter()
+                            .filter_map(|block| {
+                                if let BlockInstance::Input(input) = &block.instance {
+                                    let name = input.name.trim();
+                                    if name.is_empty() {
+                                        None
+                                    } else {
+                                        Some((name.to_string(), block.id))
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        let mut existing_connections: HashSet<(BlockId, BlockId)> =
+                            gen_connections.iter().map(|c| (c.from, c.to)).collect();
+                        for block in &gen_blocks {
+                            if let BlockInstance::Input(input) = &block.instance {
+                                if !matches!(block.block_type, BlockType::InputStaged) {
+                                    continue;
+                                }
+                                let Some(provider_name) = input
+                                    .staged
+                                    .as_ref()
+                                    .and_then(|staged| staged.for_input.as_deref())
+                                    .map(str::trim)
+                                    .filter(|provider| !provider.is_empty())
+                                else {
+                                    continue;
+                                };
+                                let Some(provider_id) = input_name_to_id.get(provider_name).copied() else {
+                                    continue;
+                                };
+                                if provider_id == block.id {
+                                    continue;
+                                }
+                                let Some(provider_block) = gen_blocks.iter().find(|b| b.id == provider_id) else {
+                                    continue;
+                                };
+                                if !is_staged_provider_connection(block, provider_block) {
+                                    continue;
+                                }
+                                if existing_connections.insert((block.id, provider_id)) {
+                                    gen_connections.push(Connection { from: block.id, to: provider_id });
+                                }
+                            }
+                        }
+
                         if !gen_blocks.is_empty() {
                             layout(&mut gen_blocks, &gen_connections);
                         }
                         {
                             let mut editor_state = editor_state_ref.borrow_mut();
-                            editor_state.canvas_offset = (0.0, 0.0);
-                            editor_state.zoom_factor = 1.0;
+                            reset_layout_view(&mut editor_state);
                             editor_state.pinch_distance = None;
                             editor_state.pan_start = (0.0, 0.0);
                             editor_state.drag.reset_dragging();
@@ -646,6 +796,203 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 || {}
             },
         );
+    }
+
+    {
+        let editor_state_ref = editor_state_ref.clone();
+        let force_update = force_update.clone();
+        let emit_sources_change = emit_sources_change.clone();
+        use_key_down((can_write_sources, *force_update), move |event: &KeyboardEvent| {
+            if !can_write_sources || event.key() != "Delete" {
+                return;
+            }
+            // Ignore the key while the user is typing in a form field.
+            if is_text_input_focused(event) {
+                return;
+            }
+
+            let mut editor_state = editor_state_ref.borrow_mut();
+            let mut ids: Vec<BlockId> = editor_state.selection.selected_blocks.iter().copied().collect();
+            if ids.is_empty() {
+                return;
+            }
+            // Delete highest ids first so re-indexing never invalidates a pending id.
+            ids.sort_unstable_by(|a, b| b.cmp(a));
+
+            let mut changed = false;
+            for id in ids {
+                let before_blocks = editor_state.blocks.len();
+                editor_state.blocks.retain(|b| b.id != id);
+                editor_state.connections.retain(|c| c.from != id && c.to != id);
+                if before_blocks == editor_state.blocks.len() {
+                    continue;
+                }
+                changed = true;
+                for block in editor_state.blocks.iter_mut() {
+                    if block.id >= id {
+                        block.id -= 1;
+                    }
+                }
+                for conn in editor_state.connections.iter_mut() {
+                    if conn.from >= id {
+                        conn.from -= 1;
+                    }
+                    if conn.to >= id {
+                        conn.to -= 1;
+                    }
+                }
+            }
+
+            let max_id = editor_state.blocks.iter().map(|b| b.id).max().unwrap_or(0);
+            editor_state.next_id = max_id + 1;
+            editor_state.selection.reset_selection();
+            editor_state.block_elements.clear();
+            editor_state.connection_elements.clear();
+            drop(editor_state);
+
+            if changed {
+                event.prevent_default();
+                force_update.set(*force_update + 1);
+                emit_sources_change.emit(());
+            }
+        });
+    }
+
+    // Duplicate selected blocks (Ctrl/Cmd+D)
+    {
+        let editor_state_ref = editor_state_ref.clone();
+        let force_update = force_update.clone();
+        let emit_sources_change = emit_sources_change.clone();
+        use_key_down((can_write_sources, *force_update), move |event: &KeyboardEvent| {
+            if !can_write_sources || !event.key().eq_ignore_ascii_case("d") || !(event.ctrl_key() || event.meta_key()) {
+                return;
+            }
+            // Ignore the key while the user is typing in a form field.
+            if is_text_input_focused(event) {
+                return;
+            }
+
+            let mut editor_state = editor_state_ref.borrow_mut();
+            let mut selected: Vec<BlockId> = editor_state.selection.selected_blocks.iter().copied().collect();
+            if selected.is_empty() {
+                return;
+            }
+            // Clone in id order so new ids are allocated deterministically.
+            selected.sort_unstable();
+            let selected_set: HashSet<BlockId> = selected.iter().copied().collect();
+
+            // Track names per namespace, kept current as clone names are minted.
+            let mut input_names: HashSet<String> = editor_state
+                .blocks
+                .iter()
+                .filter_map(|b| match &b.instance {
+                    BlockInstance::Input(dto) => Some(dto.name.to_string()),
+                    _ => None,
+                })
+                .collect();
+            let mut target_names: HashSet<String> = editor_state
+                .blocks
+                .iter()
+                .filter_map(|b| match &b.instance {
+                    BlockInstance::Target(dto) => Some(dto.name.to_string()),
+                    _ => None,
+                })
+                .collect();
+
+            let mut old_to_new: HashMap<BlockId, BlockId> = HashMap::new();
+            let mut input_rename: HashMap<String, String> = HashMap::new();
+            let mut new_blocks: Vec<Block> = Vec::with_capacity(selected.len());
+
+            for old_id in &selected {
+                let Some(source) = editor_state.blocks.iter().find(|b| b.id == *old_id) else {
+                    continue;
+                };
+                let block_type = source.block_type;
+                let position = (source.position.0 + CLONE_OFFSET, source.position.1 + CLONE_OFFSET);
+                let source_instance = source.instance.clone();
+                let new_id = editor_state.next_id;
+                editor_state.next_id += 1;
+                old_to_new.insert(*old_id, new_id);
+
+                let instance = match &source_instance {
+                    BlockInstance::Input(dto) => {
+                        let mut cloned = dto.as_ref().clone();
+                        let old_name = cloned.name.to_string();
+                        let new_name = unique_copy_name(&old_name, &input_names);
+                        if !new_name.is_empty() {
+                            input_names.insert(new_name.clone());
+                            if !old_name.trim().is_empty() {
+                                input_rename.insert(old_name, new_name.clone());
+                            }
+                            cloned.name = new_name.into();
+                        }
+                        BlockInstance::Input(Rc::new(cloned))
+                    }
+                    BlockInstance::Target(dto) => {
+                        let mut cloned = dto.as_ref().clone();
+                        let new_name = unique_copy_name(&cloned.name, &target_names);
+                        if !new_name.is_empty() {
+                            target_names.insert(new_name.clone());
+                            cloned.name = new_name;
+                        }
+                        BlockInstance::Target(Rc::new(cloned))
+                    }
+                    BlockInstance::Output(dto) => BlockInstance::Output(Rc::new(dto.as_ref().clone())),
+                };
+
+                new_blocks.push(Block { id: new_id, block_type, position, instance });
+            }
+
+            if new_blocks.is_empty() {
+                return;
+            }
+
+            // When a staged input and its provider are cloned together, point the
+            // clone at the cloned provider instead of the original.
+            for block in new_blocks.iter_mut() {
+                let replacement = if let BlockInstance::Input(dto) = &block.instance {
+                    dto.staged
+                        .as_ref()
+                        .and_then(|staged| staged.for_input.as_deref())
+                        .and_then(|provider| input_rename.get(provider))
+                        .map(|new_provider| {
+                            let mut cloned = dto.as_ref().clone();
+                            if let Some(staged) = cloned.staged.as_mut() {
+                                staged.for_input = Some(new_provider.clone().into());
+                            }
+                            BlockInstance::Input(Rc::new(cloned))
+                        })
+                } else {
+                    None
+                };
+                if let Some(instance) = replacement {
+                    block.instance = instance;
+                }
+            }
+
+            // Duplicate connections fully contained in the selection.
+            let cloned_connections: Vec<Connection> = editor_state
+                .connections
+                .iter()
+                .filter(|c| selected_set.contains(&c.from) && selected_set.contains(&c.to))
+                .filter_map(|c| match (old_to_new.get(&c.from), old_to_new.get(&c.to)) {
+                    (Some(&from), Some(&to)) => Some(Connection { from, to }),
+                    _ => None,
+                })
+                .collect();
+
+            let new_ids: HashSet<BlockId> = new_blocks.iter().map(|b| b.id).collect();
+            editor_state.blocks.extend(new_blocks);
+            editor_state.connections.extend(cloned_connections);
+            editor_state.selection.selected_blocks = new_ids;
+            editor_state.block_elements.clear();
+            editor_state.connection_elements.clear();
+            drop(editor_state);
+
+            event.prevent_default();
+            force_update.set(*force_update + 1);
+            emit_sources_change.emit(());
+        });
     }
 
     let collect_block_elements = {
@@ -698,8 +1045,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             let mut editor_state = editor_state_ref.borrow_mut();
             let connections = editor_state.connections.clone();
             layout(&mut editor_state.blocks, &connections);
-            editor_state.canvas_offset = (0.0, 0.0);
-            editor_state.zoom_factor = 1.0;
+            reset_layout_view(&mut editor_state);
             editor_state.pinch_distance = None;
             editor_state.pan_start = (0.0, 0.0);
 
@@ -782,7 +1128,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         })
     };
 
-    let handle_confirm_save = {
+    let perform_confirm_save = {
         let confirm = dialog.clone();
         let on_save = handle_save.clone();
         let translator = translate.clone();
@@ -798,6 +1144,28 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             });
         })
     };
+
+    let handle_confirm_save = {
+        let perform_confirm_save = perform_confirm_save.clone();
+        Callback::from(move |_s: String| {
+            perform_confirm_save.emit(());
+        })
+    };
+
+    // Save changes shortcut (Ctrl/Cmd+S)
+    {
+        let perform_confirm_save = perform_confirm_save.clone();
+        let show_save_button = props.show_save_button;
+        use_key_down((can_write_sources, show_save_button), move |event: &KeyboardEvent| {
+            if !can_write_sources || !show_save_button {
+                return;
+            }
+            if event.key().eq_ignore_ascii_case("s") && (event.ctrl_key() || event.meta_key()) {
+                event.prevent_default();
+                perform_confirm_save.emit(());
+            }
+        });
+    }
 
     // ----------------- Drag Start from Sidebar -----------------
     let handle_drag_start = {
@@ -2137,5 +2505,10 @@ mod tests {
 
             assert_eq!(input.input_type, expected_input_type);
         }
+    }
+
+    #[test]
+    fn initial_layout_view_matches_manual_layout_origin() {
+        assert_eq!(initial_layout_view_transform(), ((0.0, 0.0), 1.0));
     }
 }

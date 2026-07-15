@@ -64,6 +64,16 @@ pub fn is_blank_optional_str(s: Option<&str>) -> bool {
     s.as_ref().is_none_or(|s| s.chars().all(|c| c.is_whitespace()))
 }
 
+pub fn is_blank_optional_string(s: &Option<String>) -> bool {
+    s.as_ref().is_none_or(|s| s.chars().all(|c| c.is_whitespace()))
+}
+
+pub fn is_non_blank_optional_string(s: &Option<String>) -> bool { !is_blank_optional_string(s) }
+
+pub fn is_blank_optional_arc_str(s: &Option<::std::sync::Arc<str>>) -> bool {
+    s.as_ref().is_none_or(|s| s.chars().all(|c| c.is_whitespace()))
+}
+
 pub fn trim_slash(s: &str) -> Cow<'_, str> {
     let trimmed = s.trim_matches('/');
     if trimmed.len() == s.len() {

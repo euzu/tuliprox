@@ -2,9 +2,10 @@ use crate::{
     app::{
         components::{
             config::HasFormData, input::Input, key_value_editor::KeyValueEditor, select::Select, selection_parse_first,
-            AliasItemForm, BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode,
-            EpgSmartMatchForm, EpgSourceItemForm, FilterInput, IconButton, Panel, ProviderItemForm, RadioButtonGroup,
-            SourceEditorContext, TextButton, TitledCard, ToolAction,
+            AliasItemForm, BlockId, BlockInstance, Card, ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption,
+            DropDownSelection, EditMode, EpgSmartMatchForm, EpgSourceItemForm, FilterInput, HideContent, IconButton,
+            Panel, ProviderItemForm, RadioButtonGroup, SourceEditorContext, TextButton, TitledCard, ToggleSwitch,
+            ToolAction,
         },
         ConfigContext,
     },
@@ -19,10 +20,11 @@ use shared::{
     concat_string,
     error::TuliproxError,
     model::{
-        ClusterSource, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto,
-        EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, InputType, OnConnectErrorPolicy,
-        ProviderUrlSelectionPolicy, StagedInputDto, StalkerAuthMode, StalkerDeviceProfileDto,
-        StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset, XtreamLoginRequest,
+        ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto,
+        ConfigProviderDto, EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, MediaServerInputConfigDto,
+        MediaServerLibrarySelector, OnConnectErrorPolicy, ProviderUrlSelectionPolicy, StagedInputType, StalkerAuthMode,
+        StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
+        XtreamLoginRequest,
     },
     utils::{Internable, BATCH_SCHEME_PREFIX},
 };
@@ -41,7 +43,6 @@ use yew::{
 };
 
 const LABEL_NAME: &str = "LABEL.NAME";
-const LABEL_INPUT_TYPE: &str = "LABEL.INPUT_TYPE";
 const LABEL_FETCH_METHOD: &str = "LABEL.METHOD";
 const LABEL_HEADERS: &str = "LABEL.HEADERS";
 const LABEL_URL: &str = "LABEL.URL";
@@ -86,12 +87,94 @@ const LABEL_METADATA: &str = "LABEL.METADATA";
 const LABEL_CACHE_DURATION: &str = "LABEL.CACHE_DURATION";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
-const LABEL_STAGED: &str = "LABEL.STAGED";
-const LABEL_LIVE_SOURCE: &str = "LABEL.LIVE_SOURCE";
-const LABEL_VOD_SOURCE: &str = "LABEL.VOD_SOURCE";
-const LABEL_SERIES_SOURCE: &str = "LABEL.SERIES_SOURCE";
 const LABEL_EPG: &str = "LABEL.EPG";
 const LABEL_ALIAS: &str = "LABEL.ALIAS";
+const LABEL_TYPE: &str = "LABEL.TYPE";
+const LABEL_CLUSTER: &str = "LABEL.CLUSTER";
+const LABEL_MEDIA_SERVER: &str = "LABEL.MEDIA_SERVER";
+const LABEL_LIBRARIES: &str = "LABEL.LIBRARIES";
+const LABEL_TOKEN: &str = "LABEL.TOKEN";
+const LABEL_API_KEY: &str = "LABEL.API_KEY";
+const LABEL_USER_ID: &str = "LABEL.USER_ID";
+const LABEL_ACCOUNT_TOKEN: &str = "LABEL.ACCOUNT_TOKEN";
+const LABEL_SERVER_ID: &str = "LABEL.SERVER_ID";
+const LABEL_SERVER_NAME: &str = "LABEL.SERVER_NAME";
+const LABEL_PREFER_HTTPS: &str = "LABEL.PREFER_HTTPS";
+const LABEL_ALLOW_RELAY: &str = "LABEL.ALLOW_RELAY";
+
+fn input_persist_hint_key(staged_input: bool) -> &'static str {
+    if staged_input {
+        "INPUT_FORM.STAGED_PERSIST"
+    } else {
+        "INPUT_FORM.PERSIST"
+    }
+}
+
+fn input_url_hint_key(simple_input: bool) -> &'static str {
+    if simple_input {
+        "INPUT_FORM.SIMPLE_INPUT.URL"
+    } else {
+        "INPUT_FORM.URL"
+    }
+}
+
+fn staged_type_options() -> Rc<Vec<String>> {
+    Rc::new(vec![StagedInputType::M3u.to_string(), StagedInputType::Xtream.to_string()])
+}
+
+fn staged_type_from_selection(selections: &[String]) -> StagedInputType {
+    selections.first().and_then(|value| value.parse::<StagedInputType>().ok()).unwrap_or_default()
+}
+
+fn libraries_to_text(libraries: &[MediaServerLibrarySelector]) -> String {
+    libraries
+        .iter()
+        .map(|library| match library {
+            MediaServerLibrarySelector::Name(name) => name.as_str(),
+            MediaServerLibrarySelector::Detailed(details) => details.name.as_deref().unwrap_or_default(),
+        })
+        .filter(|name| !name.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn libraries_from_text(value: &str, previous: &[MediaServerLibrarySelector]) -> Vec<MediaServerLibrarySelector> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            previous
+                .iter()
+                .find(|library| match library {
+                    MediaServerLibrarySelector::Name(existing) => existing.trim() == name,
+                    MediaServerLibrarySelector::Detailed(details) => {
+                        details.name.as_deref().is_some_and(|n| n.trim() == name)
+                    }
+                })
+                .cloned()
+                .unwrap_or_else(|| MediaServerLibrarySelector::Name(name.to_string()))
+        })
+        .collect()
+}
+
+fn mutate_media_server(
+    current: &Option<MediaServerInputConfigDto>,
+    change: impl FnOnce(&mut MediaServerInputConfigDto),
+) -> Option<MediaServerInputConfigDto> {
+    let mut media_server = current.clone().unwrap_or_default();
+    change(&mut media_server);
+    Some(media_server)
+}
+
+fn mutate_staged(
+    current: &Option<ConfigInputStagedDto>,
+    change: impl FnOnce(&mut ConfigInputStagedDto),
+) -> Option<ConfigInputStagedDto> {
+    let mut staged = current.clone().unwrap_or_default();
+    change(&mut staged);
+    Some(staged)
+}
 
 fn blank_to_none(value: String) -> Option<String> {
     let value = value.trim().to_string();
@@ -177,11 +260,11 @@ const LABEL_LIVE_STREAMS: &str = "LABEL.LIVE_STREAMS";
 const LABEL_EPG_SMART_MATCH: &str = "LABEL.EPG_SMART_MATCH";
 const LABEL_EDIT_EPG_SMART_MATCH: &str = "LABEL.EDIT_EPG_SMART_MATCH";
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum InputFormPage {
     Main,
     Options,
-    Staged,
+    Libraries,
     Epg,
     Alias,
     Provider,
@@ -190,7 +273,7 @@ enum InputFormPage {
 impl InputFormPage {
     const MAIN: &str = "Main";
     const OPTIONS: &str = "Options";
-    const STAGED: &str = "Staged";
+    const LIBRARIES: &str = "Libraries";
     const EPG: &str = "Epg";
     const ALIAS: &str = "Alias";
     const PROVIDER: &str = "Provider";
@@ -203,7 +286,7 @@ impl FromStr for InputFormPage {
         match s {
             Self::MAIN => Ok(InputFormPage::Main),
             Self::OPTIONS => Ok(InputFormPage::Options),
-            Self::STAGED => Ok(InputFormPage::Staged),
+            Self::LIBRARIES => Ok(InputFormPage::Libraries),
             Self::EPG => Ok(InputFormPage::Epg),
             Self::ALIAS => Ok(InputFormPage::Alias),
             Self::PROVIDER => Ok(InputFormPage::Provider),
@@ -220,7 +303,7 @@ impl Display for InputFormPage {
             match *self {
                 InputFormPage::Main => Self::MAIN,
                 InputFormPage::Options => Self::OPTIONS,
-                InputFormPage::Staged => Self::STAGED,
+                InputFormPage::Libraries => Self::LIBRARIES,
                 InputFormPage::Epg => Self::EPG,
                 InputFormPage::Alias => Self::ALIAS,
                 InputFormPage::Provider => Self::PROVIDER,
@@ -234,7 +317,7 @@ impl Internable for InputFormPage {
         match self {
             Self::Main => Self::MAIN,
             Self::Options => Self::OPTIONS,
-            Self::Staged => Self::STAGED,
+            Self::Libraries => Self::LIBRARIES,
             Self::Epg => Self::EPG,
             Self::Alias => Self::ALIAS,
             Self::Provider => Self::PROVIDER,
@@ -264,25 +347,7 @@ generate_form_reducer!(
       ProbeLiveIntervalHours => probe_live_interval_hours: u32,
       ResolveFilter => resolve_filter: Option<String>,
       ProbeFilter => probe_filter: Option<String>,
-      StalkerPreResolvePlayback => stalker_pre_resolve_playback: bool,
-      StalkerRuntimeResolvePlayback => stalker_runtime_resolve_playback: bool,
-    }
-);
-
-generate_form_reducer!(
-    state: StagedInputDtoFormState { form: StagedInputDto },
-    action_name: StagedInputFormAction,
-    fields {
-        Enabled => enabled: bool,
-        Url => url: String,
-        Username => username: Option<String>,
-        Password => password: Option<String>,
-        Method => method: InputFetchMethod,
-        InputType => input_type: InputType,
-        LiveSource => live_source: Option<ClusterSource>,
-        VodSource => vod_source: Option<ClusterSource>,
-        SeriesSource => series_source: Option<ClusterSource>,
-        // Headers => headers: HashMap<String, String>,
+      StalkerBulkEpg => stalker_bulk_epg: bool,
     }
 );
 
@@ -299,41 +364,13 @@ generate_form_reducer!(
         Priority => priority: i16,
         MaxConnections => max_connections: u16,
         Method => method: InputFetchMethod,
+        StagedType => staged_type: StagedInputType,
+        Staged => staged: Option<ConfigInputStagedDto>,
+        MediaServer => media_server: Option<MediaServerInputConfigDto>,
         ExpDate => exp_date: Option<i64>,
         CacheDuration => cache_duration: Option<String>,
     }
 );
-fn cluster_source_options(current: Option<ClusterSource>) -> Rc<Vec<DropDownOption>> {
-    let options: [(Option<ClusterSource>, &str); 3] = [
-        (Some(ClusterSource::Staged), "staged"),
-        (Some(ClusterSource::Input), "input"),
-        (Some(ClusterSource::Skip), "skip"),
-    ];
-    Rc::new(
-        options
-            .iter()
-            .map(|(val, label)| DropDownOption {
-                id: label.to_string(),
-                label: html! { label.to_string() },
-                selected: *val == current,
-            })
-            .collect(),
-    )
-}
-
-fn apply_parsed_input_type(staged_input_state: &UseReducerHandle<StagedInputDtoFormState>, selected: Option<&str>) {
-    let input_type =
-        selected.and_then(|value| value.parse::<InputType>().ok()).unwrap_or(staged_input_state.form.input_type);
-    if staged_input_state.form.input_type != input_type {
-        staged_input_state.dispatch(StagedInputFormAction::InputType(input_type));
-        // Clear Xtream-specific credentials when switching to a non-Xtream type
-        // so they don't persist invisibly in the DTO.
-        if !input_type.is_xtream() {
-            staged_input_state.dispatch(StagedInputFormAction::Username(None));
-            staged_input_state.dispatch(StagedInputFormAction::Password(None));
-        }
-    }
-}
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct ConfigInputViewProps {
@@ -377,8 +414,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         use_reducer(|| ConfigInputFormState { form: ConfigInputDto::default(), modified: false });
     let input_options_state: UseReducerHandle<ConfigInputOptionsDtoFormState> =
         use_reducer(|| ConfigInputOptionsDtoFormState { form: ConfigInputOptionsDto::default(), modified: false });
-    let staged_input_state: UseReducerHandle<StagedInputDtoFormState> =
-        use_reducer(|| StagedInputDtoFormState { form: StagedInputDto::default(), modified: false });
 
     // State for EPG sources, Aliases, Headers, and Providers
     let epg_sources_state = use_state(Vec::<EpgSourceDto>::new);
@@ -402,19 +437,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let exp_date_request_in_flight = use_mut_ref(|| false);
     let exp_date_request_token = use_mut_ref(|| 0_u64);
 
-    let staged_input_types = use_memo(staged_input_state.form.input_type, |input_type| {
-        let default_it = input_type;
-        [
-            InputType::M3u,
-            InputType::Xtream,
-            // InputType::M3uBatch,
-            // InputType::XtreamBatch,
-        ]
-        .iter()
-        .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: t == default_it })
-        .collect::<Vec<DropDownOption>>()
-    });
-
     let stalker_auth_options = use_memo(stalker_config_state.auth_mode, |auth_mode| {
         StalkerAuthMode::iter()
             .map(|t| DropDownOption { id: t.to_string(), label: html! { t.to_string() }, selected: t == *auth_mode })
@@ -434,11 +456,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             })
             .collect::<Vec<DropDownOption>>()
     });
-
     {
         let input_form_state = input_form_state.clone();
         let input_options_state = input_options_state.clone();
-        let staged_input_state = staged_input_state.clone();
         let epg_sources_state = epg_sources_state.clone();
         let epg_smart_match_state = epg_smart_match_state.clone();
         let aliases_state = aliases_state.clone();
@@ -455,8 +475,19 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 .and_then(|cfg| cfg.sources.provider.clone())
                 .unwrap_or_default();
             if let Some(input) = cfg {
-                if input.input_type.is_library() && matches!(*view_visible, InputFormPage::Staged | InputFormPage::Epg)
-                {
+                let is_library = input.input_type.is_library();
+                let is_media_server = input.input_type.is_media_server();
+                let is_staged = input.input_type.is_staged();
+                let current_page = *view_visible;
+                let page_allowed = match current_page {
+                    InputFormPage::Main => true,
+                    InputFormPage::Libraries => is_media_server,
+                    InputFormPage::Alias | InputFormPage::Options | InputFormPage::Provider => {
+                        !is_library && !is_staged && !is_media_server
+                    }
+                    InputFormPage::Epg => !is_library && !is_staged && !is_media_server,
+                };
+                if !page_allowed {
                     view_visible.set(InputFormPage::Main);
                 }
 
@@ -464,10 +495,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(
                     input.options.as_ref().map_or_else(ConfigInputOptionsDto::default, |d| d.clone()),
-                ));
-
-                staged_input_state.dispatch(StagedInputFormAction::SetAll(
-                    input.staged.as_ref().map_or_else(StagedInputDto::default, |c| c.clone()),
                 ));
 
                 // Load headers
@@ -506,7 +533,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             } else {
                 input_form_state.dispatch(ConfigInputFormAction::SetAll(ConfigInputDto::default()));
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(ConfigInputOptionsDto::default()));
-                staged_input_state.dispatch(StagedInputFormAction::SetAll(StagedInputDto::default()));
                 headers_state.set(HashMap::new());
                 epg_sources_state.set(Vec::new());
                 epg_smart_match_state.set(None);
@@ -835,8 +861,13 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     };
 
     let library_input = input_form_state.form.input_type.is_library();
+    let media_server_input = input_form_state.form.input_type.is_media_server();
     let xtream_input = input_form_state.form.input_type.is_xtream();
     let stalker_input = input_form_state.form.input_type.is_stalker();
+    let staged_input = input_form_state.form.input_type.is_staged();
+    let staged_xtream_input = staged_input && input_form_state.form.staged_type == StagedInputType::Xtream;
+    let credentials_input = xtream_input || stalker_input || staged_xtream_input || media_server_input;
+    let options_input = !library_input && !media_server_input;
 
     let render_options = || {
         let headers = headers_state.clone();
@@ -850,11 +881,10 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                         { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_VOD), skip_vod) }
                         { config_field_bool!(input_options_state.form, translate.t(LABEL_SKIP_SERIES), skip_series) }
                       </div>
-                      { config_field_bool!(input_options_state.form, translate.t("LABEL.STALKER_PRE_RESOLVE"), stalker_pre_resolve_playback) }
-                      { config_field_bool!(input_options_state.form, translate.t("LABEL.STALKER_RUNTIME_RESOLVE"), stalker_runtime_resolve_playback) }
+                      { config_field_bool!(input_options_state.form, translate.t("LABEL.STALKER_BULK_EPG"), stalker_bulk_epg) }
                     </TitledCard>
                 })}
-                { html_if!(xtream_input, {
+                { html_if!(xtream_input || staged_xtream_input, {
                     <>
                     <TitledCard title={translate.t(LABEL_SKIP)}>
                       <div class="tp__config-view__cols-3">
@@ -923,11 +953,10 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                     { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_VOD), skip_vod, ConfigInputOptionsFormAction::SkipVod) }
                     { edit_field_bool!(input_options_state, translate.t(LABEL_SKIP_SERIES), skip_series, ConfigInputOptionsFormAction::SkipSeries) }
                   </div>
-                  { edit_field_bool!(input_options_state, translate.t("LABEL.STALKER_PRE_RESOLVE"), stalker_pre_resolve_playback, ConfigInputOptionsFormAction::StalkerPreResolvePlayback) }
-                  { edit_field_bool!(input_options_state, translate.t("LABEL.STALKER_RUNTIME_RESOLVE"), stalker_runtime_resolve_playback, ConfigInputOptionsFormAction::StalkerRuntimeResolvePlayback) }
+                  { edit_field_bool!(input_options_state, translate.t("LABEL.STALKER_BULK_EPG"), stalker_bulk_epg, ConfigInputOptionsFormAction::StalkerBulkEpg) }
                 </TitledCard>
             })}
-            { html_if!(xtream_input, {
+            { html_if!(xtream_input || staged_xtream_input, {
                 <>
                 <TitledCard title={translate.t(LABEL_SKIP)}>
                   <div class="tp__config-view__cols-3">
@@ -1002,162 +1031,17 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         }
     };
 
-    let render_staged = || {
-        let staged_method_selection = Rc::new(vec![staged_input_state.form.method.to_string()]);
-        let staged_input_state_1 = staged_input_state.clone();
-        let staged_input_state_2 = staged_input_state.clone();
-        let staged_input_state_live = staged_input_state.clone();
-        let staged_input_state_vod = staged_input_state.clone();
-        let staged_input_state_series = staged_input_state.clone();
-        let show_cluster_sources = input_form_state.form.input_type.is_xtream();
-        let live_source_options = cluster_source_options(staged_input_state.form.live_source);
-        let vod_source_options = cluster_source_options(staged_input_state.form.vod_source);
-        let series_source_options = cluster_source_options(staged_input_state.form.series_source);
-        let staged_is_xtream = staged_input_state.form.input_type.is_xtream();
-        if !props.allow_write {
-            return html! {
-                <Card class="tp__config-view__card">
-                    { config_field_bool!(staged_input_state.form, translate.t(LABEL_ENABLED), enabled) }
-                    { config_field!(staged_input_state.form, translate.t(LABEL_URL), url) }
-                    { html_if!(staged_is_xtream, {
-                        <div class="tp__config-view__cols-2">
-                        { config_field_optional!(staged_input_state.form, translate.t(LABEL_USERNAME), username) }
-                        { config_field_optional_hide!(staged_input_state.form, translate.t(LABEL_PASSWORD), password) }
-                        </div>
-                    })}
-                    <div class="tp__config-view__cols-2">
-                    { config_field_custom!(translate.t(LABEL_FETCH_METHOD), staged_input_state.form.method.to_string()) }
-                    { config_field_custom!(translate.t(LABEL_INPUT_TYPE), staged_input_state.form.input_type.to_string()) }
-                    </div>
-                    {
-                        html_if!(show_cluster_sources, {
-                        <div class="tp__config-view__cols-2">
-                        { config_field_custom!(translate.t(LABEL_LIVE_SOURCE), staged_input_state.form.live_source.map_or_else(String::new, |source| source.to_string())) }
-                        { config_field_custom!(translate.t(LABEL_VOD_SOURCE), staged_input_state.form.vod_source.map_or_else(String::new, |source| source.to_string())) }
-                        { config_field_custom!(translate.t(LABEL_SERIES_SOURCE), staged_input_state.form.series_source.map_or_else(String::new, |source| source.to_string())) }
-                        </div>
-                        })
-                    }
-                </Card>
-            };
-        }
-        html! {
-            <Card class="tp__config-view__card">
-                { edit_field_bool!(staged_input_state, translate.t(LABEL_ENABLED),  enabled, StagedInputFormAction::Enabled) }
-                { edit_field_text!(staged_input_state, translate.t(LABEL_URL),  url, StagedInputFormAction::Url) }
-                { html_if!(staged_is_xtream, {
-                  <div class="tp__config-view__cols-2">
-                  { edit_field_text_option!(staged_input_state, translate.t(LABEL_USERNAME), username, StagedInputFormAction::Username) }
-                  { edit_field_text_option!(staged_input_state, translate.t(LABEL_PASSWORD), password, StagedInputFormAction::Password, true) }
-                  </div>
-                })}
-                <div class="tp__config-view__cols-2">
-                { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
-
-                   html! {
-                       <RadioButtonGroup
-                        multi_select={false} none_allowed={false}
-                        on_select={Callback::from(move |selections: Rc<Vec<String>>| {
-                            if let Some(first) = selections.first() {
-                                staged_input_state_1.dispatch(StagedInputFormAction::Method(first.parse::<InputFetchMethod>().unwrap_or(InputFetchMethod::GET)));
-                            }
-                        })}
-                        options={&fetch_methods}
-                        selected={staged_method_selection}
-                    />
-               }})}
-               { config_field_child!(translate.t(LABEL_INPUT_TYPE), "INPUT_FORM.INPUT_TYPE", {
-                   html! {
-                       <Select
-                        name={"staged_input_types"}
-                        multi_select={false}
-                        on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                           match selections {
-                            DropDownSelection::Empty => {}
-                            DropDownSelection::Single(option) => {
-                                apply_parsed_input_type(
-                                    &staged_input_state_2,
-                                    Some(option.as_str()),
-                                );
-                            }
-                            DropDownSelection::Multi(options) => {
-                                apply_parsed_input_type(
-                                    &staged_input_state_2,
-                                    options.first().map(String::as_str),
-                                );
-                             }
-                           }
-                        })}
-                        options={staged_input_types.clone()}
-                    />
-               }})}
-                </div>
-                {
-                    html_if!(show_cluster_sources, {
-                    <div class="tp__config-view__cols-2">
-                    { config_field_child!(translate.t(LABEL_LIVE_SOURCE), "INPUT_FORM.LIVE_SOURCE", {
-                        html! {
-                            <Select
-                                name={"live_source"}
-                                multi_select={false}
-                                on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                    if let DropDownSelection::Single(option) = selections {
-                                        staged_input_state_live.dispatch(StagedInputFormAction::LiveSource(
-                                            ClusterSource::from_str(option.as_str()).ok()
-                                        ));
-                                    }
-                                })}
-                                options={live_source_options}
-                            />
-                        }
-                    })}
-                    { config_field_child!(translate.t(LABEL_VOD_SOURCE), "INPUT_FORM.VOD_SOURCE", {
-                        html! {
-                            <Select
-                                name={"vod_source"}
-                                multi_select={false}
-                                on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                    if let DropDownSelection::Single(option) = selections {
-                                        staged_input_state_vod.dispatch(StagedInputFormAction::VodSource(
-                                            ClusterSource::from_str(option.as_str()).ok()
-                                        ));
-                                    }
-                                })}
-                                options={vod_source_options}
-                            />
-                        }
-                    })}
-                    { config_field_child!(translate.t(LABEL_SERIES_SOURCE), "INPUT_FORM.SERIES_SOURCE", {
-                        html! {
-                            <Select
-                                name={"series_source"}
-                                multi_select={false}
-                                on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                    if let DropDownSelection::Single(option) = selections {
-                                        staged_input_state_series.dispatch(StagedInputFormAction::SeriesSource(
-                                            ClusterSource::from_str(option.as_str()).ok()
-                                        ));
-                                    }
-                                })}
-                                options={series_source_options}
-                            />
-                        }
-                    })}
-                    </div>
-                    })
-                }
-
-                //{ edit_field_list!(staged_input_state, translate.t(LABEL_HEADERS), headers, StagedInputFormAction::Headers, translate.t(LABEL_ADD_HEADER)) }
-            </Card>
-        }
-    };
-
     let render_input = || {
         let providers_state = providers_state.clone();
         let input_method_selection = Rc::new(vec![input_form_state.form.method.to_string()]);
         let stalker_device = stalker_config_state.device.clone().unwrap_or_default();
         let stalker_size_caps = stalker_config_state.size_caps.clone().unwrap_or_default();
+        let staged_type_selection = Rc::new(vec![input_form_state.form.staged_type.to_string()]);
+        let staged_type_options = staged_type_options();
+        let staged_type_labels = Rc::new(vec![translate.t("LABEL.M3U"), translate.t("LABEL.XTREAM")]);
+        let staged_clusters = input_form_state.form.staged.as_ref().map(|staged| staged.clusters);
         let is_csv_batch = input_form_state.form.url.starts_with(BATCH_SCHEME_PREFIX);
+        let simple_input = staged_input || media_server_input;
         let input_form_state_disp = input_form_state.clone();
         let exp_date_tool_action = if input_form_state.form.input_type.is_xtream() {
             let services = services.clone();
@@ -1249,9 +1133,15 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                    { config_field!(input_form_state.form, translate.t(LABEL_NAME), name) }
                    { config_field_bool!(input_form_state.form, translate.t(LABEL_ENABLED), enabled) }
                    </div>
+                   { html_if!(staged_input, {
+                     <>
+                     { config_field_custom!(translate.t(LABEL_TYPE), input_form_state.form.staged_type.to_string()) }
+                     { config_field_custom!(translate.t(LABEL_CLUSTER), staged_clusters.map_or_else(String::new, |clusters| clusters.to_string())) }
+                     </>
+                   })}
                    { html_if!(!library_input, {
                     <>
-                     { config_field!(input_form_state.form, translate.t(LABEL_URL), url) }
+                     { config_field!(input_form_state.form, translate.t(LABEL_URL), url, Some(input_url_hint_key(simple_input).to_string())) }
                      { html_if!(stalker_input, {
                        <>
                          { config_field_custom!(translate.t("LABEL.STALKER_MAC_ADDRESS"), stalker_device.mac_address.clone().unwrap_or_default()) }
@@ -1279,23 +1169,25 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                        </>
                      })}
                      <div class="tp__config-view__cols-2">
-                     { html_if!(xtream_input && !is_csv_batch, {
+                     { html_if!(credentials_input && !is_csv_batch, {
                        <>
                        { config_field_optional!(input_form_state.form, translate.t(LABEL_USERNAME), username) }
                        { config_field_optional_hide!(input_form_state.form, translate.t(LABEL_PASSWORD), password) }
                        </>
                      })}
-                     { html_if!(!is_csv_batch, {
+                     { html_if!(!staged_input && !is_csv_batch, {
                          <>
                          { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), input_form_state.form.max_connections.to_string()) }
                          { config_field_custom!(translate.t(LABEL_PRIORITY), input_form_state.form.priority.to_string()) }
                          { config_field_custom!(translate.t(LABEL_EXP_DATE), input_form_state.form.exp_date.map_or_else(String::new, |exp_date| exp_date.to_string())) }
                          </>
                      })}
-                     { config_field_optional!(input_form_state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
+                     { html_if!(!staged_input, {
+                         { config_field_optional!(input_form_state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
+                     })}
                      { config_field_custom!(translate.t(LABEL_FETCH_METHOD), input_form_state.form.method.to_string()) }
                      </div>
-                     { config_field_optional!(input_form_state.form, translate.t(LABEL_PERSIST), persist) }
+                     { config_field_optional!(input_form_state.form, translate.t(LABEL_PERSIST), persist, Some(input_persist_hint_key(staged_input).to_string())) }
                     </>
                    })}
                 </Card>
@@ -1307,14 +1199,70 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                { edit_field_text!(input_form_state, translate.t(LABEL_NAME),  name, ConfigInputFormAction::Name) }
                { edit_field_bool!(input_form_state, translate.t(LABEL_ENABLED), enabled, ConfigInputFormAction::Enabled) }
                </div>
+               { html_if!(staged_input, {
+                 <>
+                 { config_field_child!(translate.t(LABEL_TYPE), "INPUT_FORM.STAGED_TYPE", {
+                   let input_form_state = input_form_state.clone();
+                   html! {
+                       <RadioButtonGroup
+                        multi_select={false}
+                        none_allowed={false}
+                        options={staged_type_options}
+                        labels={Some(staged_type_labels)}
+                        selected={staged_type_selection}
+                        on_select={Callback::from(move |selections: Rc<Vec<String>>| {
+                            input_form_state.dispatch(ConfigInputFormAction::StagedType(staged_type_from_selection(&selections)));
+                        })}
+                    />
+                 }})}
+                 { config_field_child!(translate.t(LABEL_CLUSTER), "INPUT_FORM.STAGED_CLUSTERS", {
+                   let input_form_state = input_form_state.clone();
+                   html! {
+                       <ClusterFlagsInput
+                        name={"staged_clusters"}
+                        value={staged_clusters}
+                        mode={ClusterFlagsInputMode::NoneIsAll}
+                        on_change={Callback::from(move |(_, flags): (String, Option<ClusterFlags>)| {
+                            // Staged inputs must keep at least one cluster; mirror ConfigInputStagedDto::default() when the user clears the last chip.
+                            let clusters = flags.filter(|f| !f.is_empty()).unwrap_or_else(ClusterFlags::all);
+                            let next = mutate_staged(&input_form_state.form.staged, |staged| {
+                                staged.clusters = clusters;
+                            });
+                            input_form_state.dispatch(ConfigInputFormAction::Staged(next));
+                        })}
+                    />
+                 }})}
+                 </>
+               })}
                { html_if!(!library_input, {
                 <>
-                 { edit_field_text!(input_form_state, translate.t(LABEL_URL),  url, ConfigInputFormAction::Url) }
-                 { html_if!(xtream_input && !is_csv_batch, {
-                   <div class="tp__config-view__cols-2">
+                 <div class="tp__form-field tp__form-field__text">
+                     <Input
+                        label={translate.t(LABEL_URL)}
+                        name={"url"}
+                        field_id={Some(crate::app::components::dto_field_id(&input_form_state.form, "url"))}
+                        autocomplete={true}
+                        value={input_form_state.form.url.clone()}
+                        hint_key={Some(input_url_hint_key(simple_input).to_string())}
+                        on_change={Callback::from({
+                            let input_form_state = input_form_state.clone();
+                            move |value: String| input_form_state.dispatch(ConfigInputFormAction::Url(value))
+                        })}
+                     />
+                 </div>
+                 <div class="tp__config-view__cols-2">
+                 { html_if!(credentials_input && !is_csv_batch, {
+                   <>
                    { edit_field_text_option!(input_form_state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
                    { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
-                   </div>
+                   </>
+                 })}
+                 { html_if!(!staged_input && !is_csv_batch, {
+                   <>
+                   { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
+                   { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
+                   { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
+                   </>
                  })}
                  { html_if!(stalker_input, {
                    <>
@@ -1390,32 +1338,174 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
                    </>
                  })}
-                 <div class="tp__config-view__cols-2">
-                     { html_if!(!is_csv_batch, {
-                       <>
-                       { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
-                       { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
-                       { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
-                       </>
-                     })}
-                     { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
-                     { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
-                       html! {
-                           <RadioButtonGroup
-                            multi_select={false} none_allowed={false}
-                            on_select={Callback::from(move |selections: Rc<Vec<String>>| {
-                                if let Some(first) = selections.first() {
-                                    input_form_state_disp.dispatch(ConfigInputFormAction::Method(first.parse::<InputFetchMethod>().unwrap_or(InputFetchMethod::GET)));
-                                }
-                            })}
-                            options={fetch_methods.clone()}
-                            selected={input_method_selection}
-                        />
-                     }})}
+                 { html_if!(!staged_input, {
+                   { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
+                 })}
+                 { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
+                   html! {
+                       <RadioButtonGroup
+                        multi_select={false} none_allowed={false}
+                        on_select={Callback::from(move |selections: Rc<Vec<String>>| {
+                            if let Some(first) = selections.first() {
+                                input_form_state_disp.dispatch(ConfigInputFormAction::Method(first.parse::<InputFetchMethod>().unwrap_or(InputFetchMethod::GET)));
+                            }
+                        })}
+                        options={fetch_methods.clone()}
+                        selected={input_method_selection}
+                    />
+                 }})}
                  </div>
-                 { edit_field_text_option!(input_form_state, translate.t(LABEL_PERSIST), persist, ConfigInputFormAction::Persist) }
+                 <div class="tp__form-field tp__form-field__text">
+                     <Input
+                        label={translate.t(LABEL_PERSIST)}
+                        name={"persist"}
+                        field_id={Some(crate::app::components::dto_field_id(&input_form_state.form, "persist"))}
+                        autocomplete={true}
+                        value={input_form_state.form.persist.clone().unwrap_or_default()}
+                        hint_key={Some(input_persist_hint_key(staged_input).to_string())}
+                        on_change={Callback::from({
+                            let input_form_state = input_form_state.clone();
+                            move |value: String| {
+                                input_form_state.dispatch(ConfigInputFormAction::Persist((!value.is_empty()).then_some(value)));
+                            }
+                        })}
+                     />
+                 </div>
                 </>
                })}
+            </Card>
+        }
+    };
+
+    let render_media_server = || {
+        let media_server = input_form_state.form.media_server.clone().unwrap_or_default();
+        let token = media_server.token.clone().unwrap_or_default();
+        let api_key = media_server.api_key.clone().unwrap_or_default();
+        let user_id = media_server.user_id.clone().unwrap_or_default();
+        let account_token = media_server.account_token.clone().unwrap_or_default();
+        let server_id = media_server.server_id.clone().unwrap_or_default();
+        let server_name = media_server.server_name.clone().unwrap_or_default();
+
+        if !props.allow_write {
+            return html! {
+                <Card class="tp__config-view__card">
+                    <TitledCard title={translate.t(LABEL_MEDIA_SERVER)}>
+                        { config_field_child!(translate.t(LABEL_TOKEN), "MEDIA_SERVER.TOKEN", {
+                            html! { <span class="tp__form-field__value"><HideContent content={token} /></span> }
+                        })}
+                        { config_field_child!(translate.t(LABEL_API_KEY), "MEDIA_SERVER.API_KEY", {
+                            html! { <span class="tp__form-field__value"><HideContent content={api_key} /></span> }
+                        })}
+                        { config_field_child!(translate.t(LABEL_USER_ID), "MEDIA_SERVER.USER_ID", {
+                            html! { <span class="tp__form-field__value">{user_id}</span> }
+                        })}
+                        { config_field_child!(translate.t(LABEL_ACCOUNT_TOKEN), "MEDIA_SERVER.ACCOUNT_TOKEN", {
+                            html! { <span class="tp__form-field__value"><HideContent content={account_token} /></span> }
+                        })}
+                        { config_field_child!(translate.t(LABEL_SERVER_ID), "MEDIA_SERVER.SERVER_ID", {
+                            html! { <span class="tp__form-field__value">{server_id}</span> }
+                        })}
+                        { config_field_child!(translate.t(LABEL_SERVER_NAME), "MEDIA_SERVER.SERVER_NAME", {
+                            html! { <span class="tp__form-field__value">{server_name}</span> }
+                        })}
+                        <div class="tp__config-view__cols-2">
+                            { config_field_child!(translate.t(LABEL_PREFER_HTTPS), "MEDIA_SERVER.PREFER_HTTPS", {
+                                html! { <ToggleSwitch value={media_server.prefer_https} readonly={true} /> }
+                            })}
+                            { config_field_child!(translate.t(LABEL_ALLOW_RELAY), "MEDIA_SERVER.ALLOW_RELAY", {
+                                html! { <ToggleSwitch value={media_server.allow_relay} readonly={true} /> }
+                            })}
+                        </div>
+                    </TitledCard>
+                </Card>
+            };
+        }
+
+        let dispatch_media = |change: fn(&mut MediaServerInputConfigDto, String)| {
+            let state = input_form_state.clone();
+            Callback::from(move |value: String| {
+                let next = mutate_media_server(&state.form.media_server, |media_server| change(media_server, value));
+                state.dispatch(ConfigInputFormAction::MediaServer(next));
+            })
+        };
+        let dispatch_media_bool = |change: fn(&mut MediaServerInputConfigDto, bool)| {
+            let state = input_form_state.clone();
+            Callback::from(move |value: bool| {
+                let next = mutate_media_server(&state.form.media_server, |media_server| change(media_server, value));
+                state.dispatch(ConfigInputFormAction::MediaServer(next));
+            })
+        };
+
+        let on_token = dispatch_media(|media_server, value| {
+            media_server.token = (!value.is_empty()).then_some(value);
+        });
+        let on_api_key = dispatch_media(|media_server, value| {
+            media_server.api_key = (!value.is_empty()).then_some(value);
+        });
+        let on_user_id = dispatch_media(|media_server, value| {
+            media_server.user_id = (!value.is_empty()).then_some(value);
+        });
+        let on_account_token = dispatch_media(|media_server, value| {
+            media_server.account_token = (!value.is_empty()).then_some(value);
+        });
+        let on_server_id = dispatch_media(|media_server, value| {
+            media_server.server_id = (!value.is_empty()).then_some(value);
+        });
+        let on_server_name = dispatch_media(|media_server, value| {
+            media_server.server_name = (!value.is_empty()).then_some(value);
+        });
+        let on_prefer_https = dispatch_media_bool(|media_server, value| media_server.prefer_https = value);
+        let on_allow_relay = dispatch_media_bool(|media_server, value| media_server.allow_relay = value);
+
+        html! {
+            <Card class="tp__config-view__card">
+                <TitledCard title={translate.t(LABEL_MEDIA_SERVER)}>
+                    <div class="tp__config-view__cols-2">
+                        <Input name="media_server_token" field_id={Some("MEDIA_SERVER.TOKEN".to_string())} label={Some(translate.t(LABEL_TOKEN))} value={token} hidden={true} on_change={Some(on_token)} />
+                        <Input name="media_server_api_key" field_id={Some("MEDIA_SERVER.API_KEY".to_string())} label={Some(translate.t(LABEL_API_KEY))} value={api_key} hidden={true} on_change={Some(on_api_key)} />
+                        <Input name="media_server_user_id" field_id={Some("MEDIA_SERVER.USER_ID".to_string())} label={Some(translate.t(LABEL_USER_ID))} value={user_id} on_change={Some(on_user_id)} />
+                        <Input name="media_server_account_token" field_id={Some("MEDIA_SERVER.ACCOUNT_TOKEN".to_string())} label={Some(translate.t(LABEL_ACCOUNT_TOKEN))} value={account_token} hidden={true} on_change={Some(on_account_token)} />
+                        <Input name="media_server_server_id" field_id={Some("MEDIA_SERVER.SERVER_ID".to_string())} label={Some(translate.t(LABEL_SERVER_ID))} value={server_id} on_change={Some(on_server_id)} />
+                        <Input name="media_server_server_name" field_id={Some("MEDIA_SERVER.SERVER_NAME".to_string())} label={Some(translate.t(LABEL_SERVER_NAME))} value={server_name} on_change={Some(on_server_name)} />
+                    </div>
+                    <div class="tp__config-view__cols-2">
+                        { config_field_child!(translate.t(LABEL_PREFER_HTTPS), "MEDIA_SERVER.PREFER_HTTPS", {
+                            html! { <ToggleSwitch value={media_server.prefer_https} on_change={on_prefer_https} /> }
+                        })}
+                        { config_field_child!(translate.t(LABEL_ALLOW_RELAY), "MEDIA_SERVER.ALLOW_RELAY", {
+                            html! { <ToggleSwitch value={media_server.allow_relay} on_change={on_allow_relay} /> }
+                        })}
+                    </div>
+                </TitledCard>
+            </Card>
+        }
+    };
+
+    let render_media_server_libraries = || {
+        let media_server = input_form_state.form.media_server.clone().unwrap_or_default();
+        let libraries = libraries_to_text(&media_server.libraries);
+
+        if !props.allow_write {
+            return html! {
+                <Card class="tp__config-view__card">
+                    { config_field_child!(translate.t(LABEL_LIBRARIES), "MEDIA_SERVER.LIBRARIES", {
+                        html! { <span class="tp__form-field__value">{libraries}</span> }
+                    })}
+                </Card>
+            };
+        }
+
+        let input_form_state = input_form_state.clone();
+        let on_libraries = Callback::from(move |value: String| {
+            let next = mutate_media_server(&input_form_state.form.media_server, |media_server| {
+                media_server.libraries = libraries_from_text(&value, &media_server.libraries);
+            });
+            input_form_state.dispatch(ConfigInputFormAction::MediaServer(next));
+        });
+
+        html! {
+            <Card class="tp__config-view__card">
+                <Input name="media_server_libraries" field_id={Some("MEDIA_SERVER.LIBRARIES".to_string())} label={Some(translate.t(LABEL_LIBRARIES))} value={libraries} on_change={Some(on_libraries)} />
             </Card>
         }
     };
@@ -1763,7 +1853,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let source_editor_ctx = source_editor_ctx.clone();
         let input_form_state = input_form_state.clone();
         let input_options_state = input_options_state.clone();
-        let staged_input_state = staged_input_state.clone();
         let headers_state = headers_state.clone();
         let epg_sources_state = epg_sources_state.clone();
         let epg_smart_match_state = epg_smart_match_state.clone();
@@ -1778,8 +1867,16 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             let options = input_options_state.data();
             input.options = if options.is_empty() { None } else { Some(options.clone()) };
 
-            let staged_input = staged_input_state.data();
-            input.staged = if staged_input.is_empty() { None } else { Some(staged_input.clone()) };
+            if input.input_type.is_staged() {
+                input.staged.get_or_insert_with(ConfigInputStagedDto::default);
+            } else {
+                input.staged = None;
+            }
+            if input.input_type.is_media_server() {
+                input.media_server.get_or_insert_with(MediaServerInputConfigDto::default);
+            } else {
+                input.media_server = None;
+            }
 
             // Handle Headers
             input.headers = (*headers_state).clone();
@@ -1841,27 +1938,34 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
             <div class="tp__source-editor-form__body__pages">
                 <Panel value={InputFormPage::Main.intern()} active={view_visible.intern()}>
-                {render_input()}
+                    {render_input()}
                 </Panel>
-                { html_if!(!library_input, {
+                { html_if!(media_server_input, {
+                    <Panel value={InputFormPage::Libraries.intern()} active={view_visible.intern()}>
+                    {render_media_server()}
+                    {render_media_server_libraries()}
+                    </Panel>
+                })}
+                { html_if!(!library_input && !staged_input && !media_server_input, {
                     <Panel value={InputFormPage::Alias.intern()} active={view_visible.intern()}>
                     {render_alias()}
                     </Panel>
                 })}
-                { html_if!(!library_input, {
+                { html_if!(options_input, {
                  <>
                   <Panel value={InputFormPage::Options.intern()} active={view_visible.intern()}>
                    {render_options()}
                   </Panel>
+                    </>
+                })}
+                { html_if!(!library_input && !staged_input && !media_server_input, {
+                 <>
                   <Panel value={InputFormPage::Provider.intern()} active={view_visible.intern()}>
                    {render_provider()}
                    </Panel>
                   <Panel value={InputFormPage::Epg.intern()} active={view_visible.intern()}>
                    {render_epg()}
                   </Panel>
-                  <Panel value={InputFormPage::Staged.intern()} active={view_visible.intern()}>
-                   {render_staged()}
-                   </Panel>
                     </>
                 })}
             </div>
@@ -1876,15 +1980,21 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         html! {
             <div class={concat_string!("tp__source-editor-form__sidebar", if button_disabled {" disabled"} else {""})}>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Main, if *view_visible == InputFormPage::Main { " active" } else {""})}  icon="Settings" hint={translate.t(LABEL_MAIN)} name={InputFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
-            {html_if!(!library_input, {
+            {html_if!(media_server_input, {
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Libraries, if *view_visible == InputFormPage::Libraries { " active" } else {""})}  icon="VideoConfig" hint={translate.t(LABEL_MEDIA_SERVER)} name={InputFormPage::Libraries.to_string()} onclick={&handle_menu_click}></IconButton>
+            })}
+            {html_if!(!library_input && !staged_input && !media_server_input, {
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Alias, if *view_visible == InputFormPage::Alias { " active" } else {""})}  icon="Alias" hint={translate.t(LABEL_ALIAS)} name={InputFormPage::Alias.to_string()} onclick={&handle_menu_click}></IconButton>
             })}
-            { html_if!(!library_input, {
+            { html_if!(options_input, {
                 <>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Options, if *view_visible == InputFormPage::Options { " active" } else {""})}  icon="Options" hint={translate.t(LABEL_OPTIONS)} name={InputFormPage::Options.to_string()} onclick={&handle_menu_click}></IconButton>
+                </>
+             })}
+            { html_if!(!library_input && !staged_input && !media_server_input, {
+                <>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Epg, if *view_visible == InputFormPage::Epg { " active" } else {""})}  icon="Epg" hint={translate.t(LABEL_EPG)} name={InputFormPage::Epg.to_string()} onclick={&handle_menu_click}></IconButton>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Provider, if *view_visible == InputFormPage::Provider { " active" } else {""})}  icon="Dns" hint={translate.t(LABEL_PROVIDER)} name={InputFormPage::Provider.to_string()} onclick={&handle_menu_click}></IconButton>
-            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Staged, if *view_visible == InputFormPage::Staged { " active" } else {""})}  icon="Staged" hint={translate.t(LABEL_STAGED)} name={InputFormPage::Staged.to_string()} onclick={&handle_menu_click}></IconButton>
                 </>
              })}
           </div>
@@ -1910,5 +2020,44 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
             { render_edit_mode() }
         </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::{MediaServerLibraryKind, MediaServerLibrarySelectorDetailsDto};
+
+    #[test]
+    fn media_server_libraries_page_round_trips() {
+        assert_eq!(InputFormPage::from_str(InputFormPage::LIBRARIES).ok(), Some(InputFormPage::Libraries));
+        assert_eq!(InputFormPage::Libraries.to_string(), InputFormPage::LIBRARIES);
+    }
+
+    #[test]
+    fn simple_inputs_use_simple_url_hint() {
+        assert_eq!(input_url_hint_key(true), "INPUT_FORM.SIMPLE_INPUT.URL");
+        assert_eq!(input_url_hint_key(false), "INPUT_FORM.URL");
+    }
+
+    #[test]
+    fn staged_inputs_use_staged_persist_hint() {
+        assert_eq!(input_persist_hint_key(true), "INPUT_FORM.STAGED_PERSIST");
+        assert_eq!(input_persist_hint_key(false), "INPUT_FORM.PERSIST");
+    }
+
+    #[test]
+    fn libraries_from_text_preserves_existing_detailed_selector() {
+        let detailed = MediaServerLibrarySelector::Detailed(MediaServerLibrarySelectorDetailsDto {
+            id: Some("id-1".to_string()),
+            key: Some("key-1".to_string()),
+            name: Some("Movies".to_string()),
+            kind: Some(MediaServerLibraryKind::Movies),
+        });
+        let previous = vec![detailed.clone()];
+
+        let libraries = libraries_from_text("Movies, Kids", &previous);
+
+        assert_eq!(libraries, vec![detailed, MediaServerLibrarySelector::Name("Kids".to_string())]);
     }
 }

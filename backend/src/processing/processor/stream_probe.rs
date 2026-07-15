@@ -191,7 +191,7 @@ async fn prepare_generic_stream_metadata(
             )
         }
         InputType::Emby | InputType::Jellyfin | InputType::Plex
-        | InputType::Stalker | InputType::StalkerBatch => return Ok(PreparedGenericProbeOutcome::Noop),
+        | InputType::Stalker | InputType::StalkerBatch | InputType::Staged => return Ok(PreparedGenericProbeOutcome::Noop),
     };
 
     if !db_path.exists() {

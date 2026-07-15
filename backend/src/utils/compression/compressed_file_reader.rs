@@ -1,8 +1,12 @@
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
+use crate::utils::{
+    compression::compression_utils::{is_gzip, is_zlib_header},
+    file_reader, open_readonly_file,
+};
 use flate2::bufread::{GzDecoder, ZlibDecoder};
-use crate::utils::compression::compression_utils::{is_deflate, is_gzip};
-use crate::utils::{file_reader, open_readonly_file};
+use std::{
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    path::Path,
+};
 
 pub struct CompressedFileReader {
     reader: BufReader<Box<dyn Read>>,
@@ -19,38 +23,29 @@ impl CompressedFileReader {
 
         let reader: Box<dyn Read> = if is_gzip(&header) {
             Box::new(GzDecoder::new(buffered_file))
-        } else if is_deflate(&header) {
+        } else if is_zlib_header(&header) {
             Box::new(ZlibDecoder::new(buffered_file))
         } else {
             Box::new(buffered_file)
         };
 
-        Ok(Self {
-            reader: file_reader(reader),
-        })
+        Ok(Self { reader: file_reader(reader) })
     }
 }
 
 // Implement the Read trait for CompressedFileReader
 impl Read for CompressedFileReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.reader.read(buf)
-    }
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> { self.reader.read(buf) }
 }
 
 // Implement BufRead for CompressedFileReader
 impl BufRead for CompressedFileReader {
-    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
-        self.reader.fill_buf()
-    }
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> { self.reader.fill_buf() }
 
-    fn consume(&mut self, amt: usize) {
-        self.reader.consume(amt);
-    }
+    fn consume(&mut self, amt: usize) { self.reader.consume(amt); }
 }
 
-impl Iterator for CompressedFileReader
-{
+impl Iterator for CompressedFileReader {
     type Item = std::io::Result<String>;
 
     fn next(&mut self) -> Option<Self::Item> {

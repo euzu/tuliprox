@@ -40,9 +40,8 @@ pub fn BlockView(props: &BlockProps) -> Html {
     let from_id = block_id;
     let to_id = block_id;
 
-    let is_target = block_type.is_target();
-    let is_input = !is_target && block_type.is_input();
-    let is_output = !is_input && !is_target;
+    let has_input_port = block_type.has_input_port();
+    let has_output_port = block_type.has_output_port();
 
     let port_style = match port_status {
         PortStatus::Valid => "tp__source-editor__block-port--valid",
@@ -171,7 +170,7 @@ pub fn BlockView(props: &BlockProps) -> Html {
                     }
                 </div>
 
-               {html_if!(is_target || is_output, {
+               {html_if!(has_input_port, {
                 // Left port
                 <span
                     class={classes!("tp__source-editor__block-port", "tp__source-editor__block-port--left", port_style)}
@@ -185,7 +184,7 @@ pub fn BlockView(props: &BlockProps) -> Html {
                     }} />
                 })}
 
-               {html_if!(is_target || is_input, {
+               {html_if!(has_output_port, {
                 // Right port
                 <span
                     class="tp__source-editor__block-port tp__source-editor__block-port--right"

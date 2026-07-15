@@ -176,31 +176,30 @@ $port-size: 10px;
     background-color: var(--brick-input-library-background-color);
   }
 
-  &-InputStaged   {
+  &-InputStaged {
     border-color: var(--brick-input-staged-border-color);
     background-color: var(--brick-input-staged-background-color);
   }
 
-  &-InputStalker   {
+  &-InputStalker {
     border-color: var(--brick-input-stalker-border-color);
     background-color: var(--brick-input-stalker-background-color);
   }
 
-  &-InputPlex   {
-    border-color: var(--brick-input-plex-border-color);
-    background-color: var(--brick-input-plex-background-color);
-  }
-
-  &-InputEmpy   {
-    border-color: var(--brick-input-emby-border-color);
-    background-color: var(--brick-input-emby-background-color);
-  }
-
-  &-InputJellyfin   {
+  &-InputJellyfin {
     border-color: var(--brick-input-jellyfin-border-color);
     background-color: var(--brick-input-jellyfin-background-color);
   }
 
+  &-InputEmby {
+    border-color: var(--brick-input-emby-border-color);
+    background-color: var(--brick-input-emby-background-color);
+  }
+
+  &-InputPlex {
+    border-color: var(--brick-input-plex-border-color);
+    background-color: var(--brick-input-plex-background-color);
+  }
   &-Target {
     border-color: var(--brick-target-border-color);
     background-color: var(--brick-target-background-color);
@@ -312,19 +311,17 @@ $port-size: 10px;
   &-InputStalker {
     @include brick-handle-input-color(var(--brick-input-stalker-background-color), var(--brick-input-stalker-border-color));
   }
-
-  &-InputPlex {
-    @include brick-handle-input-color(var(--brick-input-plex-background-color), var(--brick-input-plex-border-color));
+  &-InputJellyfin {
+    @include brick-handle-input-color(var(--brick-input-jellyfin-background-color), var(--brick-input-jellyfin-border-color));
   }
 
   &-InputEmby {
     @include brick-handle-input-color(var(--brick-input-emby-background-color), var(--brick-input-emby-border-color));
   }
 
-  &-InputJellyfin {
-    @include brick-handle-input-color(var(--brick-input-jellyfin-background-color), var(--brick-input-jellyfin-border-color));
+  &-InputPlex {
+    @include brick-handle-input-color(var(--brick-input-plex-background-color), var(--brick-input-plex-border-color));
   }
-
   &-Target {
     .tp__source-editor__block-content {
       border-color: var(--brick-target-border-color);

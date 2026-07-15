@@ -15,16 +15,14 @@ macro_rules! create_bitset {
         impl [<$enum_name Set>] {
             pub const VARIANT_COUNT: usize = [$(stringify!($variant)),*].len();
 
-            // COMPILE-TIME CHECK:
-            // This ensures at compile time that the largest enum variant
-            // doesn't exceed the storage capacity. Zero runtime cost.
-            const _CAPACITY_CHECK: () = {
-                let mut max_val = 0;
-                $( if ($enum_name::$variant as usize) > max_val { max_val = $enum_name::$variant as usize; } )*
-                if max_val >= <$storage>::BITS as usize {
-                    panic!("BitSet storage too small for enum variants!");
-                }
-            };
+            const _CAPACITY_CHECK: [(); 1] = [(); {
+                let mut max_val: usize = 0;
+                $( {
+                    let v = $enum_name::$variant as usize;
+                    if v > max_val { max_val = v; }
+                } )*
+                (max_val < <$storage>::BITS as usize) as usize
+            }];
 
             pub const ALL: Self = if Self::VARIANT_COUNT == <$storage>::BITS as usize {
                 Self(<$storage>::MAX)

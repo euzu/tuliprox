@@ -8,8 +8,8 @@ use crate::{
         model::{
             metadata_update_manager::MetadataUpdateManager,
             qos_aggregation_manager::exec_qos_aggregation, ActiveProviderManager, ActiveUserManager,
-            ConnectionManager, DownloadQueue, EventManager, PlaylistStorage, PlaylistStorageState, SharedStreamManager,
-            UpdateGuard,
+            ConnectionManager, DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, PlaylistStorage,
+            PlaylistStorageState, SharedStreamManager, UpdateGuard,
         },
         scheduler::exec_scheduler,
     },
@@ -187,6 +187,7 @@ fn cancel_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
         metadata,
         qos_aggregation,
         downloads,
+        hls_cache: cancel_tokens.hls_cache.clone(),
     };
 
     app_state.cancel_tokens.store(Arc::new(tokens));
@@ -361,6 +362,7 @@ pub struct CancelTokens {
     pub(crate) metadata: CancellationToken,
     pub(crate) qos_aggregation: CancellationToken,
     pub(crate) downloads: CancellationToken,
+    pub(crate) hls_cache: CancellationToken,
 }
 impl Default for CancelTokens {
     fn default() -> Self {
@@ -372,6 +374,7 @@ impl Default for CancelTokens {
             metadata: CancellationToken::new(),
             qos_aggregation: CancellationToken::new(),
             downloads: CancellationToken::new(),
+            hls_cache: CancellationToken::new(),
         }
     }
 }
@@ -404,6 +407,8 @@ pub struct AppState {
     pub downloads: Arc<DownloadQueue>,
     pub cache: Arc<ArcSwapOption<RwLock<LRUResourceCache>>>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
+    pub hls_proxy: Arc<HlsProxyManager>,
+    pub hls_provisioning: Arc<HlsProvisioningState>,
     pub active_users: Arc<ActiveUserManager>,
     pub active_provider: Arc<ActiveProviderManager>,
     pub connection_manager: Arc<ConnectionManager>,
@@ -420,6 +425,79 @@ pub struct AppState {
     pub manual_update_sender: mpsc::Sender<ManualPlaylistUpdateRequest>,
 }
 
+#[cfg(test)]
+pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
+    let app_config = Arc::new(AppConfig {
+        config: Arc::new(ArcSwap::from_pointee(config)),
+        sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+        hdhomerun: Arc::new(ArcSwapOption::default()),
+        api_proxy: Arc::new(ArcSwapOption::default()),
+        file_locks: Arc::new(crate::utils::FileLockManager::default()),
+        paths: Arc::new(ArcSwap::from_pointee(shared::model::ConfigPaths {
+            home_path: String::new(),
+            config_path: String::new(),
+            storage_path: String::new(),
+            config_file_path: String::new(),
+            sources_file_path: String::new(),
+            mapping_file_path: None,
+            mapping_files_used: None,
+            template_file_path: None,
+            template_files_used: None,
+            api_proxy_file_path: String::new(),
+            custom_stream_response_path: None,
+        })),
+        custom_stream_response: Arc::new(ArcSwapOption::default()),
+        access_token_secret: [0; 32],
+        encrypt_secret: [0; 16],
+        media_tools: Arc::new(crate::model::MediaToolCapabilities::new()),
+    });
+    let event_manager = Arc::new(EventManager::new());
+    let active_provider = Arc::new(ActiveProviderManager::new(&app_config, &event_manager));
+    let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
+    active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+
+    let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+    let loaded_config = app_config.config.load();
+    let active_users = Arc::new(ActiveUserManager::new(&loaded_config, &geoip, &event_manager));
+    let connection_manager = Arc::new(ConnectionManager::new(
+        &active_users,
+        &active_provider,
+        &shared_stream_manager,
+        &event_manager,
+        None,
+    ));
+    let tokens = CancelTokens::default();
+    let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
+    let (manual_update_sender, _) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
+
+    Arc::new(AppState {
+        forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
+            enabled: false,
+            inputs: Vec::new(),
+            targets: Vec::new(),
+            target_names: Vec::new(),
+        })),
+        app_config,
+        http_client: Arc::new(ArcSwap::from_pointee(Client::new())),
+        http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
+        downloads: Arc::new(DownloadQueue::new()),
+        cache: Arc::new(ArcSwapOption::default()),
+        shared_stream_manager,
+        hls_proxy: Arc::new(HlsProxyManager::new()),
+        hls_provisioning: Arc::new(HlsProvisioningState::new()),
+        active_users,
+        active_provider,
+        connection_manager,
+        event_manager,
+        cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+        playlists: Arc::new(PlaylistStorageState::new()),
+        geoip,
+        update_guard: UpdateGuard::new(),
+        metadata_manager,
+        manual_update_sender,
+    })
+}
+
 impl AppState {
     pub(in crate::api::model) async fn set_config(&self, config: Config) -> Result<UpdateChanges, TuliproxError> {
         let old_storage_dir = self.app_config.config.load().storage_dir.clone();
@@ -434,6 +512,7 @@ impl AppState {
         self.app_config.set_config(config)?;
         reload_logger(config_log_level.as_deref());
         self.active_provider.update_config(&self.app_config).await;
+        self.hls_proxy.update_config(&self.app_config).await;
         self.update_config().await?;
 
         let geoip_reload_needed =

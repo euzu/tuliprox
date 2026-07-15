@@ -1,4 +1,4 @@
-use crate::utils::{get_default_web_root, is_blank_or_default_web_root};
+use crate::defaults::{get_default_web_root, is_blank_or_default_web_root};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]

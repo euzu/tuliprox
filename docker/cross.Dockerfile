@@ -107,6 +107,7 @@ COPY resources ./resources
 RUN set -eu; \
     find ./resources -maxdepth 1 -type f -name '*.jpg' | sort | while IFS= read -r image; do \
       output="${image%.jpg}.ts"; \
+      resource_name="$(basename "${image%.jpg}")"; \
       ffmpeg -y -nostdin -loop 1 -framerate 30 -i "${image}" \
             -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
             -t 10 -shortest \
@@ -116,6 +117,26 @@ RUN set -eu; \
             -mpegts_flags +resend_headers \
             -muxdelay 0 -muxpreload 0 \
             -f mpegts "${output}" || exit 1; \
+      if [ "${resource_name}" = "panel_api_provisioning" ]; then \
+        rm -f ./resources/panel_api_provisioning_hls_*.ts ./resources/panel_api_provisioning_hls.m3u8; \
+        ffmpeg -y -nostdin -loop 1 -framerate 30 -i "${image}" \
+              -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 \
+              -t 12 -shortest \
+              -c:v libx264 -pix_fmt yuv420p -preset veryfast -crf 23 \
+              -g 60 -keyint_min 60 \
+              -force_key_frames "expr:gte(t,n_forced*2)" \
+              -x264-params "scenecut=0:bframes=0:open_gop=0" \
+              -c:a aac -b:a 128k -ac 2 -ar 48000 \
+              -mpegts_flags +resend_headers \
+              -muxdelay 0 -muxpreload 0 \
+              -f hls \
+              -hls_time 2 \
+              -hls_list_size 0 \
+              -hls_segment_type mpegts \
+              -hls_segment_filename "./resources/panel_api_provisioning_hls_%03d.ts" \
+              ./resources/panel_api_provisioning_hls.m3u8 || exit 1; \
+        rm -f ./resources/panel_api_provisioning_hls.m3u8; \
+      fi; \
     done
 
 # -----------------------------------------------------------------

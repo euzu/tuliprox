@@ -340,6 +340,8 @@ impl fmt::Display for ProviderConfigWrapper {
 impl ProviderConfigWrapper {
     pub fn new(cfg: ProviderConfig) -> Self { Self { inner: Arc::new(cfg) } }
 
+    pub(in crate::api::model) fn config(&self) -> Arc<ProviderConfig> { Arc::clone(&self.inner) }
+
     pub async fn force_allocate(&self) -> ProviderAllocation {
         if self.inner.force_allocate().await {
             ProviderAllocation::new_available(Arc::clone(&self.inner))
@@ -372,7 +374,7 @@ impl Deref for ProviderConfigWrapper {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::{InputFetchMethod, InputType};
+    use shared::model::{InputFetchMethod, InputType, StagedInputType};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -394,6 +396,7 @@ mod tests {
             media_server: None,
             aliases: None,
             method: InputFetchMethod::default(),
+            staged_type: StagedInputType::default(),
             staged: None,
             exp_date: None,
             t_batch_url: None,

@@ -12,6 +12,8 @@
 //! guard that the disk-based source already holds; `clear_stalker_storage`
 //! takes a write lock for each file it removes.
 
+use std::collections::HashSet;
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -185,6 +187,113 @@ async fn snapshot_stalker_file(
     .map_err(|err| repo_err!("blocking task join error: {err}"))?
 }
 
+pub async fn snapshot_stalker_items_at(
+    app_config: &Arc<AppConfig>,
+    file_path: PathBuf,
+    items: &[StalkerPlaylistItem],
+) -> Result<u64, TuliproxError> {
+    let pairs = items.iter().map(|item| (item.stream_id, item.clone())).collect();
+    snapshot_stalker_file(app_config, file_path, pairs).await
+}
+
+pub async fn upsert_stalker_items_at(
+    app_config: &Arc<AppConfig>,
+    file_path: &Path,
+    items: &[StalkerPlaylistItem],
+) -> Result<u64, TuliproxError> {
+    let file_lock = app_config.file_locks.write_lock(file_path).await;
+    let blocking_path = file_path.to_path_buf();
+    let pairs: Vec<(u32, StalkerPlaylistItem)> = items.iter().map(|item| (item.stream_id, item.clone())).collect();
+    tokio::task::spawn_blocking(move || {
+        let _guard = file_lock;
+        if !blocking_path.exists() {
+            BPlusTree::<u32, StalkerPlaylistItem>::new()
+                .store(&blocking_path)
+                .map_err(|err| repo_err!("create staging tree {} failed: {err}", blocking_path.display()))?;
+        }
+        if pairs.is_empty() {
+            return Ok(0);
+        }
+        let refs: Vec<(&u32, &StalkerPlaylistItem)> = pairs.iter().map(|(key, value)| (key, value)).collect();
+        BPlusTreeUpdate::<u32, StalkerPlaylistItem>::upsert_batch_prepared_with_backoff(&blocking_path, &refs)
+            .map_err(|err| repo_err!("batch upsert failed for {}: {err}", blocking_path.display()))
+    })
+    .await
+    .map_err(|err| repo_err!("blocking task join error: {err}"))?
+}
+
+pub async fn load_stalker_items_after(
+    app_config: &Arc<AppConfig>,
+    file_path: &Path,
+    after: Option<u32>,
+    limit: usize,
+) -> Result<Vec<StalkerPlaylistItem>, TuliproxError> {
+    if !stalker_path_exists(file_path).await || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let file_lock = app_config.file_locks.read_lock(file_path).await;
+    let blocking_path = file_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let _guard = file_lock;
+        let mut query = BPlusTreeQuery::<u32, StalkerPlaylistItem>::try_new(&blocking_path)
+            .map_err(|err| repo_err!("open {} failed: {err}", blocking_path.display()))?;
+        if after.is_none() && limit == usize::MAX {
+            return Ok(query.iter().map(|(_, item)| item).collect());
+        }
+        let start = after.as_ref().map_or(Bound::Unbounded, Bound::Excluded);
+        let (items, _) = query
+            .range_page(start, Bound::Unbounded, 0, limit)
+            .map_err(|err| repo_err!("range {} failed: {err}", blocking_path.display()))?;
+        Ok(items.into_iter().map(|(_, item)| item).collect())
+    })
+    .await
+    .map_err(|err| repo_err!("blocking task join error: {err}"))?
+}
+
+pub async fn load_stalker_items_at(
+    app_config: &Arc<AppConfig>,
+    file_path: &Path,
+) -> Result<Vec<StalkerPlaylistItem>, TuliproxError> {
+    load_stalker_items_after(app_config, file_path, None, usize::MAX).await
+}
+
+pub async fn prepare_stalker_episode_series_at(
+    app_config: &Arc<AppConfig>,
+    file_path: &Path,
+    series_id: u32,
+) -> Result<HashSet<u32>, TuliproxError> {
+    if !stalker_path_exists(file_path).await {
+        return Ok(HashSet::new());
+    }
+    let file_lock = app_config.file_locks.write_lock(file_path).await;
+    let blocking_path = file_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let _guard = file_lock;
+        let mut tree = BPlusTreeUpdate::<u32, StalkerPlaylistItem>::try_new_with_backoff(&blocking_path)
+            .map_err(|err| repo_err!("open {} failed: {err}", blocking_path.display()))?;
+        let (occupied, stale) = {
+            let mut occupied = HashSet::new();
+            let mut stale = Vec::new();
+            for entry in tree.range_iter(Bound::Unbounded, Bound::Unbounded) {
+                let (key, item) = entry
+                    .map_err(|err| repo_err!("scan {} failed: {err}", blocking_path.display()))?;
+                if item.series_id == Some(series_id) {
+                    stale.push(key);
+                } else {
+                    occupied.insert(key);
+                }
+            }
+            (occupied, stale)
+        };
+        let stale_refs: Vec<&u32> = stale.iter().collect();
+        tree.delete_batch(&stale_refs)
+            .map_err(|err| repo_err!("delete stale series from {} failed: {err}", blocking_path.display()))?;
+        Ok(occupied)
+    })
+    .await
+    .map_err(|err| repo_err!("blocking task join error: {err}"))?
+}
+
 /// Persist the full result of one cluster refresh as a snapshot: every tree
 /// file belonging to `kind` is rebuilt from scratch and atomically swapped in,
 /// so items removed upstream disappear from the store instead of lingering
@@ -236,8 +345,16 @@ pub async fn read_stalker_item(
     stream_id: u32,
 ) -> Result<Option<StalkerPlaylistItem>, TuliproxError> {
     let file_path = get_stalker_file_path(storage_path, kind);
-    let file_lock = app_config.file_locks.read_lock(&file_path).await;
-    let blocking_path = file_path.clone();
+    read_stalker_item_at(app_config, &file_path, stream_id).await
+}
+
+pub async fn read_stalker_item_at(
+    app_config: &Arc<AppConfig>,
+    file_path: &Path,
+    stream_id: u32,
+) -> Result<Option<StalkerPlaylistItem>, TuliproxError> {
+    let file_lock = app_config.file_locks.read_lock(file_path).await;
+    let blocking_path = file_path.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<Option<StalkerPlaylistItem>, TuliproxError> {
         let _guard = file_lock;
         let mut query = BPlusTreeQuery::<u32, StalkerPlaylistItem>::try_new(&blocking_path)
@@ -400,9 +517,6 @@ pub async fn persist_stalker_epg_programs(
     storage_path: &Path,
     programs: &[StalkerProgramRecord],
 ) -> Result<u64, TuliproxError> {
-    if programs.is_empty() {
-        return Ok(0);
-    }
     let file_path = get_stalker_epg_file_path(storage_path);
     let pairs: Vec<(String, StalkerProgramRecord)> = programs
         .iter()
@@ -419,6 +533,92 @@ pub async fn persist_stalker_epg_programs(
     })
     .await
     .map_err(|err| repo_err!("blocking task join error: {err}"))?
+}
+
+pub async fn upsert_stalker_epg_at(
+    app_config: &Arc<AppConfig>,
+    file_path: &Path,
+    programs: &[StalkerProgramRecord],
+) -> Result<u64, TuliproxError> {
+    let pairs: Vec<(String, StalkerProgramRecord)> = programs
+        .iter()
+        .map(|program| {
+            let channel = program.channel_id.clone().unwrap_or_default();
+            let start = program.start_epoch.unwrap_or_default();
+            (format!("{channel}:{start}"), program.clone())
+        })
+        .collect();
+    let file_lock = app_config.file_locks.write_lock(file_path).await;
+    let blocking_path = file_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let _guard = file_lock;
+        if !blocking_path.exists() {
+            BPlusTree::<String, StalkerProgramRecord>::new()
+                .store(&blocking_path)
+                .map_err(|err| repo_err!("create EPG staging tree {} failed: {err}", blocking_path.display()))?;
+        }
+        if pairs.is_empty() {
+            return Ok(0);
+        }
+        let refs: Vec<(&String, &StalkerProgramRecord)> = pairs.iter().map(|(key, value)| (key, value)).collect();
+        BPlusTreeUpdate::<String, StalkerProgramRecord>::upsert_batch_prepared_with_backoff(&blocking_path, &refs)
+            .map_err(|err| repo_err!("EPG batch upsert failed for {}: {err}", blocking_path.display()))
+    })
+    .await
+    .map_err(|err| repo_err!("blocking task join error: {err}"))?
+}
+
+pub async fn snapshot_stalker_epg_at(
+    app_config: &Arc<AppConfig>,
+    file_path: &Path,
+    programs: &[StalkerProgramRecord],
+) -> Result<u64, TuliproxError> {
+    let pairs: Vec<(String, StalkerProgramRecord)> = programs
+        .iter()
+        .map(|program| {
+            let channel = program.channel_id.clone().unwrap_or_default();
+            let start = program.start_epoch.unwrap_or_default();
+            (format!("{channel}:{start}"), program.clone())
+        })
+        .collect();
+    let file_lock = app_config.file_locks.write_lock(file_path).await;
+    let blocking_path = file_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let _guard = file_lock;
+        write_stalker_snapshot_blocking(&blocking_path, &pairs)
+    })
+    .await
+    .map_err(|err| repo_err!("blocking task join error: {err}"))?
+}
+
+pub async fn promote_stalker_file(
+    app_config: &Arc<AppConfig>,
+    staging_path: &Path,
+    published_path: &Path,
+) -> Result<(), TuliproxError> {
+    let staging_lock = app_config.file_locks.write_lock(staging_path).await;
+    let published_lock = app_config.file_locks.write_lock(published_path).await;
+    let staging = staging_path.to_path_buf();
+    let published = published_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let _staging_guard = staging_lock;
+        let _published_guard = published_lock;
+        crate::utils::rename_or_copy(&staging, &published, false)
+            .map_err(|err| repo_err!("promote {} to {} failed: {err}", staging.display(), published.display()))
+    })
+    .await
+    .map_err(|err| repo_err!("blocking task join error: {err}"))?
+}
+
+pub async fn remove_stalker_file(app_config: &Arc<AppConfig>, file_path: &Path) -> Result<(), TuliproxError> {
+    let file_lock = app_config.file_locks.write_lock(file_path).await;
+    let path = file_path.to_path_buf();
+    let _guard = file_lock;
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(repo_err!("remove {} failed: {err}", path.display())),
+    }
 }
 
 /// Convenience for the proxy path: resolve the per-input storage path given an

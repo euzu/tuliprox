@@ -278,6 +278,8 @@ pub trait FieldSetAccessor {
 
 pub trait PlaylistEntry: Send + Sync {
     fn get_virtual_id(&self) -> VirtualId;
+    /// Returns the immutable stream identifier captured from the input playlist before target mappings.
+    fn get_input_stream_id(&self) -> Option<Arc<str>>;
     fn get_provider_id(&self) -> Option<u32>;
     fn get_category_id(&self) -> Option<u32>;
     fn get_provider_url(&self) -> Arc<str>;
@@ -335,6 +337,9 @@ pub struct PlaylistItemHeader {
     pub xtream_cluster: XtreamCluster,
     #[serde(default)]
     pub item_type: PlaylistItemType,
+    /// Stable provider/origin ID captured before any target transformation.
+    #[serde(default, with = "arc_str_serde")]
+    pub input_stream_id: Arc<str>,
 }
 
 impl Default for PlaylistItemHeader {
@@ -361,11 +366,30 @@ impl Default for PlaylistItemHeader {
             category_id: 0,
             input_name: "".intern(),
             source_ordinal: 0,
+            input_stream_id: "".intern(),
         }
     }
 }
 
 impl PlaylistItemHeader {
+    /// Captures the input playlist item ID at the input-processing boundary.
+    ///
+    /// This must run before target transformations and must not be used to recover an identity
+    /// from a target-mutated `id`.
+    pub fn freeze_input_stream_id(&mut self) {
+        if self.input_stream_id.is_empty() && !self.id.is_empty() {
+            self.input_stream_id = Arc::clone(&self.id);
+        }
+    }
+
+    /// Returns the input stream ID captured at the input-processing boundary.
+    ///
+    /// Legacy fallback must be resolved before a target transformation starts. Once an item is
+    /// represented by this header, the mutable target-facing `id` is never a valid fallback.
+    pub fn get_input_stream_id(&self) -> Option<Arc<str>> {
+        (!self.input_stream_id.is_empty()).then(|| Arc::clone(&self.input_stream_id))
+    }
+
     #[inline]
     pub fn gen_uuid(&mut self) {
         self.uuid = generate_runtime_playlist_uuid(&self.input_name, &self.id, self.item_type, &self.url);
@@ -544,6 +568,9 @@ pub struct M3uPlaylistItem {
     pub source_ordinal: u32,
     #[serde(default)]
     pub additional_properties: Option<StreamProperties>,
+    /// Stable provider/origin ID captured before any target transformation.
+    #[serde(default, with = "arc_str_serde")]
+    pub input_stream_id: Arc<str>,
 }
 
 fn write_m3u_attr(line: &mut String, name: &str, value: &str) { let _ = write!(line, " {name}=\"{value}\""); }
@@ -659,6 +686,11 @@ impl M3uPlaylistItem {
 impl PlaylistEntry for M3uPlaylistItem {
     #[inline]
     fn get_virtual_id(&self) -> VirtualId { self.virtual_id }
+
+    fn get_input_stream_id(&self) -> Option<Arc<str>> {
+        let input_stream_id = if self.input_stream_id.is_empty() { &self.provider_id } else { &self.input_stream_id };
+        (!input_stream_id.is_empty()).then(|| Arc::clone(input_stream_id))
+    }
 
     fn get_provider_id(&self) -> Option<u32> { get_provider_id(&self.provider_id, &self.url) }
     #[inline]
@@ -884,6 +916,9 @@ pub struct XtreamPlaylistItem {
     pub channel_no: u32,
     #[serde(default)]
     pub source_ordinal: u32,
+    /// Stable provider/origin ID captured before any target transformation.
+    #[serde(default, with = "arc_str_serde")]
+    pub input_stream_id: Arc<str>,
 }
 
 impl XtreamPlaylistItem {
@@ -940,6 +975,13 @@ impl XtreamPlaylistItem {
 impl PlaylistEntry for XtreamPlaylistItem {
     #[inline]
     fn get_virtual_id(&self) -> VirtualId { self.virtual_id }
+    fn get_input_stream_id(&self) -> Option<Arc<str>> {
+        if self.input_stream_id.is_empty() {
+            (self.provider_id > 0).then(|| self.provider_id.to_string().intern())
+        } else {
+            Some(Arc::clone(&self.input_stream_id))
+        }
+    }
     #[inline]
     fn get_provider_id(&self) -> Option<u32> { Some(self.provider_id) }
     #[inline]
@@ -1087,7 +1129,7 @@ impl PlaylistItem {
                     XtreamCluster::Live => None,
                     XtreamCluster::Video => {
                         let container_extension = extract_extension_from_url(&header.url)
-                            .map(|e| e.strip_prefix('.').unwrap_or(&*e).to_string())
+                            .map(|e| e.strip_prefix('.').unwrap_or(e).to_string())
                             .unwrap_or_default();
                         Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                             name: header.name.clone(),
@@ -1110,7 +1152,7 @@ impl PlaylistItem {
                     XtreamCluster::Series => {
                         if header.item_type == PlaylistItemType::Series {
                             let container_extension = extract_extension_from_url(&header.url)
-                                .map(|e| e.strip_prefix('.').unwrap_or(&e).to_string())
+                                .map(|e| e.strip_prefix('.').unwrap_or(e).to_string())
                                 .unwrap_or_default();
                             // TODO maybe from link ? like s01e02 or something like this
                             Some(StreamProperties::Episode(Box::new(EpisodeStreamProperties {
@@ -1166,7 +1208,11 @@ impl PlaylistItem {
 impl From<&PlaylistItem> for XtreamPlaylistItem {
     fn from(item: &PlaylistItem) -> Self {
         let header = &item.header;
-        let provider_id = get_provider_id(&header.id, &header.url).unwrap_or_default();
+        let input_stream_id = Arc::clone(&header.input_stream_id);
+        let missing_live_input_identity =
+            input_stream_id.is_empty() && (header.item_type.is_live() || header.item_type == PlaylistItemType::Catchup);
+        let provider_id =
+            if missing_live_input_identity { 0 } else { get_provider_id(&header.id, &header.url).unwrap_or_default() };
         let additional_properties = PlaylistItem::get_additional_properties(header);
 
         XtreamPlaylistItem {
@@ -1192,6 +1238,7 @@ impl From<&PlaylistItem> for XtreamPlaylistItem {
             input_name: Arc::clone(&header.input_name),
             channel_no: header.chno,
             source_ordinal: header.source_ordinal,
+            input_stream_id,
         }
     }
 }
@@ -1199,9 +1246,12 @@ impl From<&PlaylistItem> for XtreamPlaylistItem {
 impl From<&PlaylistItem> for M3uPlaylistItem {
     fn from(item: &PlaylistItem) -> Self {
         let header = &item.header;
+        let input_stream_id = Arc::clone(&header.input_stream_id);
+        let missing_live_input_identity =
+            input_stream_id.is_empty() && (header.item_type.is_live() || header.item_type == PlaylistItemType::Catchup);
         M3uPlaylistItem {
             virtual_id: header.virtual_id,
-            provider_id: Arc::clone(&header.id),
+            provider_id: if missing_live_input_identity { "".intern() } else { Arc::clone(&header.id) },
             name: if header.item_type == PlaylistItemType::Series {
                 Arc::clone(&header.title)
             } else {
@@ -1226,6 +1276,7 @@ impl From<&PlaylistItem> for M3uPlaylistItem {
             t_catchup_mode: None,
             source_ordinal: header.source_ordinal,
             additional_properties: header.additional_properties.clone(),
+            input_stream_id,
         }
     }
 }
@@ -1266,10 +1317,15 @@ impl From<&PlaylistItem> for CommonPlaylistItem {
 
 impl From<&XtreamPlaylistItem> for PlaylistItem {
     fn from(item: &XtreamPlaylistItem) -> Self {
+        let input_stream_id = item.get_input_stream_id();
         let header = PlaylistItemHeader {
             uuid: item.get_uuid(),
             virtual_id: item.virtual_id,
-            id: item.provider_id.to_string().intern(),
+            id: if item.provider_id == 0 && input_stream_id.is_none() {
+                "".intern()
+            } else {
+                item.provider_id.to_string().intern()
+            },
             name: item.name.clone(),
             title: item.title.clone(),
             logo: item.logo.clone(),
@@ -1288,6 +1344,7 @@ impl From<&XtreamPlaylistItem> for PlaylistItem {
             time_shift: "".intern(),
             additional_properties: item.additional_properties.clone(),
             source_ordinal: item.source_ordinal,
+            input_stream_id: input_stream_id.unwrap_or_else(|| "".intern()),
         };
 
         PlaylistItem { header }
@@ -1318,6 +1375,7 @@ impl From<&M3uPlaylistItem> for PlaylistItem {
             time_shift: item.time_shift.clone(),
             additional_properties: item.additional_properties.clone(),
             source_ordinal: item.source_ordinal,
+            input_stream_id: item.get_input_stream_id().unwrap_or_else(|| "".intern()),
         };
 
         PlaylistItem { header }
@@ -1352,13 +1410,8 @@ impl PlaylistItem {
         };
         let stream_id_str: Arc<str> = Internable::intern(item.stream_id.to_string());
         let logo: Arc<str> = item.logo_url.clone().unwrap_or_else(|| Internable::intern(String::new()));
-        let url: Arc<str> = if item.stream_url.is_empty() {
-            // The runtime will re-resolve on demand; expose the raw cmd as a
-            // placeholder so the pipeline can still render group/filter.
-            Arc::clone(&item.cmd)
-        } else {
-            Arc::clone(&item.stream_url)
-        };
+        // Keep unresolved commands private; playback resolves them from the persisted Stalker metadata.
+        let url = Arc::clone(&item.stream_url);
         let group: Arc<str> = if item.category_name.is_empty() {
             let fallback = match item.stream_kind {
                 StalkerStreamKind::Live | StalkerStreamKind::Archive => "Live",
@@ -1391,6 +1444,7 @@ impl PlaylistItem {
             chno: item.number,
             category_id: item.category_id,
             source_ordinal: 0,
+            input_stream_id: stream_id_str,
         };
 
         PlaylistItem { header }
@@ -1400,6 +1454,9 @@ impl PlaylistItem {
 impl PlaylistEntry for PlaylistItem {
     #[inline]
     fn get_virtual_id(&self) -> VirtualId { self.header.virtual_id }
+
+    #[inline]
+    fn get_input_stream_id(&self) -> Option<Arc<str>> { self.header.get_input_stream_id() }
 
     fn get_provider_id(&self) -> Option<u32> {
         let header = &self.header;
@@ -1462,6 +1519,7 @@ impl PlaylistGroup {
     #[inline]
     pub fn on_load(&mut self) {
         for pl in &mut self.channels {
+            pl.header.freeze_input_stream_id();
             pl.header.gen_uuid();
             pl.header.category_id = self.id;
         }
@@ -1507,10 +1565,13 @@ mod tests {
             stream_id: 7,
             stream_kind: StalkerStreamKind::Movie,
             category_name: Internable::intern("Action".to_string()),
+            cmd: Internable::intern("ffmpeg http://streams.example/movie/7".to_string()),
             ..StalkerPlaylistItem::default()
         };
         let converted = PlaylistItem::from_stalker(&item, "my_input");
         assert_eq!(&*converted.header.input_name, "my_input");
+        assert_eq!(&*converted.header.input_stream_id, "7");
+        assert!(converted.header.url.is_empty());
         assert_eq!(&*converted.header.group, "Action");
         assert_eq!(converted.header.item_type, PlaylistItemType::Video);
     }
@@ -1669,7 +1730,7 @@ mod tests {
 
     #[test]
     fn xtream_playlist_item_conversion_falls_back_to_numeric_id_in_url() {
-        let item = PlaylistItem {
+        let mut item = PlaylistItem {
             header: PlaylistItemHeader {
                 id: "channel-alpha".intern(),
                 url: "http://provider.example/live/user/pass/12345.ts".intern(),
@@ -1679,9 +1740,134 @@ mod tests {
                 ..PlaylistItemHeader::default()
             },
         };
+        item.header.freeze_input_stream_id();
 
         let xtream_item = XtreamPlaylistItem::from(&item);
         assert_eq!(xtream_item.provider_id, 12345);
+    }
+
+    #[test]
+    fn xtream_playlist_item_preserves_numeric_input_stream_id_as_string() {
+        let mut item = PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "80510".intern(),
+                virtual_id: 1001,
+                url: "http://provider.example/live/user/pass/80510.ts".intern(),
+                input_name: "input".intern(),
+                item_type: PlaylistItemType::Live,
+                xtream_cluster: XtreamCluster::Live,
+                ..PlaylistItemHeader::default()
+            },
+        };
+        item.header.freeze_input_stream_id();
+
+        let xtream_item = XtreamPlaylistItem::from(&item);
+
+        assert_eq!(xtream_item.provider_id, 80510);
+        assert_eq!(xtream_item.input_stream_id.as_ref(), "80510");
+        assert_eq!(xtream_item.get_input_stream_id().as_deref(), Some("80510"));
+    }
+
+    #[test]
+    fn alphanumeric_m3u_input_stream_id_survives_xtream_materialization() {
+        let mut source = PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "channel-alpha".intern(),
+                url: "http://provider.example/live/user/pass/12345.ts".intern(),
+                input_name: "input".intern(),
+                item_type: PlaylistItemType::Live,
+                xtream_cluster: XtreamCluster::Live,
+                ..PlaylistItemHeader::default()
+            },
+        };
+        source.header.freeze_input_stream_id();
+
+        let m3u_item = M3uPlaylistItem::from(&source);
+        let common_item = PlaylistItem::from(&m3u_item);
+        let xtream_item = XtreamPlaylistItem::from(&common_item);
+
+        assert_eq!(m3u_item.input_stream_id.as_ref(), "channel-alpha");
+        assert_eq!(xtream_item.provider_id, 12345);
+        assert_eq!(xtream_item.input_stream_id.as_ref(), "channel-alpha");
+    }
+
+    #[test]
+    fn url_hash_input_stream_id_is_preserved_verbatim() {
+        let mut source = PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "d34db33f".intern(),
+                url: "http://provider.example/live/channel.m3u8".intern(),
+                ..PlaylistItemHeader::default()
+            },
+        };
+        source.header.freeze_input_stream_id();
+
+        let m3u_item = M3uPlaylistItem::from(&source);
+
+        assert_eq!(m3u_item.input_stream_id.as_ref(), "d34db33f");
+    }
+
+    #[test]
+    fn target_field_mapping_cannot_change_frozen_input_stream_id() {
+        let mut header = PlaylistItemHeader { id: "origin-alpha".intern(), ..PlaylistItemHeader::default() };
+        header.freeze_input_stream_id();
+
+        assert!(header.set_field("id", "target-id"));
+
+        assert_eq!(header.id.as_ref(), "target-id");
+        assert_eq!(header.input_stream_id.as_ref(), "origin-alpha");
+        assert!(!header.set_field("input_stream_id", "unexpected"));
+        assert_eq!(header.input_stream_id.as_ref(), "origin-alpha");
+    }
+
+    #[test]
+    fn legacy_playlist_items_fall_back_to_provider_id_without_virtual_id() {
+        let mut source = PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "legacy-alpha".intern(),
+                virtual_id: 7001,
+                url: "http://provider.example/live/user/pass/80510.ts".intern(),
+                ..PlaylistItemHeader::default()
+            },
+        };
+        source.header.freeze_input_stream_id();
+        let mut m3u_item = M3uPlaylistItem::from(&source);
+        m3u_item.input_stream_id = "".intern();
+        let mut xtream_item = XtreamPlaylistItem::from(&source);
+        xtream_item.input_stream_id = "".intern();
+
+        assert_eq!(m3u_item.get_input_stream_id().as_deref(), Some("legacy-alpha"));
+        assert_eq!(xtream_item.get_input_stream_id().as_deref(), Some("80510"));
+        xtream_item.provider_id = 0;
+        xtream_item.url = "http://provider.example/live/channel.ts".intern();
+        assert_eq!(xtream_item.get_input_stream_id(), None);
+
+        let mut legacy_common_item = PlaylistItem::from(&xtream_item);
+        assert!(legacy_common_item.header.id.is_empty());
+        assert_eq!(legacy_common_item.get_input_stream_id(), None);
+        legacy_common_item.header.id = "target-mapped-id".intern();
+        let rematerialized_m3u_item = M3uPlaylistItem::from(&legacy_common_item);
+        let rematerialized_xtream_item = XtreamPlaylistItem::from(&legacy_common_item);
+        assert_eq!(legacy_common_item.header.id.as_ref(), "target-mapped-id");
+        assert_eq!(legacy_common_item.get_input_stream_id(), None);
+        assert!(rematerialized_m3u_item.provider_id.is_empty());
+        assert_eq!(rematerialized_m3u_item.get_input_stream_id(), None);
+        assert_eq!(rematerialized_xtream_item.provider_id, 0);
+        assert_eq!(rematerialized_xtream_item.get_input_stream_id(), None);
+
+        xtream_item.input_stream_id = "explicit-origin-alpha".intern();
+        assert_eq!(xtream_item.get_input_stream_id().as_deref(), Some("explicit-origin-alpha"));
+        let identified_common_item = PlaylistItem::from(&xtream_item);
+        assert_eq!(identified_common_item.header.input_stream_id.as_ref(), "explicit-origin-alpha");
+        assert_eq!(identified_common_item.get_input_stream_id().as_deref(), Some("explicit-origin-alpha"));
+
+        let identified_m3u_item = M3uPlaylistItem::from(&identified_common_item);
+        let identified_xtream_item = XtreamPlaylistItem::from(&identified_common_item);
+        assert_eq!(identified_m3u_item.input_stream_id.as_ref(), "explicit-origin-alpha");
+        assert_eq!(identified_m3u_item.get_input_stream_id().as_deref(), Some("explicit-origin-alpha"));
+        assert_eq!(identified_xtream_item.provider_id, 0);
+        assert_eq!(identified_xtream_item.input_stream_id.as_ref(), "explicit-origin-alpha");
+        assert_eq!(identified_xtream_item.get_input_stream_id().as_deref(), Some("explicit-origin-alpha"));
     }
 
     #[test]
@@ -1689,6 +1875,7 @@ mod tests {
         let item = M3uPlaylistItem {
             virtual_id: 0,
             provider_id: "prov1".intern(),
+            input_stream_id: "prov1".intern(),
             name: "Test Channel".intern(),
             chno: 0,
             logo: "".intern(),
@@ -1716,10 +1903,45 @@ mod tests {
     }
 
     #[test]
+    fn m3u_to_m3u_preserves_mixed_case_tvg_id() {
+        // EPG matching is case-insensitive, so ids are no longer lowercased when parsed.
+        // The M3U tvg-id output must preserve the channel's original source case.
+        let item = M3uPlaylistItem {
+            virtual_id: 0,
+            provider_id: "prov1".intern(),
+            input_stream_id: "prov1".intern(),
+            name: "Test Channel".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Test Group".intern(),
+            title: "Test Title".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/stream".intern(),
+            epg_channel_id: Some("CNN.us".intern()),
+            input_name: "test".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
+            source_ordinal: 0,
+            additional_properties: None,
+        };
+
+        let output = item.to_m3u(None, false);
+        assert!(output.contains(r#"tvg-id="CNN.us""#), "M3U tvg-id must preserve original case, got: {output}");
+    }
+
+    #[test]
     fn m3u_to_m3u_emits_tvg_chno_from_chno() {
         let item = M3uPlaylistItem {
             virtual_id: 0,
             provider_id: "prov1".intern(),
+            input_stream_id: "prov1".intern(),
             name: "Test Channel".intern(),
             chno: 42,
             logo: "".intern(),
@@ -1751,6 +1973,7 @@ mod tests {
         let item = M3uPlaylistItem {
             virtual_id: 0,
             provider_id: "prov1".intern(),
+            input_stream_id: "prov1".intern(),
             name: "Test Channel".intern(),
             chno: 0,
             logo: "".intern(),
@@ -1782,6 +2005,7 @@ mod tests {
         let item = M3uPlaylistItem {
             virtual_id: 0,
             provider_id: "prov1".intern(),
+            input_stream_id: "prov1".intern(),
             name: "Test Channel".intern(),
             chno: 0,
             logo: "".intern(),
@@ -1829,6 +2053,7 @@ mod tests {
         let item = M3uPlaylistItem {
             virtual_id: 0,
             provider_id: "prov1".intern(),
+            input_stream_id: "prov1".intern(),
             name: "Test Channel".intern(),
             chno: 0,
             logo: "".intern(),

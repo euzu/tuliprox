@@ -18,6 +18,25 @@ macro_rules! config_field_optional {
             </div>
         }
     };
+    ($config:expr, $label:expr, $field:ident, $hint:expr) => {
+        html! {
+            <div class="tp__form-field tp__form-field__text">
+                <$crate::app::components::FieldLabel
+                    label={$label.to_string()}
+                    field_id={$crate::app::components::dto_field_id(&$config, stringify!($field))}
+                    hint_key={$hint}
+                />
+                <span class="tp__form-field__value">
+                {
+                    match $config.$field.as_ref() {
+                        Some(value) => html! { &value },
+                        None => Html::default(),
+                    }
+                 }
+                </span>
+            </div>
+        }
+    };
 }
 
 #[macro_export]
@@ -236,6 +255,38 @@ $crate::edit_field_text_option!(@inner $instance, $label, $field, $action, $hidd
                             None
                         } else {
                             Some(value)
+                        }));
+                    })}
+                />
+            </div>
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! edit_field_byte_size_option {
+    ($instance:expr, $label:expr, $field:ident, $action:path) => {
+$crate::edit_field_byte_size_option!(@inner $instance, $label, $field, $action, false)
+    };
+    ($instance:expr, $label:expr, $field:ident, $action:path, $hidden:expr) => {
+$crate::edit_field_byte_size_option!(@inner $instance, $label, $field, $action, $hidden)
+    };
+    (@inner $instance:expr, $label:expr, $field:ident, $action:path, $hidden:expr) => {{
+        let instance = $instance.clone();
+        html! {
+            <div class="tp__form-field tp__form-field__text">
+                <$crate::app::components::input::Input
+                    label={$label}
+                    hidden={$hidden}
+                    name={stringify!($field)}
+                    field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
+                    autocomplete={true}
+                    value={instance.form.$field.as_ref().map_or_else(String::new, |v|v.to_string())}
+                    on_change={Callback::from(move |value: String| {
+                        instance.dispatch($action(if value.is_empty() {
+                            None
+                        } else {
+                            Some(shared::model::ByteSize::new(value))
                         }));
                     })}
                 />

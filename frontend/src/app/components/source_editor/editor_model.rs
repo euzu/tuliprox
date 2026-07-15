@@ -18,6 +18,7 @@ pub enum BlockType {
     InputJellyfin,
     InputPlex,
     InputStalker,
+    InputStaged,
     Target,
     OutputM3u,
     OutputXtream,
@@ -34,6 +35,7 @@ impl BlockType {
     pub const INPUT_JELLYFIN: &'static str = "InputJellyfin";
     pub const INPUT_PLEX: &'static str = "InputPlex";
     pub const INPUT_STALKER: &'static str = "InputStalker";
+    pub const INPUT_STAGED: &'static str = "InputStaged";
     pub const TARGET: &'static str = "Target";
     pub const OUTPUT_M3U: &'static str = "OutputM3u";
     pub const OUTPUT_XTREAM: &'static str = "OutputXtream";
@@ -50,6 +52,7 @@ impl BlockType {
                 | Self::InputJellyfin
                 | Self::InputPlex
                 | Self::InputStalker
+                | Self::InputStaged
         )
     }
 
@@ -58,6 +61,14 @@ impl BlockType {
     pub fn is_output(&self) -> bool {
         matches!(self, Self::OutputXtream | Self::OutputM3u | Self::OutputHdHomeRun | Self::OutputStrm)
     }
+
+    pub fn is_chainable_input(&self) -> bool { matches!(self, Self::InputM3u | Self::InputXtream) }
+
+    /// Left port — block can receive a connection.
+    pub fn has_input_port(&self) -> bool { self.is_target() || self.is_output() || self.is_chainable_input() }
+
+    /// Right port — block can be the source of a connection.
+    pub fn has_output_port(&self) -> bool { self.is_target() || self.is_input() }
 }
 
 // Convert from String to BlockType
@@ -71,6 +82,7 @@ impl From<&str> for BlockType {
             BlockType::INPUT_JELLYFIN => BlockType::InputJellyfin,
             BlockType::INPUT_PLEX => BlockType::InputPlex,
             BlockType::INPUT_STALKER => BlockType::InputStalker,
+            BlockType::INPUT_STAGED => BlockType::InputStaged,
             BlockType::TARGET => BlockType::Target,
             BlockType::OUTPUT_M3U => BlockType::OutputM3u,
             BlockType::OUTPUT_XTREAM => BlockType::OutputXtream,
@@ -95,6 +107,7 @@ impl From<InputType> for BlockType {
             InputType::Jellyfin => BlockType::InputJellyfin,
             InputType::Plex => BlockType::InputPlex,
             InputType::Stalker | InputType::StalkerBatch => BlockType::InputStalker,
+            InputType::Staged => BlockType::InputStaged,
         }
     }
 }
@@ -110,6 +123,7 @@ impl fmt::Display for BlockType {
             BlockType::InputJellyfin => Self::INPUT_JELLYFIN,
             BlockType::InputPlex => Self::INPUT_PLEX,
             BlockType::InputStalker => Self::INPUT_STALKER,
+            BlockType::InputStaged => Self::INPUT_STAGED,
             BlockType::Target => Self::TARGET,
             BlockType::OutputM3u => Self::OUTPUT_M3U,
             BlockType::OutputXtream => Self::OUTPUT_XTREAM,

@@ -1,22 +1,40 @@
-use crate::model::{
-    Epg, TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_TAG_CHANNEL, EPG_TAG_DISPLAY_NAME,
-    EPG_TAG_ICON, EPG_TAG_PROGRAMME, EPG_TAG_TV,
+use crate::{
+    model::{
+        Epg, EpgSmartMatchConfig, IcsDummyPolicy, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
+        TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_TAG_CHANNEL, EPG_TAG_DISPLAY_NAME,
+        EPG_TAG_ICON, EPG_TAG_PROGRAMME, EPG_TAG_TV,
+    },
+    processing::{
+        parser::ics,
+        processor::EpgIdCache,
+    },
+    utils::{
+        async_file_reader, compressed_file_reader_async::CompressedFileReaderAsync, parse_xmltv_time,
+        with_folded_epg_id,
+    },
 };
-use crate::model::{EpgSmartMatchConfig, PersistedEpgSource};
-use crate::processing::processor::EpgIdCache;
-use crate::utils::compressed_file_reader_async::CompressedFileReaderAsync;
-use crate::utils::{async_file_reader, parse_xmltv_time};
 use log::error;
 use quick_xml::events::{BytesStart, BytesText, Event};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use shared::concat_string;
-use shared::model::{EpgChannel, EpgNamePrefix, EpgProgramme};
-use shared::utils::{deunicode_string, Internable, CONSTANTS};
-use std::borrow::Cow;
-use std::cmp::min;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use shared::{
+    concat_string,
+    model::{EpgChannel, EpgNamePrefix, EpgProgramme},
+    utils::{deunicode_string, Internable, CONSTANTS},
+};
+use std::{
+    borrow::Cow,
+    cmp::min,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::io::AsyncRead;
+
+struct IcsPersistedSource<'a> {
+    channel_id: &'a Arc<str>,
+    channel_title: Option<&'a Arc<str>>,
+    match_names: &'a [Arc<str>],
+    config: &'a IcsEpgSourceConfig,
+}
 
 /// Splits a string at the first delimiter if the prefix matches a known country code.
 ///
@@ -52,7 +70,6 @@ fn split_by_first_match<'a>(input: &'a str, delimiters: &[char]) -> (Option<&'a 
     (None, input)
 }
 
-
 fn name_prefix<'a>(name: &'a str, smart_config: &EpgSmartMatchConfig) -> (&'a str, Option<&'a str>) {
     if smart_config.name_prefix != EpgNamePrefix::Ignore {
         let (prefix, suffix) = split_by_first_match(name, &smart_config.name_prefix_separator);
@@ -78,32 +95,23 @@ pub fn normalize_channel_name(name: &str, normalize_config: &EpgSmartMatchConfig
     // Remove all non-alphanumeric characters (except dashes and underscores).
     let cleaned_name = normalize_config.normalize_regex.replace_all(channel_name, "");
     // Remove terms like resolution
-    let cleaned_name = normalize_config.strip.iter().fold(cleaned_name.to_string(), |acc, term| {
-        acc.replace(term, "")
-    });
+    let cleaned_name = normalize_config.strip.iter().fold(cleaned_name.to_string(), |acc, term| acc.replace(term, ""));
     match suffix {
         None => cleaned_name,
-        Some(sfx) => {
-            match &normalize_config.name_prefix {
-                EpgNamePrefix::Ignore => cleaned_name,
-                EpgNamePrefix::Suffix(sep) => combine(sep, &cleaned_name, sfx),
-                EpgNamePrefix::Prefix(sep) => combine(sep, sfx, &cleaned_name),
-            }
-        }
+        Some(sfx) => match &normalize_config.name_prefix {
+            EpgNamePrefix::Ignore => cleaned_name,
+            EpgNamePrefix::Suffix(sep) => combine(sep, &cleaned_name, sfx),
+            EpgNamePrefix::Prefix(sep) => combine(sep, sfx, &cleaned_name),
+        },
     }
 }
 
-
 impl TVGuide {
-    pub fn merge(epgs: Vec<Epg>) -> Option<Epg> {
-        flatten_tvguide(epgs)
-    }
+    pub fn merge(epgs: Vec<Epg>) -> Option<Epg> { flatten_tvguide(epgs) }
 
     fn prepare_tag(id_cache: &mut EpgIdCache, tag: &mut XmlTag, smart_match: bool) {
         {
-            let maybe_epg_id = {
-                tag.get_attribute_value(&EPG_ATTRIB_ID.intern()).cloned()
-            };
+            let maybe_epg_id = { tag.get_attribute_value(&EPG_ATTRIB_ID.intern()).cloned() };
             if let Some(epg_id) = maybe_epg_id {
                 tag.normalized_epg_ids
                     .get_or_insert_with(Vec::new)
@@ -116,11 +124,11 @@ impl TVGuide {
             for child in children {
                 match child.name.as_ref() {
                     EPG_TAG_DISPLAY_NAME if smart_match => {
-                            if let Some(name) = &child.value {
-                                tag.normalized_epg_ids
-                                    .get_or_insert_with(Vec::new)
-                                    .push(normalize_channel_name(name, &id_cache.smart_match_config).intern());
-                            }
+                        if let Some(name) = &child.value {
+                            tag.normalized_epg_ids
+                                .get_or_insert_with(Vec::new)
+                                .push(normalize_channel_name(name, &id_cache.smart_match_config).intern());
+                        }
                     }
                     EPG_TAG_ICON => {
                         if let Some(src) = child.get_attribute_value(&src) {
@@ -138,17 +146,17 @@ impl TVGuide {
     }
 
     fn try_fuzzy_matching(id_cache: &mut EpgIdCache, epg_id: &Arc<str>, tag: &XmlTag, fuzzy_matching: bool) -> bool {
-        let mut matched = tag
-            .normalized_epg_ids
-            .as_ref()
-            .is_some_and(|ids| id_cache.match_with_normalized(epg_id, ids));
+        let mut matched =
+            tag.normalized_epg_ids.as_ref().is_some_and(|ids| id_cache.match_with_normalized(epg_id, ids));
         if !matched && fuzzy_matching {
             let (fuzzy_matched, matched_normalized_name) = Self::find_best_fuzzy_match(id_cache, tag);
             if fuzzy_matched {
                 if let Some(key) = matched_normalized_name {
                     id_cache.normalized.entry(key).and_modify(|entry| {
                         entry.replace(epg_id.clone());
-                        id_cache.channel_epg_id.insert(epg_id.clone());
+                        // Inline fold (mirrors `EpgIdCache::insert_channel_epg_id`); a
+                        // `&mut self` call would break the disjoint field capture here.
+                        with_folded_epg_id(epg_id, |folded| id_cache.channel_epg_id.insert(folded.intern()));
                         matched = true;
                     });
                 }
@@ -182,7 +190,9 @@ impl TVGuide {
         tag_title: &Arc<str>,
         tag_desc: &Arc<str>,
     ) -> Option<EpgProgramme> {
-        let Some((Some(start), Some(stop))) = tag.attributes.as_ref().map(|a| (a.get(start_attrib), a.get(stop_attrib))) else {
+        let Some((Some(start), Some(stop))) =
+            tag.attributes.as_ref().map(|a| (a.get(start_attrib), a.get(stop_attrib)))
+        else {
             error!("Missing start or stop attribute in programme tag, skipping");
             return None;
         };
@@ -206,14 +216,7 @@ impl TVGuide {
 
         let catchup_id = tag.attributes.as_ref().and_then(|attributes| attributes.get(catchup_id_attrib)).cloned();
 
-        Some(EpgProgramme::new_all(
-            start_time,
-            stop_time,
-            Arc::clone(epg_id),
-            title,
-            desc,
-            catchup_id,
-        ))
+        Some(EpgProgramme::new_all(start_time, stop_time, Arc::clone(epg_id), title, desc, catchup_id))
     }
 
     /// Finds the best fuzzy match for a channel's normalized EPG ID using phonetic encoding and Jaro-Winkler similarity.
@@ -243,10 +246,8 @@ impl TVGuide {
         };
 
         // 1) Precalculation: (tag_normalized, tag_code)
-        let pre: Vec<(Arc<str>, Arc<str>)> = normalized_epg_ids
-            .iter()
-            .map(|tn| (tn.clone(), id_cache.phonetic(tn)))
-            .collect();
+        let pre: Vec<(Arc<str>, Arc<str>)> =
+            normalized_epg_ids.iter().map(|tn| (tn.clone(), id_cache.phonetic(tn))).collect();
 
         // 2) Early exit if match >= best_match_threshold
         for (tag_normalized, tag_code) in &pre {
@@ -327,22 +328,25 @@ impl TVGuide {
                 let mut filter_tags = |mut tag: XmlTag| {
                     match tag.name.as_ref() {
                         EPG_TAG_CHANNEL => {
-                            let tag_epg_id = tag.get_attribute_value(&epg_attrib_id).map_or_else(|| "".intern(), Internable::intern);
+                            let tag_epg_id =
+                                tag.get_attribute_value(&epg_attrib_id).map_or_else(|| "".intern(), Internable::intern);
                             if tag_epg_id.is_empty() {
                                 return;
                             }
 
                             Self::prepare_tag(id_cache, &mut tag, smart_match);
+                            // Case-insensitive (ASCII) membership: fold the guide id for the
+                            // lookup only; `tag_epg_id` keeps its original case for output.
                             let add_channel = if smart_match {
-                                id_cache.channel_epg_id.contains(&tag_epg_id)
+                                id_cache.contains_channel_epg_id(&tag_epg_id)
                                     || Self::try_fuzzy_matching(id_cache, &tag_epg_id, &tag, fuzzy_matching)
                             } else {
-                                id_cache.channel_epg_id.contains(&tag_epg_id)
+                                id_cache.contains_channel_epg_id(&tag_epg_id)
                             };
 
                             if add_channel {
-                                source_processed.insert(Arc::clone(&tag_epg_id));
-                                id_cache.processed.insert(Arc::clone(&tag_epg_id));
+                                with_folded_epg_id(&tag_epg_id, |folded| source_processed.insert(folded.intern()));
+                                id_cache.insert_processed_epg_id(&tag_epg_id);
                                 accumulator.upsert_channel(
                                     epg_source.priority,
                                     source_order,
@@ -359,18 +363,16 @@ impl TVGuide {
                         }
                         EPG_TAG_PROGRAMME => {
                             if let Some(epg_id) = tag.get_attribute_value(&epg_attrib_channel) {
-                                if source_processed.contains(epg_id) {
-                                    if let Some(programme) =
-                                        Self::extract_programme(
-                                            &tag,
-                                            epg_id,
-                                            &start_attrib,
-                                            &stop_attrib,
-                                            &catchup_id_attrib,
-                                            &tag_title,
-                                            &tag_desc,
-                                        )
-                                    {
+                                if with_folded_epg_id(epg_id, |folded| source_processed.contains(folded)) {
+                                    if let Some(programme) = Self::extract_programme(
+                                        &tag,
+                                        epg_id,
+                                        &start_attrib,
+                                        &stop_attrib,
+                                        &catchup_id_attrib,
+                                        &tag_title,
+                                        &tag_desc,
+                                    ) {
                                         accumulator.push_programme(epg_source.priority, source_order, programme);
                                     }
                                 }
@@ -393,6 +395,64 @@ impl TVGuide {
         }
     }
 
+    async fn process_ics_file(
+        id_cache: &mut EpgIdCache,
+        epg_source: &PersistedEpgSource,
+        source_order: usize,
+        accumulator: &mut EpgMergeAccumulator,
+        source: IcsPersistedSource<'_>,
+    ) -> bool {
+        let IcsPersistedSource { channel_id, channel_title, match_names, config } = source;
+        let mut candidates = Vec::with_capacity(2 + match_names.len());
+        candidates.push(channel_id.to_string());
+        if let Some(title) = channel_title {
+            candidates.push(title.to_string());
+        }
+        candidates.extend(match_names.iter().map(ToString::to_string));
+        let normalized_candidates = id_cache.normalize_candidates(candidates);
+
+        let add_channel = if id_cache.smart_match_enabled {
+            id_cache.contains_channel_epg_id(channel_id)
+                || id_cache.match_epg_channel_candidates(channel_id, &normalized_candidates)
+        } else {
+            id_cache.contains_channel_epg_id(channel_id)
+        };
+
+        if !add_channel {
+            return false;
+        }
+
+        match ics::parse_ics_file_to_channel(
+            &epg_source.file_path,
+            Arc::clone(channel_id),
+            channel_title.cloned(),
+            config,
+        )
+        .await
+        {
+            Ok(channel) => {
+                id_cache.insert_processed_epg_id(channel_id);
+                accumulator.add_channel_with_programmes(
+                    epg_source.priority,
+                    source_order,
+                    epg_source.logo_override,
+                    channel,
+                );
+                accumulator.register_dummy_policy(
+                    channel_id,
+                    epg_source.priority,
+                    source_order,
+                    IcsDummyPolicy { timezone: config.timezone.clone(), config: config.dummy.clone() },
+                );
+                true
+            }
+            Err(err) => {
+                log::warn!("Failed to process ICS EPG file {}: {err}", epg_source.file_path.display());
+                false
+            }
+        }
+    }
+
     pub async fn filter(&self, id_cache: &mut EpgIdCache) -> Option<Vec<Epg>> {
         self.filter_merged(id_cache).await.map(|epg| vec![epg])
     }
@@ -410,7 +470,30 @@ impl TVGuide {
         }
         let mut accumulator = EpgMergeAccumulator::new();
         for (source_order, epg_source) in self.get_epg_sources().iter().enumerate() {
-            Self::process_epg_file(id_cache, epg_source, source_order, &mut accumulator).await;
+            let _source_read_lock = match self.get_file_locks() {
+                Some(file_locks) => Some(file_locks.read_lock(&epg_source.file_path).await),
+                None => None,
+            };
+            match &epg_source.kind {
+                PersistedEpgSourceKind::Xmltv => {
+                    Self::process_epg_file(id_cache, epg_source, source_order, &mut accumulator).await;
+                }
+                PersistedEpgSourceKind::Ics { channel_id, channel_title, match_names, config } => {
+                    Self::process_ics_file(
+                        id_cache,
+                        epg_source,
+                        source_order,
+                        &mut accumulator,
+                        IcsPersistedSource {
+                            channel_id,
+                            channel_title: channel_title.as_ref(),
+                            match_names,
+                            config: config.as_ref(),
+                        },
+                    )
+                    .await;
+                }
+            }
         }
         accumulator.finish_epg_with_icon_overrides()
     }
@@ -424,7 +507,7 @@ where
     let name_raw = String::from_utf8_lossy(binding.as_ref());
     let name = name_raw.intern();
     let tag_type = get_tag_type(&name);
-    let attributes = collect_tag_attributes(e, tag_type);
+    let attributes = collect_tag_attributes(e);
     let attribs = if attributes.is_empty() { None } else { Some(attributes) };
     let tag = XmlTag::new(name, attribs);
 
@@ -520,19 +603,7 @@ enum XmlTagType {
 
 impl XmlTagType {
     #[inline]
-    pub(crate) fn is_tv(self) -> bool {
-        self == XmlTagType::Tv
-    }
-
-    #[inline]
-    pub(crate) fn is_channel(self) -> bool {
-        self == XmlTagType::Channel
-    }
-
-    #[inline]
-    pub(crate) fn is_program(self) -> bool {
-        self == XmlTagType::Programme
-    }
+    pub(crate) fn is_tv(self) -> bool { self == XmlTagType::Tv }
 }
 
 fn get_tag_type(name: &str) -> XmlTagType {
@@ -540,12 +611,14 @@ fn get_tag_type(name: &str) -> XmlTagType {
         EPG_TAG_TV => XmlTagType::Tv,
         EPG_TAG_CHANNEL => XmlTagType::Channel,
         EPG_TAG_PROGRAMME => XmlTagType::Programme,
-        _ => XmlTagType::Ignored
+        _ => XmlTagType::Ignored,
     }
 }
 
-fn collect_tag_attributes(e: &BytesStart, tag_type: XmlTagType) -> HashMap<Arc<str>, Arc<str>> {
-    let attributes = e.attributes().filter_map(Result::ok)
+fn collect_tag_attributes(e: &BytesStart) -> HashMap<Arc<str>, Arc<str>> {
+    let attributes = e
+        .attributes()
+        .filter_map(Result::ok)
         .filter_map(|a| {
             let key_binding = a.key;
             let key_raw = String::from_utf8_lossy(key_binding.as_ref());
@@ -553,15 +626,17 @@ fn collect_tag_attributes(e: &BytesStart, tag_type: XmlTagType) -> HashMap<Arc<s
             if let Ok(value) = a.unescape_value().as_ref() {
                 if value.is_empty() {
                     None
-                } else if (tag_type.is_channel() && key.as_ref() == EPG_ATTRIB_ID) || (tag_type.is_program() && key.as_ref() == EPG_ATTRIB_CHANNEL) {
-                    Some((key, value.to_lowercase().intern()))
                 } else {
+                    // Ids are no longer lowercased when parsed; EPG matching folds case
+                    // at the comparison instead, so the guide's original-case <channel id>
+                    // and <programme channel> are preserved in the output.
                     Some((key, value.intern()))
                 }
             } else {
                 None
             }
-        }).collect::<HashMap<Arc<str>, Arc<str>>>();
+        })
+        .collect::<HashMap<Arc<str>, Arc<str>>>();
     attributes
 }
 
@@ -570,6 +645,22 @@ struct PreferredAttributes {
     priority: i16,
     source_order: usize,
     attributes: HashMap<Arc<str>, Arc<str>>,
+}
+
+#[derive(Debug)]
+struct PreferredDummyPolicy {
+    priority: i16,
+    source_order: usize,
+    policy: IcsDummyPolicy,
+}
+
+/// Carries the source rank required to select a preview dummy policy exactly like the main EPG merge.
+#[derive(Debug)]
+pub(crate) struct EpgDummyPolicySource {
+    pub priority: i16,
+    pub source_order: usize,
+    pub channel_id: Arc<str>,
+    pub policy: IcsDummyPolicy,
 }
 
 type FinishedEpgChannels = (Option<HashMap<Arc<str>, Arc<str>>>, Vec<EpgChannel>);
@@ -597,6 +688,7 @@ struct ChannelMergeAcc {
 struct EpgMergeAccumulator {
     attributes: Option<PreferredAttributes>,
     channels: HashMap<Arc<str>, ChannelMergeAcc>,
+    dummy_policies: HashMap<Arc<str>, PreferredDummyPolicy>,
 }
 
 impl EpgMergeAccumulator {
@@ -621,7 +713,8 @@ impl EpgMergeAccumulator {
     }
 
     fn upsert_channel(&mut self, priority: i16, source_order: usize, logo_override: bool, mut channel: EpgChannel) {
-        match self.channels.entry(Arc::clone(&channel.id)) {
+        let channel_key = with_folded_epg_id(&channel.id, |folded| folded.intern());
+        match self.channels.entry(channel_key) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 let acc = entry.get_mut();
                 acc.needs_programme_merge = true;
@@ -665,10 +758,32 @@ impl EpgMergeAccumulator {
     }
 
     fn push_programme(&mut self, priority: i16, source_order: usize, programme: EpgProgramme) {
-        if let Some(channel) = self.channels.get_mut(programme.get_transient_channel_id()) {
+        if let Some(channel) =
+            with_folded_epg_id(programme.get_transient_channel_id(), |folded| self.channels.get_mut(folded))
+        {
             channel.programmes.push(ProgrammeMergeEntry { priority, source_order, programme });
         } else {
             error!("Channel {} not found in EPG, dangling programme", programme.get_transient_channel_id());
+        }
+    }
+
+    fn register_dummy_policy(
+        &mut self,
+        channel_id: &Arc<str>,
+        priority: i16,
+        source_order: usize,
+        policy: IcsDummyPolicy,
+    ) {
+        if !policy.config.enabled {
+            return;
+        }
+        let key = with_folded_epg_id(channel_id, |folded| folded.intern());
+        let replace = self
+            .dummy_policies
+            .get(&key)
+            .is_none_or(|current| (priority, source_order) < (current.priority, current.source_order));
+        if replace {
+            self.dummy_policies.insert(key, PreferredDummyPolicy { priority, source_order, policy });
         }
     }
 
@@ -680,14 +795,17 @@ impl EpgMergeAccumulator {
         mut channel: EpgChannel,
     ) {
         let programmes = std::mem::take(&mut channel.programmes);
-        let channel_id = Arc::clone(&channel.id);
+        let channel_key = with_folded_epg_id(&channel.id, |folded| folded.intern());
         self.upsert_channel(priority, source_order, logo_override, channel);
-        if let Some(acc) = self.channels.get_mut(&channel_id) {
+        if let Some(acc) = self.channels.get_mut(&channel_key) {
             if !acc.programmes.is_empty() {
                 acc.needs_programme_merge = true;
             }
-            acc.programmes
-                .extend(programmes.into_iter().map(|programme| ProgrammeMergeEntry { priority, source_order, programme }));
+            acc.programmes.extend(programmes.into_iter().map(|programme| ProgrammeMergeEntry {
+                priority,
+                source_order,
+                programme,
+            }));
         }
     }
 
@@ -720,7 +838,7 @@ impl EpgMergeAccumulator {
     }
 
     fn finish_epg_with_icon_overrides(self) -> Option<MergedEpgWithIconOverrides> {
-        let EpgMergeAccumulator { attributes, channels } = self;
+        let EpgMergeAccumulator { attributes, channels, dummy_policies } = self;
         let mut channels = channels.into_values().collect::<Vec<_>>();
         if channels.is_empty() {
             return None;
@@ -729,6 +847,8 @@ impl EpgMergeAccumulator {
         for acc in &mut channels {
             normalize_channel_programmes(acc);
         }
+
+        apply_dummy_policies(&mut channels, &dummy_policies);
 
         channels.sort_by(|left, right| left.channel.id.cmp(&right.channel.id));
         let icon_override_channels = channels
@@ -750,6 +870,25 @@ impl EpgMergeAccumulator {
     }
 }
 
+fn apply_dummy_policies(channels: &mut [ChannelMergeAcc], dummy_policies: &HashMap<Arc<str>, PreferredDummyPolicy>) {
+    let now = chrono::Utc::now();
+    for acc in channels {
+        let key = with_folded_epg_id(&acc.channel.id, |folded| folded.intern());
+        if let Some(preferred) = dummy_policies.get(&key) {
+            let policy = &preferred.policy;
+            if let Err(err) = ics::fill_dummy_gaps(
+                &mut acc.channel.programmes,
+                &acc.channel.id,
+                &policy.timezone,
+                &policy.config,
+                now,
+            ) {
+                log::warn!("Failed to apply ICS dummy policy for {}: {err}", acc.channel.id);
+            }
+        }
+    }
+}
+
 fn backfill_programme_metadata(existing: &mut EpgProgramme, incoming: EpgProgramme) {
     if existing.title.is_none() {
         existing.title = incoming.title;
@@ -765,14 +904,8 @@ fn backfill_programme_metadata(existing: &mut EpgProgramme, incoming: EpgProgram
 fn normalize_channel_programmes(acc: &mut ChannelMergeAcc) {
     // Always normalize programme order and dedupe, even for single-source channels.
     // This preserves backfill behavior for duplicate entries within the same source.
-    acc.programmes.sort_by_key(|entry| {
-        (
-            entry.programme.start,
-            entry.programme.stop,
-            entry.priority,
-            entry.source_order,
-        )
-    });
+    acc.programmes
+        .sort_by_key(|entry| (entry.programme.start, entry.programme.stop, entry.priority, entry.source_order));
 
     let programme_entries = std::mem::take(&mut acc.programmes);
     let mut merged_programmes = Vec::with_capacity(programme_entries.len());
@@ -794,6 +927,7 @@ fn normalize_channel_programmes(acc: &mut ChannelMergeAcc) {
     acc.channel.programmes = merged_programmes;
 }
 
+#[cfg(test)]
 pub(crate) fn merge_epg_channels_by_priority(channels_by_source: Vec<(i16, Vec<EpgChannel>)>) -> Vec<EpgChannel> {
     let mut accumulator = EpgMergeAccumulator::new();
     for (source_order, (priority, channels)) in channels_by_source.into_iter().enumerate() {
@@ -802,6 +936,25 @@ pub(crate) fn merge_epg_channels_by_priority(channels_by_source: Vec<(i16, Vec<E
         }
     }
     accumulator.finish_channels().map(|(_, channels)| channels).unwrap_or_default()
+}
+
+pub(crate) fn merge_epg_channels_by_priority_with_dummy_policies(
+    channels_by_source: Vec<(i16, Vec<EpgChannel>)>,
+    dummy_policies: Vec<EpgDummyPolicySource>,
+) -> Vec<EpgChannel> {
+    let mut accumulator = EpgMergeAccumulator::new();
+    for (source_order, (priority, channels)) in channels_by_source.into_iter().enumerate() {
+        for channel in channels {
+            accumulator.add_channel_with_programmes(priority, source_order, false, channel);
+        }
+    }
+    for source in dummy_policies {
+        accumulator.register_dummy_policy(&source.channel_id, source.priority, source.source_order, source.policy);
+    }
+    accumulator
+        .finish_epg_with_icon_overrides()
+        .map(|(epg, _)| epg.children.into_iter().map(Arc::unwrap_or_clone).collect())
+        .unwrap_or_default()
 }
 
 pub fn flatten_tvguide(tv_guides: Vec<Epg>) -> Option<Epg> {
@@ -822,15 +975,19 @@ pub fn flatten_tvguide(tv_guides: Vec<Epg>) -> Option<Epg> {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{Epg, EpgSmartMatchConfig, PersistedEpgSource, TVGuide};
-    use crate::processing::parser::xmltv::{
-        flatten_tvguide, merge_epg_channels_by_priority, normalize_channel_name, EpgMergeAccumulator,
+    use crate::{
+        model::{
+            Epg, EpgSmartMatchConfig, IcsDummyConfig, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
+            TVGuide,
+        },
+        processing::parser::xmltv::{
+            flatten_tvguide, merge_epg_channels_by_priority, merge_epg_channels_by_priority_with_dummy_policies,
+            normalize_channel_name, EpgDummyPolicySource, EpgMergeAccumulator,
+        },
+        utils::FileLockManager,
     };
     use shared::model::{EpgChannel, EpgProgramme};
-    use std::collections::HashSet;
-    use std::fs;
-    use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::{collections::HashSet, fs, path::PathBuf, sync::Arc};
     use tempfile::tempdir;
 
     /// Run an async test body on a freshly-created multi-threaded tokio
@@ -841,6 +998,30 @@ mod tests {
         F: std::future::Future<Output = ()>,
     {
         tokio::runtime::Runtime::new().unwrap().block_on(future);
+    }
+
+    fn xmltv_source(file_path: PathBuf, priority: i16, logo_override: bool) -> PersistedEpgSource {
+        PersistedEpgSource { file_path, priority, logo_override, kind: PersistedEpgSourceKind::Xmltv }
+    }
+
+    fn dummy_policy_source(priority: i16, source_order: usize, title: &str) -> EpgDummyPolicySource {
+        EpgDummyPolicySource {
+            priority,
+            source_order,
+            channel_id: "f1.calendar".intern(),
+            policy: crate::model::IcsDummyPolicy {
+                timezone: "UTC".to_string(),
+                config: IcsDummyConfig {
+                    enabled: true,
+                    title: title.to_string(),
+                    description: String::new(),
+                    days_past: 0,
+                    days_future: 0,
+                    block_hours: 24,
+                    min_gap_minutes: 1,
+                },
+            },
+        }
     }
 
     #[test]
@@ -1100,27 +1281,135 @@ mod tests {
             )
             .unwrap();
 
-            let mut smart_cfg = EpgSmartMatchConfigDto {
-                enabled: true,
-                ..Default::default()
-            };
+            let mut smart_cfg = EpgSmartMatchConfigDto { enabled: true, ..Default::default() };
             smart_cfg.prepare().expect("smart match config");
-            let tv_guide = TVGuide::new(vec![PersistedEpgSource {
-                file_path: epg_path,
-                priority: 0,
-                logo_override: false,
-            }]);
+            let tv_guide = TVGuide::new(vec![xmltv_source(epg_path, 0, false)]);
             let mut id_cache = EpgIdCache::new(Some(&crate::model::EpgConfig {
                 sources: vec![],
                 smart_match: Some(EpgSmartMatchConfig::from(smart_cfg)),
             }));
-            id_cache.channel_epg_id.insert("demo.channel".intern());
+            id_cache.insert_channel_epg_id("demo.channel");
 
             let merged = tv_guide.filter_merged(&mut id_cache).await.expect("merged epg");
 
             assert_eq!(merged.children.len(), 1);
             assert_eq!(merged.children[0].id.as_ref(), "demo.channel");
             assert_eq!(merged.children[0].programmes.len(), 1);
+        });
+    }
+
+    #[test]
+    fn persisted_epg_source_read_uses_shared_file_lock() {
+        run_async_test(async move {
+            let dir = tempdir().expect("temp dir");
+            let epg_path = dir.path().join("locked.xml");
+            fs::write(
+                &epg_path,
+                r#"<tv>
+  <channel id="demo.channel"><display-name>Demo</display-name></channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="demo.channel">
+    <title>Locked read</title>
+  </programme>
+</tv>"#,
+            )
+            .expect("write XMLTV fixture");
+
+            let file_locks = Arc::new(FileLockManager::new());
+            let guide = TVGuide::new(vec![xmltv_source(epg_path.clone(), 0, false)])
+                .with_file_locks(Arc::clone(&file_locks));
+            let mut id_cache = EpgIdCache::new(None);
+            id_cache.insert_channel_epg_id("demo.channel");
+            let write_guard = file_locks.write_lock(&epg_path).await;
+            let filter = guide.filter_merged(&mut id_cache);
+            tokio::pin!(filter);
+
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(25), filter.as_mut()).await.is_err());
+            drop(write_guard);
+
+            let merged = filter.await.expect("EPG parse after write lock release");
+            assert_eq!(merged.children[0].programmes[0].title.as_deref(), Some("Locked read"));
+        });
+    }
+
+    #[test]
+    fn epg_channel_id_match_is_case_insensitive_and_preserves_guide_case() {
+        run_async_test(async move {
+            let dir = tempdir().unwrap();
+            let epg_path = dir.path().join("mixed-case.xml");
+
+            // Guide channel ids are MixedCase and differ in case from the playlist ids.
+            fs::write(
+                &epg_path,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="Sport.Extra1.DE">
+    <display-name>Sport Extra</display-name>
+  </channel>
+  <channel id="CNN.US">
+    <display-name>CNN</display-name>
+  </channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="Sport.Extra1.DE">
+    <title>Match A</title>
+  </programme>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="CNN.US">
+    <title>Match B</title>
+  </programme>
+</tv>"#,
+            )
+            .unwrap();
+
+            let tv_guide = TVGuide::new(vec![xmltv_source(epg_path, 0, false)]);
+            let mut id_cache = EpgIdCache::new(None);
+            // Playlist epg ids arrive in a *different* case than the guide. Both origins
+            // (an Xtream source and a mapper-script literal) go through the same
+            // `insert_channel_epg_id`, which folds the membership key.
+            id_cache.insert_channel_epg_id("sport.EXTRA1.de"); // e.g. from an Xtream source
+            id_cache.insert_channel_epg_id("cnn.us"); // e.g. set by a mapper literal @epg_channel_id = "cnn.us"
+
+            let merged = tv_guide.filter_merged(&mut id_cache).await.expect("merged epg");
+
+            // Both MixedCase guide channels matched despite the case difference.
+            assert_eq!(merged.children.len(), 2);
+            let ids: HashSet<&str> = merged.children.iter().map(|c| c.id.as_ref()).collect();
+            // Emitted <channel id> preserves the guide's ORIGINAL case (not folded).
+            assert!(ids.contains("Sport.Extra1.DE"), "emitted ids: {ids:?}");
+            assert!(ids.contains("CNN.US"), "emitted ids: {ids:?}");
+            for channel in &merged.children {
+                assert_eq!(channel.programmes.len(), 1, "channel {} programmes", channel.id);
+            }
+        });
+    }
+
+    #[test]
+    fn epg_programme_channel_match_is_case_insensitive_within_source() {
+        run_async_test(async move {
+            let dir = tempdir().unwrap();
+            let epg_path = dir.path().join("mixed-case-programme.xml");
+
+            fs::write(
+                &epg_path,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="Demo.Channel">
+    <display-name>Demo</display-name>
+  </channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="demo.channel">
+    <title>Case Variant Programme</title>
+  </programme>
+</tv>"#,
+            )
+            .unwrap();
+
+            let tv_guide = TVGuide::new(vec![xmltv_source(epg_path, 0, false)]);
+            let mut id_cache = EpgIdCache::new(None);
+            id_cache.insert_channel_epg_id("demo.channel");
+
+            let merged = tv_guide.filter_merged(&mut id_cache).await.expect("merged epg");
+
+            assert_eq!(merged.children.len(), 1);
+            assert_eq!(merged.children[0].id.as_ref(), "Demo.Channel");
+            assert_eq!(merged.children[0].programmes.len(), 1);
+            assert_eq!(merged.children[0].programmes[0].get_transient_channel_id().as_ref(), "demo.channel");
         });
     }
 
@@ -1158,16 +1447,13 @@ mod tests {
             )
             .unwrap();
 
-            let tv_guide = TVGuide::new(vec![
-                PersistedEpgSource { file_path: high_path, priority: 0, logo_override: false },
-                PersistedEpgSource { file_path: low_path, priority: 10, logo_override: false },
-            ]);
+            let tv_guide = TVGuide::new(vec![xmltv_source(high_path, 0, false), xmltv_source(low_path, 10, false)]);
             let mut id_cache = EpgIdCache::new(None);
-            id_cache.channel_epg_id.insert("demo.channel".intern());
+            id_cache.insert_channel_epg_id("demo.channel");
 
             let merged = tv_guide.filter_merged(&mut id_cache).await.expect("merged epg");
 
-            assert!(id_cache.processed.contains("demo.channel"));
+            assert!(id_cache.contains_processed_epg_id("demo.channel"));
             assert_eq!(merged.children.len(), 1);
             assert_eq!(merged.children[0].title.as_deref(), Some("High Channel"));
             assert_eq!(merged.children[0].programmes.len(), 2);
@@ -1182,6 +1468,118 @@ mod tests {
         });
     }
 
+    #[test]
+    fn ics_dummy_policy_fills_after_real_programme_merge_without_overwriting_xmltv() {
+        run_async_test(async move {
+            use chrono::{Datelike, TimeZone, Utc};
+
+            let dir = tempdir().unwrap();
+            let xml_path = dir.path().join("guide.xml");
+            let ics_path = dir.path().join("empty.ics");
+            let now = Utc::now();
+            let real_start = Utc.with_ymd_and_hms(now.year(), now.month(), now.day(), 4, 0, 0).single().expect("start");
+            let real_stop = Utc.with_ymd_and_hms(now.year(), now.month(), now.day(), 6, 0, 0).single().expect("stop");
+
+            fs::write(
+                &xml_path,
+                format!(
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="f1.calendar">
+    <display-name>Formula 1</display-name>
+  </channel>
+  <programme start="{start}" stop="{stop}" channel="f1.calendar">
+    <title>Real Show</title>
+  </programme>
+</tv>"#,
+                    start = real_start.format("%Y%m%d%H%M%S %z"),
+                    stop = real_stop.format("%Y%m%d%H%M%S %z"),
+                ),
+            )
+            .unwrap();
+            fs::write(&ics_path, "BEGIN:VCALENDAR\nEND:VCALENDAR\n").unwrap();
+
+            let guide = TVGuide::new(vec![
+                xmltv_source(xml_path, 0, false),
+                PersistedEpgSource {
+                    file_path: ics_path,
+                    priority: 1,
+                    logo_override: false,
+                    kind: PersistedEpgSourceKind::Ics {
+                        channel_id: "f1.calendar".intern(),
+                        channel_title: Some("Formula 1".intern()),
+                        match_names: Vec::new(),
+                        config: Box::new(IcsEpgSourceConfig {
+                            timezone: "UTC".to_string(),
+                            dummy: IcsDummyConfig {
+                                enabled: true,
+                                title: "No programme".to_string(),
+                                description: String::new(),
+                                days_past: 0,
+                                days_future: 0,
+                                block_hours: 4,
+                                min_gap_minutes: 1,
+                            },
+                            ..IcsEpgSourceConfig::default()
+                        }),
+                    },
+                },
+            ]);
+            let mut id_cache = EpgIdCache::new(None);
+            id_cache.insert_channel_epg_id("f1.calendar");
+
+            let merged = guide.filter_merged(&mut id_cache).await.expect("merged");
+            let channel = &merged.children[0];
+            assert_eq!(channel.id.as_ref(), "f1.calendar");
+            assert_eq!(
+                channel.programmes.iter().filter(|programme| programme.title.as_deref() == Some("Real Show")).count(),
+                1
+            );
+            let dummy_programmes = channel
+                .programmes
+                .iter()
+                .filter(|programme| programme.title.as_deref() == Some("No programme"))
+                .collect::<Vec<_>>();
+            assert!(!dummy_programmes.is_empty());
+            for dummy in dummy_programmes {
+                assert!(
+                    dummy.stop <= real_start.timestamp() || dummy.start >= real_stop.timestamp(),
+                    "dummy overlaps real programme: {}-{}",
+                    dummy.start,
+                    dummy.stop
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn dummy_policy_selection_uses_priority_then_source_order() {
+        let channel = || EpgChannel {
+            id: "f1.calendar".intern(),
+            title: Some("Formula 1".intern()),
+            icon: None,
+            programmes: Vec::new(),
+        };
+        let merge = |policies| {
+            merge_epg_channels_by_priority_with_dummy_policies(vec![(0, vec![channel()])], policies)
+                .into_iter()
+                .next()
+                .expect("merged channel")
+        };
+
+        let priority_winner =
+            merge(vec![dummy_policy_source(10, 0, "Low priority"), dummy_policy_source(-10, 1, "High priority")]);
+        assert!(!priority_winner.programmes.is_empty());
+        assert!(priority_winner.programmes.iter().all(|programme| programme.title.as_deref() == Some("High priority")));
+
+        let source_order_winner =
+            merge(vec![dummy_policy_source(0, 2, "Later source"), dummy_policy_source(0, 1, "Earlier source")]);
+        assert!(!source_order_winner.programmes.is_empty());
+        assert!(source_order_winner
+            .programmes
+            .iter()
+            .all(|programme| programme.title.as_deref() == Some("Earlier source")));
+    }
 
     #[ignore = "requires a local XMLTV fixture under /tmp"]
     #[test]
@@ -1191,10 +1589,10 @@ mod tests {
             let file_path = PathBuf::from("/tmp/invalid_epg.xml");
 
             if file_path.exists() {
-                let tv_guide = TVGuide::new(vec![PersistedEpgSource { file_path, priority: 0, logo_override: false }]);
+                let tv_guide = TVGuide::new(vec![xmltv_source(file_path, 0, false)]);
 
                 let mut id_cache = EpgIdCache::new(None);
-                id_cache.channel_epg_id.insert(342u32.intern());
+                id_cache.insert_channel_epg_id("342");
                 //id_cache.collect_epg_id(fp);
 
                 let channel_ids = HashSet::from([342u32.intern()]);
@@ -1208,9 +1606,7 @@ mod tests {
                 }
             }
         };
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(run_test());
+        tokio::runtime::Runtime::new().unwrap().block_on(run_test());
     }
 
     #[test]
@@ -1223,7 +1619,11 @@ mod tests {
     /// // This will assert that various channel names are normalized as expected.
     /// ```
     fn normalize() {
-        let mut epg_smart_cfg_dto = EpgSmartMatchConfigDto { enabled: true, name_prefix: EpgNamePrefix::Suffix(".".to_string()), ..Default::default() };
+        let mut epg_smart_cfg_dto = EpgSmartMatchConfigDto {
+            enabled: true,
+            name_prefix: EpgNamePrefix::Suffix(".".to_string()),
+            ..Default::default()
+        };
         let _ = epg_smart_cfg_dto.prepare();
         let epg_smart_cfg = EpgSmartMatchConfig::from(epg_smart_cfg_dto);
         println!("{epg_smart_cfg:?}");
@@ -1237,8 +1637,10 @@ mod tests {
 
     use crate::processing::processor::EpgIdCache;
     use rphonetic::{Encoder, Metaphone};
-    use shared::model::{EpgNamePrefix, EpgSmartMatchConfigDto};
-    use shared::utils::Internable;
+    use shared::{
+        model::{EpgNamePrefix, EpgSmartMatchConfigDto},
+        utils::Internable,
+    };
 
     #[test]
     /// Demonstrates phonetic encoding (Metaphone) of normalized channel names with various prefixes and suffixes.
@@ -1253,7 +1655,11 @@ mod tests {
     /// ```
     fn test_metaphone() {
         let metaphone = Metaphone::default();
-        let mut epg_smart_cfg_dto = EpgSmartMatchConfigDto { enabled: true, name_prefix: EpgNamePrefix::Suffix(".".to_string()), ..Default::default() };
+        let mut epg_smart_cfg_dto = EpgSmartMatchConfigDto {
+            enabled: true,
+            name_prefix: EpgNamePrefix::Suffix(".".to_string()),
+            ..Default::default()
+        };
         let _ = epg_smart_cfg_dto.prepare();
         let epg_smart_cfg = EpgSmartMatchConfig::from(epg_smart_cfg_dto);
         println!("{epg_smart_cfg:?}");

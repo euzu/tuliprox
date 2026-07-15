@@ -1,4 +1,4 @@
-use crate::app::components::{resolve_field_id, CollapsePanel, FieldLabel};
+use crate::app::components::{resolve_field_id, CollapsePanel, FieldLabel, FieldWrapper};
 use web_sys::{HtmlTextAreaElement, InputEvent, KeyboardEvent};
 use yew::{component, html, use_effect_with, Callback, Html, NodeRef, Properties, TargetCast};
 
@@ -55,13 +55,11 @@ pub fn TextArea(props: &TextAreaProps) -> Html {
         })
     };
 
-    let text_area = html! {
-        <div class="tp__input-wrapper">
-            <textarea id={resolved_field_id.clone()} ref={local_ref} name={props.name.clone()} onkeydown={props.onkeydown.clone()}
-                oninput={handle_oninput} placeholder={props.placeholder.clone()}
-                rows={props.rows.unwrap_or(5).to_string()} value={props.value.clone()}
-            />
-        </div>
+    let textarea_input = html! {
+        <textarea id={resolved_field_id.clone()} ref={local_ref} name={props.name.clone()} onkeydown={props.onkeydown.clone()}
+            oninput={handle_oninput} placeholder={props.placeholder.clone()}
+            rows={props.rows.unwrap_or(5).to_string()} value={props.value.clone()}
+        />
     };
 
     if props.collapse_on_empty {
@@ -80,26 +78,16 @@ pub fn TextArea(props: &TextAreaProps) -> Html {
                 title_content={title_content}
                 expanded={!props.value.is_empty()}
             >
-                <div class="tp__input">
-                    { text_area }
-                </div>
+                <FieldWrapper label={None::<String>} field_id={resolved_field_id.clone()}>
+                    { textarea_input }
+                </FieldWrapper>
             </CollapsePanel>
         };
     }
 
     html! {
-        <div class="tp__input">
-            { if props.label.is_some() {
-                   html! {
-                       <FieldLabel
-                           label={label_text.clone()}
-                           field_id={resolved_field_id.clone()}
-                           for_id={Some(resolved_field_id.clone())}
-                       />
-                   }
-                } else { html!{} }
-            }
-            { text_area }
-        </div>
+        <FieldWrapper label={props.label.clone()} field_id={resolved_field_id.clone()}>
+            { textarea_input }
+        </FieldWrapper>
     }
 }

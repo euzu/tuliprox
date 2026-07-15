@@ -16,6 +16,7 @@ pub(crate) mod geoip;
 mod db_viewer;
 pub(crate) mod stream_history_viewer;
 mod epg_parser;
+mod epg_id;
 mod ordinal;
 pub mod ffmpeg;
 mod lru_cache;
@@ -70,6 +71,7 @@ pub use with;
 
 pub use self::binary_utils::*;
 pub use self::db_viewer::*;
+pub(crate) use self::epg_id::*;
 pub use self::epg_parser::*;
 pub use self::geoip::*;
 pub use self::logging::*;

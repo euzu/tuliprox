@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use regex::Regex;
 use shared::model::{EpgNamePrefix, EpgSmartMatchConfigDto};
-use shared::utils::{default_epg_name_prefix_separator, default_epg_strip, CONSTANTS};
+use shared::utils::{CONSTANTS};
+use shared::defaults::{default_epg_name_prefix_separator, default_epg_strip};
 use crate::model::macros;
 
 #[derive(Debug, Clone)]

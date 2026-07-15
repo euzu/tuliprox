@@ -1,5 +1,6 @@
 mod playlist;
 mod stalker;
+mod stalker_refresh;
 mod xtream;
 // mod affix;
 mod xtream_vod;
@@ -15,6 +16,7 @@ pub use self::playlist::*;
 pub(crate) use self::stalker::{
     download_stalker_playlist, re_resolve_stalker_url, StalkerCluster,
 };
+pub(crate) use self::stalker_refresh::StalkerRefreshMode;
 pub use self::epg::*;
 pub use self::xtream::*;
 pub use self::xtream_vod::*;
@@ -71,8 +73,8 @@ macro_rules! create_resolve_options_function_for_xtream_target {
                                 false,
                                 false,
                                 false,
-                                shared::utils::default_resolve_delay_secs(),
-                                shared::utils::default_resolve_background(),
+                                shared::defaults::default_resolve_delay_secs(),
+                                shared::defaults::default_resolve_background(),
                             )
                         };
 

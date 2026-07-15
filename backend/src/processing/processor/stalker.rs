@@ -1,7 +1,6 @@
 //! Stalker/Ministra playlist processor.
 //!
-//! Orchestrates the full Stalker download: auth + catalog fetch (live, VOD, series) +
-//! pre-resolve of `create_link` (when enabled) + persistence into the B+Tree store. The
+//! Orchestrates Stalker authentication, resumable catalog refresh and B+Tree persistence. The
 //! processor is the single entry point the playlist dispatcher uses for `InputType::Stalker`
 //! — mirror of `xtream::download_xtream_playlist`.
 //!
@@ -11,31 +10,29 @@
 
 #![allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 
-use futures::stream::{self, StreamExt};
 use log::{debug, info, warn};
 use parking_lot::Mutex;
+use lru::LruCache;
 use shared::error::TuliproxError;
 use shared::model::stalker::StalkerStreamKind;
 use shared::model::stalker_item::StalkerPlaylistItem;
 use shared::model::{PlaylistGroup, PlaylistItem};
-use shared::utils::{short_hash, Internable};
+use shared::utils::Internable;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::{Arc, LazyLock, Weak};
+use std::time::{Duration, Instant};
 
 use crate::model::{AppConfig, ConfigInput, ConfigInputFlags, StalkerInputConfig};
 use crate::processing::parser::stalker as parser;
 use crate::repository::stalker_repository::{
-    ensure_stalker_storage_path, persist_stalker_item, persist_stalker_items, read_stalker_item,
+    ensure_stalker_storage_path, load_stalker_items_at, read_stalker_item_at,
 };
-use crate::utils::network::stalker::catalog::StalkerCategory;
+use crate::repository::stalker_generation_repository::{load_active_manifest, load_checkpoint};
+use super::stalker_refresh::{advance_stalker_refresh, StalkerRefreshMode, StalkerRefreshOutcome};
 use crate::utils::network::stalker::client::StalkerApiClient;
 use crate::utils::network::stalker::error::StalkerError;
-use crate::utils::network::stalker::profile::StalkerHandshake;
-
-// Bounded fan-out: Stalker/Ministra portals are typically small installations
-// that throttle or ban clients hammering create_link.
-const STALKER_PRE_RESOLVE_CONCURRENCY: usize = 8;
 
 
 /// Cluster selector used by the Stalker processor. Mirrors the Xtream cluster split
@@ -47,21 +44,62 @@ pub enum StalkerCluster {
     Series,
 }
 
-impl StalkerCluster {
-    pub fn as_stream_kind(self) -> StalkerStreamKind {
-        match self {
-            Self::Live => StalkerStreamKind::Live,
-            Self::Vod => StalkerStreamKind::Movie,
-            Self::Series => StalkerStreamKind::Episode,
-        }
-    }
-}
-
 const DEFAULT_STALKER_CLUSTERS: [StalkerCluster; 3] =
     [StalkerCluster::Live, StalkerCluster::Vod, StalkerCluster::Series];
 
-static RUNTIME_STALKER_CLIENTS: LazyLock<Mutex<HashMap<String, Weak<StalkerApiClient>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static RUNTIME_STALKER_CLIENTS: LazyLock<Mutex<LruCache<String, Arc<StalkerApiClient>>>> = LazyLock::new(|| {
+    Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN)))
+});
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct RuntimeLinkKey {
+    fingerprint: u64,
+    provider_id: u32,
+    kind: StalkerStreamKind,
+}
+
+struct RuntimeLink {
+    url: Arc<str>,
+    expires_at: Instant,
+}
+
+static RUNTIME_STALKER_LINKS: LazyLock<Mutex<LruCache<RuntimeLinkKey, RuntimeLink>>> = LazyLock::new(|| {
+    Mutex::new(LruCache::new(NonZeroUsize::new(4096).unwrap_or(NonZeroUsize::MIN)))
+});
+
+static STALKER_REFRESH_LOCKS: LazyLock<tokio::sync::Mutex<HashMap<Arc<str>, Weak<tokio::sync::Semaphore>>>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+async fn try_acquire_stalker_refresh(input_name: &Arc<str>) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    let semaphore = {
+        let mut locks = STALKER_REFRESH_LOCKS.lock().await;
+        let semaphore = locks.get(input_name).and_then(Weak::upgrade).unwrap_or_else(|| {
+            let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+            locks.insert(Arc::clone(input_name), Arc::downgrade(&semaphore));
+            semaphore
+        });
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        semaphore
+    };
+    semaphore.try_acquire_owned().ok()
+}
+
+fn cached_resolved_link(key: RuntimeLinkKey, force_refresh: bool) -> Option<Arc<str>> {
+    let mut cache = RUNTIME_STALKER_LINKS.lock();
+    let expired = cache.peek(&key).is_some_and(|entry| entry.expires_at <= Instant::now());
+    if force_refresh || expired {
+        cache.pop(&key);
+        return None;
+    }
+    cache.get(&key).map(|entry| Arc::clone(&entry.url))
+}
+
+fn cache_resolved_link(key: RuntimeLinkKey, url: Arc<str>) {
+    RUNTIME_STALKER_LINKS.lock().put(
+        key,
+        RuntimeLink { url, expires_at: Instant::now() + Duration::from_secs(45) },
+    );
+}
 
 /// Top-level orchestrator. Mirrors the `download_xtream_playlist` signature so the
 /// dispatcher can swap the call in place.
@@ -71,7 +109,9 @@ pub async fn download_stalker_playlist(
     client: &reqwest::Client,
     input: &ConfigInput,
     clusters: Option<&[StalkerCluster]>,
-) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool) {
+    refresh_mode: StalkerRefreshMode,
+    materialize_active: bool,
+) -> (Vec<PlaylistGroup>, Vec<TuliproxError>, bool, bool) {
     let stalker_cfg = match input.stalker.as_ref() {
         Some(cfg) => cfg.clone(),
         None => {
@@ -81,6 +121,7 @@ pub async fn download_stalker_playlist(
                     "Stalker input '{}' has no stalker configuration block",
                     input.name
                 ))],
+                false,
                 false,
             );
         }
@@ -98,15 +139,16 @@ pub async fn download_stalker_playlist(
 
     if resolved_clusters.is_empty() {
         info!("Stalker input '{}' has all clusters skipped", input.name);
-        return (vec![], vec![], false);
+        return (vec![], vec![], false, false);
     }
 
     let portal_url = match resolve_stalker_portal_url(input) {
         Ok(url) => url,
-        Err(err) => return (vec![], vec![err], false),
+        Err(err) => return (vec![], vec![err], false, false),
     };
 
-    let api_client = match StalkerApiClient::new(client.clone(), portal_url, stalker_cfg.clone()) {
+    let identity_fingerprint = stalker_identity_fingerprint(&portal_url, &stalker_cfg);
+    let api_client = match cached_runtime_stalker_client(client, portal_url, &stalker_cfg) {
         Ok(client) => client,
         Err(err) => {
             return (
@@ -116,19 +158,6 @@ pub async fn download_stalker_playlist(
                     input.name
                 ))],
                 false,
-            );
-        }
-    };
-
-    let handshake = match api_client.handshake().await {
-        Ok(h) => h,
-        Err(err) => {
-            return (
-                vec![],
-                vec![TuliproxError::ProviderConnection(format!(
-                    "Stalker handshake for input '{}' failed: {err}",
-                    input.name
-                ))],
                 false,
             );
         }
@@ -144,330 +173,146 @@ pub async fn download_stalker_playlist(
                     input.name
                 ))],
                 false,
+                false,
             );
         }
     };
 
-    let use_disk_based_processing = app_config.config.load().disk_based_processing;
-
-    let mut groups: Vec<PlaylistGroup> = Vec::new();
-    let mut errors: Vec<TuliproxError> = Vec::new();
-    let mut live_count = 0_usize;
-    let mut vod_count = 0_usize;
-    let mut series_count = 0_usize;
-
-    for cluster in &resolved_clusters {
-        let cluster_result = match cluster {
-            StalkerCluster::Live => process_stalker_live(&api_client, &handshake, input).await,
-            StalkerCluster::Vod => process_stalker_vod(&api_client, &handshake, input).await,
-            StalkerCluster::Series => process_stalker_series(&api_client, &handshake, input).await,
+    let outcome = if let Some(_refresh_permit) = try_acquire_stalker_refresh(&input.name).await {
+        let handshake = match api_client.handshake().await {
+            Ok(handshake) => handshake,
+            Err(err) => {
+                return (
+                    vec![],
+                    vec![TuliproxError::ProviderConnection(format!(
+                        "Stalker handshake for input '{}' failed: {err}",
+                        input.name
+                    ))],
+                    false,
+                    false,
+                );
+            }
         };
-
-        match cluster_result {
-            Ok(items) => {
-                // Count before any group post-processing so the download summary
-                // reflects what was actually fetched, not the cleared remnants.
-                match cluster {
-                    StalkerCluster::Live => live_count = items.len(),
-                    StalkerCluster::Vod => vod_count = items.len(),
-                    StalkerCluster::Series => series_count = items.len(),
-                }
-                match persist_stalker_items(app_config, &storage_path, cluster.as_stream_kind(), &items).await {
-                    Ok(_) => {
-                        let mut cluster_groups = groups_for_cluster(items, *cluster, &input.name);
-                        if use_disk_based_processing {
-                            // Drop the in-memory items when disk-based processing is enabled —
-                            // the runtime will re-read them via `StalkerDiskPlaylistSource`.
-                            for group in &mut cluster_groups {
-                                group.channels.clear();
-                            }
-                        }
-                        groups.extend(cluster_groups);
-                    }
-                    Err(err) => {
-                        warn!(
-                            "Stalker input '{}': persisting {cluster:?} items failed: {err}",
-                            input.name
-                        );
-                        errors.push(err);
-                        if !use_disk_based_processing {
-                            // In-memory mode still has the full channel list, so the groups
-                            // remain valid despite the persist failure. In disk-based mode
-                            // the cleared groups would be phantom-empty (nothing on disk to
-                            // re-read), so the cluster is skipped entirely.
-                            groups.extend(groups_for_cluster(items, *cluster, &input.name));
-                        }
-                    }
-                }
-            }
-            Err(err) => {
-                errors.push(err);
-            }
-        }
-    }
-
-    // EPG bulk fetch. The whole fetch is collected in memory and persisted as a
-    // single snapshot once the stream completes. The `on_program` callback runs
-    // on the async consumer side, so it must never block — calling
-    // `blocking_send` from it would panic inside the tokio runtime.
-    if input.has_flag(ConfigInputFlags::StalkerBulkEpg) {
-        const BULK_EPG_PERIOD_HOURS: u32 = 24;
-        let mut records: Vec<crate::utils::network::stalker::epg::StalkerProgramRecord> = Vec::new();
-        let bulk_result = api_client
-            .stream_bulk_epg(&handshake, BULK_EPG_PERIOD_HOURS, |record| records.push(record))
-            .await;
-        match bulk_result {
-            Ok(()) => {
-                let received = records.len();
-                if received == 0 {
-                    info!("Stalker input '{}': bulk EPG returned no programs", input.name);
+        loop {
+            let refresh = advance_stalker_refresh(
+                app_config,
+                api_client.as_ref(),
+                &handshake,
+                input,
+                &storage_path,
+                identity_fingerprint,
+                refresh_mode.budget(),
+            );
+            let result = if refresh_mode == StalkerRefreshMode::ServerSlice {
+                if let Ok(result) = tokio::time::timeout(Duration::from_mins(45), refresh).await {
+                    result
                 } else {
-                    match crate::repository::stalker_repository::persist_stalker_epg_programs(
-                        app_config,
-                        &storage_path,
-                        &records,
-                    )
-                    .await
-                    {
-                        Ok(inserted) => info!(
-                            "Stalker input '{}': persisted {inserted} EPG program records (received {received})",
-                            input.name
+                    let checkpoint = match load_checkpoint(&storage_path, identity_fingerprint).await {
+                        Ok(checkpoint) => checkpoint,
+                        Err(err) => return (Vec::new(), vec![err], false, false),
+                    };
+                    break StalkerRefreshOutcome::Yielded {
+                        phase: checkpoint.as_ref().map_or(
+                            crate::repository::stalker_generation_repository::StalkerRefreshPhase::LiveBulk,
+                            |state| state.phase.clone(),
                         ),
-                        Err(err) => {
-                            warn!("Stalker input '{}': bulk EPG persist failed: {err}", input.name);
+                        processed: checkpoint.as_ref().map_or(0, |state| state.processed),
+                        skipped: checkpoint.as_ref().map_or(0, |state| state.skipped_count),
+                        error: None,
+                    };
+                }
+            } else {
+                refresh.await
+            };
+            match result {
+                Ok(StalkerRefreshOutcome::Yielded { .. }) if refresh_mode == StalkerRefreshMode::Complete => {}
+                Ok(outcome) => break outcome,
+                Err(err) => return (Vec::new(), vec![err], false, false),
+            }
+        }
+    } else {
+        StalkerRefreshOutcome::Yielded {
+            phase: crate::repository::stalker_generation_repository::StalkerRefreshPhase::LiveBulk,
+            processed: 0,
+            skipped: 0,
+            error: None,
+        }
+    };
+
+    let yielded = matches!(&outcome, StalkerRefreshOutcome::Yielded { .. });
+    let terminal = matches!(&outcome, StalkerRefreshOutcome::Terminal(_));
+    let mut errors = Vec::new();
+    match outcome {
+        StalkerRefreshOutcome::Complete => {}
+        StalkerRefreshOutcome::Yielded { phase, processed, skipped, error } => {
+            info!(
+                "Stalker input '{}' yielded in phase {phase:?} after {processed} records ({skipped} skipped)",
+                input.name
+            );
+            if let Some(error) = error {
+                warn!("Stalker input '{}': resumable refresh paused after error: {error}", input.name);
+            }
+        }
+        StalkerRefreshOutcome::Terminal(error) => errors.push(error),
+    }
+
+    let manifest = match load_active_manifest(&storage_path, identity_fingerprint).await {
+        Ok(manifest) => manifest,
+        Err(err) => return (Vec::new(), vec![err], false, yielded),
+    };
+    if terminal {
+        if let Err(err) = crate::repository::stalker_generation_repository::cleanup_obsolete_generations(
+            &storage_path,
+            &manifest,
+        )
+        .await
+        {
+            errors.push(err);
+        }
+    }
+    let use_disk_based_processing = app_config.config.load().disk_based_processing;
+    if !materialize_active {
+        return (Vec::new(), errors, use_disk_based_processing, yielded);
+    }
+    let mut groups = Vec::new();
+    let mut counts = [0_usize; 3];
+    for cluster in resolved_clusters {
+        let items_result = match cluster {
+            StalkerCluster::Live => match manifest.live.as_ref() {
+                Some(files) => load_stalker_items_at(app_config, &files.data).await,
+                None => Ok(Vec::new()),
+            },
+            StalkerCluster::Vod => match manifest.vod.as_ref() {
+                Some(files) => load_stalker_items_at(app_config, &files.data).await,
+                None => Ok(Vec::new()),
+            },
+            StalkerCluster::Series => match manifest.series.as_ref() {
+                Some(files) => {
+                    match (
+                        load_stalker_items_at(app_config, &files.roots).await,
+                        load_stalker_items_at(app_config, &files.episodes).await,
+                    ) {
+                        (Ok(mut roots), Ok(episodes)) => {
+                            roots.extend(episodes);
+                            Ok(roots)
                         }
+                        (Err(err), _) | (_, Err(err)) => Err(err),
                     }
                 }
+                None => Ok(Vec::new()),
+            },
+        };
+        match items_result {
+            Ok(items) => {
+                counts[cluster as usize] = items.len();
+                let cluster_groups = groups_for_cluster(items, cluster, &input.name);
+                groups.extend(cluster_groups);
             }
-            Err(err) => {
-                warn!("Stalker input '{}': bulk EPG fetch failed: {err}", input.name);
-            }
+            Err(err) => errors.push(err),
         }
     }
-
-    parser::log_stalker_download_summary(&input.name, live_count, vod_count, series_count);
-
-    (groups, errors, use_disk_based_processing)
-}
-
-/// Fetch the live cluster: categories + channels (paginated). The pre-resolve pass is
-/// driven by the `StalkerPreResolvePlayback` flag — when set we call `create_link` for
-/// every item and persist the resolved URL.
-pub async fn process_stalker_live(
-    api_client: &StalkerApiClient,
-    handshake: &StalkerHandshake,
-    input: &ConfigInput,
-) -> Result<Vec<StalkerPlaylistItem>, TuliproxError> {
-    let raw_items = api_client.get_live_streams(handshake).await.map_err(stalker_err_to_repo)?;
-    let categories = match api_client.get_live_categories(handshake).await {
-        Ok(categories) => categories,
-        Err(err) => {
-            warn!(
-                "Stalker input '{}': live categories unavailable, continuing without category map: {err}",
-                input.name
-            );
-            Vec::new()
-        }
-    };
-    let category_map = build_category_map(categories);
-    let added_at = chrono::Utc::now().timestamp();
-    let mut items: Vec<StalkerPlaylistItem> = raw_items
-        .iter()
-        .map(|raw| {
-            let category = raw
-                .category_id
-                .as_deref()
-                .and_then(|s| s.parse::<u32>().ok())
-                .and_then(|id| category_map.get(&id));
-            parser::map_stalker_to_playlist_item(raw, category, StalkerStreamKind::Live, added_at)
-        })
-        .collect();
-    if input.has_flag(ConfigInputFlags::StalkerPreResolvePlayback) {
-        pre_resolve_playback_urls(api_client, handshake, &mut items, StalkerCluster::Live).await;
-    }
-    Ok(items)
-}
-
-/// Fetch the VOD cluster. Same shape as `process_stalker_live` but with `Movie` items.
-pub async fn process_stalker_vod(
-    api_client: &StalkerApiClient,
-    handshake: &StalkerHandshake,
-    input: &ConfigInput,
-) -> Result<Vec<StalkerPlaylistItem>, TuliproxError> {
-    let raw_items = api_client.get_vod_streams(handshake).await.map_err(stalker_err_to_repo)?;
-    let categories = match api_client.get_vod_categories(handshake).await {
-        Ok(categories) => categories,
-        Err(err) => {
-            warn!(
-                "Stalker input '{}': VOD categories unavailable, continuing without category map: {err}",
-                input.name
-            );
-            Vec::new()
-        }
-    };
-    let category_map = build_category_map(categories);
-    let added_at = chrono::Utc::now().timestamp();
-    let mut items: Vec<StalkerPlaylistItem> = raw_items
-        .iter()
-        .map(|raw| {
-            let category = raw
-                .category_id
-                .as_deref()
-                .and_then(|s| s.parse::<u32>().ok())
-                .and_then(|id| category_map.get(&id));
-            parser::map_stalker_to_playlist_item(raw, category, StalkerStreamKind::Movie, added_at)
-        })
-        .collect();
-    if input.has_flag(ConfigInputFlags::StalkerPreResolvePlayback) {
-        pre_resolve_playback_urls(api_client, handshake, &mut items, StalkerCluster::Vod).await;
-    }
-    Ok(items)
-}
-
-/// Fetch the series cluster: list + per-series details. Series roots and episodes are both
-/// persisted into the B+Tree so the runtime can render series and episodes through the
-/// same source.
-pub async fn process_stalker_series(
-    api_client: &StalkerApiClient,
-    handshake: &StalkerHandshake,
-    input: &ConfigInput,
-) -> Result<Vec<StalkerPlaylistItem>, TuliproxError> {
-    // Bounded fan-out for per-series detail fetches — enough to hide latency
-    // without hammering fragile Ministra portals.
-    const STALKER_SERIES_DETAILS_CONCURRENCY: usize = 4;
-    let raw_series = api_client.get_series_list(handshake).await.map_err(stalker_err_to_repo)?;
-    let categories = match api_client.get_series_categories(handshake).await {
-        Ok(categories) => categories,
-        Err(err) => {
-            warn!(
-                "Stalker input '{}': series categories unavailable, continuing without category map: {err}",
-                input.name
-            );
-            Vec::new()
-        }
-    };
-    let category_map = build_category_map(categories);
-    let added_at = chrono::Utc::now().timestamp();
-    let roots: Vec<StalkerPlaylistItem> = raw_series
-        .iter()
-        .map(|raw| {
-            let category = raw
-                .category_id
-                .as_deref()
-                .and_then(|s| s.parse::<u32>().ok())
-                .and_then(|id| category_map.get(&id));
-            parser::map_stalker_series_root(raw, category, added_at)
-        })
-        .collect();
-
-    // Fetch per-series details with bounded concurrency. Results are collected
-    // and restored to the original catalog order before episode mapping so the
-    // collision-safe storage-id assignment stays deterministic regardless of
-    // response arrival order. The original i64 series id is used for the portal
-    // call (the narrowed u32 `stream_id` is only a storage key).
-    //
-    // The `(index, series_id)` tuples are collected into an owned `Vec` *before*
-    // the futures are built. This mirrors the pattern used by
-    // `pre_resolve_playback_urls` below: without it, the `.map` closure would
-    // receive a `&StalkerPlaylistItem` tied to `roots.iter()`'s lifetime, and
-    // `stream::iter(...).buffer_unordered(...)` would reject the closure for
-    // not being HRTB (it must work for *any* reference lifetime, not just the
-    // one from this iterator).
-    let detail_requests: Vec<(usize, u32)> = roots
-        .iter()
-        .enumerate()
-        .map(|(index, root)| (index, root.series_id.unwrap_or(root.stream_id)))
-        .collect();
-    let detail_futures = detail_requests.into_iter().map(|(index, series_id)| async move {
-        let result = api_client.get_series_details(handshake, series_id).await;
-        (index, result)
-    });
-    let mut detail_results = stream::iter(detail_futures)
-        .buffer_unordered(STALKER_SERIES_DETAILS_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
-    detail_results.sort_by_key(|(index, _)| *index);
-
-    let mut used_episode_ids: HashSet<u32> = HashSet::new();
-    let mut items: Vec<StalkerPlaylistItem> = Vec::new();
-    for (root, (_, result)) in roots.into_iter().zip(detail_results) {
-        match result {
-            Ok(details) => {
-                let episodes =
-                    parser::map_stalker_series_details(&details, &root, added_at, &mut used_episode_ids);
-                items.push(root);
-                items.extend(episodes);
-            }
-            Err(err) => {
-                warn!(
-                    "Stalker get_series_details failed for series_id={} on input '{}': {err}",
-                    root.stream_id, input.name
-                );
-                items.push(root);
-            }
-        }
-    }
-    if input.has_flag(ConfigInputFlags::StalkerPreResolvePlayback) {
-        pre_resolve_playback_urls(api_client, handshake, &mut items, StalkerCluster::Series).await;
-    }
-    Ok(items)
-}
-
-fn build_category_map(categories: Vec<StalkerCategory>) -> HashMap<u32, StalkerCategory> {
-    categories
-        .into_iter()
-        .filter_map(|c| c.id.parse::<u32>().ok().map(|id| (id, c)))
-        .collect()
-}
-
-/// Walk every item and call `create_link` to convert the raw `cmd` into a playable URL.
-/// Items without a `cmd` are skipped silently. On failure we keep the original `cmd` so
-/// the runtime re-resolve path still has something to retry against.
-pub async fn pre_resolve_playback_urls(
-    api_client: &StalkerApiClient,
-    handshake: &StalkerHandshake,
-    items: &mut [StalkerPlaylistItem],
-    cluster: StalkerCluster,
-) {
-    let kind = cluster.as_stream_kind();
-    let requests = items.iter().enumerate().filter_map(|(index, item)| {
-        if item.is_series_root() {
-            return None;
-        }
-        let descriptor = item.playback_descriptor.as_ref()?;
-        let cmd = descriptor.candidates.first()?.cmd.clone();
-        if cmd.is_empty() {
-            return None;
-        }
-        let series_number = (kind == StalkerStreamKind::Episode).then_some(item.number);
-        // Honour the playback mode the parser derived from the raw item's temp-link
-        // capability flags. Default to DirectUrl for descriptors with no mode set.
-        let requested_mode = descriptor.primary_mode;
-        Some((index, cmd, series_number, requested_mode))
-    }).collect::<Vec<_>>();
-
-    let requests = requests.into_iter().map(|(index, cmd, series_number, requested_mode)| async move {
-            let result = api_client.create_link(handshake, kind, requested_mode, &cmd, series_number, None, None).await;
-            (index, result)
-    });
-
-    let results = stream::iter(requests)
-        .buffer_unordered(STALKER_PRE_RESOLVE_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
-    for (index, result) in results {
-        match result {
-            Ok(resolved) => {
-                items[index].stream_url = Internable::intern(resolved.stream_url);
-            }
-            Err(err) => {
-                debug!(
-                    "Stalker pre-resolve create_link failed for stream_id={} on cluster {:?}: {err}",
-                    items[index].stream_id, cluster
-                );
-            }
-        }
-    }
+    parser::log_stalker_download_summary(&input.name, counts[0], counts[1], counts[2]);
+    (groups, errors, use_disk_based_processing, yielded)
 }
 
 /// Resolve a per-input portal URL using the standard `provider://` resolution pipeline.
@@ -537,43 +382,11 @@ fn stalker_err_to_repo(err: StalkerError) -> TuliproxError {
 /// into a long-lived in-memory map key. Credentials still differentiate the
 /// key, but only as a non-reversible short hash.
 fn runtime_client_cache_key(portal_url: &str, cfg: &StalkerInputConfig) -> String {
-    use std::fmt::Write;
-    let mut key = String::with_capacity(192);
-    let _ = write!(
-        key,
-        "{portal_url}|auth={:?}|preset={:?}|endpoint={:?}|pages={:?}",
-        cfg.auth_mode, cfg.mag_preset, cfg.endpoint_preference, cfg.catalog_max_pages
-    );
-    if let Some(caps) = cfg.size_caps.as_ref() {
-        let _ = write!(
-            key,
-            "|caps={}:{}:{}",
-            caps.create_link_kb, caps.ordered_list_mb, caps.get_epg_mb
-        );
-    }
-    if let Some(device) = cfg.device.as_ref() {
-        let _ = write!(
-            key,
-            "|dev={}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-            device.mac_address.as_deref().unwrap_or_default(),
-            device.device_profile.as_deref().unwrap_or_default(),
-            device.serial_number.as_deref().unwrap_or_default(),
-            device.device_id.as_deref().unwrap_or_default(),
-            device.device_id2.as_deref().unwrap_or_default(),
-            device.signature.as_deref().unwrap_or_default(),
-            device.timezone.as_deref().unwrap_or_default(),
-            device.locale.as_deref().unwrap_or_default(),
-            device.user_agent.as_deref().unwrap_or_default(),
-            device.x_user_agent.as_deref().unwrap_or_default(),
-        );
-    }
-    let credentials = format!(
-        "{}\n{}",
-        cfg.username.as_deref().unwrap_or_default(),
-        cfg.password.as_deref().unwrap_or_default()
-    );
-    let _ = write!(key, "|cred={}", short_hash(&credentials));
-    key
+    format!("{portal_url}|{:016x}", cfg.identity_fingerprint(portal_url))
+}
+
+pub(crate) fn stalker_identity_fingerprint(portal_url: &str, cfg: &StalkerInputConfig) -> u64 {
+    cfg.identity_fingerprint(portal_url)
 }
 
 fn cached_runtime_stalker_client(
@@ -582,20 +395,14 @@ fn cached_runtime_stalker_client(
     cfg: &StalkerInputConfig,
 ) -> Result<Arc<StalkerApiClient>, TuliproxError> {
     let key = runtime_client_cache_key(&portal_url, cfg);
-    if let Some(client) = RUNTIME_STALKER_CLIENTS
-        .lock()
-        .get(&key)
-        .and_then(Weak::upgrade)
-    {
+    if let Some(client) = RUNTIME_STALKER_CLIENTS.lock().get(&key).cloned() {
         return Ok(client);
     }
 
     let client = Arc::new(
         StalkerApiClient::new(http_client.clone(), portal_url, cfg.clone()).map_err(stalker_err_to_repo)?,
     );
-    let mut cache = RUNTIME_STALKER_CLIENTS.lock();
-    cache.retain(|_, weak| weak.strong_count() > 0);
-    cache.insert(key, Arc::downgrade(&client));
+    RUNTIME_STALKER_CLIENTS.lock().put(key, Arc::clone(&client));
     Ok(client)
 }
 
@@ -605,15 +412,29 @@ pub async fn re_resolve_stalker_url(
     input: &ConfigInput,
     provider_id: u32,
     kind: StalkerStreamKind,
+    force_refresh: bool,
 ) -> Result<Option<Arc<str>>, TuliproxError> {
-    if !input.has_flag(ConfigInputFlags::StalkerRuntimeResolvePlayback) || provider_id == 0 {
+    if provider_id == 0 {
         return Ok(None);
     }
     let stalker_cfg = input.stalker.as_ref().ok_or_else(|| {
         TuliproxError::ConfigInput(format!("Stalker input '{}' has no stalker configuration block", input.name))
     })?;
+    let portal_url = resolve_stalker_portal_url(input)?;
+    let identity_fingerprint = stalker_cfg.identity_fingerprint(&portal_url);
+    let link_key = RuntimeLinkKey { fingerprint: identity_fingerprint, provider_id, kind };
+    if let Some(url) = cached_resolved_link(link_key, force_refresh) {
+        return Ok(Some(url));
+    }
     let storage_path = ensure_stalker_storage_path(app_config, &input.name).await?;
-    let Some(mut item) = read_stalker_item(app_config, &storage_path, kind, provider_id).await? else {
+    let manifest = load_active_manifest(&storage_path, identity_fingerprint).await?;
+    let item_path = match kind {
+        StalkerStreamKind::Live | StalkerStreamKind::Archive => manifest.live.as_ref().map(|files| &files.data),
+        StalkerStreamKind::Movie => manifest.vod.as_ref().map(|files| &files.data),
+        StalkerStreamKind::Episode => manifest.series.as_ref().map(|files| &files.episodes),
+    };
+    let Some(item_path) = item_path else { return Ok(None) };
+    let Some(item) = read_stalker_item_at(app_config, item_path, provider_id).await? else {
         return Ok(None);
     };
     let Some(descriptor) = item.playback_descriptor.as_ref() else {
@@ -635,7 +456,6 @@ pub async fn re_resolve_stalker_url(
         );
         return Ok(None);
     }
-    let portal_url = resolve_stalker_portal_url(input)?;
     let api_client = cached_runtime_stalker_client(
         http_client,
         portal_url,
@@ -661,9 +481,9 @@ pub async fn re_resolve_stalker_url(
             .await
         {
             Ok(resolved) => {
-                item.stream_url = Internable::intern(resolved.stream_url);
-                persist_stalker_item(app_config, &storage_path, &item).await?;
-                return Ok(Some(Arc::clone(&item.stream_url)));
+                let url = Internable::intern(resolved.stream_url);
+                cache_resolved_link(link_key, Arc::clone(&url));
+                return Ok(Some(url));
             }
             Err(err) => {
                 debug!(
@@ -678,16 +498,7 @@ pub async fn re_resolve_stalker_url(
         "Stalker runtime re-resolve failed for stream_id={}, invalidating stale stream_url",
         item.stream_id
     );
-    // Invalidate the stale persisted URL so the next request triggers a
-    // fresh re-resolve rather than serving a known-bad URL indefinitely.
-    item.stream_url = Internable::intern(String::new());
-    if let Err(persist_err) =
-        persist_stalker_item(app_config, &storage_path, &item).await
-    {
-        warn!(
-            "Stalker runtime re-resolve: persisting invalidated stream_url failed: {persist_err}"
-        );
-    }
+    RUNTIME_STALKER_LINKS.lock().pop(&link_key);
     Ok(None)
 }
 
@@ -735,5 +546,41 @@ mod tests {
         other.password = Some("other_pass".to_string());
         let other_key = runtime_client_cache_key("http://portal.example", &other);
         assert_ne!(key, other_key);
+    }
+
+    #[test]
+    fn runtime_client_cache_keeps_session_client_alive() -> Result<(), TuliproxError> {
+        let http = reqwest::Client::new();
+        let cfg = runtime_cfg();
+        let first = cached_runtime_stalker_client(&http, "http://portal.example".to_string(), &cfg)?;
+        let weak = Arc::downgrade(&first);
+        drop(first);
+
+        let second = cached_runtime_stalker_client(&http, "http://portal.example".to_string(), &cfg)?;
+
+        assert!(weak.upgrade().is_some());
+        let upgraded = weak
+            .upgrade()
+            .ok_or_else(|| TuliproxError::ProviderConnection("client dropped".to_string()))?;
+        assert!(Arc::ptr_eq(&upgraded, &second));
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_link_cache_can_be_forced_stale() {
+        let key = RuntimeLinkKey { fingerprint: 7, provider_id: 42, kind: StalkerStreamKind::Live };
+        cache_resolved_link(key, "http://stream.example/live".into());
+        assert_eq!(cached_resolved_link(key, false).as_deref(), Some("http://stream.example/live"));
+        assert!(cached_resolved_link(key, true).is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_ownership_is_non_blocking_across_invocations() {
+        let name: Arc<str> = "portal-a".into();
+        let first = try_acquire_stalker_refresh(&name).await;
+        assert!(first.is_some());
+        assert!(try_acquire_stalker_refresh(&name).await.is_none());
+        drop(first);
+        assert!(try_acquire_stalker_refresh(&name).await.is_some());
     }
 }

@@ -1,4 +1,8 @@
 use crate::{
+    defaults::{
+        default_as_default, default_as_true, is_config_target_options_empty, is_default_processing_order, is_false,
+        is_true, is_zero_u16,
+    },
     error::TuliproxError,
     foundation::{get_filter, Filter},
     handle_tuliprox_error_result_list,
@@ -6,21 +10,70 @@ use crate::{
         ClusterFlags, ConfigFavouritesDto, ConfigRenameDto, ConfigSortDto, HdHomeRunDeviceOverview, PatternTemplate,
         ProcessingOrder, StrmExportStyle, TargetType, TraktConfigDto,
     },
-    utils::{
-        default_as_default, default_as_true, is_blank_optional_string, is_config_target_options_empty,
-        is_default_processing_order, is_false, is_true, is_zero_u16,
-    },
+    utils::is_blank_optional_string,
 };
+
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigTargetShareLiveStreams {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hls: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mpeg_ts: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ConfigTargetShareLiveStreamsCompat {
+    Legacy(bool),
+    Structured(ConfigTargetShareLiveStreams),
+}
+
+fn deserialize_share_live_streams<'de, D>(deserializer: D) -> Result<ConfigTargetShareLiveStreams, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match <ConfigTargetShareLiveStreamsCompat as serde::Deserialize>::deserialize(deserializer)? {
+        ConfigTargetShareLiveStreamsCompat::Legacy(enabled) => {
+            ConfigTargetShareLiveStreams { hls: false, mpeg_ts: enabled }
+        }
+        ConfigTargetShareLiveStreamsCompat::Structured(config) => config,
+    })
+}
+
+impl ConfigTargetShareLiveStreams {
+    pub fn is_empty(&self) -> bool { !self.hls && !self.mpeg_ts }
+}
+
+/// Controls optional canonicalization of EPG data emitted for a target.
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EpgOutputOptions {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub lowercase_ids: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub lowercase_xmltv_display_names: bool,
+}
+
+impl EpgOutputOptions {
+    pub const fn is_empty(&self) -> bool { !self.lowercase_ids && !self.lowercase_xmltv_display_names }
+}
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigTargetOptions {
     #[serde(default, skip_serializing_if = "is_false")]
     pub ignore_logo: bool,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub share_live_streams: bool,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_share_live_streams",
+        skip_serializing_if = "ConfigTargetShareLiveStreams::is_empty"
+    )]
+    pub share_live_streams: ConfigTargetShareLiveStreams,
     #[serde(default, skip_serializing_if = "is_false")]
     pub remove_duplicates: bool,
+    #[serde(default, skip_serializing_if = "EpgOutputOptions::is_empty")]
+    pub epg_output: EpgOutputOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_redirect: Option<ClusterFlags>,
 }
@@ -28,11 +81,22 @@ pub struct ConfigTargetOptions {
 impl ConfigTargetOptions {
     pub fn is_empty(&self) -> bool {
         !self.ignore_logo
-            && !self.share_live_streams
+            && self.share_live_streams.is_empty()
             && !self.remove_duplicates
+            && self.epg_output.is_empty()
             && (self.force_redirect.is_none()
                 || self.force_redirect.is_some_and(|f| f.has_full_flags() || f.is_empty()))
     }
+
+    pub const fn lowercase_epg_ids(&self) -> bool { self.epg_output.lowercase_ids }
+
+    pub const fn lowercase_xmltv_display_names(&self) -> bool { self.epg_output.lowercase_xmltv_display_names }
+
+    pub fn share_live_hls_enabled(&self) -> bool { self.share_live_streams.hls }
+
+    pub fn share_live_mpeg_ts_enabled(&self) -> bool { self.share_live_streams.mpeg_ts }
+
+    pub fn share_live_any_enabled(&self) -> bool { self.share_live_hls_enabled() || self.share_live_mpeg_ts_enabled() }
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -431,7 +495,10 @@ impl ConfigTargetDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigTargetDto, M3uTargetOutputDto, StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto};
+    use super::{
+        ConfigTargetDto, ConfigTargetOptions, ConfigTargetShareLiveStreams, EpgOutputOptions, M3uTargetOutputDto,
+        StrmTargetOutputDto, TargetOutputDto, XtreamTargetOutputDto,
+    };
 
     fn target_with_outputs(output: Vec<TargetOutputDto>) -> ConfigTargetDto {
         ConfigTargetDto {
@@ -498,5 +565,152 @@ mod tests {
         let err = target.prepare(1, None, None).expect_err("STRM without stream output should fail");
 
         assert!(err.to_string().contains("xtream or m3u output"));
+    }
+
+    #[test]
+    fn target_options_deserialize_structured_share_live_streams() {
+        let yaml = r#"
+share_live_streams:
+  hls: true
+  mpeg_ts: true
+"#;
+
+        let options: ConfigTargetOptions =
+            serde_saphyr::from_str(yaml).expect("structured share_live_streams should deserialize");
+
+        assert!(options.share_live_hls_enabled());
+        assert!(options.share_live_mpeg_ts_enabled());
+        assert!(options.share_live_any_enabled());
+    }
+
+    #[test]
+    fn target_options_maps_legacy_true_share_live_streams_to_both_modes() {
+        let yaml = r#"
+share_live_streams: true
+"#;
+
+        let options = serde_saphyr::from_str::<ConfigTargetOptions>(yaml);
+
+        assert!(options.is_ok(), "legacy boolean should deserialize: {options:?}");
+        if let Ok(options) = options {
+            assert_eq!(options.share_live_streams, ConfigTargetShareLiveStreams { hls: false, mpeg_ts: true });
+        }
+    }
+
+    #[test]
+    fn target_options_maps_legacy_false_share_live_streams_to_both_modes() {
+        let yaml = r#"
+share_live_streams: false
+"#;
+
+        let options: ConfigTargetOptions =
+            serde_saphyr::from_str(yaml).expect("legacy false share_live_streams should deserialize");
+
+        assert_eq!(options.share_live_streams, ConfigTargetShareLiveStreams { hls: false, mpeg_ts: false });
+    }
+
+    #[test]
+    fn target_options_omit_default_share_live_streams() {
+        let options = ConfigTargetOptions::default();
+
+        assert!(options.is_empty());
+
+        let serialized = serde_saphyr::to_string(&options).expect("default options should serialize");
+        assert!(
+            !serialized.contains("share_live_streams"),
+            "default share_live_streams should be omitted, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn target_options_round_trips_partial_share_live_streams() {
+        let options = ConfigTargetOptions {
+            share_live_streams: ConfigTargetShareLiveStreams { hls: true, mpeg_ts: false },
+            ..ConfigTargetOptions::default()
+        };
+
+        let serialized = serde_saphyr::to_string(&options).expect("partial share_live_streams should serialize");
+        let reparsed: ConfigTargetOptions =
+            serde_saphyr::from_str(&serialized).expect("partial share_live_streams should deserialize");
+
+        assert_eq!(reparsed.share_live_streams, options.share_live_streams);
+    }
+
+    #[test]
+    fn target_options_default_epg_output_is_disabled_and_omitted() {
+        let options = serde_saphyr::from_str::<ConfigTargetOptions>("{}")
+            .expect("target options without epg_output should deserialize");
+
+        assert!(!options.lowercase_epg_ids());
+        assert!(!options.lowercase_xmltv_display_names());
+        assert!(options.epg_output.is_empty());
+        assert!(options.is_empty());
+
+        let serialized = serde_saphyr::to_string(&options).expect("default target options should serialize");
+        assert!(!serialized.contains("epg_output"), "default epg_output should be omitted, got: {serialized}");
+    }
+
+    #[test]
+    fn target_options_epg_output_roundtrips() {
+        let yaml = r#"
+epg_output:
+  lowercase_ids: true
+  lowercase_xmltv_display_names: true
+"#;
+
+        let options =
+            serde_saphyr::from_str::<ConfigTargetOptions>(yaml).expect("configured epg_output should deserialize");
+
+        assert!(options.lowercase_epg_ids());
+        assert!(options.lowercase_xmltv_display_names());
+        assert!(!options.is_empty());
+
+        let serialized = serde_saphyr::to_string(&options).expect("configured epg_output should serialize");
+        let roundtripped = serde_saphyr::from_str::<ConfigTargetOptions>(&serialized)
+            .expect("serialized epg_output should deserialize");
+        assert_eq!(roundtripped, options);
+    }
+
+    #[test]
+    fn target_options_epg_output_makes_options_nonempty() {
+        let lowercase_ids = ConfigTargetOptions {
+            epg_output: EpgOutputOptions { lowercase_ids: true, ..EpgOutputOptions::default() },
+            ..ConfigTargetOptions::default()
+        };
+        let lowercase_display_names = ConfigTargetOptions {
+            epg_output: EpgOutputOptions { lowercase_xmltv_display_names: true, ..EpgOutputOptions::default() },
+            ..ConfigTargetOptions::default()
+        };
+
+        assert!(!lowercase_ids.is_empty());
+        assert!(!lowercase_display_names.is_empty());
+    }
+
+    #[test]
+    fn target_options_reject_unknown_epg_output_fields() {
+        let yaml = r#"
+epg_output:
+  lowercase_id: true
+"#;
+
+        let result = serde_saphyr::from_str::<ConfigTargetOptions>(yaml);
+
+        assert!(result.is_err(), "unknown epg_output fields must be rejected");
+    }
+
+    #[test]
+    fn target_options_mpeg_ts_helper_keeps_existing_stream_share_semantics() {
+        let hls_only = ConfigTargetOptions {
+            share_live_streams: ConfigTargetShareLiveStreams { hls: true, mpeg_ts: false },
+            ..Default::default()
+        };
+        let mpeg_ts = ConfigTargetOptions {
+            share_live_streams: ConfigTargetShareLiveStreams { hls: false, mpeg_ts: true },
+            ..Default::default()
+        };
+
+        assert!(hls_only.share_live_hls_enabled());
+        assert!(!hls_only.share_live_mpeg_ts_enabled());
+        assert!(mpeg_ts.share_live_mpeg_ts_enabled());
     }
 }

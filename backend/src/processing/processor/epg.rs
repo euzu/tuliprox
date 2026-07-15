@@ -2,6 +2,7 @@ use crate::model::Epg;
 use crate::model::{EpgConfig, EpgSmartMatchConfig};
 use crate::model::FetchedPlaylist;
 use crate::processing::parser::xmltv::normalize_channel_name;
+use crate::utils::with_folded_epg_id;
 use log::{debug, trace, warn};
 use rphonetic::{DoubleMetaphone, Encoder};
 use std::collections::{HashMap, HashSet};
@@ -10,6 +11,12 @@ use std::sync::Arc;
 use shared::utils::Internable;
 
 pub struct EpgIdCache {
+    /// Membership set of the epg ids collected from playlist channels.
+    /// Keys are stored ASCII-lowercased so guide-id matching is case-insensitive.
+    /// This set is used only for membership tests, never to source an emitted/display
+    /// id, so folding the stored key does not affect output (channels keep their
+    /// original-case id). Insert via [`Self::insert_channel_epg_id`] and query via
+    /// [`Self::contains_channel_epg_id`] to keep the fold consistent.
     pub channel_epg_id: HashSet<Arc<str>>,
     pub normalized: HashMap<Arc<str>, Option<Arc<str>>>,
     pub phonetics: HashMap<Arc<str>, HashSet<Arc<str>>>,
@@ -51,6 +58,29 @@ impl EpgIdCache {
 
     fn is_empty(&self) -> bool {
         self.channel_epg_id.is_empty() && self.normalized.is_empty()
+    }
+
+    /// Adds an epg id to the case-folded membership set.
+    ///
+    /// The key is ASCII-lowercased so a `MixedCase` source id matches a guide
+    /// `<channel id>` of a different case. ASCII folding (not Unicode) avoids
+    /// Turkish-i/locale issues and is faster; channel ids are ASCII.
+    pub fn insert_channel_epg_id(&mut self, id: &str) {
+        with_folded_epg_id(id, |folded| self.channel_epg_id.insert(folded.intern()));
+    }
+
+    /// Case-insensitive (ASCII) membership test against the folded keys stored by
+    /// [`Self::insert_channel_epg_id`].
+    pub fn contains_channel_epg_id(&self, id: &str) -> bool {
+        with_folded_epg_id(id, |folded| self.channel_epg_id.contains(folded))
+    }
+
+    pub fn insert_processed_epg_id(&mut self, id: &str) {
+        with_folded_epg_id(id, |folded| self.processed.insert(folded.intern()));
+    }
+
+    pub fn contains_processed_epg_id(&self, id: &str) -> bool {
+        with_folded_epg_id(id, |folded| self.processed.contains(folded))
     }
 
     /// Normalizes a channel name, computes its phonetic encoding, and stores both in the cache for later EPG matching.
@@ -117,7 +147,7 @@ impl EpgIdCache {
             if let Some(id) = epg_channel_id {
                 if !id.is_empty() {
                     missing_epg_id = false;
-                    self.channel_epg_id.insert(Arc::clone(id));
+                    self.insert_channel_epg_id(id);
                 }
             }
 
@@ -141,11 +171,78 @@ impl EpgIdCache {
         for key in normalized_epg_ids {
             if let Some(entry) = self.normalized.get_mut(key) {
                 entry.replace(Arc::clone(epg_id));
-                self.channel_epg_id.insert(Arc::clone(epg_id));
+                // Inline fold (mirrors `insert_channel_epg_id`); a `&mut self` call
+                // here would conflict with the `entry` borrow of `self.normalized`.
+                with_folded_epg_id(epg_id, |folded| self.channel_epg_id.insert(folded.intern()));
                 return true;
             }
         }
         false
+    }
+
+    pub fn normalize_candidates<I, S>(&self, candidates: I) -> Vec<Arc<str>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.as_ref().trim().to_string())
+            .filter(|candidate| !candidate.is_empty())
+            .map(|candidate| self.normalize(&candidate).intern())
+            .collect()
+    }
+
+    pub fn match_epg_channel_candidates(&mut self, epg_id: &Arc<str>, normalized_candidates: &[Arc<str>]) -> bool {
+        let mut matched = self.match_with_normalized(epg_id, normalized_candidates);
+        if !matched && self.fuzzy_match_enabled {
+            if let Some(key) = self.find_best_fuzzy_match_for_candidates(normalized_candidates) {
+                self.normalized.entry(key).and_modify(|entry| {
+                    entry.replace(epg_id.clone());
+                    with_folded_epg_id(epg_id, |folded| self.channel_epg_id.insert(folded.intern()));
+                    matched = true;
+                });
+            }
+        }
+        matched
+    }
+
+    fn find_best_fuzzy_match_for_candidates(&self, normalized_candidates: &[Arc<str>]) -> Option<Arc<str>> {
+        let match_threshold = self.smart_match_config.match_threshold;
+        let best_match_threshold = self.smart_match_config.best_match_threshold;
+        let pre = normalized_candidates
+            .iter()
+            .map(|candidate| (candidate.clone(), self.phonetic(candidate)))
+            .collect::<Vec<_>>();
+
+        for (candidate, code) in &pre {
+            if let Some(keys) = self.phonetics.get(code) {
+                if let Some(good_enough) = keys.iter().find(|norm_key| {
+                    let jw = strsim::jaro_winkler(norm_key, candidate);
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let score = ((jw * 100.0).round() as u16).min(100);
+                    score >= best_match_threshold
+                }) {
+                    return Some(good_enough.clone());
+                }
+            }
+        }
+
+        pre.iter()
+            .filter_map(|(candidate, code)| {
+                self.phonetics.get(code).and_then(|keys| {
+                    keys.iter()
+                        .map(|norm_key| {
+                            let jw = strsim::jaro_winkler(norm_key, candidate);
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let score = ((jw * 100.0).round() as u16).min(100);
+                            (score, norm_key)
+                        })
+                        .max_by_key(|(score, _)| *score)
+                })
+            })
+            .max_by_key(|(score, _)| *score)
+            .and_then(|(score, key)| (score >= match_threshold).then(|| key.clone()))
     }
 }
 
@@ -166,17 +263,25 @@ async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>
     if let Some(tv_guide) = &fp.epg {
         if let Some((epg_source, icon_override_channels)) = tv_guide.filter_merged_with_icon_overrides(id_cache).await {
             let mut icon_assigned = HashSet::new();
-            let icon_tags: HashMap<&Arc<str>, &Arc<str>> = epg_source.children
+            let icon_tags: HashMap<Arc<str>, &Arc<str>> = epg_source.children
                 .iter()
-                .filter_map(|tag| tag.icon.as_ref().filter(|icon| !icon.is_empty()).map(|icon| (&tag.id, icon)))
+                .filter_map(|tag| {
+                    tag.icon.as_ref().filter(|icon| !icon.is_empty()).map(|icon| {
+                        (with_folded_epg_id(&tag.id, |folded| folded.intern()), icon)
+                    })
+                })
                 .collect();
+            let icon_override_channels = icon_override_channels
+                .into_iter()
+                .map(|id| with_folded_epg_id(&id, |folded| folded.intern()))
+                .collect::<HashSet<_>>();
 
             let assign_values = |chan: &mut PlaylistItem| {
                 if id_cache.smart_match_enabled {
                     // id_cache.processed contains all epg_ids found in any xmltv source.
                     let not_found_in_epg = match &chan.header.epg_channel_id {
                         None => true,
-                        Some(epg_id) => !id_cache.processed.contains(&**epg_id),
+                        Some(epg_id) => !id_cache.contains_processed_epg_id(epg_id),
                     };
                     if not_found_in_epg {
                         let try_match = |key: &str| {
@@ -196,19 +301,21 @@ async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>
                     }
                 }
                 if let Some(epg_channel_id) = chan.header.epg_channel_id.as_ref() {
-                    if !icon_assigned.contains(epg_channel_id) &&
-                        (icon_override_channels.contains(epg_channel_id) || chan.header.logo.is_empty() || chan.header.logo_small.is_empty()) {
-                        if let Some(icon) = icon_tags.get(epg_channel_id) {
-                            icon_assigned.insert(epg_channel_id.clone());
-                            if icon_override_channels.contains(epg_channel_id) || chan.header.logo.is_empty() {
+                    with_folded_epg_id(epg_channel_id, |folded_epg_channel_id| {
+                    if !icon_assigned.contains(folded_epg_channel_id) &&
+                        (icon_override_channels.contains(folded_epg_channel_id) || chan.header.logo.is_empty() || chan.header.logo_small.is_empty()) {
+                        if let Some(icon) = icon_tags.get(folded_epg_channel_id) {
+                            icon_assigned.insert(folded_epg_channel_id.intern());
+                            if icon_override_channels.contains(folded_epg_channel_id) || chan.header.logo.is_empty() {
                                 trace!("Matched channel {} to epg icon {icon}", chan.header.name);
                                 chan.header.logo = Arc::clone(icon);
                             }
-                            if icon_override_channels.contains(epg_channel_id) || chan.header.logo_small.is_empty() {
+                            if icon_override_channels.contains(folded_epg_channel_id) || chan.header.logo_small.is_empty() {
                                 chan.header.logo_small = Arc::clone(icon);
                             }
                         }
                     }
+                    });
                 }
             };
 
@@ -254,9 +361,18 @@ pub async fn process_playlist_epg(fp: &mut FetchedPlaylist<'_>, epg: &mut Vec<Ep
 
 #[cfg(test)]
 mod tests {
+    use crate::model::{
+        ConfigInput, EpgConfig, EpgSmartMatchConfig, FetchedPlaylist, IcsEpgSourceConfig, PersistedEpgSource,
+        PersistedEpgSourceKind, TVGuide,
+    };
+    use crate::repository::MemoryPlaylistSource;
     use rand::distr::Alphanumeric;
     use rand::Rng;
     use rphonetic::{DoubleMetaphone, Encoder};
+    use shared::model::{ConfigInputDto, PlaylistGroup, PlaylistItemHeader, PlaylistItemType};
+    use shared::utils::Internable;
+    use std::{fs, sync::Arc};
+    use tempfile::tempdir;
     use tokio::time::Instant;
 
     fn random_string() -> String {
@@ -265,6 +381,193 @@ mod tests {
             .take(30)
             .map(char::from)
             .collect()
+    }
+
+    fn write_ics_file(path: &std::path::Path) {
+        fs::write(
+            path,
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:Practice 1\nDTSTART:20260306T123000Z\nDTEND:20260306T133000Z\nEND:VEVENT\nEND:VCALENDAR",
+        )
+        .expect("write ics");
+    }
+
+    fn ics_tv_guide(path: std::path::PathBuf, match_names: Vec<Arc<str>>) -> TVGuide {
+        TVGuide::new(vec![PersistedEpgSource {
+            file_path: path,
+            priority: 0,
+            logo_override: false,
+            kind: PersistedEpgSourceKind::Ics {
+                channel_id: "f1.calendar".intern(),
+                channel_title: Some("Formula 1".intern()),
+                match_names,
+                config: Box::new(IcsEpgSourceConfig::default()),
+            },
+        }])
+    }
+
+    fn live_playlist_item(name: &str, epg_channel_id: Option<&str>) -> shared::model::PlaylistItem {
+        shared::model::PlaylistItem {
+            header: PlaylistItemHeader {
+                name: name.intern(),
+                epg_channel_id: epg_channel_id.map(Internable::intern),
+                xtream_cluster: super::XtreamCluster::Live,
+                item_type: PlaylistItemType::Live,
+                ..PlaylistItemHeader::default()
+            },
+        }
+    }
+
+    #[test]
+    fn channel_epg_id_membership_is_case_insensitive_ascii() {
+        let mut cache = super::EpgIdCache::new(None);
+        // Playlist epg ids stored MixedCase from different origins (Xtream source /
+        // mapper literal). Both go through the folding insert.
+        cache.insert_channel_epg_id("CNN.us");
+        cache.insert_channel_epg_id("BBC.One.UK");
+
+        // A guide <channel id> in any case matches the folded membership key.
+        assert!(cache.contains_channel_epg_id("cnn.US"));
+        assert!(cache.contains_channel_epg_id("CNN.US"));
+        assert!(cache.contains_channel_epg_id("cnn.us"));
+        assert!(cache.contains_channel_epg_id("bbc.one.uk"));
+        assert!(!cache.contains_channel_epg_id("unknown.tv"));
+    }
+
+    #[test]
+    fn assign_channel_epg_uses_case_insensitive_processed_and_icon_lookup() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let dir = tempdir().unwrap();
+            let epg_path = dir.path().join("mixed-case-icon.xml");
+
+            fs::write(
+                &epg_path,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<tv>
+  <channel id="Demo.Channel">
+    <display-name>Demo</display-name>
+    <icon src="http://guide/icon.png" />
+  </channel>
+  <programme start="20260425000000 +0000" stop="20260425010000 +0000" channel="Demo.Channel">
+    <title>Demo Show</title>
+  </programme>
+</tv>"#,
+            )
+            .unwrap();
+
+            let mut input = ConfigInput::from(ConfigInputDto::default());
+            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            let channel = shared::model::PlaylistItem {
+                header: PlaylistItemHeader {
+                    name: "Demo".intern(),
+                    epg_channel_id: Some("demo.channel".intern()),
+                    logo: "http://old/icon.png".intern(),
+                    logo_small: "".intern(),
+                    xtream_cluster: super::XtreamCluster::Live,
+                    item_type: PlaylistItemType::Live,
+                    ..PlaylistItemHeader::default()
+                },
+            };
+            let groups = vec![PlaylistGroup {
+                id: 1,
+                title: "Live".intern(),
+                channels: vec![channel],
+                xtream_cluster: super::XtreamCluster::Live,
+            }];
+            let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+                file_path: epg_path,
+                priority: 0,
+                logo_override: true,
+                kind: PersistedEpgSourceKind::Xmltv,
+            }]);
+            let mut playlist = FetchedPlaylist {
+                input: &input,
+                source: MemoryPlaylistSource::new(groups).into_source(),
+                epg: Some(tv_guide),
+            };
+            let mut epg = Vec::new();
+
+            super::process_playlist_epg(&mut playlist, &mut epg).await;
+
+            let updated = playlist.items_mut().next().unwrap();
+            assert_eq!(updated.header.epg_channel_id.as_deref(), Some("demo.channel"));
+            assert_eq!(updated.header.logo.as_ref(), "http://guide/icon.png");
+            assert_eq!(updated.header.logo_small.as_ref(), "http://guide/icon.png");
+            assert_eq!(epg[0].children[0].id.as_ref(), "Demo.Channel");
+        });
+    }
+
+    #[test]
+    fn playlist_item_with_ics_epg_channel_id_gets_ics_programmes() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let dir = tempdir().unwrap();
+            let ics_path = dir.path().join("f1.ics");
+            write_ics_file(&ics_path);
+
+            let mut input = ConfigInput::from(ConfigInputDto::default());
+            input.epg = Some(EpgConfig { sources: vec![], smart_match: None });
+            let groups = vec![PlaylistGroup {
+                id: 1,
+                title: "Live".intern(),
+                channels: vec![live_playlist_item("Formula 1", Some("f1.calendar"))],
+                xtream_cluster: super::XtreamCluster::Live,
+            }];
+            let mut playlist = FetchedPlaylist {
+                input: &input,
+                source: MemoryPlaylistSource::new(groups).into_source(),
+                epg: Some(ics_tv_guide(ics_path, Vec::new())),
+            };
+            let mut epg = Vec::new();
+
+            super::process_playlist_epg(&mut playlist, &mut epg).await;
+
+            assert_eq!(epg.len(), 1);
+            assert_eq!(epg[0].children[0].id.as_ref(), "f1.calendar");
+            assert_eq!(epg[0].children[0].programmes.len(), 1);
+            assert_eq!(epg[0].children[0].programmes[0].title.as_deref(), Some("Practice 1"));
+        });
+    }
+
+    #[test]
+    fn smart_match_uses_ics_channel_title_and_match_names() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let dir = tempdir().unwrap();
+            let ics_path = dir.path().join("f1.ics");
+            write_ics_file(&ics_path);
+
+            let mut smart_dto = shared::model::EpgSmartMatchConfigDto {
+                enabled: true,
+                fuzzy_matching: false,
+                ..shared::model::EpgSmartMatchConfigDto::default()
+            };
+            smart_dto.prepare().expect("smart config");
+            let mut input = ConfigInput::from(ConfigInputDto::default());
+            input.epg = Some(EpgConfig {
+                sources: vec![],
+                smart_match: Some(EpgSmartMatchConfig::from(smart_dto)),
+            });
+            let groups = vec![PlaylistGroup {
+                id: 1,
+                title: "Live".intern(),
+                channels: vec![live_playlist_item("F1", None)],
+                xtream_cluster: super::XtreamCluster::Live,
+            }];
+            let mut playlist = FetchedPlaylist {
+                input: &input,
+                source: MemoryPlaylistSource::new(groups).into_source(),
+                epg: Some(ics_tv_guide(ics_path, vec!["F1".intern()])),
+            };
+            let mut epg = Vec::new();
+
+            super::process_playlist_epg(&mut playlist, &mut epg).await;
+
+            let updated = playlist.items_mut().next().unwrap();
+            assert_eq!(updated.header.epg_channel_id.as_deref(), Some("f1.calendar"));
+            assert_eq!(epg[0].children[0].id.as_ref(), "f1.calendar");
+            assert_eq!(epg[0].children[0].programmes.len(), 1);
+        });
     }
 
     #[test]

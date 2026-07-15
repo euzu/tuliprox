@@ -5,7 +5,16 @@
       "label": "backend: run",
       "type": "shell",
       "command": "cargo run -p tuliprox --bin tuliprox -- -s -p ${workspaceFolder}/config",
-      "problemMatcher": ["$rustc"],
+      "options": {
+        "env": {
+          "CARGO_PROFILE_DEV_DEBUG": "0",
+          "TULIPROX_HOME": "${workspaceFolder}",
+          "TULIPROX_PROXY_REWRITE_SECRET": "00112233445566778899aabbccddeeff",
+          "TULIPROX_HOST_IP": "127.0.0.1",
+          "TULIPROX_DOMAIN": "localhost"
+        }
+      },
+      "problemMatcher": [],
       "group": "build",
       "presentation": {
         "panel": "dedicated",
@@ -16,7 +25,16 @@
       "label": "backend: watch",
       "type": "shell",
       "command": "cargo watch -i 'data/**' -i 'config/**' -x 'run -p tuliprox --bin tuliprox -- -s -p ${workspaceFolder}/config'",
-      "problemMatcher": ["$rustc"],
+      "options": {
+        "env": {
+          "CARGO_PROFILE_DEV_DEBUG": "0",
+          "TULIPROX_HOME": "${workspaceFolder}",
+          "TULIPROX_PROXY_REWRITE_SECRET": "00112233445566778899aabbccddeeff",
+          "TULIPROX_HOST_IP": "127.0.0.1",
+          "TULIPROX_DOMAIN": "localhost"
+        }
+      },
+      "problemMatcher": [],
       "isBackground": true,
       "presentation": {
         "panel": "dedicated",
@@ -28,7 +46,13 @@
       "type": "shell",
       "command": "trunk serve",
       "options": {
-        "cwd": "${workspaceFolder}/frontend"
+        "cwd": "${workspaceFolder}/frontend",
+        "env": {
+          "CARGO_INCREMENTAL": "0",
+          "CARGO_PROFILE_DEV_DEBUG": "0",
+          "CARGO_BUILD_JOBS": "2",
+          "RUST_MIN_STACK": "33554432"
+        }
       },
       "isBackground": true,
       "problemMatcher": [],
@@ -47,7 +71,7 @@
       "label": "test",
       "type": "shell",
       "command": "make test",
-      "problemMatcher": ["$rustc"],
+      "problemMatcher": [],
       "group": {
         "kind": "test",
         "isDefault": true
@@ -57,14 +81,14 @@
       "label": "lint (clippy)",
       "type": "shell",
       "command": "make lint",
-      "problemMatcher": ["$rustc"],
+      "problemMatcher": [],
       "group": "build"
     },
     {
       "label": "lint-fix",
       "type": "shell",
       "command": "make lint-fix",
-      "problemMatcher": ["$rustc"]
+      "problemMatcher": []
     },
     {
       "label": "fmt",
@@ -82,7 +106,7 @@
       "label": "coverage (llvm-cov)",
       "type": "shell",
       "command": "cargo llvm-cov --workspace --html",
-      "problemMatcher": ["$rustc"]
+      "problemMatcher": []
     },
     {
       "label": "deps: deny",

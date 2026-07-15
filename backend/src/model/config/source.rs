@@ -107,7 +107,7 @@ impl ProviderDnsCache {
         let mut guard = self.by_host.write();
         let entry = guard.entry(host.to_ascii_lowercase()).or_default();
         // `% len` guards against a stale index when the override list changed length.
-        let idx = entry.rr_index.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some((i + 1) % len)).unwrap_or_else(|i| i) % len;
+        let idx = entry.rr_index.try_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some((i + 1) % len)).unwrap_or_else(|i| i) % len;
         Some(ips[idx])
     }
 
@@ -118,7 +118,7 @@ impl ProviderDnsCache {
             return None;
         }
         let len = entry.ips.len();
-        let idx = entry.rr_index.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some((i + 1) % len)).unwrap_or_else(|i| i) % len;
+        let idx = entry.rr_index.try_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some((i + 1) % len)).unwrap_or_else(|i| i) % len;
         Some(entry.ips[idx])
     }
 
@@ -141,7 +141,7 @@ impl ProviderDnsCache {
         if new_len == 0 {
             entry.rr_index.store(0, Ordering::Relaxed);
         } else {
-            entry.rr_index.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some(i % new_len)).ok();
+            entry.rr_index.try_update(Ordering::Relaxed, Ordering::Relaxed, |i| Some(i % new_len)).ok();
         }
         entry.last_ok = Some(SystemTime::now());
         entry.last_err = None;
@@ -358,7 +358,7 @@ impl ConfigProvider {
         }
 
         let previous = self.current_url_index
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 let next = (current + 1) % len;
                 // If we've cycled back to start, we've tried all URLs.
                 (next != start_index).then_some(next)
@@ -414,7 +414,7 @@ macros::try_from_impl!(SourcesConfig);
 impl TryFrom<&SourcesConfigDto> for SourcesConfig {
     type Error = TuliproxError;
     fn try_from(dto: &SourcesConfigDto) -> Result<Self, TuliproxError> {
-        let mut inputs = Vec::<Arc<ConfigInput>>::new();
+        let mut inputs = Vec::<ConfigInput>::new();
         let mut batch_files = Vec::<PathBuf>::new();
         let mut input_names = HashSet::new();
         let provider: Vec<_> = dto.provider.as_ref()
@@ -428,8 +428,21 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
                 batch_files.push(path);
             }
             input_names.insert(input.name.clone());
-            inputs.push(Arc::new(input));
+            inputs.push(input);
         }
+
+        // Resolve staged playlist inputs to their configured download type.
+        // The provider link is kept for overlay routing and must not affect staged playlist fetching.
+        if inputs.iter().any(|input| input.input_type.is_staged()) {
+            for input in &mut inputs {
+                if !input.input_type.is_staged() {
+                    continue;
+                }
+                input.resolve_staged_download_type();
+            }
+        }
+
+        let inputs: Vec<Arc<ConfigInput>> = inputs.into_iter().map(Arc::new).collect();
 
         let mut sources = Vec::new();
         for source_dto in &dto.sources {
@@ -455,6 +468,16 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
 impl SourcesConfig {
     pub(crate) fn get_source_at(&self, idx: usize) -> Option<&ConfigSource> {
         self.sources.get(idx)
+    }
+
+    pub(crate) fn get_staged_input_for_provider(&self, provider_name: &Arc<str>) -> Option<&Arc<ConfigInput>> {
+        self.inputs.iter().find(|input| {
+            input
+                .staged
+                .as_ref()
+                .and_then(|staged| staged.for_input.as_ref())
+                .is_some_and(|name| name == provider_name)
+        })
     }
 
     pub fn get_target_by_id(&self, target_id: u16) -> Option<Arc<ConfigTarget>> {

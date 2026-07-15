@@ -5,6 +5,7 @@ use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 use std::fmt;
 use std::io::{Error as IoError, ErrorKind, Read};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use tokio_util::io::{StreamReader, SyncIoBridge};
 
 use crate::utils::network::stalker::client::StalkerApiClient;
@@ -155,14 +156,16 @@ pub async fn get_epg(
 /// Bulk-EPG stream. The portal can return hundreds of thousands of records in a single
 /// `get_epg_info?period=<h>` call, so we stream the HTTP body through a reader-backed
 /// JSON deserializer and emit one programme record at a time.
-pub async fn stream_bulk_epg<F>(
+pub async fn stream_bulk_epg<F, Fut>(
     client: &StalkerApiClient,
     handshake: &StalkerHandshake,
     period_hours: u32,
-    on_program: &mut F,
+    batch_size: usize,
+    mut on_batch: F,
 ) -> StalkerResult<()>
 where
-    F: FnMut(StalkerProgramRecord),
+    F: FnMut(Vec<StalkerProgramRecord>) -> Fut,
+    Fut: std::future::Future<Output = StalkerResult<()>>,
 {
     let spec = recipe_spec_for(handshake.profile.bootstrap_recipe);
     let candidates = client.load_url_candidates().to_vec();
@@ -209,7 +212,9 @@ where
             Err(err) => Err(IoError::other(err.without_url())),
         });
         let reader = StreamReader::new(body_stream);
-        let bridge = SyncIoBridge::new(reader);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut cancellation_guard = EpgCancellationGuard { cancelled: Arc::clone(&cancelled), armed: true };
+        let bridge = CancellableReader { inner: SyncIoBridge::new(reader), cancelled };
         // Bounded async channel between the blocking parser and the async consumer.
         // The parser side lives on a `spawn_blocking` thread, so blocking that thread
         // with `blocking_send` is the correct backpressure primitive: a full channel
@@ -229,9 +234,17 @@ where
             })
         });
         let mut emitted = 0_u64;
+        let mut batch = Vec::with_capacity(batch_size.max(1));
         while let Some(record) = rx.recv().await {
             emitted = emitted.saturating_add(1);
-            on_program(record);
+            batch.push(record);
+            if batch.len() >= batch_size.max(1) {
+                on_batch(std::mem::take(&mut batch)).await?;
+                batch.reserve(batch_size.max(1));
+            }
+        }
+        if !batch.is_empty() {
+            on_batch(batch).await?;
         }
         parse_task
             .await
@@ -246,12 +259,44 @@ where
                     message: format!("get_epg_bulk json decode: {err}"),
                 },
             })?;
+        cancellation_guard.disarm();
         if emitted == 0 {
             warn!("Stalker bulk EPG returned zero programs for period {period_hours}");
         }
         return Ok(());
     }
     Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: client.portal_url().to_string() }))
+}
+
+struct CancellableReader<R> {
+    inner: R,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl<R: Read> Read for CancellableReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, IoError> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(IoError::new(ErrorKind::Interrupted, "Stalker EPG parsing cancelled"));
+        }
+        self.inner.read(buffer)
+    }
+}
+
+struct EpgCancellationGuard {
+    cancelled: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl EpgCancellationGuard {
+    fn disarm(&mut self) { self.armed = false; }
+}
+
+impl Drop for EpgCancellationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancelled.store(true, Ordering::Release);
+        }
+    }
 }
 
 fn parse_epg_records(value: &Value) -> Vec<StalkerProgramRecord> {

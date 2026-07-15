@@ -25,7 +25,8 @@ use shared::{
         ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigApiDto, ConfigDto, ConfigPaths, PatternTemplate,
         SourcesConfigDto, TemplateDefinitionDto, TokenResponse, WebAuthConfigDto, WebUiConfigDto, TOKEN_NO_AUTH,
     },
-    utils::{default_kick_secs, hex_encode, DEFAULT_PORT, DEFAULT_STORAGE_DIR, USER_FILE},
+    utils::{hex_encode},
+    defaults::{default_kick_secs, DEFAULT_PORT, DEFAULT_STORAGE_DIR, USER_FILE, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH},
 };
 use std::{
     collections::HashSet,
@@ -39,7 +40,6 @@ use std::{
 };
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tower_http::{compression::predicate::{DefaultPredicate, Predicate}, services::ServeDir};
-use shared::utils::DEFAULT_CUSTOM_STREAM_RESPONSE_PATH;
 
 const DEFAULT_SETUP_HOST: &str = "0.0.0.0";
 

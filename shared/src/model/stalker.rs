@@ -296,9 +296,7 @@ impl StalkerInputConfigDto {
         self.mag_preset = StalkerMagPreset::default();
         self.endpoint_preference = StalkerEndpointPreference::default();
         self.size_caps = None;
-        if self.catalog_max_pages == Some(0) {
-            self.catalog_max_pages = None;
-        }
+        self.catalog_max_pages = None;
     }
 }
 

@@ -36,6 +36,29 @@ const DEFAULT_COLUMNS: &[&str] = &[
 ];
 const CSV_EXTENSION: &str = ".csv";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AliasExpDateSortOrder {
+    NewestFirst,
+    OldestFirst,
+}
+
+pub fn compare_alias_exp_date_with_order(
+    a: &ConfigInputAliasDto,
+    b: &ConfigInputAliasDto,
+    order: AliasExpDateSortOrder,
+) -> std::cmp::Ordering {
+    match (a.exp_date, b.exp_date) {
+        (Some(a_ts), Some(b_ts)) => match order {
+            AliasExpDateSortOrder::NewestFirst => b_ts.cmp(&a_ts),
+            AliasExpDateSortOrder::OldestFirst => a_ts.cmp(&b_ts),
+        },
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+    .then_with(|| a.name.cmp(&b.name))
+}
+
 pub fn is_csv_file(url: &str) -> bool {
     url.to_lowercase().ends_with(CSV_EXTENSION)
 }
@@ -180,7 +203,7 @@ pub fn csv_read_inputs_from_reader(
         InputType::XtreamBatch | InputType::Xtream => InputType::XtreamBatch,
         InputType::Stalker | InputType::StalkerBatch => InputType::StalkerBatch,
         InputType::Library => InputType::Library,
-        InputType::Emby | InputType::Jellyfin | InputType::Plex => batch_input_type,
+        InputType::Emby | InputType::Jellyfin | InputType::Plex | InputType::Staged => batch_input_type,
     };
     let mut result = vec![];
     let mut default_columns = vec![];
@@ -550,6 +573,7 @@ pub async fn csv_patch_batch_remove_expired(
 pub async fn csv_patch_batch_sort_by_exp_date(
     input_type: InputType,
     csv_path: &Path,
+    order: AliasExpDateSortOrder,
 ) -> Result<bool, TuliproxError> {
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
         .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
@@ -558,11 +582,7 @@ pub async fn csv_patch_batch_sort_by_exp_date(
         return Ok(false);
     }
     let mut sorted = aliases.clone();
-    sorted.sort_by(|a, b| {
-        let a_ts = a.exp_date.unwrap_or(i64::MIN);
-        let b_ts = b.exp_date.unwrap_or(i64::MIN);
-        b_ts.cmp(&a_ts).then_with(|| a.name.cmp(&b.name))
-    });
+    sorted.sort_by(|a, b| compare_alias_exp_date_with_order(a, b, order));
     if sorted == aliases {
         return Ok(false);
     }
@@ -575,10 +595,12 @@ pub async fn csv_patch_batch_sort_by_exp_date(
 
 #[cfg(test)]
 mod tests {
+    use super::{csv_patch_batch_sort_by_exp_date, csv_read_inputs_from_path, AliasExpDateSortOrder};
     use crate::repository::csv_read_inputs_from_reader;
     use crate::utils::{file_reader};
     use shared::model::InputType;
     use std::io::Cursor;
+    use std::path::PathBuf;
 
     const M3U_BATCH: &str = r"
 #url;name;max_connections;priority
@@ -651,5 +673,41 @@ input_2;de566567;de2345f43g5;http://provider_2.tv:8080;1;2028-12-23 13:12:34
         // inherit the parent input's stalker configuration in `as_input`.
         assert!(aliases.iter().all(|alias| alias.stalker.is_none()));
         assert!(aliases.iter().all(|alias| !alias.url.contains("username")));
+    }
+
+    fn temp_csv_path(test_name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "tuliprox-{test_name}-{}-{}.csv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ))
+    }
+
+    #[tokio::test]
+    async fn csv_sort_by_exp_date_newest_first_keeps_existing_rows() {
+        let path = temp_csv_path("csv-sort-newest-first");
+        std::fs::write(
+            &path,
+            "#name;username;password;url;max_connections;exp_date\n\
+old;old-user;old-pass;http://old.example;1;2026-01-01 00:00:00\n\
+new;new-user;new-pass;http://new.example;1;2027-01-01 00:00:00\n\
+missing;missing-user;missing-pass;http://missing.example;1;\n",
+        )
+        .expect("write csv fixture");
+
+        let changed = csv_patch_batch_sort_by_exp_date(InputType::XtreamBatch, &path, AliasExpDateSortOrder::NewestFirst)
+            .await
+            .expect("sort succeeds");
+
+        assert!(changed);
+        let (_, aliases) = csv_read_inputs_from_path(InputType::XtreamBatch, &path).await.expect("read sorted csv");
+        assert_eq!(aliases.len(), 3);
+        assert_eq!(aliases[0].name.as_ref(), "new");
+        assert_eq!(aliases[1].name.as_ref(), "old");
+        assert_eq!(aliases[2].name.as_ref(), "missing");
+        let _ = std::fs::remove_file(path);
     }
 }

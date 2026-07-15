@@ -10,6 +10,55 @@
   - Existing config files remain read-compatible because the old names are still accepted as aliases.
   - This is still a breaking change for generated config, API payloads, docs snippets, and any tooling that depends on
     the old serialized field names.
+- **Staged inputs reworked into a first-class `staged` input type.** The old nested `staged:` block on
+  provider inputs (with `enabled`, `live_source`, `vod_source`, and `series_source`) has been removed.
+  A staged source is now its own input with `type: staged`. It points to one non-staged `m3u` /
+  `xtream` provider through `staged.for_input`, and `staged.clusters` selects which clusters (`live`,
+  `vod`, `series`) are loaded from the staged playlist. Clusters not selected there are loaded from the
+  provider input itself. The merged result is stored under the provider input, so playlist delivery and
+  stream/API routing continue to use the provider.
+
+  Before:
+
+  ```yaml
+  inputs:
+    - name: provider_a
+      type: xtream
+      url: http://provider-a.tv/player_api.php
+      username: alice
+      password: secret
+      staged:
+        url: http://lists.example/list1.m3u
+        type: m3u
+        live_source: staged
+  ```
+
+  After:
+
+  ```yaml
+  inputs:
+    - name: provider_a
+      type: xtream
+      url: http://provider-a.tv/player_api.php
+      username: alice
+      password: secret
+    - name: provider_a_list
+      type: staged
+      url: http://lists.example/list1.m3u
+      staged:
+        provider: provider_a
+        clusters: [live]
+  ```
+
+  A staged input cannot be linked directly to a target. It must reference an existing non-staged `m3u` /
+  `xtream` provider input, and each provider can have at most one staged overlay. Staged inputs do not
+  use `priority`, `max_connections`, or `cache_duration`; the linked provider controls stream limits and
+  refresh cadence.
+
+- **Case-insensitive EPG channel-id matching**: EPG channel-id matching is now case-insensitive (ASCII). Ids are no
+  longer lowercased when parsed — output preserves the source's original case. Users whose sources provide MixedCase
+  ids will see MixedCase ids in the M3U/XMLTV output instead of the previously-lowercased form; downstream players may
+  re-map affected channels once. Supersedes #688 (M3U tvg-id lowercasing removed).
 
 - Removed the `plex` STRM export style. Existing STRM outputs configured with `style: plex` must switch to `kodi`,
   `emby`, or `jellyfin`; Plex use cases should use the HDHomeRun integration instead. Existing generated TMDB marker
@@ -23,15 +72,18 @@
   - Added Stalker playback URL materialization with runtime `create_link` refresh for stale or expired temp links.
   - Added typed handling for portal-internal auth/session body codes such as `44` and `440..449` so Stalker playback refresh can react to them.
   - Added Stalker bulk-EPG ingestion with streaming parse and batched persistence to avoid buffering the full payload in memory first.
-  - Added explicit unresolved-item semantics for Stalker playlist entries: Tuliprox keeps Stalker playback metadata without  
+  - Added explicit unresolved-item semantics for Stalker playlist entries: Tuliprox keeps Stalker playback metadata without
     exposing raw portal `cmd` values as playlist URLs.
-  - Added follow-up hardening for Stalker temp-link playback modes, runtime stale-URL invalidation, endpoint-preference ordering,  
+  - Added follow-up hardening for Stalker temp-link playback modes, runtime stale-URL invalidation, endpoint-preference ordering,
     and soft session-TTL refresh behavior.
-  - Added explicit Stalker transport-policy handling: Tuliprox only proxies `http`/`https` playback URLs and rejects unsupported `rtmp`/`rtsp`  
+  - Added explicit Stalker transport-policy handling: Tuliprox only proxies `http`/`https` playback URLs and rejects unsupported `rtmp`/`rtsp`
     commands up front.
   - Added the remaining Stalker config fields to the Web UI, including device identity overrides and per-action response-size caps.
-  - The remaining open edge case is portal-specific header/cookie forwarding for temp-link media requests; fresh temp-link resolution  
+  - The remaining open edge case is portal-specific header/cookie forwarding for temp-link media requests; fresh temp-link resolution
     itself is already implemented.
+- **ICS Calendar EPG Sources**: Import iCalendar (`.ics`) events as XMLTV EPG data with M3U and Xtream channel
+  assignment, Smart Match support, configurable four-hour dummy gap filling, bounded atomic cache downloads, and
+  aggregated warnings for recurring events that are detected but not expanded yet.
 
 - **Trakt Charts**: Xtream Trakt integration can now build virtual categories from public Trakt charts via `trakt.charts[]`.
   - MVP supports `movies/shows` with `trending` and `popular`.
@@ -142,6 +194,12 @@
 
 - **Popup Menu Keyboard Dismissal**:
   - Popup menus now close when pressing `Escape`, in addition to clicking outside, improving keyboard accessibility.
+
+- **Accessible Modal Dialogs**:
+  - All dialogs (confirm, content, and custom) now expose `role="dialog"` and `aria-modal`, trap keyboard focus
+    within the dialog while open (Tab/Shift+Tab cycle through its controls), close on `Escape` when dismissable,
+    and restore focus to the previously focused element when closed. Confirm dialogs also expose their title as an
+    accessible label.
 
 - **Recoverable Error Boundary**:
   - Added an `ErrorBoundary` component that wraps each main view (dashboard, stats, streams, downloads, users,
@@ -349,8 +407,55 @@
 - **Stream View**:
   - Displays the user comment in the stream view.
   - Displays EPG information in the stream view.
+- **Shared HLS Streams**
+  - Added advanced video routing with HLS and TS support, including HLS provisioning polling and correct byte-range
+    handling for TS output.
+  - Introduced live HLS reverse-proxy caching with lifecycle scheduling, garbage collection, and improved demand/prefetch backpressure.
+  - Added smarter HLS playback access/admission handling for consistent manifest responses.
 
 ## 🐛 Fixes
+
+- **Media servers no longer show a duplicate movie for every extra provider listing (STRM `flat` mode)**: under
+  `flat: true` the movie folder is deduplicated by TMDB id, but each file was still named after *its own*
+  provider title. Providers routinely list the same film twice with the tag written differently
+  (`X [MULTI-SUB] - 2021` vs `X - 2021 [Multi Sub]`), so the second listing landed in the first one's folder
+  under a name that does not start with the folder name — exactly what Jellyfin/Emby require in order to group
+  alternate versions. Jellyfin's `VideoListResolver` then abandons version grouping for the *whole* folder and
+  shows one movie per file. Every listing that reuses a folder is now named after that folder, so the existing
+  `add_quality_to_filename` suffix (or the `[Version id#N]` collision suffix) distinguishes them and the media
+  server shows a single movie with selectable versions. Applies to the `jellyfin`, `emby` and `kodi` styles.
+  **Note:** this renames existing files in `flat` STRM trees; with `cleanup: true` the old names are removed on
+  the next update.
+
+- **The provider category is no longer appended to STRM movie file names in `flat` mode**: it was added as a
+  collision guard, but the only files that can now collide are versions of the same movie (same TMDB folder,
+  same quality string), which the existing `[Version id#N]` pass already separates. Jellyfin and Emby render
+  whatever follows the folder name as the *version label*, so the category leaked into the version picker; the
+  label now reads as the quality alone. Items with no TMDB id still carry the category — it is what keeps their
+  folder unique — and for the `jellyfin` and `emby` styles they now carry it in the file name too, so the name
+  still starts with the folder name (it previously did not, which quietly broke version detection for those
+  items). `kodi` is unchanged here: it has no filename-starts-with-folder-name convention.
+
+- **Two STRM versions of the same movie could silently overwrite each other when the name was very long**: the
+  `[Version id#N]` suffix that tells colliding versions apart was appended last, and the writer then truncates
+  the file stem to 250 characters — so for a long title the only distinguishing part was cut off and both
+  versions resolved to the same path. The shared base is now trimmed instead, so the version label always
+  survives.
+
+- **Quality tags no longer demote widescreen films a resolution tier**: `MediaQuality` classified the
+  resolution from the frame *height* alone. A letterboxed 2.40:1 film mastered at 1080p is 1920x796, so it was
+  tagged `720p HD`; a 2.40:1 UHD master (3840x1600) was tagged `1440p QHD`. Resolution is now taken from the
+  higher of the width-derived and height-derived tier, so scope films land in the tier they were mastered at.
+  Height alone still decides when the width is unknown. Affects `add_quality_to_filename` STRM names.
+
+- **STRM files are no longer rewritten on every playlist update**: authenticated tokens (STRM
+  `/provider/resolve/…` URLs and M3U catchup URLs) used a random IV, so re-encoding the same item produced a
+  different token every run. That made every STRM file's content differ on each update, so the existing
+  `has_strm_file_same_hash` skip in `strm_repository` never matched and the whole STRM tree was rewritten every
+  time (measured: ~28k files rewritten by a no-op update). The IV is now derived synthetically (SIV) from the
+  secret, domain and payload, so the same item always encodes to the same token and unchanged STRM files are left
+  alone. The token wire format is unchanged and the IV is still read from the token on decode, so **tokens issued
+  by older versions keep working** — no STRM regeneration required.
 
 - **Playlist Cache Load Failures No Longer Silent**: Xtream and M3U storage loads that fail due to corruption,
   version mismatch, or task panics now log an error before falling back to an empty playlist, instead of silently
@@ -394,6 +499,16 @@
 
 ## ⚙️ New Settings
 
+- **source.yml (target `options.epg_output`)**:
+  - Added optional `lowercase_ids` (`bool`, default `false`) to canonicalize technical EPG IDs with ASCII lowercase
+    consistently across visible M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV `<channel id>` / `<programme channel>`
+    references, EPG API responses, and target EPG storage keys after a full target refresh. Disabled targets retain
+    their existing source-case storage keys and ordering.
+  - Added optional `lowercase_xmltv_display_names` (`bool`, default `false`) to lowercase only XMLTV `<display-name>`
+    values during serialization; playlist names and programme metadata remain unchanged, and no persisted rebuild is
+    normally required.
+  - Both options are disabled by default, so existing visible outputs remain unchanged. Changing `lowercase_ids`
+    requires a full target refresh, and clients may need to re-index EPG data once after visible IDs change.
 - **config.yml (main)**:
   - Added `interner_gc_interval_secs`: interval in seconds between background string interner GC checks.
   - Added `interner_gc_min_pool_size`: minimum interned-string pool size required before background interner GC runs.
@@ -474,83 +589,12 @@
     - `allowed_countries`: ISO-style country codes resolved through GeoIP.
   - The rules use OR semantics: any matching CIDR or country allows the request.
 
-## 🚀 Performance
+## 🛠 Maintenance
 
-- **EPG Programme Lookup**: `EpgChannel::get_programme_with_limit` now binary-searches the sorted programme list
-  for the current window boundary instead of scanning linearly, reducing per-channel EPG lookup from `O(p)` to
-  `O(log p)` on large guides. The selected programmes are unchanged.
-- **Item Type Field Access**: Reading the `Type` field during sorting and filtering no longer re-interns the
-  type label on every access. The five fixed type labels are now interned once and cached, so `Type`-keyed
-  rules return a cheap `Arc` clone instead of performing an interner hash-map lookup per item.
-- **EPG XML Parsing**: The Web UI XMLTV parser no longer allocates an owned `String` for every XML element. It now
-  borrows the element name (via `from_utf8_lossy` without `to_string`) and tracks the active text element with a
-  small enum, removing one to two heap allocations per element on large EPG guides.
-- **VOD/Recording Download Loop**: The per-chunk download-control check is now throttled to at most every 200ms
-  instead of running on every chunk. Pause/cancel/restart still take effect immediately via the existing
-  `control_notify` wakeups in the `select!` loop; the throttled poll only covers the rare race where a control
-  change fires mid-write, removing an unthrottled per-chunk lock read from multi-GB downloads.
-- **Playlist Filtering**: `apply_filter_to_playlist` now pre-sizes each surviving-channel buffer to the source
-  group length instead of growing from a fixed small capacity, removing repeated reallocations while collecting
-  survivors for permissive filters (the common case where most channels pass).
-- **Remote File Download**: `get_remote_content_as_file` no longer drains the response stream twice. It previously
-  consumed the whole body in an initial loop with no idle protection and then re-entered an idle-timeout `select!`
-  loop on an already-exhausted stream (dead code). The redundant first loop is removed, so the download runs through
-  a single loop and the idle timeout now actually guards the transfer.
-- **Client Stream Keep-Alive Handling**: After a run of empty keep-alive chunks, `ClientStream` now backs off with a
-  short timer instead of immediately re-waking the task. A provider that streams an endless sequence of empty chunks
-  can no longer keep the task hot with back-to-back `Poll::Pending` re-wakes.
-- **Library Orphan Cleanup**: `cleanup_orphaned` no longer reloads the entire metadata library for every orphaned
-  entry (and again for each thumbnail reference check). It now reads the library once, partitions entries into
-  orphaned and surviving, and deletes unreferenced thumbnails against a precomputed surviving-thumbnail set, turning
-  an O(orphans × library) scan into a single linear pass.
-- **Series Expansion Merge**: Applying resolved series groups back into the in-memory playlist no longer re-scans
-  (and re-normalizes the title of) every existing group for each incoming group. A new batched `merge_groups`/
-  `extend_playlist` path builds `(cluster, normalized_title)` and `(cluster, id)` indexes once and merges the whole
-  batch in a single linear pass, replacing the previous O(groups²) behavior on series-heavy inputs while moving
-  channels instead of cloning them.
-- **Group Flatten Pre-Sizing**: `flatten_groups` now pre-allocates its merge buffer and category index to the
-  incoming group count instead of growing them from empty, reducing reallocation churn when assembling large target
-  playlists.
-- **Custom Provider Playlist Streaming**: The custom provider playlist endpoint now streams its UI items lazily via
-  `stream_json_or_bin_response_stream` (like the target and input endpoints) instead of collecting every channel into
-  a second `Vec<UiPlaylistItem>` and serializing the whole body at once, lowering peak memory and latency for large
-  provider imports.
-
-## 🧹 Maintainability
-
-- **Output Capability Descriptor**: Introduced `TargetType::capabilities()` — a single exhaustive table describing
-  whether each output format supports playlist filtering, EPG, and the in-memory cache. The EPG write/path sites now
-  derive "this format has no EPG" from the table instead of silent empty match arms, and a new `TargetOutput::filter()`
-  accessor co-locates the per-format filter lookup so the playlist writer no longer re-matches every variant. Adding an
-  output format now centers on one descriptor entry plus the format-specific writer.
-- **Input Capability Descriptor**: Introduced `InputType::capabilities()` — a single exhaustive table describing each
-  input type's persistence family (`InputPersistence`), whether generic probing needs a provider connection, and
-  whether the custom-provider endpoint can serve it. Backend persist/load routing, the stream-probe requirement check,
-  and the custom-provider endpoint now derive from this table instead of re-listing `InputType` variants in parallel
-  `match` arms, so most new input variants only need a single descriptor entry and the dependent sites stay in sync.
-- **ItemField Single-Source Binding**: The directly-bound `ItemField` variants (`Group`/`Name`/`Title`/`Url`/`Input`)
-  are now listed once and both `get_field_value` and `set_field_value` are generated from that single list via a
-  callback macro, so a new simple field can no longer be wired into the read half but forgotten in the write half (or
-  vice versa). The asymmetric `Genre`/`Type`/`Caption` cases stay explicit because their read/write behavior differs.
-- **Resolver Stage Summaries**: The background VOD and series resolve-queueing loops now emit a single concise
-  debug summary (total / queued / expanded / skipped-by-filter / skipped-by-resolve-filter / elapsed) per stage in
-  addition to the existing detailed per-item logs, making operational analysis of the hot resolver paths easier
-  without raising the default log level.
-- **InputType Family Helpers**: Added `InputType::is_batch()` and routed the scattered
-  `matches!(input_type, M3uBatch | XtreamBatch)` / `Xtream | XtreamBatch` / `M3u | M3uBatch` checks across the backend
-  and frontend through the centralized `is_batch()` / `is_xtream()` / `is_m3u()` methods, so the batch/family rules
-  live on the enum instead of being re-encoded (and risking silent drift) at every call site.
-- **PlaylistItemType Classification Helpers**: Added `PlaylistItemType::is_video()` / `is_series()` and routed the
-  repeated `matches!(item_type, Video | LocalVideo)` and `matches!(item_type, Series | LocalSeries)` boolean checks
-  (filter evaluation, stream probing, trakt matching, playlist persistence, custom-provider filtering, metadata probe
-  routing) through them, so the family classification is defined once on the enum instead of re-encoded per call site.
-- **XtreamCluster Behavior Centralization**: Added `XtreamCluster::info_action_and_id_field()` (and a backend
-  `xtream_cluster_category_collection()` helper) so the per-cluster `player_api` action / id-field and the
-  `cat_live`/`cat_vod`/`cat_series` collection names are derived once instead of being re-matched at each storage and
-  network call site, reducing the chance of a forgotten or inconsistent cluster arm.
-- **Derived GeoIP Error Display**: `GeoIpUpdateError` now derives its `Display`/`Error` implementation via `thiserror`
-  instead of a hand-written `match self` formatter, so adding a variant only requires an `#[error(...)]` attribute next
-  to it rather than remembering to extend a separate formatting block (a classic source of stale or missing messages).
+- **Shared `FieldWrapper` For Form Inputs**:
+  - Extracted the repeated label / field-id / `tp__input-wrapper` scaffolding from the `Input`, `NumberInput`, and
+    `TextArea` primitives into a single shared `FieldWrapper` component, reducing duplication while keeping the
+    rendered markup and behavior unchanged.
 
 ## 3.3.0 (2026-04-02)
 
@@ -1503,24 +1547,24 @@ target output type `xtream`:
 
 target output type `m3u`:
 
-- `filename`: _optional_
+- `filename`: *optional*
 - `include_type_in_url`: `true`|`false`,
 - `mask_redirect_url`: `true`|`false`,
 
 target output type `strm`:
 
-- `directory`: _mandatory_,
-- `username`: _optional_,
+- `directory`: *mandatory*,
+- `username`: *optional*,
 - `underscore_whitespace`: `true`|`false`,
 - `cleanup`: `true`|`false`,
 - `kodi_style`: `true`|`false`,
-- `strm_props`: _optional_,  list of strings,
+- `strm_props`: *optional*,  list of strings,
 
 target output type `hdhomerun`:
 
-- `device`: _mandatory_,
-- `username`: _mandatory_,
-- `use_output`: _optional_, `m3u`|`xtream`
+- `device`: *mandatory*,
+- `username`: *mandatory*,
+- `use_output`: *optional*, `m3u`|`xtream`
 
 Example:
 
@@ -1666,9 +1710,9 @@ messaging:
 - Watch files are now moved inside the `target` folder. Move them manually from `watch_<target_name>_<watched_group>.bin` to
   `<target_name>/watch_<watched_group>.bin`
 - No error log for xtream api when content is skipped with options `xtream_skip_[live|vod|series]`
-- _experimental_:  added live channel connection sharing in reverse proxy mode. To activate set `share_live_streams` in target options.
+- *experimental*:  added live channel connection sharing in reverse proxy mode. To activate set `share_live_streams` in target options.
 - Added `info` and `tmdb-id` caching for vod and series with options `xtream_resolve_(series|vod)`.
-- The `kodi` format for movies can contain the `tmdb-id` (_optional_). To add the `tmdb-id` you can set now `kodi_style`,  `xtream_resolve_vod`,
+- The `kodi` format for movies can contain the `tmdb-id` (*optional*). To add the `tmdb-id` you can set now `kodi_style`,  `xtream_resolve_vod`,
   `xtream_resolve_vod_delay`, `xtream_resolve_series` and  `xtream_resolve_series_delay` to target options.
 - `kodi` output can now have `username` attribute to use reverse proxy mode when combined with `xtream` output.
 - Fixed webUI manual update for selected targets
