@@ -394,7 +394,6 @@
 
 ## 🐛 Fixes
 
-
 - **Media servers no longer show a duplicate movie for every extra provider listing (STRM `flat` mode)**: under
   `flat: true` the movie folder is deduplicated by TMDB id, but each file was still named after *its own*
   provider title. Providers routinely list the same film twice with the tag written differently
