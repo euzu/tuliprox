@@ -1520,24 +1520,24 @@ target output type `xtream`:
 
 target output type `m3u`:
 
-- `filename`: _optional_
+- `filename`: *optional*
 - `include_type_in_url`: `true`|`false`,
 - `mask_redirect_url`: `true`|`false`,
 
 target output type `strm`:
 
-- `directory`: _mandatory_,
-- `username`: _optional_,
+- `directory`: *mandatory*,
+- `username`: *optional*,
 - `underscore_whitespace`: `true`|`false`,
 - `cleanup`: `true`|`false`,
 - `kodi_style`: `true`|`false`,
-- `strm_props`: _optional_,  list of strings,
+- `strm_props`: *optional*,  list of strings,
 
 target output type `hdhomerun`:
 
-- `device`: _mandatory_,
-- `username`: _mandatory_,
-- `use_output`: _optional_, `m3u`|`xtream`
+- `device`: *mandatory*,
+- `username`: *mandatory*,
+- `use_output`: *optional*, `m3u`|`xtream`
 
 Example:
 
@@ -1683,9 +1683,9 @@ messaging:
 - Watch files are now moved inside the `target` folder. Move them manually from `watch_<target_name>_<watched_group>.bin` to
   `<target_name>/watch_<watched_group>.bin`
 - No error log for xtream api when content is skipped with options `xtream_skip_[live|vod|series]`
-- _experimental_:  added live channel connection sharing in reverse proxy mode. To activate set `share_live_streams` in target options.
+- *experimental*:  added live channel connection sharing in reverse proxy mode. To activate set `share_live_streams` in target options.
 - Added `info` and `tmdb-id` caching for vod and series with options `xtream_resolve_(series|vod)`.
-- The `kodi` format for movies can contain the `tmdb-id` (_optional_). To add the `tmdb-id` you can set now `kodi_style`,  `xtream_resolve_vod`,
+- The `kodi` format for movies can contain the `tmdb-id` (*optional*). To add the `tmdb-id` you can set now `kodi_style`,  `xtream_resolve_vod`,
   `xtream_resolve_vod_delay`, `xtream_resolve_series` and  `xtream_resolve_series_delay` to target options.
 - `kodi` output can now have `username` attribute to use reverse proxy mode when combined with `xtream` output.
 - Fixed webUI manual update for selected targets
