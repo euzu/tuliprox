@@ -27,21 +27,21 @@ impl VideoResolution {
         // Thresholds sit well below each tier's nominal size so that cropped or slightly
         // non-standard encodes still land in the right bucket.
         let by_width = width.map(|w| match w {
-            _ if w >= 7000 => Self::P4320,
-            _ if w >= 3500 => Self::P2160,
-            _ if w >= 2400 => Self::P1440,
-            _ if w >= 1700 => Self::P1080,
-            _ if w >= 1200 => Self::P720,
-            _ => Self::SD,
+            7000.. => Self::P4320,
+            3500..7000 => Self::P2160,
+            2400..3500 => Self::P1440,
+            1700..2400 => Self::P1080,
+            1200..1700 => Self::P720,
+            ..1200 => Self::SD,
         });
 
         let by_height = height.map(|h| match h {
-            _ if h >= 4300 => Self::P4320,
-            _ if h >= 2100 => Self::P2160,
-            _ if h >= 1400 => Self::P1440,
-            _ if h >= 1000 => Self::P1080,
-            _ if h >= 700 => Self::P720,
-            _ => Self::SD,
+            4300.. => Self::P4320,
+            2100..4300 => Self::P2160,
+            1400..2100 => Self::P1440,
+            1000..1400 => Self::P1080,
+            700..1000 => Self::P720,
+            ..700 => Self::SD,
         });
 
         by_width.max(by_height).unwrap_or_default()
