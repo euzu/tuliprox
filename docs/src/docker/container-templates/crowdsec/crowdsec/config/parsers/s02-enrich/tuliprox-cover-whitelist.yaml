@@ -1,0 +1,12 @@
+---
+name: local/tuliprox-cover-parser-whitelist
+description: Ignore expected Tuliprox Xtream image fetches before scenarios
+filter: 'evt.Meta.log_type == "http_access-log"'
+whitelist:
+  reason: "Ignore expected Tuliprox 4xx/5xx Xtream image GETs"
+  expression:
+    - >
+      evt.Meta.traefik_router_name in ["tuliprox@docker", "tuliprox-secure@docker"] &&
+      evt.Meta.http_verb == "GET" &&
+      evt.Meta.http_status matches "^[45][0-9][0-9]$" &&
+      evt.Meta.http_path matches "^(/[^/?#]+)*/resource/(live/[^/]+/[^/]+/[0-9]+/(logo|logo_small)|movie/[^/]+/[^/]+/[0-9]+/(logo|logo_small|nfo_cover_big|nfo_movie_image|nfo_backdrop_path_[0-9]+)|series/[^/]+/[^/]+/[0-9]+/(logo|logo_small|cover|backdrop_path_[0-9]+|nfo_s_[0-9]+_(cover|cover_tmdb|cover_big)|nfo_ep_[0-9]+_[0-9]+_movie_image))$"

@@ -325,7 +325,7 @@ and CrowdSec protection.
 
 2. **Gluetun (VPN & Proxy Sidecar):**
 
-   Provide your Wireguard details in `gluetun-01/.env.wg-01` and set a user/pass in `.env.socks5-proxy`. Once started (
+   Provide your Wireguard details in `gluetun/.env.wg` and set a user/pass in `gluetun/.env.socks5-proxy`. Once started (
    `docker-compose up -d`), it
    securely routes all traffic attached to its network through the VPN.
 
@@ -335,7 +335,7 @@ and CrowdSec protection.
 
    ```yaml
    proxy:
-     url: socks5://socks5-01:1388
+     url: socks5://gluetun:1388
      username: "<socks5-proxy-user>"
      password: "<socks5-proxy-password>"
    ```

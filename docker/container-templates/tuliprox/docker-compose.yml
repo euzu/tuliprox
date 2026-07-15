@@ -2,7 +2,7 @@ services:
   tuliprox:
     container_name: tuliprox
     image: ghcr.io/euzu/tuliprox:latest
-    restart: on-failure
+    restart: unless-stopped
     networks:
       - proxy-net
     expose:

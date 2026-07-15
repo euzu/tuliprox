@@ -27,21 +27,21 @@ tcp:
     gluetun-http-proxy:
       loadBalancer:
         servers:
-          - address: "gluetun-01:1080"
+          - address: "gluetun:1080"
           # - address: "gluetun-02:1080"   # optional second gluetun instance, but does not work right now because traefik does not support sticking of TCP connections -> https://traefik.io/glossary/what-are-sticky-sessions
           # - address: "gluetun-03:1080"   # optional third gluetun instance, but does not work right now because traefik does not support sticking of TCP connections -> https://traefik.io/glossary/what-are-sticky-sessions
 
     socks5h-tcp:
       loadbalancer:
         servers:
-          - address: "gluetun-01:1388"
+          - address: "gluetun:1388"
           # - address: "gluetun-02:1388"   # optional second gluetun instance, but does not work right now because traefik does not support sticking of TCP connections -> https://traefik.io/glossary/what-are-sticky-sessions
           # - address: "gluetun-03:1388"   # optional third gluetun instance, but does not work right now because traefik does not support sticking of TCP connections -> https://traefik.io/glossary/what-are-sticky-sessions
 
     shadowsocks-tcp:
       loadBalancer:
         servers:
-          - address: "gluetun-01:9388"
+          - address: "gluetun:9388"
           # - address: "gluetun-02:9388"   # optional second gluetun instance, but does not work right now because traefik does not support sticking of TCP connections -> https://traefik.io/glossary/what-are-sticky-sessions
           # - address: "gluetun-03:9388"   # optional third gluetun instance, but does not work right now because traefik does not support sticking of TCP connections -> https://traefik.io/glossary/what-are-sticky-sessions
 
@@ -59,13 +59,13 @@ udp:
     socks5h-udp:
       loadbalancer:
         servers:
-          - address: "gluetun-01:1388"
+          - address: "gluetun:1388"
           # - address: "gluetun-02:1388"   # optional second gluetun instance, but does not work right now because traefik does not support sticking of TCP connections -> https://traefik.io/glossary/what-are-sticky-sessions
           # - address: "gluetun-03:1388"   # optional third gluetun instance, but does not work right now because traefik does not support sticking of TCP connections -> https://traefik.io/glossary/what-are-sticky-sessions
 
     shadowsocks-udp:
       loadBalancer:
         servers:
-          - address: "gluetun-01:9388"
+          - address: "gluetun:9388"
           # - address: "gluetun-02:9388"   # optional second gluetun instance, but does not work right now because traefik does not support sticking of TCP connections -> https://traefik.io/glossary/what-are-sticky-sessions
           # - address: "gluetun-03:9388"   # optional third gluetun instance, but does not work right now because traefik does not support sticking of TCP connections -> https://traefik.io/glossary/what-are-sticky-sessions

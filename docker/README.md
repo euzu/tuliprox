@@ -52,8 +52,8 @@ Set timezone in docker-compose.yml like
 ## Docker Container Templates — Deployment Guide
 
 This repository contains ready-to-use Docker Compose templates for a secure reverse proxy stack with VPN egress and CrowdSec protection. It includes
-**Traefik**, **Gluetun** (WireGuard) with optional proxy sidecars, **CrowdSec** with Traefik integration, and an example **Tuliprox** app wired for
-reverse proxying.
+**Traefik**, **Gluetun** (WireGuard) with optional proxy sidecars, **CrowdSec** with Traefik integration, an **IPTV-org-epg** service, and an example
+**Tuliprox** app wired for reverse proxying.
 
 > **Software baseline:** Traefik v3.5, a current Rust toolchain, and a current Docker/Compose setup.
 
@@ -61,12 +61,13 @@ reverse proxying.
 
 ## Legend
 
-| Template     | Folder                          | Purpose                                                                                                                        | Notable Ports (internal unless published)                          |
-| ------------ | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| **Traefik**  | `container-templates/traefik/`  | Reverse proxy & TLS (ACME/DNS), dashboard, dynamic security middlewares, optional CrowdSec bouncer.                            | 80 `web`, 443 `websecure`                                          |
-| **Gluetun**  | `container-templates/gluetun/`  | VPN egress via WireGuard; sidecars provide **SOCKS5**, **HTTP**, and **Shadowsocks** proxies bound to Gluetun’s network stack. | 1080/tcp (HTTP), 1388/tcp+udp (SOCKS5), 9388/tcp+udp (Shadowsocks) |
-| **CrowdSec** | `container-templates/crowdsec/` | LAPI + bouncers (Traefik & firewall) to protect services.                                                                      | LAPI on `127.0.0.1:8080` (host)                                    |
-| **Tuliprox** | `container-templates/tuliprox/` | Example application container with Traefik labels and `expose: 8901` for reverse proxying.                                     | 8901 (internal)                                                    |
+| Template         | Folder                          | Purpose                                                                                                                        | Notable Ports (internal unless published)                          |
+| ---------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| **Traefik**      | `container-templates/traefik/`  | Reverse proxy & TLS (ACME/DNS), dashboard, dynamic security middlewares, optional CrowdSec bouncer.                            | 80 `web`, 443 `websecure`                                          |
+| **Gluetun**      | `container-templates/gluetun/`  | VPN egress via WireGuard; sidecars provide **SOCKS5**, **HTTP**, and **Shadowsocks** proxies bound to Gluetun’s network stack. | 1080/tcp (HTTP), 1388/tcp+udp (SOCKS5), 9388/tcp+udp (Shadowsocks) |
+| **CrowdSec**     | `container-templates/crowdsec/` | LAPI + bouncers (Traefik & firewall) to protect services.                                                                      | LAPI on `127.0.0.1:8080` (host)                                    |
+| **Tuliprox**     | `container-templates/tuliprox/` | Example application container with Traefik labels and `expose: 8901` for reverse proxying.                                     | 8901 (internal)                                                    |
+| **IPTV-org-epg** | `container-templates/iptv-org/` | Generates and serves a local XMLTV guide from a manually curated channel list.                                                 | 3000 (internal)                                                    |
 
 ---
 
@@ -94,15 +95,9 @@ container-templates/
 │  ├─ .env.http-proxy
 │  ├─ .env.socks5-proxy
 │  ├─ .env.ss-proxy
-│  ├─ gluetun-01/
-│  │  ├─ .env.wg-01
+│  ├─ gluetun/
+│  │  ├─ .env.wg
 │  │  └─ docker-compose.yml
-│  ├─ gluetun-02/
-│  │  ├─ .env.wg-02
-│  │  └─ docker-compose.yml
-│  └─ gluetun-03/
-│     ├─ .env.wg-03
-│     └─ docker-compose.yml
 ├─ crowdsec/
 │  ├─ .env.cs-bouncer-firewall
 │  ├─ .env.cs-bouncer-traefik
@@ -118,7 +113,11 @@ container-templates/
 │  ├─ firewall-bouncer/
 │  │  └─ config/crowdsec-firewall-bouncer.yaml
 │  └─ docker-compose.yml
-└─ tuliprox/
+├─ tuliprox/
+│  └─ docker-compose.yml
+└─ iptv-org/
+   ├─ data/
+   │  └─ channels.xml
    └─ docker-compose.yml
 ```
 
@@ -207,15 +206,15 @@ docker logs -f traefik
 
 **Folder:** `container-templates/gluetun/`
 
-Each instance (`gluetun-01`, `gluetun-02`, `gluetun-03`) has its own `.env.wg-0x` with WireGuard settings. Sidecars (e.g., `socks5-02`) use
-`network_mode: service:gluetun-02` to share Gluetun’s network. Otherwise connect the provided proxies within your tuliprox instance through traefik.
+Each instance (`gluetun`) has its own `.env.wg` with WireGuard settings. Sidecars (e.g., `socks5`) use
+`network_mode: service:gluetun` to share Gluetun’s network. Otherwise connect the provided proxies within your tuliprox instance through traefik.
 
-### Configure minimum one instance (example: gluetun-02)
+### Configure minimum one instance (example: gluetun)
 
 1. Edit WireGuard values:
 
    ```bash
-   nano container-templates/gluetun/gluetun-02/.env.wg-02
+   nano container-templates/gluetun/.env.wg
    # WIREGUARD_PRIVATE_KEY=...
    # WIREGUARD_ADDRESSES=...
    # WIREGUARD_PUBLIC_KEY=...
@@ -233,8 +232,8 @@ Each instance (`gluetun-01`, `gluetun-02`, `gluetun-03`) has its own `.env.wg-0x
 3. Start:
 
    ```bash
-   docker compose -f container-templates/gluetun/gluetun-02/docker-compose.yml up -d
-   docker logs -f gluetun-02
+   docker compose -f container-templates/gluetun/docker-compose.yml up -d
+   docker logs -f gluetun
    ```
 
 ### Test from your Docker host
@@ -344,6 +343,36 @@ labels:
 
 ---
 
+## 5) IPTV-org-epg (EPG guide)
+
+**Folder:** `container-templates/iptv-org/`
+
+### Configure
+
+1. Copy the desired `<channel>` entries from the IPTV-org `sites` files to
+   `container-templates/iptv-org/data/channels.xml`.
+2. Ensure every `xmltv_id` exactly matches the corresponding `@epg_channel_id` in Tuliprox. For example,
+   `xmltv_id="BBCOne.uk@LondonHD"` matches `@epg_channel_id = "BBCOne.uk@LondonHD"`. If necessary, adjust `xmltv_id` in
+   `channels.xml` or set the corresponding `@epg_channel_id` in `mapping.yml`.
+3. Add the generated guide to the corresponding input in your `source.yml`:
+
+   ```yaml
+   epg:
+     sources:
+       - url: http://iptv-org-epg:3000/guide.xml
+   ```
+
+### Start
+
+```bash
+docker compose -f container-templates/iptv-org/docker-compose.yml up -d
+docker logs -f iptv-org-epg
+```
+
+The generated `guide.xml` is written to `container-templates/iptv-org/data/`.
+
+---
+
 ## Quick Start (end-to-end)
 
 ```bash
@@ -358,9 +387,9 @@ echo "<your-dns-api-token>" > cf-token && chmod 600 cf-token
 # Fix .env and config/traefik.yml (ACME email, dnsChallenge provider, etc.)
 docker compose up -d
 
-# 2) Gluetun (e.g., instance 02)
-cd ../gluetun/gluetun-02
-# Fill .env.wg-02; optionally enable sidecars via ../.env.* files
+# 2) Gluetun
+cd ../gluetun
+# Fill .env.wg and configure the main-container proxies in the local .env.* proxy files
 docker compose up -d
 
 # 3) Tuliprox
@@ -370,6 +399,11 @@ docker compose up -d
 # 4) CrowdSec
 cd ../crowdsec
 # Fill .env.cs-bouncer-*
+docker compose up -d
+
+# 5) IPTV-org-epg
+cd ../iptv-org
+# Fill data/channels.xml and match every xmltv_id with @epg_channel_id
 docker compose up -d
 ```
 
