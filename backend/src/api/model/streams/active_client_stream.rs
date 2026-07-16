@@ -1333,6 +1333,7 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
 
 #[cfg(test)]
 mod tests {
+    use super::super::buffered_stream::BufferedStream;
     use super::{
         create_active_client_stream, create_deferred_provider_open_future, should_use_direct_body_idle_timeout,
         stream_grace_period, ActiveClientStream, ActiveClientStreamParams, ActiveClientStreamState, CustomVideoBuffers,
@@ -1344,9 +1345,10 @@ mod tests {
             api_utils::GraceResolutionContext,
             model::{
                 connection_manager::PROVIDER_END_NOT_SET, ActiveProviderManager, ActiveUserManager, AppState,
-                CancelTokens, ConnectionManager, CreateUserSessionParams, CustomVideoStreamType, DownloadQueue,
-                EventManager, MetadataUpdateManager, PlaylistStorageState, ProviderContentRepresentationMode,
-                SharedStreamManager, StreamDetails, StreamError, UpdateGuard,
+                BoxedProviderStream, CancelTokens, ConnectionManager, CreateUserSessionParams, CustomVideoStreamType,
+                DownloadQueue, EventManager, MetadataUpdateManager, PlaylistStorageState,
+                ProviderContentRepresentationMode, ProviderHandle, SharedStreamManager, StreamDetails, StreamError,
+                UpdateGuard,
             },
         },
         auth::Fingerprint,
@@ -1357,9 +1359,10 @@ mod tests {
         utils::{FileLockManager, GeoIp},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
-    use axum::http::HeaderMap;
+    use axum::{body::Body, http::HeaderMap};
     use bytes::Bytes;
     use futures::{pin_mut, StreamExt};
+    use http_body_util::BodyExt;
     use reqwest::Client;
     use shared::{
         model::{
@@ -1370,13 +1373,17 @@ mod tests {
     };
     use std::{
         collections::HashMap,
+        net::SocketAddr,
+        pin::Pin,
         sync::{
-            atomic::{AtomicU8, Ordering},
+            atomic::{AtomicBool, AtomicU8, Ordering},
             Arc,
         },
+        task::{Context, Poll},
         time::Duration,
     };
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot, Notify};
+    use tokio_util::sync::CancellationToken;
 
     fn create_test_app_config() -> AppConfig {
         let input = Arc::new(ConfigInput {
@@ -1602,6 +1609,180 @@ mod tests {
         channel.group = "Movies".intern();
         channel.url = url.into();
         channel
+    }
+
+    fn create_test_series_stream_channel(virtual_id: u32, url: &str) -> StreamChannel {
+        let mut channel = create_test_stream_channel(virtual_id, url);
+        channel.item_type = PlaylistItemType::Series;
+        channel.cluster = XtreamCluster::Series;
+        channel.group = "Series".intern();
+        channel.url = url.into();
+        channel
+    }
+
+    #[derive(Clone, Default)]
+    struct DropTracker(Arc<AtomicBool>);
+
+    impl DropTracker {
+        fn is_dropped(&self) -> bool { self.0.load(Ordering::Acquire) }
+    }
+
+    struct DropTrackedProviderStream {
+        inner: BoxedProviderStream,
+        tracker: DropTracker,
+    }
+
+    impl futures::Stream for DropTrackedProviderStream {
+        type Item = Result<Bytes, StreamError>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            self.inner.as_mut().poll_next(cx)
+        }
+    }
+
+    impl Drop for DropTrackedProviderStream {
+        fn drop(&mut self) { self.tracker.0.store(true, Ordering::Release); }
+    }
+
+    fn track_provider_stream(stream: BoxedProviderStream) -> (BoxedProviderStream, DropTracker) {
+        let tracker = DropTracker::default();
+        let tracked_stream = DropTrackedProviderStream { inner: stream, tracker: tracker.clone() }.boxed();
+        (tracked_stream, tracker)
+    }
+
+    struct TestDirectStreamParams<'a> {
+        app_state: &'a Arc<AppState>,
+        username: &'a str,
+        max_connections: u32,
+        addr: SocketAddr,
+        stream_channel: StreamChannel,
+        provider_stream: BoxedProviderStream,
+        provider_handle: Option<ProviderHandle>,
+    }
+
+    struct TestDirectStream {
+        stream: BoxedProviderStream,
+        uid: u32,
+    }
+
+    async fn create_test_active_direct_stream(params: TestDirectStreamParams<'_>) -> TestDirectStream {
+        let TestDirectStreamParams {
+            app_state,
+            username,
+            max_connections,
+            addr,
+            stream_channel,
+            provider_stream,
+            provider_handle,
+        } = params;
+        let mut user = create_test_user(username);
+        user.max_connections = max_connections;
+        let fingerprint = create_test_fingerprint(addr);
+        let mut stream_details = StreamDetails::from_stream(provider_stream, GracePeriodOptions::default());
+        if provider_handle.is_some() {
+            stream_details.provider_name = Some("provider_1".intern());
+        }
+        stream_details.provider_handle = provider_handle;
+        let virtual_id = stream_channel.virtual_id;
+
+        let stream = create_active_client_stream(ActiveClientStreamParams {
+            stream_details,
+            app_state,
+            user: &user,
+            connection_permission: UserConnectionPermission::Allowed,
+            connection_kind: crate::api::model::ConnectionKind::Normal,
+            fingerprint: &fingerprint,
+            stream_channel,
+            socket_bound: false,
+            session_token: None,
+            req_headers: &HeaderMap::default(),
+            meter_uid: 0,
+            meter_stream: false,
+        })
+        .await;
+        let uid = app_state
+            .active_users
+            .active_streams()
+            .await
+            .into_iter()
+            .find(|active| {
+                active.username == username && active.addr == addr && active.channel.virtual_id == virtual_id
+            })
+            .map(|active| active.uid)
+            .expect("direct test stream should be registered");
+
+        TestDirectStream { stream, uid }
+    }
+
+    async fn acquire_test_provider_handle(app_state: &Arc<AppState>, addr: SocketAddr) -> ProviderHandle {
+        app_state
+            .active_provider
+            .acquire_exact_connection_with_grace(
+                &"provider_1".intern(),
+                &addr,
+                false,
+                0,
+                crate::api::model::ConnectionKind::Normal,
+            )
+            .await
+            .expect("direct test stream should acquire the provider slot")
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct TestLifecycleSnapshot {
+        active_counts: (usize, usize),
+        stream_uids: Vec<u32>,
+        provider_connections: usize,
+    }
+
+    async fn lifecycle_snapshot(app_state: &Arc<AppState>) -> TestLifecycleSnapshot {
+        let active_counts = app_state.active_users.active_users_and_connections().await;
+        let mut stream_uids =
+            app_state.active_users.active_streams().await.into_iter().map(|stream| stream.uid).collect::<Vec<_>>();
+        stream_uids.sort_unstable();
+        TestLifecycleSnapshot {
+            active_counts,
+            stream_uids,
+            provider_connections: app_state.active_provider.get_provider_connections_count().await,
+        }
+    }
+
+    struct ExpectedLifecycle<'a> {
+        description: &'static str,
+        active_counts: (usize, usize),
+        stream_uids: &'a [u32],
+        provider_connections: usize,
+        dropped_streams: &'a [&'a DropTracker],
+    }
+
+    async fn wait_for_lifecycle(app_state: &Arc<AppState>, expected: ExpectedLifecycle<'_>) {
+        let mut expected_stream_uids = expected.stream_uids.to_vec();
+        expected_stream_uids.sort_unstable();
+        let expected_snapshot = TestLifecycleSnapshot {
+            active_counts: expected.active_counts,
+            stream_uids: expected_stream_uids,
+            provider_connections: expected.provider_connections,
+        };
+        let completed = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let snapshot = lifecycle_snapshot(app_state).await;
+                if snapshot == expected_snapshot && expected.dropped_streams.iter().all(|tracker| tracker.is_dropped())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+
+        if completed.is_err() {
+            let snapshot = lifecycle_snapshot(app_state).await;
+            let dropped = expected.dropped_streams.iter().map(|tracker| tracker.is_dropped()).collect::<Vec<_>>();
+            panic!(
+                "{} did not converge: expected={expected_snapshot:?}, actual={snapshot:?}, dropped={dropped:?}",
+                expected.description
+            );
+        }
     }
 
     fn create_deferred_provider_grace_details(
@@ -2645,36 +2826,302 @@ mod tests {
         assert_eq!(entries[0].total_kb, 3);
     }
 
+    #[tokio::test]
+    async fn direct_series_normal_eof_releases_full_lifecycle() {
+        let app_state = create_test_app_state();
+        let addr = "127.0.0.1:55031".parse().unwrap_or_else(|_| unreachable!());
+        let provider_handle = acquire_test_provider_handle(&app_state, addr).await;
+        let (provider_stream, tracker) =
+            track_provider_stream(futures::stream::once(async { Ok(Bytes::from_static(b"series-eof")) }).boxed());
+        let direct = create_test_active_direct_stream(TestDirectStreamParams {
+            app_state: &app_state,
+            username: "series-eof-user",
+            max_connections: 1,
+            addr,
+            stream_channel: create_test_series_stream_channel(1, "http://provider-1.example/series/1.mkv"),
+            provider_stream,
+            provider_handle: Some(provider_handle),
+        })
+        .await;
+        let active_uids = [direct.uid];
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "registered Series EOF stream",
+                active_counts: (1, 1),
+                stream_uids: &active_uids,
+                provider_connections: 1,
+                dropped_streams: &[],
+            },
+        )
+        .await;
+        assert!(!tracker.is_dropped());
+
+        let body = Body::from_stream(direct.stream);
+        let collected = body.collect().await.expect("normal provider EOF should complete the response body");
+        assert_eq!(collected.to_bytes(), Bytes::from_static(b"series-eof"));
+
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "normal Series EOF cleanup",
+                active_counts: (0, 0),
+                stream_uids: &[],
+                provider_connections: 0,
+                dropped_streams: &[&tracker],
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn direct_series_upstream_error_after_registration_releases_full_lifecycle() {
+        let app_state = create_test_app_state();
+        let addr = "127.0.0.1:55032".parse().unwrap_or_else(|_| unreachable!());
+        let provider_handle = acquire_test_provider_handle(&app_state, addr).await;
+        let provider_items = vec![
+            Ok(Bytes::from_static(b"before-error")),
+            Err(StreamError::Stream("controlled upstream failure".to_string())),
+        ];
+        let (provider_stream, tracker) = track_provider_stream(futures::stream::iter(provider_items).boxed());
+        let direct = create_test_active_direct_stream(TestDirectStreamParams {
+            app_state: &app_state,
+            username: "series-error-user",
+            max_connections: 1,
+            addr,
+            stream_channel: create_test_series_stream_channel(2, "http://provider-1.example/series/2.mkv"),
+            provider_stream,
+            provider_handle: Some(provider_handle),
+        })
+        .await;
+        let active_uids = [direct.uid];
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "registered Series error stream",
+                active_counts: (1, 1),
+                stream_uids: &active_uids,
+                provider_connections: 1,
+                dropped_streams: &[],
+            },
+        )
+        .await;
+
+        let body = Body::from_stream(direct.stream);
+        let collected = body
+            .collect()
+            .await
+            .expect("ActiveClientStream should convert the controlled upstream error into stream termination");
+        assert_eq!(collected.to_bytes(), Bytes::from_static(b"before-error"));
+
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "Series upstream error cleanup",
+                active_counts: (0, 0),
+                stream_uids: &[],
+                provider_connections: 0,
+                dropped_streams: &[&tracker],
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn closed_buffered_consumer_releases_direct_series_full_lifecycle() {
+        let app_state = create_test_app_state();
+        let addr = "127.0.0.1:55039".parse().unwrap_or_else(|_| unreachable!());
+        let provider_handle = acquire_test_provider_handle(&app_state, addr).await;
+        let (gate_tx, gate_rx) = oneshot::channel();
+        let gated_provider = futures::stream::once(async move {
+            gate_rx.await.expect("test should release the upstream chunk");
+            Ok(Bytes::from_static(b"after-consumer-drop"))
+        })
+        .chain(futures::stream::pending())
+        .boxed();
+        let (tracked_provider, tracker) = track_provider_stream(gated_provider);
+        let producer_cancel = CancellationToken::new();
+        let buffered_provider =
+            BufferedStream::new(tracked_provider, 1, producer_cancel.clone(), "controlled-test-stream").boxed();
+        let direct = create_test_active_direct_stream(TestDirectStreamParams {
+            app_state: &app_state,
+            username: "series-closed-consumer-user",
+            max_connections: 1,
+            addr,
+            stream_channel: create_test_series_stream_channel(10, "http://provider-1.example/series/10.mkv"),
+            provider_stream: buffered_provider,
+            provider_handle: Some(provider_handle),
+        })
+        .await;
+        let active_uids = [direct.uid];
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "registered buffered Series stream",
+                active_counts: (1, 1),
+                stream_uids: &active_uids,
+                provider_connections: 1,
+                dropped_streams: &[],
+            },
+        )
+        .await;
+
+        drop(Body::from_stream(direct.stream));
+        gate_tx.send(()).expect("buffered producer should still own the gated upstream");
+
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "closed buffered Series consumer cleanup",
+                active_counts: (0, 0),
+                stream_uids: &[],
+                provider_connections: 0,
+                dropped_streams: &[&tracker],
+            },
+        )
+        .await;
+        assert!(producer_cancel.is_cancelled(), "closed consumer must cancel the buffered producer");
+    }
+
+    #[tokio::test]
+    async fn aborting_task_polling_direct_series_body_releases_full_lifecycle() {
+        let app_state = create_test_app_state();
+        let addr = "127.0.0.1:55033".parse().unwrap_or_else(|_| unreachable!());
+        let provider_handle = acquire_test_provider_handle(&app_state, addr).await;
+        let (provider_stream, tracker) =
+            track_provider_stream(futures::stream::pending::<Result<Bytes, StreamError>>().boxed());
+        let direct = create_test_active_direct_stream(TestDirectStreamParams {
+            app_state: &app_state,
+            username: "series-abort-user",
+            max_connections: 1,
+            addr,
+            stream_channel: create_test_series_stream_channel(3, "http://provider-1.example/series/3.mkv"),
+            provider_stream,
+            provider_handle: Some(provider_handle),
+        })
+        .await;
+        let active_uids = [direct.uid];
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "registered Series task-abort stream",
+                active_counts: (1, 1),
+                stream_uids: &active_uids,
+                provider_connections: 1,
+                dropped_streams: &[],
+            },
+        )
+        .await;
+
+        let started = Arc::new(Notify::new());
+        let started_in_task = Arc::clone(&started);
+        let task = tokio::spawn(async move {
+            let mut body = Body::from_stream(direct.stream);
+            started_in_task.notify_one();
+            let _ = body.frame().await;
+        });
+        tokio::time::timeout(Duration::from_secs(1), started.notified()).await.expect("body polling task should start");
+        task.abort();
+        let join_error = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("aborted body polling task should finish")
+            .expect_err("pending body polling task should be cancelled");
+        assert!(join_error.is_cancelled());
+
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "aborted Series body task cleanup",
+                active_counts: (0, 0),
+                stream_uids: &[],
+                provider_connections: 0,
+                dropped_streams: &[&tracker],
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn response_builder_error_after_registration_drops_direct_series_body() {
+        let app_state = create_test_app_state();
+        let addr = "127.0.0.1:55034".parse().unwrap_or_else(|_| unreachable!());
+        let provider_handle = acquire_test_provider_handle(&app_state, addr).await;
+        let (provider_stream, tracker) =
+            track_provider_stream(futures::stream::pending::<Result<Bytes, StreamError>>().boxed());
+        let direct = create_test_active_direct_stream(TestDirectStreamParams {
+            app_state: &app_state,
+            username: "series-builder-error-user",
+            max_connections: 1,
+            addr,
+            stream_channel: create_test_series_stream_channel(4, "http://provider-1.example/series/4.mkv"),
+            provider_stream,
+            provider_handle: Some(provider_handle),
+        })
+        .await;
+        let active_uids = [direct.uid];
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "registered Series response-builder stream",
+                active_counts: (1, 1),
+                stream_uids: &active_uids,
+                provider_connections: 1,
+                dropped_streams: &[],
+            },
+        )
+        .await;
+
+        let response = axum::response::Response::builder().status(10_000_u16).body(Body::from_stream(direct.stream));
+        assert!(response.is_err(), "invalid status should fail response construction");
+
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "response-builder error cleanup",
+                active_counts: (0, 0),
+                stream_uids: &[],
+                provider_connections: 0,
+                dropped_streams: &[&tracker],
+            },
+        )
+        .await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_direct_vod_body_idle_timeout_releases_active_stream() {
         let app_state = create_test_app_state();
-        let addr = "127.0.0.1:55031".parse().unwrap_or_else(|_| unreachable!());
-        let test_user = create_test_user("vod-user");
-        let test_fingerprint = create_test_fingerprint(addr);
-        let provider_stream =
+        let addr = "127.0.0.1:55035".parse().unwrap_or_else(|_| unreachable!());
+        let provider_handle = acquire_test_provider_handle(&app_state, addr).await;
+        let pending_provider =
             futures::stream::once(async { Ok(Bytes::from_static(b"vod")) }).chain(futures::stream::pending()).boxed();
-        let stream_details = StreamDetails::from_stream(provider_stream, GracePeriodOptions::default());
-
-        let stream = create_active_client_stream(ActiveClientStreamParams {
-            stream_details,
+        let (provider_stream, tracker) = track_provider_stream(pending_provider);
+        let direct = create_test_active_direct_stream(TestDirectStreamParams {
             app_state: &app_state,
-            user: &test_user,
-            connection_permission: UserConnectionPermission::Allowed,
-            connection_kind: crate::api::model::ConnectionKind::Normal,
-            fingerprint: &test_fingerprint,
-            stream_channel: create_test_video_stream_channel(1, "http://provider-1.example/movie/1.mkv"),
-            socket_bound: false,
-            session_token: None,
-            req_headers: &HeaderMap::default(),
-            meter_uid: 0,
-            meter_stream: false,
+            username: "vod-user",
+            max_connections: 1,
+            addr,
+            stream_channel: create_test_video_stream_channel(5, "http://provider-1.example/movie/5.mkv"),
+            provider_stream,
+            provider_handle: Some(provider_handle),
         })
         .await;
+        let active_uids = [direct.uid];
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "registered idle-timeout VOD stream",
+                active_counts: (1, 1),
+                stream_uids: &active_uids,
+                provider_connections: 1,
+                dropped_streams: &[],
+            },
+        )
+        .await;
+        let stream = direct.stream;
         pin_mut!(stream);
 
         let first_chunk = stream.next().await;
         assert!(matches!(first_chunk, Some(Ok(ref bytes)) if bytes.as_ref() == b"vod"));
-        assert_eq!(app_state.active_users.active_streams().await.len(), 1);
         assert!(
             matches!(futures::poll!(stream.next()), std::task::Poll::Pending),
             "pending VOD body should wait until the direct body idle timeout elapses"
@@ -2682,18 +3129,165 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(DIRECT_BODY_IDLE_TIMEOUT_SECS)).await;
         tokio::task::yield_now().await;
-
         assert!(stream.next().await.is_none(), "VOD body idle timeout should terminate the stream");
+        tokio::time::resume();
 
-        for _ in 0..20 {
-            if app_state.active_users.active_streams().await.is_empty() {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert!(
-            app_state.active_users.active_streams().await.is_empty(),
-            "cleanup worker should remove the timed-out VOD stream from active streams"
-        );
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "VOD body idle-timeout cleanup",
+                active_counts: (0, 0),
+                stream_uids: &[],
+                provider_connections: 0,
+                dropped_streams: &[&tracker],
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn dropping_direct_series_body_releases_original_user_after_socket_owner_changes() {
+        let app_state = create_test_app_state();
+        let addr = "127.0.0.1:55036".parse().unwrap_or_else(|_| unreachable!());
+        let provider_handle = acquire_test_provider_handle(&app_state, addr).await;
+        let (first_provider_stream, first_tracker) =
+            track_provider_stream(futures::stream::pending::<Result<Bytes, StreamError>>().boxed());
+        let first = create_test_active_direct_stream(TestDirectStreamParams {
+            app_state: &app_state,
+            username: "series-user-a",
+            max_connections: 1,
+            addr,
+            stream_channel: create_test_series_stream_channel(6, "http://provider-1.example/series/6.mkv"),
+            provider_stream: first_provider_stream,
+            provider_handle: Some(provider_handle),
+        })
+        .await;
+        let (second_provider_stream, second_tracker) =
+            track_provider_stream(futures::stream::pending::<Result<Bytes, StreamError>>().boxed());
+        let second = create_test_active_direct_stream(TestDirectStreamParams {
+            app_state: &app_state,
+            username: "series-user-b",
+            max_connections: 1,
+            addr,
+            stream_channel: create_test_series_stream_channel(7, "http://provider-1.example/series/7.mkv"),
+            provider_stream: second_provider_stream,
+            provider_handle: None,
+        })
+        .await;
+        let both_uids = [first.uid, second.uid];
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "two users sharing a reused socket address",
+                active_counts: (2, 2),
+                stream_uids: &both_uids,
+                provider_connections: 1,
+                dropped_streams: &[],
+            },
+        )
+        .await;
+
+        let first_body = Body::from_stream(first.stream);
+        let second_body = Body::from_stream(second.stream);
+        drop(first_body);
+        let second_uid = [second.uid];
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "original user Body drop after socket owner replacement",
+                active_counts: (1, 1),
+                stream_uids: &second_uid,
+                provider_connections: 0,
+                dropped_streams: &[&first_tracker],
+            },
+        )
+        .await;
+        assert!(!second_tracker.is_dropped());
+
+        drop(second_body);
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "replacement user Body drop cleanup",
+                active_counts: (0, 0),
+                stream_uids: &[],
+                provider_connections: 0,
+                dropped_streams: &[&first_tracker, &second_tracker],
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn multiple_same_user_direct_series_connections_release_independently() {
+        let app_state = create_test_app_state();
+        let first_addr = "127.0.0.1:55037".parse().unwrap_or_else(|_| unreachable!());
+        let second_addr = "127.0.0.1:55038".parse().unwrap_or_else(|_| unreachable!());
+        let (first_provider_stream, first_tracker) =
+            track_provider_stream(futures::stream::pending::<Result<Bytes, StreamError>>().boxed());
+        let first = create_test_active_direct_stream(TestDirectStreamParams {
+            app_state: &app_state,
+            username: "multi-series-user",
+            max_connections: 2,
+            addr: first_addr,
+            stream_channel: create_test_series_stream_channel(8, "http://provider-1.example/series/8.mkv"),
+            provider_stream: first_provider_stream,
+            provider_handle: None,
+        })
+        .await;
+        let (second_provider_stream, second_tracker) =
+            track_provider_stream(futures::stream::pending::<Result<Bytes, StreamError>>().boxed());
+        let second = create_test_active_direct_stream(TestDirectStreamParams {
+            app_state: &app_state,
+            username: "multi-series-user",
+            max_connections: 2,
+            addr: second_addr,
+            stream_channel: create_test_series_stream_channel(9, "http://provider-1.example/series/9.mkv"),
+            provider_stream: second_provider_stream,
+            provider_handle: None,
+        })
+        .await;
+        let both_uids = [first.uid, second.uid];
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "two connections for one Series user",
+                active_counts: (1, 2),
+                stream_uids: &both_uids,
+                provider_connections: 0,
+                dropped_streams: &[],
+            },
+        )
+        .await;
+
+        let first_body = Body::from_stream(first.stream);
+        let second_body = Body::from_stream(second.stream);
+        drop(first_body);
+        let second_uid = [second.uid];
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "first same-user Series connection cleanup",
+                active_counts: (1, 1),
+                stream_uids: &second_uid,
+                provider_connections: 0,
+                dropped_streams: &[&first_tracker],
+            },
+        )
+        .await;
+        assert!(!second_tracker.is_dropped());
+
+        drop(second_body);
+        wait_for_lifecycle(
+            &app_state,
+            ExpectedLifecycle {
+                description: "last same-user Series connection cleanup",
+                active_counts: (0, 0),
+                stream_uids: &[],
+                provider_connections: 0,
+                dropped_streams: &[&first_tracker, &second_tracker],
+            },
+        )
+        .await;
     }
 }

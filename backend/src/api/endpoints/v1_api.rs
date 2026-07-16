@@ -186,3 +186,85 @@ pub fn v1_api_register(
         .nest(&api_prefix, public_router)
         .nest(&api_prefix, router)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::create_status_check;
+    use crate::{
+        api::model::{create_test_app_state, ConnectionKind, ConnectionParams},
+        auth::Fingerprint,
+        model::Config,
+    };
+    use shared::{
+        model::{PlaylistItemType, StreamChannel, XtreamCluster},
+        utils::Internable,
+    };
+    use std::{borrow::Cow, net::SocketAddr};
+
+    #[tokio::test]
+    async fn status_snapshot_removes_released_direct_series_stream() {
+        let app_state = create_test_app_state(Config::default());
+        let addr: SocketAddr = "127.0.0.1:55070".parse().expect("test address");
+        let fingerprint = Fingerprint::new("status-series".to_string(), "127.0.0.1".to_string(), addr);
+        let channel = StreamChannel {
+            target_id: 1,
+            virtual_id: 70,
+            provider_id: 1,
+            input_name: "input".intern(),
+            item_type: PlaylistItemType::Series,
+            cluster: XtreamCluster::Series,
+            group: "Series".intern(),
+            title: "Episode".intern(),
+            url: "http://provider.example/series/70.mkv".intern(),
+            shared: false,
+            shared_joined_existing: None,
+            shared_stream_id: None,
+            technical: None,
+            epg_channel_id: None,
+            epg_reference_ts: None,
+        };
+        app_state.connection_manager.add_connection(&addr).await;
+        let registered = app_state
+            .connection_manager
+            .update_connection(ConnectionParams {
+                meter_uid: 0,
+                username: "status-user",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider".intern(),
+                stream_channel: &channel,
+                user_agent: Cow::Borrowed("ua"),
+                session_token: None,
+            })
+            .await
+            .expect("direct Series stream should register");
+
+        let active = create_status_check(&app_state).await;
+        assert_eq!(active.active_users, 1);
+        assert_eq!(active.active_user_connections, 1);
+        assert_eq!(active.active_user_streams.len(), 1);
+        assert_eq!(active.active_user_streams[0].uid, registered.uid);
+
+        app_state
+            .active_users
+            .release_stream_by_uid(&addr, registered.uid)
+            .await
+            .expect("registered stream should release");
+        let clean = create_status_check(&app_state).await;
+        assert_eq!(clean.active_users, 0);
+        assert_eq!(clean.active_user_connections, 0);
+        assert!(clean.active_user_streams.is_empty());
+        assert_eq!(
+            clean
+                .active_provider_connections
+                .unwrap_or_default()
+                .values()
+                .sum::<usize>(),
+            0
+        );
+    }
+}

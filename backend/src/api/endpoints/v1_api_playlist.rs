@@ -937,6 +937,7 @@ mod tests {
             app_config: app_cfg,
             http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             downloads: Arc::new(crate::api::model::DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
@@ -972,10 +973,24 @@ mod tests {
                             "name": "Demo Channel",
                             "category_id": "10",
                             "cmd": "ffmpeg http://streams.example/live/101"
+                        },
+                        "102": {
+                            "id": "102",
+                            "name": "Private Channel",
+                            "category_id": "10",
+                            "cmd": "ffmpeg http://streams.example/live/102"
                         }
                     }
                 }
             }),
+            ("itv", "create_link", _) => {
+                let destination = if params.get("cmd").is_some_and(|cmd| cmd.ends_with("/102")) {
+                    "http://127.0.0.1/live/102"
+                } else {
+                    "http://8.8.8.8/live/101"
+                };
+                json!({"js": {"cmd": format!("ffmpeg {destination}")}})
+            }
             _ => json!({"js": []}),
         };
         Json(response)
@@ -1617,13 +1632,22 @@ mod tests {
             inputs: vec![Arc::clone(&input.name)],
             targets: vec![],
         };
-        let app_config = test_app_config(input, source);
+        let app_config = test_app_config(Arc::clone(&input), source);
+        let mut sources = app_config.sources.load().as_ref().clone();
+        sources.inputs.push(Arc::new(ConfigInput {
+            id: 8,
+            name: "m3u".intern(),
+            input_type: InputType::M3u,
+            ..Default::default()
+        }));
+        app_config.sources.store(Arc::new(sources));
         app_config.config.store(Arc::new(Config {
             storage_dir: temp_dir.path().to_string_lossy().to_string(),
             ..Default::default()
         }));
         let app_state = test_app_state(Arc::new(app_config));
-        let router = super::v1_api_playlist_register_protected(Router::new()).with_state(app_state);
+        let router = super::v1_api_playlist_register_protected(super::v1_api_playlist_register_public(Router::new()))
+            .with_state(Arc::clone(&app_state));
         let request = Request::builder()
             .method("POST")
             .uri("/playlist/live")
@@ -1631,8 +1655,7 @@ mod tests {
             .body(Body::from(r#"{"Input":"stalker"}"#))
             .expect("request");
 
-        let response = router.into_service::<Body>().oneshot(request).await.expect("response");
-        server_handle.abort();
+        let response = router.clone().into_service::<Body>().oneshot(request).await.expect("response");
 
         let status = response.status();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
@@ -1650,6 +1673,61 @@ mod tests {
             .unwrap_or_default();
         assert!(!playback_url.is_empty(), "{body_text}");
         assert!(playback_url.starts_with("http") || playback_url.starts_with('/'), "{playback_url}");
+
+        let resource_path = playback_url
+            .find("/playlist/resource/")
+            .map(|index| &playback_url[index..])
+            .expect("Stalker playback resource path");
+        let response = router
+            .clone()
+            .into_service::<Body>()
+            .oneshot(Request::get(resource_path).body(Body::empty()).expect("resource request"))
+            .await
+            .expect("resource response");
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT, "{resource_path}");
+        assert_eq!(response.headers().get("location").and_then(|value| value.to_str().ok()), Some("http://8.8.8.8/live/101"));
+
+        let response = router
+            .clone()
+            .into_service::<Body>()
+            .oneshot(Request::get("/playlist/resource/*").body(Body::empty()).expect("malformed request"))
+            .await
+            .expect("malformed response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        for locator in [
+            format!("{}99/live/101", super::STALKER_RESOURCE_SCHEME),
+            format!("{}8/live/101", super::STALKER_RESOURCE_SCHEME),
+        ] {
+            let resource = shared::utils::obfuscate_text(&app_state.get_encrypt_secret(), &locator);
+            let response = router
+                .clone()
+                .into_service::<Body>()
+                .oneshot(
+                    Request::get(format!("/playlist/resource/{resource}"))
+                        .body(Body::empty())
+                        .expect("not-found request"),
+                )
+                .await
+                .expect("not-found response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{locator}");
+        }
+
+        let resource = shared::utils::obfuscate_text(
+            &app_state.get_encrypt_secret(),
+            &format!("{}7/live/102", super::STALKER_RESOURCE_SCHEME),
+        );
+        let response = router
+            .into_service::<Body>()
+            .oneshot(
+                Request::get(format!("/playlist/resource/{resource}"))
+                    .body(Body::empty())
+                    .expect("private destination request"),
+            )
+            .await
+            .expect("private destination response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        server_handle.abort();
     }
 
     #[tokio::test]
