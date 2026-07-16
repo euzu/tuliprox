@@ -1216,6 +1216,9 @@
     "PRIORITY": "Приоритет",
     "PROBE": "Зондирование",
     "PROBE_DELAY_SEC": "Задержка зондирования (сек)",
+    "PROBE_LIVE": "Зондировать прямой эфир",
+    "PROBE_SERIES": "Зондировать сериалы",
+    "PROBE_VOD": "Зондировать VOD",
     "PROBE_LIVE_INTERVAL_HOURS": "Интервал Live (час)",
     "PROBE_FILTER": "Фильтр зондирования",
     "PROBE_STREAM": "Зондировать поток",
@@ -1269,6 +1272,8 @@
     "RENAME_SETTINGS": "Настройки переименования",
     "REPEAT_PASSWORD": "Повторите пароль",
     "RESOLVE": "Разрешение",
+    "RESOLVE_SERIES": "Разрешать сериалы",
+    "RESOLVE_VOD": "Разрешать VOD",
     "RESOLVE_BACKGROUND": "Разрешать в фоновом режиме",
     "RESOLVE_DELAY_SEC": "Задержка разрешения (сек)",
     "RESOLVE_FILTER": "Фильтр разрешения",
@@ -1656,6 +1661,7 @@
       "MISSING_SELECTION": "Запись не выбрана"
     },
     "SOURCE_EDITOR": {
+      "NO_EXPIRATION_DATE_RETURNED": "Провайдер не вернул дату истечения срока действия",
       "URL_USERNAME_AND_PASSWORD_MANDATORY": "URL, имя пользователя и пароль обязательны!"
     },
     "TARGET_NOT_EXISTS": "Цель не существует",

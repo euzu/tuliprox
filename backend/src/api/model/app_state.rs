@@ -20,7 +20,7 @@ use crate::{
     repository::{get_geoip_path, load_target_into_memory_cache},
     utils::{
         reload_logger,
-        request::{create_client, create_client_with_redirect},
+        request::{create_client, create_client_with_redirect, PublicIpResolver},
         GeoIp,
     },
 };
@@ -298,6 +298,23 @@ pub fn create_http_client_no_redirect(app_config: &AppConfig) -> Result<Client, 
     )
 }
 
+/// Creates a direct no-redirect client whose connection-time resolver rejects
+/// non-public destinations. It is intentionally separate from the general client so
+/// configured internal providers keep working.
+pub fn create_public_http_client_no_redirect(app_config: &AppConfig) -> Result<Client, TuliproxError> {
+    let config = app_config.config.load();
+    let mut builder = create_client_with_redirect(app_config, reqwest::redirect::Policy::none())
+        .no_proxy()
+        .dns_resolver(PublicIpResolver)
+        .http1_only();
+    if config.connect_timeout_secs > 0 {
+        builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
+    }
+    builder
+        .build()
+        .map_err(|err| TuliproxError::Config(format!("Failed to create public-only HTTP client: {err}")))
+}
+
 fn build_http_client_with_fallback(
     mut builder: reqwest::ClientBuilder,
     config: &Arc<Config>,
@@ -404,6 +421,7 @@ pub struct AppState {
     pub app_config: Arc<AppConfig>,
     pub http_client: Arc<ArcSwap<Client>>,
     pub http_client_no_redirect: Arc<ArcSwap<Client>>,
+    pub public_http_client_no_redirect: Arc<ArcSwap<Client>>,
     pub downloads: Arc<DownloadQueue>,
     pub cache: Arc<ArcSwapOption<RwLock<LRUResourceCache>>>,
     pub shared_stream_manager: Arc<SharedStreamManager>,
@@ -480,6 +498,7 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
         app_config,
         http_client: Arc::new(ArcSwap::from_pointee(Client::new())),
         http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
+        public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(Client::new())),
         downloads: Arc::new(DownloadQueue::new()),
         cache: Arc::new(ArcSwapOption::default()),
         shared_stream_manager,
@@ -539,6 +558,8 @@ impl AppState {
         self.http_client.store(Arc::new(client));
         let client_no_redirect = create_http_client_no_redirect(&self.app_config)?;
         self.http_client_no_redirect.store(Arc::new(client_no_redirect));
+        let public_client_no_redirect = create_public_http_client_no_redirect(&self.app_config)?;
+        self.public_http_client_no_redirect.store(Arc::new(public_client_no_redirect));
 
         // cache
         let config = self.app_config.config.load();

@@ -1284,6 +1284,9 @@
     "PRIORITY": "Priority",
     "PROBE": "Probe",
     "PROBE_DELAY_SEC": "Probe Delay (sec)",
+    "PROBE_LIVE": "Probe Live",
+    "PROBE_SERIES": "Probe Series",
+    "PROBE_VOD": "Probe VOD",
     "PROBE_LIVE_INTERVAL_HOURS": "Live Interval (hour)",
     "PROBE_FILTER": "Probe Filter",
     "PROBE_STREAM": "Probe Stream",
@@ -1337,6 +1340,8 @@
     "RENAME_SETTINGS": "Rename Settings",
     "REPEAT_PASSWORD": "Repeat Password",
     "RESOLVE": "Resolve",
+    "RESOLVE_SERIES": "Resolve Series",
+    "RESOLVE_VOD": "Resolve VOD",
     "RESOLVE_BACKGROUND": "Resolve in Background",
     "RESOLVE_DELAY_SEC": "Resolve Delay (sec)",
     "RESOLVE_FILTER": "Resolve Filter",
@@ -1781,6 +1786,7 @@
       "MISSING_SELECTION": "No entry selected"
     },
     "SOURCE_EDITOR": {
+      "NO_EXPIRATION_DATE_RETURNED": "No expiration date returned by provider",
       "URL_USERNAME_AND_PASSWORD_MANDATORY": "Url, Username and Password are mandatory!"
     },
     "TARGET_NOT_EXISTS": "Target does not exist",

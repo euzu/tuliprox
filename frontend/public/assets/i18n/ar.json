@@ -1277,6 +1277,9 @@
     "PRIORITY": "أولوية",
     "PROBE": "فحص",
     "PROBE_DELAY_SEC": "تأخير الفحص (ثانية)",
+    "PROBE_LIVE": "فحص البث المباشر",
+    "PROBE_SERIES": "فحص المسلسلات",
+    "PROBE_VOD": "فحص الفيديو حسب الطلب",
     "PROBE_LIVE_INTERVAL_HOURS": "فاصل البث المباشر (ساعة)",
     "PROBE_FILTER": "مرشح الفحص",
     "PROBE_STREAM": "فحص البث",
@@ -1330,6 +1333,8 @@
     "RENAME_SETTINGS": "إعادة تسمية الإعدادات",
     "REPEAT_PASSWORD": "تكرار كلمة المرور",
     "RESOLVE": "حل",
+    "RESOLVE_SERIES": "حل المسلسلات",
+    "RESOLVE_VOD": "حل الفيديو حسب الطلب",
     "RESOLVE_BACKGROUND": "الحل في الخلفية",
     "RESOLVE_DELAY_SEC": "تأخير الحل (ثانية)",
     "RESOLVE_FILTER": "مرشح الحل",
@@ -1755,6 +1760,7 @@
       "MISSING_SELECTION": "لم يتم تحديد أي إدخال"
     },
     "SOURCE_EDITOR": {
+      "NO_EXPIRATION_DATE_RETURNED": "لم يُرجع المزود تاريخ انتهاء الصلاحية",
       "URL_USERNAME_AND_PASSWORD_MANDATORY": "URL واسم المستخدم وكلمة المرور مطلوبة!"
     },
     "TARGET_NOT_EXISTS": "الهدف غير موجود",

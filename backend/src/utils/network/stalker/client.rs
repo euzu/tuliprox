@@ -3,7 +3,6 @@ use log::{debug, warn};
 use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, COOKIE, REFERER, USER_AGENT};
 use std::path::{Path, PathBuf};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::fmt::Write;
@@ -43,6 +42,7 @@ const STALKER_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// than this, growing on demand instead.
 const INITIAL_BODY_ALLOC_CAP: u64 = 256 * 1024;
 const STALKER_DEBUG_DUMP_LIMIT: usize = 32;
+const STALKER_DEBUG_DUMP_PREFIX: &str = "stalker-response-";
 
 /// Per-action cap on the response body in bytes. Configurable at construction time so
 /// the user can dial it down for adversarial portals and up for friendly ones.
@@ -621,54 +621,13 @@ pub(crate) async fn validate_public_playable_url(url: &Url) -> StalkerResult<()>
     let port = url.port_or_known_default().ok_or_else(|| StalkerError::BodyDecode {
         message: "create_link url has no port".to_string(),
     })?;
-    let addresses: Vec<IpAddr> = if let Ok(ip) = host.parse() {
-        vec![ip]
-    } else {
-        tokio::net::lookup_host((host, port))
-            .await
-            .map_err(StalkerError::Io)?
-            .map(|address| address.ip())
-            .collect()
-    };
-    if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(*address)) {
-        return Err(StalkerError::BodyDecode {
-            message: "create_link url resolves to a non-public destination".to_string(),
-        });
+    match crate::utils::network::request::resolve_public_socket_addrs(host, port).await {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Err(StalkerError::BodyDecode {
+            message: format!("create_link url destination rejected: {err}"),
+        }),
+        Err(err) => Err(StalkerError::Io(err)),
     }
-    Ok(())
-}
-
-fn is_public_ip(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => is_public_ipv4(address),
-        IpAddr::V6(address) => is_public_ipv6(address),
-    }
-}
-
-fn is_public_ipv4(address: Ipv4Addr) -> bool {
-    let [a, b, _, _] = address.octets();
-    !(address.is_private()
-        || address.is_loopback()
-        || address.is_link_local()
-        || address.is_broadcast()
-        || address.is_documentation()
-        || address.is_multicast()
-        || address.is_unspecified()
-        || a == 0
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 198 && matches!(b, 18 | 19))
-        || a >= 240)
-}
-
-fn is_public_ipv6(address: Ipv6Addr) -> bool {
-    let segments = address.segments();
-    !(address.is_loopback()
-        || address.is_unspecified()
-        || address.is_multicast()
-        || segments[0] & 0xfe00 == 0xfc00
-        || segments[0] & 0xffc0 == 0xfe80
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8))
-        && address.to_ipv4_mapped().is_none_or(is_public_ipv4)
 }
 
 /// The MAG identity cookies every Stalker request should carry. Portals key the device
@@ -741,7 +700,7 @@ fn write_stalker_debug_body(dir: &str, portal_url: &str, action: &str, body: &[u
         .duration_since(UNIX_EPOCH)
         .map_or(0_u128, |duration| duration.as_millis());
     let filename = format!(
-        "{ts:020}-{seq:06}-{}-{}.bin",
+        "{STALKER_DEBUG_DUMP_PREFIX}{ts:020}-{seq:06}-{}-{}.bin",
         sanitize_dump_component(&host),
         sanitize_dump_component(action)
     );
@@ -796,6 +755,9 @@ fn rotate_stalker_debug_dumps(dump_dir: &Path) {
     let mut dumps: Vec<_> = entries
         .flatten()
         .filter_map(|entry| {
+            if !entry.file_name().to_string_lossy().starts_with(STALKER_DEBUG_DUMP_PREFIX) {
+                return None;
+            }
             let metadata = entry.metadata().ok()?;
             metadata.is_file().then(|| (metadata.modified().ok(), entry.path()))
         })
@@ -844,6 +806,26 @@ mod tests {
         assert!(!sanitized.contains("secret"));
         assert!(!sanitized.contains("private"));
         assert!(sanitized.contains("Visible"));
+        Ok(())
+    }
+
+    #[test]
+    fn debug_dump_rotation_preserves_unrelated_files() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let sentinel = dir.path().join("unrelated-diagnostic.log");
+        std::fs::write(&sentinel, b"keep")?;
+        for index in 0..=STALKER_DEBUG_DUMP_LIMIT {
+            std::fs::write(dir.path().join(format!("{STALKER_DEBUG_DUMP_PREFIX}{index}.bin")), b"dump")?;
+        }
+
+        rotate_stalker_debug_dumps(dir.path());
+
+        assert!(sentinel.exists());
+        let dump_count = std::fs::read_dir(dir.path())?
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(STALKER_DEBUG_DUMP_PREFIX))
+            .count();
+        assert_eq!(dump_count, STALKER_DEBUG_DUMP_LIMIT);
         Ok(())
     }
 
@@ -923,10 +905,10 @@ mod tests {
     #[test]
     fn public_destination_filter_rejects_non_public_ranges() -> Result<(), std::net::AddrParseError> {
         for address in ["127.0.0.1", "10.0.0.1", "169.254.1.1", "100.64.0.1", "::1", "fc00::1", "fe80::1"] {
-            assert!(!is_public_ip(address.parse()?), "{address}");
+            assert!(!crate::utils::network::request::is_public_ip(address.parse()?), "{address}");
         }
-        assert!(is_public_ip("8.8.8.8".parse()?));
-        assert!(is_public_ip("2606:4700:4700::1111".parse()?));
+        assert!(crate::utils::network::request::is_public_ip("8.8.8.8".parse()?));
+        assert!(crate::utils::network::request::is_public_ip("2606:4700:4700::1111".parse()?));
         Ok(())
     }
 

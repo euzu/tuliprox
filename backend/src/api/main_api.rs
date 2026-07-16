@@ -19,7 +19,8 @@ use crate::{
         hdhomerun_ssdp::spawn_ssdp_discover_task,
         http_layers::create_cors_layer,
         model::{
-            create_cache, create_http_client, create_http_client_no_redirect, exec_provider_dns,
+            create_cache, create_http_client, create_http_client_no_redirect, create_public_http_client_no_redirect,
+            exec_provider_dns,
             exec_hls_cache_gc, exec_hls_lifecycle, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens,
             ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState, HlsProvisioningState,
             HlsProxyManager, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
@@ -308,6 +309,7 @@ async fn create_shared_data(
 
     let client = create_http_client(app_config)?;
     let client_no_redirect = create_http_client_no_redirect(app_config)?;
+    let public_client_no_redirect = create_public_http_client_no_redirect(app_config)?;
 
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
@@ -320,6 +322,7 @@ async fn create_shared_data(
             app_config: Arc::clone(app_config),
             http_client: Arc::new(ArcSwap::from_pointee(client)),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
+            public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(public_client_no_redirect)),
             downloads: Arc::new(DownloadQueue::new_with_state_file(Some(downloads_state_file))),
             cache: Arc::new(ArcSwapOption::from(cache)),
             shared_stream_manager,

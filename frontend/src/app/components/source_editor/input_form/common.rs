@@ -3,9 +3,10 @@ use super::{
     ConfigInputOptionsDtoFormState, ConfigInputOptionsFormAction, LABEL_CACHE_DURATION, LABEL_ENABLED, LABEL_EXP_DATE,
     LABEL_FETCH_METHOD, LABEL_HEADERS, LABEL_LIVE_STREAMS, LABEL_MAX_CONNECTIONS, LABEL_METADATA, LABEL_NAME,
     LABEL_PASSWORD, LABEL_PERSIST, LABEL_PRIORITY, LABEL_PROBE, LABEL_PROBE_DELAY_SEC, LABEL_PROBE_FILTER,
-    LABEL_PROBE_LIVE_INTERVAL_HOURS, LABEL_RESOLVE, LABEL_RESOLVE_BACKGROUND, LABEL_RESOLVE_DELAY_SEC,
-    LABEL_RESOLVE_FILTER, LABEL_RESOLVE_TMDB, LABEL_SKIP, LABEL_SKIP_LIVE, LABEL_SKIP_SERIES, LABEL_SKIP_VOD,
-    LABEL_URL, LABEL_USERNAME, LABEL_XTREAM_LIVE_STREAM_USE_PREFIX, LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION,
+    LABEL_PROBE_LIVE, LABEL_PROBE_LIVE_INTERVAL_HOURS, LABEL_PROBE_SERIES, LABEL_PROBE_VOD, LABEL_RESOLVE,
+    LABEL_RESOLVE_BACKGROUND, LABEL_RESOLVE_DELAY_SEC, LABEL_RESOLVE_FILTER, LABEL_RESOLVE_SERIES, LABEL_RESOLVE_TMDB,
+    LABEL_RESOLVE_VOD, LABEL_SKIP, LABEL_SKIP_LIVE, LABEL_SKIP_SERIES, LABEL_SKIP_VOD, LABEL_URL, LABEL_USERNAME,
+    LABEL_XTREAM_LIVE_STREAM_USE_PREFIX, LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION,
 };
 use crate::{
     app::components::{input::Input, Card, FilterInput, KeyValueEditor, RadioButtonGroup, TitledCard, ToolAction},
@@ -242,8 +243,8 @@ fn xtream_options_readonly(state: &UseReducerHandle<ConfigInputOptionsDtoFormSta
         </div></TitledCard>
         <TitledCard title={translate.t(LABEL_RESOLVE)}>
             <div class="tp__config-view__cols-2">
-                { config_field_bool!(state.form, translate.t(LABEL_SKIP_VOD), resolve_vod) }
-                { config_field_bool!(state.form, translate.t(LABEL_SKIP_SERIES), resolve_series) }
+                { config_field_bool!(state.form, translate.t(LABEL_RESOLVE_VOD), resolve_vod) }
+                { config_field_bool!(state.form, translate.t(LABEL_RESOLVE_SERIES), resolve_series) }
             </div>
             { config_field_custom!(translate.t(LABEL_RESOLVE_DELAY_SEC), state.form.resolve_delay.to_string()) }
             { config_field_bool!(state.form, translate.t(LABEL_RESOLVE_BACKGROUND), resolve_background) }
@@ -251,9 +252,9 @@ fn xtream_options_readonly(state: &UseReducerHandle<ConfigInputOptionsDtoFormSta
         </TitledCard>
         <TitledCard title={translate.t(LABEL_PROBE)}>
             <div class="tp__config-view__cols-3">
-                { config_field_bool!(state.form, translate.t(LABEL_SKIP_LIVE), probe_live) }
-                { config_field_bool!(state.form, translate.t(LABEL_SKIP_VOD), probe_vod) }
-                { config_field_bool!(state.form, translate.t(LABEL_SKIP_SERIES), probe_series) }
+                { config_field_bool!(state.form, translate.t(LABEL_PROBE_LIVE), probe_live) }
+                { config_field_bool!(state.form, translate.t(LABEL_PROBE_VOD), probe_vod) }
+                { config_field_bool!(state.form, translate.t(LABEL_PROBE_SERIES), probe_series) }
             </div>
             <div class="tp__config-view__cols-2">
                 { config_field_custom!(translate.t(LABEL_PROBE_DELAY_SEC), state.form.probe_delay.to_string()) }
@@ -277,8 +278,8 @@ fn xtream_options_editable(state: &UseReducerHandle<ConfigInputOptionsDtoFormSta
         </div></TitledCard>
         <TitledCard title={translate.t(LABEL_RESOLVE)}>
             <div class="tp__config-view__cols-2">
-                { edit_field_bool!(state, translate.t(LABEL_SKIP_VOD), resolve_vod, ConfigInputOptionsFormAction::ResolveVod) }
-                { edit_field_bool!(state, translate.t(LABEL_SKIP_SERIES), resolve_series, ConfigInputOptionsFormAction::ResolveSeries) }
+                { edit_field_bool!(state, translate.t(LABEL_RESOLVE_VOD), resolve_vod, ConfigInputOptionsFormAction::ResolveVod) }
+                { edit_field_bool!(state, translate.t(LABEL_RESOLVE_SERIES), resolve_series, ConfigInputOptionsFormAction::ResolveSeries) }
             </div>
             { edit_field_number_u16!(state, translate.t(LABEL_RESOLVE_DELAY_SEC), resolve_delay, ConfigInputOptionsFormAction::ResolveDelay) }
             { edit_field_bool!(state, translate.t(LABEL_RESOLVE_BACKGROUND), resolve_background, ConfigInputOptionsFormAction::ResolveBackground) }
@@ -289,9 +290,9 @@ fn xtream_options_editable(state: &UseReducerHandle<ConfigInputOptionsDtoFormSta
         </TitledCard>
         <TitledCard title={translate.t(LABEL_PROBE)}>
             <div class="tp__config-view__cols-3">
-                { edit_field_bool!(state, translate.t(LABEL_SKIP_LIVE), probe_live, ConfigInputOptionsFormAction::ProbeLive) }
-                { edit_field_bool!(state, translate.t(LABEL_SKIP_VOD), probe_vod, ConfigInputOptionsFormAction::ProbeVod) }
-                { edit_field_bool!(state, translate.t(LABEL_SKIP_SERIES), probe_series, ConfigInputOptionsFormAction::ProbeSeries) }
+                { edit_field_bool!(state, translate.t(LABEL_PROBE_LIVE), probe_live, ConfigInputOptionsFormAction::ProbeLive) }
+                { edit_field_bool!(state, translate.t(LABEL_PROBE_VOD), probe_vod, ConfigInputOptionsFormAction::ProbeVod) }
+                { edit_field_bool!(state, translate.t(LABEL_PROBE_SERIES), probe_series, ConfigInputOptionsFormAction::ProbeSeries) }
             </div>
             <div class="tp__config-view__cols-2">
                 { edit_field_number_u16!(state, translate.t(LABEL_PROBE_DELAY_SEC), probe_delay, ConfigInputOptionsFormAction::ProbeDelay) }

@@ -64,6 +64,7 @@ pub(super) fn XtreamInputForm(props: &XtreamInputFormProps) -> Html {
                 let loading = loading.clone();
                 let request_in_flight = request_in_flight.clone();
                 let request_token = request_token.clone();
+                let translate = translate.clone();
                 spawn_local(async move {
                     match services.config.get_xtream_login_info(&request).await {
                         Ok(login_info) if *request_token.borrow() == token => {
@@ -74,7 +75,9 @@ pub(super) fn XtreamInputForm(props: &XtreamInputFormProps) -> Html {
                                 if let Some(exp_date) = login_info.exp_date {
                                     state.dispatch(ConfigInputFormAction::ExpDate(Some(exp_date)));
                                 } else {
-                                    services.toastr.warning("No expiration date returned by provider");
+                                    services
+                                        .toastr
+                                        .warning(translate.t("MESSAGES.SOURCE_EDITOR.NO_EXPIRATION_DATE_RETURNED"));
                                 }
                             }
                         }

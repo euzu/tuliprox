@@ -843,7 +843,11 @@ async fn provider_stream_request(
         );
     }
     let response_result = if use_manual_redirects {
-        let client_no_redirect = app_state.http_client_no_redirect.load();
+        let client_no_redirect = if stream_options.requires_public_destination() {
+            app_state.public_http_client_no_redirect.load()
+        } else {
+            app_state.http_client_no_redirect.load()
+        };
         send_with_manual_redirects(&client_no_redirect, stream_options, &app_state.app_config).await
     } else {
         // Use send_with_retry_and_provider for automatic failover support

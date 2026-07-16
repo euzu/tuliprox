@@ -133,10 +133,16 @@ fn repository_error(context: &str, err: impl std::fmt::Display) -> TuliproxError
     TuliproxError::RepositoryStalker(format!("{context}: {err}"))
 }
 
+fn unique_temporary_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().map_or_else(std::ffi::OsString::new, ToOwned::to_owned);
+    name.push(format!(".{}.tmp", Uuid::new_v4()));
+    path.with_file_name(name)
+}
+
 async fn atomic_write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<(), TuliproxError> {
     let bytes = serde_json::to_vec(value).map_err(|err| repository_error("encode Stalker state", err))?;
     tokio::task::spawn_blocking(move || {
-        let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
+        let temporary = unique_temporary_path(&path);
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -413,6 +419,15 @@ mod tests {
         assert_ne!(live, vod);
         assert_ne!(roots, episodes);
         assert!(live.ends_with("generation-9-live.db"));
+    }
+
+    #[test]
+    fn temporary_path_appends_suffix_to_complete_filename() {
+        let path = unique_temporary_path(Path::new("/tmp/stalker/manifest.json"));
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+
+        assert!(name.starts_with("manifest.json."));
+        assert_eq!(path.extension().and_then(|extension| extension.to_str()), Some("tmp"));
     }
 
     #[tokio::test]
