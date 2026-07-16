@@ -17,6 +17,7 @@ use crate::{
             ContentCodingDetection, ContentCodingError, OutboundContentCodingPolicy,
         },
         debug_if_enabled,
+        network::stalker::client::validate_public_playable_url,
         request::{
             get_request_headers, is_safe_cross_origin_redirect_header, preview_request_diagnostics_for_logging,
             preview_request_target_for_logging, send_with_retry_and_provider_policy,
@@ -73,6 +74,7 @@ create_bitset!(
     ShareStream,
     PipeStream,
     RangeRequested
+    ,PublicDestinationRequired
 );
 
 #[derive(Debug, Clone)]
@@ -213,6 +215,10 @@ impl ProviderStreamFactoryOptions {
 
     pub fn set_provider(&mut self, provider: Option<Arc<ConfigProvider>>) { self.provider = provider; }
 
+    pub fn require_public_destination(&mut self) {
+        self.flags.set(ProviderStreamFactoryFlags::PublicDestinationRequired);
+    }
+
     pub fn get_provider(&self) -> Option<&Arc<ConfigProvider>> { self.provider.as_ref() }
 
     #[inline]
@@ -242,6 +248,10 @@ impl ProviderStreamFactoryOptions {
     #[inline]
     pub fn should_retry_provider_request(&self) -> bool {
         self.flags.contains(ProviderStreamFactoryFlags::RetryEnabled)
+    }
+
+    fn requires_public_destination(&self) -> bool {
+        self.flags.contains(ProviderStreamFactoryFlags::PublicDestinationRequired)
     }
 
     #[inline]
@@ -628,6 +638,11 @@ async fn send_with_manual_redirects(
     let mut credential_state = ProviderRequestCredentialState::OriginalOrigin;
 
     loop {
+        if stream_options.requires_public_destination() {
+            validate_public_playable_url(&current_url)
+                .await
+                .map_err(|err| io::Error::new(io::ErrorKind::PermissionDenied, err))?;
+        }
         let result = send_with_retry_and_provider_policy(
             app_config,
             &current_url,
@@ -815,7 +830,8 @@ async fn provider_stream_request(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, ProviderStreamRequestFailure> {
-    let use_manual_redirects = app_state.should_use_manual_redirects()
+    let use_manual_redirects = stream_options.requires_public_destination()
+        || app_state.should_use_manual_redirects()
         || provider_headers_require_manual_redirects(stream_options.get_headers());
     if log_enabled!(log::Level::Debug) {
         let diagnostics =

@@ -264,21 +264,21 @@ mod tests {
             std::future::pending::<Result<MediaServerStatus, MediaServerError>>()
         }
         fn list_libraries(&self) -> impl std::future::Future<Output = Result<Vec<MediaServerLibrary>, MediaServerError>> {
-            std::future::pending::<Result<Vec<MediaServerLibrary>, MediaServerError>>()
+            std::future::ready(Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)))
         }
         fn list_movies(
             &self,
             _library: &MediaServerLibraryRef,
             _page: MediaServerPageRequest,
         ) -> impl std::future::Future<Output = Result<MediaServerPage<MediaServerMovie>, MediaServerError>> {
-            std::future::pending::<Result<MediaServerPage<MediaServerMovie>, MediaServerError>>()
+            std::future::ready(Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)))
         }
         fn list_series(
             &self,
             _library: &MediaServerLibraryRef,
             _page: MediaServerPageRequest,
         ) -> impl std::future::Future<Output = Result<MediaServerPage<MediaServerSeries>, MediaServerError>> {
-            std::future::pending::<Result<MediaServerPage<MediaServerSeries>, MediaServerError>>()
+            std::future::ready(Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)))
         }
 
         fn list_seasons(
@@ -286,7 +286,7 @@ mod tests {
             _library: &MediaServerLibraryRef,
             _page: MediaServerPageRequest,
         ) -> impl std::future::Future<Output = Result<MediaServerPage<MediaServerSeason>, MediaServerError>> {
-            std::future::pending::<Result<MediaServerPage<MediaServerSeason>, MediaServerError>>()
+            std::future::ready(Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)))
         }
 
         fn list_episodes(
@@ -294,7 +294,7 @@ mod tests {
             _library: &MediaServerLibraryRef,
             _page: MediaServerPageRequest,
         ) -> impl std::future::Future<Output = Result<MediaServerPage<MediaServerEpisode>, MediaServerError>> {
-            std::future::pending::<Result<MediaServerPage<MediaServerEpisode>, MediaServerError>>()
+            std::future::ready(Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)))
         }
 
         fn open_stream(

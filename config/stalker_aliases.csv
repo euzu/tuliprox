@@ -1,0 +1,3 @@
+#name;url;username;password;mac_address;auth_mode;mag_preset;endpoint_preference;max_connections;priority;exp_date;enabled
+portal_primary;http://portal.example/c/;account1;secret1;00:1A:79:12:34:56;mac_plus_credentials;mag254_strict;portal;1;0;;true
+portal_backup;https://backup.example/stalker_portal/c/;account2;secret2;;credentials_only;generic_safe;auto;1;10;;true

@@ -48,7 +48,7 @@ pub async fn create_link(
         let builder = build_create_link_builder(client, &load_url, handshake, &spec, kind, cmd, series_number, archive_start, archive_end);
         match client.send_json::<StalkerCreateLinkResponse>(builder, "create_link").await {
             Ok(resp) => {
-                return resolve_response(client, resp, kind, requested_mode);
+                return resolve_response(resp, kind, requested_mode);
             }
             Err(err) => {
                 last_err = Some(err);
@@ -110,7 +110,6 @@ fn build_create_link_builder(
 }
 
 fn resolve_response(
-    _client: &StalkerApiClient,
     resp: StalkerCreateLinkResponse,
     kind: StalkerStreamKind,
     requested_mode: StalkerPlaybackMode,
@@ -149,7 +148,6 @@ fn resolve_response(
 mod tests {
     use super::*;
     use crate::utils::network::stalker::client::strip_jsonp;
-    use crate::utils::network::stalker::cmd_parser::extract_url_from_cmd;
 
     #[test]
     fn resolves_create_link_response_with_js_cmd() {
@@ -190,35 +188,7 @@ mod tests {
         resp: StalkerCreateLinkResponse,
         kind: StalkerStreamKind,
     ) -> StalkerResult<StalkerResolvedStream> {
-        resolve_response_helper(resp, kind, StalkerPlaybackMode::DirectUrl)
-    }
-
-    fn resolve_response_helper(
-        resp: StalkerCreateLinkResponse,
-        kind: StalkerStreamKind,
-        requested_mode: StalkerPlaybackMode,
-    ) -> StalkerResult<StalkerResolvedStream> {
-        // Same logic as `resolve_response` but without the `&StalkerApiClient` so the
-        // unit test stays self-contained.
-        let raw_cmd = resp
-            .js
-            .as_ref()
-            .and_then(|js| js.get("cmd").and_then(Value::as_str).map(String::from))
-            .or(resp.cmd);
-        let Some(raw_cmd) = raw_cmd else {
-            return Err(StalkerError::PortalRefusedCmd { reason: "create_link response contained no cmd".to_string() });
-        };
-        let url = extract_url_from_cmd(&raw_cmd)?;
-        let scheme = validate_playable_scheme(&url)?;
-        if !scheme_is_playable(scheme) {
-            return Err(StalkerError::UnsupportedScheme { scheme: scheme.to_string() });
-        }
-        Ok(StalkerResolvedStream {
-            stream_url: url,
-            stream_kind: kind,
-            playback_mode: requested_mode,
-            candidates: vec![raw_cmd],
-        })
+        resolve_response(resp, kind, StalkerPlaybackMode::DirectUrl)
     }
 
     #[test]
@@ -236,7 +206,7 @@ mod tests {
         }))
         .unwrap();
         let parsed: StalkerCreateLinkResponse = serde_json::from_str(&body).unwrap();
-        let resolved = resolve_response_helper(parsed, StalkerStreamKind::Live, StalkerPlaybackMode::TempLinkNginx)
+        let resolved = resolve_response(parsed, StalkerStreamKind::Live, StalkerPlaybackMode::TempLinkNginx)
             .expect("ok");
         assert_eq!(resolved.playback_mode, StalkerPlaybackMode::TempLinkNginx);
     }

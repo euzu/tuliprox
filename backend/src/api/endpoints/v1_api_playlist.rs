@@ -5,7 +5,10 @@ use crate::{
             try_result_bad_request, try_unwrap_body,
         },
         endpoints::{
-            api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target},
+            api_playlist_utils::{
+                get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target,
+                STALKER_RESOURCE_SCHEME,
+            },
             extract_accept_header::ExtractAcceptHeader,
             m3u_api::m3u_api_stream_loaded,
             xmltv_api::{rewrite_epg_channel_resource_url, serve_epg_web_ui, stream_epg_api},
@@ -21,12 +24,20 @@ use crate::{
         parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags,
         ConfigInputOptions, EpgSource, EpgSourceType, IcsDummyPolicy, InputSource,
     },
-    processing::parser::{
+    processing::{
+        parser::{
         ics::parse_ics_file_to_channel,
         xmltv::{merge_epg_channels_by_priority_with_dummy_policies, EpgDummyPolicySource},
+        },
+        processor::re_resolve_stalker_url,
     },
     repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id},
-    utils::{epg::get_input_raw_epg_file_path, file_exists_async, request, xtream},
+    utils::{
+        epg::get_input_raw_epg_file_path,
+        file_exists_async,
+        network::stalker::client::validate_public_playable_url,
+        request, xtream,
+    },
 };
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
@@ -34,8 +45,9 @@ use serde_json::json;
 use shared::{
     error::TuliproxError,
     model::{
-        permission::Permission, EpgChannel, InputType, OperationRunAccepted, PlaylistEpgRequest, PlaylistRequest,
-        PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem, XtreamCluster,
+        permission::Permission, stalker::StalkerStreamKind, EpgChannel, InputType, OperationRunAccepted,
+        PlaylistEpgRequest, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem,
+        XtreamCluster,
     },
     utils::{concat_path_leading_slash, deobfuscate_text, sanitize_sensitive_info, Internable},
 };
@@ -654,9 +666,53 @@ async fn playlist_resource(
 ) -> impl IntoResponse + Send {
     let encrypt_secret = app_state.get_encrypt_secret();
     if let Ok(resource_url) = deobfuscate_text(&encrypt_secret, &resource) {
+        if let Some((input_id, cluster, provider_id)) = parse_stalker_resource(&resource_url) {
+            return stalker_resource_response(&app_state, input_id, cluster, provider_id).await;
+        }
         resource_response(&app_state, &resource_url, &req_headers, None).await.into_response()
     } else {
         axum::http::StatusCode::BAD_REQUEST.into_response()
+    }
+}
+
+fn parse_stalker_resource(resource: &str) -> Option<(u16, XtreamCluster, u32)> {
+    let mut parts = resource.strip_prefix(STALKER_RESOURCE_SCHEME)?.split('/');
+    let input_id = parts.next()?.parse().ok()?;
+    let cluster = parts.next()?.parse().ok()?;
+    let provider_id = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((input_id, cluster, provider_id))
+}
+
+async fn stalker_resource_response(
+    app_state: &Arc<AppState>,
+    input_id: u16,
+    cluster: XtreamCluster,
+    provider_id: u32,
+) -> axum::response::Response {
+    let Some(input) = app_state.app_config.get_input_by_id(input_id).filter(|input| input.input_type.is_stalker()) else {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    };
+    let kind = match cluster {
+        XtreamCluster::Live => StalkerStreamKind::Live,
+        XtreamCluster::Video => StalkerStreamKind::Movie,
+        XtreamCluster::Series => StalkerStreamKind::Episode,
+    };
+    let client = app_state.http_client.load().as_ref().clone();
+    match re_resolve_stalker_url(&app_state.app_config, &client, &input, provider_id, kind, false).await {
+        Ok(Some(resolved_url)) => {
+            let Ok(url) = Url::parse(&resolved_url) else {
+                return axum::http::StatusCode::BAD_GATEWAY.into_response();
+            };
+            if validate_public_playable_url(&url).await.is_err() {
+                return axum::http::StatusCode::BAD_GATEWAY.into_response();
+            }
+            axum::response::Redirect::temporary(url.as_str()).into_response()
+        }
+        Ok(None) => axum::http::StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            error!("Failed to resolve Stalker preview stream: {}", sanitize_sensitive_info(&err.to_string()));
+            axum::http::StatusCode::BAD_GATEWAY.into_response()
+        }
     }
 }
 
@@ -1584,6 +1640,16 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body_text}");
         assert!(body_text.contains("Demo Channel"), "{body_text}");
         assert!(!body_text.contains("ffmpeg http://streams.example/live/101"), "{body_text}");
+        let body_json: serde_json::Value = serde_json::from_str(&body_text).unwrap_or_default();
+        let playback_url = body_json
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(serde_json::Value::as_array)
+            .and_then(|item| item.get(6))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(!playback_url.is_empty(), "{body_text}");
+        assert!(playback_url.starts_with("http") || playback_url.starts_with('/'), "{playback_url}");
     }
 
     #[tokio::test]

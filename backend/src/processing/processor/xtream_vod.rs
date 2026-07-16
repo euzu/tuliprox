@@ -74,7 +74,9 @@ pub async fn playlist_resolve_vod(
         sync_resolved_vod_properties(provider_fpl, fpl);
     }
 
-    provider_fpl.source.obtain_resources().await;
+    if let Err(err) = provider_fpl.source.obtain_resources().await {
+        errors.push(err);
+    }
 }
 
 fn sync_resolved_vod_properties(provider_fpl: &mut FetchedPlaylist<'_>, processed_fpl: &mut FetchedPlaylist<'_>) {

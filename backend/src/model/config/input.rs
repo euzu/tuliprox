@@ -1,28 +1,33 @@
-use crate::model::{macros, ConfigProvider, EpgConfig, PanelApiConfig};
-use crate::repository::get_csv_file_path;
+use crate::{
+    model::{macros, ConfigProvider, EpgConfig, PanelApiConfig},
+    repository::get_csv_file_path,
+};
 use chrono::Utc;
 use log::warn;
-use shared::foundation::Filter;
-use shared::{apply_flags, create_bitset};
-use shared::error::TuliproxError;
-use shared::model::{
-    ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, InputFetchMethod,
-    InputType,
-    MediaServerCatalogConfigDto, MediaServerImagePolicy, MediaServerInputConfigDto, MediaServerLibrarySelector,
-    MediaServerPlaybackConfigDto, StagedInputType, StalkerAuthMode, StalkerDeviceProfileDto,
-    StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
+use shared::{
+    apply_flags, check_input_connections, check_input_credentials, concat_string, create_bitset,
+    error::TuliproxError,
+    foundation::Filter,
+    model::{
+        ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto,
+        InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicy, MediaServerInputConfigDto,
+        MediaServerLibrarySelector, MediaServerPlaybackConfigDto, StagedInputType, StalkerAuthMode,
+        StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
+    },
+    utils::{
+        get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string,
+        parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable, BATCH_SCHEME_PREFIX,
+        PROVIDER_SCHEME_PREFIX,
+    },
+    write_if_some,
 };
-use shared::utils::{
-    get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable,
-    BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    fmt,
+    path::PathBuf,
+    sync::{Arc, LazyLock},
 };
-use shared::{check_input_connections, write_if_some};
-use shared::{check_input_credentials, concat_string };
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::fmt;
-use std::path::PathBuf;
-use std::sync::{Arc, LazyLock};
 use url::Url;
 
 create_bitset!(
@@ -56,19 +61,13 @@ pub struct ConfigInputOptions {
 macros::from_impl!(ConfigInputOptions);
 impl ConfigInputOptions {
     #[inline]
-    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool {
-        self.flags.contains(flag)
-    }
+    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool { self.flags.contains(flag) }
 
     #[inline]
-    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.flags.contains_any(&flags)
-    }
+    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool { self.flags.contains_any(&flags) }
 
     #[inline]
-    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.flags.contains_all(&flags)
-    }
+    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool { self.flags.contains_all(&flags) }
 
     #[inline]
     pub fn defaults() -> &'static Self { &DEFAULT_CONFIG_INPUT_OPTIONS }
@@ -130,12 +129,7 @@ pub struct ConfigInputStaged {
 }
 
 impl From<&ConfigInputStagedDto> for ConfigInputStaged {
-    fn from(dto: &ConfigInputStagedDto) -> Self {
-        Self {
-            for_input: dto.for_input.clone(),
-            clusters: dto.clusters,
-        }
-    }
+    fn from(dto: &ConfigInputStagedDto) -> Self { Self { for_input: dto.for_input.clone(), clusters: dto.clusters } }
 }
 
 impl From<&MediaServerInputConfigDto> for MediaServerInputConfig {
@@ -194,11 +188,7 @@ impl InputUserInfo {
             let (username, password) = get_credentials_from_url(&url);
             if username.is_some() || password.is_some() {
                 if let (Some(username), Some(password)) = (username.as_ref(), password.as_ref()) {
-                    return Some(Self {
-                        base_url,
-                        username: username.to_owned(),
-                        password: password.to_owned(),
-                    });
+                    return Some(Self { base_url, username: username.to_owned(), password: password.to_owned() });
                 }
             }
         }
@@ -226,8 +216,21 @@ pub struct StalkerDeviceProfile {
 }
 
 impl StalkerDeviceProfile {
-    pub fn mac(&self) -> Option<&str> {
-        self.mac_address.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    pub fn mac(&self) -> Option<&str> { self.mac_address.as_deref().map(str::trim).filter(|s| !s.is_empty()) }
+
+    fn with_alias_overrides(self, alias: Self) -> Self {
+        Self {
+            mac_address: alias.mac_address.or(self.mac_address),
+            device_profile: alias.device_profile.or(self.device_profile),
+            serial_number: alias.serial_number.or(self.serial_number),
+            device_id: alias.device_id.or(self.device_id),
+            device_id2: alias.device_id2.or(self.device_id2),
+            signature: alias.signature.or(self.signature),
+            timezone: alias.timezone.or(self.timezone),
+            locale: alias.locale.or(self.locale),
+            user_agent: alias.user_agent.or(self.user_agent),
+            x_user_agent: alias.x_user_agent.or(self.x_user_agent),
+        }
     }
 }
 
@@ -252,7 +255,7 @@ impl From<&StalkerDeviceProfileDto> for StalkerDeviceProfile {
 /// negotiated auth mode, the preferred MAG preset, the body-size caps and
 /// the portal account credentials (copied from the owning input/alias so
 /// the network layer never has to reach back into `ConfigInput`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct StalkerInputConfig {
     pub device: Option<StalkerDeviceProfile>,
     pub auth_mode: StalkerAuthMode,
@@ -264,6 +267,50 @@ pub struct StalkerInputConfig {
     pub username: Option<String>,
     /// Portal account password (from the input/alias `password` field).
     pub password: Option<String>,
+}
+
+impl StalkerInputConfig {
+    fn with_alias_overrides(self, alias: Self) -> Self {
+        let device = match (self.device, alias.device) {
+            (Some(parent), Some(alias)) => Some(parent.with_alias_overrides(alias)),
+            (parent, alias) => alias.or(parent),
+        };
+        Self {
+            device,
+            auth_mode: alias.auth_mode,
+            mag_preset: alias.mag_preset,
+            endpoint_preference: alias.endpoint_preference,
+            size_caps: alias.size_caps.or(self.size_caps),
+            catalog_max_pages: alias.catalog_max_pages.or(self.catalog_max_pages),
+            username: alias.username.or(self.username),
+            password: alias.password.or(self.password),
+        }
+    }
+}
+
+fn merge_stalker_config(
+    parent: Option<StalkerInputConfig>,
+    alias: Option<StalkerInputConfig>,
+) -> Option<StalkerInputConfig> {
+    match (parent, alias) {
+        (Some(parent), Some(alias)) => Some(parent.with_alias_overrides(alias)),
+        (parent, alias) => alias.or(parent),
+    }
+}
+
+impl std::fmt::Debug for StalkerInputConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StalkerInputConfig")
+            .field("device", &self.device.as_ref().map(|_| "[redacted]"))
+            .field("auth_mode", &self.auth_mode)
+            .field("mag_preset", &self.mag_preset)
+            .field("endpoint_preference", &self.endpoint_preference)
+            .field("size_caps", &self.size_caps)
+            .field("catalog_max_pages", &self.catalog_max_pages)
+            .field("username", &self.username.as_ref().map(|_| "[redacted]"))
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 impl StalkerInputConfig {
@@ -284,11 +331,7 @@ impl StalkerInputConfig {
             self.auth_mode, self.mag_preset, self.endpoint_preference, self.catalog_max_pages
         );
         if let Some(caps) = self.size_caps.as_ref() {
-            let _ = write!(
-                identity,
-                "|caps={}:{}:{}",
-                caps.create_link_kb, caps.ordered_list_mb, caps.get_epg_mb
-            );
+            let _ = write!(identity, "|caps={}:{}:{}", caps.create_link_kb, caps.ordered_list_mb, caps.get_epg_mb);
         }
         if let Some(device) = self.device.as_ref() {
             let _ = write!(
@@ -326,9 +369,7 @@ pub struct StalkerSizeCaps {
 }
 
 impl Default for StalkerSizeCaps {
-    fn default() -> Self {
-        Self { create_link_kb: 64, ordered_list_mb: 8, get_epg_mb: 64 }
-    }
+    fn default() -> Self { Self { create_link_kb: 64, ordered_list_mb: 8, get_epg_mb: 64 } }
 }
 
 impl From<&StalkerInputConfigDto> for StalkerInputConfig {
@@ -418,7 +459,10 @@ pub struct ConfigInput {
 }
 
 impl ConfigInput {
-    fn resolve_provider_config(url: &str, provider_configs: &[Arc<ConfigProvider>]) -> Result<Arc<ConfigProvider>, TuliproxError> {
+    fn resolve_provider_config(
+        url: &str,
+        provider_configs: &[Arc<ConfigProvider>],
+    ) -> Result<Arc<ConfigProvider>, TuliproxError> {
         let (host, _path) = parse_provider_scheme_url_parts(url).map_err(|err| {
             TuliproxError::ConfigInput(format!(
                 "Malformed provider URL {}: {}",
@@ -427,11 +471,12 @@ impl ConfigInput {
             ))
         })?;
 
-        provider_configs
-            .iter()
-            .find(|p| p.name.as_ref() == host)
-            .cloned()
-            .ok_or_else(|| TuliproxError::ConfigInput(format!("Failed to resolve provider config for {}", sanitize_sensitive_info(url))))
+        provider_configs.iter().find(|p| p.name.as_ref() == host).cloned().ok_or_else(|| {
+            TuliproxError::ConfigInput(format!(
+                "Failed to resolve provider config for {}",
+                sanitize_sensitive_info(url)
+            ))
+        })
     }
 
     fn prepare_aliases(
@@ -464,19 +509,13 @@ impl ConfigInput {
 
     fn apply_expiration(&mut self) {
         if is_input_expired(self.exp_date) {
-            warn!(
-                "Account {} expired for provider: {}",
-                self.username.as_ref().map_or("?", |s| s.as_str()),
-                self.name
-            );
+            warn!("Account {} expired for provider: {}", self.username.as_ref().map_or("?", |s| s.as_str()), self.name);
             self.enabled = false;
         }
     }
 
     #[inline]
-    pub fn get_download_input_type(&self) -> InputType {
-        self.input_type
-    }
+    pub fn get_download_input_type(&self) -> InputType { self.input_type }
 
     pub fn resolve_staged_download_type(&mut self) {
         self.input_type = self.staged_type.input_type();
@@ -492,9 +531,7 @@ impl ConfigInput {
     }
 
     #[inline]
-    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool {
-        self.has_flag_or(flag, false)
-    }
+    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool { self.has_flag_or(flag, false) }
 
     #[inline]
     /// Returns `default` when `self.options` is `None`; unlike `has_flag`, which returns
@@ -505,9 +542,7 @@ impl ConfigInput {
     }
 
     #[inline]
-    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.has_any_flags_or(flags, false)
-    }
+    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool { self.has_any_flags_or(flags, false) }
 
     #[inline]
     /// Returns `default` when `self.options` is `None`; unlike `has_any_flags`, which returns
@@ -518,9 +553,7 @@ impl ConfigInput {
     }
 
     #[inline]
-    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.has_all_flags_or(flags, false)
-    }
+    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool { self.has_all_flags_or(flags, false) }
 
     #[inline]
     /// Returns `default` when `self.options` is `None`; unlike `has_all_flags`, which returns
@@ -697,7 +730,10 @@ impl ConfigInput {
         InputUserInfo::new(self.input_type, self.username.as_deref(), self.password.as_deref(), &self.url)
     }
 
-    pub fn get_matched_config_by_url<'a>(&'a self, url: &str) -> Option<(&'a str, Option<&'a String>, Option<&'a String>)> {
+    pub fn get_matched_config_by_url<'a>(
+        &'a self,
+        url: &str,
+    ) -> Option<(&'a str, Option<&'a String>, Option<&'a String>)> {
         if url.starts_with(&self.url) {
             return Some((&self.url, self.username.as_ref(), self.password.as_ref()));
         }
@@ -730,12 +766,17 @@ impl ConfigInput {
                         for alias in aliases.iter_mut() {
                             if is_input_expired(alias.exp_date) {
                                 alias.enabled = false;
-                                warn!("Alias-Account {} expired for provider: {}", alias.username.as_ref().map_or("?", |s| s.as_str()), alias.name);
+                                warn!(
+                                    "Alias-Account {} expired for provider: {}",
+                                    alias.username.as_ref().map_or("?", |s| s.as_str()),
+                                    alias.name
+                                );
                             }
                         }
 
                         if let Some(index) = aliases.iter().position(|alias| alias.enabled) {
                             let mut first = aliases.remove(index);
+                            let stalker = merge_stalker_config(self.stalker.take(), first.stalker.take());
                             self.id = first.id;
                             self.username = first.username.take();
                             self.password = first.password.take();
@@ -744,6 +785,8 @@ impl ConfigInput {
                             self.priority = first.priority;
                             self.enabled = first.enabled;
                             self.exp_date = first.exp_date;
+                            self.stalker =
+                                stalker.map(|cfg| cfg.with_credentials(self.username.as_ref(), self.password.as_ref()));
                             if self.name.is_empty() {
                                 self.name.clone_from(&first.name);
                             }
@@ -786,24 +829,18 @@ impl ConfigInput {
             panel_api: self.panel_api.clone(),
             cache_duration_seconds: self.cache_duration_seconds,
             provider_configs: self.provider_configs.clone(),
-            stalker: alias
-                .stalker
-                .clone()
-                .or_else(|| self.stalker.clone())
-                .map(|cfg| {
-                    // The alias' own credentials take precedence; fall back to
-                    // whatever the inherited config already carries.
-                    let username = alias.username.clone().or_else(|| cfg.username.clone());
-                    let password = alias.password.clone().or_else(|| cfg.password.clone());
-                    StalkerInputConfig { username, password, ..cfg }
-                }),
+            stalker: merge_stalker_config(self.stalker.clone(), alias.stalker.clone()).map(|cfg| {
+                // The alias' own credentials take precedence; fall back to
+                // whatever the inherited config already carries.
+                let username = alias.username.clone().or_else(|| cfg.username.clone());
+                let password = alias.password.clone().or_else(|| cfg.password.clone());
+                StalkerInputConfig { username, password, ..cfg }
+            }),
         }
     }
 
     pub fn has_enabled_aliases(&self) -> bool {
-        self.aliases
-            .as_ref()
-            .is_some_and(|aliases| aliases.iter().any(|a| a.enabled))
+        self.aliases.as_ref().is_some_and(|aliases| aliases.iter().any(|a| a.enabled))
     }
 
     pub fn get_enabled_aliases(&self) -> Option<Vec<&ConfigInputAlias>> {
@@ -824,7 +861,8 @@ impl ConfigInput {
 
         let (host, _path) = parse_provider_scheme_url_parts(url)?;
 
-        let provider_config = self.provider_configs
+        let provider_config = self
+            .provider_configs
             .as_ref()
             .and_then(|configs| configs.iter().find(|p| p.name.as_ref() == host))
             .cloned();
@@ -833,13 +871,14 @@ impl ConfigInput {
             let (_, resolved) = resolve_provider_scheme_url_with_provider(url, Some(provider))?;
             Ok(resolved)
         } else {
-            Err(TuliproxError::ConfigInput(format!("Provider config for '{}' not found in input '{}'", host, self.name)))
+            Err(TuliproxError::ConfigInput(format!(
+                "Provider config for '{}' not found in input '{}'",
+                host, self.name
+            )))
         }
     }
 
-    pub fn resolve(&self) -> Result<Cow<'_, str>, TuliproxError> {
-        self.resolve_url(&self.url)
-    }
+    pub fn resolve(&self) -> Result<Cow<'_, str>, TuliproxError> { self.resolve_url(&self.url) }
 
     pub fn get_resolve_provider(&self, url: &str) -> Option<Arc<ConfigProvider>> {
         if !url.starts_with(PROVIDER_SCHEME_PREFIX) {
@@ -857,10 +896,8 @@ impl ConfigInput {
 macros::from_impl!(ConfigInput);
 impl From<&ConfigInputDto> for ConfigInput {
     fn from(dto: &ConfigInputDto) -> Self {
-        let options = dto
-            .options
-            .as_ref()
-            .map_or_else(|| ConfigInputOptions::defaults().clone(), ConfigInputOptions::from);
+        let options =
+            dto.options.as_ref().map_or_else(|| ConfigInputOptions::defaults().clone(), ConfigInputOptions::from);
 
         Self {
             id: dto.id,
@@ -919,7 +956,6 @@ impl fmt::Display for ConfigInput {
     }
 }
 
-
 pub fn is_input_expired(exp_date: Option<i64>) -> bool {
     match exp_date {
         Some(ts) => {
@@ -951,7 +987,10 @@ pub fn resolve_provider_scheme_url_with_provider_index(
     let (_host, path_and_query) = parse_provider_scheme_url_parts(stream_url)?;
 
     let provider = provider_config.ok_or_else(|| {
-        TuliproxError::ConfigInput(format!("Provider config missing for resolution of: '{}'", sanitize_sensitive_info(stream_url)))
+        TuliproxError::ConfigInput(format!(
+            "Provider config missing for resolution of: '{}'",
+            sanitize_sensitive_info(stream_url)
+        ))
     })?;
 
     let final_url = assemble_provider_url_at_index(&provider, path_and_query, provider_url_index)?;
@@ -970,11 +1009,7 @@ fn assemble_provider_url_at_index(
         .ok_or_else(|| TuliproxError::ConfigInput(format!("Provider '{}' has no URLs available", provider.name)))?;
 
     // Add http:// scheme if no scheme is present
-    let base_with_scheme = if base.contains("://") {
-        base.to_string()
-    } else {
-        concat_string!("http://", base)
-    };
+    let base_with_scheme = if base.contains("://") { base.to_string() } else { concat_string!("http://", base) };
 
     let mut final_url = base_with_scheme.trim_end_matches('/').to_string();
     if !path_and_query.is_empty() {
@@ -987,9 +1022,10 @@ fn assemble_provider_url_at_index(
 mod tests {
     use super::*;
     use crate::model::ConfigProvider;
-    use shared::model::{ConfigProviderDto, MediaServerInputConfigDto, MediaServerLibrarySelector, ProviderUrlSelectionPolicy};
-    use std::borrow::Cow;
-    use std::sync::Arc;
+    use shared::model::{
+        ConfigProviderDto, MediaServerInputConfigDto, MediaServerLibrarySelector, ProviderUrlSelectionPolicy,
+    };
+    use std::{borrow::Cow, sync::Arc};
 
     fn media_server_config_with_library() -> MediaServerInputConfig {
         MediaServerInputConfig::from(&MediaServerInputConfigDto {
@@ -1210,10 +1246,7 @@ mod tests {
 
     #[test]
     fn test_resolve_url_normal() {
-        let input = ConfigInput {
-            url: "http://example.com/stream".to_string(),
-            ..Default::default()
-        };
+        let input = ConfigInput { url: "http://example.com/stream".to_string(), ..Default::default() };
         let resolved = input.resolve_url("http://example.com/stream").unwrap();
         assert_eq!(resolved, "http://example.com/stream");
         assert!(matches!(resolved, Cow::Borrowed(_)));
@@ -1277,11 +1310,7 @@ mod tests {
 
     #[test]
     fn test_resolve_url_provider_missing() {
-        let input = ConfigInput {
-            name: "test_input".into(),
-            provider_configs: Some(vec![]),
-            ..Default::default()
-        };
+        let input = ConfigInput { name: "test_input".into(), provider_configs: Some(vec![]), ..Default::default() };
 
         let err = input.resolve_url("provider://myprovider/stream").unwrap_err();
         assert!(err.to_string().contains("Provider config for 'myprovider' not found"));
@@ -1289,10 +1318,7 @@ mod tests {
 
     #[test]
     fn test_resolve_default() {
-        let input = ConfigInput {
-            url: "http://example.com/stream".to_string(),
-            ..Default::default()
-        };
+        let input = ConfigInput { url: "http://example.com/stream".to_string(), ..Default::default() };
         let resolved = input.resolve().unwrap();
         assert_eq!(resolved, "http://example.com/stream");
     }
@@ -1432,9 +1458,8 @@ mod tests {
             ..Default::default()
         };
 
-        let err = input
-            .prepare(&[])
-            .expect_err("prepare must require root URL even when aliases are attached directly");
+        let err =
+            input.prepare(&[]).expect_err("prepare must require root URL even when aliases are attached directly");
         assert!(err.to_string().contains("url for input is mandatory"), "Error: {err}");
         assert!(err.to_string().contains("xtream_batch_missing_root_url"), "Error: {err}");
     }
@@ -1461,9 +1486,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = input
-            .prepare(&[])
-            .expect_err("prepare must require root credentials for non-batch xtream-batch URL");
+        let err = input.prepare(&[]).expect_err("prepare must require root credentials for non-batch xtream-batch URL");
         assert!(err.to_string().contains("xtream-batch without batch:// URL"), "Error: {err}");
         assert!(err.to_string().contains("xtream_batch_missing_root_creds"), "Error: {err}");
     }
@@ -1480,9 +1503,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = input
-            .prepare(&[])
-            .expect_err("prepare must reject root credentials for batch:// xtream-batch URL");
+        let err = input.prepare(&[]).expect_err("prepare must reject root credentials for batch:// xtream-batch URL");
         assert!(err.to_string().contains("with batch:// URL should not define username or password"), "Error: {err}");
         assert!(err.to_string().contains("xtream_batch_root_creds_not_allowed"), "Error: {err}");
     }
@@ -1491,7 +1512,12 @@ mod tests {
     fn stalker_alias_configuration_overrides_parent() {
         let parent = ConfigInput {
             input_type: InputType::StalkerBatch,
-            stalker: Some(StalkerInputConfig { auth_mode: StalkerAuthMode::MacOnly, ..Default::default() }),
+            stalker: Some(StalkerInputConfig {
+                auth_mode: StalkerAuthMode::MacOnly,
+                size_caps: Some(StalkerSizeCaps { create_link_kb: 96, ..Default::default() }),
+                catalog_max_pages: Some(200),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let alias = ConfigInputAlias {
@@ -1504,16 +1530,65 @@ mod tests {
             max_connections: 1,
             exp_date: None,
             enabled: true,
-            stalker: Some(StalkerInputConfig {
-                auth_mode: StalkerAuthMode::CredentialsOnly,
-                ..Default::default()
-            }),
+            stalker: Some(StalkerInputConfig { auth_mode: StalkerAuthMode::CredentialsOnly, ..Default::default() }),
         };
 
-        assert_eq!(
-            parent.as_input(&alias).stalker.expect("stalker config").auth_mode,
-            StalkerAuthMode::CredentialsOnly
-        );
+        let stalker = parent.as_input(&alias).stalker.expect("stalker config");
+        assert_eq!(stalker.auth_mode, StalkerAuthMode::CredentialsOnly);
+        assert_eq!(stalker.size_caps.map(|caps| caps.create_link_kb), Some(96));
+        assert_eq!(stalker.catalog_max_pages, Some(200));
+    }
+
+    #[test]
+    fn stalker_batch_promotes_first_alias_configuration() -> Result<(), TuliproxError> {
+        let mut input = ConfigInput {
+            input_type: InputType::StalkerBatch,
+            url: "batch:///tmp/stalker.csv".to_string(),
+            enabled: true,
+            stalker: Some(StalkerInputConfig {
+                auth_mode: StalkerAuthMode::MacOnly,
+                device: Some(StalkerDeviceProfile { locale: Some("de_DE".to_string()), ..Default::default() }),
+                size_caps: Some(StalkerSizeCaps { create_link_kb: 96, ..Default::default() }),
+                catalog_max_pages: Some(200),
+                ..Default::default()
+            }),
+            aliases: Some(vec![ConfigInputAlias {
+                id: 7,
+                name: "alias".into(),
+                url: "http://portal.example/c/".to_string(),
+                username: Some("user".to_string()),
+                password: Some("password".to_string()),
+                priority: 0,
+                max_connections: 1,
+                exp_date: None,
+                enabled: true,
+                stalker: Some(StalkerInputConfig {
+                    auth_mode: StalkerAuthMode::CredentialsOnly,
+                    device: Some(StalkerDeviceProfile {
+                        mac_address: Some("00:1a:79:12:34:56".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            }]),
+            ..Default::default()
+        };
+
+        let _ = input.prepare_batch();
+
+        let stalker = input
+            .stalker
+            .ok_or_else(|| TuliproxError::ConfigInput("missing promoted Stalker configuration".to_string()))?;
+        assert_eq!(stalker.auth_mode, StalkerAuthMode::CredentialsOnly);
+        assert_eq!(stalker.username.as_deref(), Some("user"));
+        assert_eq!(stalker.password.as_deref(), Some("password"));
+        assert_eq!(stalker.size_caps.map(|caps| caps.create_link_kb), Some(96));
+        assert_eq!(stalker.catalog_max_pages, Some(200));
+        let device =
+            stalker.device.ok_or_else(|| TuliproxError::ConfigInput("missing merged Stalker device".to_string()))?;
+        assert_eq!(device.mac_address.as_deref(), Some("00:1a:79:12:34:56"));
+        assert_eq!(device.locale.as_deref(), Some("de_DE"));
+        Ok(())
     }
 
     #[test]

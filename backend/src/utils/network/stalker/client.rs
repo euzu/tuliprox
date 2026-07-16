@@ -3,6 +3,7 @@ use log::{debug, warn};
 use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, COOKIE, REFERER, USER_AGENT};
 use std::path::{Path, PathBuf};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::fmt::Write;
@@ -41,6 +42,7 @@ const STALKER_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// advertise a huge `Content-Length` without sending data; we never pre-allocate more
 /// than this, growing on demand instead.
 const INITIAL_BODY_ALLOC_CAP: u64 = 256 * 1024;
+const STALKER_DEBUG_DUMP_LIMIT: usize = 32;
 
 /// Per-action cap on the response body in bytes. Configurable at construction time so
 /// the user can dial it down for adversarial portals and up for friendly ones.
@@ -571,23 +573,7 @@ pub(crate) fn strip_jsonp(body: &[u8]) -> &str {
     // Find the first `(` — everything before it is the JSONP callback name (which we
     // discard); the matching `)` delimits the JSON body.
     let Some(open) = s.find('(') else { return s; };
-    let bytes = s.as_bytes();
-    let mut depth: i32 = 0;
-    let mut last_close: Option<usize> = None;
-    for (idx, b) in bytes.iter().enumerate().skip(open) {
-        match b {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    last_close = Some(idx);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    match last_close {
+    match s.rfind(')').filter(|end| *end > open) {
         Some(end) => &s[open + 1..end],
         None => s,
     }
@@ -625,6 +611,64 @@ pub(crate) fn validate_playable_scheme(url: &str) -> StalkerResult<&'static str>
         }),
         other => Err(StalkerError::UnsupportedScheme { scheme: other.to_string() }),
     }
+}
+
+pub(crate) async fn validate_public_playable_url(url: &Url) -> StalkerResult<()> {
+    validate_playable_scheme(url.as_str())?;
+    let host = url.host_str().ok_or_else(|| StalkerError::BodyDecode {
+        message: "create_link url has no host".to_string(),
+    })?;
+    let port = url.port_or_known_default().ok_or_else(|| StalkerError::BodyDecode {
+        message: "create_link url has no port".to_string(),
+    })?;
+    let addresses: Vec<IpAddr> = if let Ok(ip) = host.parse() {
+        vec![ip]
+    } else {
+        tokio::net::lookup_host((host, port))
+            .await
+            .map_err(StalkerError::Io)?
+            .map(|address| address.ip())
+            .collect()
+    };
+    if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(*address)) {
+        return Err(StalkerError::BodyDecode {
+            message: "create_link url resolves to a non-public destination".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn is_public_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => is_public_ipv4(address),
+        IpAddr::V6(address) => is_public_ipv6(address),
+    }
+}
+
+fn is_public_ipv4(address: Ipv4Addr) -> bool {
+    let [a, b, _, _] = address.octets();
+    !(address.is_private()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_broadcast()
+        || address.is_documentation()
+        || address.is_multicast()
+        || address.is_unspecified()
+        || a == 0
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 198 && matches!(b, 18 | 19))
+        || a >= 240)
+}
+
+fn is_public_ipv6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    !(address.is_loopback()
+        || address.is_unspecified()
+        || address.is_multicast()
+        || segments[0] & 0xfe00 == 0xfc00
+        || segments[0] & 0xffc0 == 0xfe80
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8))
+        && address.to_ipv4_mapped().is_none_or(is_public_ipv4)
 }
 
 /// The MAG identity cookies every Stalker request should carry. Portals key the device
@@ -702,10 +746,66 @@ fn write_stalker_debug_body(dir: &str, portal_url: &str, action: &str, body: &[u
         sanitize_dump_component(action)
     );
     let path: PathBuf = dump_dir.join(filename);
-    if let Err(err) = std::fs::write(&path, body) {
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let sanitized = sanitize_stalker_debug_body(body);
+    if let Err(err) = options.open(&path).and_then(|mut file| std::io::Write::write_all(&mut file, &sanitized)) {
         warn!("Stalker debug dump: could not write {}: {err}", path.display());
     } else {
+        rotate_stalker_debug_dumps(dump_dir);
         debug!("Stalker debug dump written: {}", path.display());
+    }
+}
+
+fn sanitize_stalker_debug_body(body: &[u8]) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(strip_jsonp(strip_bom(body))) else {
+        return b"[non-JSON Stalker response omitted]".to_vec();
+    };
+    redact_stalker_debug_value(&mut value);
+    serde_json::to_vec(&value).unwrap_or_else(|_| b"[Stalker response serialization failed]".to_vec())
+}
+
+fn redact_stalker_debug_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                let key = key.to_ascii_lowercase();
+                if ["token", "password", "passwd", "credential", "secret", "auth", "email", "phone", "account",
+                    "login", "username", "mac", "cmd", "url"]
+                    .iter()
+                    .any(|sensitive| key.contains(sensitive))
+                {
+                    *value = serde_json::Value::String("[redacted]".to_string());
+                } else {
+                    redact_stalker_debug_value(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => values.iter_mut().for_each(redact_stalker_debug_value),
+        _ => {}
+    }
+}
+
+fn rotate_stalker_debug_dumps(dump_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dump_dir) else { return; };
+    let mut dumps: Vec<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            metadata.is_file().then(|| (metadata.modified().ok(), entry.path()))
+        })
+        .collect();
+    dumps.sort_by_key(|(modified, _)| *modified);
+    let remove_count = dumps.len().saturating_sub(STALKER_DEBUG_DUMP_LIMIT);
+    for (_, path) in dumps.into_iter().take(remove_count) {
+        if let Err(err) = std::fs::remove_file(&path) {
+            warn!("Stalker debug dump: could not remove {}: {err}", path.display());
+        }
     }
 }
 
@@ -737,6 +837,41 @@ mod tests {
     }
 
     #[test]
+    fn debug_dump_body_redacts_secrets_and_urls() -> Result<(), std::string::FromUtf8Error> {
+        let body = br#"callback({"token":"secret","js":{"cmd":"ffmpeg http://private/stream","title":"Visible"}})"#;
+        let sanitized = String::from_utf8(sanitize_stalker_debug_body(body))?;
+
+        assert!(!sanitized.contains("secret"));
+        assert!(!sanitized.contains("private"));
+        assert!(sanitized.contains("Visible"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn debug_dumps_are_owner_only_and_rotated() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir()?;
+        let dir_path = dir.path().to_str().ok_or("temporary directory path is not UTF-8")?;
+        for _ in 0..=STALKER_DEBUG_DUMP_LIMIT {
+            write_stalker_debug_body(
+                dir_path,
+                "http://portal.example/c/",
+                "profile",
+                br#"{"js":{"title":"Visible"}}"#,
+            );
+        }
+        let entries: Vec<_> = std::fs::read_dir(dir.path())?.collect::<Result<_, _>>()?;
+
+        assert_eq!(entries.len(), STALKER_DEBUG_DUMP_LIMIT);
+        for entry in entries {
+            assert_eq!(entry.metadata()?.permissions().mode() & 0o777, 0o600);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn strip_jsonp_handles_raw_json() {
         let s = strip_jsonp(b"{\"js\":{}}");
         assert_eq!(s, "{\"js\":{}}");
@@ -746,6 +881,15 @@ mod tests {
     fn strip_jsonp_handles_nested_parens() {
         let s = strip_jsonp(b"jsonp({\"js\":{\"foo\":{}}})");
         assert_eq!(s, "{\"js\":{\"foo\":{}}}");
+    }
+
+    #[test]
+    fn strip_jsonp_ignores_closing_parenthesis_in_json_string() -> Result<(), serde_json::Error> {
+        let s = strip_jsonp(br#"callback({"js":{"text":"value ) remains"}})"#);
+        let value: serde_json::Value = serde_json::from_str(s)?;
+
+        assert_eq!(value["js"]["text"], "value ) remains");
+        Ok(())
     }
 
     #[test]
@@ -774,6 +918,16 @@ mod tests {
     fn validate_playable_scheme_rejects_file() {
         let err = validate_playable_scheme("file:///etc/passwd").expect_err("fail");
         assert!(matches!(err, StalkerError::UnsupportedScheme { .. }));
+    }
+
+    #[test]
+    fn public_destination_filter_rejects_non_public_ranges() -> Result<(), std::net::AddrParseError> {
+        for address in ["127.0.0.1", "10.0.0.1", "169.254.1.1", "100.64.0.1", "::1", "fc00::1", "fe80::1"] {
+            assert!(!is_public_ip(address.parse()?), "{address}");
+        }
+        assert!(is_public_ip("8.8.8.8".parse()?));
+        assert!(is_public_ip("2606:4700:4700::1111".parse()?));
+        Ok(())
     }
 
     #[test]

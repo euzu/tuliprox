@@ -18,6 +18,8 @@ use std::sync::Arc;
 use tokio_stream::StreamExt;
 use crate::api::api_utils::json_or_bin_response;
 
+pub(in crate::api::endpoints) const STALKER_RESOURCE_SCHEME: &str = "stalker://";
+
 fn stalker_cluster(cluster: XtreamCluster) -> StalkerCluster {
     match cluster {
         XtreamCluster::Live => StalkerCluster::Live,
@@ -107,6 +109,21 @@ fn rewrite_resource_url(encrypt_secret: &[u8; 16], resource_url: &str, item: UiP
     item
 }
 
+fn rewrite_stalker_playback_url(
+    encrypt_secret: &[u8; 16],
+    resource_url: &str,
+    input_id: u16,
+    mut item: UiPlaylistItem,
+) -> UiPlaylistItem {
+    let locator = format!(
+        "{STALKER_RESOURCE_SCHEME}{input_id}/{}/{}",
+        item.xtream_cluster.as_stream_type(),
+        item.provider_id
+    );
+    item.url = concat_path(resource_url, &obfuscate_text(encrypt_secret, &locator)).intern();
+    item
+}
+
 pub(in crate::api::endpoints) async fn get_playlist_for_input(
     cfg_input: Option<&Arc<ConfigInput>>,
     app_state: &Arc<AppState>,
@@ -147,15 +164,26 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
                 )
                 .await;
             if groups.is_empty() {
-                if partial && errors.is_empty() {
+                if partial {
                     return stalker_refresh_pending_response(accept);
+                }
+                if errors.is_empty() {
+                    return json_or_bin_response(accept, &Vec::<UiPlaylistItem>::new()).into_response();
                 }
                 let error_strings: Vec<String> = errors.iter().map(ToString::to_string).collect();
                 return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": error_strings.join(", ")})))
                     .into_response();
             }
-            let channels: Vec<UiPlaylistItem> =
-                groups.iter().flat_map(|g| g.channels.iter()).map(UiPlaylistItem::from).collect();
+            let config = app_state.app_config.config.load();
+            let web_ui_path = config.web_ui.as_ref().and_then(|web_ui| web_ui.path.as_ref()).map_or("", String::as_str);
+            let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
+            let encrypt_secret = app_state.get_encrypt_secret();
+            let channels: Vec<UiPlaylistItem> = groups
+                .iter()
+                .flat_map(|group| group.channels.iter())
+                .map(UiPlaylistItem::from)
+                .map(|item| rewrite_stalker_playback_url(&encrypt_secret, &resource_url, input.id, item))
+                .collect();
             interner_gc();
             return json_or_bin_response(accept, &channels).into_response();
         }
@@ -217,8 +245,11 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
                 }
             };
             if result.is_empty() {
-                if partial && errors.is_empty() {
+                if partial {
                     return stalker_refresh_pending_response(accept);
+                }
+                if errors.is_empty() {
+                    return json_or_bin_response(accept, &Vec::<UiPlaylistItem>::new()).into_response();
                 }
                 let error_strings: Vec<String> = errors.iter().map(ToString::to_string).collect();
                 (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": error_strings.join(", ")})))
@@ -226,9 +257,18 @@ pub(in crate::api::endpoints) async fn get_playlist_for_custom_provider(
             } else {
                 // Stream the UI conversion lazily (like the target/input endpoints) instead of
                 // collecting the whole playlist into a second Vec and serializing it all at once.
-                let converted_stream = tokio_stream::iter(
-                    result.into_iter().flat_map(|g| g.channels).map(|pli| UiPlaylistItem::from(&pli)),
-                );
+                let web_ui_path = cfg.web_ui.as_ref().and_then(|web_ui| web_ui.path.as_ref()).map_or("", String::as_str);
+                let resource_url = concat_path_leading_slash(web_ui_path, "api/v1/playlist/resource");
+                let encrypt_secret = app_state.get_encrypt_secret();
+                let input_id = input.id;
+                let converted_stream = tokio_stream::iter(result.into_iter().flat_map(|g| g.channels).map(move |pli| {
+                    rewrite_stalker_playback_url(
+                        &encrypt_secret,
+                        &resource_url,
+                        input_id,
+                        UiPlaylistItem::from(&pli),
+                    )
+                }));
                 stream_json_or_bin_response_stream(accept, converted_stream).into_response()
             }
         }

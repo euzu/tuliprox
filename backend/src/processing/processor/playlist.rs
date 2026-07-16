@@ -804,16 +804,6 @@ async fn download_input(
         PlaylistDownloadResult::new(vec![], vec![], true, false)
     };
 
-    if playlist_download_result.partial {
-        ctx.partial_refresh.store(true, std::sync::atomic::Ordering::Release);
-        if let Some(events) = ctx.event_manager.as_deref() {
-            events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-                target: input.name.to_string(),
-                message: "Stalker refresh checkpoint saved; active snapshot remains in service".to_string(),
-            }));
-        }
-    }
-
     let mut preloaded_playlist: Option<(PlaylistSource, Option<TuliproxError>)> = None;
     if playlist_download_result.was_cached {
         let (cached_playlist, cached_error) = load_cached_input_playlist(ctx, input).await;
@@ -858,6 +848,15 @@ async fn download_input(
             }
         } else {
             preloaded_playlist = Some((cached_playlist, None));
+        }
+    }
+    if playlist_download_result.partial {
+        ctx.partial_refresh.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(events) = ctx.event_manager.as_deref() {
+            events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+                target: input.name.to_string(),
+                message: "Stalker refresh checkpoint saved; active snapshot remains in service".to_string(),
+            }));
         }
     }
     let apply_staged_overlay = should_apply_staged_overlay(&playlist_download_result);

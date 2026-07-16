@@ -126,8 +126,7 @@ pub fn detect_fingerprint(
     preset: StalkerMagPreset,
 ) -> StalkerPortalFingerprint {
     let spec = stalker_mag_preset_spec(preset);
-    let body = handshake_body_keys.iter().map(String::as_str).collect::<Vec<_>>().join("|");
-    if body.contains("js.token") {
+    if handshake_body_keys.iter().any(|key| key == "js.token") {
         if (400..500).contains(&handshake_status) {
             if spec.emit_token_query {
                 StalkerPortalFingerprint::AuthStrictMag
@@ -137,11 +136,11 @@ pub fn detect_fingerprint(
         } else {
             StalkerPortalFingerprint::AuthOnly
         }
-    } else if body.contains("js.id") && !body.contains("js.token") {
+    } else if handshake_body_keys.iter().any(|key| key == "js.id") {
         StalkerPortalFingerprint::StrictMag
-    } else if body.contains("js.mac") {
+    } else if handshake_body_keys.iter().any(|key| key == "js.mac") {
         StalkerPortalFingerprint::BasicMac
-    } else if body.contains("js.module") {
+    } else if handshake_body_keys.iter().any(|key| key == "js.module") {
         StalkerPortalFingerprint::ModuleGated
     } else {
         StalkerPortalFingerprint::BasicMac

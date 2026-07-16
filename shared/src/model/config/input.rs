@@ -10,7 +10,7 @@ use crate::{
     foundation::{get_filter, Filter},
     model::{
         config::media_server_catalog::MediaServerInputConfigDto, ClusterFlags, EpgConfigDto, PatternTemplate,
-        StalkerInputConfigDto,
+        StalkerAuthMode, StalkerInputConfigDto,
     },
     utils::{
         arc_str_option_serde, arc_str_serde, arc_str_vec_serde, deserialize_timestamp, get_credentials_from_url_str,
@@ -155,7 +155,10 @@ impl InputType {
     pub fn is_m3u(&self) -> bool { matches!(self, Self::M3u | Self::M3uBatch) }
     pub fn is_stalker(&self) -> bool { matches!(self, Self::Stalker | Self::StalkerBatch) }
     pub fn uses_standard_input_url(&self) -> bool {
-        matches!(self, Self::M3u | Self::Xtream | Self::M3uBatch | Self::XtreamBatch | Self::Stalker)
+        matches!(
+            self,
+            Self::M3u | Self::Xtream | Self::M3uBatch | Self::XtreamBatch | Self::Stalker | Self::StalkerBatch
+        )
     }
     pub fn is_library(&self) -> bool { matches!(self, Self::Library) }
     pub fn is_media_server(&self) -> bool { matches!(self, Self::Emby | Self::Jellyfin | Self::Plex) }
@@ -657,14 +660,26 @@ fn prepare_stalker_config(
         }
     }
 
-    // Identity check: a Stalker portal needs *some* identity anchor —
-    // a MAC address or account credentials. Aliases may inherit the
-    // parent's identity, so only main inputs are checked.
-    if !is_alias && !has_mac && username.is_none() && password.is_none() {
-        log::warn!(
-            "Stalker input '{input_name}' has neither stalker.device.mac_address nor username/password; \
-             the portal handshake will likely be rejected"
-        );
+    // Aliases may inherit the parent's identity, so only main inputs are checked.
+    if !is_alias && !input_type.is_batch() {
+        let has_credentials = username.is_some_and(|value| !value.trim().is_empty())
+            && password.is_some_and(|value| !value.trim().is_empty());
+        let requirement = match config.auth_mode {
+            StalkerAuthMode::Auto if !has_mac && !has_credentials => {
+                Some("stalker.device.mac_address or username/password")
+            }
+            StalkerAuthMode::MacOnly if !has_mac => Some("stalker.device.mac_address for auth_mode mac_only"),
+            StalkerAuthMode::CredentialsOnly if !has_credentials => {
+                Some("username and password for auth_mode credentials_only")
+            }
+            StalkerAuthMode::MacPlusCredentials if !has_mac || !has_credentials => {
+                Some("stalker.device.mac_address, username and password for auth_mode mac_plus_credentials")
+            }
+            _ => None,
+        };
+        if let Some(requirement) = requirement {
+            return Err(TuliproxError::ConfigInput(format!("Stalker input '{input_name}' requires {requirement}")));
+        }
     }
 
     Ok(())
@@ -1881,6 +1896,49 @@ mod tests {
         input.stalker.as_mut().expect("stalker config").device.as_mut().expect("device").mac_address =
             Some("01:00:00:00:00:00".to_string());
         assert!(input.prepare_stalker_input().is_err());
+    }
+
+    #[test]
+    fn stalker_main_input_requires_identity_but_batch_aliases_may_inherit() {
+        let mut input = ConfigInputDto::new_with_type(InputType::Stalker);
+        input.name = "portal".into();
+        assert!(input.prepare_stalker_input().is_err());
+
+        let mut alias = ConfigInputAliasDto {
+            name: "alias".into(),
+            url: "http://portal.example/c/".to_string(),
+            ..Default::default()
+        };
+        assert!(alias.prepare(0, &InputType::Stalker).is_ok());
+    }
+
+    #[test]
+    fn stalker_auth_mode_requires_matching_identity() {
+        for (auth_mode, has_mac, has_credentials, valid) in [
+            (StalkerAuthMode::Auto, true, false, true),
+            (StalkerAuthMode::Auto, false, true, true),
+            (StalkerAuthMode::MacOnly, true, false, true),
+            (StalkerAuthMode::MacOnly, false, true, false),
+            (StalkerAuthMode::CredentialsOnly, false, true, true),
+            (StalkerAuthMode::CredentialsOnly, true, false, false),
+            (StalkerAuthMode::MacPlusCredentials, true, true, true),
+            (StalkerAuthMode::MacPlusCredentials, true, false, false),
+        ] {
+            let mut input = ConfigInputDto::new_with_type(InputType::Stalker);
+            input.name = "portal".into();
+            input.username = has_credentials.then(|| "user".to_string());
+            input.password = has_credentials.then(|| "password".to_string());
+            input.stalker = Some(StalkerInputConfigDto {
+                auth_mode,
+                device: has_mac.then(|| StalkerDeviceProfileDto {
+                    mac_address: Some("00:1a:79:aa:bb:cc".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+
+            assert_eq!(input.prepare_stalker_input().is_ok(), valid, "auth mode: {auth_mode}");
+        }
     }
 
     #[test]

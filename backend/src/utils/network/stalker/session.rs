@@ -1,11 +1,11 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{fmt, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 /// A successful Stalker handshake. The token is sent as `Authorization: Bearer <token>` on
 /// every subsequent API call; portal cookies live in the client's shared cookie jar; the
 /// referer is the `Referer` header the portal expects; the `fingerprint_evidence` is a
 /// list of `js.*` keys the portal echoed back so that callers can decide which
 /// `StalkerPortalFingerprint` the portal matches.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StalkerSession {
     pub token: String,
     pub referer: String,
@@ -14,6 +14,18 @@ pub struct StalkerSession {
     /// Unix-epoch seconds at the moment the handshake response was received. Used by
     /// the client to enforce `STALKER_SESSION_TTL` on the cached session.
     pub created_at_epoch_secs: u64,
+}
+
+impl fmt::Debug for StalkerSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StalkerSession")
+            .field("token", &"[redacted]")
+            .field("referer", &self.referer)
+            .field("load_url", &self.load_url)
+            .field("fingerprint_evidence", &self.fingerprint_evidence)
+            .field("created_at_epoch_secs", &self.created_at_epoch_secs)
+            .finish()
+    }
 }
 
 impl StalkerSession {

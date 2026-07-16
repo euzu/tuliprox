@@ -517,6 +517,9 @@ pub async fn persist_stalker_epg_programs(
     storage_path: &Path,
     programs: &[StalkerProgramRecord],
 ) -> Result<u64, TuliproxError> {
+    if programs.is_empty() {
+        return Ok(0);
+    }
     let file_path = get_stalker_epg_file_path(storage_path);
     let pairs: Vec<(String, StalkerProgramRecord)> = programs
         .iter()

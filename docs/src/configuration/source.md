@@ -131,7 +131,7 @@ inputs:
 | `name`                  | String |   Yes    |         | Internal reference ID for Tuliprox. Must be strictly unique. Critical for persistent UUID generation!                                                                                                                                                                                                                                                                                                                                     |
 | `type`                  | Enum   |    No    | `m3u`   | Allowed: `m3u`, `xtream`, `stalker`, `library`, `staged`, `emby`, `jellyfin`, `plex`, and `m3u_batch` / `xtream_batch` / `stalker_batch` (CSV offloading). Stalker inputs use the portal handshake/catalog flow instead of a plain playlist download.                                                                                                                                                                                     |
 | `url`                   | String |   Yes    |         | The Provider URL. Tuliprox supports magic scheme prefixes: `http(s)://`, `file://`, `batch://`, and **`provider://my_failover_provider`** (for the Failover System above).                                                                                                                                                                                                                                                                |
-| `username` / `password` | String |  Often   |         | Mandatory if `type` = `xtream`.                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `username` / `password` | String |  Often   |         | Mandatory for `xtream` and for Stalker inputs using `credentials_only` or `mac_plus_credentials`. Stalker inputs using `mac_only` do not need them.                                                                                                                                                                                                                                                                                       |
 | `enabled`               | Bool   |    No    | `true`  | If `false`, this input is completely ignored in all processing.                                                                                                                                                                                                                                                                                                                                                                           |
 | `cache_duration`        | String |    No    | `0`     | **Crucial:** Determines how often Tuliprox actually downloads the raw list from the provider. At `1d` (1 day), Tuliprox serves from its local `.db` for 24 hours, even if you trigger hourly updates. This heavily protects against provider bans! Supported units are `s`, `m`, `h`, and `d`. If `cache_duration` is set, the cached provider playlist stored on disk is reused for subsequent updates instead of downloading it again.  |
 | `persist`               | String |    No    |         | Optional path template (e.g., `./playlist_{}.m3u`) to permanently store the downloaded raw provider list locally on your disk. The `{}` in the filename is filled with the current timestamp. For `m3u` use a full filename. For `xtream` use a prefix like `./playlist_`.                                                                                                                                                                |
@@ -150,6 +150,12 @@ inputs:
   - name: stalker_main
     type: stalker
     url: http://portal.example.com/c/
+    stalker:
+      auth_mode: mac_only
+      mag_preset: generic_safe
+      endpoint_preference: auto
+      device:
+        mac_address: '00:1A:79:12:34:56'
     enabled: true
     options:
       stalker_pre_resolve_playback: false
@@ -159,6 +165,13 @@ inputs:
 Use `stalker_pre_resolve_playback: true` if you want Tuliprox to materialize playback URLs during refresh whenever the portal already grants them.
 Keep `stalker_runtime_resolve_playback: true` when the portal uses expiring or session-bound temp links that may need a fresh `create_link`
 call later during playback.
+
+Stalker supports four authentication modes:
+
+* `auto`: requires either a MAC address or a complete username/password pair.
+* `mac_only`: requires `stalker.device.mac_address`; username/password are ignored.
+* `credentials_only`: requires username and password; no MAC address is required.
+* `mac_plus_credentials`: requires both a MAC address and username/password.
 
 #### Input URL Schemes (`inputs[].url`)
 
@@ -759,7 +772,7 @@ For managing dozens or hundreds of accounts, Tuliprox supports offloading alias 
 
 > **Note:** Batch inputs only support local filesystem paths. Schemes like `http(s)://`, `file://`, or `provider://`
 > are rejected for batch URL definitions. If an input `url` starts with `batch://`,
-> Tuliprox automatically sets the type to `xtream_batch` or `m3u_batch`.
+> Tuliprox automatically sets the corresponding batch type for `xtream`, `m3u`, or `stalker` inputs.
 
 #### Batch CSV Formats
 
@@ -804,18 +817,49 @@ http://p1.com/get.php?username=u1&password=p1;1;0;true
 http://p2.com/get.php?username=u2&password=p2;1;5;true
 ```
 
+##### `StalkerBatch`
+
+Used for Stalker/Ministra portals. The complete portal path is retained, so URLs such as `/c/` must be included in
+the CSV. The following credentials-based example uses [`config/stalker_aliases.csv`](../../../config/stalker_aliases.csv):
+
+```yaml
+inputs:
+  - type: stalker_batch
+    name: stalker_pool
+    url: 'batch://./config/stalker_aliases.csv'
+    stalker:
+      catalog_max_pages: 1000
+```
+
+**CSV Structure:**
+
+```csv
+#name;url;username;password;mac_address;auth_mode;mag_preset;endpoint_preference;max_connections;priority;exp_date;enabled
+portal_primary;http://portal.example/c/;account1;secret1;00:1A:79:12:34:56;mac_plus_credentials;mag254_strict;portal;1;0;;true
+portal_backup;https://backup.example/stalker_portal/c/;account2;secret2;;credentials_only;generic_safe;auto;1;10;;true
+```
+
+Columns are selected by the header and may appear in any order. `mac_address`, `auth_mode`, `mag_preset`, and
+`endpoint_preference` are optional per-alias Stalker fields. An alias with no Stalker-specific values inherits the
+complete parent configuration; otherwise empty enum fields use their normal defaults. Other device fields, size caps,
+and the catalog page limit are configured on the parent input in the Web UI or YAML and inherited by every CSV alias.
+
 #### Field Specifications
 
-| Parameter             | Technical Impact & Details                                                                                                                                                                                                                         |
-|:----------------------|:---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **`url`**             | Provider base URL or full M3U playlist URL. Required in CSV rows.                                                                                                                                                                                  |
-| **`name`**            | **Crucial:** The first alias is automatically renamed with the `name` from the input definition (e.g., `my_provider_1` gets `my_provider`). This is necessary for stable playlist UUID generation and consistent channel numbering across updates. |
-| **`username`**        | Xtream username. For M3U CSV rows, Tuliprox can also extract credentials from the URL query parameters.                                                                                                                                            |
-| **`password`**        | Xtream password. For M3U CSV rows, Tuliprox can also extract credentials from the URL query parameters.                                                                                                                                            |
-| **`max_connections`** | Defines allowed concurrent streams. Default in CSV is **1**.                                                                                                                                                                                       |
-| **`priority`**        | Lower numbers = higher priority. `0` is higher than `1`. Negative numbers (e.g., `-1`) are allowed for top-tier priority. Items with the lowest values are processed first.                                                                        |
-| **`exp_date`**        | Account expiration. Supports `"YYYY-MM-DD HH:MM:SS"` interpreted as UTC or Unix timestamps in seconds. Used for auto-cleanup or Panel API sync.                                                                                                    |
-| **`enabled`**         | Enables/disables a CSV alias row. Empty values, `1`, `t`, and `true` are treated as enabled; `0`, `f`, or `false` disable the alias.                                                                                                               |
+| Parameter                 | Technical Impact & Details                                                                                                                                                                                                                          |
+|:--------------------------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **`url`**                 | Provider base URL or full M3U playlist URL. Required in CSV rows.                                                                                                                                                                                   |
+| **`name`**                | **Crucial:** The first alias is automatically renamed with the `name` from the input definition (e.g., `my_provider_1` gets `my_provider`). This is necessary for stable playlist UUID generation and consistent channel numbering across updates.  |
+| **`username`**            | Xtream or Stalker account username. For M3U CSV rows, Tuliprox can also extract credentials from the URL query parameters.                                                                                                                          |
+| **`password`**            | Xtream or Stalker account password. For M3U CSV rows, Tuliprox can also extract credentials from the URL query parameters.                                                                                                                          |
+| **`mac_address`**         | Stalker alias MAC address. Required by `mac_only` and `mac_plus_credentials`; optional for credentials-only authentication.                                                                                                                         |
+| **`auth_mode`**           | Stalker alias authentication mode: `auto`, `mac_only`, `credentials_only`, or `mac_plus_credentials`.                                                                                                                                               |
+| **`mag_preset`**          | Stalker alias MAG profile: `generic_safe`, `mag250_legacy`, `mag254_strict`, or `ministra_modern`.                                                                                                                                                  |
+| **`endpoint_preference`** | Stalker portal endpoint selection: `auto`, `server_load`, or `portal`.                                                                                                                                                                              |
+| **`max_connections`**     | Defines allowed concurrent streams. Default in CSV is **1**.                                                                                                                                                                                        |
+| **`priority`**            | Lower numbers = higher priority. `0` is higher than `1`. Negative numbers (e.g., `-1`) are allowed for top-tier priority. Items with the lowest values are processed first.                                                                         |
+| **`exp_date`**            | Account expiration. Supports `"YYYY-MM-DD HH:MM:SS"` interpreted as UTC or Unix timestamps in seconds. Used for auto-cleanup or Panel API sync.                                                                                                     |
+| **`enabled`**             | Enables/disables a CSV alias row. Empty values, `1`, `t`, and `true` are treated as enabled; `0`, `f`, or `false` disable the alias.                                                                                                                |
 
 ---
 

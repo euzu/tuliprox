@@ -77,7 +77,7 @@ impl StalkerError {
     /// can react to them.
     pub fn is_token_rejected(&self) -> bool {
         match self {
-            Self::TokenRejected { status, .. } => matches!(*status, 401 | 403 | 456),
+            Self::TokenRejected { status, .. } => matches!(*status, 204 | 401 | 403 | 456),
             Self::BadStatus { status, .. } => matches!(*status, 401 | 403 | 456 | 204),
             Self::PortalBodyError { code, .. } => matches!(*code, 44 | 440..=449),
             _ => false,
@@ -98,3 +98,17 @@ impl StalkerError {
 }
 
 pub type StalkerResult<T> = Result<T, StalkerError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_content_token_rejection_is_recognized() {
+        assert!(StalkerError::TokenRejected {
+            status: 204,
+            url: None,
+        }
+        .is_token_rejected());
+    }
+}

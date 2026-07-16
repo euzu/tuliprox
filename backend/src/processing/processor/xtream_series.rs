@@ -87,7 +87,9 @@ pub async fn playlist_resolve_series(
         sync_resolved_series_properties(provider_fpl, processed_fpl);
     }
 
-    provider_fpl.source.obtain_resources().await;
+    if let Err(err) = provider_fpl.source.obtain_resources().await {
+        errors.push(err);
+    }
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]

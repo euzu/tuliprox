@@ -348,26 +348,24 @@ async fn run_manual_update_worker(
     mut rx: mpsc::Receiver<ManualPlaylistUpdateRequest>,
 ) {
     while let Some(request) = rx.recv().await {
-        if let Some(permit) = app_state.update_guard.try_playlist() {
-            exec_processing(
-                &client,
-                Arc::clone(&app_state.app_config),
-                request.targets,
-                Some(Arc::clone(&app_state.event_manager)),
-                Some(Arc::clone(&app_state)),
-                Some(Arc::clone(&app_state.playlists)),
-                Some(app_state.update_guard.clone()),
-                app_state.get_disabled_headers(),
-                Some(Arc::clone(&app_state.active_provider)),
-                Some(Arc::clone(&app_state.metadata_manager)),
-                None,
-                Some(permit),
-            )
-            .await;
-        } else {
-            debug!("Manual playlist update coalesced with an update already in progress");
-        }
-        while rx.try_recv().is_ok() {}
+        let Some(permit) = app_state.update_guard.acquire_playlist_lock().await else {
+            break;
+        };
+        exec_processing(
+            &client,
+            Arc::clone(&app_state.app_config),
+            request.targets,
+            Some(Arc::clone(&app_state.event_manager)),
+            Some(Arc::clone(&app_state)),
+            Some(Arc::clone(&app_state.playlists)),
+            Some(app_state.update_guard.clone()),
+            app_state.get_disabled_headers(),
+            Some(Arc::clone(&app_state.active_provider)),
+            Some(Arc::clone(&app_state.metadata_manager)),
+            None,
+            Some(permit),
+        )
+        .await;
     }
 }
 

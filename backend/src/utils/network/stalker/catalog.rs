@@ -2,7 +2,7 @@ use log::{info, warn};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 use shared::model::stalker::StalkerStreamKind;
-use shared::utils::deserialize_number_from_string;
+use shared::utils::{deserialize_as_option_string, deserialize_number_from_string};
 
 use crate::utils::network::stalker::client::StalkerApiClient;
 use crate::utils::network::stalker::error::{StalkerError, StalkerResult};
@@ -159,7 +159,7 @@ pub struct StalkerRawItemInfo {
 /// form so the rest of the code does not need to care.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct StalkerRawSeriesItem {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_as_option_string")]
     pub id: Option<String>,
     #[serde(default)]
     pub number: Option<String>,
@@ -191,7 +191,7 @@ pub struct StalkerRawSeriesItem {
     pub backdrop: Option<Vec<String>>,
     #[serde(default)]
     pub last_modified: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_as_option_string")]
     pub series_id: Option<String>,
     #[serde(default)]
     pub count: Option<u32>,
@@ -422,7 +422,10 @@ where
                     "Stalker {portal_type}/{action} stopped at configured page limit {page_limit} with {} items fetched",
                     all.len()
                 );
-                break;
+                return Err(StalkerError::CatalogIncomplete {
+                    portal_type,
+                    reason: format!("configured page limit {page_limit} reached at page {page}"),
+                });
             }
             page += 1;
         }
@@ -1109,6 +1112,16 @@ mod tests {
         let v: Value = serde_json::from_str(r#"{"id":"123","name":"x"}"#).unwrap();
         let item: StalkerRawItem = serde_json::from_value(v).unwrap();
         assert_eq!(item.stream_id(), Some(123));
+    }
+
+    #[test]
+    fn series_ids_accept_numeric_payloads() -> Result<(), serde_json::Error> {
+        let item: StalkerRawSeriesItem =
+            serde_json::from_value(serde_json::json!({"id": 123, "series_id": 456, "name": "Series"}))?;
+
+        assert_eq!(item.id.as_deref(), Some("123"));
+        assert_eq!(item.series_id.as_deref(), Some("456"));
+        Ok(())
     }
 
     #[test]

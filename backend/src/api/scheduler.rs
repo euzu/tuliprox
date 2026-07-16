@@ -166,7 +166,9 @@ async fn run_playlist_update_worker(
 fn drain_pending_playlist_triggers(rx: &mut mpsc::Receiver<()>) -> bool {
     loop {
         match rx.try_recv() {
-            Ok(()) => {}
+            Ok(()) => {
+                log::debug!("Scheduled playlist update coalesced with an already-completed update");
+            }
             Err(mpsc::error::TryRecvError::Empty) => return true,
             Err(mpsc::error::TryRecvError::Disconnected) => return false,
         }
@@ -178,8 +180,7 @@ async fn run_playlist_update_inner(
     app_state: &Arc<AppState>,
     schedule_target_names: Option<&Vec<String>>,
 ) {
-    let Some(permit) = app_state.update_guard.try_playlist() else {
-        log::debug!("Scheduled playlist update coalesced with an update already in progress");
+    let Some(permit) = app_state.update_guard.acquire_playlist_lock().await else {
         return;
     };
     // Re-resolve targets from the CURRENT sources and forced_targets each time,

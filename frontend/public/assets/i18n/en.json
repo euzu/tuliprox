@@ -314,6 +314,28 @@
       "URL": "Input source URL. Supported schemes:\n\n```http(s)://\nfile://\nprovider://<provider>/...\nbatch://...(auto-switches m3u/xtream to batch types).```\n\nFor m3u_batch/xtream_batch only local CSV sources are allowed (batch://...).",
       "USERNAME": "Login username for this account or service."
     },
+    "STALKER_INPUT_CONFIG": {
+      "AUTH_MODE": "Authentication identity to use. Auto accepts either a MAC address or username/password; the explicit modes require the identity they name.",
+      "MAG_PRESET": "Predefined MAG device profile used for portal headers and identity defaults.",
+      "ENDPOINT_PREFERENCE": "Preferred Stalker portal endpoint. Auto tries the compatible endpoint candidates."
+    },
+    "STALKER_DEVICE_PROFILE": {
+      "MAC_ADDRESS": "Portal device MAC address. Required by auto without credentials, mac_only, and mac_plus_credentials.",
+      "TIMEZONE": "Timezone reported to the portal, for example Europe/Berlin.",
+      "LOCALE": "Locale reported to the portal, for example en_US.",
+      "USER_AGENT": "Optional HTTP User-Agent override. Leave empty to use the selected MAG preset.",
+      "X_USER_AGENT": "Optional X-User-Agent override sent to the portal.",
+      "DEVICE_PROFILE": "Optional device profile override. Leave empty to derive it from the selected MAG preset.",
+      "SERIAL_NUMBER": "Optional device serial number reported to the portal.",
+      "DEVICE_ID": "Optional primary device identifier reported to the portal.",
+      "DEVICE_ID2": "Optional secondary device identifier reported to the portal.",
+      "SIGNATURE": "Optional device signature expected by some portals."
+    },
+    "STALKER_ACTION_SIZE_CAP": {
+      "CREATE_LINK_KB": "Maximum accepted create_link response size in KiB.",
+      "ORDERED_LIST_MB": "Maximum accepted ordered-list catalog response size in MiB.",
+      "GET_EPG_MB": "Maximum accepted EPG response size in MiB."
+    },
     "CONFIG_INPUT_ALIAS": {
       "ENABLED": "Enables or disables this specific alias.",
       "EXP_DATE": "Expiration date for this alias connection.",
@@ -1708,6 +1730,7 @@
     "PLAYLIST_UPDATE": {
       "FAIL": "Playlist update failed!",
       "FAIL_FINISH": "Playlist update failed!",
+      "PARTIAL_FINISH": "Playlist update is incomplete and will continue from its saved checkpoint.",
       "SUCCESS": "Successfully started playlist update!",
       "SUCCESS_FINISH": "Successfully updated playlist!",
       "URL_MANDATORY": "Url is mandatory!",

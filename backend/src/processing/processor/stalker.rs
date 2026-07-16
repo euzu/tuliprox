@@ -229,18 +229,19 @@ pub async fn download_stalker_playlist(
                 refresh.await
             };
             match result {
-                Ok(StalkerRefreshOutcome::Yielded { .. }) if refresh_mode == StalkerRefreshMode::Complete => {}
+                Ok(StalkerRefreshOutcome::Yielded { error: None, .. })
+                    if refresh_mode == StalkerRefreshMode::Complete => {}
                 Ok(outcome) => break outcome,
                 Err(err) => return (Vec::new(), vec![err], false, false),
             }
         }
     } else {
-        StalkerRefreshOutcome::Yielded {
-            phase: crate::repository::stalker_generation_repository::StalkerRefreshPhase::LiveBulk,
-            processed: 0,
-            skipped: 0,
-            error: None,
-        }
+        return (
+            Vec::new(),
+            Vec::new(),
+            app_config.config.load().disk_based_processing,
+            true,
+        );
     };
 
     let yielded = matches!(&outcome, StalkerRefreshOutcome::Yielded { .. });
@@ -262,7 +263,10 @@ pub async fn download_stalker_playlist(
 
     let manifest = match load_active_manifest(&storage_path, identity_fingerprint).await {
         Ok(manifest) => manifest,
-        Err(err) => return (Vec::new(), vec![err], false, yielded),
+        Err(err) => {
+            errors.push(err);
+            return (Vec::new(), errors, false, yielded);
+        }
     };
     if terminal {
         if let Err(err) = crate::repository::stalker_generation_repository::cleanup_obsolete_generations(
@@ -574,7 +578,7 @@ mod tests {
 
     #[test]
     fn resolved_link_cache_can_be_forced_stale() {
-        let key = RuntimeLinkKey { fingerprint: 7, generation: 1, provider_id: 42, kind: StalkerStreamKind::Live };
+        let key = RuntimeLinkKey { fingerprint: 8, generation: 1, provider_id: 43, kind: StalkerStreamKind::Live };
         cache_resolved_link(key, "http://stream.example/live".into());
         assert_eq!(cached_resolved_link(key, false).as_deref(), Some("http://stream.example/live"));
         assert!(cached_resolved_link(key, true).is_none());

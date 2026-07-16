@@ -757,7 +757,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
                         Arc::clone(&input.name),
                         manifest,
                     )
-                    .await,
+                    .await?,
                 );
                 Ok(PlaylistSource::filtered(source, skipped_clusters(clusters_to_load)))
             } else {

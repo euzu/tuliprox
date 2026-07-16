@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use serde::Deserialize;
 use shared::model::stalker::{
@@ -14,7 +14,7 @@ use crate::utils::network::stalker::session::StalkerSession;
 /// deserialize it loosely (all fields optional) because the field set varies by portal
 /// firmware. The fields we actually rely on are `max_connections`, `expiration` and
 /// `status` — those drive connection admission and credential rotation.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Default, Clone, Deserialize)]
 pub struct StalkerRawProviderProfile {
     #[serde(default, deserialize_with = "deserialize_as_option_string")]
     pub id: Option<String>,
@@ -46,11 +46,32 @@ pub struct StalkerRawProviderProfile {
     pub portal_url: Option<String>,
 }
 
+impl fmt::Debug for StalkerRawProviderProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StalkerRawProviderProfile")
+            .field("id", &self.id.as_ref().map(|_| "[redacted]"))
+            .field("name", &self.name.as_ref().map(|_| "[redacted]"))
+            .field("login", &self.login.as_ref().map(|_| "[redacted]"))
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
+            .field("status", &self.status)
+            .field("expiration", &self.expiration)
+            .field("max_connections", &self.max_connections)
+            .field("storage_usage", &self.storage_usage)
+            .field("storage_total", &self.storage_total)
+            .field("phone", &self.phone.as_ref().map(|_| "[redacted]"))
+            .field("email", &self.email.as_ref().map(|_| "[redacted]"))
+            .field("account_number", &self.account_number.as_ref().map(|_| "[redacted]"))
+            .field("tariff_plan", &self.tariff_plan)
+            .field("portal_url", &self.portal_url.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
 /// Resolved, runtime view of a Stalker input. Built by the client at handshake time from
 /// the backend `StalkerInputConfig` + the raw profile returned by the portal. The
 /// plan and the runtime fields never diverge in shape — only the `portal_capabilities`
 /// field is portal-specific and is refreshed on every handshake.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StalkerProviderProfile {
     pub auth_mode: StalkerAuthMode,
     pub mag_preset: StalkerMagPreset,
@@ -67,6 +88,28 @@ pub struct StalkerProviderProfile {
     pub storage_total: Option<String>,
     pub portal_capabilities: StalkerPortalCapabilitiesDto,
     pub action_size_caps: StalkerSizeCaps,
+}
+
+impl fmt::Debug for StalkerProviderProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StalkerProviderProfile")
+            .field("auth_mode", &self.auth_mode)
+            .field("mag_preset", &self.mag_preset)
+            .field("endpoint_preference", &self.endpoint_preference)
+            .field("bootstrap_recipe", &self.bootstrap_recipe)
+            .field("bootstrap_recipe_chain", &self.bootstrap_recipe_chain)
+            .field("account_login", &self.account_login.as_ref().map(|_| "[redacted]"))
+            .field("account_password", &self.account_password.as_ref().map(|_| "[redacted]"))
+            .field("account_id", &self.account_id.as_ref().map(|_| "[redacted]"))
+            .field("status", &self.status)
+            .field("expiration", &self.expiration)
+            .field("max_connections", &self.max_connections)
+            .field("storage_usage", &self.storage_usage)
+            .field("storage_total", &self.storage_total)
+            .field("portal_capabilities", &self.portal_capabilities)
+            .field("action_size_caps", &self.action_size_caps)
+            .finish()
+    }
 }
 
 impl StalkerProviderProfile {

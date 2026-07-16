@@ -3,6 +3,7 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
+use shared::utils::deserialize_as_option_string;
 use std::fmt;
 use std::io::{Error as IoError, ErrorKind, Read};
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
@@ -40,14 +41,14 @@ struct RawStalkerProgram {
     desc: Option<String>,
     #[serde(default)]
     description: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_as_option_string")]
     start: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_as_option_string")]
     stop: Option<String>,
-    #[serde(default)]
-    start_timestamp: Option<i64>,
-    #[serde(default)]
-    stop_timestamp: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_as_option_string")]
+    start_timestamp: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_as_option_string")]
+    stop_timestamp: Option<String>,
     #[serde(default)]
     category: Option<String>,
     #[serde(default)]
@@ -61,9 +62,13 @@ impl RawStalkerProgram {
         let title = self.title.or(self.name)?;
         let start_epoch = self
             .start_timestamp
+            .as_deref()
+            .and_then(parse_stalker_timestamp)
             .or_else(|| self.start.as_deref().and_then(parse_stalker_timestamp));
         let stop_epoch = self
             .stop_timestamp
+            .as_deref()
+            .and_then(parse_stalker_timestamp)
             .or_else(|| self.stop.as_deref().and_then(parse_stalker_timestamp));
         Some(StalkerProgramRecord {
             channel_id: self.ch_id.or(self.id),
@@ -425,10 +430,10 @@ where
                 "name" => raw.name = map.next_value()?,
                 "desc" => raw.desc = map.next_value()?,
                 "description" => raw.description = map.next_value()?,
-                "start" => raw.start = map.next_value()?,
-                "stop" => raw.stop = map.next_value()?,
-                "start_timestamp" => raw.start_timestamp = map.next_value()?,
-                "stop_timestamp" => raw.stop_timestamp = map.next_value()?,
+                "start" => raw.start = value_as_string(map.next_value()?),
+                "stop" => raw.stop = value_as_string(map.next_value()?),
+                "start_timestamp" => raw.start_timestamp = value_as_string(map.next_value()?),
+                "stop_timestamp" => raw.stop_timestamp = value_as_string(map.next_value()?),
                 "category" => raw.category = map.next_value()?,
                 "t_time" => raw.t_time = map.next_value()?,
                 "p_time" => raw.p_time = map.next_value()?,
@@ -494,6 +499,14 @@ where
         E: serde::de::Error,
     {
         Ok(())
+    }
+}
+
+fn value_as_string(value: Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
     }
 }
 
@@ -594,6 +607,25 @@ mod tests {
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].title, "A");
         assert_eq!(recs[0].start_epoch, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn numeric_timestamps_work_in_value_and_streaming_paths() -> Result<(), IoError> {
+        let value = serde_json::json!({
+            "js": [{"ch_id": "1", "title": "A", "start": 1_700_000_000, "stop_timestamp": 1_700_003_600}]
+        });
+        let records = parse_epg_records(&value);
+        assert_eq!(records[0].start_epoch, Some(1_700_000_000));
+        assert_eq!(records[0].stop_epoch, Some(1_700_003_600));
+
+        let mut streamed = Vec::new();
+        let emitted = stream_bulk_epg_from_reader(
+            Cursor::new(value.to_string()),
+            &mut |record| streamed.push(record),
+        )?;
+        assert_eq!(emitted, 1);
+        assert_eq!(streamed, records);
+        Ok(())
     }
 
     #[test]

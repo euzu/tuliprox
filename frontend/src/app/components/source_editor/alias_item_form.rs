@@ -82,6 +82,8 @@ pub struct AliasItemFormProps {
     pub on_cancel: Callback<()>,
     pub input_type: InputType,
     #[prop_or_default]
+    pub stalker_auth_mode: StalkerAuthMode,
+    #[prop_or_default]
     pub providers: Vec<ConfigProviderDto>,
     #[prop_or_default]
     pub initial: Option<ConfigInputAliasDto>,
@@ -115,6 +117,13 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
     let stalker_config = form_state.form.stalker.clone().unwrap_or_default();
     let stalker_device = stalker_config.device.clone().unwrap_or_default();
     let is_stalker = props.input_type.is_stalker();
+    let effective_stalker_auth_mode =
+        form_state.form.stalker.as_ref().map_or(props.stalker_auth_mode, |config| config.auth_mode);
+    let show_credentials = !is_stalker
+        || matches!(
+            effective_stalker_auth_mode,
+            StalkerAuthMode::CredentialsOnly | StalkerAuthMode::MacPlusCredentials
+        );
 
     let handle_submit = {
         let form_state = form_state.clone();
@@ -229,9 +238,13 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                 { config_field_bool!(form_state.form, translate.t(LABEL_ENABLED), enabled) }
                 { config_field!(form_state.form, translate.t(LABEL_ALIAS_NAME), name) }
                 { config_field!(form_state.form, translate.t(LABEL_URL), url) }
+                if show_credentials {
+                    <div class="tp__config-view__cols-2">
+                      { config_field_optional!(form_state.form, translate.t(LABEL_USERNAME), username) }
+                      { config_field_optional_hide!(form_state.form, translate.t(LABEL_PASSWORD), password) }
+                    </div>
+                }
                 <div class="tp__config-view__cols-2">
-                  { config_field_optional!(form_state.form, translate.t(LABEL_USERNAME), username) }
-                  { config_field_optional_hide!(form_state.form, translate.t(LABEL_PASSWORD), password) }
                   { config_field_custom!(translate.t(LABEL_PRIORITY), form_state.form.priority.to_string()) }
                   { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), form_state.form.max_connections.to_string()) }
                 </div>
@@ -240,9 +253,13 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                     { edit_field_bool!(form_state, translate.t(LABEL_ENABLED), enabled, AliasFormAction::Enabled) }
                     { edit_field_text!(form_state, translate.t(LABEL_ALIAS_NAME), name, AliasFormAction::Name) }
                     { edit_field_text!(form_state, translate.t(LABEL_URL), url, AliasFormAction::Url) }
+                    if show_credentials {
+                        <div class="tp__config-view__cols-2">
+                          { edit_field_text_option!(form_state, translate.t(LABEL_USERNAME), username, AliasFormAction::Username) }
+                          { edit_field_text_option!(form_state, translate.t(LABEL_PASSWORD), password, AliasFormAction::Password, true) }
+                        </div>
+                    }
                     <div class="tp__config-view__cols-2">
-                      { edit_field_text_option!(form_state, translate.t(LABEL_USERNAME), username, AliasFormAction::Username) }
-                      { edit_field_text_option!(form_state, translate.t(LABEL_PASSWORD), password, AliasFormAction::Password, true) }
                       { edit_field_number_i16!(form_state, translate.t(LABEL_PRIORITY), priority, AliasFormAction::Priority) }
                       { edit_field_number_u16!(form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, AliasFormAction::MaxConnections) }
                     </div>
@@ -253,7 +270,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                 <div class="tp__config-view__cols-2">
                     if props.readonly {
                         { config_field_custom!(translate.t("LABEL.STALKER_MAC_ADDRESS"), stalker_device.mac_address.clone().unwrap_or_default()) }
-                        { config_field_custom!(translate.t("LABEL.STALKER_AUTH_MODE"), stalker_config.auth_mode.to_string()) }
+                        { config_field_custom!(translate.t("LABEL.STALKER_AUTH_MODE"), effective_stalker_auth_mode.to_string()) }
                         { config_field_custom!(translate.t("LABEL.STALKER_MAG_PRESET"), stalker_config.mag_preset.to_string()) }
                         { config_field_custom!(translate.t("LABEL.STALKER_ENDPOINT_PREFERENCE"), stalker_config.endpoint_preference.to_string()) }
                     } else {
@@ -275,7 +292,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                             &form_state,
                             "alias_stalker_auth_mode",
                             translate.t("LABEL.STALKER_AUTH_MODE"),
-                            stalker_config.auth_mode,
+                            effective_stalker_auth_mode,
                             |config, value| config.auth_mode = value,
                         ) }
                         { stalker_alias_choice::<StalkerMagPreset, _>(

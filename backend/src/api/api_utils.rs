@@ -2054,6 +2054,9 @@ async fn create_stream_response_details(
 
                     let provider_config = input.get_resolve_provider(url.as_ref());
                     provider_stream_factory_options.set_provider(provider_config);
+                    if input.input_type.is_stalker() {
+                        provider_stream_factory_options.require_public_destination();
+                    }
 
                     let reconnect_flag = provider_stream_factory_options.get_reconnect_flag_clone();
                     let provider_stream = match create_provider_stream(
@@ -2140,6 +2143,7 @@ async fn create_stream_response_details(
                                     },
                                 );
                                 options.set_provider(input.get_resolve_provider(url.as_ref()));
+                                options.require_public_destination();
                                 let retry_reconnect_flag = options.get_reconnect_flag_clone();
                                 let retried = create_provider_stream(
                                     app_state,

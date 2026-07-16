@@ -4,10 +4,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use shared::error::TuliproxError;
+use uuid::Uuid;
 
 const SCHEMA_VERSION: u8 = 2;
 const ACTIVE_MANIFEST: &str = "active.json";
 const CHECKPOINT: &str = "checkpoint.json";
+static MANIFEST_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ClusterFiles {
@@ -134,7 +136,7 @@ fn repository_error(context: &str, err: impl std::fmt::Display) -> TuliproxError
 async fn atomic_write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<(), TuliproxError> {
     let bytes = serde_json::to_vec(value).map_err(|err| repository_error("encode Stalker state", err))?;
     tokio::task::spawn_blocking(move || {
-        let temporary = path.with_extension("tmp");
+        let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -198,6 +200,7 @@ pub async fn publish_cluster(
     identity_fingerprint: u64,
     cluster: PublishedCluster,
 ) -> Result<(), TuliproxError> {
+    let _guard = MANIFEST_WRITE_LOCK.lock().await;
     let mut manifest = load_active_manifest(storage_path, identity_fingerprint).await?;
     match cluster {
         PublishedCluster::Live(files) => manifest.live = Some(files),
@@ -340,6 +343,29 @@ mod tests {
         let active = load_active_manifest(temp.path(), 17).await?;
         assert_eq!(active.live.as_ref().map(|files| files.generation), Some(2));
         assert_eq!(active.series, manifest.series);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_cluster_publications_preserve_both_updates() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let live = publish_cluster(
+            temp.path(),
+            17,
+            PublishedCluster::Live(ClusterFiles { generation: 1, data: "live.db".into() }),
+        );
+        let vod = publish_cluster(
+            temp.path(),
+            17,
+            PublishedCluster::Vod(ClusterFiles { generation: 1, data: "vod.db".into() }),
+        );
+
+        let (live_result, vod_result) = tokio::join!(live, vod);
+        live_result?;
+        vod_result?;
+        let active = load_active_manifest(temp.path(), 17).await?;
+        assert!(active.live.is_some());
+        assert!(active.vod.is_some());
         Ok(())
     }
 

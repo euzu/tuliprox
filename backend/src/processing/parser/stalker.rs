@@ -144,8 +144,8 @@ pub fn map_stalker_to_playlist_item(
         playback_descriptor: build_descriptor_from_raw(raw),
         archive_available: raw.tv_archive.unwrap_or(false),
         allow_local_timeshift: raw.allow_local_timeshift.unwrap_or(false),
-        allow_local_pvr: raw.allow_pvr.or(raw.pvr).unwrap_or(false),
-        allow_remote_pvr: raw.pvr_shift.or(raw.pvr_time_shift).unwrap_or(false),
+        allow_local_pvr: raw.allow_pvr.unwrap_or(false) || raw.pvr.unwrap_or(false),
+        allow_remote_pvr: raw.pvr_shift.unwrap_or(false) || raw.pvr_time_shift.unwrap_or(false),
         nginx_secure_link: raw.nginx_secure_link.unwrap_or(false),
         flussonic_tmp_link: raw.flussonic_tmp_link.unwrap_or(false),
         wowza_tmp_link: raw.wowza_tmp_link.unwrap_or(false),
@@ -521,6 +521,20 @@ mod tests {
         assert!(item.allow_local_pvr);
         assert!(item.nginx_secure_link);
         assert!(item.use_http_tmp_link);
+    }
+
+    #[test]
+    fn map_live_item_combines_boolean_capability_aliases() {
+        let mut raw = raw_with_id("1", "x");
+        raw.allow_pvr = Some(false);
+        raw.pvr = Some(true);
+        raw.pvr_shift = Some(false);
+        raw.pvr_time_shift = Some(true);
+
+        let item = map_stalker_to_playlist_item(&raw, None, StalkerStreamKind::Live, 0);
+
+        assert!(item.allow_local_pvr);
+        assert!(item.allow_remote_pvr);
     }
 
     #[test]

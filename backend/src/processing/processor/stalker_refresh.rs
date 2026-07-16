@@ -262,9 +262,26 @@ pub async fn advance_stalker_refresh(
     mut budget: StalkerRefreshBudget,
 ) -> Result<StalkerRefreshOutcome, TuliproxError> {
     let mut checkpoint = match load_checkpoint(storage_path, identity_fingerprint).await? {
-        Some(state)
-            if state.selection_mask == selection.mask()
-                && !matches!(state.phase, StalkerRefreshPhase::Complete | StalkerRefreshPhase::Terminal) => state,
+        Some(state) if state.selection_mask == selection.mask() => {
+            if state.phase == StalkerRefreshPhase::Terminal {
+                return Ok(StalkerRefreshOutcome::Terminal(TuliproxError::ProviderConnection(
+                    "Stalker refresh reached a terminal state".to_string(),
+                )));
+            }
+            if state.phase == StalkerRefreshPhase::Complete {
+                let mut state = StalkerCheckpoint::new(
+                    identity_fingerprint,
+                    generation_id(),
+                    selection.mask(),
+                    chrono::Utc::now().timestamp(),
+                );
+                state.phase = first_phase(selection);
+                save_checkpoint(storage_path, &state).await?;
+                state
+            } else {
+                state
+            }
+        }
         _ => {
             let mut state = StalkerCheckpoint::new(
                 identity_fingerprint,
@@ -444,7 +461,13 @@ pub async fn advance_stalker_refresh(
                             .as_deref()
                             .and_then(|value| value.parse::<u32>().ok())
                             .and_then(|id| categories.get(&id));
-                        parser::map_stalker_series_root(raw, category, added_at)
+                        let mut root = parser::map_stalker_series_root(raw, category, added_at);
+                        let capabilities = &handshake.profile.portal_capabilities;
+                        root.nginx_secure_link = capabilities.nginx_secure_link;
+                        root.flussonic_tmp_link = capabilities.flussonic_temporary_link;
+                        root.wowza_tmp_link = capabilities.wowza_temporary_link;
+                        root.use_http_tmp_link = capabilities.use_http_temporary_link;
+                        root
                     })
                     .collect();
                 let roots_path = generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::SeriesRoots);
