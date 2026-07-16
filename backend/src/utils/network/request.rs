@@ -109,6 +109,7 @@ fn is_public_ipv6(address: Ipv6Addr) -> bool {
         || address.is_multicast()
         || segments[0] & 0xfe00 == 0xfc00
         || segments[0] & 0xffc0 == 0xfe80
+        || segments[0] & 0xffc0 == 0xfec0
         || (segments[0] == 0x2001 && segments[1] == 0x0db8))
         && address.to_ipv4_mapped().is_none_or(is_public_ipv4)
 }

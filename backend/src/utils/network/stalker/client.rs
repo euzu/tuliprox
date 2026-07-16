@@ -907,6 +907,7 @@ mod tests {
         for address in ["127.0.0.1", "10.0.0.1", "169.254.1.1", "100.64.0.1", "::1", "fc00::1", "fe80::1"] {
             assert!(!crate::utils::network::request::is_public_ip(address.parse()?), "{address}");
         }
+        assert!(!crate::utils::network::request::is_public_ip("fec0::1".parse()?));
         assert!(crate::utils::network::request::is_public_ip("8.8.8.8".parse()?));
         assert!(crate::utils::network::request::is_public_ip("2606:4700:4700::1111".parse()?));
         Ok(())
