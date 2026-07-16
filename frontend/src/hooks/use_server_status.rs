@@ -132,6 +132,18 @@ fn merge_aux_streams(server_status: &mut StatusCheck, download_streams: &[Stream
     dedupe_streams_by_identity(&mut server_status.active_user_streams);
 }
 
+fn replace_server_status_snapshot(
+    status_holder: &mut Option<Rc<StatusCheck>>,
+    mut server_status: StatusCheck,
+    download_streams: &[StreamInfo],
+) -> Rc<StatusCheck> {
+    dedupe_streams_by_identity(&mut server_status.active_user_streams);
+    merge_aux_streams(&mut server_status, download_streams);
+    let server_status = Rc::new(server_status);
+    *status_holder = Some(Rc::clone(&server_status));
+    server_status
+}
+
 fn rebuild_status_with_downloads(
     status_holder: &UseStateHandle<RefCell<Option<Rc<StatusCheck>>>>,
     status_signal: &UseStateHandle<Option<Rc<StatusCheck>>>,
@@ -265,11 +277,11 @@ pub fn use_server_status(
 
                 subid = Some(services_ctx.event.subscribe(move |msg| match msg {
                     EventMessage::ServerStatus(server_status) => {
-                        let mut server_status = (*server_status).clone();
-                        dedupe_streams_by_identity(&mut server_status.active_user_streams);
-                        merge_aux_streams(&mut server_status, download_streams_holder_signal.borrow().as_slice());
-                        let server_status = Rc::new(server_status);
-                        *status_holder_signal.borrow_mut() = Some(Rc::clone(&server_status));
+                        let server_status = replace_server_status_snapshot(
+                            &mut status_holder_signal.borrow_mut(),
+                            (*server_status).clone(),
+                            download_streams_holder_signal.borrow().as_slice(),
+                        );
                         status_signal.set(Some(server_status));
                     }
                     EventMessage::ActiveUser(event) => {
@@ -347,7 +359,7 @@ pub fn use_server_status(
 mod tests {
     use super::{
         apply_active_user_change, apply_downloads_delta, apply_downloads_snapshot, dedupe_streams_by_identity,
-        download_task_to_stream_with_ts, find_stream_update_index,
+        download_task_to_stream_with_ts, find_stream_update_index, replace_server_status_snapshot,
     };
     use shared::{
         model::{
@@ -356,7 +368,7 @@ mod tests {
         },
         utils::Internable,
     };
-    use std::net::SocketAddr;
+    use std::{net::SocketAddr, rc::Rc};
 
     fn test_stream(uid: u32, addr: &str, session_token: Option<&str>, item_type: PlaylistItemType) -> StreamInfo {
         StreamInfo {
@@ -567,6 +579,33 @@ mod tests {
         );
 
         assert_eq!(status.active_user_streams, vec![kept]);
+    }
+
+    #[test]
+    fn server_status_snapshot_replaces_stale_backend_streams_and_readds_current_downloads() {
+        let stale_stream = test_stream(1, "127.0.0.1:1234", Some("tok-series"), PlaylistItemType::Series);
+        let download_stream = download_task_to_stream_with_ts(
+            &test_download("running", TransferStatusDto::Running, TaskKindDto::Download),
+            123,
+        );
+        let mut status_holder = Some(Rc::new(shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 1,
+            active_user_streams: vec![stale_stream],
+            ..Default::default()
+        }));
+        let clean_backend_snapshot = shared::model::StatusCheck::default();
+
+        let status = replace_server_status_snapshot(
+            &mut status_holder,
+            clean_backend_snapshot,
+            std::slice::from_ref(&download_stream),
+        );
+
+        assert_eq!(status.active_users, 0);
+        assert_eq!(status.active_user_connections, 0);
+        assert_eq!(status.active_user_streams, vec![download_stream]);
+        assert_eq!(status_holder.as_deref(), Some(status.as_ref()));
     }
 
     fn test_download(id: &str, status: TransferStatusDto, kind: TaskKindDto) -> FileDownloadDto {

@@ -441,7 +441,7 @@ struct AdaptiveExpiryKey {
 pub struct ReleasedConnection {
     pub addr_removed: bool,
     pub removed_streams: Vec<StreamInfo>,
-    pub disconnected_user: Option<String>,
+    pub disconnected_users: Vec<String>,
 }
 
 pub struct ActiveUserConnectionParams<'a> {
@@ -729,17 +729,14 @@ impl ActiveUserManager {
 
     async fn log_active_user(&self) {
         let is_log_user_enabled = self.is_log_user_enabled();
-        // Skip the full connection-map snapshot + event send entirely when logging
-        // is disabled — this runs on every connection add/release and dominates
-        // lock contention on the active-user path at high segment rates.
-        if !is_log_user_enabled {
-            return;
-        }
         let (user_count, user_connection_count) = { self.active_users_and_connections().await };
         self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(
             user_count,
             user_connection_count,
         )));
+        if !is_log_user_enabled {
+            return;
+        }
         let last_user_count = self.last_logged_user_count.load(Ordering::Relaxed);
         let last_connection_count = self.last_logged_user_connection_count.load(Ordering::Relaxed);
         if last_user_count != user_count || last_connection_count != user_connection_count {
@@ -786,22 +783,29 @@ impl ActiveUserManager {
         let (removed_stream, username, expiry_entry, preserved_update, connection_changed, promotion, divergence_snapshot) = {
             let mut user_connections = self.connections.write().await;
 
-            let username = user_connections
-                .key_by_addr
-                .get(addr)
-                .filter(|reg| !reg.username.is_empty())
-                .map(|reg| reg.username.clone())
-                .or_else(|| {
-                    stream_uid.and_then(|uid| {
+            let username = match stream_uid {
+                Some(uid) => user_connections.by_key.iter().find_map(|(username, connection_data)| {
+                    connection_data
+                        .streams
+                        .iter()
+                        .any(|stream| !stream.preserved && stream.uid == uid && stream.addr == *addr)
+                        .then(|| username.clone())
+                }),
+                None => user_connections
+                    .key_by_addr
+                    .get(addr)
+                    .filter(|reg| !reg.username.is_empty())
+                    .map(|reg| reg.username.clone())
+                    .or_else(|| {
                         user_connections.by_key.iter().find_map(|(username, connection_data)| {
                             connection_data
                                 .streams
                                 .iter()
-                                .any(|stream| stream.uid == uid && stream.addr == *addr)
+                                .any(|stream| !stream.preserved && stream.addr == *addr)
                                 .then(|| username.clone())
                         })
-                    })
-                })?;
+                    }),
+            }?;
 
             let mut removed_stream = None;
             let mut expiry_entry = None;
@@ -920,31 +924,45 @@ impl ActiveUserManager {
 
     #[allow(clippy::too_many_lines)]
     async fn release_connection_inner(&self, addr: &SocketAddr, preserve_session_streams: bool) -> ReleasedConnection {
-        let (addr_removed, disconnected_user, removed_streams, expiry_entries, preserved_updates, promotions) = {
+        let (
+            addr_removed,
+            connection_count_changed,
+            disconnected_users,
+            removed_streams,
+            expiry_entries,
+            preserved_updates,
+            promotions,
+        ) = {
             let mut user_connections = self.connections.write().await;
 
             let registration = user_connections.key_by_addr.remove(addr);
             let had_registration = registration.is_some();
-            let fallback_username = if had_registration {
-                None
-            } else {
-                user_connections.by_key.iter().find_map(|(username, connection_data)| {
-                    connection_data
-                        .streams
-                        .iter()
-                        .any(|stream| stream.addr == *addr)
-                        .then(|| username.clone())
-                })
-            };
+            let mut disconnected_users = registration
+                .map(|registration| registration.username)
+                .filter(|username| !username.is_empty())
+                .into_iter()
+                .collect::<Vec<_>>();
+            disconnected_users.extend(
+                user_connections
+                    .by_key
+                    .iter()
+                    .filter(|(_, connection_data)| {
+                        connection_data.has_session_addr(addr)
+                            || connection_data.streams.iter().any(|stream| stream.addr == *addr)
+                    })
+                    .map(|(username, _)| username.clone()),
+            );
+            disconnected_users.sort_unstable();
+            disconnected_users.dedup();
 
-            let username = registration.map(|registration| registration.username).or(fallback_username);
-
-            if let Some(username) = username {
-                let mut removed_streams = Vec::new();
-                let mut expiry_entries = Vec::new();
-                let mut preserved_updates = Vec::new();
-                let mut promotions = Vec::new();
-                if let Some(connection_data) = user_connections.by_key.get_mut(&username) {
+            let mut removed_streams = Vec::new();
+            let mut expiry_entries = Vec::new();
+            let mut preserved_updates = Vec::new();
+            let mut promotions = Vec::new();
+            let mut connection_count_changed = false;
+            for username in &disconnected_users {
+                if let Some(connection_data) = user_connections.by_key.get_mut(username) {
+                    let previous_connection_count = connection_data.connections;
                     let migrated_session_addrs = connection_data.release_addr_from_sessions(addr);
                     let mut remaining_streams = Vec::with_capacity(connection_data.streams.len());
                     let mut released_kinds = Vec::new();
@@ -965,7 +983,7 @@ impl ActiveUserManager {
                                 remaining_streams.push(stream_info);
                             } else if preserve_session_streams && Self::should_preserve_session_stream(&stream_info) {
                                 if let Some(entry) =
-                                    self.build_preserved_stream_expiry(&username, &stream_info, &connection_data.sessions)
+                                    self.build_preserved_stream_expiry(username, &stream_info, &connection_data.sessions)
                                 {
                                     if let Some(kind) = connection_data.stream_kinds.remove(&stream_info.uid) {
                                         released_kinds.push(kind);
@@ -1019,7 +1037,7 @@ impl ActiveUserManager {
                         if let Some(stream) = promoted_stream.as_ref() {
                             Self::promote_session_for_stream(connection_data, stream);
                         }
-                        promotions.push(action);
+                        promotions.push((username.clone(), action));
                     }
                     for session_token in &removed_session_tokens {
                         Self::clear_session_counted_without_stream(connection_data, session_token);
@@ -1033,12 +1051,19 @@ impl ActiveUserManager {
                         connection_data.granted_grace = false;
                         connection_data.grace_ts = 0;
                     }
+                    connection_count_changed |= connection_data.connections != previous_connection_count;
                 }
-                let state_changed = had_registration || !removed_streams.is_empty();
-                (state_changed, Some(username), removed_streams, expiry_entries, preserved_updates, promotions)
-            } else {
-                (false, None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
             }
+            let state_changed = had_registration || !disconnected_users.is_empty();
+            (
+                state_changed,
+                connection_count_changed,
+                disconnected_users,
+                removed_streams,
+                expiry_entries,
+                preserved_updates,
+                promotions,
+            )
         };
 
         for entry in expiry_entries {
@@ -1049,29 +1074,31 @@ impl ActiveUserManager {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
         }
 
-        if let Some(ref username) = disconnected_user {
+        for username in &disconnected_users {
             if !username.is_empty() {
                 debug_if_enabled!(
                     "Released connection for user {username} at {}",
                     sanitize_sensitive_info(&addr.to_string())
                 );
             }
-            if addr_removed {
-                self.log_active_user().await;
-                for action in promotions {
-                    self.emit_promotion_update(username, action).await;
-                }
+        }
+        if connection_count_changed {
+            self.log_active_user().await;
+        }
+        if addr_removed {
+            for (username, action) in promotions {
+                self.emit_promotion_update(&username, action).await;
             }
         }
 
-        ReleasedConnection { addr_removed, removed_streams, disconnected_user }
+        ReleasedConnection { addr_removed, removed_streams, disconnected_users }
     }
 
     pub async fn release_connection(&self, addr: &SocketAddr) -> ReleasedConnection {
         let released = self.release_connection_inner(addr, true).await;
         // divergence check after connection release
         if released.addr_removed {
-            if let Some(ref username) = released.disconnected_user {
+            for username in &released.disconnected_users {
                 self.check_and_log_divergence_for_user(username).await;
             }
         }
@@ -1082,7 +1109,7 @@ impl ActiveUserManager {
         let released = self.release_connection_inner(addr, false).await;
         // divergence check after connection release
         if released.addr_removed {
-            if let Some(ref username) = released.disconnected_user {
+            for username in &released.disconnected_users {
                 self.check_and_log_divergence_for_user(username).await;
             }
         }
@@ -1469,7 +1496,7 @@ impl ActiveUserManager {
             user_agent,
             session_token,
         } = update;
-        let (stream_info, divergence_snapshot) = {
+        let (stream_info, divergence_snapshot, connection_count_changed) = {
             let mut user_connections = self.connections.write().await;
 
             let now = current_time_secs();
@@ -1493,6 +1520,7 @@ impl ActiveUserManager {
                 .or_insert_with(|| UserConnectionData::new(0, max_connections, soft_connections));
             connection_data.max_connections = max_connections;
             connection_data.soft_connections = soft_connections;
+            let previous_connection_count = connection_data.connections;
 
             if let Some(token) = session_token {
                 if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) {
@@ -1567,7 +1595,7 @@ impl ActiveUserManager {
                     stream_info.previous_session_id = None;
                     (result, was_preserved)
                 });
-            if let Some((stream_info, was_preserved)) = existing_stream_info {
+            let (stream_info, divergence_snapshot) = if let Some((stream_info, was_preserved)) = existing_stream_info {
                 let effective_connection_kind = reserved_session_kind.unwrap_or(connection_kind);
                 if was_preserved {
                     connection_data.increment_kind(effective_connection_kind);
@@ -1618,12 +1646,16 @@ impl ActiveUserManager {
                 Self::log_connection_added(username, &fingerprint.addr, connection_data, tracked_socket_count);
                 let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, username);
                 (stream_info, divergence_snapshot)
-            }
+            };
+            let connection_count_changed = connection_data.connections != previous_connection_count;
+            (stream_info, divergence_snapshot, connection_count_changed)
         };
 
         self.log_divergence_snapshot(divergence_snapshot).await;
 
-        self.log_active_user().await;
+        if connection_count_changed {
+            self.log_active_user().await;
+        }
 
         Some(stream_info)
     }
@@ -3486,6 +3518,15 @@ mod tests {
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
+        }
+    }
+
+    fn test_series_channel(virtual_id: u32) -> StreamChannel {
+        StreamChannel {
+            item_type: PlaylistItemType::Series,
+            cluster: XtreamCluster::Series,
+            url: "http://localhost/series/episode.mkv".intern(),
+            ..test_channel(virtual_id)
         }
     }
 
@@ -5715,6 +5756,189 @@ mod tests {
         let streams = manager.active_streams().await;
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].uid, 41);
+    }
+
+    #[tokio::test]
+    async fn release_stream_by_uid_finds_original_user_after_shared_addr_owner_changes() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55034".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-cross-user-stream".to_string(), "127.0.0.1".to_string(), addr);
+        manager.add_connection(&addr).await;
+
+        for (uid, username) in [(43, "user-a"), (44, "user-b")] {
+            manager
+                .update_connection(ActiveUserConnectionParams {
+                    uid,
+                    meter_uid: 0,
+                    username,
+                    max_connections: 1,
+                    soft_connections: 0,
+                    connection_kind: ConnectionKind::Normal,
+                    priority: 0,
+                    soft_priority: 0,
+                    fingerprint: &fingerprint,
+                    provider: "provider-a".intern(),
+                    stream_channel: &test_series_channel(3005),
+                    user_agent: Cow::Borrowed("ua"),
+                    session_token: None,
+                })
+                .await
+                .expect("direct Series stream should register");
+        }
+
+        assert_eq!(manager.active_users_and_connections().await, (2, 2));
+        assert_eq!(manager.active_streams().await.len(), 2);
+
+        let removed = manager.release_stream_by_uid(&addr, 43).await;
+        assert!(removed.as_ref().is_some_and(|stream| stream.uid == 43));
+        assert_eq!(manager.active_users_and_connections().await, (1, 1));
+        let streams = manager.active_streams().await;
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].uid, 44);
+
+        assert!(manager.release_stream_by_uid(&addr, 44).await.is_some());
+        assert_eq!(manager.active_users_and_connections().await, (0, 0));
+        assert!(manager.active_streams().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn release_connection_cleans_every_user_stream_for_reused_addr_only() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let reused_addr: SocketAddr = "127.0.0.1:55035".parse().unwrap();
+        let unrelated_addr: SocketAddr = "127.0.0.1:55036".parse().unwrap();
+        let reused_fingerprint =
+            Fingerprint::new("fp-cross-user-socket".to_string(), "127.0.0.1".to_string(), reused_addr);
+        let unrelated_fingerprint =
+            Fingerprint::new("fp-unrelated-socket".to_string(), "127.0.0.1".to_string(), unrelated_addr);
+        manager.add_connection(&reused_addr).await;
+        manager.add_connection(&unrelated_addr).await;
+
+        for (uid, username, fingerprint) in [
+            (45, "user-a", &reused_fingerprint),
+            (46, "user-b", &reused_fingerprint),
+            (47, "user-a", &unrelated_fingerprint),
+        ] {
+            manager
+                .update_connection(ActiveUserConnectionParams {
+                    uid,
+                    meter_uid: 0,
+                    username,
+                    max_connections: 2,
+                    soft_connections: 0,
+                    connection_kind: ConnectionKind::Normal,
+                    priority: 0,
+                    soft_priority: 0,
+                    fingerprint,
+                    provider: "provider-a".intern(),
+                    stream_channel: &test_series_channel(3006 + uid),
+                    user_agent: Cow::Borrowed("ua"),
+                    session_token: None,
+                })
+                .await
+                .expect("direct Series stream should register");
+        }
+
+        let released = manager.release_connection(&reused_addr).await;
+        let mut removed_uids = released.removed_streams.iter().map(|stream| stream.uid).collect::<Vec<_>>();
+        removed_uids.sort_unstable();
+        assert!(released.addr_removed);
+        assert_eq!(removed_uids, vec![45, 46]);
+        assert_eq!(manager.active_users_and_connections().await, (1, 1));
+        let streams = manager.active_streams().await;
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].uid, 47);
+
+        manager.release_connection(&unrelated_addr).await;
+        assert_eq!(manager.active_users_and_connections().await, (0, 0));
+        assert!(manager.active_streams().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn connection_counts_are_broadcast_when_active_user_logging_is_disabled() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let mut events = event_manager.get_event_channel();
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55037".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-count-events".to_string(), "127.0.0.1".to_string(), addr);
+        manager.add_connection(&addr).await;
+        manager.release_connection(&addr).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), events.recv()).await.is_err(),
+            "closing an unowned socket must not broadcast unchanged connection counts"
+        );
+        manager.add_connection(&addr).await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 48,
+                meter_uid: 0,
+                username: "event-user",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_series_channel(3048),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: None,
+            })
+            .await
+            .expect("direct Series stream should register");
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("connection count update should be broadcast")
+                .expect("event channel should remain open"),
+            EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(1, 1))
+        );
+
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 49,
+                meter_uid: 0,
+                username: "event-user",
+                max_connections: 1,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_series_channel(3048),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: None,
+            })
+            .await
+            .expect("same direct Series stream should be reused");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), events.recv()).await.is_err(),
+            "unchanged connection counts must not broadcast another full snapshot"
+        );
+
+        manager
+            .release_stream_by_uid(&addr, 48)
+            .await
+            .expect("direct Series stream should release");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("released count update should be broadcast")
+                .expect("event channel should remain open"),
+            EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(0, 0))
+        );
     }
 
     #[tokio::test]

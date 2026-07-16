@@ -312,7 +312,7 @@ async fn release_connection_parts(
         }
         // Explicitly terminate all sessions for the kicked addr. This expires them
         // immediately rather than leaving them for TTL-based GC cleanup.
-        if let Some(ref username) = removed.disconnected_user {
+        for username in &removed.disconnected_users {
             deps.user_manager.terminate_sessions_for_addr(username, addr).await;
         }
     }
@@ -953,7 +953,7 @@ impl ConnectionManager {
                 self.provider_manager.clear_provider_reservation(session_token).await;
             }
         }
-        if let Some(ref username) = removed.disconnected_user {
+        for username in &removed.disconnected_users {
             self.user_manager.terminate_sessions_for_addr(username, addr).await;
         }
         for stream_info in &removed.removed_streams {
