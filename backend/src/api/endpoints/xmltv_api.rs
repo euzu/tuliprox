@@ -4,7 +4,7 @@ use crate::{
             coalesce_byte_stream, create_api_proxy_user, empty_json_response_as_array, get_user_target,
             get_user_target_by_credentials, internal_server_error,
             resource_response,
-            stream_json_or_bin_response_stream, try_unwrap_body,
+            stream_json_or_bin_response_try_stream, try_unwrap_body,
         },
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
     },
@@ -129,25 +129,33 @@ pub async fn serve_epg_web_ui(
         let bg_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
         let epg_path = epg_path.to_path_buf();
         let target_name = target.name.clone();
-        let (tx, rx) = mpsc::channel::<EpgChannel>(64);
+        let (tx, rx) = mpsc::channel::<Result<EpgChannel, String>>(64);
 
         let epg_path_for_log = epg_path.clone();
         let target_name_for_log = target_name.clone();
+        let join_error_tx = tx.clone();
         let handle = task::spawn_blocking(move || {
             let _guard = bg_lock;
-            let Ok(query) = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) else {
-                error!("Failed to open epg db for target {} {}", target_name, epg_path.display());
-                return;
+            let query = match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) {
+                Ok(query) => query,
+                Err(error) => {
+                    let message = format!("Failed to open epg db for target {target_name} {}: {error}", epg_path.display());
+                    error!("{message}");
+                    let _ = tx.blocking_send(Err(message));
+                    return;
+                }
             };
             for entry in query.disk_iter() {
                 let (_, channel) = match entry {
                     Ok(entry) => entry,
                     Err(error) => {
-                        error!("EPG stream failed for {}: {error}", epg_path.display());
+                        let message = format!("EPG stream failed for {}: {error}", epg_path.display());
+                        error!("{message}");
+                        let _ = tx.blocking_send(Err(message));
                         break;
                     }
                 };
-                if tx.blocking_send(channel).is_err() {
+                if tx.blocking_send(Ok(channel)).is_err() {
                     break;
                 }
             }
@@ -159,12 +167,15 @@ pub async fn serve_epg_web_ui(
                     target_name_for_log,
                     epg_path_for_log.display()
                 );
+                let _ = join_error_tx
+                    .send(Err(format!("EPG web UI producer task failed for target {} {}: {err}", target_name_for_log, epg_path_for_log.display())))
+                    .await;
             }
         });
 
         let stream = LockedReceiverStream::new(rx, iter_lock)
-            .map(move |channel| rewrite_epg_channel_resource_url(&encrypt_secret, &resource_url, channel));
-        return stream_json_or_bin_response_stream(accept, stream);
+            .map(move |result| result.map(|channel| rewrite_epg_channel_resource_url(&encrypt_secret, &resource_url, channel)));
+        return stream_json_or_bin_response_try_stream(accept, stream);
     }
     try_unwrap_body!(empty_json_response_as_array())
 }
@@ -228,25 +239,33 @@ async fn serve_epg_with_rewrites(
 
     let bg_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
     let epg_path = epg_path.to_path_buf();
-    let (channel_tx, mut channel_rx) = mpsc::channel::<EpgChannel>(256);
+    let (channel_tx, mut channel_rx) = mpsc::channel::<Result<EpgChannel, String>>(256);
 
     let epg_path_for_log = epg_path.clone();
+    let join_error_tx = channel_tx.clone();
     let spawn_handle = task::spawn_blocking(move || {
         let _guard = bg_lock;
-        let Ok(mut query) = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) else {
-            error!("Failed to open BPlusTreeQuery {}", epg_path.display());
-            return;
+        let mut query = match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) {
+            Ok(query) => query,
+            Err(error) => {
+                let message = format!("Failed to open BPlusTreeQuery {}: {error}", epg_path.display());
+                error!("{message}");
+                let _ = channel_tx.blocking_send(Err(message));
+                return;
+            }
         };
 
         for entry in query.iter() {
             let (_, channel) = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
-                    error!("EPG rewrite stream failed for {}: {error}", epg_path.display());
+                    let message = format!("EPG rewrite stream failed for {}: {error}", epg_path.display());
+                    error!("{message}");
+                    let _ = channel_tx.blocking_send(Err(message));
                     break;
                 }
             };
-            if channel_tx.blocking_send(channel).is_err() {
+            if channel_tx.blocking_send(Ok(channel)).is_err() {
                 break;
             }
         }
@@ -254,6 +273,9 @@ async fn serve_epg_with_rewrites(
     tokio::spawn(async move {
         if let Err(err) = spawn_handle.await {
             error!("EPG rewrite producer task failed for {}: {err}", epg_path_for_log.display());
+            let _ = join_error_tx
+                .send(Err(format!("EPG rewrite producer task failed for {}: {err}", epg_path_for_log.display())))
+                .await;
         }
     });
 
@@ -271,7 +293,14 @@ async fn serve_epg_with_rewrites(
         }
 
         let mut writer = quick_xml::writer::Writer::new(tx);
-        while let Some(channel) = channel_rx.recv().await {
+        while let Some(result) = channel_rx.recv().await {
+            let channel = match result {
+                Ok(channel) => channel,
+                Err(error) => {
+                    error!("{error}");
+                    return;
+                }
+            };
             let programmes = if limit > 0 {
                 channel.get_programme_with_limit(limit)
             } else {
