@@ -300,11 +300,9 @@ impl QosSnapshotRepository {
         F: FnMut(&QosSnapshotRecord),
     {
         let tree = load_snapshot_tree(&self.snapshot_path)?;
-        tree.traverse(|_keys, values| {
-            for snapshot in values {
-                visit(snapshot);
-            }
-        });
+        for (_, snapshot) in &tree {
+            visit(snapshot);
+        }
         Ok(())
     }
 
@@ -320,11 +318,9 @@ impl QosSnapshotRepository {
     {
         let snapshot_path = Self::snapshot_db_path(storage_dir);
         let tree = load_snapshot_tree(&snapshot_path)?;
-        tree.traverse(|_keys, values| {
-            for snapshot in values {
-                visit(snapshot);
-            }
-        });
+        for (_, snapshot) in &tree {
+            visit(snapshot);
+        }
         Ok(())
     }
 

@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio::task;
 
 pub struct XtreamPlaylistIterator {
-    inner: LockedReceiverStream<(XtreamPlaylistItem, bool)>,
+    inner: LockedReceiverStream<Result<(XtreamPlaylistItem, bool), TuliproxError>>,
 }
 
 fn is_cluster_allowed_for_user(user: &ProxyUserCredentials, cluster: XtreamCluster) -> bool {
@@ -28,7 +28,7 @@ impl XtreamPlaylistIterator {
     fn empty() -> Self {
         // Ghost Channel pattern
         // When you immediately drop the sender with `_`, the channel is closed and receiver gets None.
-        let (_tx, rx) = mpsc::channel::<(XtreamPlaylistItem, bool)>(1);
+        let (_tx, rx) = mpsc::channel::<Result<(XtreamPlaylistItem, bool), TuliproxError>>(1);
         Self { inner: LockedReceiverStream::new_empty(rx) }
     }
 
@@ -73,7 +73,7 @@ impl XtreamPlaylistIterator {
 
             let xtream_path = xtream_path.clone();
             let index_path = get_file_path_for_db_index(&xtream_path);
-            let (tx, rx) = mpsc::channel::<(XtreamPlaylistItem, bool)>(256);
+            let (tx, rx) = mpsc::channel::<Result<(XtreamPlaylistItem, bool), TuliproxError>>(256);
 
             let xtream_path_for_log = xtream_path.clone();
             let handle = task::spawn_blocking(move || {
@@ -89,6 +89,7 @@ impl XtreamPlaylistIterator {
                             "Failed to open Xtream playlist DB {} (cluster {cluster}): {err}",
                             xtream_path.display()
                         );
+                        let _ = tx.blocking_send(Err(err));
                         return;
                     }
                 };
@@ -96,10 +97,15 @@ impl XtreamPlaylistIterator {
                 let mut pending: Option<XtreamPlaylistItem> = None;
                 for entry in reader {
                     let item = match entry {
-                        Ok((_, item)) => item,
-                        Err(err) => {
-                            error!("Error reading sorted index: {err}");
-                            continue;
+                    Ok((_, item)) => item,
+                    Err(err) => {
+                            if let Some(item) = pending.take() {
+                                if tx.blocking_send(Ok((item, true))).is_err() {
+                                    return;
+                                }
+                            }
+                            let _ = tx.blocking_send(Err(TuliproxError::RepositoryXtream(err.to_string())));
+                            return;
                         }
                     };
 
@@ -108,14 +114,14 @@ impl XtreamPlaylistIterator {
                     }
 
                     if let Some(prev) = pending.replace(item) {
-                        if tx.blocking_send((prev, true)).is_err() {
+                        if tx.blocking_send(Ok((prev, true))).is_err() {
                             return;
                         }
                     }
                 }
 
                 if let Some(last) = pending {
-                    let _ = tx.blocking_send((last, false));
+                    let _ = tx.blocking_send(Ok((last, false)));
                 }
             });
             tokio::spawn(async move {
@@ -153,7 +159,7 @@ impl XtreamPlaylistIterator {
 }
 
 impl Stream for XtreamPlaylistIterator {
-    type Item = (XtreamPlaylistItem, bool);
+    type Item = Result<(XtreamPlaylistItem, bool), TuliproxError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.inner).poll_next(cx)
     }
@@ -198,19 +204,18 @@ impl XtreamPlaylistJsonIterator {
 
 
 impl Stream for XtreamPlaylistJsonIterator {
-    type Item = (String, bool);
+    type Item = Result<(String, bool), TuliproxError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Ready(Some((pli, has_next))) => {
+            Poll::Ready(Some(Ok((pli, has_next)))) => {
                 let Some(options) = self.options.as_ref() else {
                     return Poll::Ready(None);
                 };
-                let json = serde_json::to_string(&pli.to_document(options)).unwrap_or_else(|err| {
-                    error!("Failed to serialize playlist item {}: {err}", pli.virtual_id);
-                    "{}".to_string()
-                });
-                Poll::Ready(Some((json, has_next)))
+                let json = serde_json::to_string(&pli.to_document(options))
+                    .map_err(|error| TuliproxError::RepositoryXtream(error.to_string()));
+                Poll::Ready(Some(json.map(|json| (json, has_next))))
             }
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
@@ -222,8 +227,13 @@ impl Stream for XtreamPlaylistJsonIterator {
 mod tests {
     use super::{is_cluster_allowed_for_user, XtreamPlaylistIterator};
     use crate::model::ProxyUserCredentials;
-    use shared::model::{ClusterFlags, XtreamCluster};
+    use crate::repository::LockedReceiverStream;
+    use shared::{
+        model::{ClusterFlags, PlaylistItemType, XtreamCluster, XtreamPlaylistItem},
+        utils::Internable,
+    };
     use futures::StreamExt;
+    use tokio::sync::mpsc;
 
     #[test]
     fn cluster_guard_respects_user_cluster_flags() {
@@ -239,5 +249,39 @@ mod tests {
     async fn empty_iterator_yields_no_items() {
         let mut iter = XtreamPlaylistIterator::empty();
         assert!(iter.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn iterator_forwards_one_storage_error_then_ends() {
+        let (tx, rx) = mpsc::channel(2);
+        let item = XtreamPlaylistItem {
+            virtual_id: 1,
+            provider_id: 1,
+            name: "name".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "group".intern(),
+            title: "title".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: "http://example.test/live.ts".intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Live,
+            additional_properties: None,
+            item_type: PlaylistItemType::Live,
+            category_id: 1,
+            input_name: "input".intern(),
+            channel_no: 0,
+            source_ordinal: 0,
+            input_stream_id: "1".intern(),
+        };
+        assert!(tx.send(Ok((item, true))).await.is_ok());
+        assert!(tx.send(Err(shared::error::TuliproxError::RepositoryXtream("corrupt page".into()))).await.is_ok());
+        drop(tx);
+
+        let mut iterator = XtreamPlaylistIterator { inner: LockedReceiverStream::new_empty(rx) };
+        assert!(iterator.next().await.is_some_and(|entry| entry.is_ok()));
+        assert!(iterator.next().await.is_some_and(|entry| entry.is_err()));
+        assert!(iterator.next().await.is_none());
     }
 }

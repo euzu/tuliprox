@@ -119,15 +119,11 @@ impl TargetIdMapping {
         let mut mem_by_uuid = HashMap::new();
         let mut mem_by_virtual_id = HashMap::new();
 
-        tree.traverse(|keys, values| {
-            if let Some(max_key) = keys.iter().max() {
-                virtual_id_counter = max(virtual_id_counter, *max_key);
-            }
-            for v in values {
-                mem_by_uuid.insert(v.uuid, v.virtual_id);
-                mem_by_virtual_id.insert(v.virtual_id, v.clone());
-            }
-        });
+        for (key, value) in &tree {
+            virtual_id_counter = max(virtual_id_counter, *key);
+            mem_by_uuid.insert(value.uuid, value.virtual_id);
+            mem_by_virtual_id.insert(value.virtual_id, value.clone());
+        }
 
         Ok(Self {
             virtual_id_counter,

@@ -3795,6 +3795,21 @@ where
     stream_json_array_stream(data)
 }
 
+pub fn stream_json_or_bin_response_try_stream<P, S, E>(
+    accept: Option<&str>,
+    data: S,
+) -> axum::response::Response
+where
+    P: serde::Serialize + Send + 'static,
+    S: Stream<Item = Result<P, E>> + Send + Unpin + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    if accept.is_some_and(|value| value.contains(CONTENT_TYPE_CBOR)) {
+        return stream_bin_array_try_stream(data);
+    }
+    stream_json_array_try_stream(data)
+}
+
 pub fn create_session_fingerprint(
     fingerprint: &Fingerprint,
     username: &str,
@@ -3972,6 +3987,45 @@ where
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_JSON).body(body))
 }
 
+fn stream_json_array_try_stream<P, S, E>(stream: S) -> axum::response::Response
+where
+    P: serde::Serialize + Send + 'static,
+    S: Stream<Item = Result<P, E>> + Send + Unpin + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    let stream = stream::unfold((stream, true, false), |(mut stream, first, failed)| async move {
+        if failed {
+            return None;
+        }
+        match stream.next().await {
+            Some(Ok(item)) => {
+                let serialized = serde_json::to_vec(&item).map_err(|error| error.to_string());
+                let bytes = serialized.map(|serialized| {
+                    if first {
+                        Bytes::from(serialized)
+                    } else {
+                        let mut framed = Vec::with_capacity(serialized.len() + 1);
+                        framed.push(b',');
+                        framed.extend_from_slice(&serialized);
+                        Bytes::from(framed)
+                    }
+                });
+                let failed = bytes.is_err();
+                Some((bytes, (stream, false, failed)))
+            }
+            Some(Err(error)) => Some((Err(error.to_string()), (stream, first, true))),
+            None => None,
+        }
+    });
+
+    let body = Body::from_stream(
+        stream::once(async { Ok::<_, String>(Bytes::from_static(b"[")) })
+            .chain(stream)
+            .chain(stream::once(async { Ok::<_, String>(Bytes::from_static(b"]")) })),
+    );
+    try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_JSON).body(body))
+}
+
 pub fn stream_bin_array_stream<P, S>(stream: S) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
@@ -3996,6 +4050,35 @@ where
             .chain(stream::once(async { Ok::<_, Infallible>(Bytes::from_static(&[0xff])) })),
     );
 
+    try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_CBOR).body(body))
+}
+
+fn stream_bin_array_try_stream<P, S, E>(stream: S) -> axum::response::Response
+where
+    P: serde::Serialize + Send + 'static,
+    S: Stream<Item = Result<P, E>> + Send + Unpin + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    let stream = stream::unfold((stream, false), |(mut stream, failed)| async move {
+        if failed {
+            return None;
+        }
+        match stream.next().await {
+            Some(Ok(item)) => {
+                let bytes = bin_serialize(&item).map(Bytes::from).map_err(|error| error.to_string());
+                let failed = bytes.is_err();
+                Some((bytes, (stream, failed)))
+            }
+            Some(Err(error)) => Some((Err(error.to_string()), (stream, true))),
+            None => None,
+        }
+    });
+
+    let body = Body::from_stream(
+        stream::once(async { Ok::<_, String>(Bytes::from_static(&[0x9f])) })
+            .chain(stream)
+            .chain(stream::once(async { Ok::<_, String>(Bytes::from_static(&[0xff])) })),
+    );
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_CBOR).body(body))
 }
 

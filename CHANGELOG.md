@@ -570,6 +570,14 @@
 
 ## 🛠 Maintenance
 
+- **B+Tree v3 persistence engine**:
+  - Consolidated the facade, v2 compatibility reader, v3 engine, migration, WAL, sorted index, and stress tests.
+  - Added checksummed 4 KiB Slotted Pages, WAL-before-data in-place updates, verified atomic full replacement, typed
+    v1/v2 startup migration, identity-bound sorted indexes, and corruption-reporting iterators.
+  - Reused mmap mappings, page validation, and decoded internal routes across cheap `BPlusTreeQuery` clones while
+    retaining request-local scratch buffers.
+  - Classified B+Tree read failures as repository errors instead of configuration errors; opening a corrupt existing
+    Library database no longer silently produces an empty Library.
 - **Shared `FieldWrapper` For Form Inputs**:
   - Extracted the repeated label / field-id / `tp__input-wrapper` scaffolding from the `Input`, `NumberInput`, and
     `TextArea` primitives into a single shared `FieldWrapper` component, reducing duplication while keeping the

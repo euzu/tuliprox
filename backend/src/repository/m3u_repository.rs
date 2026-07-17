@@ -384,7 +384,7 @@ async fn iter_raw_m3u_playlist<SortKey, ItemKey>(
 ) -> Option<Box<dyn Stream<Item=Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>>
 where
     ItemKey: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
-    SortKey: for<'de> Deserialize<'de> + Send + 'static,
+    SortKey: Ord + for<'de> Deserialize<'de> + Send + 'static,
 {
     // Two read locks: iter_lock is held by LockedReceiverStream for the consumer lifetime,
     // while bg_lock is moved into spawn_blocking to guard the on-disk reader.
@@ -419,8 +419,8 @@ where
             let item = match entry {
                 Ok((_, item)) => item,
                 Err(err) => {
-                    error!("M3U playlist reader error: {err}");
-                    continue;
+                    let _ = tx.blocking_send(Err(TuliproxError::RepositoryM3u(err.to_string())));
+                    break;
                 }
             };
             if cluster.is_none_or(|c| item.item_type.is_cluster(c))
@@ -489,7 +489,8 @@ pub async fn load_input_m3u_playlist(
         let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
         if let Ok(mut query) = BPlusTreeQuery::<Arc<str>, M3uPlaylistItem>::try_new(&m3u_path) {
             let mut group_cnt = 0;
-            for (_, ref item) in query.iter() {
+            for entry in query.iter() {
+                let (_, item) = entry.map_err(|error| TuliproxError::RepositoryM3u(error.to_string()))?;
                 let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
                 let key = (cluster, item.group.clone());
                 groups
@@ -504,7 +505,7 @@ pub async fn load_input_m3u_playlist(
                         }
                     })
                     .channels
-                    .push(PlaylistItem::from(item));
+                    .push(PlaylistItem::from(&item));
             }
         }
         Ok(groups.into_values().collect())

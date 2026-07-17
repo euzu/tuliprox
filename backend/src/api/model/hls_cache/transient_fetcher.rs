@@ -1118,7 +1118,7 @@ mod tests {
     }
 
     struct TestTransientCacheFixture {
-        _temp_dir: tempfile::TempDir,
+        temp_dir: tempfile::TempDir,
         segment_cache: Arc<HlsSegmentCache>,
         segment_repair: Arc<HlsSegmentRepairManager>,
         session: HlsSessionHandle,
@@ -1160,7 +1160,7 @@ mod tests {
                 ..Default::default()
             }));
             Self {
-                _temp_dir: temp_dir,
+                temp_dir,
                 segment_cache,
                 segment_repair,
                 session,
@@ -1677,7 +1677,7 @@ mod tests {
         assert_eq!(dropped_guards.load(Ordering::Relaxed), 1);
         assert!(fixture.segment_cache.metadata(&fixture.cache_key).await.expect("cache metadata reads").is_none());
         assert!(!fixture.segment_cache.has_active_temp_files().await);
-        assert_eq!(std::fs::read_dir(fixture._temp_dir.path()).expect("cache root reads").count(), 0);
+        assert_eq!(std::fs::read_dir(fixture.temp_dir.path()).expect("cache root reads").count(), 0);
         let session = fixture.session.read().await;
         let entry = session.transient.object_cache.get(&fixture.cache_key).expect("fetching cache entry remains");
         assert!(!matches!(entry.status, TransientObjectCacheStatus::Ready { .. }));

@@ -1,4 +1,4 @@
-use super::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy};
+use super::{BPlusTree, BPlusTreeQuery, BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy};
 use rand::{distr::Alphanumeric, prelude::*};
 use std::{
     io::Write,
@@ -220,7 +220,7 @@ fn stress_test_bplustree() {
     writeln!(log_file, "\n[Phase 6] Compaction...").unwrap();
     let mut tree_updater = BPlusTreeUpdate::<u32, String>::try_new(&filepath).unwrap();
     let start = Instant::now();
-    tree_updater.compact(&filepath).unwrap();
+    tree_updater.compact().unwrap();
     let duration = start.elapsed();
     writeln!(log_file, "Time: {duration:.2?}").unwrap();
     let size_phase6 = std::fs::metadata(&filepath).unwrap().len();
@@ -440,7 +440,8 @@ fn stress_test_bplustree() {
     let iter_start = Instant::now();
     let mut iterated_count = 0usize;
     let mut iterator = iter_query.iter();
-    for (_k, _v) in iterator.by_ref() {
+    for entry in iterator.by_ref() {
+        let (_k, _v) = entry.unwrap();
         iterated_count += 1;
         if iterated_count >= iterator_target {
             break;
@@ -510,7 +511,7 @@ fn stress_test_bplustree() {
 
     let final_size_before_compact = std::fs::metadata(&filepath).unwrap().len();
     let final_compact_start = Instant::now();
-    final_updater.compact(&filepath).unwrap();
+    final_updater.compact().unwrap();
     let final_compact_duration = final_compact_start.elapsed();
     let final_size_after_compact = std::fs::metadata(&filepath).unwrap().len();
     writeln!(
@@ -521,4 +522,211 @@ fn stress_test_bplustree() {
         (final_size_before_compact as i64 - final_size_after_compact as i64) as f64 / 1024.0 / 1024.0
     )
     .unwrap();
+}
+
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
+struct ComparisonValue {
+    sort_key: u32,
+    payload: String,
+}
+
+fn comparison_dataset(count: usize) -> Vec<(String, ComparisonValue)> {
+    const SIZES: [usize; 5] = [96, 640, 48, 160, 320];
+    (0..count)
+        .map(|index| {
+            let profile = index % SIZES.len();
+            (
+                format!("{profile}:{index:08}"),
+                ComparisonValue {
+                    sort_key: u32::try_from(count - index).unwrap_or(u32::MAX),
+                    payload: char::from(b'a' + u8::try_from(profile).unwrap_or(0)).to_string().repeat(SIZES[profile]),
+                },
+            )
+        })
+        .collect()
+}
+
+fn store_comparison_v2(path: &std::path::Path, entries: &[(String, ComparisonValue)]) -> std::io::Result<()> {
+    let mut tree = super::v2::BPlusTree::new();
+    for (key, value) in entries {
+        tree.insert(key.clone(), value.clone());
+    }
+    tree.store(path).map(|_| ())
+}
+
+fn store_comparison_v3(
+    path: &std::path::Path,
+    entries: &[(String, ComparisonValue)],
+) -> std::io::Result<()> {
+    let mut tree = super::v3::BPlusTree::new();
+    for (key, value) in entries {
+        tree.insert(key.clone(), value.clone());
+    }
+    tree.store_with_index(path, |value| value.sort_key).map(|_| ())
+}
+
+fn comparison_runs(
+    name: &str,
+    mut operation: impl FnMut() -> std::io::Result<()>,
+) -> std::io::Result<Vec<Duration>> {
+    let mut runs = Vec::with_capacity(5);
+    for _ in 0..5 {
+        let started = Instant::now();
+        operation()?;
+        runs.push(started.elapsed());
+    }
+    let individual = runs.iter().map(|duration| format!("{duration:?}")).collect::<Vec<_>>().join(", ");
+    println!("{name}: [{individual}], median={:?}", comparison_median(&runs));
+    Ok(runs)
+}
+
+fn comparison_median(runs: &[Duration]) -> Duration {
+    let mut sorted = runs.to_vec();
+    sorted.sort_unstable();
+    sorted[sorted.len() / 2]
+}
+
+#[allow(clippy::too_many_lines)]
+#[ignore = "explicit release-only v2/v3 persistence comparison"]
+#[test]
+fn bplustree_v2_v3_comparison() -> std::io::Result<()> {
+    use std::{hint::black_box, ops::Bound};
+
+    const ENTRY_COUNT: usize = 10_000;
+    const LOOKUP_COUNT: usize = 4_000;
+    const UPDATE_COUNT: usize = 1_000;
+
+    let directory = tempfile::tempdir()?;
+    let v2_path = directory.path().join("comparison-v2.db");
+    let v3_path = directory.path().join("comparison-v3.db");
+    let entries = comparison_dataset(ENTRY_COUNT);
+    store_comparison_v2(&v2_path, &entries)?;
+    store_comparison_v3(&v3_path, &entries)?;
+
+    println!("profiles: mapping=48B, M3U=96B, QoS=160B, user=320B, Xtream=640B; entries={ENTRY_COUNT}");
+    println!("initial sizes: v2={} v3={}", std::fs::metadata(&v2_path)?.len(), std::fs::metadata(&v3_path)?.len());
+
+    let lookup_keys = entries
+        .iter()
+        .step_by((ENTRY_COUNT / LOOKUP_COUNT).max(1))
+        .take(LOOKUP_COUNT)
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let v2_point = comparison_runs("v2 point lookup", || {
+        let mut query = super::v2::BPlusTreeQuery::<String, ComparisonValue>::try_new(&v2_path)?;
+        for key in &lookup_keys {
+            let value = query
+                .range_iter(Bound::Included(key), Bound::Included(key))
+                .next()
+                .transpose()
+                .map_err(super::v2::BPlusTreeError::to_io)?;
+            black_box(value);
+        }
+        Ok(())
+    })?;
+    let v3_point = comparison_runs("v3 point lookup", || {
+        let mut query = super::v3::BPlusTreeQuery::<String, ComparisonValue>::try_new(&v3_path)?;
+        for key in &lookup_keys {
+            black_box(query.query(key).map_err(super::BPlusTreeError::to_io)?);
+        }
+        Ok(())
+    })?;
+    let held_query = super::v3::BPlusTreeQuery::<String, ComparisonValue>::try_new(&v3_path)?;
+    comparison_runs("v3 shared snapshot clone + point lookup", || {
+        for key in &lookup_keys {
+            let mut query = held_query.try_clone()?;
+            black_box(query.query(key).map_err(super::BPlusTreeError::to_io)?);
+        }
+        Ok(())
+    })?;
+    drop(held_query);
+
+    let v2_scan = comparison_runs("v2 full scan", || {
+        let mut query = super::v2::BPlusTreeQuery::<String, ComparisonValue>::try_new(&v2_path)?;
+        let count = query
+            .range_iter(Bound::Unbounded, Bound::Unbounded)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(super::v2::BPlusTreeError::to_io)?
+            .len();
+        black_box(count);
+        Ok(())
+    })?;
+    let v3_scan = comparison_runs("v3 mmap full scan", || {
+        let mut query = super::v3::BPlusTreeQuery::<String, ComparisonValue>::try_new(&v3_path)?;
+        black_box(query.iter().collect::<std::io::Result<Vec<_>>>()?.len());
+        Ok(())
+    })?;
+
+    comparison_runs("v2 sorted full scan", || {
+        let mut query = super::v2::BPlusTreeQuery::<String, ComparisonValue>::try_new(&v2_path)?;
+        let mut values = query
+            .range_iter(Bound::Unbounded, Bound::Unbounded)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(super::v2::BPlusTreeError::to_io)?;
+        values.sort_unstable_by_key(|(_, value)| value.sort_key);
+        black_box(values.len());
+        Ok(())
+    })?;
+    let index_path = crate::repository::storage::get_file_path_for_db_index(&v3_path);
+    comparison_runs("v3 locator sorted full scan", || {
+        let query = super::v3::BPlusTreeQuery::<String, ComparisonValue>::try_new(&v3_path)?;
+        let iterator = super::sorted_index::v4::OwnedIterator::<String, ComparisonValue, u32>::open(query, &index_path)?;
+        black_box(iterator.collect::<std::io::Result<Vec<_>>>()?.len());
+        Ok(())
+    })?;
+
+    let smaller = entries
+        .iter()
+        .take(UPDATE_COUNT)
+        .map(|(key, value)| {
+            let mut value = value.clone();
+            value.payload.truncate(32);
+            (key.clone(), value)
+        })
+        .collect::<Vec<_>>();
+    let growing = entries
+        .iter()
+        .take(UPDATE_COUNT)
+        .map(|(key, value)| {
+            let mut value = value.clone();
+            value.payload.push_str(&"z".repeat(1_024));
+            (key.clone(), value)
+        })
+        .collect::<Vec<_>>();
+
+    for (label, updates) in [("equal/smaller", &smaller), ("growing", &growing)] {
+        let filename_label = label.replace('/', "-");
+        let mut rewritten = entries.clone();
+        for ((_, destination), (_, replacement)) in rewritten.iter_mut().take(UPDATE_COUNT).zip(updates) {
+            *destination = replacement.clone();
+        }
+        comparison_runs(&format!("v2 {label} full rewrite"), || {
+            store_comparison_v2(&directory.path().join(format!("v2-{filename_label}.db")), &rewritten)
+        })?;
+        comparison_runs(&format!("v3 {label} 1000-item batch"), || {
+            let path = directory.path().join(format!("v3-{filename_label}.db"));
+            std::fs::copy(&v3_path, &path)?;
+            let mut updater = super::v3::BPlusTreeUpdate::<String, ComparisonValue>::try_new(&path)?;
+            let references = updates.iter().map(|(key, value)| (key, value)).collect::<Vec<_>>();
+            updater.update_batch(&references).map_err(super::BPlusTreeError::to_io)?;
+            updater.commit()
+        })?;
+    }
+
+    let compact_path = directory.path().join("v3-compact.db");
+    std::fs::copy(&v3_path, &compact_path)?;
+    let mut updater = super::v3::BPlusTreeUpdate::<String, ComparisonValue>::try_new(&compact_path)?;
+    let growing_refs = growing.iter().map(|(key, value)| (key, value)).collect::<Vec<_>>();
+    updater.update_batch(&growing_refs).map_err(super::BPlusTreeError::to_io)?;
+    updater.commit()?;
+    let grown_size = std::fs::metadata(&compact_path)?.len();
+    let compact_runs = comparison_runs("v3 compaction", || updater.compact())?;
+    let compacted_size = std::fs::metadata(&compact_path)?.len();
+    println!("v3 growth/compaction: grown={grown_size}, compacted={compacted_size}, median={:?}", comparison_median(&compact_runs));
+
+    let point_regression = comparison_median(&v3_point).as_secs_f64() / comparison_median(&v2_point).as_secs_f64() - 1.0;
+    let scan_regression = comparison_median(&v3_scan).as_secs_f64() / comparison_median(&v2_scan).as_secs_f64() - 1.0;
+    println!("gate point-latency regression: {:+.2}%", point_regression * 100.0);
+    println!("gate full-scan duration regression: {:+.2}%", scan_regression * 100.0);
+    Ok(())
 }

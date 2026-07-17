@@ -3982,9 +3982,8 @@ mod tests {
             panic!("provider-only request lost the default idle-timeout guard");
         }
 
-        let error = match request.await.expect("request task should join") {
-            Ok(_) => panic!("hanging request must time out"),
-            Err(error) => error,
+        let Err(error) = request.await.expect("request task should join") else {
+            panic!("hanging request must time out");
         };
         assert_eq!(error.kind(), ErrorKind::TimedOut);
         server.abort();

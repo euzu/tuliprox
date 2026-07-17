@@ -660,14 +660,14 @@ pub async fn xtream_load_rewrite_playlist(
     XtreamPlaylistJsonIterator::new(cluster, app_state, target, category_id, user).await
 }
 
-pub async fn iter_raw_xtream_target_playlist(app_config: &AppConfig, target: &ConfigTarget, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item=XtreamPlaylistItem> + Send + Unpin>> {
+pub async fn iter_raw_xtream_target_playlist(app_config: &AppConfig, target: &ConfigTarget, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item=Result<XtreamPlaylistItem, TuliproxError>> + Send + Unpin>> {
     let config = app_config.config.load();
     let storage_path = xtream_get_storage_path(&config, target.name.as_str())?;
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
     iter_raw_xtream_playlist(app_config, &xtream_path).await
 }
 
-pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &ConfigInput, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item=XtreamPlaylistItem> + Send + Unpin>> {
+pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &ConfigInput, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item=Result<XtreamPlaylistItem, TuliproxError>> + Send + Unpin>> {
     let config = app_config.config.load();
     let storage_dir = &config.storage_dir;
     let storage_path = get_input_storage_path(&input.name, storage_dir).await.ok()?;
@@ -676,7 +676,7 @@ pub async fn iter_raw_xtream_input_playlist(app_config: &AppConfig, input: &Conf
     iter_raw_xtream_playlist(app_config, &xtream_path).await
 }
 
-async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) -> Option<Box<dyn Stream<Item=XtreamPlaylistItem> + Send + Unpin>> {
+async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) -> Option<Box<dyn Stream<Item=Result<XtreamPlaylistItem, TuliproxError>> + Send + Unpin>> {
     if !file_exists_async(xtream_path).await {
         return None;
     }
@@ -684,7 +684,7 @@ async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) ->
 
     let xtream_path = xtream_path.to_path_buf();
     let index_path = get_file_path_for_db_index(&xtream_path);
-    let (tx, rx) = mpsc::channel::<XtreamPlaylistItem>(256);
+    let (tx, rx) = mpsc::channel::<Result<XtreamPlaylistItem, TuliproxError>>(256);
 
     let xtream_path_for_log = xtream_path.clone();
     let index_path_for_log = index_path.clone();
@@ -702,7 +702,7 @@ async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) ->
                     xtream_path.display(),
                     index_path.display()
                 );
-                drop(tx);
+                let _ = tx.blocking_send(Err(err));
                 return;
             }
         };
@@ -711,11 +711,11 @@ async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) ->
             let item = match entry {
                 Ok((_, item)) => item,
                 Err(err) => {
-                    error!("Xtream playlist reader error: {err}");
-                    continue;
+                    let _ = tx.blocking_send(Err(TuliproxError::RepositoryXtream(err.to_string())));
+                    break;
                 }
             };
-            if tx.blocking_send(item).is_err() {
+            if tx.blocking_send(Ok(item)).is_err() {
                 break;
             }
         }
@@ -730,7 +730,7 @@ async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) ->
         }
     });
 
-    let stream: Box<dyn Stream<Item=XtreamPlaylistItem> + Send + Unpin> =
+    let stream: Box<dyn Stream<Item=Result<XtreamPlaylistItem, TuliproxError>> + Send + Unpin> =
         Box::new(ReceiverStream::new(rx));
     Some(stream)
 }
@@ -785,7 +785,8 @@ fn preserve_details_input_xtream_playlist_cluster_to_disk(
     };
 
     let mut updates: Vec<(u32, XtreamPlaylistItem)> = Vec::with_capacity(BATCH_SIZE);
-    for (_, old_item) in old_tree.iter() {
+    for entry in old_tree.iter() {
+        let (_, old_item) = entry.map_err(|error| TuliproxError::RepositoryXtream(error.to_string()))?;
         if let Some(old_props) = old_item.additional_properties.as_ref() {
             if old_props.has_details() {
                 if let Ok(Some(mut new_item)) = new_tree.query(&old_item.provider_id) {
@@ -969,7 +970,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
     let compact_path = tmp_xtream_path.clone();
     match tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
         if let Ok(mut tree_update) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&compact_path) {
-            tree_update.compact(&compact_path)?;
+            tree_update.compact()?;
         }
         Ok(())
     })
@@ -1076,15 +1077,20 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
                 let _guard = file_lock;
                 let mut entries = IndexMap::new();
                 if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                    for (_, doc) in query.iter() {
+                    for entry in query.iter() {
+                        let (_, doc) = entry?;
                         entries.insert(doc.provider_id, doc);
                     }
                 }
-                entries
+                Ok::<_, std::io::Error>(entries)
             })
                 .await
             {
-                Ok(entries) => Some(entries),
+                Ok(Ok(entries)) => Some(entries),
+                Ok(Err(err)) => {
+                    errors.push(format!("Failed to read stored xtream playlist entries for {cluster}: {err}"));
+                    None
+                }
                 Err(err) => {
                     errors.push(format!(
                         "Failed to load stored xtream playlist entries for {cluster}: {err}"
@@ -1477,7 +1483,8 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
                 let _guard = file_lock;
                 let mut items = Vec::new();
                 if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                    for (_, item) in query.iter() {
+                    for entry in query.iter() {
+                        let (_, item) = entry.map_err(|error| TuliproxError::RepositoryXtream(error.to_string()))?;
                         items.push(item);
                     }
                 }

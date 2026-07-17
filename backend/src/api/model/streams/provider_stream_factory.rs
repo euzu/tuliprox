@@ -1301,7 +1301,13 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
         let task_requests = Arc::clone(&requests);
-        let response_headers = headers.iter().map(|(name, value)| format!("{name}: {value}\r\n")).collect::<String>();
+        let response_headers = headers.iter().fold(String::new(), |mut response, (name, value)| {
+            response.push_str(name);
+            response.push_str(": ");
+            response.push_str(value);
+            response.push_str("\r\n");
+            response
+        });
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             task_requests.fetch_add(1, Ordering::SeqCst);

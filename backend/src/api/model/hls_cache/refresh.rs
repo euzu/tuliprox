@@ -2252,7 +2252,7 @@ mod tests {
         request.origin_entry = entry;
         request.now_ms = now_ms;
 
-        assert!(trigger_origin_refresh_sync(request).await);
+        assert!(Box::pin(trigger_origin_refresh_sync(request)).await);
 
         let lease = hls_proxy
             .access_leases()
@@ -2402,7 +2402,7 @@ mod tests {
         let mut request = test_origin_refresh_request(Arc::clone(&session));
         request.origin_entry = entry;
 
-        assert!(trigger_origin_refresh_sync(request).await);
+        assert!(Box::pin(trigger_origin_refresh_sync(request)).await);
 
         let session = session.read().await;
         assert!(!session.origin_request_headers.contains_key(header::COOKIE));
@@ -3063,7 +3063,7 @@ mod tests {
             LiveHlsOriginEntry::parse(&format!("{}/live/user/pass/12345.m3u8", server.base_url)).expect("entry url");
         let metrics = Arc::clone(request.segment_worker_pool.metrics());
 
-        assert!(trigger_origin_refresh_sync(request).await);
+        assert!(Box::pin(trigger_origin_refresh_sync(request)).await);
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.refresh_started, 1);

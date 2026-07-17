@@ -23,7 +23,7 @@ use tokio::task;
 create_bitset!(u8, M3uPlaylistIteratorFlags, MaskRedirectUrl, IncludeTypeInUrl, RewriteResource);
 
 pub struct M3uPlaylistIterator {
-    inner: LockedReceiverStream<(M3uPlaylistItem, bool)>,
+    inner: LockedReceiverStream<Result<(M3uPlaylistItem, bool), TuliproxError>>,
 }
 
 struct UrlRewriteContext<'a> {
@@ -252,7 +252,7 @@ impl M3uPlaylistIterator {
 
         let m3u_path = m3u_path.clone();
         let index_path = get_file_path_for_db_index(&m3u_path);
-        let (tx, rx) = mpsc::channel::<(M3uPlaylistItem, bool)>(256);
+        let (tx, rx) = mpsc::channel::<Result<(M3uPlaylistItem, bool), TuliproxError>>(256);
 
         let m3u_path_for_log = m3u_path.clone();
         let index_path_for_log = index_path.clone();
@@ -266,6 +266,7 @@ impl M3uPlaylistIterator {
                 Ok(reader) => reader,
                 Err(err) => {
                     error!("Failed to open M3U playlist DB {}: {err}", m3u_path.display());
+                    let _ = tx.blocking_send(Err(err));
                     return;
                 }
             };
@@ -275,8 +276,13 @@ impl M3uPlaylistIterator {
                 let item = match entry {
                     Ok((_, item)) => item,
                     Err(err) => {
-                        error!("Iterator error: {err}");
-                        continue;
+                        if let Some(item) = pending.take() {
+                            if tx.blocking_send(Ok((item, true))).is_err() {
+                                return;
+                            }
+                        }
+                        let _ = tx.blocking_send(Err(TuliproxError::RepositoryM3u(err.to_string())));
+                        return;
                     }
                 };
 
@@ -308,14 +314,14 @@ impl M3uPlaylistIterator {
                 );
 
                 if let Some(prev) = pending.replace(item) {
-                    if tx.blocking_send((prev, true)).is_err() {
+                    if tx.blocking_send(Ok((prev, true))).is_err() {
                         return;
                     }
                 }
             }
 
             if let Some(last) = pending {
-                let _ = tx.blocking_send((last, false));
+                let _ = tx.blocking_send(Ok((last, false)));
             }
         });
         tokio::spawn(async move {
@@ -335,7 +341,7 @@ impl M3uPlaylistIterator {
 }
 
 impl Stream for M3uPlaylistIterator {
-    type Item = (M3uPlaylistItem, bool);
+    type Item = Result<(M3uPlaylistItem, bool), TuliproxError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.inner).poll_next(cx)
@@ -363,19 +369,20 @@ impl M3uPlaylistM3uTextIterator {
 }
 
 impl Stream for M3uPlaylistM3uTextIterator {
-    type Item = String;
+    type Item = Result<String, String>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if !self.started {
             self.started = true;
-            return Poll::Ready(Some("#EXTM3U".to_string()));
+            return Poll::Ready(Some(Ok("#EXTM3U".to_string())));
         }
 
         match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Ready(Some((m3u_pli, _has_next))) => {
+            Poll::Ready(Some(Ok((m3u_pli, _has_next)))) => {
                 let target_options = self.target_options.as_ref();
-                Poll::Ready(Some(m3u_pli.to_m3u(target_options, true)))
+                Poll::Ready(Some(Ok(m3u_pli.to_m3u(target_options, true))))
             }
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error.to_string()))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
@@ -545,15 +552,28 @@ mod tests {
     // no item lines, which lets the assertion focus on the header line only.
     #[tokio::test]
     async fn m3u_text_iterator_emits_bare_extm3u_header_without_proxying_source_url_tvg() {
-        let (tx, rx) = mpsc::channel::<(M3uPlaylistItem, bool)>(1);
+        let (tx, rx) = mpsc::channel::<Result<(M3uPlaylistItem, bool), shared::error::TuliproxError>>(1);
         drop(tx);
         let inner_iter = M3uPlaylistIterator { inner: LockedReceiverStream::new_empty(rx) };
         let mut text_iter = M3uPlaylistM3uTextIterator { inner: inner_iter, started: false, target_options: None };
 
         let first = text_iter.next().await;
-        assert_eq!(first.as_deref(), Some("#EXTM3U"), "EXTM3U header must be bare, never contain url-tvg");
+        assert_eq!(first.as_ref().and_then(|line| line.as_deref().ok()), Some("#EXTM3U"), "EXTM3U header must be bare, never contain url-tvg");
 
         let second = text_iter.next().await;
         assert_eq!(second, None, "inner channel is closed, so no item lines should follow");
+    }
+
+    #[tokio::test]
+    async fn iterator_forwards_one_storage_error_then_ends() {
+        let (tx, rx) = mpsc::channel(2);
+        assert!(tx.send(Ok((m3u_item("http://example.test/live.ts"), true))).await.is_ok());
+        assert!(tx.send(Err(shared::error::TuliproxError::RepositoryM3u("corrupt page".into()))).await.is_ok());
+        drop(tx);
+
+        let mut iterator = M3uPlaylistIterator { inner: LockedReceiverStream::new_empty(rx) };
+        assert!(iterator.next().await.is_some_and(|entry| entry.is_ok()));
+        assert!(iterator.next().await.is_some_and(|entry| entry.is_err()));
+        assert!(iterator.next().await.is_none());
     }
 }

@@ -457,6 +457,16 @@ pub struct XtreamDiskPlaylistSource {
     series: Option<XtreamQueryHandle>,
 }
 
+fn stop_on_btree_error<T>(entry: std::io::Result<T>) -> Option<T> {
+    match entry {
+        Ok(entry) => Some(entry),
+        Err(error) => {
+            error!("B+Tree playlist iteration stopped after corruption or I/O failure: {error}");
+            None
+        }
+    }
+}
+
 impl XtreamDiskPlaylistSource {
     pub(crate) async fn new(app_config: &Arc<AppConfig>, storage_path: &Path) -> Self {
         let mut source = XtreamDiskPlaylistSource {
@@ -501,7 +511,11 @@ impl PlaylistSourceOps for XtreamDiskPlaylistSource {
 
     fn get_group_count(&mut self) -> usize {
         fn collect_groups<Q>(query: &mut Option<(BPlusTreeQuery<u32, XtreamPlaylistItem>, Q)>, groups: &mut HashSet<Arc<str>>) {
-            if let Some((query, _)) = query { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
+            if let Some((query, _)) = query {
+                for (_, item) in query.iter().map_while(stop_on_btree_error) {
+                    groups.insert(item.group.clone());
+                }
+            }
         }
         let mut groups = HashSet::new();
 
@@ -541,7 +555,7 @@ impl PlaylistSourceOps for XtreamDiskPlaylistSource {
                 return;
             }
             if let Some((query, _)) = query {
-                for (_, item) in query.iter() {
+                for (_, item) in query.iter().map_while(stop_on_btree_error) {
                     groups.insert((cluster, Arc::clone(&item.group)));
                 }
             }
@@ -561,16 +575,16 @@ impl PlaylistSourceOps for XtreamDiskPlaylistSource {
     }
 
     fn into_items(&mut self) -> Box<dyn Iterator<Item=PlaylistItem> + Send + '_> {
-        let live = self.live.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
-        let vod = self.vod.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
-        let series = self.series.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| PlaylistItem::from(&item));
+        let live = self.live.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map_while(stop_on_btree_error).map(|(_, item)| PlaylistItem::from(&item));
+        let vod = self.vod.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map_while(stop_on_btree_error).map(|(_, item)| PlaylistItem::from(&item));
+        let series = self.series.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map_while(stop_on_btree_error).map(|(_, item)| PlaylistItem::from(&item));
         Box::new(live.chain(vod).chain(series))
     }
 
     fn items<'a>(&'a mut self) -> Box<dyn Iterator<Item=Cow<'a, PlaylistItem>> + Send + 'a> {
-        let live = self.live.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
-        let vod = self.vod.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
-        let series = self.series.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
+        let live = self.live.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map_while(stop_on_btree_error).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
+        let vod = self.vod.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map_while(stop_on_btree_error).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
+        let series = self.series.as_mut().into_iter().flat_map(|(q, _)| q.iter()).map_while(stop_on_btree_error).map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
         Box::new(live.chain(vod).chain(series))
     }
 
@@ -602,7 +616,7 @@ impl PlaylistSourceOps for XtreamDiskPlaylistSource {
 
     fn get_missing_vod_info_count(&mut self) -> usize {
         self.vod.as_mut().map_or(0, |(query, _)| {
-            query.iter().filter(|(_, item)| {
+            query.iter().map_while(stop_on_btree_error).filter(|(_, item)| {
                 item.item_type == PlaylistItemType::Video && item.provider_id > 0 && !item.has_details()
             }).count()
         })
@@ -610,7 +624,7 @@ impl PlaylistSourceOps for XtreamDiskPlaylistSource {
 
     fn get_missing_series_info_count(&mut self) -> usize {
         self.series.as_mut().map_or(0, |(query, _)| {
-            query.iter().filter(|(_, item)| {
+            query.iter().map_while(stop_on_btree_error).filter(|(_, item)| {
                 item.item_type == PlaylistItemType::SeriesInfo && item.provider_id > 0 && !item.has_details()
             }).count()
         })
@@ -641,13 +655,13 @@ impl PlaylistSourceOps for XtreamDiskPlaylistSource {
         let mut groups_map: IndexMap<(XtreamCluster, u32), PlaylistGroup> = IndexMap::new();
         let mut iters: Vec<(XtreamCluster, Box<dyn Iterator<Item=XtreamPlaylistItem> + Send>)> = vec![];
         if let Some((q, _)) = self.live.as_mut() {
-            iters.push((XtreamCluster::Live, Box::new(q.iter().map(|(_, item)| item))));
+            iters.push((XtreamCluster::Live, Box::new(q.iter().map_while(stop_on_btree_error).map(|(_, item)| item))));
         }
         if let Some((q, _)) = self.vod.as_mut() {
-            iters.push((XtreamCluster::Video, Box::new(q.iter().map(|(_, item)| item))));
+            iters.push((XtreamCluster::Video, Box::new(q.iter().map_while(stop_on_btree_error).map(|(_, item)| item))));
         }
         if let Some((q, _)) = self.series.as_mut() {
-            iters.push((XtreamCluster::Series, Box::new(q.iter().map(|(_, item)| item))));
+            iters.push((XtreamCluster::Series, Box::new(q.iter().map_while(stop_on_btree_error).map(|(_, item)| item))));
         }
 
         for (cluster, iter) in iters {
@@ -748,7 +762,11 @@ macro_rules! impl_single_file_disk_source {
 
             fn get_group_count(&mut self) -> usize {
                 let mut groups = HashSet::new();
-                if let Some(query) = self.playlist.as_mut() { for (_, item) in query.iter() { groups.insert(item.group.clone()); } }
+                if let Some(query) = self.playlist.as_mut() {
+                    for (_, item) in query.iter().map_while(stop_on_btree_error) {
+                        groups.insert(item.group.clone());
+                    }
+                }
                 groups.len()
             }
 
@@ -756,6 +774,7 @@ macro_rules! impl_single_file_disk_source {
                 self.playlist.as_mut().map_or(0, |query| {
                     query
                         .iter()
+                        .map_while(stop_on_btree_error)
                         .filter(|(_, item)| !skip_set.contains(&cluster_from_item_type(item.item_type)))
                         .count()
                 })
@@ -764,7 +783,7 @@ macro_rules! impl_single_file_disk_source {
             fn get_group_count_excluding_clusters(&mut self, skip_set: &HashSet<XtreamCluster>) -> usize {
                 let mut groups = HashSet::<(XtreamCluster, Arc<str>)>::new();
                 if let Some(query) = self.playlist.as_mut() {
-                    for (_, item) in query.iter() {
+                    for (_, item) in query.iter().map_while(stop_on_btree_error) {
                         let cluster = cluster_from_item_type(item.item_type);
                         if !skip_set.contains(&cluster) {
                             groups.insert((cluster, Arc::clone(&item.group)));
@@ -778,7 +797,7 @@ macro_rules! impl_single_file_disk_source {
 
             fn into_items(&mut self) -> Box<dyn Iterator<Item=PlaylistItem> + Send + '_> {
                 if let Some(q) = self.playlist.as_mut() {
-                    Box::new(q.iter().map(|(_, item)| PlaylistItem::from(&item)))
+                    Box::new(q.iter().map_while(stop_on_btree_error).map(|(_, item)| PlaylistItem::from(&item)))
                 } else {
                     Box::new(std::iter::empty())
                 }
@@ -786,7 +805,10 @@ macro_rules! impl_single_file_disk_source {
 
             fn items<'a>(&'a mut self) -> Box<dyn Iterator<Item=Cow<'a, PlaylistItem>> + Send + 'a> {
                 if let Some(pl) = self.playlist.as_mut() {
-                    let iter = pl.iter().map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
+                    let iter = pl
+                        .iter()
+                        .map_while(stop_on_btree_error)
+                        .map(|(_, item)| Cow::Owned(PlaylistItem::from(&item)));
                     Box::new(iter)
                 } else {
                     Box::new(std::iter::empty())
@@ -815,7 +837,7 @@ macro_rules! impl_single_file_disk_source {
                 // Build groups on-the-fly using disk iterator (streams one leaf at a time)
                 if let Some(q) = self.playlist.as_mut() {
                     let mut groups_map: IndexMap<(XtreamCluster, Arc<str>), PlaylistGroup> = IndexMap::new();
-                    for (_, item) in q.iter() {
+                    for (_, item) in q.iter().map_while(stop_on_btree_error) {
                         let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
                         let normalized_group = shared::utils::deunicode_string(&item.group).to_lowercase().intern();
                         let key = (cluster, normalized_group);
@@ -1066,7 +1088,7 @@ impl PlaylistSourceOps for MemoryPlaylistSource {
 
 async fn load_bplustree_query<K, P>(app_config: &Arc<AppConfig>, file_path: &Path) -> Option<(BPlusTreeQuery<K, P>, FileReadGuard)>
 where
-    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
+    K: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
     P: Serialize + for<'de> Deserialize<'de> + Clone + Send + 'static,
 {
     if file_path.exists() {
@@ -1238,7 +1260,7 @@ mod tests {
             result,
             Err(TuliproxError::RepositoryPlaylist(message))
                 if message.contains("Failed to clone live disk playlist query")
-                    && message.contains("No data source available to clone")
+                    && message.contains("mapped query without a path cannot be cloned")
         ));
     }
 
