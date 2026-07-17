@@ -12,6 +12,7 @@ use crate::{
             is_session_based_playback, is_stream_share_enabled, local_stream_response, redirect, redirect_response,
             resource_response, separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
             try_option_bad_request, try_result_bad_request, try_unwrap_body, RedirectParams,
+            resolve_initial_stalker_playback_url,
         },
         endpoints::{
             hls_api::{
@@ -272,7 +273,7 @@ async fn xtream_player_api_stream(
     }
 
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let Ok(pli) = xtream_get_item_for_stream_id(req_virtual_id, app_state, &target, None).await else {
+    let Ok(mut pli) = xtream_get_item_for_stream_id(req_virtual_id, app_state, &target, None).await else {
         error!("Failed to read xtream item for stream id {req_virtual_id}");
         if is_hls_manifest_request {
             return hls_custom_video_manifest_response(
@@ -385,14 +386,31 @@ async fn xtream_player_api_stream(
         .into_response();
     }
 
-    let resolved_stream_ext = resolve_xtream_playback_extension(stream_ext, &pli);
-    let stream_ext = resolved_stream_ext.as_deref();
-
     let (cluster, item_type) = if stream_req.context == ApiStreamContext::Timeshift {
         (XtreamCluster::Video, PlaylistItemType::Catchup)
     } else {
         (pli.xtream_cluster, pli.item_type)
     };
+
+    pli.url = match resolve_initial_stalker_playback_url(
+        app_state,
+        &input,
+        pli.provider_id,
+        pli.xtream_cluster,
+        item_type,
+        &pli.url,
+    )
+    .await
+    {
+        Ok(url) => url,
+        Err(err) => {
+            error!("Failed to resolve initial Stalker playback URL: {}", sanitize_sensitive_info(&err.to_string()));
+            return axum::http::StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+
+    let resolved_stream_ext = resolve_xtream_playback_extension(stream_ext, &pli);
+    let stream_ext = resolved_stream_ext.as_deref();
 
     debug_if_enabled!(
         "ID chain for xtream endpoint: request_stream_id={} -> action_stream_id={action_stream_id} -> req_virtual_id={req_virtual_id} -> virtual_id={virtual_id}",
@@ -704,7 +722,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
         }
         let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
         let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-        let pli = try_result_bad_request!(
+        let mut pli = try_result_bad_request!(
             xtream_get_item_for_stream_id(req_virtual_id, app_state, &target, None).await,
             true,
             format!("Failed to read xtream item for stream id {req_virtual_id}")
@@ -740,6 +758,28 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
             .await
             .into_response();
         }
+
+        let resolution_item_type = if stream_req.context == ApiStreamContext::Timeshift {
+            PlaylistItemType::Catchup
+        } else {
+            pli.item_type
+        };
+        pli.url = match resolve_initial_stalker_playback_url(
+            app_state,
+            &input,
+            pli.provider_id,
+            pli.xtream_cluster,
+            resolution_item_type,
+            &pli.url,
+        )
+        .await
+        {
+            Ok(url) => url,
+            Err(err) => {
+                error!("Failed to resolve initial Stalker playback URL: {}", sanitize_sensitive_info(&err.to_string()));
+                return axum::http::StatusCode::BAD_GATEWAY.into_response();
+            }
+        };
 
         let requested_extension = resolve_xtream_playback_extension(stream_ext, &pli);
 

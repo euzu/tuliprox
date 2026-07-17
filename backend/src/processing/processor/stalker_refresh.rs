@@ -10,9 +10,8 @@ use shared::model::stalker_item::StalkerPlaylistItem;
 use crate::model::{AppConfig, ConfigInput, ConfigInputFlags};
 use crate::processing::parser::stalker as parser;
 use crate::repository::stalker_generation_repository::{
-    cleanup_obsolete_generations, clear_checkpoint, generation_data_path, load_active_manifest,
-    load_checkpoint, publish_cluster, save_checkpoint, ClusterFiles, PublishedCluster, SeriesFiles,
-    StalkerCheckpoint, StalkerGenerationData, StalkerRefreshPhase,
+    cleanup_obsolete_generations, clear_checkpoint, generation_data_path, load_checkpoint,
+    publish_selection, save_checkpoint, StalkerCheckpoint, StalkerGenerationData, StalkerRefreshPhase,
 };
 use crate::repository::stalker_repository::{
     load_stalker_items_after, prepare_stalker_episode_series_at, promote_stalker_file,
@@ -30,7 +29,6 @@ const SKIPPED_SAMPLE_LIMIT: usize = 32;
 
 pub enum StalkerRefreshLimit {
     Deadline(Instant),
-    #[cfg(test)]
     Units { remaining: usize },
     Unlimited,
 }
@@ -38,6 +36,7 @@ pub enum StalkerRefreshLimit {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StalkerRefreshMode {
     ServerSlice,
+    Parallel,
     Complete,
 }
 
@@ -47,6 +46,7 @@ impl StalkerRefreshMode {
             Self::ServerSlice => {
                 StalkerRefreshBudget::deadline(Instant::now() + std::time::Duration::from_mins(45))
             }
+            Self::Parallel => StalkerRefreshBudget::units(8),
             Self::Complete => StalkerRefreshBudget::unlimited(),
         }
     }
@@ -61,12 +61,9 @@ impl StalkerRefreshBudget {
 
     pub fn unlimited() -> Self { Self { limit: StalkerRefreshLimit::Unlimited } }
 
-    #[cfg(test)]
     fn units(remaining: usize) -> Self { Self { limit: StalkerRefreshLimit::Units { remaining } } }
 
     fn completed_unit(&mut self) {
-        let _ = &mut self.limit;
-        #[cfg(test)]
         if let StalkerRefreshLimit::Units { remaining } = &mut self.limit {
             *remaining = remaining.saturating_sub(1);
         }
@@ -75,7 +72,6 @@ impl StalkerRefreshBudget {
     fn should_yield(&self) -> bool {
         match self.limit {
             StalkerRefreshLimit::Deadline(deadline) => Instant::now() >= deadline,
-            #[cfg(test)]
             StalkerRefreshLimit::Units { remaining } => remaining == 0,
             StalkerRefreshLimit::Unlimited => false,
         }
@@ -171,6 +167,44 @@ fn generation_id() -> u64 {
         .map_or(0, |duration| u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX))
 }
 
+async fn load_or_start_checkpoint(
+    storage_path: &Path,
+    identity_fingerprint: u64,
+    selection: StalkerClusterSelection,
+) -> Result<StalkerCheckpoint, TuliproxError> {
+    if let Some(state) = load_checkpoint(storage_path, identity_fingerprint).await? {
+        if state.selection_mask == selection.mask() {
+            return Ok(state);
+        }
+    }
+
+    let mut state = StalkerCheckpoint::new(
+        identity_fingerprint,
+        generation_id(),
+        selection.mask(),
+        chrono::Utc::now().timestamp(),
+    );
+    state.phase = first_phase(selection);
+    save_checkpoint(storage_path, &state).await?;
+    Ok(state)
+}
+
+async fn finish_completed_refresh(
+    storage_path: &Path,
+    identity_fingerprint: u64,
+    checkpoint: &StalkerCheckpoint,
+) -> Result<(), TuliproxError> {
+    let manifest = publish_selection(
+        storage_path,
+        identity_fingerprint,
+        checkpoint.generation,
+        checkpoint.selection_mask,
+    )
+    .await?;
+    clear_checkpoint(storage_path).await?;
+    cleanup_obsolete_generations(storage_path, &manifest).await
+}
+
 fn category_map(categories: Vec<StalkerCategory>) -> HashMap<u32, StalkerCategory> {
     categories
         .into_iter()
@@ -261,39 +295,12 @@ pub async fn advance_stalker_refresh(
     identity_fingerprint: u64,
     mut budget: StalkerRefreshBudget,
 ) -> Result<StalkerRefreshOutcome, TuliproxError> {
-    let mut checkpoint = match load_checkpoint(storage_path, identity_fingerprint).await? {
-        Some(state) if state.selection_mask == selection.mask() => {
-            if state.phase == StalkerRefreshPhase::Terminal {
-                return Ok(StalkerRefreshOutcome::Terminal(TuliproxError::ProviderConnection(
-                    "Stalker refresh reached a terminal state".to_string(),
-                )));
-            }
-            if state.phase == StalkerRefreshPhase::Complete {
-                let mut state = StalkerCheckpoint::new(
-                    identity_fingerprint,
-                    generation_id(),
-                    selection.mask(),
-                    chrono::Utc::now().timestamp(),
-                );
-                state.phase = first_phase(selection);
-                save_checkpoint(storage_path, &state).await?;
-                state
-            } else {
-                state
-            }
-        }
-        _ => {
-            let mut state = StalkerCheckpoint::new(
-                identity_fingerprint,
-                generation_id(),
-                selection.mask(),
-                chrono::Utc::now().timestamp(),
-            );
-            state.phase = first_phase(selection);
-            save_checkpoint(storage_path, &state).await?;
-            state
-        }
-    };
+    let mut checkpoint = load_or_start_checkpoint(storage_path, identity_fingerprint, selection).await?;
+    if checkpoint.phase == StalkerRefreshPhase::Terminal {
+        return Ok(StalkerRefreshOutcome::Terminal(TuliproxError::ProviderConnection(
+            "Stalker refresh reached a terminal state".to_string(),
+        )));
+    }
     let added_at = checkpoint.started_at;
     let mut live_categories = None;
     let mut vod_categories = None;
@@ -328,12 +335,6 @@ pub async fn advance_stalker_refresh(
                         let items = map_items(&raw, categories, StalkerStreamKind::Live, added_at);
                         let path = generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::Live);
                         snapshot_stalker_items_at(app_config, path.clone(), &items).await?;
-                        publish_cluster(
-                            storage_path,
-                            identity_fingerprint,
-                            PublishedCluster::Live(ClusterFiles { generation: checkpoint.generation, data: path }),
-                        )
-                        .await?;
                         checkpoint.processed = checkpoint.processed.saturating_add(items.len() as u64);
                         checkpoint.phase = next_phase_after_live(selection);
                         checkpoint.retry_count = 0;
@@ -376,12 +377,6 @@ pub async fn advance_stalker_refresh(
                     checkpoint.page_signature = Some(signature);
                     StalkerRefreshPhase::Live { page: next_page }
                 } else {
-                    publish_cluster(
-                        storage_path,
-                        identity_fingerprint,
-                        PublishedCluster::Live(ClusterFiles { generation: checkpoint.generation, data: path }),
-                    )
-                    .await?;
                     checkpoint.page_signature = None;
                     next_phase_after_live(selection)
                 };
@@ -418,12 +413,6 @@ pub async fn advance_stalker_refresh(
                     checkpoint.page_signature = Some(signature);
                     StalkerRefreshPhase::Vod { page: next_page }
                 } else {
-                    publish_cluster(
-                        storage_path,
-                        identity_fingerprint,
-                        PublishedCluster::Vod(ClusterFiles { generation: checkpoint.generation, data: path }),
-                    )
-                    .await?;
                     checkpoint.page_signature = None;
                     next_phase_after_vod(selection)
                 };
@@ -489,17 +478,6 @@ pub async fn advance_stalker_refresh(
                 let roots_path = generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::SeriesRoots);
                 let mut roots = load_stalker_items_after(app_config, &roots_path, provider_id, 1).await?;
                 let Some(root) = roots.pop() else {
-                    let episodes = generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::SeriesEpisodes);
-                    publish_cluster(
-                        storage_path,
-                        identity_fingerprint,
-                        PublishedCluster::Series(SeriesFiles {
-                            generation: checkpoint.generation,
-                            roots: roots_path,
-                            episodes,
-                        }),
-                    )
-                    .await?;
                     checkpoint.phase = next_phase_after_series(selection);
                     checkpoint.retry_count = 0;
                     save_checkpoint(storage_path, &checkpoint).await?;
@@ -568,19 +546,11 @@ pub async fn advance_stalker_refresh(
                     return yield_after_error(storage_path, checkpoint, provider_error(&err)).await;
                 }
                 promote_stalker_file(&app_config, &attempt_path, &path).await?;
-                publish_cluster(
-                    storage_path,
-                    identity_fingerprint,
-                    PublishedCluster::Epg(ClusterFiles { generation: checkpoint.generation, data: path }),
-                )
-                .await?;
                 checkpoint.phase = StalkerRefreshPhase::Complete;
                 checkpoint.retry_count = 0;
             }
             StalkerRefreshPhase::Complete => {
-                clear_checkpoint(storage_path).await?;
-                let manifest = load_active_manifest(storage_path, identity_fingerprint).await?;
-                cleanup_obsolete_generations(storage_path, &manifest).await?;
+                finish_completed_refresh(storage_path, identity_fingerprint, &checkpoint).await?;
                 return Ok(StalkerRefreshOutcome::Complete);
             }
             StalkerRefreshPhase::Terminal => {
@@ -599,11 +569,54 @@ pub async fn advance_stalker_refresh(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn complete_checkpoint_is_resumed_without_new_generation() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let selection = StalkerClusterSelection { live: true, vod: true, series: false, epg: false };
+        let mut checkpoint = StalkerCheckpoint::new(17, 23, selection.mask(), 123);
+        checkpoint.phase = StalkerRefreshPhase::Complete;
+        save_checkpoint(temp.path(), &checkpoint).await?;
+
+        let resumed = load_or_start_checkpoint(temp.path(), 17, selection).await?;
+
+        assert_eq!(resumed.generation, 23);
+        assert_eq!(resumed.phase, StalkerRefreshPhase::Complete);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn complete_publication_is_idempotent_after_restart() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let mut checkpoint = StalkerCheckpoint::new(17, 23, 0b0011, 123);
+        checkpoint.phase = StalkerRefreshPhase::Complete;
+        save_checkpoint(temp.path(), &checkpoint).await?;
+
+        finish_completed_refresh(temp.path(), 17, &checkpoint).await?;
+        save_checkpoint(temp.path(), &checkpoint).await?;
+        finish_completed_refresh(temp.path(), 17, &checkpoint).await?;
+
+        let manifest = crate::repository::stalker_generation_repository::load_active_manifest(temp.path(), 17).await?;
+        assert_eq!(manifest.live.as_ref().map(|files| files.generation), Some(23));
+        assert_eq!(manifest.vod.as_ref().map(|files| files.generation), Some(23));
+        assert!(load_checkpoint(temp.path(), 17).await?.is_none());
+        Ok(())
+    }
+
     #[test]
     fn unit_budget_yields_after_completed_unit() {
         let mut budget = StalkerRefreshBudget::units(1);
         assert!(!budget.should_yield());
         budget.completed_unit();
+        assert!(budget.should_yield());
+    }
+
+    #[test]
+    fn parallel_mode_uses_a_bounded_work_unit_budget() {
+        let mut budget = StalkerRefreshMode::Parallel.budget();
+        assert!(!budget.should_yield());
+        for _ in 0..64 {
+            budget.completed_unit();
+        }
         assert!(budget.should_yield());
     }
 

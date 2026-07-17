@@ -4,7 +4,7 @@ use crate::{
         number_input::NumberInput, select::Select, selection_parse_first, DropDownOption, DropDownSelection,
     },
     config_field, config_field_child, config_field_optional, edit_field_text_option, generate_form_reducer,
-    i18n::use_translation,
+    i18n::{use_translation, YewI18n},
 };
 use shared::model::{
     stalker::StalkerActionSizeCapDto, StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference,
@@ -58,6 +58,44 @@ fn size_cap_field(
     }
 }
 
+pub(super) fn stalker_options_fields(
+    state: &UseStateHandle<StalkerInputConfigDto>,
+    allow_write: bool,
+    translate: &YewI18n,
+) -> Html {
+    let config: &StalkerInputConfigDto = state;
+    let caps = state.size_caps.clone().unwrap_or_default();
+
+    if !allow_write {
+        return html! {
+            <>
+                { config_field!(caps, translate.t("LABEL.STALKER_CREATE_LINK_KB"), create_link_kb) }
+                { config_field!(caps, translate.t("LABEL.STALKER_ORDERED_LIST_MB"), ordered_list_mb) }
+                { config_field!(caps, translate.t("LABEL.STALKER_GET_EPG_MB"), get_epg_mb) }
+                { config_field_optional!(config, translate.t("LABEL.STALKER_CATALOG_PAGE_LIMIT"), catalog_max_pages) }
+            </>
+        };
+    }
+
+    let page_limit_state = state.clone();
+    html! {
+        <>
+            { size_cap_field(state, translate.t("LABEL.STALKER_CREATE_LINK_KB"), "stalker_create_link_kb", "STALKER_ACTION_SIZE_CAP.CREATE_LINK_KB", caps.create_link_kb, |caps, value| caps.create_link_kb = value) }
+            { size_cap_field(state, translate.t("LABEL.STALKER_ORDERED_LIST_MB"), "stalker_ordered_list_mb", "STALKER_ACTION_SIZE_CAP.ORDERED_LIST_MB", caps.ordered_list_mb, |caps, value| caps.ordered_list_mb = value) }
+            { size_cap_field(state, translate.t("LABEL.STALKER_GET_EPG_MB"), "stalker_get_epg_mb", "STALKER_ACTION_SIZE_CAP.GET_EPG_MB", caps.get_epg_mb, |caps, value| caps.get_epg_mb = value) }
+            <div class="tp__form-field tp__form-field__number">
+                <NumberInput label={translate.t("LABEL.STALKER_CATALOG_PAGE_LIMIT")}
+                    name="stalker_catalog_page_limit" value={state.catalog_max_pages.map(i64::from)}
+                    on_change={Callback::from(move |value| {
+                        let mut config = (*page_limit_state).clone();
+                        config.catalog_max_pages = parsed_size_cap(value).filter(|value| *value > 0);
+                        page_limit_state.set(config);
+                    })} />
+            </div>
+        </>
+    }
+}
+
 #[derive(Properties, Clone)]
 pub(super) struct StalkerInputFormProps {
     pub state: UseReducerHandle<ConfigInputFormState>,
@@ -74,7 +112,6 @@ pub(super) fn StalkerInputForm(props: &StalkerInputFormProps) -> Html {
     let translate = use_translation();
     let config = props.config.clone();
     let config_value: &StalkerInputConfigDto = &config;
-    let caps = config.size_caps.clone().unwrap_or_default();
     let auth_options = use_memo(config.auth_mode, |selected| enum_options::<StalkerAuthMode>(*selected));
     let preset_options = use_memo(config.mag_preset, |selected| enum_options::<StalkerMagPreset>(*selected));
     let endpoint_options =
@@ -86,11 +123,6 @@ pub(super) fn StalkerInputForm(props: &StalkerInputFormProps) -> Html {
                 { config_field!(config_value, translate.t("LABEL.STALKER_AUTH_MODE"), auth_mode) }
                 { config_field!(config_value, translate.t("LABEL.STALKER_MAG_PRESET"), mag_preset) }
                 { config_field!(config_value, translate.t("LABEL.STALKER_ENDPOINT_PREFERENCE"), endpoint_preference) }
-                <div class="tp__config-view__cols-2">
-                    { config_field!(caps, translate.t("LABEL.STALKER_CREATE_LINK_KB"), create_link_kb) }
-                    { config_field!(caps, translate.t("LABEL.STALKER_ORDERED_LIST_MB"), ordered_list_mb) }
-                </div>
-                { config_field!(caps, translate.t("LABEL.STALKER_GET_EPG_MB"), get_epg_mb) }
             </>
         }
     } else {
@@ -99,11 +131,6 @@ pub(super) fn StalkerInputForm(props: &StalkerInputFormProps) -> Html {
                 { select_field(&config, translate.t("LABEL.STALKER_AUTH_MODE"), "stalker_auth_mode", "STALKER_INPUT_CONFIG.AUTH_MODE", auth_options, |config, value| config.auth_mode = value) }
                 { select_field(&config, translate.t("LABEL.STALKER_MAG_PRESET"), "stalker_mag_preset", "STALKER_INPUT_CONFIG.MAG_PRESET", preset_options, |config, value| config.mag_preset = value) }
                 { select_field(&config, translate.t("LABEL.STALKER_ENDPOINT_PREFERENCE"), "stalker_endpoint_preference", "STALKER_INPUT_CONFIG.ENDPOINT_PREFERENCE", endpoint_options, |config, value| config.endpoint_preference = value) }
-                <div class="tp__config-view__cols-2">
-                    { size_cap_field(&config, translate.t("LABEL.STALKER_CREATE_LINK_KB"), "stalker_create_link_kb", "STALKER_ACTION_SIZE_CAP.CREATE_LINK_KB", caps.create_link_kb, |caps, value| caps.create_link_kb = value) }
-                    { size_cap_field(&config, translate.t("LABEL.STALKER_ORDERED_LIST_MB"), "stalker_ordered_list_mb", "STALKER_ACTION_SIZE_CAP.ORDERED_LIST_MB", caps.ordered_list_mb, |caps, value| caps.ordered_list_mb = value) }
-                </div>
-                { size_cap_field(&config, translate.t("LABEL.STALKER_GET_EPG_MB"), "stalker_get_epg_mb", "STALKER_ACTION_SIZE_CAP.GET_EPG_MB", caps.get_epg_mb, |caps, value| caps.get_epg_mb = value) }
             </>
         }
     };

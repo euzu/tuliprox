@@ -93,13 +93,6 @@ impl StalkerCheckpoint {
     }
 }
 
-pub enum PublishedCluster {
-    Live(ClusterFiles),
-    Vod(ClusterFiles),
-    Series(SeriesFiles),
-    Epg(ClusterFiles),
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StalkerGenerationData {
     Live,
@@ -201,20 +194,41 @@ pub async fn load_active_manifest(
     Ok(empty)
 }
 
-pub async fn publish_cluster(
+pub async fn publish_selection(
     storage_path: &Path,
     identity_fingerprint: u64,
-    cluster: PublishedCluster,
-) -> Result<(), TuliproxError> {
+    generation: u64,
+    selection_mask: u8,
+) -> Result<StalkerActiveManifest, TuliproxError> {
     let _guard = MANIFEST_WRITE_LOCK.lock().await;
     let mut manifest = load_active_manifest(storage_path, identity_fingerprint).await?;
-    match cluster {
-        PublishedCluster::Live(files) => manifest.live = Some(files),
-        PublishedCluster::Vod(files) => manifest.vod = Some(files),
-        PublishedCluster::Series(files) => manifest.series = Some(files),
-        PublishedCluster::Epg(files) => manifest.epg = Some(files),
+    if selection_mask & 0b0001 != 0 {
+        manifest.live = Some(ClusterFiles {
+            generation,
+            data: generation_data_path(storage_path, generation, StalkerGenerationData::Live),
+        });
     }
-    save_active_manifest(storage_path, &manifest).await
+    if selection_mask & 0b0010 != 0 {
+        manifest.vod = Some(ClusterFiles {
+            generation,
+            data: generation_data_path(storage_path, generation, StalkerGenerationData::Vod),
+        });
+    }
+    if selection_mask & 0b0100 != 0 {
+        manifest.series = Some(SeriesFiles {
+            generation,
+            roots: generation_data_path(storage_path, generation, StalkerGenerationData::SeriesRoots),
+            episodes: generation_data_path(storage_path, generation, StalkerGenerationData::SeriesEpisodes),
+        });
+    }
+    if selection_mask & 0b1000 != 0 {
+        manifest.epg = Some(ClusterFiles {
+            generation,
+            data: generation_data_path(storage_path, generation, StalkerGenerationData::Epg),
+        });
+    }
+    save_active_manifest(storage_path, &manifest).await?;
+    Ok(manifest)
 }
 
 pub async fn save_checkpoint(
@@ -339,12 +353,7 @@ mod tests {
         });
         save_active_manifest(temp.path(), &manifest).await?;
 
-        publish_cluster(
-            temp.path(),
-            17,
-            PublishedCluster::Live(ClusterFiles { generation: 2, data: "live-2.db".into() }),
-        )
-        .await?;
+        publish_selection(temp.path(), 17, 2, 0b0001).await?;
 
         let active = load_active_manifest(temp.path(), 17).await?;
         assert_eq!(active.live.as_ref().map(|files| files.generation), Some(2));
@@ -353,25 +362,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_cluster_publications_preserve_both_updates() -> Result<(), Box<dyn std::error::Error>> {
+    async fn stalker_selection_publish_replaces_selected_entries_atomically() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
-        let live = publish_cluster(
-            temp.path(),
-            17,
-            PublishedCluster::Live(ClusterFiles { generation: 1, data: "live.db".into() }),
-        );
-        let vod = publish_cluster(
-            temp.path(),
-            17,
-            PublishedCluster::Vod(ClusterFiles { generation: 1, data: "vod.db".into() }),
-        );
+        let mut manifest = StalkerActiveManifest::empty(17);
+        manifest.live = Some(ClusterFiles { generation: 1, data: "old-live.db".into() });
+        manifest.vod = Some(ClusterFiles { generation: 1, data: "old-vod.db".into() });
+        manifest.series = Some(SeriesFiles {
+            generation: 1,
+            roots: "old-series-roots.db".into(),
+            episodes: "old-series-episodes.db".into(),
+        });
+        save_active_manifest(temp.path(), &manifest).await?;
 
-        let (live_result, vod_result) = tokio::join!(live, vod);
-        live_result?;
-        vod_result?;
+        publish_selection(temp.path(), 17, 2, 0b0101).await?;
+
         let active = load_active_manifest(temp.path(), 17).await?;
-        assert!(active.live.is_some());
-        assert!(active.vod.is_some());
+        assert_eq!(
+            active.live,
+            Some(ClusterFiles {
+                generation: 2,
+                data: generation_data_path(temp.path(), 2, StalkerGenerationData::Live),
+            })
+        );
+        assert_eq!(active.vod, manifest.vod);
+        assert_eq!(
+            active.series,
+            Some(SeriesFiles {
+                generation: 2,
+                roots: generation_data_path(temp.path(), 2, StalkerGenerationData::SeriesRoots),
+                episodes: generation_data_path(temp.path(), 2, StalkerGenerationData::SeriesEpisodes),
+            })
+        );
+        assert!(active.epg.is_none());
         Ok(())
     }
 

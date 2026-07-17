@@ -311,6 +311,7 @@
       "NAME": "Human readable name for this entry. Must be unique.",
       "PASSWORD": "Password or credential used for this account or service.",
       "PRIORITY": "The order of processing. Lower numbers mean higher priority (e.g. -1 is higher than 0).",
+      "SEQUENTIAL_GROUP": "Optional process-wide group ID. Inputs with the same ID are refreshed one after another when parallel processing is enabled.",
       "URL": "Input source URL. Supported schemes:\n\n```http(s)://\nfile://\nprovider://<provider>/...\nbatch://...(auto-switches m3u/xtream to batch types).```\n\nFor m3u_batch/xtream_batch only local CSV sources are allowed (batch://...).",
       "USERNAME": "Login username for this account or service."
     },
@@ -1169,6 +1170,7 @@
     "MAX_BACKGROUND_PER_PROVIDER": "Max background per provider",
     "MAX_CON": "Max Con.",
     "MAX_CONNECTIONS": "Max Connections",
+    "SEQUENTIAL_GROUP": "Sequential group",
     "MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL": "Max concurrent segment fetches global",
     "MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION": "Max concurrent segment fetches per session",
     "MAX_SEGMENTS_PREFETCH": "Max segments prefetch",
@@ -1587,6 +1589,7 @@
     "STALKER_ORDERED_LIST_MB": "ordered_list cap (MB)",
     "STALKER_GET_EPG_MB": "get_epg cap (MB)",
     "STALKER_BULK_EPG": "Load EPG in bulk",
+    "STALKER_CATALOG_PAGE_LIMIT": "Catalog page limit",
     "STALKER_DEVICE_PROFILE": "Device profile",
     "STALKER_SERIAL_NUMBER": "Serial number",
     "STALKER_DEVICE_ID": "Device ID",

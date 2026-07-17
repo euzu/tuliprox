@@ -1048,6 +1048,7 @@ mod tests {
             password: None,
             persist: None,
             enabled: true,
+            sequential_group: None,
             input_type: InputType::Xtream, // You can use a default value here
             max_connections,
             priority,

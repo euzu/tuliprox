@@ -231,6 +231,9 @@ pub async fn download_stalker_playlist(
             match result {
                 Ok(StalkerRefreshOutcome::Yielded { error: None, .. })
                     if refresh_mode == StalkerRefreshMode::Complete => {}
+                Ok(StalkerRefreshOutcome::Yielded { .. }) if refresh_mode == StalkerRefreshMode::Parallel => {
+                    tokio::task::yield_now().await;
+                }
                 Ok(outcome) => break outcome,
                 Err(err) => return (Vec::new(), vec![err], false, false),
             }

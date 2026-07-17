@@ -1887,6 +1887,74 @@ fn should_refresh_stalker_playback(
     input_type.is_stalker() && (!request_url_valid || status.is_some_and(|status| status.is_client_error()))
 }
 
+fn needs_initial_stalker_resolution(input_type: InputType, stream_url: &str) -> bool {
+    input_type.is_stalker() && stream_url.is_empty()
+}
+
+fn stalker_stream_kind(cluster: XtreamCluster, item_type: PlaylistItemType) -> StalkerStreamKind {
+    if item_type == PlaylistItemType::Catchup {
+        StalkerStreamKind::Archive
+    } else {
+        match cluster {
+            XtreamCluster::Live => StalkerStreamKind::Live,
+            XtreamCluster::Video => StalkerStreamKind::Movie,
+            XtreamCluster::Series => StalkerStreamKind::Episode,
+        }
+    }
+}
+
+async fn re_resolve_stalker_url_singleflight(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+    provider_id: u32,
+    kind: StalkerStreamKind,
+    force_refresh: bool,
+) -> Result<Option<Arc<str>>, TuliproxError> {
+    let guard_key = (input.id, provider_id);
+    let entry_lock = {
+        let mut guards = STALKER_RE_RESOLVE_GUARDS.lock().await;
+        Arc::clone(guards.entry(guard_key).or_insert_with(|| Arc::new(Mutex::new(()))))
+    };
+    let result = {
+        let _flight = entry_lock.lock().await;
+        let client = app_state.http_client.load().as_ref().clone();
+        re_resolve_stalker_url(&app_state.app_config, &client, input, provider_id, kind, force_refresh).await
+    };
+    drop(entry_lock);
+    let mut guards = STALKER_RE_RESOLVE_GUARDS.lock().await;
+    if guards.get(&guard_key).is_some_and(|lock| Arc::strong_count(lock) == 1) {
+        guards.remove(&guard_key);
+    }
+    result
+}
+
+pub(crate) async fn resolve_initial_stalker_playback_url(
+    app_state: &Arc<AppState>,
+    input: &ConfigInput,
+    provider_id: u32,
+    cluster: XtreamCluster,
+    item_type: PlaylistItemType,
+    stream_url: &Arc<str>,
+) -> Result<Arc<str>, TuliproxError> {
+    if !needs_initial_stalker_resolution(input.input_type, stream_url) {
+        return Ok(Arc::clone(stream_url));
+    }
+    re_resolve_stalker_url_singleflight(
+        app_state,
+        input,
+        provider_id,
+        stalker_stream_kind(cluster, item_type),
+        false,
+    )
+    .await?
+    .ok_or_else(|| {
+        TuliproxError::RepositoryStalker(format!(
+            "Stalker playback URL could not be resolved for input '{}' and provider id {provider_id}",
+            input.name
+        ))
+    })
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn create_stream_response_details(
     app_state: &Arc<AppState>,
@@ -2087,37 +2155,14 @@ async fn create_stream_response_details(
                         XtreamCluster::Video => StalkerStreamKind::Movie,
                         XtreamCluster::Series => StalkerStreamKind::Episode,
                     };
-                    let stalker_http_client = app_state.http_client.load().as_ref().clone();
-                    // Single-flight: serialize portal re-resolves per (input, provider stream),
-                    // so N concurrent clients don't hammer an already failing portal.
-                    let guard_key = (input.id, stream_channel.provider_id);
-                    let resolve_result = {
-                        let entry_lock = {
-                            let mut guards = STALKER_RE_RESOLVE_GUARDS.lock().await;
-                            Arc::clone(
-                                guards
-                                    .entry(guard_key)
-                                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-                            )
-                        };
-                        let _flight = entry_lock.lock().await;
-                        re_resolve_stalker_url(
-                            &app_state.app_config,
-                            &stalker_http_client,
-                            input,
-                            stream_channel.provider_id,
-                            kind,
-                            force_stalker_refresh,
-                        )
-                        .await
-                    };
-                    // Drop the map entry once no other task is waiting on it, to avoid unbounded growth.
-                    {
-                        let mut guards = STALKER_RE_RESOLVE_GUARDS.lock().await;
-                        if guards.get(&guard_key).is_some_and(|lock| Arc::strong_count(lock) == 1) {
-                            guards.remove(&guard_key);
-                        }
-                    }
+                    let resolve_result = re_resolve_stalker_url_singleflight(
+                        app_state,
+                        input,
+                        stream_channel.provider_id,
+                        kind,
+                        force_stalker_refresh,
+                    )
+                    .await;
                     match resolve_result {
                         Ok(Some(refreshed_url)) => {
                             if let Ok(url) = Url::parse(&refreshed_url) {
@@ -4337,6 +4382,13 @@ mod tests {
         ));
         assert!(!should_refresh_stalker_playback(InputType::Stalker, true, Some(StatusCode::OK)));
         assert!(!should_refresh_stalker_playback(InputType::Xtream, false, None));
+    }
+
+    #[test]
+    fn initial_stalker_playback_resolves_only_empty_urls() {
+        assert!(needs_initial_stalker_resolution(InputType::Stalker, ""));
+        assert!(!needs_initial_stalker_resolution(InputType::Stalker, "https://stream.example/live.ts"));
+        assert!(!needs_initial_stalker_resolution(InputType::Xtream, ""));
     }
 
     fn test_runtime_provider(url: &str, username: &str, password: &str) -> Arc<RuntimeProviderConfig> {

@@ -5,14 +5,15 @@ use super::{
     LABEL_PASSWORD, LABEL_PERSIST, LABEL_PRIORITY, LABEL_PROBE, LABEL_PROBE_DELAY_SEC, LABEL_PROBE_FILTER,
     LABEL_PROBE_LIVE, LABEL_PROBE_LIVE_INTERVAL_HOURS, LABEL_PROBE_SERIES, LABEL_PROBE_VOD, LABEL_RESOLVE,
     LABEL_RESOLVE_BACKGROUND, LABEL_RESOLVE_DELAY_SEC, LABEL_RESOLVE_FILTER, LABEL_RESOLVE_SERIES, LABEL_RESOLVE_TMDB,
-    LABEL_RESOLVE_VOD, LABEL_SKIP, LABEL_SKIP_LIVE, LABEL_SKIP_SERIES, LABEL_SKIP_VOD, LABEL_URL, LABEL_USERNAME,
-    LABEL_XTREAM_LIVE_STREAM_USE_PREFIX, LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION,
+    LABEL_RESOLVE_VOD, LABEL_SEQUENTIAL_GROUP, LABEL_SKIP, LABEL_SKIP_LIVE, LABEL_SKIP_SERIES, LABEL_SKIP_VOD,
+    LABEL_URL, LABEL_USERNAME, LABEL_XTREAM_LIVE_STREAM_USE_PREFIX, LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION,
 };
 use crate::{
-    app::components::{input::Input, Card, FilterInput, KeyValueEditor, RadioButtonGroup, TitledCard, ToolAction},
+    app::components::{Card, FilterInput, KeyValueEditor, RadioButtonGroup, TitledCard, ToolAction},
     config_field, config_field_bool, config_field_child, config_field_custom, config_field_optional,
-    config_field_optional_hide, edit_field_bool, edit_field_exp_date, edit_field_number_i16, edit_field_number_u16,
-    edit_field_number_u32, edit_field_text, edit_field_text_option, html_if,
+    config_field_optional_hide, edit_field_bool, edit_field_exp_date, edit_field_number_i16,
+    edit_field_number_option_u32, edit_field_number_u16, edit_field_number_u32, edit_field_text,
+    edit_field_text_option, html_if,
     i18n::{use_translation, YewI18n},
 };
 use shared::{model::InputFetchMethod, utils::BATCH_SCHEME_PREFIX};
@@ -35,6 +36,8 @@ pub(super) struct CommonInputFormProps {
     pub cache_duration: bool,
     #[prop_or(false)]
     pub staged_persist: bool,
+    #[prop_or(true)]
+    pub sequential_group: bool,
     #[prop_or_default]
     pub extra: Html,
     #[prop_or_default]
@@ -60,6 +63,11 @@ pub(super) fn CommonInputForm(props: &CommonInputFormProps) -> Html {
                     { config_field!(state.form, translate.t(LABEL_NAME), name) }
                     { config_field_bool!(state.form, translate.t(LABEL_ENABLED), enabled) }
                 </div>
+                { html_if!(props.sequential_group, {
+                    <div class="tp__config-view__cols-2">
+                    { config_field_optional!(state.form, translate.t(LABEL_SEQUENTIAL_GROUP), sequential_group) }
+                    </div>
+                })}
                 if props.show_url {
                     { config_field!(state.form, translate.t(LABEL_URL), url, Some(input_url_hint_key(props.simple_url).to_string())) }
                     { html_if!(credentials, {
@@ -101,17 +109,13 @@ pub(super) fn CommonInputForm(props: &CommonInputFormProps) -> Html {
                 { edit_field_text!(state, translate.t(LABEL_NAME), name, ConfigInputFormAction::Name) }
                 { edit_field_bool!(state, translate.t(LABEL_ENABLED), enabled, ConfigInputFormAction::Enabled) }
             </div>
-            if props.show_url {
-                <div class="tp__form-field tp__form-field__text">
-                    <Input label={translate.t(LABEL_URL)} name="url"
-                        field_id={Some(crate::app::components::dto_field_id(&state.form, "url"))}
-                        autocomplete={true} value={state.form.url.clone()}
-                        hint_key={Some(input_url_hint_key(props.simple_url).to_string())}
-                        on_change={Callback::from({
-                            let state = state.clone();
-                            move |value| state.dispatch(ConfigInputFormAction::Url(value))
-                        })} />
+            { html_if!(props.sequential_group, {
+                <div class="tp__config-view__cols-2">
+                 { edit_field_number_option_u32!(state, translate.t(LABEL_SEQUENTIAL_GROUP), sequential_group, ConfigInputFormAction::SequentialGroup) }
                 </div>
+            })}
+            if props.show_url {
+                { edit_field_text!(state, translate.t(LABEL_URL), url, ConfigInputFormAction::Url, false, Some(input_url_hint_key(props.simple_url).to_string())) }
                 { html_if!(credentials, {
                     <div class="tp__config-view__cols-2">
                         { edit_field_text_option!(state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
@@ -149,14 +153,7 @@ pub(super) fn CommonInputForm(props: &CommonInputFormProps) -> Html {
                         }
                     })}
                     <div class="tp__form-field tp__form-field__text">
-                        <Input label={translate.t(LABEL_PERSIST)} name="persist"
-                            field_id={Some(crate::app::components::dto_field_id(&state.form, "persist"))}
-                            autocomplete={true} value={state.form.persist.clone().unwrap_or_default()}
-                            hint_key={Some(input_persist_hint_key(props.staged_persist).to_string())}
-                            on_change={Callback::from({
-                                let state = state.clone();
-                                move |value: String| state.dispatch(ConfigInputFormAction::Persist((!value.is_empty()).then_some(value)))
-                            })} />
+                       { edit_field_text_option!(state, translate.t(LABEL_PERSIST), persist, ConfigInputFormAction::Persist, false, Some(input_persist_hint_key(props.staged_persist).to_string())) }
                     </div>
                 </div>
             }
@@ -178,6 +175,8 @@ pub(super) struct InputOptionsFormProps {
     pub headers: UseStateHandle<HashMap<String, String>>,
     pub allow_write: bool,
     pub kind: OptionsKind,
+    #[prop_or_default]
+    pub extra: Html,
 }
 
 #[component]
@@ -195,17 +194,23 @@ pub(super) fn InputOptionsForm(props: &InputOptionsFormProps) -> Html {
                     { config_field_bool!(state.form, translate.t(LABEL_SKIP_SERIES), skip_series) }
                 </div>
                 { config_field_bool!(state.form, translate.t("LABEL.STALKER_BULK_EPG"), stalker_bulk_epg) }
+                {props.extra.clone()}
             </TitledCard>
         },
         (true, OptionsKind::Stalker) => html! {
-            <TitledCard title={translate.t("LABEL.STALKER")}>
+            <>
+            <TitledCard title={translate.t("LABEL.SKIP")}>
                 <div class="tp__config-view__cols-3">
                     { edit_field_bool!(state, translate.t(LABEL_SKIP_LIVE), skip_live, ConfigInputOptionsFormAction::SkipLive) }
                     { edit_field_bool!(state, translate.t(LABEL_SKIP_VOD), skip_vod, ConfigInputOptionsFormAction::SkipVod) }
                     { edit_field_bool!(state, translate.t(LABEL_SKIP_SERIES), skip_series, ConfigInputOptionsFormAction::SkipSeries) }
                 </div>
-                { edit_field_bool!(state, translate.t("LABEL.STALKER_BULK_EPG"), stalker_bulk_epg, ConfigInputOptionsFormAction::StalkerBulkEpg) }
             </TitledCard>
+            <TitledCard title={translate.t("LABEL.STALKER")}>
+                { edit_field_bool!(state, translate.t("LABEL.STALKER_BULK_EPG"), stalker_bulk_epg, ConfigInputOptionsFormAction::StalkerBulkEpg) }
+                {props.extra.clone()}
+            </TitledCard>
+            </>
         },
         (false, OptionsKind::Xtream) => xtream_options_readonly(&state, &translate),
         (true, OptionsKind::Xtream) => xtream_options_editable(&state, &translate),

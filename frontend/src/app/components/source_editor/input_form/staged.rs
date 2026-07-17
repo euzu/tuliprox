@@ -55,6 +55,7 @@ pub(super) fn StagedInputForm(props: &StagedInputFormProps) -> Html {
     };
     html! {
         <CommonInputForm state={state} allow_write={props.allow_write} simple_url={true}
-            credentials={staged_type == StagedInputType::Xtream} staged_persist={true} extra={extra} />
+            credentials={staged_type == StagedInputType::Xtream} staged_persist={true}
+            sequential_group={false} extra={extra} />
     }
 }

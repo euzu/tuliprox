@@ -392,6 +392,7 @@ mod tests {
             epg: None,
             persist: None,
             enabled: true,
+            sequential_group: None,
             options: None,
             media_server: None,
             aliases: None,

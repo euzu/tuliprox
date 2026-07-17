@@ -473,6 +473,8 @@ pub struct ConfigInputDto {
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequential_group: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub options: Option<ConfigInputOptionsDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_server: Option<MediaServerInputConfigDto>,
@@ -517,6 +519,7 @@ impl Default for ConfigInputDto {
             password: None,
             persist: None,
             enabled: default_as_true(),
+            sequential_group: None,
             options: None,
             media_server: None,
             cache_duration: None,
@@ -890,6 +893,19 @@ impl ConfigInputDto {
         self.name = self.name.trim().intern();
         if self.name.is_empty() {
             return Err(TuliproxError::ConfigInput("name for input is mandatory".to_string()));
+        }
+
+        if self.sequential_group == Some(0) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "sequential_group must be greater than zero (input: {})",
+                self.name
+            )));
+        }
+        if self.input_type.is_staged() && self.sequential_group.is_some() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "staged input does not support sequential_group (input: {})",
+                self.name
+            )));
         }
 
         if self.input_type.is_staged() {
@@ -1304,6 +1320,47 @@ mod tests {
 
     fn prepare_dto(dto: &mut ConfigInputDto) -> Result<u16, TuliproxError> {
         dto.prepare(0, false, &HashSet::new(), None)
+    }
+
+    #[test]
+    fn sequential_group_round_trips_yaml_and_json() {
+        let yaml = "name: grouped\ntype: m3u\nurl: http://example.com/list.m3u\nsequential_group: 7\n";
+        let dto: ConfigInputDto = serde_saphyr::from_str(yaml).expect("sequential group should deserialize from yaml");
+        assert_eq!(dto.sequential_group, Some(7));
+
+        let encoded_yaml = serde_saphyr::to_string(&dto).expect("sequential group should serialize to yaml");
+        assert!(encoded_yaml.contains("sequential_group: 7"));
+
+        let encoded_json = serde_json::to_string(&dto).expect("sequential group should serialize to json");
+        let decoded_json: ConfigInputDto =
+            serde_json::from_str(&encoded_json).expect("sequential group should deserialize from json");
+        assert_eq!(decoded_json.sequential_group, Some(7));
+    }
+
+    #[test]
+    fn sequential_group_rejects_zero_and_staged_inputs() {
+        let mut zero = ConfigInputDto {
+            name: "zero_group".intern(),
+            url: "http://example.com/list.m3u".to_string(),
+            sequential_group: Some(0),
+            ..ConfigInputDto::default()
+        };
+        let err = prepare_dto(&mut zero).expect_err("group zero must be rejected");
+        assert!(err.to_string().contains("sequential_group"), "Error: {err}");
+
+        let mut staged = ConfigInputDto {
+            name: "staged_group".intern(),
+            input_type: InputType::Staged,
+            url: "http://example.com/list.m3u".to_string(),
+            staged: Some(ConfigInputStagedDto {
+                for_input: Some("provider_a".intern()),
+                ..ConfigInputStagedDto::default()
+            }),
+            sequential_group: Some(1),
+            ..ConfigInputDto::default()
+        };
+        let err = prepare_dto(&mut staged).expect_err("staged groups must be rejected");
+        assert!(err.to_string().contains("sequential_group"), "Error: {err}");
     }
 
     #[test]

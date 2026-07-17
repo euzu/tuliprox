@@ -66,6 +66,16 @@
 
 ## 🌟 New Features
 
+- **Dependency-aware parallel playlist updates**:
+  - `process_parallel: true` now downloads independent inputs concurrently and starts each source's targets as soon as
+    its required inputs are ready.
+  - Added optional non-zero `inputs[].sequential_group` IDs to serialize complete refreshes that share provider
+    credentials or another upstream ban constraint.
+  - Target preparation remains configuration-ordered, while final persistence overlaps only for disjoint normalized
+    storage, M3U, and STRM paths.
+  - Stalker Live/VOD/Series/EPG selections publish atomically and resume a durable completion checkpoint after a crash.
+  - Playlist update progress messages identify the affected input.
+
 - **New Stalker Portal Integration**:
   - Added first-class Stalker input support to Tuliprox.
   - Added Stalker catalog preview support in the protected Web UI playlist endpoints.

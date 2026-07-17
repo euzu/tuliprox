@@ -234,12 +234,15 @@ pub trait HasFormData {
 #[macro_export]
 macro_rules! edit_field_text_option {
     ($instance:expr, $label:expr, $field:ident, $action:path) => {
-$crate::edit_field_text_option!(@inner $instance, $label, $field, $action, false)
+$crate::edit_field_text_option!(@inner $instance, $label, $field, $action, false, Option::<String>::None)
     };
     ($instance:expr, $label:expr, $field:ident, $action:path, $hidden:expr) => {
-$crate::edit_field_text_option!(@inner $instance, $label, $field, $action, $hidden)
+$crate::edit_field_text_option!(@inner $instance, $label, $field, $action, $hidden, Option::<String>::None)
     };
-    (@inner $instance:expr, $label:expr, $field:ident, $action:path, $hidden:expr) => {{
+    ($instance:expr, $label:expr, $field:ident, $action:path, $hidden:expr, $hint:expr) => {
+$crate::edit_field_text_option!(@inner $instance, $label, $field, $action, $hidden, $hint)
+    };
+    (@inner $instance:expr, $label:expr, $field:ident, $action:path, $hidden:expr, $hint:expr) => {{
         let instance = $instance.clone();
         html! {
             <div class="tp__form-field tp__form-field__text">
@@ -249,6 +252,7 @@ $crate::edit_field_text_option!(@inner $instance, $label, $field, $action, $hidd
                     name={stringify!($field)}
                     field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     autocomplete={true}
+                    hint_key={$hint}
                     value={instance.form.$field.as_ref().map_or_else(String::new, |v|v.to_string())}
                     on_change={Callback::from(move |value: String| {
                         instance.dispatch($action(if value.is_empty() {
@@ -322,12 +326,15 @@ macro_rules! edit_field_textarea_option {
 #[macro_export]
 macro_rules! edit_field_text {
     ($instance:expr, $label:expr, $field:ident, $action:path) => {
-$crate::edit_field_text!(@inner $instance, $label, $field, $action, false)
+$crate::edit_field_text!(@inner $instance, $label, $field, $action, false, Option::<String>::None)
     };
     ($instance:expr, $label:expr, $field:ident, $action:path,  $hidden:expr) => {
-$crate::edit_field_text!(@inner $instance, $label, $field, $action, $hidden)
+$crate::edit_field_text!(@inner $instance, $label, $field, $action, $hidden, Option::<String>::None)
     };
-    (@inner $instance:expr, $label:expr, $field:ident, $action:path, $hidden:expr) => {{
+    ($instance:expr, $label:expr, $field:ident, $action:path,  $hidden:expr, $hint:expr) => {
+$crate::edit_field_text!(@inner $instance, $label, $field, $action, $hidden, $hint)
+    };
+    (@inner $instance:expr, $label:expr, $field:ident, $action:path, $hidden:expr, $hint:expr) => {{
         let instance = $instance.clone();
         html! {
             <div class="tp__form-field tp__form-field__text">
@@ -337,6 +344,7 @@ $crate::edit_field_text!(@inner $instance, $label, $field, $action, $hidden)
                     name={stringify!($field)}
                     field_id={Some($crate::app::components::dto_field_id(&instance.form, stringify!($field)))}
                     autocomplete={true}
+                    hint_key={$hint}
                     value={instance.form.$field.to_string()}
                     on_change={Callback::from(move |value: String| {
                         instance.dispatch($action(value.into()));

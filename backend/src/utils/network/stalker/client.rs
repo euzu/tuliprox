@@ -1,5 +1,5 @@
 use bytes::{Bytes, BytesMut};
-use log::{debug, warn};
+use log::{trace, warn};
 use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, COOKIE, REFERER, USER_AGENT};
 use std::path::{Path, PathBuf};
@@ -502,7 +502,7 @@ impl StalkerApiClient {
             let advertised = response
                 .content_length()
                 .map_or_else(|| "unknown".to_string(), |len| len.to_string());
-            debug!("Stalker {action} response {advertised} bytes (cap {cap})");
+            trace!("Stalker {action} response {advertised} bytes (cap {cap})");
         } else {
             warn!("Stalker {action} response status {}", response.status());
         }
@@ -717,7 +717,7 @@ fn write_stalker_debug_body(dir: &str, portal_url: &str, action: &str, body: &[u
         warn!("Stalker debug dump: could not write {}: {err}", path.display());
     } else {
         rotate_stalker_debug_dumps(dump_dir);
-        debug!("Stalker debug dump written: {}", path.display());
+        trace!("Stalker debug dump written: {}", path.display());
     }
 }
 

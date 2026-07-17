@@ -113,6 +113,7 @@ inputs:
     username: my_user
     password: my_password
     enabled: true
+    sequential_group: 1
     cache_duration: 1d
     persist: playlist_{}.m3u
     method: GET
@@ -133,6 +134,7 @@ inputs:
 | `url`                   | String |   Yes    |         | The Provider URL. Tuliprox supports magic scheme prefixes: `http(s)://`, `file://`, `batch://`, and **`provider://my_failover_provider`** (for the Failover System above).                                                                                                                                                                                                                                                                |
 | `username` / `password` | String |  Often   |         | Mandatory for `xtream` and for Stalker inputs using `credentials_only` or `mac_plus_credentials`. Stalker inputs using `mac_only` do not need them.                                                                                                                                                                                                                                                                                       |
 | `enabled`               | Bool   |    No    | `true`  | If `false`, this input is completely ignored in all processing.                                                                                                                                                                                                                                                                                                                                                                           |
+| `sequential_group`      | Int    |    No    |         | Optional non-zero process-wide group ID. With `process_parallel: true`, complete refreshes of inputs sharing an ID run one after another, including all Stalker page slices. Different groups and ungrouped inputs may overlap. Not valid for `staged` inputs; a staged overlay inherits its provider job.                                                                                                                                |
 | `cache_duration`        | String |    No    | `0`     | **Crucial:** Determines how often Tuliprox actually downloads the raw list from the provider. At `1d` (1 day), Tuliprox serves from its local `.db` for 24 hours, even if you trigger hourly updates. This heavily protects against provider bans! Supported units are `s`, `m`, `h`, and `d`. If `cache_duration` is set, the cached provider playlist stored on disk is reused for subsequent updates instead of downloading it again.  |
 | `persist`               | String |    No    |         | Optional path template (e.g., `./playlist_{}.m3u`) to permanently store the downloaded raw provider list locally on your disk. The `{}` in the filename is filled with the current timestamp. For `m3u` use a full filename. For `xtream` use a prefix like `./playlist_`.                                                                                                                                                                |
 | `method`                | Enum   |    No    | `GET`   | HTTP Request method for playlist downloads (`GET` or `POST`).                                                                                                                                                                                                                                                                                                                                                                             |
@@ -161,6 +163,13 @@ inputs:
       stalker_pre_resolve_playback: false
       stalker_runtime_resolve_playback: true
 ```
+
+Stalker refreshes write pages into an unpublished generation. Live, VOD, series, and EPG selected for one refresh
+become active together only after the complete selection is durable. Until then, Tuliprox continues serving the
+previous complete snapshot; a first import exposes no partial catalog. A saved checkpoint resumes after restart.
+
+When `process_parallel` is enabled, progress messages include the input name. Targets wait for every enabled input in
+their source and begin as soon as that source is ready, without waiting for unrelated sources.
 
 Use `stalker_pre_resolve_playback: true` if you want Tuliprox to materialize playback URLs during refresh whenever the portal already grants them.
 Keep `stalker_runtime_resolve_playback: true` when the portal uses expiring or session-bound temp links that may need a fresh `create_link`

@@ -1617,7 +1617,7 @@ mod tests {
             result,
             Err(TuliproxError::RepositoryPlaylist(message))
                 if message.contains("Failed to clone live disk playlist query")
-                    && message.contains("No data source available to clone")
+                    && message.contains("mapped query without a path cannot be cloned")
         ));
     }
 

@@ -13,8 +13,8 @@ use self::{
     media_server::{MediaServerInputForm, MediaServerSettingsForm},
     staged::StagedInputForm,
     stalker::{
-        empty_device_form_state, StalkerDeviceFormAction, StalkerDeviceFormState, StalkerDeviceInputForm,
-        StalkerInputForm,
+        empty_device_form_state, stalker_options_fields, StalkerDeviceFormAction, StalkerDeviceFormState,
+        StalkerDeviceInputForm, StalkerInputForm,
     },
     xtream::XtreamInputForm,
 };
@@ -65,6 +65,7 @@ const LABEL_DISABLED: &str = "LABEL.DISABLED";
 const LABEL_ALIASES: &str = "LABEL.ALIASES";
 const LABEL_PRIORITY: &str = "LABEL.PRIORITY";
 const LABEL_MAX_CONNECTIONS: &str = "LABEL.MAX_CONNECTIONS";
+const LABEL_SEQUENTIAL_GROUP: &str = "LABEL.SEQUENTIAL_GROUP";
 const LABEL_EXP_DATE: &str = "LABEL.EXP_DATE";
 const LABEL_SELECTION_POLICY: &str = "LABEL.SELECTION_POLICY";
 const LABEL_PROVIDER_URL_SELECTION_RESUME_LAST_WORKING: &str = "LABEL.PROVIDER_URL_SELECTION_RESUME_LAST_WORKING";
@@ -323,6 +324,7 @@ fn materialize_stalker_config(
     mut config: StalkerInputConfigDto,
     mut device: StalkerDeviceProfileDto,
 ) -> StalkerInputConfigDto {
+    config.catalog_max_pages = config.catalog_max_pages.filter(|value| *value > 0);
     normalize_optional_device_field(&mut device.mac_address);
     normalize_optional_device_field(&mut device.device_profile);
     normalize_optional_device_field(&mut device.serial_number);
@@ -374,6 +376,7 @@ generate_form_reducer!(
         Enabled => enabled: bool,
         Priority => priority: i16,
         MaxConnections => max_connections: u16,
+        SequentialGroup => sequential_group: Option<u32>,
         Method => method: InputFetchMethod,
         StagedType => staged_type: StagedInputType,
         Staged => staged: Option<ConfigInputStagedDto>,
@@ -871,8 +874,14 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         } else {
             OptionsKind::Basic
         };
+        let extra = if stalker_input {
+            stalker_options_fields(&stalker_config_state, props.allow_write, &translate)
+        } else {
+            Html::default()
+        };
         html! {
-            <InputOptionsForm state={input_options_state.clone()} headers={headers_state.clone()} allow_write={props.allow_write} kind={kind} />
+            <InputOptionsForm state={input_options_state.clone()} headers={headers_state.clone()}
+                allow_write={props.allow_write} kind={kind} {extra} />
         }
     };
 
@@ -1237,6 +1246,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
             if input.input_type.is_staged() {
                 input.staged.get_or_insert_with(ConfigInputStagedDto::default);
+                input.sequential_group = None;
             } else {
                 input.staged = None;
             }
@@ -1428,6 +1438,7 @@ mod tests {
         let config = StalkerInputConfigDto {
             auth_mode: StalkerAuthMode::CredentialsOnly,
             size_caps: Some(shared::model::stalker::StalkerActionSizeCapDto::default()),
+            catalog_max_pages: Some(0),
             ..Default::default()
         };
         let device = StalkerDeviceProfileDto {
@@ -1440,6 +1451,7 @@ mod tests {
 
         assert_eq!(materialized.auth_mode, StalkerAuthMode::CredentialsOnly);
         assert!(materialized.size_caps.is_some());
+        assert_eq!(materialized.catalog_max_pages, None);
         assert_eq!(materialized.device.as_ref().and_then(|value| value.mac_address.as_deref()), None);
         assert_eq!(materialized.device.and_then(|value| value.signature), Some("signature".to_string()));
         assert!(materialize_stalker_config(StalkerInputConfigDto::default(), StalkerDeviceProfileDto::default())

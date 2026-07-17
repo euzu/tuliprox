@@ -14,7 +14,7 @@ use crate::{
     media_server::plex::client::PlexCatalogClient,
     model::{
         AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget,
-        FetchedPlaylist, Mapping, MessageContent, ProcessTargets, ReverseProxyDisabledHeaderConfig, TVGuide,
+        Epg, FetchedPlaylist, Mapping, MessageContent, ProcessTargets, ReverseProxyDisabledHeaderConfig, TVGuide,
     },
     processing::{
         input_cache,
@@ -39,6 +39,7 @@ use crate::{
 use futures::{FutureExt, StreamExt};
 use indexmap::IndexMap;
 use log::{debug, error, info, log_enabled, warn, Level};
+use path_clean::PathClean;
 use shared::{
     concat_string,
     error::{get_errors_notify_message, TuliproxError},
@@ -63,12 +64,13 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    sync::{Mutex, OwnedRwLockWriteGuard, RwLock},
+    sync::{watch, Mutex, OwnedRwLockWriteGuard, RwLock},
     task::JoinSet,
 };
 use shared::model::PlaylistUpdateProgressEvent;
 
 const PLAYLIST_UPDATE_MAX_DURATION_SECS: u64 = 3600;
+const MAX_CONCURRENT_TARGET_FINALIZERS: usize = 2;
 
 fn join_arc_strs(values: &[Arc<str>], separator: &str) -> String {
     let mut result = String::new();
@@ -79,6 +81,42 @@ fn join_arc_strs(values: &[Arc<str>], separator: &str) -> String {
         result.push_str(value.as_ref());
     }
     result
+}
+
+fn target_waiting_message(target: &str, input: &str) -> String {
+    format!("Target '{target}' is waiting for input '{input}'")
+}
+
+fn target_mutated_resources(config: &crate::model::Config, target: &ConfigTarget) -> HashSet<PathBuf> {
+    let mut resources = HashSet::new();
+    if let Some(path) = crate::repository::get_target_storage_path(config, &target.name) {
+        resources.insert(path.clean());
+    }
+    for output in &target.output {
+        match output {
+            crate::model::TargetOutput::M3u(output) => {
+                if let Some(path) = crate::utils::get_file_path(
+                    &config.storage_dir,
+                    output.filename.as_deref().map(PathBuf::from),
+                ) {
+                    resources.insert(path.clean());
+                }
+            }
+            crate::model::TargetOutput::Strm(output) => {
+                if let Some(path) =
+                    crate::utils::get_file_path(&config.storage_dir, Some(PathBuf::from(&output.directory)))
+                {
+                    resources.insert(path.clean());
+                }
+            }
+            crate::model::TargetOutput::Xtream(_) | crate::model::TargetOutput::HdHomeRun(_) => {}
+        }
+    }
+    resources
+}
+
+fn stalker_checkpoint_message(input: &str) -> String {
+    format!("Input '{input}': Stalker refresh checkpoint saved; active snapshot remains in service")
 }
 
 fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
@@ -326,6 +364,24 @@ fn is_input_enabled(input: &ConfigInput, user_targets: &ProcessTargets) -> bool 
 
 fn is_target_enabled(target: &ConfigTarget, user_targets: &ProcessTargets) -> bool {
     (!user_targets.enabled && target.enabled) || (user_targets.enabled && user_targets.has_target(target.id))
+}
+
+async fn with_sequential_group<T>(
+    file_locks: &crate::utils::FileLockManager,
+    group: Option<u32>,
+    process_parallel: bool,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    let _guard = if process_parallel {
+        if let Some(group) = group {
+            Some(file_locks.write_lock_str(&format!("sequential_group:{group}")).await)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    future.await
 }
 
 struct PlaylistDownloadResult {
@@ -586,6 +642,254 @@ async fn playlist_download_from_input(
     PlaylistDownloadResult::new(playlist, errors, false, persisted).with_partial(partial)
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum InputJobState {
+    Ready,
+    Pending,
+    Failed,
+}
+
+struct InputJobResult {
+    index: usize,
+    input_name: Arc<str>,
+    state: InputJobState,
+    source: Option<PlaylistSource>,
+    epg: Option<TVGuide>,
+    stat: InputStats,
+    errors: Vec<TuliproxError>,
+}
+
+async fn process_input_job(
+    index: usize,
+    ctx: &PlaylistProcessingContext,
+    input: &Arc<ConfigInput>,
+    process_parallel: bool,
+) -> InputJobResult {
+    with_sequential_group(
+        &ctx.config.file_locks,
+        input.sequential_group,
+        process_parallel,
+        process_input_job_inner(index, ctx, input),
+    )
+    .await
+}
+
+async fn process_input_job_inner(
+    index: usize,
+    ctx: &PlaylistProcessingContext,
+    input: &Arc<ConfigInput>,
+) -> InputJobResult {
+    let start_time = Instant::now();
+    let input_type = input.get_download_input_type();
+    let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
+    broadcast_step("Playlist download", &format!("Downloading input '{}'", input.name));
+
+    let (mut errors, mut source, storage_error, partial) = download_input(ctx, input, false).await;
+    let storage_failed = storage_error.is_some();
+    if let Some(err) = storage_error {
+        broadcast_step(
+            "Playlist download",
+            &format!("Failed to persist/load input '{}' playlist", input.name),
+        );
+        error!("Failed to persist input playlist {}", input.name);
+        errors.push(err);
+    }
+    let epg = if input_type == InputType::Library || partial || storage_failed {
+        None
+    } else {
+        download_input_epg(ctx, input, &mut errors).await
+    };
+    let group_count = source.get_group_count();
+    let channel_count = source.get_channel_count();
+    let state = if partial {
+        InputJobState::Pending
+    } else if storage_failed || source.is_empty() {
+        if source.is_empty() {
+            broadcast_step("Playlist download", &format!("Input '{}' playlist is empty", input.name));
+            errors.push(TuliproxError::RepositoryPlaylist(format!("Source is empty {}", input.name)));
+        }
+        InputJobState::Failed
+    } else {
+        InputJobState::Ready
+    };
+    let stat = create_input_stat(
+        group_count,
+        channel_count,
+        errors.len(),
+        input_type,
+        &input.name,
+        start_time.elapsed().as_secs(),
+    );
+
+    InputJobResult {
+        index,
+        input_name: input.name.clone(),
+        state,
+        source: (state == InputJobState::Ready).then_some(source),
+        epg,
+        stat,
+        errors,
+    }
+}
+
+fn panicked_input_job(index: usize, input: &ConfigInput) -> InputJobResult {
+    let error = TuliproxError::RepositoryPlaylist(format!("Input '{}' processing panicked", input.name));
+    InputJobResult {
+        index,
+        input_name: input.name.clone(),
+        state: InputJobState::Failed,
+        source: None,
+        epg: None,
+        stat: create_input_stat(0, 0, 1, input.get_download_input_type(), &input.name, 0),
+        errors: vec![error],
+    }
+}
+
+struct TargetJobResult {
+    index: usize,
+    name: String,
+    result: Result<(), Vec<TuliproxError>>,
+    errors: Vec<TuliproxError>,
+}
+
+fn collect_target_task_result(
+    result: Result<TargetJobResult, tokio::task::JoinError>,
+    results: &mut Vec<TargetJobResult>,
+    errors: &mut Vec<TuliproxError>,
+) {
+    match result {
+        Ok(result) => results.push(result),
+        Err(err) => errors.push(TuliproxError::RepositoryPlaylist(format!(
+            "Target finalization task failed: {err}"
+        ))),
+    }
+}
+
+async fn wait_for_target_finalizer_slot(
+    tasks: &mut JoinSet<TargetJobResult>,
+    results: &mut Vec<TargetJobResult>,
+    errors: &mut Vec<TuliproxError>,
+) {
+    if tasks.len() >= MAX_CONCURRENT_TARGET_FINALIZERS {
+        if let Some(result) = tasks.join_next().await {
+            collect_target_task_result(result, results, errors);
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn process_targets(
+    ctx: &Arc<PlaylistProcessingContext>,
+    playlists: &mut [FetchedPlaylist<'_>],
+    targets: &[&Arc<ConfigTarget>],
+    input_stats: &mut HashMap<Arc<str>, InputStats>,
+    errors: &mut Vec<TuliproxError>,
+    process_parallel: bool,
+) -> Vec<TargetStats> {
+    if !process_parallel {
+        let mut target_stats = Vec::with_capacity(targets.len());
+        for (index, target) in targets.iter().enumerate() {
+            let consume_input_source = index + 1 == targets.len();
+            let result =
+                prepare_playlist_for_target(ctx, playlists, target, input_stats, errors, consume_input_source).await;
+            match result {
+                Ok(prepared) => {
+                    let (result, mut finalization_errors) =
+                        finalize_prepared_target(Arc::clone(ctx), prepared).await;
+                    errors.append(&mut finalization_errors);
+                    match result {
+                        Ok(()) => target_stats.push(TargetStats::success(&target.name)),
+                        Err(mut target_errors) => {
+                            target_stats.push(TargetStats::failure(&target.name));
+                            errors.append(&mut target_errors);
+                        }
+                    }
+                }
+                Err(mut target_errors) => {
+                    target_stats.push(TargetStats::failure(&target.name));
+                    errors.append(&mut target_errors);
+                }
+            }
+        }
+        return target_stats;
+    }
+
+    let resources = {
+        let config = ctx.config.config.load();
+        targets.iter().map(|target| target_mutated_resources(&config, target)).collect::<Vec<_>>()
+    };
+    let mut completion_receivers: Vec<watch::Receiver<bool>> = Vec::with_capacity(targets.len());
+    let mut tasks = JoinSet::new();
+    let mut results = Vec::with_capacity(targets.len());
+
+    for (index, target) in targets.iter().enumerate() {
+        wait_for_target_finalizer_slot(&mut tasks, &mut results, errors).await;
+        let predecessors = resources[..index]
+            .iter()
+            .zip(&completion_receivers)
+            .filter(|(earlier, _)| !earlier.is_disjoint(&resources[index]))
+            .map(|(_, receiver)| receiver.clone())
+            .collect::<Vec<_>>();
+        let (completion, receiver) = watch::channel(false);
+        completion_receivers.push(receiver);
+
+        match prepare_playlist_for_target(ctx, playlists, target, input_stats, errors, false).await {
+            Ok(prepared) => {
+                let task_ctx = Arc::clone(ctx);
+                let target_name = target.name.clone();
+                tasks.spawn(async move {
+                    for mut predecessor in predecessors {
+                        if !*predecessor.borrow() {
+                            let _ = predecessor.changed().await;
+                        }
+                    }
+                    let finalized =
+                        std::panic::AssertUnwindSafe(finalize_prepared_target(task_ctx, prepared)).catch_unwind().await;
+                    completion.send_replace(true);
+                    match finalized {
+                        Ok((result, errors)) => TargetJobResult { index, name: target_name, result, errors },
+                        Err(_) => TargetJobResult {
+                            index,
+                            name: target_name.clone(),
+                            result: Err(vec![TuliproxError::RepositoryPlaylist(format!(
+                                "Target '{target_name}' finalization panicked"
+                            ))]),
+                            errors: Vec::new(),
+                        },
+                    }
+                });
+            }
+            Err(target_errors) => {
+                completion.send_replace(true);
+                results.push(TargetJobResult {
+                    index,
+                    name: target.name.clone(),
+                    result: Err(target_errors),
+                    errors: Vec::new(),
+                });
+            }
+        }
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        collect_target_task_result(result, &mut results, errors);
+    }
+    results.sort_by_key(|result| result.index);
+
+    let mut target_stats = Vec::with_capacity(results.len());
+    for mut target_result in results {
+        errors.append(&mut target_result.errors);
+        match target_result.result {
+            Ok(()) => target_stats.push(TargetStats::success(&target_result.name)),
+            Err(mut target_errors) => {
+                target_stats.push(TargetStats::failure(&target_result.name));
+                errors.append(&mut target_errors);
+            }
+        }
+    }
+    target_stats
+}
+
 #[allow(clippy::too_many_lines)]
 async fn process_source(
     source_idx: usize,
@@ -599,68 +903,60 @@ async fn process_source(
     if let Some(source) = sources.get_source_at(source_idx) {
         let mut source_playlists = Vec::with_capacity(source.inputs.len());
         let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
-        // Download the sources
-        let mut source_downloaded = false;
+        let process_parallel = ctx.config.config.load().process_parallel;
         let mut disabled_inputs: Vec<Arc<str>> = vec![];
-        for input_name in &source.inputs {
+        let mut enabled_inputs = Vec::with_capacity(source.inputs.len());
+        for (index, input_name) in source.inputs.iter().enumerate() {
             let Some(input) = sources.get_input_by_name(input_name) else {
                 error!("Input {input_name} referenced by source {source_idx} does not exist");
                 continue;
             };
             if is_input_enabled(input, &ctx.user_targets) {
-                let effective_input_type = input.get_download_input_type();
-                source_downloaded = true;
-                log_memory_snapshot(format!("source[{source_idx}] input '{}' before_download", input.name).as_str());
-
-                let start_time = Instant::now();
-                // Download the playlist for input
-                let (mut playlist_groups, mut error_list) = {
-                    broadcast_step("Playlist download", &format!("Downloading input '{}'", input.name));
-
-                    let (mut download_err, playlist, error) = download_input(&ctx, input, false).await;
-
-                    if let Some(err) = error {
-                        broadcast_step(
-                            "Playlist download",
-                            &format!("Failed to persist/load input '{}' playlist", input.name),
-                        );
-                        error!("Failed to persist input playlist {}", input.name);
-                        download_err.push(err);
-                    }
-                    (playlist, download_err)
-                };
-                log_memory_snapshot(format!("source[{source_idx}] input '{}' after_download", input.name).as_str());
-
-                let tvguide = if effective_input_type == InputType::Library {
-                    None
-                } else {
-                    download_input_epg(&ctx, input, &mut error_list).await
-                };
-                log_memory_snapshot(format!("source[{source_idx}] input '{}' after_epg_download", input.name).as_str());
-
-                errors.append(&mut error_list);
-                let group_count = playlist_groups.get_group_count();
-                let channel_count = playlist_groups.get_channel_count();
-                let input_name = &input.name;
-                if playlist_groups.is_empty() {
-                    broadcast_step("Playlist download", &format!("Input '{}' playlist is empty", input.name));
-                    info!("Source is empty {input_name}");
-                    errors.push(TuliproxError::RepositoryPlaylist(format!("Source is empty {input_name}")));
-                } else {
-                    source_playlists.push(FetchedPlaylist { input, source: playlist_groups, epg: tvguide });
-                    log_memory_snapshot(
-                        format!("source[{source_idx}] input '{}' after_source_push", input.name).as_str(),
-                    );
-                }
-                let elapsed = start_time.elapsed().as_secs();
-                input_stats.insert(
-                    input_name.clone(),
-                    create_input_stat(group_count, channel_count, errors.len(), effective_input_type, input_name, elapsed),
-                );
+                enabled_inputs.push((index, input));
             } else {
                 disabled_inputs.push(input.name.clone());
             }
         }
+
+        let source_downloaded = !enabled_inputs.is_empty();
+        let mut job_results = Vec::with_capacity(enabled_inputs.len());
+        if process_parallel {
+            let mut jobs = futures::stream::FuturesUnordered::new();
+            for &(index, input) in &enabled_inputs {
+                let job = std::panic::AssertUnwindSafe(process_input_job(index, &ctx, input, true)).catch_unwind();
+                jobs.push(async move {
+                    match job.await {
+                        Ok(result) => result,
+                        Err(_) => panicked_input_job(index, input),
+                    }
+                });
+            }
+            while let Some(result) = jobs.next().await {
+                job_results.push(result);
+            }
+        } else {
+            for &(index, input) in &enabled_inputs {
+                job_results.push(process_input_job(index, &ctx, input, false).await);
+            }
+        }
+        job_results.sort_by_key(|result| result.index);
+
+        let mut blockers = Vec::new();
+        for mut result in job_results {
+            errors.append(&mut result.errors);
+            input_stats.insert(result.input_name.clone(), result.stat);
+            if result.state == InputJobState::Ready {
+                if let (Some(input), Some(source)) = (
+                    sources.get_input_by_name(&result.input_name),
+                    result.source.take(),
+                ) {
+                    source_playlists.push(FetchedPlaylist { input, source, epg: result.epg });
+                }
+            } else {
+                blockers.push(result.input_name);
+            }
+        }
+
         if !disabled_inputs.is_empty() && !source_downloaded {
             warn!(
                 "Source at index {source_idx} has no enabled inputs for the given targets. Disabled: {}",
@@ -668,7 +964,16 @@ async fn process_source(
             );
         }
         if source_downloaded {
-            if source_playlists.is_empty() {
+            if !blockers.is_empty() {
+                for target in source.targets.iter().filter(|target| is_target_enabled(target, &ctx.user_targets)) {
+                    for input_name in &blockers {
+                        broadcast_step(
+                            "Playlist download",
+                            &target_waiting_message(&target.name, input_name),
+                        );
+                    }
+                }
+            } else if source_playlists.is_empty() {
                 debug!("Source at index {source_idx} is empty");
                 errors.push(TuliproxError::RepositoryPlaylist(format!(
                     "Source at index {source_idx} is empty: {}",
@@ -681,43 +986,23 @@ async fn process_source(
                 );
                 let enabled_targets: Vec<_> =
                     source.targets.iter().filter(|target| is_target_enabled(target, &ctx.user_targets)).collect();
-
-                for (idx, target) in enabled_targets.iter().enumerate() {
-                    let consume_input_source = idx + 1 == enabled_targets.len();
-                    debug!(
-                        "Processing target '{}' (use_memory_cache={}, consume_input_source={})",
-                        target.name, target.use_memory_cache, consume_input_source
-                    );
-                    log_memory_snapshot(
-                        format!("source[{source_idx}] target '{}' before_process", target.name).as_str(),
-                    );
-                    match process_playlist_for_target(
-                        &ctx,
-                        &mut source_playlists,
-                        target,
-                        &mut input_stats,
-                        &mut errors,
-                        consume_input_source,
-                    )
-                        .await
-                    {
-                        Ok(()) => {
-                            target_stats.push(TargetStats::success(&target.name));
-                        }
-                        Err(mut err) => {
-                            target_stats.push(TargetStats::failure(&target.name));
-                            errors.append(&mut err);
-                        }
-                    }
-                    log_memory_snapshot(
-                        format!("source[{source_idx}] target '{}' after_process", target.name).as_str(),
-                    );
-                }
+                target_stats = process_targets(
+                    &ctx,
+                    &mut source_playlists,
+                    &enabled_targets,
+                    &mut input_stats,
+                    &mut errors,
+                    process_parallel,
+                )
+                .await;
             }
         }
     }
     log_memory_snapshot(format!("source[{source_idx}] end").as_str());
-    (input_stats.into_values().collect(), target_stats, errors)
+    let ordered_input_stats = sources.get_source_at(source_idx).map_or_else(Vec::new, |source| {
+        source.inputs.iter().filter_map(|name| input_stats.remove(name)).collect()
+    });
+    (ordered_input_stats, target_stats, errors)
 }
 
 async fn download_input_epg(
@@ -765,9 +1050,9 @@ async fn download_input(
     ctx: &PlaylistProcessingContext,
     input: &Arc<ConfigInput>,
     allow_staged_input: bool,
-) -> (Vec<TuliproxError>, PlaylistSource, Option<TuliproxError>) {
+) -> (Vec<TuliproxError>, PlaylistSource, Option<TuliproxError>, bool) {
     if input.staged.is_some() && !allow_staged_input {
-        return (vec![], MemoryPlaylistSource::default().into_source(), None);
+        return (vec![], MemoryPlaylistSource::default().into_source(), None, false);
     }
 
     let staged_overlay = if input.staged.is_none() {
@@ -855,7 +1140,7 @@ async fn download_input(
         if let Some(events) = ctx.event_manager.as_deref() {
             events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
                 target: input.name.to_string(),
-                message: "Stalker refresh checkpoint saved; active snapshot remains in service".to_string(),
+                message: stalker_checkpoint_message(&input.name),
             }));
         }
     }
@@ -878,8 +1163,9 @@ async fn download_input(
 
     if let Some(staged_input) = staged_overlay.filter(|_| apply_staged_overlay) {
         let clusters = staged_input.staged.as_ref().map_or_else(ClusterFlags::all, |staged| staged.clusters);
-        let (mut staged_download_err, mut staged_playlist, staged_error) =
+        let (mut staged_download_err, mut staged_playlist, staged_error, staged_partial) =
             Box::pin(download_input(ctx, &staged_input, true)).await;
+        playlist_download_result.partial |= staged_partial;
         playlist_download_result.download_err.append(&mut staged_download_err);
         if let Some(staged_error) = staged_error {
             playlist_download_result.download_err.push(staged_error);
@@ -897,7 +1183,7 @@ async fn download_input(
         }
     }
 
-    if mark_as_processed {
+    if mark_as_processed && !playlist_download_result.partial && error.is_none() && !playlist.is_empty() {
         // Mark after persist/load so other workers only see this input as ready when data is usable.
         ctx.mark_input_downloaded(input.name.clone()).await;
     }
@@ -905,7 +1191,7 @@ async fn download_input(
     // Explicitly release per-input lock after load/persist/mark steps are completed.
     drop(input_lock);
 
-    (playlist_download_result.download_err, playlist, error)
+    (playlist_download_result.download_err, playlist, error, playlist_download_result.partial)
 }
 
 fn create_broadcast_callback(event_manager: Option<&Arc<EventManager>>) -> StepMeasureCallback {
@@ -992,13 +1278,13 @@ impl PlaylistProcessingContext {
 async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<SourceStats>, Vec<TuliproxError>) {
     let mut async_tasks = JoinSet::new();
     let sources = processing_ctx.config.sources.load();
-    let process_parallel = processing_ctx.config.config.load().process_parallel && sources.sources.len() > 1;
+    let process_parallel = processing_ctx.config.config.load().process_parallel;
     if process_parallel && log_enabled!(Level::Debug) {
         debug!("Parallel processing enabled");
     }
 
-    let errors = Arc::new(Mutex::<Vec<TuliproxError>>::new(vec![]));
-    let stats = Arc::new(Mutex::<Vec<SourceStats>>::new(vec![]));
+    let mut source_results = Vec::new();
+    let mut errors = Vec::new();
     let mut processed_any = false;
 
     for (index, source) in sources.sources.iter().enumerate() {
@@ -1013,36 +1299,16 @@ async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<Sou
             continue;
         };
 
-        let shared_errors = errors.clone();
-        let shared_stats = stats.clone();
-        // Wrap the context in an `Arc` once per source. The inner future spawned
-        // by `JoinSet::spawn` is required to be `Send` for *any* lifetime
-        // (HRTB), but a plain `&PlaylistProcessingContext` would tie the future's
-        // `Send` impl to a concrete lifetime and break the bound. `Arc<T>` is
-        // unconditionally `Send + Sync` for every lifetime, so the nested
-        // future from `process_source` is `Send` regardless of how the caller
-        // obtained the reference.
         let ctx = Arc::new(processing_ctx.clone());
 
         processed_any = true;
         if process_parallel {
             async_tasks.spawn(async move {
-                // Hold the per-source lock for the full duration of this update.
-                let current_update_lock = update_lock;
-                let (input_stats, target_stats, mut res_errors) =
-                    process_source(index, ctx.clone()).await;
-                shared_errors.lock().await.append(&mut res_errors);
-                if let Some(process_stats) = SourceStats::try_new(input_stats, target_stats) {
-                    shared_stats.lock().await.push(process_stats);
-                }
-                drop(current_update_lock);
+                let _update_lock = update_lock;
+                (index, process_source(index, ctx).await)
             });
         } else {
-            let (input_stats, target_stats, mut res_errors) = process_source(index, ctx).await;
-            shared_errors.lock().await.append(&mut res_errors);
-            if let Some(process_stats) = SourceStats::try_new(input_stats, target_stats) {
-                shared_stats.lock().await.push(process_stats);
-            }
+            source_results.push((index, process_source(index, ctx).await));
             drop(update_lock);
         }
     }
@@ -1055,15 +1321,26 @@ async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<Sou
         );
     }
     while let Some(result) = async_tasks.join_next().await {
-        if let Err(err) = result {
-            error!("Playlist processing task failed: {err:?}");
+        match result {
+            Ok(result) => source_results.push(result),
+            Err(err) => {
+                error!("Playlist processing task failed: {err:?}");
+                errors.push(TuliproxError::RepositoryPlaylist(format!(
+                    "Playlist source processing task failed: {err}"
+                )));
+            }
         }
     }
-    if let (Ok(s), Ok(e)) = (Arc::try_unwrap(stats), Arc::try_unwrap(errors)) {
-        (s.into_inner(), e.into_inner())
-    } else {
-        (vec![], vec![])
+
+    source_results.sort_by_key(|(index, _)| *index);
+    let mut stats = Vec::with_capacity(source_results.len());
+    for (_, (input_stats, target_stats, mut source_errors)) in source_results {
+        errors.append(&mut source_errors);
+        if let Some(source_stats) = SourceStats::try_new(input_stats, target_stats) {
+            stats.push(source_stats);
+        }
     }
+    (stats, errors)
 }
 
 pub type ProcessingPipe = Vec<fn(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>>>;
@@ -1146,15 +1423,21 @@ fn flatten_groups(playlistgroups: Vec<PlaylistGroup>) -> Vec<PlaylistGroup> {
     sort_order
 }
 
+struct PreparedTarget {
+    target: ConfigTarget,
+    playlist: Vec<PlaylistGroup>,
+    epg: Vec<Epg>,
+}
+
 #[allow(clippy::too_many_arguments)]
-async fn process_playlist_for_target(
+async fn prepare_playlist_for_target(
     ctx: &PlaylistProcessingContext,
     playlists: &mut [FetchedPlaylist<'_>],
     target: &ConfigTarget,
     stats: &mut HashMap<Arc<str>, InputStats>,
     errors: &mut Vec<TuliproxError>,
     consume_input_source: bool,
-) -> Result<(), Vec<TuliproxError>> {
+) -> Result<PreparedTarget, Vec<TuliproxError>> {
     debug_if_enabled!("Processing order is {}", &target.processing_order);
     log_memory_snapshot(format!("target '{}' start", target.name).as_str());
 
@@ -1202,7 +1485,20 @@ async fn process_playlist_for_target(
     }
     step.tick("filter rename map + epg");
     log_memory_snapshot(format!("target '{}' after_filter_rename_map_epg", target.name).as_str());
+    step.stop("Preparing playlist");
+    Ok(PreparedTarget { target: target.clone(), playlist: new_playlist, epg: new_epg })
+}
 
+async fn finalize_prepared_target(
+    ctx: Arc<PlaylistProcessingContext>,
+    prepared: PreparedTarget,
+) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
+    let target = &prepared.target;
+    let mut new_playlist = prepared.playlist;
+    let new_epg = prepared.epg;
+    let mut errors = Vec::new();
+    let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
+    let mut step = StepMeasure::new(&target.name, broadcast_step);
     if target.favourites.is_some() {
         step.broadcast("Processing favourites for '{}' playlist", &target.name);
         process_favourites(&mut new_playlist, target.favourites.as_deref());
@@ -1212,10 +1508,10 @@ async fn process_playlist_for_target(
     if new_playlist.is_empty() {
         step.stop("");
         info!("Playlist is empty: {}", target.name);
-        Ok(())
+        (Ok(()), errors)
     } else {
         // Process Trakt categories
-        if trakt_playlist(&ctx.client, target, errors, &mut new_playlist).await {
+        if trakt_playlist(&ctx.client, target, &mut errors, &mut new_playlist).await {
             step.tick("trakt categories");
             log_memory_snapshot(format!("target '{}' after_trakt", target.name).as_str());
         }
@@ -1249,7 +1545,7 @@ async fn process_playlist_for_target(
             .await;
         step.stop("Persisting playlists");
         log_memory_snapshot(format!("target '{}' after_persist", target.name).as_str());
-        result
+        (result, errors)
     }
 }
 
@@ -1647,7 +1943,9 @@ pub async fn exec_processing(
         provider_manager,
         metadata_manager,
         pre_processed_inputs: pre_processed_inputs.map(Arc::new),
-        stalker_refresh_mode: if update_guard.is_some() {
+        stalker_refresh_mode: if app_config.config.load().process_parallel {
+            StalkerRefreshMode::Parallel
+        } else if update_guard.is_some() {
             StalkerRefreshMode::ServerSlice
         } else {
             StalkerRefreshMode::Complete
@@ -1741,6 +2039,7 @@ mod tests {
         PlaylistItemHeader, PlaylistItemType, XtreamCluster, XtreamPlaylistItem,
     };
     use shared::utils::Internable;
+    use crate::model::Config;
 
     fn serialize_without_trailing_input_stream_id<T: serde::Serialize>(value: &T) -> Vec<u8> {
         let mut encoded = rmp_serde::to_vec(value).expect("playlist item should serialize");
@@ -2264,5 +2563,138 @@ mod tests {
         assert_eq!(groups[0].channels[0].header.chno, 1);
         assert_eq!(groups[0].channels[1].header.chno, 2);
         assert_eq!(groups[1].channels[0].header.chno, 3);
+    }
+
+    #[tokio::test]
+    async fn parallel_input_scheduler_serializes_equal_groups_and_overlaps_distinct_groups() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        async fn observe(active: &AtomicUsize, maximum: &AtomicUsize) {
+            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+            maximum.fetch_max(current, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            active.fetch_sub(1, Ordering::SeqCst);
+        }
+
+        let locks = crate::utils::FileLockManager::default();
+        let active = AtomicUsize::new(0);
+        let maximum = AtomicUsize::new(0);
+        tokio::join!(
+            with_sequential_group(&locks, Some(7), true, observe(&active, &maximum)),
+            with_sequential_group(&locks, Some(7), true, observe(&active, &maximum)),
+        );
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
+
+        maximum.store(0, Ordering::SeqCst);
+        tokio::join!(
+            with_sequential_group(&locks, Some(7), true, observe(&active, &maximum)),
+            with_sequential_group(&locks, Some(8), true, observe(&active, &maximum)),
+        );
+        assert_eq!(maximum.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn parallel_input_scheduler_releases_group_after_abort() {
+        let locks = Arc::new(crate::utils::FileLockManager::default());
+        let task_locks = Arc::clone(&locks);
+        let task = tokio::spawn(async move {
+            with_sequential_group(&task_locks, Some(7), true, std::future::pending::<()>()).await;
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            with_sequential_group(&locks, Some(7), true, std::future::ready(())),
+        )
+        .await
+        .expect("aborting an input job must release its sequential group");
+    }
+
+    #[test]
+    fn input_progress_message_contains_each_target_and_blocking_input() {
+        let targets = ["target-a", "target-b"];
+        let inputs = ["input-a", "input-b"];
+        let messages: Vec<_> = targets
+            .iter()
+            .flat_map(|target| inputs.iter().map(move |input| target_waiting_message(target, input)))
+            .collect();
+
+        assert_eq!(messages.len(), 4);
+        for target in targets {
+            for input in inputs {
+                assert!(messages.contains(&format!("Target '{target}' is waiting for input '{input}'")));
+            }
+        }
+        assert!(stalker_checkpoint_message("portal-a").contains("portal-a"));
+    }
+
+    #[tokio::test]
+    async fn parallel_target_pipeline_bounds_active_finalizers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let mut tasks = JoinSet::new();
+        let mut results = Vec::new();
+        let mut errors = Vec::new();
+
+        for index in 0..6 {
+            wait_for_target_finalizer_slot(&mut tasks, &mut results, &mut errors).await;
+            let active = Arc::clone(&active);
+            let maximum = Arc::clone(&maximum);
+            tasks.spawn(async move {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                maximum.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                TargetJobResult {
+                    index,
+                    name: format!("target-{index}"),
+                    result: Ok(()),
+                    errors: Vec::new(),
+                }
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            collect_target_task_result(result, &mut results, &mut errors);
+        }
+
+        assert!(maximum.load(Ordering::SeqCst) <= MAX_CONCURRENT_TARGET_FINALIZERS);
+        assert_eq!(results.len(), 6);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn parallel_target_pipeline_normalizes_conflicting_output_resources() {
+        let config = Config {
+            storage_dir: "/tmp/tuliprox-target-resources".to_string(),
+            ..Config::default()
+        };
+
+        let mut spaced = ConfigTarget::from(&ConfigTargetDto::default());
+        spaced.name = "A B".to_string();
+        let mut underscored = ConfigTarget::from(&ConfigTargetDto::default());
+        underscored.name = "A_B".to_string();
+        assert!(!target_mutated_resources(&config, &spaced)
+            .is_disjoint(&target_mutated_resources(&config, &underscored)));
+
+        spaced.name = "one".to_string();
+        spaced.output = vec![crate::model::TargetOutput::M3u(crate::model::M3uTargetOutput {
+            filename: Some("out/../x.m3u".to_string()),
+            include_type_in_url: false,
+            mask_redirect_url: false,
+            filter: None,
+        })];
+        underscored.name = "two".to_string();
+        underscored.output = vec![crate::model::TargetOutput::M3u(crate::model::M3uTargetOutput {
+            filename: Some("x.m3u".to_string()),
+            include_type_in_url: false,
+            mask_redirect_url: false,
+            filter: None,
+        })];
+        assert!(!target_mutated_resources(&config, &spaced)
+            .is_disjoint(&target_mutated_resources(&config, &underscored)));
     }
 }
