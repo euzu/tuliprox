@@ -1,7 +1,7 @@
 use crate::{
     api::{
         api_utils::{
-            create_api_proxy_user, empty_json_response_as_array, get_user_target,
+            coalesce_byte_stream, create_api_proxy_user, empty_json_response_as_array, get_user_target,
             get_user_target_by_credentials, internal_server_error,
             resource_response,
             stream_json_or_bin_response_stream, try_unwrap_body,
@@ -139,7 +139,14 @@ pub async fn serve_epg_web_ui(
                 error!("Failed to open epg db for target {} {}", target_name, epg_path.display());
                 return;
             };
-            for (_, channel) in query.disk_iter() {
+            for entry in query.disk_iter() {
+                let (_, channel) = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        error!("EPG stream failed for {}: {error}", epg_path.display());
+                        break;
+                    }
+                };
                 if tx.blocking_send(channel).is_err() {
                     break;
                 }
@@ -231,7 +238,14 @@ async fn serve_epg_with_rewrites(
             return;
         };
 
-        for (_, channel) in query.iter() {
+        for entry in query.iter() {
+            let (_, channel) = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    error!("EPG rewrite stream failed for {}: {error}", epg_path.display());
+                    break;
+                }
+            };
             if channel_tx.blocking_send(channel).is_err() {
                 break;
             }
@@ -350,7 +364,7 @@ async fn serve_epg_with_rewrites(
     let body_stream = ReaderStream::new(rx);
     try_unwrap_body!(axum::response::Response::builder()
         .header(axum::http::header::CONTENT_TYPE, mime::TEXT_XML.to_string())
-        .body(axum::body::Body::from_stream(body_stream)))
+        .body(axum::body::Body::from_stream(coalesce_byte_stream(body_stream))))
 }
 
 /// Looks up an EPG channel by its exact, target-output-case storage key.

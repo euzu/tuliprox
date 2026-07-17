@@ -2,6 +2,7 @@ use crate::{
     api::{
         api_utils::{
             admission_failure_response, create_m3u_catchup_session_key,
+            coalesce_byte_stream,
             create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response, get_session_reservation_ttl_secs,
             get_user_target, get_user_target_by_credentials, is_seek_request, is_session_based_playback,
             is_stream_share_enabled, local_stream_response, redirect, redirect_response, resource_response,
@@ -48,9 +49,11 @@ async fn m3u_api(
 
     match m3u_load_rewrite_playlist(&app_state.app_config, &target, &user).await {
         Ok(m3u_iter) => {
-            let content_stream = m3u_iter.map(|mut line| {
-                line.push('\n');
-                Ok::<Bytes, String>(Bytes::from(line))
+            let content_stream = m3u_iter.map(|line| {
+                line.map(|mut line| {
+                    line.push('\n');
+                    Bytes::from(line)
+                })
             });
 
             let mut builder = axum::response::Response::builder()
@@ -60,7 +63,7 @@ async fn m3u_api(
                 builder =
                     builder.header(axum::http::header::CONTENT_DISPOSITION, "attachment; filename=\"playlist.m3u\"");
             }
-            try_unwrap_body!(builder.body(axum::body::Body::from_stream(content_stream)))
+            try_unwrap_body!(builder.body(axum::body::Body::from_stream(coalesce_byte_stream(content_stream))))
         }
         Err(err) => {
             error!("{}", sanitize_sensitive_info(&err.to_string()));
