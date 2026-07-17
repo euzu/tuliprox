@@ -28,17 +28,16 @@ See [`LICENSE`](https://github.com/euzu/tuliprox/blob/develop/LICENSE).
 
 ### 2. Custom B+Tree Storage Engine — No External Database Needed
 
-- Purpose-built B+Tree with Slotted Page architecture
-- Adaptive LZ4 compression for minimal disk footprint
-- Zero-copy scans at up to 96,000 ops/sec
-- Batch upsert for massive throughput during playlist updates
-- Atomic I/O with file locking — no corrupt data, ever
-- Configurable flush policy (Immediate, Batch, None)
+- Versioned 4 KiB Slotted Page format with checksummed headers, pages, cells, and overflow chains
+- Adaptive LZ4 compression and overflow pages for compact variable-size values
+- Mmap-backed streaming scans without loading the complete database into memory
+- Shared query snapshots reuse mmap mappings, validated pages, and decoded internal routes
+- WAL-protected in-place updates with `Immediate` and `Batch` flush policies
+- Fully built replacements and compaction results are verified before atomic publication
+- Typed startup migration upgrades recognized legacy v1/v2 databases to v3
+- Identity- and generation-bound sorted indexes accelerate playlist-order streaming
 - String interning (`Arc<str>`) for playlist entries reduces memory footprint
-- B+Tree compaction to reclaim disk space
-- Persistent value caching with thread-safe access
-- Packed block update optimization — direct disk writes for same-size updates, bypassing expensive
-  read-scan-modify-write cycles
+- Page-local updates, tombstone reuse, free-page reuse, and explicit compaction reclaim disk space
 
 ### 3. Input Sources — Bring Everything Together
 

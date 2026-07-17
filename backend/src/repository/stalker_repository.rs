@@ -238,7 +238,11 @@ pub async fn load_stalker_items_after(
         let mut query = BPlusTreeQuery::<u32, StalkerPlaylistItem>::try_new(&blocking_path)
             .map_err(|err| repo_err!("open {} failed: {err}", blocking_path.display()))?;
         if after.is_none() && limit == usize::MAX {
-            return Ok(query.iter().map(|(_, item)| item).collect());
+            return query
+                .iter()
+                .map(|entry| entry.map(|(_, item)| item))
+                .collect::<std::io::Result<Vec<_>>>()
+                .map_err(|err| repo_err!("scan {} failed: {err}", blocking_path.display()));
         }
         let start = after.as_ref().map_or(Bound::Unbounded, Bound::Excluded);
         let (items, _) = query
@@ -269,12 +273,12 @@ pub async fn prepare_stalker_episode_series_at(
     let blocking_path = file_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let _guard = file_lock;
-        let mut tree = BPlusTreeUpdate::<u32, StalkerPlaylistItem>::try_new_with_backoff(&blocking_path)
-            .map_err(|err| repo_err!("open {} failed: {err}", blocking_path.display()))?;
         let (occupied, stale) = {
+            let mut query = BPlusTreeQuery::<u32, StalkerPlaylistItem>::try_new(&blocking_path)
+                .map_err(|err| repo_err!("open {} failed: {err}", blocking_path.display()))?;
             let mut occupied = HashSet::new();
             let mut stale = Vec::new();
-            for entry in tree.range_iter(Bound::Unbounded, Bound::Unbounded) {
+            for entry in query.iter() {
                 let (key, item) = entry
                     .map_err(|err| repo_err!("scan {} failed: {err}", blocking_path.display()))?;
                 if item.series_id == Some(series_id) {
@@ -285,6 +289,8 @@ pub async fn prepare_stalker_episode_series_at(
             }
             (occupied, stale)
         };
+        let mut tree = BPlusTreeUpdate::<u32, StalkerPlaylistItem>::try_new_with_backoff(&blocking_path)
+            .map_err(|err| repo_err!("open {} failed: {err}", blocking_path.display()))?;
         let stale_refs: Vec<&u32> = stale.iter().collect();
         tree.delete_batch(&stale_refs)
             .map_err(|err| repo_err!("delete stale series from {} failed: {err}", blocking_path.display()))?;
@@ -404,10 +410,15 @@ async fn iter_stalker_file(
         let result: Result<(), String> = (|| {
             let mut query = BPlusTreeQuery::<u32, StalkerPlaylistItem>::try_new(&blocking_path)
                 .map_err(|err| format!("open {} failed: {err}", blocking_path.display()))?;
-            for (_, doc) in query.iter() {
-                if tx.blocking_send(doc).is_err() {
-                    break;
-                }
+            for entry in query.iter() {
+                let (_, doc) = match entry {
+                    Ok(entry) => entry,
+                    Err(err) => {
+                        warn!("Skipping unreadable Stalker playlist entry in {}: {err}", blocking_path.display());
+                        continue;
+                    }
+                };
+                if tx.blocking_send(doc).is_err() { break; }
             }
             Ok(())
         })();

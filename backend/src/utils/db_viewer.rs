@@ -188,7 +188,15 @@ where
 
     println!("[");
     let mut first = true;
-    for (_, entry) in iterator {
+    for item in iterator {
+        let (_, entry) = match item {
+            Ok(entry) => entry,
+            Err(err) => {
+                error!("Failed to iterate database: {err}");
+                error_count += 1;
+                break;
+            }
+        };
         match to_human_readable_json_value(&entry).and_then(|value| serde_json::to_string(&value)) {
             Ok(json) => {
                 if !first {

@@ -32,10 +32,11 @@ pub async fn persist_input_library_playlist(
         // Keep previously probed technical metadata for unchanged local files.
         let mut existing_by_uuid: HashMap<UUIDType, XtreamPlaylistItem> = HashMap::new();
         if library_path.exists() {
-            if let Ok(mut query) = BPlusTreeQuery::<UUIDType, XtreamPlaylistItem>::try_new(&library_path) {
-                for (uuid, item) in query.iter() {
-                    existing_by_uuid.insert(uuid, item);
-                }
+            let mut query = BPlusTreeQuery::<UUIDType, XtreamPlaylistItem>::try_new(&library_path)
+                .map_err(|error| repository_read_error(&library_path, error))?;
+            for entry in query.iter() {
+                let (uuid, item) = entry.map_err(|error| repository_read_error(&library_path, error))?;
+                existing_by_uuid.insert(uuid, item);
             }
         }
 
@@ -111,6 +112,10 @@ fn preserve_local_probe_state_if_unchanged(new_item: &mut XtreamPlaylistItem, ol
     }
 }
 
+fn repository_read_error(path: &Path, error: impl std::fmt::Display) -> TuliproxError {
+    TuliproxError::Repository(format!("failed to read B+Tree database {}: {error}", path.display()))
+}
+
 pub async fn load_input_local_library_playlist(app_config: &Arc<AppConfig>, lib_path: &Path) -> Result<Vec<PlaylistGroup>, TuliproxError> {
     if file_exists_async(lib_path).await {
         let file_lock = app_config.file_locks.read_lock(lib_path).await;
@@ -120,23 +125,24 @@ pub async fn load_input_local_library_playlist(app_config: &Arc<AppConfig>, lib_
         let groups = task::spawn_blocking(move || -> Result<Vec<PlaylistGroup>, TuliproxError> {
             let _guard = file_lock;
             let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
-            if let Ok(mut query) = BPlusTreeQuery::<UUIDType, XtreamPlaylistItem>::try_new(&lib_path) {
-                let mut group_cnt = 0;
-                for (_, ref item) in query.iter() {
-                    let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
-                    let key = (cluster, item.group.clone());
-                    groups.entry(key)
-                        .or_insert_with(|| {
-                            group_cnt += 1;
-                            PlaylistGroup {
-                                id: group_cnt,
-                                title: item.group.clone(),
-                                channels: Vec::new(),
-                                xtream_cluster: cluster,
-                            }
-                        })
-                        .channels.push(PlaylistItem::from(item));
-                }
+            let mut query = BPlusTreeQuery::<UUIDType, XtreamPlaylistItem>::try_new(&lib_path)
+                .map_err(|error| repository_read_error(&lib_path, error))?;
+            let mut group_cnt = 0;
+            for entry in query.iter() {
+                let (_, item) = entry.map_err(|error| repository_read_error(&lib_path, error))?;
+                let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
+                let key = (cluster, item.group.clone());
+                groups.entry(key)
+                    .or_insert_with(|| {
+                        group_cnt += 1;
+                        PlaylistGroup {
+                            id: group_cnt,
+                            title: item.group.clone(),
+                            channels: Vec::new(),
+                            xtream_cluster: cluster,
+                        }
+                    })
+                    .channels.push(PlaylistItem::from(&item));
             }
             Ok(groups.into_values().collect())
         })
@@ -154,6 +160,12 @@ mod tests {
     use super::*;
     use shared::utils::Internable;
     use shared::model::{EpisodeStreamProperties, VideoStreamDetailProperties, VideoStreamProperties};
+
+    #[test]
+    fn bplustree_read_errors_are_generic_repository_errors() {
+        let error = repository_read_error(Path::new("library.db"), std::io::Error::other("corrupt page"));
+        assert!(matches!(error, TuliproxError::Repository(message) if message.contains("library.db") && message.contains("corrupt page")));
+    }
 
     fn video_item(
         url: &str,

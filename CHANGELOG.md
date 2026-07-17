@@ -591,6 +591,21 @@
 
 ## 🛠 Maintenance
 
+- **B+Tree v3 persistence engine**:
+  - Consolidated the facade, v2 compatibility reader, v3 engine, migration, WAL, sorted index, and stress tests under
+    `backend/src/repository/bplustree/`.
+  - Added checksummed 4 KiB Slotted Pages, WAL-before-data in-place updates, verified atomic full replacement, typed
+    v1/v2 startup migration, identity-bound sorted indexes, and corruption-reporting iterators.
+  - Reused mmap mappings, page validation, and decoded internal routes across cheap `BPlusTreeQuery` clones while
+    retaining request-local scratch buffers.
+  - Kept stored values up to 512 bytes inline, avoiding one mostly empty 4 KiB overflow page per typical Xtream/M3U
+    playlist entry and restoring compact full-scan behavior.
+  - Playlist APIs now coalesce small M3U, Xtream, HDHomeRun, XMLTV, JSON, and CBOR fragments into bounded 64 KiB
+    response chunks instead of emitting one HTTP body frame per entry.
+  - Corrupt individual B+Tree values are logged and skipped when the iterator can safely continue; database-open and
+    worker failures remain visible, and failed input-cache opens no longer replace existing Xtream persistence.
+  - Classified B+Tree read failures as repository errors
+  - Opening a corrupt existing Library database no longer silently produces an empty Library.
 - **Shared `FieldWrapper` For Form Inputs**:
   - Extracted the repeated label / field-id / `tp__input-wrapper` scaffolding from the `Input`, `NumberInput`, and
     `TextArea` primitives into a single shared `FieldWrapper` component, reducing duplication while keeping the

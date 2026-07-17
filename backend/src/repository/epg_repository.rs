@@ -468,7 +468,13 @@ mod tests {
             .expect("case-preserving EPG should be written");
 
         let mut query = BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&path).expect("EPG DB should open");
-        let stored_ids = query.iter().map(|(_, channel)| channel.id).collect::<Vec<_>>();
+        let stored_ids = query
+            .iter()
+            .collect::<std::io::Result<Vec<_>>>()
+            .expect("EPG entries should be readable")
+            .into_iter()
+            .map(|(_, channel)| channel.id)
+            .collect::<Vec<_>>();
 
         assert_eq!(stored_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>(), vec!["Z.Channel", "a.channel"]);
     }

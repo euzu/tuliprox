@@ -1,4 +1,5 @@
 .tools
+.worktrees
 dist
 /resources/*.ts
 /release

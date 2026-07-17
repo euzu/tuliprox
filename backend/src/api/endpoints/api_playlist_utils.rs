@@ -1,6 +1,6 @@
 use crate::api::model::AppState;
 use crate::{
-    api::api_utils::{empty_json_list_response, stream_json_or_bin_response_stream},
+    api::api_utils::{empty_json_list_response, stream_json_or_bin_response_stream, stream_json_or_bin_response_try_stream},
     model::{ConfigInput, ConfigTarget},
     processing::processor::{download_stalker_playlist, StalkerCluster},
     repository::{
@@ -10,7 +10,6 @@ use crate::{
     utils::{m3u, xtream},
 };
 use axum::response::IntoResponse;
-use log::warn;
 use serde_json::json;
 use shared::utils::{concat_path, concat_path_leading_slash, interner_gc, obfuscate_text, Internable};
 use shared::model::{InputPersistence, M3uPlaylistItem, TargetType, UiPlaylistItem, XtreamCluster, XtreamPlaylistItem};
@@ -64,8 +63,16 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
             } else {
                 |_pli: &XtreamPlaylistItem| true
             };
-            let converted_stream = channel_iterator.filter(item_filter).map(UiPlaylistItem::from).map(move |uiu| rewrite_resource_url(&encrypt_secret, &resource_url, uiu));
-            return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
+            let converted_stream = channel_iterator.filter_map(move |entry| match entry {
+                Ok(item) if item_filter(&item) => Some(Ok(rewrite_resource_url(
+                    &encrypt_secret,
+                    &resource_url,
+                    UiPlaylistItem::from(item),
+                ))),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            });
+            return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         } else if target.has_output(TargetType::M3u) {
             let Some(channel_iterator) = iter_raw_m3u_target_playlist(&app_state.app_config, target, Some(cluster)).await else {
                 return empty_json_list_response();
@@ -79,19 +86,15 @@ pub(in crate::api::endpoints) async fn get_playlist_for_target(
             };
 
             let converted_stream = channel_iterator.filter_map(move |res| match res {
-                Ok(pli) => {
-                    if item_filter(&pli) {
-                        Some(rewrite_resource_url(&encrypt_secret, &resource_url, UiPlaylistItem::from(pli)))
-                    } else {
-                        None
-                    }
-                }
-                Err(err) => {
-                    warn!("Skipping unreadable M3U target playlist entry: {err}");
-                    None
-                }
+                Ok(pli) if item_filter(&pli) => Some(Ok(rewrite_resource_url(
+                    &encrypt_secret,
+                    &resource_url,
+                    UiPlaylistItem::from(pli),
+                ))),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
             });
-            return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
+            return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         }
     }
     (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": "Invalid Arguments"}))).into_response()
@@ -135,20 +138,14 @@ pub(in crate::api::endpoints) async fn get_playlist_for_input(
             let Some(channel_iterator) = iter_raw_xtream_input_playlist(&app_state.app_config, input, cluster).await else {
                 return empty_json_list_response();
             };
-            let converted_stream = channel_iterator.map(UiPlaylistItem::from);
-            return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
+            let converted_stream = channel_iterator.map(|entry| entry.map(UiPlaylistItem::from));
+            return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         } else if input.input_type.is_m3u() {
             let Some(channels) = iter_raw_m3u_input_playlist(&app_state.app_config, input, Some(cluster)).await else {
                 return empty_json_list_response();
             };
-            let converted_stream = channels.filter_map(|res| match res {
-                Ok(pli) => Some(UiPlaylistItem::from(pli)),
-                Err(err) => {
-                    warn!("Skipping unreadable M3U input playlist entry: {err}");
-                    None
-                }
-            });
-            return stream_json_or_bin_response_stream(accept, converted_stream).into_response();
+            let converted_stream = channels.map(|entry| entry.map(UiPlaylistItem::from));
+            return stream_json_or_bin_response_try_stream(accept, converted_stream).into_response();
         } else if input.input_type.is_stalker() {
             // TODO refactor
             let stalker_cluster = stalker_cluster(cluster);

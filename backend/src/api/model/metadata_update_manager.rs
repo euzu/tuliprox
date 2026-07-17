@@ -496,7 +496,8 @@ fn load_metadata_retry_states_from_disk(path: &Path) -> io::Result<HashMap<TaskK
     let mut result = HashMap::new();
     let mut stale_keys: Vec<MetadataRetryDbKey> = Vec::new();
     let mut query = BPlusTreeQuery::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new(path)?;
-    for (key, value) in query.iter() {
+    for entry in query.iter() {
+        let (key, value) = entry?;
         if let Some(state) = value.clone().into_task_retry_state() {
             result.insert(key.into_task_key(), state);
         } else {

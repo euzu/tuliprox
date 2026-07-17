@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use tokio::task;
 
 // V6 (current): added network_access. V1-V5 are migrated to V6 at startup
-// by `bplustree_migration::run_all_startup_migrations`.
+// by `bplustree::run_all_startup_migrations`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredProxyUserCredentials {
     pub target: String,
