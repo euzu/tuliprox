@@ -3158,6 +3158,7 @@ where
     if state.finished {
         return None;
     }
+    let mut entry_error = false;
     let result = (|| {
         if !state.initialized {
             state.leaf_page_id = match &state.start {
@@ -3191,8 +3192,13 @@ where
             while state.slot_index < state.cell_ranges.len() {
                 let index = state.slot_index;
                 state.slot_index += 1;
-                if let Some(entry) = query.decode_entry_range(page_id, state.cell_ranges[index].clone())? {
-                    return Ok(Some(entry));
+                match query.decode_entry_range(page_id, state.cell_ranges[index].clone()) {
+                    Ok(Some(entry)) => return Ok(Some(entry)),
+                    Ok(None) => {}
+                    Err(error) => {
+                        entry_error = true;
+                        return Err(error);
+                    }
                 }
             }
             let right = state.right_sibling;
@@ -3214,7 +3220,7 @@ where
             None
         }
         Err(err) => {
-            state.finished = true;
+            state.finished = !entry_error;
             Some(Err(err))
         }
     }
@@ -3882,6 +3888,25 @@ mod tests {
         let mut query = BPlusTreeQuery::<u32, Vec<u8>>::try_new(&path)?;
         assert_eq!(query.query(&4).map_err(BPlusTreeError::to_io)?, Some(grown));
         let _ = verify_full(&mut query)?;
+        Ok(())
+    }
+
+    #[test]
+    fn medium_stored_value_remains_inline() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("medium-inline.db");
+        let value = random_value()
+            .get(..300)
+            .ok_or_else(|| io::Error::other("random test value is too short"))?
+            .to_vec();
+        let mut tree = BPlusTree::new();
+        tree.insert(7u32, value.clone());
+
+        let report = tree.store_verified(&path)?;
+
+        assert_eq!(report.overflow_pages, 0);
+        let mut query = BPlusTreeQuery::<u32, Vec<u8>>::try_new(&path)?;
+        assert_eq!(query.query(&7).map_err(BPlusTreeError::to_io)?, Some(value));
         Ok(())
     }
 
@@ -5314,6 +5339,51 @@ mod tests {
         }
         assert!(iterator.next().is_none());
         assert!(yielded > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn iterator_skips_corrupt_value_and_continues_with_next_cell() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("iterator-corrupt-value.db");
+        let mut tree = BPlusTree::new();
+        for key in 1..=3u32 {
+            tree.insert(key, format!("value-{key}"));
+        }
+        tree.store(&path)?;
+
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+        let (page_id, range) = query
+            .locate_cell(&2)?
+            .ok_or_else(|| io::Error::other("test key missing"))?;
+        let next_page_id = query.header.next_page_id;
+        let stored_offset = query.with_page(page_id, |bytes, _| {
+            let cell = LeafCellRef::decode(
+                bytes.get(range).ok_or_else(|| io::Error::other("test cell range missing"))?,
+                page_id,
+                next_page_id,
+            )?;
+            let LeafValueRef::Inline { stored, .. } = cell.value else {
+                return Err(io::Error::other("test value is not inline"));
+            };
+            Ok(stored.as_ptr() as usize - bytes.as_ptr() as usize)
+        })?;
+        drop(query);
+
+        let mut database = fs::read(&path)?;
+        let absolute = page_range(page_id)?.start + stored_offset;
+        *database
+            .get_mut(absolute)
+            .ok_or_else(|| io::Error::other("test value byte missing"))? = 0xc1;
+        rewrite_page_checksum(&mut database, page_id)?;
+        fs::write(&path, database)?;
+
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+        let mut iterator = query.iter();
+        assert_eq!(iterator.next().transpose()?, Some((1, String::from("value-1"))));
+        assert!(iterator.next().is_some_and(|entry| entry.is_err()));
+        assert_eq!(iterator.next().transpose()?, Some((3, String::from("value-3"))));
+        assert!(iterator.next().is_none());
         Ok(())
     }
 

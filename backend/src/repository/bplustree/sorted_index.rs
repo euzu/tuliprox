@@ -223,20 +223,35 @@ pub(crate) mod v4 {
 
         fn read_next_inner(&mut self) -> io::Result<Option<BorrowedEntry<'_, SortKey, K>>> {
             if self.remaining_bytes < ENTRY_PREFIX_LEN_U64 {
+                self.failed = true;
                 return Err(invalid_data("sorted-index entry prefix is truncated"));
             }
             let mut prefix = [0; ENTRY_PREFIX_LEN];
-            self.input.read_exact(&mut prefix)?;
+            if let Err(error) = self.input.read_exact(&mut prefix) {
+                self.failed = true;
+                return Err(error);
+            }
             self.remaining_bytes -= ENTRY_PREFIX_LEN_U64;
             let body_len = u64::from(read_u32(&prefix, 0)?);
             let expected_crc = read_u32(&prefix, 4)?;
             if body_len < ENTRY_FIXED_BODY_LEN as u64 || body_len > self.remaining_bytes {
+                self.failed = true;
                 return Err(invalid_data("sorted-index entry length is invalid"));
             }
-            let body_len = usize::try_from(body_len).map_err(invalid_integer)?;
+            let body_len = match usize::try_from(body_len) {
+                Ok(body_len) => body_len,
+                Err(error) => {
+                    self.failed = true;
+                    return Err(invalid_integer(error));
+                }
+            };
             self.body.resize(body_len, 0);
-            self.input.read_exact(&mut self.body)?;
+            if let Err(error) = self.input.read_exact(&mut self.body) {
+                self.failed = true;
+                return Err(error);
+            }
             self.remaining_bytes -= u64::try_from(body_len).map_err(invalid_integer)?;
+            self.remaining_entries -= 1;
             if crc32fast::hash(&self.body) != expected_crc {
                 return Err(invalid_data("sorted-index entry checksum mismatch"));
             }
@@ -261,7 +276,6 @@ pub(crate) mod v4 {
                 .get(sort_key_end..expected_len)
                 .ok_or_else(|| invalid_data("primary key is truncated"))?;
             let primary_key = binary_deserialize(serialized_primary_key)?;
-            self.remaining_entries -= 1;
             Ok(Some(BorrowedEntry { sort_key, primary_key, serialized_primary_key, locator }))
         }
     }
@@ -321,10 +335,7 @@ pub(crate) mod v4 {
             };
             match result {
                 Ok(entry) => Some(Ok(entry)),
-                Err(error) => {
-                    self.finished = true;
-                    Some(Err(error))
-                }
+                Err(error) => Some(Err(error)),
             }
         }
     }

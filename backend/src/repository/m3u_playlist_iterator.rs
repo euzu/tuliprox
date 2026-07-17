@@ -256,6 +256,7 @@ impl M3uPlaylistIterator {
 
         let m3u_path_for_log = m3u_path.clone();
         let index_path_for_log = index_path.clone();
+        let join_error_tx = tx.clone();
         let handle = task::spawn_blocking(move || {
             let _guard = bg_lock;
             let reader = match open_playlist_reader::<u32, M3uPlaylistItem, u32>(
@@ -276,13 +277,8 @@ impl M3uPlaylistIterator {
                 let item = match entry {
                     Ok((_, item)) => item,
                     Err(err) => {
-                        if let Some(item) = pending.take() {
-                            if tx.blocking_send(Ok((item, true))).is_err() {
-                                return;
-                            }
-                        }
-                        let _ = tx.blocking_send(Err(TuliproxError::RepositoryM3u(err.to_string())));
-                        return;
+                        error!("Skipping unreadable M3U playlist entry: {err}");
+                        continue;
                     }
                 };
 
@@ -331,6 +327,12 @@ impl M3uPlaylistIterator {
                     m3u_path_for_log.display(),
                     index_path_for_log.display()
                 );
+                let _ = join_error_tx
+                    .send(Err(TuliproxError::RepositoryM3u(format!(
+                        "M3U playlist iterator task failed for {}: {err}",
+                        m3u_path_for_log.display()
+                    ))))
+                    .await;
             }
         });
 

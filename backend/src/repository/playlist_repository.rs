@@ -684,7 +684,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
             let clusters_to_load = clusters.unwrap_or(&XTREAM_CLUSTER);
             if disk_based_processing {
                 let source = PlaylistSource::xtream_disk(
-                    XtreamDiskPlaylistSource::new(app_config, &storage_path).await,
+                    XtreamDiskPlaylistSource::new(app_config, &storage_path).await?,
                 );
                 Ok(PlaylistSource::filtered(source, skipped_clusters(clusters_to_load)))
             } else {
@@ -697,7 +697,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
             let file_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
                 Ok(PlaylistSource::m3u_disk(
-                    M3uDiskPlaylistSource::new(app_config, &file_path).await,
+                    M3uDiskPlaylistSource::new(app_config, &file_path).await?,
                 ))
             } else {
                 let groups = load_input_m3u_playlist(app_config, &file_path).await?;
@@ -708,7 +708,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
             let file_path = get_input_local_library_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
                 Ok(PlaylistSource::local_library_disk(
-                    LocalLibraryDiskPlaylistSource::new(app_config, &file_path).await,
+                    LocalLibraryDiskPlaylistSource::new(app_config, &file_path).await?,
                 ))
             } else {
                 let groups = load_input_local_library_playlist(app_config, &file_path).await?;
@@ -719,7 +719,7 @@ pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &Config
             let file_path = get_input_media_server_playlist_file_path(&storage_path, &input.name);
             if disk_based_processing && file_path.exists() {
                 Ok(PlaylistSource::media_server_disk(
-                    MediaServerDiskPlaylistSource::new(app_config, &file_path).await,
+                    MediaServerDiskPlaylistSource::new(app_config, &file_path).await?,
                 ))
             } else {
                 let groups = load_input_media_server_playlist(app_config, &file_path).await?;

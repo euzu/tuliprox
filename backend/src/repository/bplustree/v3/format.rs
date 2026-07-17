@@ -10,7 +10,7 @@ pub(crate) const STORAGE_VERSION_V2: u32 = 2;
 pub(crate) const STORAGE_VERSION_V3: u32 = 3;
 pub(crate) const MAX_ENCODED_KEY_LEN: usize = 2004;
 pub(crate) const MAX_CELL_FOOTPRINT: usize = 2032;
-pub(crate) const MAX_INLINE_STORED_VALUE: usize = 256;
+pub(crate) const MAX_INLINE_STORED_VALUE: usize = 512;
 pub(crate) const OVERFLOW_PAYLOAD_LEN: usize = 4056;
 pub(crate) const MAGIC: &[u8; 4] = b"BTRE";
 
@@ -1090,7 +1090,7 @@ mod tests {
         assert_eq!(STORAGE_VERSION_V3, 3);
         assert_eq!(MAX_ENCODED_KEY_LEN, 2004);
         assert_eq!(MAX_CELL_FOOTPRINT, 2032);
-        assert_eq!(MAX_INLINE_STORED_VALUE, 256);
+        assert_eq!(MAX_INLINE_STORED_VALUE, 512);
         assert_eq!(OVERFLOW_PAYLOAD_LEN, 4056);
         assert_eq!(PAGE_HEADER_LEN, 32);
         assert_eq!(SLOT_LEN, 4);

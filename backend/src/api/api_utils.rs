@@ -35,7 +35,7 @@ use axum::{
     http::{header, Extensions, HeaderMap, HeaderName, HeaderValue, Response, StatusCode},
     response::IntoResponse,
 };
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use chrono::{DateTime, Utc};
 use futures::{stream, Stream, StreamExt, TryStreamExt};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
@@ -3915,11 +3915,11 @@ where
         }
     });
 
-    let body = Body::from_stream(
+    let body = Body::from_stream(coalesce_byte_stream(
         stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"[")) })
             .chain(stream)
             .chain(stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"]")) })),
-    );
+    ));
 
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_JSON).body(body))
 }
@@ -3943,7 +3943,7 @@ where
         }
     });
 
-    let body = Body::from_stream(
+    let body = Body::from_stream(coalesce_byte_stream(
         stream::once(async {
             // CBOR: start indefinite-length array
             Ok::<_, Infallible>(Bytes::from_static(&[0x9f]))
@@ -3953,7 +3953,7 @@ where
             // CBOR: end indefinite-length array
             Ok::<_, Infallible>(Bytes::from_static(&[0xff]))
         })),
-    );
+    ));
 
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_CBOR).body(body))
 }
@@ -3978,11 +3978,11 @@ where
         }
     });
 
-    let body = Body::from_stream(
+    let body = Body::from_stream(coalesce_byte_stream(
         stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"[")) })
             .chain(stream)
             .chain(stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"]")) })),
-    );
+    ));
 
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_JSON).body(body))
 }
@@ -4018,11 +4018,11 @@ where
         }
     });
 
-    let body = Body::from_stream(
+    let body = Body::from_stream(coalesce_byte_stream(
         stream::once(async { Ok::<_, String>(Bytes::from_static(b"[")) })
             .chain(stream)
             .chain(stream::once(async { Ok::<_, String>(Bytes::from_static(b"]")) })),
-    );
+    ));
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_JSON).body(body))
 }
 
@@ -4044,11 +4044,11 @@ where
         }
     });
 
-    let body = Body::from_stream(
+    let body = Body::from_stream(coalesce_byte_stream(
         stream::once(async { Ok::<_, Infallible>(Bytes::from_static(&[0x9f])) })
             .chain(stream)
             .chain(stream::once(async { Ok::<_, Infallible>(Bytes::from_static(&[0xff])) })),
-    );
+    ));
 
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_CBOR).body(body))
 }
@@ -4074,12 +4074,52 @@ where
         }
     });
 
-    let body = Body::from_stream(
+    let body = Body::from_stream(coalesce_byte_stream(
         stream::once(async { Ok::<_, String>(Bytes::from_static(&[0x9f])) })
             .chain(stream)
             .chain(stream::once(async { Ok::<_, String>(Bytes::from_static(&[0xff])) })),
-    );
+    ));
     try_unwrap_body!(Response::builder().header(header::CONTENT_TYPE, CONTENT_TYPE_CBOR).body(body))
+}
+
+const API_STREAM_CHUNK_SIZE: usize = 64 * 1024;
+
+pub(crate) fn coalesce_byte_stream<S, E>(stream: S) -> impl Stream<Item = Result<Bytes, E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    stream::unfold((Box::pin(stream), None, false), |(mut stream, pending_error, finished)| async move {
+        if let Some(error) = pending_error {
+            return Some((Err(error), (stream, None, true)));
+        }
+        if finished {
+            return None;
+        }
+
+        let mut chunk = BytesMut::with_capacity(API_STREAM_CHUNK_SIZE);
+        loop {
+            match stream.next().await {
+                Some(Ok(bytes)) if chunk.is_empty() && bytes.len() >= API_STREAM_CHUNK_SIZE => {
+                    return Some((Ok(bytes), (stream, None, false)));
+                }
+                Some(Ok(bytes)) => {
+                    chunk.extend_from_slice(&bytes);
+                    if chunk.len() >= API_STREAM_CHUNK_SIZE {
+                        return Some((Ok(chunk.freeze()), (stream, None, false)));
+                    }
+                }
+                Some(Err(error)) if chunk.is_empty() => {
+                    return Some((Err(error), (stream, None, true)));
+                }
+                Some(Err(error)) => {
+                    return Some((Ok(chunk.freeze()), (stream, Some(error), false)));
+                }
+                None if chunk.is_empty() => return None,
+                None => return Some((Ok(chunk.freeze()), (stream, None, true))),
+            }
+        }
+    })
 }
 
 pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials {
@@ -4168,6 +4208,26 @@ mod tests {
 
     fn test_runtime_provider(url: &str, username: &str, password: &str) -> Arc<RuntimeProviderConfig> {
         test_runtime_provider_with_type(url, username, password, InputType::Xtream)
+    }
+
+    #[tokio::test]
+    async fn streamed_json_array_coalesces_small_entries() {
+        let response = stream_json_array_stream(stream::iter(0..4_096u32));
+        let mut body = response.into_body();
+        let mut frames = 0usize;
+        let mut bytes = Vec::new();
+        while let Some(frame) = body.frame().await {
+            let Ok(frame) = frame else {
+                return;
+            };
+            if let Ok(data) = frame.into_data() {
+                frames += 1;
+                bytes.extend_from_slice(&data);
+            }
+        }
+        assert!(frames <= 2, "small JSON entries should be coalesced, got {frames} frames");
+        let decoded = serde_json::from_slice::<Vec<u32>>(&bytes);
+        assert!(decoded.is_ok_and(|values| values.len() == 4_096));
     }
 
     fn test_runtime_provider_with_type(

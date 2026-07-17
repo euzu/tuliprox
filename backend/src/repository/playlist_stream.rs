@@ -162,13 +162,14 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_late_index_entry_is_returned_once_without_fallback() -> io::Result<()> {
+    fn corrupt_late_index_entry_does_not_hide_following_entries() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let database = dir.path().join("playlist-late.db");
         let index = dir.path().join("playlist-late.idx");
         let mut tree = BPlusTree::new();
         tree.insert(1u32, String::from("one"));
         tree.insert(2u32, String::from("two"));
+        tree.insert(3u32, String::from("three"));
         tree.store(&database)?;
         let mut query = BPlusTreeQuery::<u32, String>::try_new(&database)?;
         let entries = query.collect_with_locators()?;
@@ -177,12 +178,14 @@ mod tests {
         let mut writer = v4::Writer::<u32, u32>::new(&index, database_id, generation)?;
         writer.push(&1, &entries[0].0, entries[0].2)?;
         writer.push(&2, &entries[1].0, Locator { slot_index: u16::MAX, ..entries[1].2 })?;
+        writer.push(&3, &entries[2].0, entries[2].2)?;
         writer.finish()?;
 
         let mut reader = open_playlist_reader::<u32, String, u32>(&database, &index, None)
             .map_err(io::Error::other)?;
         assert_eq!(reader.next().transpose()?, Some((1, String::from("one"))));
         assert!(reader.next().is_some_and(|entry| entry.is_err()));
+        assert_eq!(reader.next().transpose()?, Some((3, String::from("three"))));
         assert!(reader.next().is_none());
         Ok(())
     }

@@ -688,6 +688,7 @@ async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) ->
 
     let xtream_path_for_log = xtream_path.clone();
     let index_path_for_log = index_path.clone();
+    let join_error_tx = tx.clone();
     let handle = tokio::task::spawn_blocking(move || {
         let _guard = bg_lock;
         let reader = match open_playlist_reader::<u32, XtreamPlaylistItem, u32>(
@@ -711,8 +712,8 @@ async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) ->
             let item = match entry {
                 Ok((_, item)) => item,
                 Err(err) => {
-                    let _ = tx.blocking_send(Err(TuliproxError::RepositoryXtream(err.to_string())));
-                    break;
+                    error!("Skipping unreadable Xtream playlist entry: {err}");
+                    continue;
                 }
             };
             if tx.blocking_send(Ok(item)).is_err() {
@@ -727,6 +728,12 @@ async fn iter_raw_xtream_playlist(app_config: &AppConfig, xtream_path: &Path) ->
                 xtream_path_for_log.display(),
                 index_path_for_log.display()
             );
+            let _ = join_error_tx
+                .send(Err(TuliproxError::RepositoryXtream(format!(
+                    "Xtream playlist producer task failed for {}: {err}",
+                    xtream_path_for_log.display()
+                ))))
+                .await;
         }
     });
 
@@ -1076,11 +1083,10 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
             let stored_entries = match tokio::task::spawn_blocking(move || {
                 let _guard = file_lock;
                 let mut entries = IndexMap::new();
-                if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                    for entry in query.iter() {
-                        let (_, doc) = entry?;
-                        entries.insert(doc.provider_id, doc);
-                    }
+                let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)?;
+                for entry in query.iter() {
+                    let (_, doc) = entry?;
+                    entries.insert(doc.provider_id, doc);
                 }
                 Ok::<_, std::io::Error>(entries)
             })
@@ -1103,6 +1109,10 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
                 *stored_scratch.get_mut(cluster) = entries;
             }
         }
+    }
+
+    if !errors.is_empty() {
+        return (playlist, Some(TuliproxError::RepositoryXtream(errors.join("\n"))));
     }
 
     let mut groups = IndexMap::new();
@@ -1482,11 +1492,11 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
             let items = tokio::task::spawn_blocking(move || -> Result<Vec<XtreamPlaylistItem>, TuliproxError> {
                 let _guard = file_lock;
                 let mut items = Vec::new();
-                if let Ok(mut query) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path) {
-                    for entry in query.iter() {
-                        let (_, item) = entry.map_err(|error| TuliproxError::RepositoryXtream(error.to_string()))?;
-                        items.push(item);
-                    }
+                let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path)
+                    .map_err(|error| TuliproxError::RepositoryXtream(error.to_string()))?;
+                for entry in query.iter() {
+                    let (_, item) = entry.map_err(|error| TuliproxError::RepositoryXtream(error.to_string()))?;
+                    items.push(item);
                 }
                 Ok(items)
             })

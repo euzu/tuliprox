@@ -76,6 +76,7 @@ impl XtreamPlaylistIterator {
             let (tx, rx) = mpsc::channel::<Result<(XtreamPlaylistItem, bool), TuliproxError>>(256);
 
             let xtream_path_for_log = xtream_path.clone();
+            let join_error_tx = tx.clone();
             let handle = task::spawn_blocking(move || {
                 let _guard = bg_lock;
                 let reader = match open_playlist_reader::<u32, XtreamPlaylistItem, u32>(
@@ -97,15 +98,10 @@ impl XtreamPlaylistIterator {
                 let mut pending: Option<XtreamPlaylistItem> = None;
                 for entry in reader {
                     let item = match entry {
-                    Ok((_, item)) => item,
-                    Err(err) => {
-                            if let Some(item) = pending.take() {
-                                if tx.blocking_send(Ok((item, true))).is_err() {
-                                    return;
-                                }
-                            }
-                            let _ = tx.blocking_send(Err(TuliproxError::RepositoryXtream(err.to_string())));
-                            return;
+                        Ok((_, item)) => item,
+                        Err(err) => {
+                            error!("Skipping unreadable Xtream playlist entry: {err}");
+                            continue;
                         }
                     };
 
@@ -130,6 +126,12 @@ impl XtreamPlaylistIterator {
                         "Xtream playlist iterator task failed for {} (cluster {cluster}): {err}",
                         xtream_path_for_log.display()
                     );
+                    let _ = join_error_tx
+                        .send(Err(TuliproxError::RepositoryXtream(format!(
+                            "Xtream playlist iterator task failed for {}: {err}",
+                            xtream_path_for_log.display()
+                        ))))
+                        .await;
                 }
             });
 
