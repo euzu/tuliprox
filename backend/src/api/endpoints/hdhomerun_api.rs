@@ -1,6 +1,6 @@
 use crate::{
     api::{
-        api_utils::{internal_server_error, try_unwrap_body},
+        api_utils::{coalesce_byte_stream, internal_server_error, try_unwrap_body},
         model::HdHomerunAppState,
     },
     auth::{try_check_network_access_only, AuthBasic, Fingerprint},
@@ -16,6 +16,7 @@ use log::{error, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use shared::{
+    error::TuliproxError,
     model::{M3uPlaylistItem, PlaylistItemType, TargetType, XtreamCluster, XtreamPlaylistItem},
     utils::concat_path,
 };
@@ -115,11 +116,12 @@ fn xtream_item_to_lineup_stream<I>(
     channels: Option<I>,
 ) -> impl Stream<Item = Result<Bytes, String>>
 where
-    I: Stream<Item = (XtreamPlaylistItem, bool)> + Send + Unpin + 'static,
+    I: Stream<Item = Result<(XtreamPlaylistItem, bool), TuliproxError>> + Send + Unpin + 'static,
 {
     match channels {
         Some(chans) => {
-            let mapped = chans.map(move |(item, has_next)| {
+            let mapped = chans.map(move |entry| {
+                let (item, has_next) = entry.map_err(|error| error.to_string())?;
                 let input = cfg.get_input_by_name(&item.input_name);
                 let (live_stream_use_prefix, live_stream_without_extension) =
                     input.as_ref().map_or((true, false), |i| {
@@ -159,11 +161,12 @@ where
 
 fn m3u_item_to_lineup_stream<I>(channels: Option<I>) -> impl Stream<Item = Result<Bytes, String>>
 where
-    I: Stream<Item = (M3uPlaylistItem, bool)> + Send + Unpin + 'static,
+    I: Stream<Item = Result<(M3uPlaylistItem, bool), TuliproxError>> + Send + Unpin + 'static,
 {
     match channels {
         Some(chans) => {
-            let mapped = chans.map(move |(item, has_next)| {
+            let mapped = chans.map(move |entry| {
+                let (item, has_next) = entry.map_err(|error| error.to_string())?;
                 let lineup = Lineup {
                     guide_number: item.epg_channel_id.clone().unwrap_or(item.name.clone()),
                     guide_name: item.title.clone(),
@@ -284,7 +287,7 @@ async fn lineup_status(
                     let cred = Arc::clone(&credentials);
                     let live = if cred.allows_cluster(XtreamCluster::Live) {
                         match XtreamPlaylistIterator::new(XtreamCluster::Live, &cfg, &target, None, &cred).await {
-                            Ok(stream) => stream.count().await,
+                            Ok(stream) => stream.filter_map(|entry| async move { entry.ok() }).count().await,
                             Err(_) => 0,
                         }
                     } else {
@@ -292,7 +295,7 @@ async fn lineup_status(
                     };
                     let vod = if cred.allows_cluster(XtreamCluster::Video) {
                         match XtreamPlaylistIterator::new(XtreamCluster::Video, &cfg, &target, None, &cred).await {
-                            Ok(stream) => stream.count().await,
+                            Ok(stream) => stream.filter_map(|entry| async move { entry.ok() }).count().await,
                             Err(_) => 0,
                         }
                     } else {
@@ -370,7 +373,7 @@ async fn lineup(
         return try_unwrap_body!(axum::response::Response::builder()
             .status(axum::http::StatusCode::OK)
             .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
-            .body(axum::body::Body::from_stream(body_stream)));
+            .body(axum::body::Body::from_stream(coalesce_byte_stream(body_stream))));
     } else if (use_all || use_xtream) && target.has_output(TargetType::Xtream) {
         let Some(server_info) = app_state.app_state.app_config.get_user_server_info(credentials) else {
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -436,7 +439,7 @@ async fn lineup(
         return try_unwrap_body!(axum::response::Response::builder()
             .status(axum::http::StatusCode::OK)
             .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
-            .body(axum::body::Body::from_stream(body_stream)));
+            .body(axum::body::Body::from_stream(coalesce_byte_stream(body_stream))));
     }
     axum::http::StatusCode::NOT_FOUND.into_response()
 }

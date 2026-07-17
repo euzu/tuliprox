@@ -5,7 +5,7 @@ use crate::{
     api::{
         api_utils,
         api_utils::{
-            admission_failure_response, create_api_proxy_user, create_catchup_session_key,
+            admission_failure_response, coalesce_byte_stream, create_api_proxy_user, create_catchup_session_key,
             create_playback_session_fingerprint, create_session_fingerprint, empty_json_response_as_array,
             empty_json_response_as_object, force_provider_stream_response, get_session_reservation_ttl_secs,
             get_user_target, get_user_target_by_credentials, internal_server_error, is_seek_request,
@@ -1593,17 +1593,19 @@ async fn xtream_player_api(
 
 fn xtream_create_content_stream<S>(xtream_iter: S) -> impl Stream<Item = Result<Bytes, String>>
 where
-    S: Stream<Item = (String, bool)> + Send + Unpin + 'static,
+    S: Stream<Item = Result<(String, bool), TuliproxError>> + Send + Unpin + 'static,
 {
-    let mapped = xtream_iter.map(move |(mut line, has_next)| {
-        if has_next {
-            line.push(',');
-        }
-        Ok::<Bytes, String>(Bytes::from(line))
+    let mapped = xtream_iter.map(move |entry| {
+        entry.map_err(|error| error.to_string()).map(|(mut line, has_next)| {
+            if has_next {
+                line.push(',');
+            }
+            Bytes::from(line)
+        })
     });
-    stream::once(async { Ok::<Bytes, String>(Bytes::from("[")) })
+    coalesce_byte_stream(stream::once(async { Ok::<Bytes, String>(Bytes::from("[")) })
         .chain(mapped)
-        .chain(stream::once(async { Ok::<Bytes, String>(Bytes::from("]")) }))
+        .chain(stream::once(async { Ok::<Bytes, String>(Bytes::from("]")) })))
 }
 
 async fn xtream_player_api_get(

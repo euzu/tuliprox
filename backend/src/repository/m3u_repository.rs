@@ -384,7 +384,7 @@ async fn iter_raw_m3u_playlist<SortKey, ItemKey>(
 ) -> Option<Box<dyn Stream<Item=Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>>
 where
     ItemKey: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
-    SortKey: for<'de> Deserialize<'de> + Send + 'static,
+    SortKey: Ord + for<'de> Deserialize<'de> + Send + 'static,
 {
     // Two read locks: iter_lock is held by LockedReceiverStream for the consumer lifetime,
     // while bg_lock is moved into spawn_blocking to guard the on-disk reader.
@@ -419,7 +419,7 @@ where
             let item = match entry {
                 Ok((_, item)) => item,
                 Err(err) => {
-                    error!("M3U playlist reader error: {err}");
+                    error!("Skipping unreadable M3U playlist entry: {err}");
                     continue;
                 }
             };
@@ -487,25 +487,26 @@ pub async fn load_input_m3u_playlist(
     let groups = task::spawn_blocking(move || -> Result<Vec<PlaylistGroup>, TuliproxError> {
         let _guard = file_lock;
         let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
-        if let Ok(mut query) = BPlusTreeQuery::<Arc<str>, M3uPlaylistItem>::try_new(&m3u_path) {
-            let mut group_cnt = 0;
-            for (_, ref item) in query.iter() {
-                let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
-                let key = (cluster, item.group.clone());
-                groups
-                    .entry(key)
-                    .or_insert_with(|| {
-                        group_cnt += 1;
-                        PlaylistGroup {
-                            id: group_cnt,
-                            title: item.group.clone(),
-                            channels: Vec::new(),
-                            xtream_cluster: cluster,
-                        }
-                    })
-                    .channels
-                    .push(PlaylistItem::from(item));
-            }
+        let mut query = BPlusTreeQuery::<Arc<str>, M3uPlaylistItem>::try_new(&m3u_path)
+            .map_err(|error| TuliproxError::RepositoryM3u(error.to_string()))?;
+        let mut group_cnt = 0;
+        for entry in query.iter() {
+            let (_, item) = entry.map_err(|error| TuliproxError::RepositoryM3u(error.to_string()))?;
+            let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
+            let key = (cluster, item.group.clone());
+            groups
+                .entry(key)
+                .or_insert_with(|| {
+                    group_cnt += 1;
+                    PlaylistGroup {
+                        id: group_cnt,
+                        title: item.group.clone(),
+                        channels: Vec::new(),
+                        xtream_cluster: cluster,
+                    }
+                })
+                .channels
+                .push(PlaylistItem::from(&item));
         }
         Ok(groups.into_values().collect())
     })

@@ -1865,6 +1865,7 @@ pub fn retry_after_delay_ms(headers: &HeaderMap) -> Option<u64> {
 fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
 
 #[cfg(test)]
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn refresh_from_live_hls_entrypoint_with_retries(
     origin_entry: &LiveHlsOriginEntry,
     headers: &HeaderMap,
@@ -1930,24 +1931,15 @@ pub(crate) async fn refresh_from_live_hls_entrypoint_with_retries(
                     origin_entry,
                     attempt_index,
                     next_retry_delay_ms(retry_policy, attempt_index, None, 0),
-                    "error=request".to_string(),
+                    "error=request",
                 );
             }
             Ok(Err(
                 err @ (OriginManifestFetchError::ContentDecoding { .. }
-                | OriginManifestFetchError::ContentCoding(ContentCodingError::PrefixRead(_))),
+                | OriginManifestFetchError::ContentCoding(ContentCodingError::PrefixRead(_))
+                | OriginManifestFetchError::Redirect(_)
+                | OriginManifestFetchError::Timeout),
             )) => {
-                if attempt_index + 1 == attempts {
-                    return Err(err);
-                }
-                log_origin_refresh_retry_scheduled(
-                    origin_entry,
-                    attempt_index,
-                    next_retry_delay_ms(retry_policy, attempt_index, None, 0),
-                    format!("error={}", err.log_label()),
-                );
-            }
-            Ok(Err(err @ (OriginManifestFetchError::Redirect(_) | OriginManifestFetchError::Timeout))) => {
                 if attempt_index + 1 == attempts {
                     return Err(err);
                 }
@@ -1962,11 +1954,6 @@ pub(crate) async fn refresh_from_live_hls_entrypoint_with_retries(
             Ok(Err(OriginManifestFetchError::ProviderUnavailable(kind))) => {
                 return Err(OriginManifestFetchError::ProviderUnavailable(kind));
             }
-            Ok(Err(
-                err @ (OriginManifestFetchError::ContentCoding(_)
-                | OriginManifestFetchError::DecodedBodyLimitExceeded { .. }
-                | OriginManifestFetchError::InvalidUtf8 { .. }),
-            )) => return Err(err),
             Err(OriginManifestFetchError::Timeout) => {
                 if attempt_index + 1 == attempts {
                     return Err(OriginManifestFetchError::Timeout);
@@ -1978,7 +1965,12 @@ pub(crate) async fn refresh_from_live_hls_entrypoint_with_retries(
                     "error=timeout",
                 );
             }
-            Err(err) => return Err(err),
+            Ok(Err(
+                err @ (OriginManifestFetchError::ContentCoding(_)
+                | OriginManifestFetchError::DecodedBodyLimitExceeded { .. }
+                | OriginManifestFetchError::InvalidUtf8 { .. }),
+            ))
+            | Err(err) => return Err(err),
         }
     }
 

@@ -1,32 +1,33 @@
 //! Startup migration helpers for legacy repository files.
 //!
-//! The current B+Tree implementation writes storage format v2. This migrator is
-//! intentionally limited to normalizing legacy v1 headers into v2-compatible
-//! files at startup. It is format-version aware, but it is not a generic typed
-//! v2 -> v3 rewrite tool; that migration must be added at repository call sites
-//! that know the concrete key and value types.
+//! The current B+Tree implementation writes storage format v3. This migrator
+//! recognizes the repository's closed set of concrete key/value schemas and
+//! rewrites legacy v1/v2 databases into verified v3 files before publishing
+//! them atomically.
 
-use super::{
-    bplustree::{BPlusTree, MAGIC, STORAGE_VERSION},
+use super::v3::{BPlusTree, MAGIC, STORAGE_VERSION};
+use crate::repository::{
+    qos_snapshot_repository::{QosAggregationCheckpoint, QosSnapshotRecord},
     storage_const,
+    target_id_mapping::VirtualIdRecord,
 };
+use crate::api::model::{MetadataRetryDbKey, MetadataRetryDbValue};
 use fs2::FileExt as _;
 use log::{info, trace, warn};
-use shared::model::{ClusterFlags, ConfigPaths, NetworkAccessDto, ProxyType, ProxyUserStatus};
+use shared::model::{
+    ClusterFlags, ConfigPaths, EpgChannel, M3uPlaylistItem, NetworkAccessDto, ProxyType, ProxyUserStatus, UUIDType,
+    XtreamPlaylistItem,
+};
 use std::{
     collections::{HashSet, VecDeque},
     ffi::OsStr,
     fs::OpenOptions,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 const LEGACY_STORAGE_VERSION: u32 = 1;
-const METADATA_LEN_OFFSET: u64 = 16;
-const METADATA_MAX_SIZE: u32 = 4000;
-const HEADER_FLAG_HAS_METADATA_FLAGS: u32 = 1 << 31;
-const HEADER_FLAG_HAS_TOMBSTONES: u32 = 1 << 30;
-const HEADER_METADATA_LEN_MASK: u32 = !(HEADER_FLAG_HAS_METADATA_FLAGS | HEADER_FLAG_HAS_TOMBSTONES);
 const MARKER_FILE_GUARD_PREFIX: &str = ".db_mergeto_v";
 const MARKER_FILE_GUARD_PREFIX_LEGACY_ALT: &str = ".db_mergedto";
 const MARKER_FILE_API_USER_GUARD: &str = ".userdb_mergeto_v6";
@@ -38,7 +39,7 @@ pub struct BPlusTreeMigrationStats {
     pub scanned_files: usize,
     pub bplustree_files: usize,
     pub migrated_files: usize,
-    pub skipped_by_marker: bool,
+    pub marker_was_current: bool,
 }
 
 #[derive(Debug)]
@@ -60,17 +61,13 @@ impl BPlusTreeStartupMigrator {
         let resolved_roots = Self::resolve_scan_roots(&self.roots);
         let roots_fingerprint = Self::roots_fingerprint(&resolved_roots);
         if let Some(marker_path) = &self.migration_marker_path {
-            if Self::marker_matches(marker_path, &roots_fingerprint)? {
-                stats.skipped_by_marker = true;
-                return Ok(stats);
-            }
+            stats.marker_was_current = Self::marker_matches(marker_path, &roots_fingerprint)?;
         }
-
         for root in &resolved_roots {
             let files = Self::collect_db_files_for_root(root)?;
             for file in files {
                 stats.scanned_files = stats.scanned_files.saturating_add(1);
-                match Self::migrate_file_if_needed(&file)? {
+                match Self::migrate_file_if_needed(&file, &resolved_roots)? {
                     FileMigrationOutcome::NotBPlusTree => {}
                     FileMigrationOutcome::AlreadyCurrent | FileMigrationOutcome::Locked => {
                         stats.bplustree_files = stats.bplustree_files.saturating_add(1);
@@ -220,6 +217,10 @@ impl BPlusTreeStartupMigrator {
                 if !file_type.is_file() {
                     continue;
                 }
+                if Self::is_abandoned_v3_temporary(&path) {
+                    std::fs::remove_file(&path)?;
+                    continue;
+                }
                 if path.extension().and_then(OsStr::to_str).is_some_and(|ext| ext.eq_ignore_ascii_case("db")) {
                     files.push(path);
                 }
@@ -227,6 +228,22 @@ impl BPlusTreeStartupMigrator {
         }
 
         Ok(files)
+    }
+
+    fn is_abandoned_v3_temporary(path: &Path) -> bool {
+        let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+            return false;
+        };
+        let Some(prefix) = name.strip_suffix(".v3.tmp") else {
+            return false;
+        };
+        let Some((database_name, transaction)) = prefix.rsplit_once('.') else {
+            return false;
+        };
+        Path::new(database_name)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("db") || extension.eq_ignore_ascii_case("idx"))
+            && uuid::Uuid::parse_str(transaction).is_ok()
     }
 
     fn marker_matches(marker_path: &Path, expected_fingerprint: &str) -> io::Result<bool> {
@@ -281,7 +298,7 @@ impl BPlusTreeStartupMigrator {
         Ok(())
     }
 
-    fn migrate_file_if_needed(path: &Path) -> io::Result<FileMigrationOutcome> {
+    fn migrate_file_if_needed(path: &Path, roots: &[PathBuf]) -> io::Result<FileMigrationOutcome> {
         let mut read_file = OpenOptions::new().read(true).open(path)?;
         let file_len = read_file.metadata()?.len();
         if file_len < 8 {
@@ -297,9 +314,10 @@ impl BPlusTreeStartupMigrator {
         let version =
             u32::from_le_bytes(header[4..8].try_into().map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?);
         if version == STORAGE_VERSION {
+            let _ = super::v3::BPlusTreeQuery::<u8, u8>::try_new(path)?;
             return Ok(FileMigrationOutcome::AlreadyCurrent);
         }
-        if version != LEGACY_STORAGE_VERSION {
+        if version != LEGACY_STORAGE_VERSION && version != 2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -332,7 +350,7 @@ impl BPlusTreeStartupMigrator {
         if locked_version == STORAGE_VERSION {
             return Ok(FileMigrationOutcome::AlreadyCurrent);
         }
-        if locked_version != LEGACY_STORAGE_VERSION {
+        if locked_version != LEGACY_STORAGE_VERSION && locked_version != 2 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -342,38 +360,93 @@ impl BPlusTreeStartupMigrator {
             ));
         }
 
-        let _flags_written = Self::normalize_metadata_flags(&mut file)?;
-        file.sync_data()?;
-
-        file.seek(SeekFrom::Start(4))?;
-        file.write_all(&STORAGE_VERSION.to_le_bytes())?;
-        file.flush()?;
-        file.sync_data()?;
+        Self::migrate_typed_path(path, roots, locked_version).map_err(|error| {
+            io::Error::new(error.kind(), format!("Failed to migrate B+Tree {}: {error}", path.display()))
+        })?;
         Ok(FileMigrationOutcome::Migrated)
     }
 
-    fn normalize_metadata_flags(file: &mut std::fs::File) -> io::Result<bool> {
-        file.seek(SeekFrom::Start(METADATA_LEN_OFFSET))?;
-        let mut metadata_len_raw = [0u8; 4];
-        file.read_exact(&mut metadata_len_raw)?;
-        let raw = u32::from_le_bytes(metadata_len_raw);
+    fn migrate_typed_path(path: &Path, roots: &[PathBuf], version: u32) -> io::Result<()> {
+        use super::v3::migration::{migrate_v2_typed, migrate_v2_typed_with_index};
 
-        let metadata_len = raw & HEADER_METADATA_LEN_MASK;
-        if metadata_len > METADATA_MAX_SIZE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Metadata too large: {metadata_len}")));
-        }
-
-        let mut normalized = metadata_len | HEADER_FLAG_HAS_METADATA_FLAGS;
-        normalized &= !HEADER_FLAG_HAS_TOMBSTONES;
-
-        if normalized == raw {
-            return Ok(false);
-        }
-
-        file.seek(SeekFrom::Start(METADATA_LEN_OFFSET))?;
-        file.write_all(&normalized.to_le_bytes())?;
-        Ok(true)
+        let kind = Self::migration_kind(path, roots).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Unsupported typed B+Tree migration for {} (storage version {version})", path.display()),
+            )
+        })?;
+        match kind {
+            TypedMigration::MetadataRetry => migrate_v2_typed::<MetadataRetryDbKey, MetadataRetryDbValue>(path)?,
+            TypedMigration::QosSnapshot => migrate_v2_typed::<String, QosSnapshotRecord>(path)?,
+            TypedMigration::QosCheckpoint => migrate_v2_typed::<u8, QosAggregationCheckpoint>(path)?,
+            TypedMigration::GeoIp => migrate_v2_typed::<u32, (u32, String)>(path)?,
+            TypedMigration::IdMapping => migrate_v2_typed::<u32, VirtualIdRecord>(path)?,
+            TypedMigration::UuidMapping => migrate_v2_typed::<UUIDType, u32>(path)?,
+            TypedMigration::TargetM3u => {
+                migrate_v2_typed_with_index::<u32, M3uPlaylistItem, u32, _>(path, |item| item.source_ordinal)?
+            }
+            TypedMigration::InputM3u => migrate_v2_typed::<Arc<str>, M3uPlaylistItem>(path)?,
+            TypedMigration::Library => migrate_v2_typed::<UUIDType, XtreamPlaylistItem>(path)?,
+            TypedMigration::TargetXtream => {
+                migrate_v2_typed_with_index::<u32, XtreamPlaylistItem, u32, _>(path, |item| item.source_ordinal)?
+            }
+            TypedMigration::InputXtream => migrate_v2_typed::<u32, XtreamPlaylistItem>(path)?,
+            TypedMigration::Epg => migrate_v2_typed::<Arc<str>, EpgChannel>(path)?,
+        };
+        Ok(())
     }
+
+    fn migration_kind(path: &Path, roots: &[PathBuf]) -> Option<TypedMigration> {
+        let relative = roots.iter().find_map(|root| path.strip_prefix(root).ok())?;
+        let components = relative.iter().filter_map(OsStr::to_str).collect::<Vec<_>>();
+        match components.as_slice() {
+            ["metadata_retry_state.db"] => Some(TypedMigration::MetadataRetry),
+            ["qos_snapshot.db"] => Some(TypedMigration::QosSnapshot),
+            ["qos_snapshot_meta.db"] => Some(TypedMigration::QosCheckpoint),
+            ["geoip.db"] => Some(TypedMigration::GeoIp),
+            [directory, "metadata_retry_state.db"] if directory.starts_with("input_") => {
+                Some(TypedMigration::MetadataRetry)
+            }
+            [directory, name] if directory.starts_with("input_") && name.starts_with("m3u_") => {
+                Some(TypedMigration::InputM3u)
+            }
+            [directory, name]
+                if directory.starts_with("input_")
+                    && (name.starts_with("lib_") || name.starts_with("media_server_")) =>
+            {
+                Some(TypedMigration::Library)
+            }
+            [directory, name]
+                if directory.starts_with("input_")
+                    && matches!(*name, "live.db" | "video.db" | "series.db") =>
+            {
+                Some(TypedMigration::InputXtream)
+            }
+            [_, "id_mapping.db"] => Some(TypedMigration::IdMapping),
+            [_, "id_mapping.uuid.db"] => Some(TypedMigration::UuidMapping),
+            [_, "m3u", "m3u.db"] => Some(TypedMigration::TargetM3u),
+            [_, "m3u" | "xtream", "epg.db"] => Some(TypedMigration::Epg),
+            [_, "xtream", "live.db" | "video.db" | "series.db"] => Some(TypedMigration::TargetXtream),
+            _ => None,
+        }
+    }
+
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypedMigration {
+    MetadataRetry,
+    QosSnapshot,
+    QosCheckpoint,
+    GeoIp,
+    IdMapping,
+    UuidMapping,
+    TargetM3u,
+    InputM3u,
+    Library,
+    TargetXtream,
+    InputXtream,
+    Epg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -693,6 +766,44 @@ fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
 
 pub(crate) fn user_db_merge_guard_path(config_dir: &Path) -> PathBuf { config_dir.join(MARKER_FILE_API_USER_GUARD) }
 
+fn migrate_legacy_user_schema<SourceV, Map>(
+    db_path: &Path,
+    merge_guard_path: &Path,
+    map: Map,
+) -> io::Result<bool>
+where
+    SourceV: serde::Serialize + for<'de> serde::Deserialize<'de> + Clone,
+    Map: FnMut(SourceV) -> StoredApiUserV6,
+{
+    if super::v3::migration::migrate_v2_typed_map::<String, SourceV, StoredApiUserV6, _>(db_path, map).is_err()
+    {
+        return Ok(false);
+    }
+    create_user_db_merge_guard(merge_guard_path)?;
+    Ok(true)
+}
+
+fn migrate_current_user_schema<SourceV, Map>(
+    db_path: &Path,
+    merge_guard_path: &Path,
+    map: Map,
+) -> io::Result<bool>
+where
+    SourceV: for<'de> serde::Deserialize<'de>,
+    Map: Fn(&SourceV) -> StoredApiUserV6,
+{
+    let Ok(tree) = BPlusTree::<String, SourceV>::load(db_path) else {
+        return Ok(false);
+    };
+    let mut v6_tree = BPlusTree::new();
+    for (key, user) in &tree {
+        v6_tree.insert(key.clone(), map(user));
+    }
+    v6_tree.store(db_path)?;
+    create_user_db_merge_guard(merge_guard_path)?;
+    Ok(true)
+}
+
 /// Migrates the user database file from V1-V5 schema to V6 (current) in
 /// place and creates a merge-guard file so config-driven merges are skipped
 /// until the operator explicitly removes it.
@@ -704,57 +815,65 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
         return Ok(false);
     }
 
-    if let Ok(tree) = BPlusTree::<String, StoredApiUserV5>::load(db_path) {
-        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
-        for (key, v5) in &tree {
-            v6_tree.insert(key.clone(), StoredApiUserV6::from_v5(v5));
+    let storage_version = super::v3::migration::storage_version(db_path)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "user database is not a B+Tree"))?;
+    if storage_version <= 2 {
+        if super::v3::migration::migrate_v2_typed::<String, StoredApiUserV6>(db_path).is_ok() {
+            return Ok(false);
         }
-        create_user_db_merge_guard(merge_guard_path)?;
-        v6_tree.store(db_path)?;
-        return Ok(true);
+        if migrate_legacy_user_schema::<StoredApiUserV5, _>(db_path, merge_guard_path, |user| {
+            StoredApiUserV6::from_v5(&user)
+        })? {
+            return Ok(true);
+        }
+        if migrate_legacy_user_schema::<StoredApiUserV4, _>(db_path, merge_guard_path, |user| {
+            StoredApiUserV6::from_v4(&user)
+        })? {
+            return Ok(true);
+        }
+        if migrate_legacy_user_schema::<StoredApiUserV3, _>(db_path, merge_guard_path, |user| {
+            StoredApiUserV6::from_v3(&user)
+        })? {
+            return Ok(true);
+        }
+        if migrate_legacy_user_schema::<StoredApiUserV2, _>(db_path, merge_guard_path, |user| {
+            StoredApiUserV6::from_v2(&user)
+        })? {
+            return Ok(true);
+        }
+        if migrate_legacy_user_schema::<StoredApiUserV1, _>(db_path, merge_guard_path, |user| {
+            StoredApiUserV6::from_v1(&user)
+        })? {
+            return Ok(true);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Legacy user DB at '{}' could not be read as V1, V2, V3, V4, V5, or V6", db_path.display()),
+        ));
+    }
+    if storage_version != STORAGE_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Unsupported user B+Tree storage version {storage_version} in {}", db_path.display()),
+        ));
     }
 
     if BPlusTree::<String, StoredApiUserV6>::load(db_path).is_ok() {
         return Ok(false);
     }
-
-    if let Ok(tree) = BPlusTree::<String, StoredApiUserV4>::load(db_path) {
-        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
-        for (key, v4) in &tree {
-            v6_tree.insert(key.clone(), StoredApiUserV6::from_v4(v4));
-        }
-        create_user_db_merge_guard(merge_guard_path)?;
-        v6_tree.store(db_path)?;
+    if migrate_current_user_schema::<StoredApiUserV5, _>(db_path, merge_guard_path, StoredApiUserV6::from_v5)? {
         return Ok(true);
     }
-
-    if let Ok(tree) = BPlusTree::<String, StoredApiUserV3>::load(db_path) {
-        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
-        for (key, v3) in &tree {
-            v6_tree.insert(key.clone(), StoredApiUserV6::from_v3(v3));
-        }
-        create_user_db_merge_guard(merge_guard_path)?;
-        v6_tree.store(db_path)?;
+    if migrate_current_user_schema::<StoredApiUserV4, _>(db_path, merge_guard_path, StoredApiUserV6::from_v4)? {
         return Ok(true);
     }
-
-    if let Ok(tree) = BPlusTree::<String, StoredApiUserV2>::load(db_path) {
-        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
-        for (key, v2) in &tree {
-            v6_tree.insert(key.clone(), StoredApiUserV6::from_v2(v2));
-        }
-        create_user_db_merge_guard(merge_guard_path)?;
-        v6_tree.store(db_path)?;
+    if migrate_current_user_schema::<StoredApiUserV3, _>(db_path, merge_guard_path, StoredApiUserV6::from_v3)? {
         return Ok(true);
     }
-
-    if let Ok(tree) = BPlusTree::<String, StoredApiUserV1>::load(db_path) {
-        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
-        for (key, v1) in &tree {
-            v6_tree.insert(key.clone(), StoredApiUserV6::from_v1(v1));
-        }
-        create_user_db_merge_guard(merge_guard_path)?;
-        v6_tree.store(db_path)?;
+    if migrate_current_user_schema::<StoredApiUserV2, _>(db_path, merge_guard_path, StoredApiUserV6::from_v2)? {
+        return Ok(true);
+    }
+    if migrate_current_user_schema::<StoredApiUserV1, _>(db_path, merge_guard_path, StoredApiUserV6::from_v1)? {
         return Ok(true);
     }
 
@@ -781,12 +900,11 @@ fn run_all_startup_migrations(
     storage_dir: &Path,
     config_dir: &Path,
 ) -> io::Result<AllStartupMigrationStats> {
-    let marker_path = bplustree_migration_marker_path(storage_dir);
-    let bplustree = BPlusTreeStartupMigrator::new_with_marker(roots.to_vec(), marker_path).run()?;
-
     let user_db_path = config_dir.join(storage_const::API_USER_DB_FILE);
     let merge_guard_path = user_db_merge_guard_path(config_dir);
     let user_db_migrated = migrate_user_db_schema(&user_db_path, &merge_guard_path)?;
+    let marker_path = bplustree_migration_marker_path(storage_dir);
+    let bplustree = BPlusTreeStartupMigrator::new_with_marker(roots.to_vec(), marker_path).run()?;
 
     Ok(AllStartupMigrationStats { bplustree, user_db_migrated })
 }
@@ -810,9 +928,10 @@ pub fn run_startup_migrations(config_paths: &ConfigPaths) {
 
     match run_all_startup_migrations(&roots, &storage_dir, &config_dir) {
         Ok(stats) => {
-            if stats.bplustree.skipped_by_marker {
-                trace!("B+Tree startup migration skipped (marker already present)");
-            } else if stats.bplustree.migrated_files > 0 {
+            if stats.bplustree.marker_was_current {
+                trace!("B+Tree startup migration marker was current; database headers were still scanned");
+            }
+            if stats.bplustree.migrated_files > 0 {
                 info!(
                     "B+Tree startup migration completed: migrated {} file(s) ({} B+Tree files checked, {} .db files scanned)",
                     stats.bplustree.migrated_files,
@@ -920,18 +1039,24 @@ mod tests {
         BPlusTreeStartupMigrator::roots_fingerprint(&resolved)
     }
 
+    fn write_legacy_geoip(root: &Path, version: u32) -> io::Result<PathBuf> {
+        let path = root.join("geoip.db");
+        let mut tree = super::super::v2::BPlusTree::new();
+        tree.insert(1u32, (2u32, String::from("DE")));
+        tree.store(&path)?;
+        if version == LEGACY_STORAGE_VERSION {
+            let mut file = OpenOptions::new().write(true).open(&path)?;
+            file.seek(SeekFrom::Start(4))?;
+            file.write_all(&version.to_le_bytes())?;
+            file.sync_all()?;
+        }
+        Ok(path)
+    }
+
     #[test]
     fn startup_migrator_upgrades_legacy_bplustree_files() -> io::Result<()> {
         let temp = tempdir()?;
-        let db_path = temp.path().join("legacy.db");
-
-        let mut file = OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&db_path)?;
-        let mut header = [0u8; 4096];
-        header[0..4].copy_from_slice(MAGIC);
-        header[4..8].copy_from_slice(&LEGACY_STORAGE_VERSION.to_le_bytes());
-        file.write_all(&header)?;
-        file.flush()?;
-        drop(file);
+        let db_path = write_legacy_geoip(temp.path(), LEGACY_STORAGE_VERSION)?;
 
         let stats = migrate_bplustree_databases(&[temp.path().to_path_buf()])?;
         assert_eq!(stats.scanned_files, 1);
@@ -945,11 +1070,8 @@ mod tests {
             version_bytes[4..8].try_into().map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?,
         );
         assert_eq!(version, STORAGE_VERSION);
-        let metadata_len_raw = u32::from_le_bytes(
-            version_bytes[16..20].try_into().map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?,
-        );
-        assert_ne!(metadata_len_raw & HEADER_FLAG_HAS_METADATA_FLAGS, 0);
-        assert_eq!(metadata_len_raw & HEADER_FLAG_HAS_TOMBSTONES, 0);
+        let query = BPlusTree::<u32, (u32, String)>::load(&db_path)?;
+        assert_eq!(query.query(&1), Some(&(2, String::from("DE"))));
 
         Ok(())
     }
@@ -972,34 +1094,137 @@ mod tests {
     }
 
     #[test]
+    fn startup_migrator_rejects_an_unknown_valid_legacy_tree_without_changing_it() -> io::Result<()> {
+        let temp = tempdir()?;
+        let path = temp.path().join("backup.db");
+        let mut tree = super::super::v2::BPlusTree::new();
+        tree.insert(1u32, String::from("preserve"));
+        tree.store(&path)?;
+        let before = std::fs::read(&path)?;
+
+        assert!(migrate_bplustree_databases(&[temp.path().to_path_buf()]).is_err());
+        assert_eq!(std::fs::read(&path)?, before);
+        Ok(())
+    }
+
+    #[test]
+    fn startup_migrator_reports_a_locked_legacy_tree_without_modifying_it() -> io::Result<()> {
+        let temp = tempdir()?;
+        let path = write_legacy_geoip(temp.path(), 2)?;
+        let before = std::fs::read(&path)?;
+        let file = OpenOptions::new().read(true).write(true).open(&path)?;
+        file.lock_exclusive()?;
+
+        let stats = migrate_bplustree_databases(&[temp.path().to_path_buf()])?;
+        assert_eq!(stats.bplustree_files, 1);
+        assert_eq!(stats.migrated_files, 0);
+        assert_eq!(std::fs::read(&path)?, before);
+        fs2::FileExt::unlock(&file)?;
+        Ok(())
+    }
+
+    #[test]
+    fn startup_migrator_only_removes_exact_abandoned_v3_temporary_names() -> io::Result<()> {
+        let temp = tempdir()?;
+        let abandoned = temp.path().join(format!("geoip.db.{}.v3.tmp", uuid::Uuid::new_v4()));
+        let unrelated = temp.path().join("geoip.db.not-a-uuid.v3.tmp");
+        std::fs::write(&abandoned, b"partial")?;
+        std::fs::write(&unrelated, b"keep")?;
+
+        let stats = migrate_bplustree_databases(&[temp.path().to_path_buf()])?;
+        assert_eq!(stats.scanned_files, 0);
+        assert!(!abandoned.exists());
+        assert!(unrelated.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn typed_registry_matches_only_the_persisted_path_families() -> io::Result<()> {
+        let temp = tempdir()?;
+        let roots = [temp.path().to_path_buf()];
+        let cases = [
+            ("input_news/metadata_retry_state.db", TypedMigration::MetadataRetry),
+            ("qos_snapshot.db", TypedMigration::QosSnapshot),
+            ("qos_snapshot_meta.db", TypedMigration::QosCheckpoint),
+            ("geoip.db", TypedMigration::GeoIp),
+            ("target/id_mapping.db", TypedMigration::IdMapping),
+            ("target/id_mapping.uuid.db", TypedMigration::UuidMapping),
+            ("target/m3u/m3u.db", TypedMigration::TargetM3u),
+            ("input_news/m3u_news.db", TypedMigration::InputM3u),
+            ("input_news/lib_news.db", TypedMigration::Library),
+            ("input_news/media_server_news.db", TypedMigration::Library),
+            ("target/xtream/live.db", TypedMigration::TargetXtream),
+            ("target/xtream/video.db", TypedMigration::TargetXtream),
+            ("input_news/live.db", TypedMigration::InputXtream),
+            ("input_news/video.db", TypedMigration::InputXtream),
+            ("target/m3u/epg.db", TypedMigration::Epg),
+            ("target/xtream/epg.db", TypedMigration::Epg),
+        ];
+        for (relative, expected) in cases {
+            assert_eq!(BPlusTreeStartupMigrator::migration_kind(&temp.path().join(relative), &roots), Some(expected));
+        }
+        assert_eq!(BPlusTreeStartupMigrator::migration_kind(&temp.path().join("backup/tree.db"), &roots), None);
+        assert_eq!(BPlusTreeStartupMigrator::migration_kind(&temp.path().join("input_news/vod.db"), &roots), None);
+        Ok(())
+    }
+
+    #[test]
+    fn startup_migrator_exercises_every_typed_registry_family() -> io::Result<()> {
+        let temp = tempdir()?;
+        let mut paths = Vec::new();
+        macro_rules! empty_v2 {
+            ($relative:literal, $key:ty, $value:ty) => {{
+                let path = temp.path().join($relative);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut tree = super::super::v2::BPlusTree::<$key, $value>::new();
+                tree.store(&path)?;
+                paths.push(path);
+            }};
+        }
+        empty_v2!("input_news/metadata_retry_state.db", MetadataRetryDbKey, MetadataRetryDbValue);
+        empty_v2!("qos_snapshot.db", String, QosSnapshotRecord);
+        empty_v2!("qos_snapshot_meta.db", u8, QosAggregationCheckpoint);
+        empty_v2!("geoip.db", u32, (u32, String));
+        empty_v2!("target/id_mapping.db", u32, VirtualIdRecord);
+        empty_v2!("target/id_mapping.uuid.db", UUIDType, u32);
+        empty_v2!("target/m3u/m3u.db", u32, M3uPlaylistItem);
+        empty_v2!("input_news/m3u_news.db", Arc<str>, M3uPlaylistItem);
+        empty_v2!("input_news/lib_news.db", UUIDType, XtreamPlaylistItem);
+        empty_v2!("input_news/media_server_news.db", UUIDType, XtreamPlaylistItem);
+        empty_v2!("target/xtream/live.db", u32, XtreamPlaylistItem);
+        empty_v2!("target/xtream/video.db", u32, XtreamPlaylistItem);
+        empty_v2!("target/xtream/series.db", u32, XtreamPlaylistItem);
+        empty_v2!("input_news/live.db", u32, XtreamPlaylistItem);
+        empty_v2!("input_news/video.db", u32, XtreamPlaylistItem);
+        empty_v2!("input_news/series.db", u32, XtreamPlaylistItem);
+        empty_v2!("target/m3u/epg.db", Arc<str>, EpgChannel);
+        empty_v2!("target/xtream/epg.db", Arc<str>, EpgChannel);
+
+        let stats = migrate_bplustree_databases(&[temp.path().to_path_buf()])?;
+        assert_eq!(stats.migrated_files, paths.len());
+        for path in paths {
+            assert_eq!(super::super::v3::migration::storage_version(&path)?, Some(STORAGE_VERSION));
+        }
+        assert!(temp.path().join("target/m3u/m3u.idx").exists());
+        assert!(temp.path().join("target/xtream/live.idx").exists());
+        Ok(())
+    }
+
+    #[test]
     fn startup_migrator_writes_marker_after_success() -> io::Result<()> {
         let temp = tempdir()?;
         let temp_other = tempdir()?;
-        let db_path = temp.path().join("legacy.db");
-        let db_path_other = temp_other.path().join("legacy_other.db");
-        let mut file = OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&db_path)?;
-        let mut header = [0u8; 4096];
-        header[0..4].copy_from_slice(MAGIC);
-        header[4..8].copy_from_slice(&LEGACY_STORAGE_VERSION.to_le_bytes());
-        file.write_all(&header)?;
-        file.flush()?;
-        drop(file);
-
-        let mut file_other =
-            OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&db_path_other)?;
-        let mut header_other = [0u8; 4096];
-        header_other[0..4].copy_from_slice(MAGIC);
-        header_other[4..8].copy_from_slice(&LEGACY_STORAGE_VERSION.to_le_bytes());
-        file_other.write_all(&header_other)?;
-        file_other.flush()?;
-        drop(file_other);
+        let _ = write_legacy_geoip(temp.path(), LEGACY_STORAGE_VERSION)?;
+        let _ = write_legacy_geoip(temp_other.path(), LEGACY_STORAGE_VERSION)?;
 
         let stats = migrate_bplustree_databases_with_marker(
             &[temp.path().to_path_buf(), temp_other.path().to_path_buf()],
             temp.path(),
         )?;
         assert_eq!(stats.migrated_files, 2);
-        assert!(!stats.skipped_by_marker);
+        assert!(!stats.marker_was_current);
 
         let marker = bplustree_migration_marker_path(temp.path());
         assert!(marker.exists());
@@ -1011,16 +1236,9 @@ mod tests {
     }
 
     #[test]
-    fn startup_migrator_skips_when_marker_exists() -> io::Result<()> {
+    fn startup_migrator_scans_when_marker_exists() -> io::Result<()> {
         let temp = tempdir()?;
-        let db_path = temp.path().join("legacy.db");
-        let mut file = OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&db_path)?;
-        let mut header = [0u8; 4096];
-        header[0..4].copy_from_slice(MAGIC);
-        header[4..8].copy_from_slice(&LEGACY_STORAGE_VERSION.to_le_bytes());
-        file.write_all(&header)?;
-        file.flush()?;
-        drop(file);
+        let db_path = write_legacy_geoip(temp.path(), LEGACY_STORAGE_VERSION)?;
 
         let marker = bplustree_migration_marker_path(temp.path());
         let roots = [temp.path().to_path_buf()];
@@ -1028,10 +1246,10 @@ mod tests {
         BPlusTreeStartupMigrator::write_migration_marker(&marker, &fingerprint)?;
 
         let stats = migrate_bplustree_databases_with_marker(&roots, temp.path())?;
-        assert_eq!(stats.scanned_files, 0);
-        assert_eq!(stats.bplustree_files, 0);
-        assert_eq!(stats.migrated_files, 0);
-        assert!(stats.skipped_by_marker);
+        assert_eq!(stats.scanned_files, 1);
+        assert_eq!(stats.bplustree_files, 1);
+        assert_eq!(stats.migrated_files, 1);
+        assert!(stats.marker_was_current);
 
         let mut check = OpenOptions::new().read(true).open(&db_path)?;
         let mut version_bytes = [0u8; 8];
@@ -1039,7 +1257,7 @@ mod tests {
         let version = u32::from_le_bytes(
             version_bytes[4..8].try_into().map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?,
         );
-        assert_eq!(version, LEGACY_STORAGE_VERSION);
+        assert_eq!(version, STORAGE_VERSION);
 
         Ok(())
     }
@@ -1059,7 +1277,7 @@ mod tests {
         assert!(legacy_per_root_marker.exists());
 
         let stats = migrate_bplustree_databases_with_marker(&roots, marker_dir)?;
-        assert!(stats.skipped_by_marker);
+        assert!(stats.marker_was_current);
         assert!(!legacy_per_root_marker.exists());
         assert!(global_marker.exists());
 
@@ -1070,15 +1288,7 @@ mod tests {
     fn startup_migrator_does_not_skip_when_marker_fingerprint_differs() -> io::Result<()> {
         let temp_a = tempdir()?;
         let temp_b = tempdir()?;
-        let db_path = temp_a.path().join("legacy.db");
-
-        let mut file = OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&db_path)?;
-        let mut header = [0u8; 4096];
-        header[0..4].copy_from_slice(MAGIC);
-        header[4..8].copy_from_slice(&LEGACY_STORAGE_VERSION.to_le_bytes());
-        file.write_all(&header)?;
-        file.flush()?;
-        drop(file);
+        let _ = write_legacy_geoip(temp_a.path(), LEGACY_STORAGE_VERSION)?;
 
         let marker = bplustree_migration_marker_path(temp_a.path());
         let old_roots = [temp_a.path().to_path_buf()];
@@ -1087,7 +1297,7 @@ mod tests {
 
         let current_roots = [temp_a.path().to_path_buf(), temp_b.path().to_path_buf()];
         let stats = migrate_bplustree_databases_with_marker(&current_roots, temp_a.path())?;
-        assert!(!stats.skipped_by_marker);
+        assert!(!stats.marker_was_current);
         assert_eq!(stats.migrated_files, 1);
 
         Ok(())
@@ -1099,7 +1309,8 @@ mod tests {
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
 
-        let mut v2_tree: BPlusTree<String, StoredApiUserV2> = BPlusTree::new();
+        let mut v2_tree: super::super::v2::BPlusTree<String, StoredApiUserV2> =
+            super::super::v2::BPlusTree::new();
         v2_tree.insert(
             "alice".to_string(),
             StoredApiUserV2 {
@@ -1292,7 +1503,8 @@ mod tests {
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
 
-        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
+        let mut v6_tree: super::super::v2::BPlusTree<String, StoredApiUserV6> =
+            super::super::v2::BPlusTree::new();
         v6_tree.insert(
             "erin".to_string(),
             StoredApiUserV6 {

@@ -891,7 +891,9 @@ mod tests {
 
             let mut response = format!("HTTP/1.1 {} Test\r\nConnection: close\r\n", status.as_u16());
             if !has_content_length {
-                response.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                response.push_str("Content-Length: ");
+                response.push_str(&body.len().to_string());
+                response.push_str("\r\n");
             }
             for (name, value) in owned_headers {
                 response.push_str(&name);
