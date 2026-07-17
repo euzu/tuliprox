@@ -4120,6 +4120,7 @@ where
             }
         }
     })
+    .fuse()
 }
 
 pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials {
@@ -4228,6 +4229,15 @@ mod tests {
         assert!(frames <= 2, "small JSON entries should be coalesced, got {frames} frames");
         let decoded = serde_json::from_slice::<Vec<u32>>(&bytes);
         assert!(decoded.is_ok_and(|values| values.len() == 4_096));
+    }
+
+    #[tokio::test]
+    async fn coalesced_stream_remains_finished_when_polled_again() {
+        let stream = coalesce_byte_stream(stream::empty::<Result<Bytes, ()>>());
+        futures::pin_mut!(stream);
+
+        assert!(stream.next().await.is_none());
+        assert!(stream.next().await.is_none());
     }
 
     fn test_runtime_provider_with_type(
