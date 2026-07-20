@@ -89,7 +89,14 @@ pub fn exec_scheduler(
                 let worker_client = http_client;
                 let worker_state = app_state_clone;
                 tokio::spawn(async move {
-                    run_playlist_update_worker(worker_client, worker_state, schedule_target_names, rx, cancel_token).await;
+                    Box::pin(run_playlist_update_worker(
+                        worker_client,
+                        worker_state,
+                        schedule_target_names,
+                        rx,
+                        cancel_token,
+                    ))
+                    .await;
                 });
             }
             ScheduleTaskType::LibraryScan | ScheduleTaskType::GeoIpUpdate => {

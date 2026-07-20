@@ -264,6 +264,13 @@ fn provider_error(err: &StalkerError) -> TuliproxError {
     TuliproxError::ProviderConnection(format!("Stalker client error: {err}"))
 }
 
+async fn finish_terminal_refresh(storage_path: &Path) -> Result<StalkerRefreshOutcome, TuliproxError> {
+    clear_checkpoint(storage_path).await?;
+    Ok(StalkerRefreshOutcome::Terminal(TuliproxError::ProviderConnection(
+        "Stalker refresh reached a terminal state".to_string(),
+    )))
+}
+
 async fn yield_after_error(
     storage_path: &Path,
     mut checkpoint: StalkerCheckpoint,
@@ -296,9 +303,7 @@ pub async fn advance_stalker_refresh(
 ) -> Result<StalkerRefreshOutcome, TuliproxError> {
     let mut checkpoint = load_or_start_checkpoint(storage_path, identity_fingerprint, selection).await?;
     if checkpoint.phase == StalkerRefreshPhase::Terminal {
-        return Ok(StalkerRefreshOutcome::Terminal(TuliproxError::ProviderConnection(
-            "Stalker refresh reached a terminal state".to_string(),
-        )));
+        return finish_terminal_refresh(storage_path).await;
     }
     let added_at = checkpoint.started_at;
     let mut live_categories = None;
@@ -553,10 +558,7 @@ pub async fn advance_stalker_refresh(
                 return Ok(StalkerRefreshOutcome::Complete);
             }
             StalkerRefreshPhase::Terminal => {
-                clear_checkpoint(storage_path).await?;
-                return Ok(StalkerRefreshOutcome::Terminal(TuliproxError::ProviderConnection(
-                    "Stalker refresh reached a terminal state".to_string(),
-                )));
+                return finish_terminal_refresh(storage_path).await;
             }
         }
         save_checkpoint(storage_path, &checkpoint).await?;
@@ -567,6 +569,21 @@ pub async fn advance_stalker_refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_checkpoint_is_cleared_after_restart() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let selection = StalkerClusterSelection { live: true, vod: false, series: false, epg: false };
+        let mut checkpoint = StalkerCheckpoint::new(17, 23, selection.mask(), 123);
+        checkpoint.phase = StalkerRefreshPhase::Terminal;
+        save_checkpoint(temp.path(), &checkpoint).await?;
+
+        let outcome = finish_terminal_refresh(temp.path()).await?;
+
+        assert!(matches!(outcome, StalkerRefreshOutcome::Terminal(_)));
+        assert!(load_checkpoint(temp.path(), 17).await?.is_none());
+        Ok(())
+    }
 
     #[tokio::test]
     async fn complete_checkpoint_is_resumed_without_new_generation() -> Result<(), Box<dyn std::error::Error>> {

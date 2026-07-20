@@ -2150,11 +2150,7 @@ async fn create_stream_response_details(
                     let force_stalker_refresh = stream_info
                         .as_ref()
                         .is_some_and(|(_, status, _, _)| status.is_client_error());
-                    let kind = match stream_channel.cluster {
-                        XtreamCluster::Live => StalkerStreamKind::Live,
-                        XtreamCluster::Video => StalkerStreamKind::Movie,
-                        XtreamCluster::Series => StalkerStreamKind::Episode,
-                    };
+                    let kind = stalker_stream_kind(stream_channel.cluster, item_type);
                     let resolve_result = re_resolve_stalker_url_singleflight(
                         app_state,
                         input,
@@ -4389,6 +4385,10 @@ mod tests {
         assert!(needs_initial_stalker_resolution(InputType::Stalker, ""));
         assert!(!needs_initial_stalker_resolution(InputType::Stalker, "https://stream.example/live.ts"));
         assert!(!needs_initial_stalker_resolution(InputType::Xtream, ""));
+        assert_eq!(
+            stalker_stream_kind(XtreamCluster::Live, PlaylistItemType::Catchup),
+            StalkerStreamKind::Archive
+        );
     }
 
     fn test_runtime_provider(url: &str, username: &str, password: &str) -> Arc<RuntimeProviderConfig> {
