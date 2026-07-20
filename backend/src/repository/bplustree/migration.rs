@@ -1032,6 +1032,9 @@ mod tests {
         assert_eq!(decoded.title.as_deref(), Some("Programme"));
         assert_eq!(decoded.desc.as_deref(), Some("Description"));
         assert!(decoded.catchup_id.is_none());
+        assert!(decoded.categories.is_empty());
+        assert!(!decoded.is_live);
+        assert!(!decoded.is_new);
     }
 
     fn test_roots_fingerprint(roots: &[PathBuf]) -> String {

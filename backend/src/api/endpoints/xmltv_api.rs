@@ -35,11 +35,11 @@ use shared::{
     utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
 use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
-use tokio::{io::AsyncWriteExt, sync::mpsc, task};
+use tokio::{io::{AsyncWrite, AsyncWriteExt}, sync::mpsc, task};
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
 use crate::auth::resolve_api_user_context;
-use crate::model::ApiProxyServerInfo;
+use crate::model::{ApiProxyServerInfo, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY, EPG_TAG_LIVE, EPG_TAG_NEW};
 
 pub fn get_empty_epg_response() -> axum::response::Response {
     try_unwrap_body!(axum::response::Response::builder()
@@ -197,6 +197,31 @@ macro_rules! continue_on_err {
             continue;
         }
     };
+}
+
+async fn write_programme_classification_tags<W: AsyncWrite + Unpin>(
+    writer: &mut quick_xml::Writer<W>,
+    programme: &EpgProgramme,
+) -> Result<(), quick_xml::Error> {
+    for category in &programme.categories {
+        let mut elem = BytesStart::new(EPG_TAG_CATEGORY);
+        if let Some(lang) = &category.lang {
+            elem.push_attribute((EPG_ATTRIB_LANG, lang.as_ref()));
+        }
+        writer.write_event_async(Event::Start(elem)).await?;
+        writer
+            .write_event_async(Event::Text(BytesText::new(category.value.as_ref())))
+            .await?;
+        writer.write_event_async(Event::End(BytesEnd::new(EPG_TAG_CATEGORY))).await?;
+    }
+
+    if programme.is_live {
+        writer.write_event_async(Event::Empty(BytesStart::new(EPG_TAG_LIVE))).await?;
+    }
+    if programme.is_new {
+        writer.write_event_async(Event::Empty(BytesStart::new(EPG_TAG_NEW))).await?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -372,6 +397,10 @@ async fn serve_epg_with_rewrites(
                         continue_on_err!(writer.write_event_async(Event::Start(elem)).await);
                         continue_on_err!(writer.write_event_async(Event::Text(BytesText::new(desc))).await);
                         continue_on_err!(writer.write_event_async(Event::End(BytesEnd::new("desc"))).await);
+                    }
+
+                    if let Err(err) = write_programme_classification_tags(&mut writer, programme).await {
+                        error!("EPG classification tags write failed: {err}");
                     }
 
                     let _ = writer.write_event_async(Event::End(BytesEnd::new("programme"))).await;
@@ -886,6 +915,7 @@ mod tests {
         serve_stream_epg,
         stream_epg_api,
         stream_epg_programmes_for_channel,
+        write_programme_classification_tags,
         MAX_STREAM_EPG_CHANNEL_ID_BYTES,
         MAX_STREAM_EPG_ITEMS,
     };
@@ -905,13 +935,41 @@ mod tests {
     use shared::{
         foundation::Filter,
         model::{
-            ConfigTargetOptions, EpgChannel, EpgOutputOptions, EpgProgramme, ProcessingOrder, StreamEpgItemRequest,
-            StreamEpgRequest, TargetType,
+            ConfigTargetOptions, EpgCategory, EpgChannel, EpgOutputOptions, EpgProgramme, ProcessingOrder,
+            StreamEpgItemRequest, StreamEpgRequest, TargetType,
         },
         utils::{concat_path, obfuscate_text, Internable},
     };
-    use std::{collections::HashMap, fs, sync::Arc};
+    use std::{
+        collections::HashMap,
+        fs,
+        io,
+        pin::Pin,
+        sync::Arc,
+        task::{Context, Poll},
+    };
     use tempfile::tempdir;
+    use tokio::io::AsyncWrite;
+
+    struct ErroringWriter;
+
+    impl AsyncWrite for ErroringWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<Result<usize, io::Error>> {
+            Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, "synthetic write failure")))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     fn test_target_with_xtream_and_m3u() -> ConfigTarget {
         ConfigTarget {
@@ -1031,6 +1089,7 @@ mod tests {
                 "DTEND:20300310T160000Z\r\n",
                 "SUMMARY:Formula 1 Grand Prix\r\n",
                 "DESCRIPTION:Imported calendar programme\r\n",
+                "CATEGORIES:Motorsport,Live Event\r\n",
                 "END:VEVENT\r\n",
                 "END:VCALENDAR\r\n",
             ),
@@ -1081,6 +1140,10 @@ mod tests {
         assert!(xml.contains(r#"channel="f1.calendar""#));
         assert!(xml.contains("<title>Formula 1 Grand Prix</title>"));
         assert!(xml.contains("<desc>Imported calendar programme</desc>"));
+        assert!(xml.contains("<category>Motorsport</category>"));
+        assert!(xml.contains("<category>Live Event</category>"));
+        assert!(!xml.contains("<live"));
+        assert!(!xml.contains("<new"));
     }
 
     #[test]
@@ -1388,20 +1451,27 @@ mod tests {
     async fn xmltv_output_uses_canonical_channel_ids_and_only_lowercases_display_names() {
         let dir = tempdir().expect("temp dir");
         let epg_path = dir.path().join("epg.db");
+        let mut programme = EpgProgramme::new_all(
+            100,
+            200,
+            "source.MixedCase".intern(),
+            Some("News & Updates".intern()),
+            Some("Keep <Case>".intern()),
+            None,
+        );
+        programme.categories = vec![
+            EpgCategory { value: "News & Analysis".intern(), lang: Some("en".intern()) },
+            EpgCategory { value: "Sports".intern(), lang: None },
+        ];
+        programme.is_live = true;
+        programme.is_new = true;
         write_test_epg_db(
             &epg_path,
             EpgChannel {
                 id: "example.channel".intern(),
                 title: Some("CAFÉ NETWORK & <HD>".intern()),
                 icon: None,
-                programmes: vec![EpgProgramme::new_all(
-                    100,
-                    200,
-                    "source.MixedCase".intern(),
-                    Some("News & Updates".intern()),
-                    Some("Keep <Case>".intern()),
-                    None,
-                )],
+                programmes: vec![programme],
             },
         );
         let app_state = test_app_state();
@@ -1423,6 +1493,31 @@ mod tests {
         assert!(xml.contains("<title>News &amp; Updates</title>"));
         assert!(xml.contains("<desc>Keep &lt;Case&gt;</desc>"));
         assert!(!xml.contains("<title>news &amp; updates</title>"));
+        assert!(xml.contains(r#"<category lang="en">News &amp; Analysis</category>"#));
+        assert!(xml.contains("<category>Sports</category>"));
+        assert!(xml.contains("<live/>"));
+        assert!(xml.contains("<new/>"));
+
+        let title_pos = xml.find("<title>News").expect("title position");
+        let desc_pos = xml.find("<desc>Keep").expect("desc position");
+        let first_category_pos = xml.find("<category lang=\"en\">News").expect("first category position");
+        let second_category_pos = xml.find("<category>Sports").expect("second category position");
+        let live_pos = xml.find("<live/>").expect("live position");
+        let new_pos = xml.find("<new/>").expect("new position");
+        assert!(title_pos < desc_pos);
+        assert!(desc_pos < first_category_pos);
+        assert!(first_category_pos < second_category_pos);
+        assert!(second_category_pos < live_pos);
+        assert!(live_pos < new_pos);
+    }
+
+    #[tokio::test]
+    async fn programme_classification_writer_propagates_io_errors() {
+        let mut programme = EpgProgramme::new(100, 200, "channel".intern());
+        programme.categories = vec![EpgCategory { value: "Sports".intern(), lang: None }];
+        let mut writer = quick_xml::Writer::new(ErroringWriter);
+
+        assert!(write_programme_classification_tags(&mut writer, &programme).await.is_err());
     }
 
     #[tokio::test]

@@ -1,8 +1,9 @@
 use crate::{
     model::{
         Epg, EpgSmartMatchConfig, IcsDummyPolicy, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
-        TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_TAG_CHANNEL, EPG_TAG_DISPLAY_NAME,
-        EPG_TAG_ICON, EPG_TAG_PROGRAMME, EPG_TAG_TV,
+        TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY,
+        EPG_TAG_CHANNEL, EPG_TAG_DESC, EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW,
+        EPG_TAG_PROGRAMME, EPG_TAG_TITLE, EPG_TAG_TV,
     },
     processing::{
         parser::ics,
@@ -18,7 +19,7 @@ use quick_xml::events::{BytesStart, BytesText, Event};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use shared::{
     concat_string,
-    model::{EpgChannel, EpgNamePrefix, EpgProgramme},
+    model::{EpgCategory, EpgChannel, EpgNamePrefix, EpgProgramme},
     utils::{deunicode_string, Internable, CONSTANTS},
 };
 use std::{
@@ -187,8 +188,6 @@ impl TVGuide {
         start_attrib: &Arc<str>,
         stop_attrib: &Arc<str>,
         catchup_id_attrib: &Arc<str>,
-        tag_title: &Arc<str>,
-        tag_desc: &Arc<str>,
     ) -> Option<EpgProgramme> {
         let Some((Some(start), Some(stop))) =
             tag.attributes.as_ref().map(|a| (a.get(start_attrib), a.get(stop_attrib)))
@@ -204,19 +203,40 @@ impl TVGuide {
 
         let mut title = None;
         let mut desc = None;
+        let mut categories = Vec::new();
+        let mut is_live = false;
+        let mut is_new = false;
         if let Some(children) = tag.children.as_ref() {
             for child in children {
-                if child.name == *tag_title {
-                    title.clone_from(&child.value);
-                } else if child.name == *tag_desc {
-                    desc.clone_from(&child.value);
+                match child.name.as_ref() {
+                    EPG_TAG_TITLE => title.clone_from(&child.value),
+                    EPG_TAG_DESC => desc.clone_from(&child.value),
+                    EPG_TAG_CATEGORY => {
+                        if let Some(value) = child.value.as_ref().filter(|value| !value.is_empty()) {
+                            categories.push(EpgCategory {
+                                value: Arc::clone(value),
+                                lang: child
+                                    .attributes
+                                    .as_ref()
+                                    .and_then(|attributes| attributes.get(EPG_ATTRIB_LANG))
+                                    .cloned(),
+                            });
+                        }
+                    }
+                    EPG_TAG_LIVE => is_live = true,
+                    EPG_TAG_NEW => is_new = true,
+                    _ => {}
                 }
             }
         }
 
         let catchup_id = tag.attributes.as_ref().and_then(|attributes| attributes.get(catchup_id_attrib)).cloned();
 
-        Some(EpgProgramme::new_all(start_time, stop_time, Arc::clone(epg_id), title, desc, catchup_id))
+        let mut programme = EpgProgramme::new_all(start_time, stop_time, Arc::clone(epg_id), title, desc, catchup_id);
+        programme.categories = categories;
+        programme.is_live = is_live;
+        programme.is_new = is_new;
+        Some(programme)
     }
 
     /// Finds the best fuzzy match for a channel's normalized EPG ID using phonetic encoding and Jaro-Winkler similarity.
@@ -316,8 +336,6 @@ impl TVGuide {
         let start_attrib = "start".intern();
         let stop_attrib = "stop".intern();
         let catchup_id_attrib = "catchup-id".intern();
-        let tag_title = "title".intern();
-        let tag_desc = "desc".intern();
 
         match CompressedFileReaderAsync::new(&epg_source.file_path).await {
             Ok(mut reader) => {
@@ -370,8 +388,6 @@ impl TVGuide {
                                         &start_attrib,
                                         &stop_attrib,
                                         &catchup_id_attrib,
-                                        &tag_title,
-                                        &tag_desc,
                                     ) {
                                         accumulator.push_programme(epg_source.priority, source_order, programme);
                                     }
@@ -899,6 +915,11 @@ fn backfill_programme_metadata(existing: &mut EpgProgramme, incoming: EpgProgram
     if existing.catchup_id.is_none() {
         existing.catchup_id = incoming.catchup_id;
     }
+    if existing.categories.is_empty() {
+        existing.categories = incoming.categories;
+    }
+    existing.is_live |= incoming.is_live;
+    existing.is_new |= incoming.is_new;
 }
 
 fn normalize_channel_programmes(acc: &mut ChannelMergeAcc) {
@@ -986,7 +1007,7 @@ mod tests {
         },
         utils::FileLockManager,
     };
-    use shared::model::{EpgChannel, EpgProgramme};
+    use shared::model::{EpgCategory, EpgChannel, EpgProgramme};
     use std::{collections::HashSet, fs, path::PathBuf, sync::Arc};
     use tempfile::tempdir;
 
@@ -1120,6 +1141,66 @@ mod tests {
         assert_eq!(merged[0].programmes.len(), 1);
         assert_eq!(merged[0].programmes[0].title.as_deref(), Some("High Title"));
         assert_eq!(merged[0].programmes[0].desc.as_deref(), Some("Recovered desc"));
+    }
+
+    #[test]
+    fn epg_priority_merge_backfills_programme_tags() {
+        let low_priority_categories = vec![
+            EpgCategory { value: "Sports".intern(), lang: None },
+            EpgCategory { value: "Live".intern(), lang: Some("en".intern()) },
+        ];
+        let mut low_programme = epg_programme("demo.channel", 10, 20, None, None);
+        low_programme.categories = low_priority_categories.clone();
+        low_programme.is_live = true;
+        low_programme.is_new = true;
+
+        let merged = merge_epg_channels_by_priority(vec![
+            (
+                0,
+                vec![epg_channel(
+                    "demo.channel",
+                    Some("High"),
+                    None,
+                    vec![epg_programme("demo.channel", 10, 20, Some("High Title"), None)],
+                )],
+            ),
+            (10, vec![epg_channel("demo.channel", None, None, vec![low_programme])]),
+        ]);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].programmes.len(), 1);
+        assert_eq!(merged[0].programmes[0].categories, low_priority_categories);
+        assert!(merged[0].programmes[0].is_live);
+        assert!(merged[0].programmes[0].is_new);
+
+        let high_programme_with_categories = {
+            let mut programme = epg_programme("demo.channel", 30, 40, Some("High Title 2"), None);
+            programme.categories = vec![EpgCategory { value: "Drama".intern(), lang: None }];
+            programme.is_new = true;
+            programme
+        };
+        let low_programme_extra = {
+            let mut programme = epg_programme("demo.channel", 30, 40, None, None);
+            programme.categories = vec![EpgCategory { value: "ShouldNotWin".intern(), lang: None }];
+            programme.is_live = true;
+            programme
+        };
+        let merged = merge_epg_channels_by_priority(vec![
+            (
+                0,
+                vec![epg_channel("demo.channel", None, None, vec![high_programme_with_categories])],
+            ),
+            (10, vec![epg_channel("demo.channel", None, None, vec![low_programme_extra])]),
+        ]);
+
+        assert_eq!(merged.len(), 1);
+        let programme = &merged[0].programmes[0];
+        assert_eq!(
+            programme.categories,
+            vec![EpgCategory { value: "Drama".intern(), lang: None }],
+        );
+        assert!(programme.is_live);
+        assert!(programme.is_new);
     }
 
     #[test]
@@ -1676,5 +1757,43 @@ mod tests {
         println!("{}", metaphone.encode(&normalize_channel_name("ODISEA ᵁᴴᴰ ³⁸⁴⁰ᴾ", &epg_smart_cfg)));
         println!("{}", metaphone.encode(&normalize_channel_name("BU | ODISEA ᵁᴴᴰ ³⁸⁴⁰ᴾ", &epg_smart_cfg)));
         println!("{}", metaphone.encode(&normalize_channel_name("BG | ODISEA ᵁᴴᴰ ³⁸⁴⁰ᴾ", &epg_smart_cfg)));
+    }
+
+    #[test]
+    fn xmltv_programme_tags_are_extracted() {
+        run_async_test(async move {
+            let dir = tempdir().expect("temp dir");
+            let epg_path = dir.path().join("programme-tags.xml");
+            fs::write(
+                &epg_path,
+                r#"<tv>
+  <channel id="ESPN.us"><display-name>ESPN</display-name></channel>
+  <programme start="20260718180000 +0000" stop="20260718200000 +0000" channel="ESPN.us">
+    <title lang="en">Softball</title>
+    <category lang="en">Softball</category>
+    <category>Sports</category>
+    <live/>
+    <new></new>
+  </programme>
+</tv>"#,
+            )
+            .expect("write XMLTV fixture");
+
+            let guide = TVGuide::new(vec![xmltv_source(epg_path, 0, false)]);
+            let mut id_cache = EpgIdCache::new(None);
+            id_cache.insert_channel_epg_id("ESPN.us");
+            let merged = guide.filter_merged(&mut id_cache).await.expect("merged EPG");
+            let programme = &merged.children[0].programmes[0];
+
+            assert_eq!(
+                programme.categories,
+                vec![
+                    EpgCategory { value: "Softball".intern(), lang: Some("en".intern()) },
+                    EpgCategory { value: "Sports".intern(), lang: None },
+                ],
+            );
+            assert!(programme.is_live);
+            assert!(programme.is_new);
+        });
     }
 }

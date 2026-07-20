@@ -16,7 +16,7 @@ pub struct IcsEvent {
     pub summary: Option<String>,
     pub description: Option<String>,
     pub location: Option<String>,
-    pub categories: Option<String>,
+    pub categories: Vec<String>,
     pub start: Option<i64>,
     pub stop: Option<i64>,
     pub start_display: Option<String>,
@@ -270,7 +270,7 @@ fn parse_event_lines(lines: &[String], config: &IcsEpgSourceConfig) -> Result<Op
                     Some(truncate_to_byte_limit(unescape_ics_text(&property.value), MAX_ICS_DESCRIPTION_LENGTH));
             }
             "LOCATION" => event.location = Some(unescape_ics_text(&property.value)),
-            "CATEGORIES" => event.categories = Some(unescape_ics_text(&property.value)),
+            "CATEGORIES" => event.categories.extend(parse_ics_text_list(&property.value)),
             "STATUS" if property.value.eq_ignore_ascii_case("CANCELLED") => event.cancelled = true,
             "RRULE" | "RDATE" | "EXDATE" => event.unsupported_recurrence = true,
             "DTSTART" => {
@@ -374,6 +374,33 @@ fn unescape_ics_text(value: &str) -> String {
     result
 }
 
+fn parse_ics_text_list(value: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut start = 0;
+    let mut escaped = false;
+
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == ',' {
+            push_ics_text_list_value(&mut values, &value[start..index]);
+            start = index + character.len_utf8();
+        }
+    }
+    push_ics_text_list_value(&mut values, &value[start..]);
+    values
+}
+
+fn push_ics_text_list_value(values: &mut Vec<String>, raw: &str) {
+    let value = unescape_ics_text(raw);
+    let value = value.trim();
+    if !value.is_empty() {
+        values.push(value.to_string());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +421,15 @@ mod tests {
         assert_eq!(events[0].summary.as_deref(), Some("Practice 1"));
         assert_eq!(events[0].start, Some(1_772_800_200));
         assert_eq!(events[0].stop, Some(1_772_803_800));
+    }
+
+    #[test]
+    fn categories_split_only_on_unescaped_commas() {
+        let content = calendar(
+            "BEGIN:VEVENT\nCATEGORIES: Sports ,Team\\, Regional,,News\nCATEGORIES:Path\\\\,Extra\nDTSTART:20260306T123000Z\nDTEND:20260306T133000Z\nEND:VEVENT",
+        );
+        let events = parse_ics_events(&content, &config()).expect("events");
+        assert_eq!(events[0].categories, vec!["Sports", "Team, Regional", "News", "Path\\", "Extra"]);
     }
 
     #[test]
