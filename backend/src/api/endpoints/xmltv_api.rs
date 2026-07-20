@@ -401,7 +401,6 @@ async fn serve_epg_with_rewrites(
 
                     if let Err(err) = write_programme_classification_tags(&mut writer, programme).await {
                         error!("EPG classification tags write failed: {err}");
-                        return;
                     }
 
                     let _ = writer.write_event_async(Event::End(BytesEnd::new("programme"))).await;
