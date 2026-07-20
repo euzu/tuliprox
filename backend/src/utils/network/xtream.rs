@@ -258,13 +258,13 @@ fn xtream_resolve_stream_info(app_state: &Arc<AppState>, user: &ProxyUserCredent
 
 pub(crate) fn get_skip_cluster(input: &ConfigInput) -> Vec<XtreamCluster> {
     let mut skip_cluster = vec![];
-    if input.has_flag(ConfigInputFlags::XtreamSkipLive) {
+    if input.has_flag(ConfigInputFlags::SkipLive) {
         skip_cluster.push(XtreamCluster::Live);
     }
-    if input.has_flag(ConfigInputFlags::XtreamSkipVod) {
+    if input.has_flag(ConfigInputFlags::SkipVod) {
         skip_cluster.push(XtreamCluster::Video);
     }
-    if input.has_flag(ConfigInputFlags::XtreamSkipSeries) {
+    if input.has_flag(ConfigInputFlags::SkipSeries) {
         skip_cluster.push(XtreamCluster::Series);
     }
     if skip_cluster.len() == 3 {
@@ -574,7 +574,7 @@ mod tests {
         let input = ConfigInput {
             name: "test".intern(),
             input_type: InputType::Xtream,
-            options: Some(options_with_flags(&[ConfigInputFlags::XtreamSkipLive])),
+            options: Some(options_with_flags(&[ConfigInputFlags::SkipLive])),
             ..ConfigInput::default()
         };
 

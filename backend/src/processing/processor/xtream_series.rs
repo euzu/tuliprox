@@ -70,7 +70,7 @@ pub async fn playlist_resolve_series(
     processed_fpl: &mut FetchedPlaylist<'_>,
 ) {
     // Skip-flag is the kill-switch: no resolve, no probe, no iteration.
-    if processed_fpl.input.has_flag(ConfigInputFlags::XtreamSkipSeries) {
+    if processed_fpl.input.has_flag(ConfigInputFlags::SkipSeries) {
         return;
     }
 
@@ -87,7 +87,9 @@ pub async fn playlist_resolve_series(
         sync_resolved_series_properties(provider_fpl, processed_fpl);
     }
 
-    provider_fpl.source.obtain_resources().await;
+    if let Err(err) = provider_fpl.source.obtain_resources().await {
+        errors.push(err);
+    }
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -690,7 +692,7 @@ pub async fn update_series_metadata(
         .await
         .map_err(|e| TuliproxError::Io(format!("Storage path error: {e}")))?;
 
-    if input.has_flag(ConfigInputFlags::XtreamSkipSeries) {
+    if input.has_flag(ConfigInputFlags::SkipSeries) {
         return Ok(None);
     }
 

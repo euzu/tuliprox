@@ -176,7 +176,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("  {} added", country_code.to_ascii_uppercase());
                     }
                     Err(err) => {
-                        println!("  {}: {}", country_code, err);
+                        println!("  {country_code}: {err}");
                     }
                 }
             }

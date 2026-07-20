@@ -793,6 +793,7 @@ mod tests {
     use shared::model::HlsSegmentRepairMode;
     use std::{
         collections::VecDeque,
+        fmt::Write as _,
         io::Cursor,
         path::{Path, PathBuf},
         sync::{
@@ -1015,10 +1016,7 @@ mod tests {
                     let mut head =
                         format!("HTTP/1.1 {} {reason}\r\nContent-Length: {}\r\n", response.status, response.body.len());
                     for (name, value) in response.headers {
-                        head.push_str(&name);
-                        head.push_str(": ");
-                        head.push_str(&value);
-                        head.push_str("\r\n");
+                        let _ = write!(head, "{name}: {value}\r\n");
                     }
                     head.push_str("Connection: close\r\n\r\n");
                     let _ = socket.write_all(head.as_bytes()).await;

@@ -1,16 +1,26 @@
-use crate::model::is_input_expired;
-use crate::utils::request::get_local_file_content;
-use crate::utils::EnvResolvingReader;
-use crate::utils::{file_reader, resolve_relative_path};
+use crate::{
+    model::is_input_expired,
+    utils::{file_reader, request::get_local_file_content, resolve_relative_path, EnvResolvingReader},
+};
 use futures::TryFutureExt;
 use log::{error, warn};
-use shared::error::{string_to_io_error, to_io_error, TuliproxError};
-use shared::model::{ConfigInputAliasDto, InputType};
-use shared::utils::{get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, Internable, BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX};
-use std::io;
-use std::io::{BufRead, Cursor, Error};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use shared::{
+    error::{string_to_io_error, to_io_error, TuliproxError},
+    model::{
+        ConfigInputAliasDto, InputType, StalkerAuthMode, StalkerDeviceProfileDto, StalkerEndpointPreference,
+        StalkerInputConfigDto, StalkerMagPreset,
+    },
+    utils::{
+        get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, Internable,
+        BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
+    },
+};
+use std::{
+    io,
+    io::{BufRead, Cursor, Error},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use url::Url;
 
 const CSV_SEPARATOR: char = ';';
@@ -23,17 +33,13 @@ const FIELD_USERNAME: &str = "username";
 const FIELD_PASSWORD: &str = "password";
 const FIELD_EXP_DATE: &str = "exp_date";
 const FIELD_ENABLED: &str = "enabled";
+const FIELD_STALKER_MAC_ADDRESS: &str = "mac_address";
+const FIELD_STALKER_AUTH_MODE: &str = "auth_mode";
+const FIELD_STALKER_MAG_PRESET: &str = "mag_preset";
+const FIELD_STALKER_ENDPOINT_PREFERENCE: &str = "endpoint_preference";
 const FIELD_UNKNOWN: &str = "?";
-const DEFAULT_COLUMNS: &[&str] = &[
-    FIELD_URL,
-    FIELD_MAX_CON,
-    FIELD_PRIO,
-    FIELD_NAME,
-    FIELD_USERNAME,
-    FIELD_PASSWORD,
-    FIELD_EXP_DATE,
-    FIELD_ENABLED
-];
+const DEFAULT_COLUMNS: &[&str] =
+    &[FIELD_URL, FIELD_MAX_CON, FIELD_PRIO, FIELD_NAME, FIELD_USERNAME, FIELD_PASSWORD, FIELD_EXP_DATE, FIELD_ENABLED];
 const CSV_EXTENSION: &str = ".csv";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,16 +65,9 @@ pub fn compare_alias_exp_date_with_order(
     .then_with(|| a.name.cmp(&b.name))
 }
 
-pub fn is_csv_file(url: &str) -> bool {
-    url.to_lowercase().ends_with(CSV_EXTENSION)
-}
+pub fn is_csv_file(url: &str) -> bool { url.to_lowercase().ends_with(CSV_EXTENSION) }
 
-
-fn build_m3u_url(
-    base: &Url,
-    username: Option<&str>,
-    password: Option<&str>,
-) -> Result<Url, url::ParseError> {
+fn build_m3u_url(base: &Url, username: Option<&str>, password: Option<&str>) -> Result<Url, url::ParseError> {
     let base_origin = base.origin().ascii_serialization();
     let mut url = base_origin.parse::<Url>()?.join("get.php")?;
     {
@@ -95,14 +94,9 @@ fn csv_assign_mandatory_fields(alias: &mut ConfigInputAliasDto, input_type: Inpu
                     // xtream url
                     if input_type == InputType::XtreamBatch {
                         alias.url = url.origin().ascii_serialization();
-                    } else if input_type == InputType::M3uBatch
-                        && alias.username.is_some()
-                        && alias.password.is_some()
+                    } else if input_type == InputType::M3uBatch && alias.username.is_some() && alias.password.is_some()
                     {
-                        match build_m3u_url(
-                            &url,
-                            alias.username.as_deref(),
-                            alias.password.as_deref()) {
+                        match build_m3u_url(&url, alias.username.as_deref(), alias.password.as_deref()) {
                             Ok(alias_url) => {
                                 alias.url = alias_url.to_string();
                             }
@@ -144,7 +138,7 @@ fn str_to_bool(val: &str) -> bool {
     if val.is_empty() || val == "1" {
         return true;
     }
-    if val == "0"  || val.eq_ignore_ascii_case("f")  || val.eq_ignore_ascii_case("false") {
+    if val == "0" || val.eq_ignore_ascii_case("f") || val.eq_ignore_ascii_case("false") {
         return false;
     }
     true
@@ -152,6 +146,7 @@ fn str_to_bool(val: &str) -> bool {
 
 fn csv_assign_config_input_column(
     config_input: &mut ConfigInputAliasDto,
+    input_type: InputType,
     header: &str,
     raw_value: &str,
 ) -> Result<(), io::Error> {
@@ -188,6 +183,24 @@ fn csv_assign_config_input_column(
             FIELD_ENABLED => {
                 config_input.enabled = str_to_bool(value);
             }
+            FIELD_STALKER_MAC_ADDRESS if input_type == InputType::StalkerBatch => {
+                let stalker = config_input.stalker.get_or_insert_with(StalkerInputConfigDto::default);
+                let device = stalker.device.get_or_insert_with(StalkerDeviceProfileDto::default);
+                device.mac_address = Some(value.to_string());
+            }
+            FIELD_STALKER_AUTH_MODE if input_type == InputType::StalkerBatch => {
+                let auth_mode = value.parse::<StalkerAuthMode>().map_err(to_io_error)?;
+                config_input.stalker.get_or_insert_with(StalkerInputConfigDto::default).auth_mode = auth_mode;
+            }
+            FIELD_STALKER_MAG_PRESET if input_type == InputType::StalkerBatch => {
+                let mag_preset = value.parse::<StalkerMagPreset>().map_err(to_io_error)?;
+                config_input.stalker.get_or_insert_with(StalkerInputConfigDto::default).mag_preset = mag_preset;
+            }
+            FIELD_STALKER_ENDPOINT_PREFERENCE if input_type == InputType::StalkerBatch => {
+                let endpoint_preference = value.parse::<StalkerEndpointPreference>().map_err(to_io_error)?;
+                config_input.stalker.get_or_insert_with(StalkerInputConfigDto::default).endpoint_preference =
+                    endpoint_preference;
+            }
             _ => {}
         }
     }
@@ -201,6 +214,7 @@ pub fn csv_read_inputs_from_reader(
     let input_type = match batch_input_type {
         InputType::M3uBatch | InputType::M3u => InputType::M3uBatch,
         InputType::XtreamBatch | InputType::Xtream => InputType::XtreamBatch,
+        InputType::Stalker | InputType::StalkerBatch => InputType::StalkerBatch,
         InputType::Library => InputType::Library,
         InputType::Emby | InputType::Jellyfin | InputType::Plex | InputType::Staged => batch_input_type,
     };
@@ -227,6 +241,10 @@ pub fn csv_read_inputs_from_reader(
                         FIELD_PASSWORD => FIELD_PASSWORD,
                         FIELD_EXP_DATE => FIELD_EXP_DATE,
                         FIELD_ENABLED => FIELD_ENABLED,
+                        FIELD_STALKER_MAC_ADDRESS => FIELD_STALKER_MAC_ADDRESS,
+                        FIELD_STALKER_AUTH_MODE => FIELD_STALKER_AUTH_MODE,
+                        FIELD_STALKER_MAG_PRESET => FIELD_STALKER_MAG_PRESET,
+                        FIELD_STALKER_ENDPOINT_PREFERENCE => FIELD_STALKER_ENDPOINT_PREFERENCE,
                         _ => {
                             error!("Field {s} is unsupported for csv input");
                             FIELD_UNKNOWN
@@ -247,13 +265,19 @@ pub fn csv_read_inputs_from_reader(
             max_connections: 1,
             exp_date: None,
             enabled: true,
+            stalker: None,
         };
 
         let columns: Vec<&str> = line.split(CSV_SEPARATOR).collect();
+        let mut invalid = false;
         for (&header, &value) in default_columns.iter().zip(columns.iter()) {
-            if let Err(err) = csv_assign_config_input_column(&mut config_input, header, value) {
-                error!("Could not parse input line: {} err: {err}", line_idx+1);
+            if let Err(err) = csv_assign_config_input_column(&mut config_input, input_type, header, value) {
+                error!("Could not parse input line: {} err: {err}", line_idx + 1);
+                invalid = true;
             }
+        }
+        if invalid {
+            continue;
         }
         csv_assign_mandatory_fields(&mut config_input, input_type);
         if config_input.url.is_empty() {
@@ -272,10 +296,7 @@ async fn csv_read_inputs_from_path(
     match get_local_file_content(file_path).await {
         Ok(content) => Ok((
             file_path.to_path_buf(),
-            csv_read_inputs_from_reader(
-                input_type,
-                EnvResolvingReader::new(file_reader(Cursor::new(content))),
-            )?,
+            csv_read_inputs_from_reader(input_type, EnvResolvingReader::new(file_reader(Cursor::new(content))))?,
         )),
         Err(err) => Err(err),
     }
@@ -293,29 +314,21 @@ pub fn get_csv_file_path(file_uri: &str) -> Result<PathBuf, Error> {
     // Handle batch:// scheme: strip prefix and treat remainder as file path.
     if let Some(path_str) = file_uri.strip_prefix(BATCH_SCHEME_PREFIX) {
         let path = Path::new(path_str);
-        return if path.is_absolute() {
-            Ok(path.to_path_buf())
-        } else {
-            resolve_relative_path(path_str)
-        };
+        return if path.is_absolute() { Ok(path.to_path_buf()) } else { resolve_relative_path(path_str) };
     }
     let raw_path = Path::new(file_uri);
     if raw_path.is_absolute() {
         return Ok(raw_path.to_path_buf());
     }
     if let Ok(_url) = file_uri.parse::<Url>() {
-        Err(string_to_io_error(format!(
-            "Unsupported URL scheme for batch CSV, use batch:// instead: {file_uri}"
-        )))
+        Err(string_to_io_error(format!("Unsupported URL scheme for batch CSV, use batch:// instead: {file_uri}")))
     } else {
         resolve_relative_path(file_uri)
     }
 }
 
-async fn csv_write_input_to_path(
-    file_path: &Path,
-    aliases: &[ConfigInputAliasDto],
-) -> Result<(), Error> {
+async fn csv_write_input_to_path(file_path: &Path, aliases: &[ConfigInputAliasDto]) -> Result<(), Error> {
+    let write_stalker_fields = aliases.iter().any(|alias| alias.stalker.is_some());
     let mut content = String::new();
     content.push(HEADER_PREFIX);
     content.push_str(FIELD_NAME);
@@ -326,6 +339,16 @@ async fn csv_write_input_to_path(
     content.push(CSV_SEPARATOR);
     content.push_str(FIELD_URL);
     content.push(CSV_SEPARATOR);
+    if write_stalker_fields {
+        content.push_str(FIELD_STALKER_MAC_ADDRESS);
+        content.push(CSV_SEPARATOR);
+        content.push_str(FIELD_STALKER_AUTH_MODE);
+        content.push(CSV_SEPARATOR);
+        content.push_str(FIELD_STALKER_MAG_PRESET);
+        content.push(CSV_SEPARATOR);
+        content.push_str(FIELD_STALKER_ENDPOINT_PREFERENCE);
+        content.push(CSV_SEPARATOR);
+    }
     content.push_str(FIELD_ENABLED);
     content.push(CSV_SEPARATOR);
     content.push_str(FIELD_MAX_CON);
@@ -344,30 +367,37 @@ async fn csv_write_input_to_path(
         content.push(CSV_SEPARATOR);
         content.push_str(&alias.url);
         content.push(CSV_SEPARATOR);
-        content.push_str(if alias.enabled { "1" } else {"0"} );
+        if write_stalker_fields {
+            if let Some(stalker) = alias.stalker.as_ref() {
+                content
+                    .push_str(stalker.device.as_ref().and_then(|device| device.mac_address.as_deref()).unwrap_or(""));
+                content.push(CSV_SEPARATOR);
+                content.push_str(stalker.auth_mode.as_ref());
+                content.push(CSV_SEPARATOR);
+                content.push_str(stalker.mag_preset.as_ref());
+                content.push(CSV_SEPARATOR);
+                content.push_str(stalker.endpoint_preference.as_ref());
+            } else {
+                content.push_str(";;;");
+            }
+            content.push(CSV_SEPARATOR);
+        }
+        content.push_str(if alias.enabled { "1" } else { "0" });
         content.push(CSV_SEPARATOR);
         content.push_str(&alias.max_connections.to_string());
         content.push(CSV_SEPARATOR);
         content.push_str(&alias.priority.to_string());
         content.push(CSV_SEPARATOR);
         if let Some(exp) = alias.exp_date {
-            content.push_str(
-                &shared::utils::unix_ts_to_str_with_format(exp, "%Y-%m-%d %H:%M:%S")
-                    .unwrap_or_default(),
-            );
+            content.push_str(&shared::utils::unix_ts_to_str_with_format(exp, "%Y-%m-%d %H:%M:%S").unwrap_or_default());
         }
         content.push('\n');
     }
 
-    tokio::fs::write(file_path, content)
-        .await
-        .map_err(to_io_error)
+    tokio::fs::write(file_path, content).await.map_err(to_io_error)
 }
 
-pub async fn csv_write_inputs(
-    file_uri: &str,
-    aliases: &[ConfigInputAliasDto],
-) -> Result<(), Error> {
+pub async fn csv_write_inputs(file_uri: &str, aliases: &[ConfigInputAliasDto]) -> Result<(), Error> {
     let file_path = get_csv_file_path(file_uri)?;
     csv_write_input_to_path(&file_path, aliases).await
 }
@@ -386,7 +416,6 @@ pub async fn csv_patch_batch_append(
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
         .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
         .await?;
-
 
     let url = if input_type == InputType::M3uBatch {
         let base = Url::parse(base_url).map_err(|e| TuliproxError::Config(format!("{e}")))?;
@@ -407,12 +436,11 @@ pub async fn csv_patch_batch_append(
         max_connections: 1,
         exp_date,
         enabled: true,
+        stalker: None,
     };
     aliases.push(alias);
 
-    csv_write_input_to_path(&file_path, &aliases)
-        .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
-        .await?;
+    csv_write_input_to_path(&file_path, &aliases).map_err(|err| TuliproxError::ConfigInput(format!("{err}"))).await?;
     Ok(())
 }
 
@@ -430,8 +458,7 @@ pub async fn csv_patch_batch_update_exp_date(
         .await?;
     for alias in &mut aliases {
         if &alias.name == account_name
-            || (alias.username == Some(username.to_string())
-            && alias.password == Some(password.to_string()))
+            || (alias.username == Some(username.to_string()) && alias.password == Some(password.to_string()))
         {
             alias.exp_date = Some(exp_date);
             alias.max_connections = 1;
@@ -474,18 +501,17 @@ pub async fn csv_patch_batch_update_credentials(
     for alias in &mut aliases {
         let mut is_match = &alias.name == account_name;
         if !is_match {
-            is_match = alias.username.as_deref() == Some(old_username)
-                && alias.password.as_deref() == Some(old_password);
+            is_match =
+                alias.username.as_deref() == Some(old_username) && alias.password.as_deref() == Some(old_password);
         }
         if !is_match {
-            is_match = alias.username.as_deref() == Some(new_username)
-                && alias.password.as_deref() == Some(new_password);
+            is_match =
+                alias.username.as_deref() == Some(new_username) && alias.password.as_deref() == Some(new_password);
         }
 
         if !is_match {
             if let (Some(u), Some(p)) = get_credentials_from_url_str(&alias.url) {
-                is_match = (u == old_username && p == old_password)
-                    || (u == new_username && p == new_password);
+                is_match = (u == old_username && p == old_password) || (u == new_username && p == new_password);
             }
         }
 
@@ -502,10 +528,8 @@ pub async fn csv_patch_batch_update_credentials(
 
         if matches!(input_type, InputType::M3uBatch | InputType::M3u) {
             if let Ok(mut url) = Url::parse(alias.url.as_str()) {
-                let mut pairs: Vec<(String, String)> = url
-                    .query_pairs()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect();
+                let mut pairs: Vec<(String, String)> =
+                    url.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
                 let mut has_user = false;
                 let mut has_pass = false;
                 for (k, v) in &mut pairs {
@@ -549,10 +573,7 @@ pub async fn csv_patch_batch_update_credentials(
     Ok(())
 }
 
-pub async fn csv_patch_batch_remove_expired(
-    input_type: InputType,
-    csv_path: &Path,
-) -> Result<bool, TuliproxError> {
+pub async fn csv_patch_batch_remove_expired(input_type: InputType, csv_path: &Path) -> Result<bool, TuliproxError> {
     let (file_path, mut aliases) = csv_read_inputs_from_path(input_type, csv_path)
         .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
         .await?;
@@ -584,20 +605,18 @@ pub async fn csv_patch_batch_sort_by_exp_date(
         return Ok(false);
     }
     aliases = sorted;
-    csv_write_input_to_path(&file_path, &aliases)
-        .map_err(|err| TuliproxError::ConfigInput(format!("{err}")))
-        .await?;
+    csv_write_input_to_path(&file_path, &aliases).map_err(|err| TuliproxError::ConfigInput(format!("{err}"))).await?;
     Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{csv_patch_batch_sort_by_exp_date, csv_read_inputs_from_path, AliasExpDateSortOrder};
-    use crate::repository::csv_read_inputs_from_reader;
-    use crate::utils::{file_reader};
-    use shared::model::InputType;
-    use std::io::Cursor;
-    use std::path::PathBuf;
+    use super::{
+        csv_patch_batch_sort_by_exp_date, csv_read_inputs_from_path, csv_write_input_to_path, AliasExpDateSortOrder,
+    };
+    use crate::{repository::csv_read_inputs_from_reader, utils::file_reader};
+    use shared::model::{InputType, StalkerAuthMode, StalkerEndpointPreference, StalkerMagPreset};
+    use std::{io::Cursor, path::PathBuf};
 
     const M3U_BATCH: &str = r"
 #url;name;max_connections;priority
@@ -612,6 +631,69 @@ http://hd.providerline.com/get.php?username=user4&password=user4&type=m3u_plus;i
 input_1;de566567;de2345f43g5;http://provider_1.tv:80;1;2028-11-23 13:12:34
 input_2;de566567;de2345f43g5;http://provider_2.tv:8080;1;2028-12-23 13:12:34
 ";
+
+    #[test]
+    fn stalker_batch_keeps_portal_path() -> Result<(), std::io::Error> {
+        let input = "http://portal.example/c/;1;0;portal;;;1\n";
+        let aliases = csv_read_inputs_from_reader(InputType::StalkerBatch, Cursor::new(input))?;
+
+        assert_eq!(aliases[0].url, "http://portal.example/c/");
+        Ok(())
+    }
+
+    #[test]
+    fn stalker_batch_reads_optional_alias_fields_by_header() -> Result<(), std::io::Error> {
+        let input = "#endpoint_preference;url;mac_address;auth_mode;name;mag_preset\n\
+portal;http://portal.example/c/;00:1A:79:12:34:56;mac_plus_credentials;primary;mag254_strict\n\
+;http://backup.example/c/;;;backup;\n";
+        let aliases = csv_read_inputs_from_reader(InputType::StalkerBatch, Cursor::new(input))?;
+
+        let stalker = aliases
+            .first()
+            .ok_or_else(|| std::io::Error::other("missing primary Stalker alias"))?
+            .stalker
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("missing Stalker alias configuration"))?;
+        assert_eq!(stalker.auth_mode, StalkerAuthMode::MacPlusCredentials);
+        assert_eq!(stalker.mag_preset, StalkerMagPreset::Mag254Strict);
+        assert_eq!(stalker.endpoint_preference, StalkerEndpointPreference::Portal);
+        assert_eq!(stalker.device.as_ref().and_then(|device| device.mac_address.as_deref()), Some("00:1A:79:12:34:56"));
+        assert!(aliases.get(1).ok_or_else(|| std::io::Error::other("missing backup Stalker alias"))?.stalker.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn stalker_batch_skips_alias_with_invalid_enum() -> Result<(), std::io::Error> {
+        let input = "#url;auth_mode\nhttp://portal.example/c/;invalid\n";
+        let aliases = csv_read_inputs_from_reader(InputType::StalkerBatch, Cursor::new(input))?;
+
+        assert!(aliases.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stalker_batch_write_preserves_alias_fields() -> Result<(), std::io::Error> {
+        let input = "#name;url;mac_address;auth_mode;mag_preset;endpoint_preference\n\
+primary;http://portal.example/c/;00:1A:79:12:34:56;mac_only;mag254_strict;portal\n";
+        let aliases = csv_read_inputs_from_reader(InputType::StalkerBatch, Cursor::new(input))?;
+        let path = temp_csv_path("stalker-round-trip");
+
+        csv_write_input_to_path(&path, &aliases).await?;
+        let (_, written_aliases) = csv_read_inputs_from_path(InputType::StalkerBatch, &path).await?;
+        let _ = std::fs::remove_file(path);
+
+        let stalker = written_aliases
+            .first()
+            .ok_or_else(|| std::io::Error::other("missing persisted Stalker alias"))?
+            .stalker
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("missing persisted Stalker alias configuration"))?;
+        assert_eq!(stalker.auth_mode, StalkerAuthMode::MacOnly);
+        assert_eq!(stalker.mag_preset, StalkerMagPreset::Mag254Strict);
+        assert_eq!(stalker.endpoint_preference, StalkerEndpointPreference::Portal);
+        assert_eq!(stalker.device.as_ref().and_then(|device| device.mac_address.as_deref()), Some("00:1A:79:12:34:56"));
+        Ok(())
+    }
 
     #[test]
     fn test_read_inputs_xtream_as_m3u() {
@@ -661,14 +743,22 @@ input_2;de566567;de2345f43g5;http://provider_2.tv:8080;1;2028-12-23 13:12:34
         }
     }
 
+    #[test]
+    fn test_read_inputs_xtream_as_stalker_batch() {
+        let reader = file_reader(Cursor::new(XTREAM_BATCH));
+        let aliases = csv_read_inputs_from_reader(InputType::StalkerBatch, reader).expect("stalker batch aliases");
+        assert_eq!(aliases.len(), 2);
+        // Aliases must NOT materialize a stalker block of their own — they
+        // inherit the parent input's stalker configuration in `as_input`.
+        assert!(aliases.iter().all(|alias| alias.stalker.is_none()));
+        assert!(aliases.iter().all(|alias| !alias.url.contains("username")));
+    }
+
     fn temp_csv_path(test_name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "tuliprox-{test_name}-{}-{}.csv",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system time")
-                .as_nanos()
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("system time").as_nanos()
         ))
     }
 
@@ -684,9 +774,10 @@ missing;missing-user;missing-pass;http://missing.example;1;\n",
         )
         .expect("write csv fixture");
 
-        let changed = csv_patch_batch_sort_by_exp_date(InputType::XtreamBatch, &path, AliasExpDateSortOrder::NewestFirst)
-            .await
-            .expect("sort succeeds");
+        let changed =
+            csv_patch_batch_sort_by_exp_date(InputType::XtreamBatch, &path, AliasExpDateSortOrder::NewestFirst)
+                .await
+                .expect("sort succeeds");
 
         assert!(changed);
         let (_, aliases) = csv_read_inputs_from_path(InputType::XtreamBatch, &path).await.expect("read sorted csv");

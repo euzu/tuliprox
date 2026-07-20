@@ -469,7 +469,7 @@ mod tests {
     use super::*;
     use async_compression::tokio::bufread::{BrotliEncoder, DeflateEncoder, GzipEncoder, ZlibEncoder, ZstdEncoder};
     use reqwest::redirect::Policy;
-    use std::io::Cursor;
+    use std::{fmt::Write as _, io::Cursor};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -891,9 +891,7 @@ mod tests {
 
             let mut response = format!("HTTP/1.1 {} Test\r\nConnection: close\r\n", status.as_u16());
             if !has_content_length {
-                response.push_str("Content-Length: ");
-                response.push_str(&body.len().to_string());
-                response.push_str("\r\n");
+                let _ = write!(response, "Content-Length: {}\r\n", body.len());
             }
             for (name, value) in owned_headers {
                 response.push_str(&name);

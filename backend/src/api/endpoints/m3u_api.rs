@@ -6,7 +6,8 @@ use crate::{
             create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response, get_session_reservation_ttl_secs,
             get_user_target, get_user_target_by_credentials, is_seek_request, is_session_based_playback,
             is_stream_share_enabled, local_stream_response, redirect, redirect_response, resource_response,
-            separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
+            resolve_initial_stalker_playback_url, separate_number_and_remainder,
+            should_allow_exhausted_shared_reconnect, stream_response,
             try_option_bad_request, try_result_bad_request, try_result_not_found, try_unwrap_body, RedirectParams,
         },
         endpoints::{
@@ -129,7 +130,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     fingerprint: &Fingerprint,
     req_headers: &axum::http::HeaderMap,
     app_state: &Arc<AppState>,
-    pli: shared::model::M3uPlaylistItem,
+    mut pli: shared::model::M3uPlaylistItem,
     input: Arc<crate::model::ConfigInput>,
     stream_ext: Option<&str>,
     archive_discriminator: Option<&str>,
@@ -224,6 +225,22 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     }
 
     let cluster = XtreamCluster::try_from(pli.item_type).unwrap_or(XtreamCluster::Live);
+    pli.url = match resolve_initial_stalker_playback_url(
+        app_state,
+        &input,
+        pli.get_provider_id().unwrap_or_default(),
+        cluster,
+        pli.item_type,
+        &pli.url,
+    )
+    .await
+    {
+        Ok(url) => url,
+        Err(err) => {
+            error!("Failed to resolve initial Stalker playback URL: {}", sanitize_sensitive_info(&err.to_string()));
+            return axum::http::StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
 
     debug_if_enabled!(
         "M3U playback for virtual_id={virtual_id}, item_type={}",

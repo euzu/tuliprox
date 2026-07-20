@@ -1048,6 +1048,7 @@ mod tests {
             password: None,
             persist: None,
             enabled: true,
+            sequential_group: None,
             input_type: InputType::Xtream, // You can use a default value here
             max_connections,
             priority,
@@ -1063,6 +1064,7 @@ mod tests {
             panel_api: None,
             provider_configs: None,
             cache_duration_seconds: 0,
+            stalker: None,
         }
     }
 
@@ -1078,6 +1080,7 @@ mod tests {
             max_connections,
             exp_date: None,
             enabled: true,
+            stalker: None,
         }
     }
 

@@ -17,6 +17,7 @@ use crate::{
             ContentCodingDetection, ContentCodingError, OutboundContentCodingPolicy,
         },
         debug_if_enabled,
+        network::stalker::client::validate_public_playable_url,
         request::{
             get_request_headers, is_safe_cross_origin_redirect_header, preview_request_diagnostics_for_logging,
             preview_request_target_for_logging, send_with_retry_and_provider_policy,
@@ -73,6 +74,7 @@ create_bitset!(
     ShareStream,
     PipeStream,
     RangeRequested
+    ,PublicDestinationRequired
 );
 
 #[derive(Debug, Clone)]
@@ -213,6 +215,10 @@ impl ProviderStreamFactoryOptions {
 
     pub fn set_provider(&mut self, provider: Option<Arc<ConfigProvider>>) { self.provider = provider; }
 
+    pub fn require_public_destination(&mut self) {
+        self.flags.set(ProviderStreamFactoryFlags::PublicDestinationRequired);
+    }
+
     pub fn get_provider(&self) -> Option<&Arc<ConfigProvider>> { self.provider.as_ref() }
 
     #[inline]
@@ -242,6 +248,10 @@ impl ProviderStreamFactoryOptions {
     #[inline]
     pub fn should_retry_provider_request(&self) -> bool {
         self.flags.contains(ProviderStreamFactoryFlags::RetryEnabled)
+    }
+
+    fn requires_public_destination(&self) -> bool {
+        self.flags.contains(ProviderStreamFactoryFlags::PublicDestinationRequired)
     }
 
     #[inline]
@@ -628,6 +638,11 @@ async fn send_with_manual_redirects(
     let mut credential_state = ProviderRequestCredentialState::OriginalOrigin;
 
     loop {
+        if stream_options.requires_public_destination() {
+            validate_public_playable_url(&current_url)
+                .await
+                .map_err(|err| io::Error::new(io::ErrorKind::PermissionDenied, err))?;
+        }
         let result = send_with_retry_and_provider_policy(
             app_config,
             &current_url,
@@ -815,7 +830,8 @@ async fn provider_stream_request(
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, ProviderStreamRequestFailure> {
-    let use_manual_redirects = app_state.should_use_manual_redirects()
+    let use_manual_redirects = stream_options.requires_public_destination()
+        || app_state.should_use_manual_redirects()
         || provider_headers_require_manual_redirects(stream_options.get_headers());
     if log_enabled!(log::Level::Debug) {
         let diagnostics =
@@ -827,7 +843,11 @@ async fn provider_stream_request(
         );
     }
     let response_result = if use_manual_redirects {
-        let client_no_redirect = app_state.http_client_no_redirect.load();
+        let client_no_redirect = if stream_options.requires_public_destination() {
+            app_state.public_http_client_no_redirect.load()
+        } else {
+            app_state.http_client_no_redirect.load()
+        };
         send_with_manual_redirects(&client_no_redirect, stream_options, &app_state.app_config).await
     } else {
         // Use send_with_retry_and_provider for automatic failover support
@@ -1118,9 +1138,12 @@ mod tests {
         model::{ConfigPaths, PlaylistItemType, StreamChannel, XtreamCluster},
         utils::Internable,
     };
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
+    use std::{
+        fmt::Write as _,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -1301,12 +1324,9 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
         let task_requests = Arc::clone(&requests);
-        let response_headers = headers.iter().fold(String::new(), |mut response, (name, value)| {
-            response.push_str(name);
-            response.push_str(": ");
-            response.push_str(value);
-            response.push_str("\r\n");
-            response
+        let response_headers = headers.iter().fold(String::new(), |mut headers, (name, value)| {
+            let _ = write!(headers, "{name}: {value}\r\n");
+            headers
         });
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();

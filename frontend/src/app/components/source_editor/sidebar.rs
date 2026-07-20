@@ -4,10 +4,11 @@ use crate::{
 };
 use yew::prelude::*;
 
-pub const BLOCK_TYPES_INPUT: [BlockType; 7] = [
+pub const BLOCK_TYPES_INPUT: [BlockType; 8] = [
     BlockType::InputXtream,
     BlockType::InputM3u,
     BlockType::InputLibrary,
+    BlockType::InputStalker,
     BlockType::InputStaged,
     BlockType::InputJellyfin,
     BlockType::InputEmby,

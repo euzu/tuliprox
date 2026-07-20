@@ -471,7 +471,7 @@ impl ConfigTargetDto {
         if let Some(watch) = &self.watch {
             for pat in watch {
                 if let Err(err) = crate::model::REGEX_CACHE.get_or_compile(pat) {
-                    return Err(TuliproxError::ConfigTarget(format!("Invalid watch regular expression: {}", err)));
+                    return Err(TuliproxError::ConfigTarget(format!("Invalid watch regular expression: {err}")));
                 }
             }
         }

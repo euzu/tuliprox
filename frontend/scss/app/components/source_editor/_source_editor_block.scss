@@ -181,6 +181,11 @@ $port-size: 10px;
     background-color: var(--brick-input-staged-background-color);
   }
 
+  &-InputStalker {
+    border-color: var(--brick-input-stalker-border-color);
+    background-color: var(--brick-input-stalker-background-color);
+  }
+
   &-InputJellyfin {
     border-color: var(--brick-input-jellyfin-border-color);
     background-color: var(--brick-input-jellyfin-background-color);
@@ -195,7 +200,6 @@ $port-size: 10px;
     border-color: var(--brick-input-plex-border-color);
     background-color: var(--brick-input-plex-background-color);
   }
-
   &-Target {
     border-color: var(--brick-target-border-color);
     background-color: var(--brick-target-background-color);
@@ -304,6 +308,9 @@ $port-size: 10px;
     @include brick-handle-input-color(var(--brick-input-staged-background-color), var(--brick-input-staged-border-color));
   }
 
+  &-InputStalker {
+    @include brick-handle-input-color(var(--brick-input-stalker-background-color), var(--brick-input-stalker-border-color));
+  }
   &-InputJellyfin {
     @include brick-handle-input-color(var(--brick-input-jellyfin-background-color), var(--brick-input-jellyfin-border-color));
   }
@@ -315,7 +322,6 @@ $port-size: 10px;
   &-InputPlex {
     @include brick-handle-input-color(var(--brick-input-plex-background-color), var(--brick-input-plex-border-color));
   }
-
   &-Target {
     .tp__source-editor__block-content {
       border-color: var(--brick-target-border-color);

@@ -5,7 +5,10 @@ use crate::{
             try_result_bad_request, try_unwrap_body,
         },
         endpoints::{
-            api_playlist_utils::{get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target},
+            api_playlist_utils::{
+                get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target,
+                STALKER_RESOURCE_SCHEME,
+            },
             extract_accept_header::ExtractAcceptHeader,
             m3u_api::m3u_api_stream_loaded,
             xmltv_api::{rewrite_epg_channel_resource_url, serve_epg_web_ui, stream_epg_api},
@@ -21,12 +24,20 @@ use crate::{
         parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags,
         ConfigInputOptions, EpgSource, EpgSourceType, IcsDummyPolicy, InputSource,
     },
-    processing::parser::{
+    processing::{
+        parser::{
         ics::parse_ics_file_to_channel,
         xmltv::{merge_epg_channels_by_priority_with_dummy_policies, EpgDummyPolicySource},
+        },
+        processor::re_resolve_stalker_url,
     },
     repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id},
-    utils::{epg::get_input_raw_epg_file_path, file_exists_async, request, xtream},
+    utils::{
+        epg::get_input_raw_epg_file_path,
+        file_exists_async,
+        network::stalker::client::validate_public_playable_url,
+        request, xtream,
+    },
 };
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
@@ -34,8 +45,9 @@ use serde_json::json;
 use shared::{
     error::TuliproxError,
     model::{
-        permission::Permission, EpgChannel, InputType, OperationRunAccepted, PlaylistEpgRequest, PlaylistRequest,
-        PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem, XtreamCluster,
+        permission::Permission, stalker::StalkerStreamKind, EpgChannel, InputType, OperationRunAccepted,
+        PlaylistEpgRequest, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType, TargetType, UiPlaylistItem,
+        XtreamCluster,
     },
     utils::{concat_path_leading_slash, deobfuscate_text, sanitize_sensitive_info, Internable},
 };
@@ -654,9 +666,53 @@ async fn playlist_resource(
 ) -> impl IntoResponse + Send {
     let encrypt_secret = app_state.get_encrypt_secret();
     if let Ok(resource_url) = deobfuscate_text(&encrypt_secret, &resource) {
+        if let Some((input_id, cluster, provider_id)) = parse_stalker_resource(&resource_url) {
+            return stalker_resource_response(&app_state, input_id, cluster, provider_id).await;
+        }
         resource_response(&app_state, &resource_url, &req_headers, None).await.into_response()
     } else {
         axum::http::StatusCode::BAD_REQUEST.into_response()
+    }
+}
+
+fn parse_stalker_resource(resource: &str) -> Option<(u16, XtreamCluster, u32)> {
+    let mut parts = resource.strip_prefix(STALKER_RESOURCE_SCHEME)?.split('/');
+    let input_id = parts.next()?.parse().ok()?;
+    let cluster = parts.next()?.parse().ok()?;
+    let provider_id = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((input_id, cluster, provider_id))
+}
+
+async fn stalker_resource_response(
+    app_state: &Arc<AppState>,
+    input_id: u16,
+    cluster: XtreamCluster,
+    provider_id: u32,
+) -> axum::response::Response {
+    let Some(input) = app_state.app_config.get_input_by_id(input_id).filter(|input| input.input_type.is_stalker()) else {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    };
+    let kind = match cluster {
+        XtreamCluster::Live => StalkerStreamKind::Live,
+        XtreamCluster::Video => StalkerStreamKind::Movie,
+        XtreamCluster::Series => StalkerStreamKind::Episode,
+    };
+    let client = app_state.http_client.load().as_ref().clone();
+    match re_resolve_stalker_url(&app_state.app_config, &client, &input, provider_id, kind, false).await {
+        Ok(Some(resolved_url)) => {
+            let Ok(url) = Url::parse(&resolved_url) else {
+                return axum::http::StatusCode::BAD_GATEWAY.into_response();
+            };
+            if validate_public_playable_url(&url).await.is_err() {
+                return axum::http::StatusCode::BAD_GATEWAY.into_response();
+            }
+            axum::response::Redirect::temporary(url.as_str()).into_response()
+        }
+        Ok(None) => axum::http::StatusCode::NOT_FOUND.into_response(),
+        Err(err) => {
+            error!("Failed to resolve Stalker preview stream: {}", sanitize_sensitive_info(&err.to_string()));
+            axum::http::StatusCode::BAD_GATEWAY.into_response()
+        }
     }
 }
 
@@ -759,20 +815,24 @@ mod tests {
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::{
+        extract::Query,
         body::Body,
         http::{Request, StatusCode},
-        Router,
+        response::IntoResponse,
+        Json, Router,
     };
     use chrono::Utc;
+    use crate::model::ConfigInputOptions;
+    use serde_json::json;
     use shared::{
         foundation::Filter,
         model::{
             ConfigPaths, ConfigProviderDto, EpgChannel, EpgConfigDto, EpgProgramme, EpgSourceDto, EpgSourceTypeDto,
-            IcsDummyConfigDto, IcsEpgSourceConfigDto, PlaylistRequest, ProcessingOrder, XtreamCluster,
+            IcsDummyConfigDto, IcsEpgSourceConfigDto, InputType, PlaylistRequest, ProcessingOrder, XtreamCluster,
         },
         utils::Internable,
     };
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
     use tempfile::tempdir;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -877,6 +937,7 @@ mod tests {
             app_config: app_cfg,
             http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             downloads: Arc::new(crate::api::model::DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
@@ -893,6 +954,56 @@ mod tests {
             metadata_manager,
             manual_update_sender,
         })
+    }
+
+    async fn stalker_mock_handler(Query(params): Query<HashMap<String, String>>) -> impl IntoResponse {
+        let action = params.get("action").map_or("", String::as_str);
+        let portal_type = params.get("type").map_or("", String::as_str);
+        let page = params.get("p").map_or("1", String::as_str);
+        let response = match (portal_type, action, page) {
+            ("stb", "handshake", _) => json!({"js": {"token": "preview-token"}}),
+            ("stb", "get_profile", _) => json!({"js": {"status": 1, "max_connections": 1}}),
+            ("stb", "get_capabilities", _) => json!({"js": {}}),
+            ("itv", "get_genres", _) => json!({"js": [{"id": "10", "title": "News"}]}),
+            ("itv", "get_ordered_list", "1") => json!({
+                "js": {
+                    "data": {
+                        "101": {
+                            "id": "101",
+                            "name": "Demo Channel",
+                            "category_id": "10",
+                            "cmd": "ffmpeg http://streams.example/live/101"
+                        },
+                        "102": {
+                            "id": "102",
+                            "name": "Private Channel",
+                            "category_id": "10",
+                            "cmd": "ffmpeg http://streams.example/live/102"
+                        }
+                    }
+                }
+            }),
+            ("itv", "create_link", _) => {
+                let destination = if params.get("cmd").is_some_and(|cmd| cmd.ends_with("/102")) {
+                    "http://127.0.0.1/live/102"
+                } else {
+                    "http://8.8.8.8/live/101"
+                };
+                json!({"js": {"cmd": format!("ffmpeg {destination}")}})
+            }
+            _ => json!({"js": []}),
+        };
+        Json(response)
+    }
+
+    async fn spawn_stalker_mock_server() -> (String, tokio::task::JoinHandle<()>) {
+        let router = Router::new().route("/server/load.php", axum::routing::get(stalker_mock_handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind mock stalker server");
+        let base_url = format!("http://{}", listener.local_addr().expect("mock addr"));
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve mock stalker server");
+        });
+        (base_url, handle)
     }
 
     #[test]
@@ -1486,6 +1597,137 @@ mod tests {
         let response = router.into_service::<Body>().oneshot(request).await.expect("response");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn playlist_live_input_route_supports_stalker_inputs() {
+        let temp_dir = tempdir().expect("temp dir");
+        let (base_url, server_handle) = spawn_stalker_mock_server().await;
+        let input = Arc::new(ConfigInput {
+            id: 7,
+            name: "stalker".intern(),
+            input_type: InputType::Stalker,
+            url: base_url,
+            enabled: true,
+            options: Some(ConfigInputOptions {
+                flags: crate::model::ConfigInputFlagsSet::new(),
+                resolve_delay: shared::defaults::default_resolve_delay_secs(),
+                probe_delay: shared::defaults::default_probe_delay_secs(),
+                probe_live_interval_hours: 120,
+                resolve_filter: None,
+                probe_filter: None,
+            }),
+            stalker: Some(crate::model::StalkerInputConfig {
+                device: None,
+                auth_mode: shared::model::StalkerAuthMode::Auto,
+                mag_preset: shared::model::StalkerMagPreset::GenericSafe,
+                endpoint_preference: shared::model::StalkerEndpointPreference::ServerLoad,
+                size_caps: None,
+                catalog_max_pages: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        let source = ConfigSource {
+            inputs: vec![Arc::clone(&input.name)],
+            targets: vec![],
+        };
+        let app_config = test_app_config(Arc::clone(&input), source);
+        let mut sources = app_config.sources.load().as_ref().clone();
+        sources.inputs.push(Arc::new(ConfigInput {
+            id: 8,
+            name: "m3u".intern(),
+            input_type: InputType::M3u,
+            ..Default::default()
+        }));
+        app_config.sources.store(Arc::new(sources));
+        app_config.config.store(Arc::new(Config {
+            storage_dir: temp_dir.path().to_string_lossy().to_string(),
+            ..Default::default()
+        }));
+        let app_state = test_app_state(Arc::new(app_config));
+        let router = super::v1_api_playlist_register_protected(super::v1_api_playlist_register_public(Router::new()))
+            .with_state(Arc::clone(&app_state));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/playlist/live")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"Input":"stalker"}"#))
+            .expect("request");
+
+        let response = router.clone().into_service::<Body>().oneshot(request).await.expect("response");
+
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body_text = String::from_utf8(body.to_vec()).expect("utf8");
+        assert_eq!(status, StatusCode::OK, "{body_text}");
+        assert!(body_text.contains("Demo Channel"), "{body_text}");
+        assert!(!body_text.contains("ffmpeg http://streams.example/live/101"), "{body_text}");
+        let body_json: serde_json::Value = serde_json::from_str(&body_text).unwrap_or_default();
+        let playback_url = body_json
+            .as_array()
+            .and_then(|items| items.first())
+            .and_then(serde_json::Value::as_array)
+            .and_then(|item| item.get(6))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(!playback_url.is_empty(), "{body_text}");
+        assert!(playback_url.starts_with("http") || playback_url.starts_with('/'), "{playback_url}");
+
+        let resource_path = playback_url
+            .find("/playlist/resource/")
+            .map(|index| &playback_url[index..])
+            .expect("Stalker playback resource path");
+        let response = router
+            .clone()
+            .into_service::<Body>()
+            .oneshot(Request::get(resource_path).body(Body::empty()).expect("resource request"))
+            .await
+            .expect("resource response");
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT, "{resource_path}");
+        assert_eq!(response.headers().get("location").and_then(|value| value.to_str().ok()), Some("http://8.8.8.8/live/101"));
+
+        let response = router
+            .clone()
+            .into_service::<Body>()
+            .oneshot(Request::get("/playlist/resource/*").body(Body::empty()).expect("malformed request"))
+            .await
+            .expect("malformed response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        for locator in [
+            format!("{}99/live/101", super::STALKER_RESOURCE_SCHEME),
+            format!("{}8/live/101", super::STALKER_RESOURCE_SCHEME),
+        ] {
+            let resource = shared::utils::obfuscate_text(&app_state.get_encrypt_secret(), &locator);
+            let response = router
+                .clone()
+                .into_service::<Body>()
+                .oneshot(
+                    Request::get(format!("/playlist/resource/{resource}"))
+                        .body(Body::empty())
+                        .expect("not-found request"),
+                )
+                .await
+                .expect("not-found response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{locator}");
+        }
+
+        let resource = shared::utils::obfuscate_text(
+            &app_state.get_encrypt_secret(),
+            &format!("{}7/live/102", super::STALKER_RESOURCE_SCHEME),
+        );
+        let response = router
+            .into_service::<Body>()
+            .oneshot(
+                Request::get(format!("/playlist/resource/{resource}"))
+                    .body(Body::empty())
+                    .expect("private destination request"),
+            )
+            .await
+            .expect("private destination response");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        server_handle.abort();
     }
 
     #[tokio::test]

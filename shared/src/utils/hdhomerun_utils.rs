@@ -34,7 +34,7 @@ pub fn generate_hdhr_device_id_from_base(base_id: &str) -> String {
         let base_shifted = base7_int << 4; // bits 4-31 for base, bits 0-3 for checksum
         let checksum = calculate_checksum(base_shifted);
         let final_id = base_shifted | u32::from(checksum);
-        format!("{:08X}", final_id)
+        format!("{final_id:08X}")
     } else {
         generate_hdhr_device_id()
     }

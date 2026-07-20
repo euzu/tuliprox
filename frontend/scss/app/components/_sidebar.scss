@@ -34,6 +34,7 @@
   .tp__app-header__logo {
     .svg-icon,
     img {
+      min-width: 1.5rem;
       width: 1.5rem;
       height: 1.5rem;
       object-fit: contain;
@@ -41,6 +42,7 @@
   }
 
   .svg-icon {
+    min-width: 1.5rem;
     width: 1.5rem;
     height: 1.5rem;
   }
@@ -161,6 +163,7 @@
     .tp__app-header__logo {
       .svg-icon,
       img {
+        min-width: 1.5rem;
         width: 1.5rem;
         height: 1.5rem;
         object-fit: contain;

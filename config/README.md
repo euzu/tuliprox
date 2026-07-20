@@ -1,5 +1,8 @@
 Sample configuration.
 
+`stalker_aliases.csv` is an example for a `stalker_batch` input. Its portal URLs deliberately retain the full Stalker
+path, while authentication mode, MAC address, MAG preset, and endpoint preference can vary per alias.
+
 ## Login user credentials
 
 The `user.txt` file uses the format `username:argon2_hash[:group1,group2,...]`:

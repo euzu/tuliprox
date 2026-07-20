@@ -123,7 +123,7 @@ impl FromStr for ProxyType {
             }
         }
 
-        Err(TuliproxError::ConfigProxyType(format!("Unknown ProxyType: {}", s)))
+        Err(TuliproxError::ConfigProxyType(format!("Unknown ProxyType: {s}")))
     }
 }
 

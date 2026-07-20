@@ -110,7 +110,7 @@ pub fn truncate_string(s: &str, max_len: usize) -> String {
 
 pub fn mask_credentials(s: &str) -> String {
     match s.chars().next() {
-        Some(first) => format!("{}...", first),
+        Some(first) => format!("{first}..."),
         None => "...".to_string(),
     }
 }

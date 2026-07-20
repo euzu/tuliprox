@@ -732,6 +732,7 @@ mod tests {
             app_config: app_cfg,
             http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+            public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             downloads: Arc::new(DownloadQueue::new()),
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,

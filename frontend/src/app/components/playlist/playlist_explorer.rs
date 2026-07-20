@@ -80,7 +80,7 @@ impl FromStr for ExplorerAction {
         } else if s.eq(RECORD_ITEM) {
             Ok(Self::Record)
         } else {
-            Err(TuliproxError::Config(format!("Unknown ExplorerAction: {}", s)))
+            Err(TuliproxError::Config(format!("Unknown ExplorerAction: {s}")))
         }
     }
 }

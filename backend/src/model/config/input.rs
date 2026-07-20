@@ -1,30 +1,41 @@
-use crate::model::{macros, ConfigProvider, EpgConfig, PanelApiConfig};
-use crate::repository::get_csv_file_path;
+use crate::{
+    model::{macros, ConfigProvider, EpgConfig, PanelApiConfig},
+    repository::get_csv_file_path,
+};
 use chrono::Utc;
 use log::warn;
-use shared::foundation::Filter;
-use shared::{apply_flags, create_bitset};
-use shared::error::TuliproxError;
-use shared::model::{ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicy, MediaServerInputConfigDto, MediaServerLibrarySelector, MediaServerPlaybackConfigDto, StagedInputType};
-use shared::utils::{
-    get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string, parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable,
-    BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
+use shared::{
+    apply_flags, check_input_connections, check_input_credentials, concat_string, create_bitset,
+    error::TuliproxError,
+    foundation::Filter,
+    model::{
+        ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto,
+        InputFetchMethod, InputType, MediaServerCatalogConfigDto, MediaServerImagePolicy, MediaServerInputConfigDto,
+        MediaServerLibrarySelector, MediaServerPlaybackConfigDto, StagedInputType, StalkerAuthMode,
+        StalkerDeviceProfileDto, StalkerEndpointPreference, StalkerInputConfigDto, StalkerMagPreset,
+    },
+    utils::{
+        get_credentials_from_url, get_credentials_from_url_str, is_non_blank_optional_string,
+        parse_provider_scheme_url_parts, sanitize_sensitive_info, Internable, BATCH_SCHEME_PREFIX,
+        PROVIDER_SCHEME_PREFIX,
+    },
+    write_if_some,
 };
-use shared::{check_input_connections, write_if_some};
-use shared::{check_input_credentials, concat_string };
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::fmt;
-use std::path::PathBuf;
-use std::sync::{Arc, LazyLock};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    fmt,
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+};
 use url::Url;
 
 create_bitset!(
-    u16,
+    u32,
     ConfigInputFlags,
-    XtreamSkipLive,
-    XtreamSkipVod,
-    XtreamSkipSeries,
+    SkipLive,
+    SkipVod,
+    SkipSeries,
     XtreamLiveStreamUsePrefix,
     XtreamLiveStreamWithoutExtension,
     ResolveTmdb,
@@ -33,11 +44,9 @@ create_bitset!(
     ResolveVod,
     ProbeSeries,
     ProbeVod,
-    ProbeLive
+    ProbeLive,
+    StalkerBulkEpg
 );
-
-
-
 
 #[derive(Debug, Clone)]
 pub struct ConfigInputOptions {
@@ -52,19 +61,13 @@ pub struct ConfigInputOptions {
 macros::from_impl!(ConfigInputOptions);
 impl ConfigInputOptions {
     #[inline]
-    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool {
-        self.flags.contains(flag)
-    }
+    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool { self.flags.contains(flag) }
 
     #[inline]
-    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.flags.contains_any(&flags)
-    }
+    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool { self.flags.contains_any(&flags) }
 
     #[inline]
-    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.flags.contains_all(&flags)
-    }
+    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool { self.flags.contains_all(&flags) }
 
     #[inline]
     pub fn defaults() -> &'static Self { &DEFAULT_CONFIG_INPUT_OPTIONS }
@@ -74,9 +77,9 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
         let mut flags = ConfigInputFlagsSet::new();
         apply_flags!(
             dto, flags, ConfigInputFlags;
-            (xtream_skip_live, XtreamSkipLive),
-            (xtream_skip_vod, XtreamSkipVod),
-            (xtream_skip_series, XtreamSkipSeries),
+            (skip_live, SkipLive),
+            (skip_vod, SkipVod),
+            (skip_series, SkipSeries),
             (xtream_live_stream_use_prefix, XtreamLiveStreamUsePrefix),
             (xtream_live_stream_without_extension, XtreamLiveStreamWithoutExtension),
             (resolve_tmdb, ResolveTmdb),
@@ -85,7 +88,8 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             (resolve_vod, ResolveVod),
             (probe_series, ProbeSeries),
             (probe_vod, ProbeVod),
-            (probe_live, ProbeLive)
+            (probe_live, ProbeLive),
+            (stalker_bulk_epg, StalkerBulkEpg),
         );
 
         Self {
@@ -125,12 +129,7 @@ pub struct ConfigInputStaged {
 }
 
 impl From<&ConfigInputStagedDto> for ConfigInputStaged {
-    fn from(dto: &ConfigInputStagedDto) -> Self {
-        Self {
-            for_input: dto.for_input.clone(),
-            clusters: dto.clusters,
-        }
-    }
+    fn from(dto: &ConfigInputStagedDto) -> Self { Self { for_input: dto.for_input.clone(), clusters: dto.clusters } }
 }
 
 impl From<&MediaServerInputConfigDto> for MediaServerInputConfig {
@@ -189,15 +188,209 @@ impl InputUserInfo {
             let (username, password) = get_credentials_from_url(&url);
             if username.is_some() || password.is_some() {
                 if let (Some(username), Some(password)) = (username.as_ref(), password.as_ref()) {
-                    return Some(Self {
-                        base_url,
-                        username: username.to_owned(),
-                        password: password.to_owned(),
-                    });
+                    return Some(Self { base_url, username: username.to_owned(), password: password.to_owned() });
                 }
             }
         }
         None
+    }
+}
+
+/// Resolved Stalker device identity (MAG profile + derived hashes).
+///
+/// `serial_number`, `device_id`, `device_id2`, `signature` may be `None` at
+/// config time — the network layer fills them lazily during the first
+/// handshake. The runtime never reaches into the raw DTO.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StalkerDeviceProfile {
+    pub mac_address: Option<String>,
+    pub device_profile: Option<String>,
+    pub serial_number: Option<String>,
+    pub device_id: Option<String>,
+    pub device_id2: Option<String>,
+    pub signature: Option<String>,
+    pub timezone: Option<String>,
+    pub locale: Option<String>,
+    pub user_agent: Option<String>,
+    pub x_user_agent: Option<String>,
+}
+
+impl StalkerDeviceProfile {
+    pub fn mac(&self) -> Option<&str> { self.mac_address.as_deref().map(str::trim).filter(|s| !s.is_empty()) }
+
+    fn with_alias_overrides(self, alias: Self) -> Self {
+        Self {
+            mac_address: alias.mac_address.or(self.mac_address),
+            device_profile: alias.device_profile.or(self.device_profile),
+            serial_number: alias.serial_number.or(self.serial_number),
+            device_id: alias.device_id.or(self.device_id),
+            device_id2: alias.device_id2.or(self.device_id2),
+            signature: alias.signature.or(self.signature),
+            timezone: alias.timezone.or(self.timezone),
+            locale: alias.locale.or(self.locale),
+            user_agent: alias.user_agent.or(self.user_agent),
+            x_user_agent: alias.x_user_agent.or(self.x_user_agent),
+        }
+    }
+}
+
+impl From<&StalkerDeviceProfileDto> for StalkerDeviceProfile {
+    fn from(dto: &StalkerDeviceProfileDto) -> Self {
+        Self {
+            mac_address: dto.mac_address.clone(),
+            device_profile: dto.device_profile.clone(),
+            serial_number: dto.serial_number.clone(),
+            device_id: dto.device_id.clone(),
+            device_id2: dto.device_id2.clone(),
+            signature: dto.signature.clone(),
+            timezone: dto.timezone.clone(),
+            locale: dto.locale.clone(),
+            user_agent: dto.user_agent.clone(),
+            x_user_agent: dto.x_user_agent.clone(),
+        }
+    }
+}
+
+/// Resolved Stalker input configuration. Holds the device profile, the
+/// negotiated auth mode, the preferred MAG preset, the body-size caps and
+/// the portal account credentials (copied from the owning input/alias so
+/// the network layer never has to reach back into `ConfigInput`).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct StalkerInputConfig {
+    pub device: Option<StalkerDeviceProfile>,
+    pub auth_mode: StalkerAuthMode,
+    pub mag_preset: StalkerMagPreset,
+    pub endpoint_preference: StalkerEndpointPreference,
+    pub size_caps: Option<StalkerSizeCaps>,
+    pub catalog_max_pages: Option<u32>,
+    /// Portal account username (from the input/alias `username` field).
+    pub username: Option<String>,
+    /// Portal account password (from the input/alias `password` field).
+    pub password: Option<String>,
+}
+
+impl StalkerInputConfig {
+    fn with_alias_overrides(self, alias: Self) -> Self {
+        let device = match (self.device, alias.device) {
+            (Some(parent), Some(alias)) => Some(parent.with_alias_overrides(alias)),
+            (parent, alias) => alias.or(parent),
+        };
+        Self {
+            device,
+            auth_mode: alias.auth_mode,
+            mag_preset: alias.mag_preset,
+            endpoint_preference: alias.endpoint_preference,
+            size_caps: alias.size_caps.or(self.size_caps),
+            catalog_max_pages: alias.catalog_max_pages.or(self.catalog_max_pages),
+            username: alias.username.or(self.username),
+            password: alias.password.or(self.password),
+        }
+    }
+}
+
+fn merge_stalker_config(
+    parent: Option<StalkerInputConfig>,
+    alias: Option<StalkerInputConfig>,
+) -> Option<StalkerInputConfig> {
+    match (parent, alias) {
+        (Some(parent), Some(alias)) => Some(parent.with_alias_overrides(alias)),
+        (parent, alias) => alias.or(parent),
+    }
+}
+
+impl std::fmt::Debug for StalkerInputConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StalkerInputConfig")
+            .field("device", &self.device.as_ref().map(|_| "[redacted]"))
+            .field("auth_mode", &self.auth_mode)
+            .field("mag_preset", &self.mag_preset)
+            .field("endpoint_preference", &self.endpoint_preference)
+            .field("size_caps", &self.size_caps)
+            .field("catalog_max_pages", &self.catalog_max_pages)
+            .field("username", &self.username.as_ref().map(|_| "[redacted]"))
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+impl StalkerInputConfig {
+    /// Copy account credentials from the owning input/alias onto the
+    /// stalker config so the network layer can authenticate with them.
+    fn with_credentials(mut self, username: Option<&String>, password: Option<&String>) -> Self {
+        self.username = username.cloned();
+        self.password = password.cloned();
+        self
+    }
+
+    pub fn identity_fingerprint(&self, portal_url: &str) -> u64 {
+        use std::fmt::Write;
+        let mut identity = String::with_capacity(256);
+        let _ = write!(
+            identity,
+            "{portal_url}|auth={:?}|preset={:?}|endpoint={:?}|pages={:?}",
+            self.auth_mode, self.mag_preset, self.endpoint_preference, self.catalog_max_pages
+        );
+        if let Some(caps) = self.size_caps.as_ref() {
+            let _ = write!(identity, "|caps={}:{}:{}", caps.create_link_kb, caps.ordered_list_mb, caps.get_epg_mb);
+        }
+        if let Some(device) = self.device.as_ref() {
+            let _ = write!(
+                identity,
+                "|dev={}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                device.mac_address.as_deref().unwrap_or_default(),
+                device.device_profile.as_deref().unwrap_or_default(),
+                device.serial_number.as_deref().unwrap_or_default(),
+                device.device_id.as_deref().unwrap_or_default(),
+                device.device_id2.as_deref().unwrap_or_default(),
+                device.signature.as_deref().unwrap_or_default(),
+                device.timezone.as_deref().unwrap_or_default(),
+                device.locale.as_deref().unwrap_or_default(),
+                device.user_agent.as_deref().unwrap_or_default(),
+                device.x_user_agent.as_deref().unwrap_or_default(),
+            );
+        }
+        let credentials = format!(
+            "{}\n{}",
+            self.username.as_deref().unwrap_or_default(),
+            self.password.as_deref().unwrap_or_default()
+        );
+        let _ = write!(identity, "|credentials={}", shared::utils::short_hash(&credentials));
+        u64::from_str_radix(&shared::utils::short_hash(&identity), 16).unwrap_or_default()
+    }
+}
+
+/// Simple body-size cap struct used at runtime (DTO has the same fields but
+/// uses u32 to allow unbounded `None`; runtime uses concrete limits).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StalkerSizeCaps {
+    pub create_link_kb: u32,
+    pub ordered_list_mb: u32,
+    pub get_epg_mb: u32,
+}
+
+impl Default for StalkerSizeCaps {
+    fn default() -> Self { Self { create_link_kb: 64, ordered_list_mb: 8, get_epg_mb: 64 } }
+}
+
+impl From<&StalkerInputConfigDto> for StalkerInputConfig {
+    fn from(dto: &StalkerInputConfigDto) -> Self {
+        Self {
+            device: dto.device.as_ref().map(StalkerDeviceProfile::from),
+            auth_mode: dto.auth_mode,
+            mag_preset: dto.mag_preset,
+            endpoint_preference: dto.endpoint_preference,
+            size_caps: dto.size_caps.as_ref().map(|caps| StalkerSizeCaps {
+                create_link_kb: caps.create_link_kb,
+                ordered_list_mb: caps.ordered_list_mb,
+                get_epg_mb: caps.get_epg_mb,
+            }),
+            catalog_max_pages: dto.catalog_max_pages.filter(|value| *value > 0),
+            // Credentials live on the input/alias DTO, not on the stalker
+            // block — they are filled by the owning conversion via
+            // `with_credentials`.
+            username: None,
+            password: None,
+        }
     }
 }
 
@@ -212,6 +405,7 @@ pub struct ConfigInputAlias {
     pub max_connections: u16,
     pub exp_date: Option<i64>,
     pub enabled: bool,
+    pub stalker: Option<StalkerInputConfig>,
 }
 
 macros::from_impl!(ConfigInputAlias);
@@ -227,6 +421,10 @@ impl From<&ConfigInputAliasDto> for ConfigInputAlias {
             max_connections: dto.max_connections,
             exp_date: dto.exp_date,
             enabled: dto.enabled,
+            stalker: dto
+                .stalker
+                .as_ref()
+                .map(|s| StalkerInputConfig::from(s).with_credentials(dto.username.as_ref(), dto.password.as_ref())),
         }
     }
 }
@@ -243,6 +441,7 @@ pub struct ConfigInput {
     pub password: Option<String>,
     pub persist: Option<String>,
     pub enabled: bool,
+    pub sequential_group: Option<u32>,
     pub options: Option<ConfigInputOptions>,
     pub media_server: Option<MediaServerInputConfig>,
     pub aliases: Option<Vec<ConfigInputAlias>>,
@@ -256,10 +455,15 @@ pub struct ConfigInput {
     pub panel_api: Option<PanelApiConfig>,
     pub cache_duration_seconds: u64,
     pub provider_configs: Option<Vec<Arc<ConfigProvider>>>,
+    /// Resolved Stalker device identity + portal hints.
+    pub stalker: Option<StalkerInputConfig>,
 }
 
 impl ConfigInput {
-    fn resolve_provider_config(url: &str, provider_configs: &[Arc<ConfigProvider>]) -> Result<Arc<ConfigProvider>, TuliproxError> {
+    fn resolve_provider_config(
+        url: &str,
+        provider_configs: &[Arc<ConfigProvider>],
+    ) -> Result<Arc<ConfigProvider>, TuliproxError> {
         let (host, _path) = parse_provider_scheme_url_parts(url).map_err(|err| {
             TuliproxError::ConfigInput(format!(
                 "Malformed provider URL {}: {}",
@@ -268,11 +472,12 @@ impl ConfigInput {
             ))
         })?;
 
-        provider_configs
-            .iter()
-            .find(|p| p.name.as_ref() == host)
-            .cloned()
-            .ok_or_else(|| TuliproxError::ConfigInput(format!("Failed to resolve provider config for {}", sanitize_sensitive_info(url))))
+        provider_configs.iter().find(|p| p.name.as_ref() == host).cloned().ok_or_else(|| {
+            TuliproxError::ConfigInput(format!(
+                "Failed to resolve provider config for {}",
+                sanitize_sensitive_info(url)
+            ))
+        })
     }
 
     fn prepare_aliases(
@@ -305,19 +510,13 @@ impl ConfigInput {
 
     fn apply_expiration(&mut self) {
         if is_input_expired(self.exp_date) {
-            warn!(
-                "Account {} expired for provider: {}",
-                self.username.as_ref().map_or("?", |s| s.as_str()),
-                self.name
-            );
+            warn!("Account {} expired for provider: {}", self.username.as_ref().map_or("?", |s| s.as_str()), self.name);
             self.enabled = false;
         }
     }
 
     #[inline]
-    pub fn get_download_input_type(&self) -> InputType {
-        self.input_type
-    }
+    pub fn get_download_input_type(&self) -> InputType { self.input_type }
 
     pub fn resolve_staged_download_type(&mut self) {
         self.input_type = self.staged_type.input_type();
@@ -333,9 +532,7 @@ impl ConfigInput {
     }
 
     #[inline]
-    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool {
-        self.has_flag_or(flag, false)
-    }
+    pub fn has_flag(&self, flag: ConfigInputFlags) -> bool { self.has_flag_or(flag, false) }
 
     #[inline]
     /// Returns `default` when `self.options` is `None`; unlike `has_flag`, which returns
@@ -346,9 +543,7 @@ impl ConfigInput {
     }
 
     #[inline]
-    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.has_any_flags_or(flags, false)
-    }
+    pub fn has_any_flags(&self, flags: ConfigInputFlagsSet) -> bool { self.has_any_flags_or(flags, false) }
 
     #[inline]
     /// Returns `default` when `self.options` is `None`; unlike `has_any_flags`, which returns
@@ -359,9 +554,7 @@ impl ConfigInput {
     }
 
     #[inline]
-    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool {
-        self.has_all_flags_or(flags, false)
-    }
+    pub fn has_all_flags(&self, flags: ConfigInputFlagsSet) -> bool { self.has_all_flags_or(flags, false) }
 
     #[inline]
     /// Returns `default` when `self.options` is `None`; unlike `has_all_flags`, which returns
@@ -371,12 +564,7 @@ impl ConfigInput {
         self.options.as_ref().map_or(default, |o| o.has_all_flags(flags))
     }
 
-    fn prepare_media_server_input(&self) -> Result<(), TuliproxError> {
-        if !self.input_type.is_media_server() {
-            return Ok(());
-        }
-
-        let trimmed_url = self.url.trim();
+    fn validate_media_server_commons(&self, trimmed_url: &str) -> Result<(), TuliproxError> {
         if trimmed_url.starts_with(BATCH_SCHEME_PREFIX) || trimmed_url.starts_with(PROVIDER_SCHEME_PREFIX) {
             return Err(TuliproxError::ConfigInput(format!(
                 "media-server input does not support batch:// or provider:// URLs (input: {})",
@@ -401,30 +589,14 @@ impl ConfigInput {
                 self.name
             )));
         }
-        let Some(media_server) = self.media_server.as_ref() else {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media_server configuration is mandatory for input type {} (input: {})",
-                self.input_type, self.name
-            )));
-        };
-        if media_server.libraries.is_empty() {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media-server input requires at least one selected library (input: {})",
-                self.name
-            )));
-        }
-        if media_server.libraries.iter().any(MediaServerLibrarySelector::is_empty) {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media_server library selectors must not be empty (input: {})",
-                self.name
-            )));
-        }
-        if media_server.catalog.page_size == 0 {
-            return Err(TuliproxError::ConfigInput(format!(
-                "media server catalog page_size must be greater than zero (input: {})",
-                self.name
-            )));
-        }
+        Ok(())
+    }
+
+    fn validate_media_server_specific(
+        &self,
+        trimmed_url: &str,
+        media_server: &MediaServerInputConfig,
+    ) -> Result<(), TuliproxError> {
         match self.input_type {
             InputType::Emby | InputType::Jellyfin => {
                 if trimmed_url.is_empty() {
@@ -463,8 +635,50 @@ impl ConfigInput {
                     )));
                 }
             }
-            InputType::M3u | InputType::Xtream | InputType::M3uBatch | InputType::XtreamBatch | InputType::Library | InputType::Staged => {}
+            InputType::M3u
+            | InputType::Xtream
+            | InputType::M3uBatch
+            | InputType::XtreamBatch
+            | InputType::Stalker
+            | InputType::StalkerBatch
+            | InputType::Library
+            | InputType::Staged => {}
         }
+        Ok(())
+    }
+
+    fn prepare_media_server_input(&self) -> Result<(), TuliproxError> {
+        if !self.input_type.is_media_server() {
+            return Ok(());
+        }
+
+        let trimmed_url = self.url.trim();
+        self.validate_media_server_commons(trimmed_url)?;
+        let Some(media_server) = self.media_server.as_ref() else {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media_server configuration is mandatory for input type {} (input: {})",
+                self.input_type, self.name
+            )));
+        };
+        if media_server.libraries.is_empty() {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media-server input requires at least one selected library (input: {})",
+                self.name
+            )));
+        }
+        if media_server.libraries.iter().any(MediaServerLibrarySelector::is_empty) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media_server library selectors must not be empty (input: {})",
+                self.name
+            )));
+        }
+        if media_server.catalog.page_size == 0 {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media server catalog page_size must be greater than zero (input: {})",
+                self.name
+            )));
+        }
+        self.validate_media_server_specific(trimmed_url, media_server)?;
 
         Ok(())
     }
@@ -517,7 +731,10 @@ impl ConfigInput {
         InputUserInfo::new(self.input_type, self.username.as_deref(), self.password.as_deref(), &self.url)
     }
 
-    pub fn get_matched_config_by_url<'a>(&'a self, url: &str) -> Option<(&'a str, Option<&'a String>, Option<&'a String>)> {
+    pub fn get_matched_config_by_url<'a>(
+        &'a self,
+        url: &str,
+    ) -> Option<(&'a str, Option<&'a String>, Option<&'a String>)> {
         if url.starts_with(&self.url) {
             return Some((&self.url, self.username.as_ref(), self.password.as_ref()));
         }
@@ -536,8 +753,10 @@ impl ConfigInput {
         if self.input_type.is_batch() {
             let input_type = if self.input_type == InputType::M3uBatch {
                 InputType::M3u
-            } else {
+            } else if self.input_type == InputType::XtreamBatch {
                 InputType::Xtream
+            } else {
+                InputType::Stalker
             };
 
             self.t_batch_url = Some(self.url.clone());
@@ -548,12 +767,17 @@ impl ConfigInput {
                         for alias in aliases.iter_mut() {
                             if is_input_expired(alias.exp_date) {
                                 alias.enabled = false;
-                                warn!("Alias-Account {} expired for provider: {}", alias.username.as_ref().map_or("?", |s| s.as_str()), alias.name);
+                                warn!(
+                                    "Alias-Account {} expired for provider: {}",
+                                    alias.username.as_ref().map_or("?", |s| s.as_str()),
+                                    alias.name
+                                );
                             }
                         }
 
                         if let Some(index) = aliases.iter().position(|alias| alias.enabled) {
                             let mut first = aliases.remove(index);
+                            let stalker = merge_stalker_config(self.stalker.take(), first.stalker.take());
                             self.id = first.id;
                             self.username = first.username.take();
                             self.password = first.password.take();
@@ -562,6 +786,8 @@ impl ConfigInput {
                             self.priority = first.priority;
                             self.enabled = first.enabled;
                             self.exp_date = first.exp_date;
+                            self.stalker =
+                                stalker.map(|cfg| cfg.with_credentials(self.username.as_ref(), self.password.as_ref()));
                             if self.name.is_empty() {
                                 self.name.clone_from(&first.name);
                             }
@@ -591,6 +817,7 @@ impl ConfigInput {
             password: alias.password.clone(),
             persist: self.persist.clone(),
             enabled: self.enabled,
+            sequential_group: self.sequential_group,
             options: self.options.clone(),
             media_server: self.media_server.clone(),
             aliases: None,
@@ -604,13 +831,18 @@ impl ConfigInput {
             panel_api: self.panel_api.clone(),
             cache_duration_seconds: self.cache_duration_seconds,
             provider_configs: self.provider_configs.clone(),
+            stalker: merge_stalker_config(self.stalker.clone(), alias.stalker.clone()).map(|cfg| {
+                // The alias' own credentials take precedence; fall back to
+                // whatever the inherited config already carries.
+                let username = alias.username.clone().or_else(|| cfg.username.clone());
+                let password = alias.password.clone().or_else(|| cfg.password.clone());
+                StalkerInputConfig { username, password, ..cfg }
+            }),
         }
     }
 
     pub fn has_enabled_aliases(&self) -> bool {
-        self.aliases
-            .as_ref()
-            .is_some_and(|aliases| aliases.iter().any(|a| a.enabled))
+        self.aliases.as_ref().is_some_and(|aliases| aliases.iter().any(|a| a.enabled))
     }
 
     pub fn get_enabled_aliases(&self) -> Option<Vec<&ConfigInputAlias>> {
@@ -631,7 +863,8 @@ impl ConfigInput {
 
         let (host, _path) = parse_provider_scheme_url_parts(url)?;
 
-        let provider_config = self.provider_configs
+        let provider_config = self
+            .provider_configs
             .as_ref()
             .and_then(|configs| configs.iter().find(|p| p.name.as_ref() == host))
             .cloned();
@@ -640,13 +873,14 @@ impl ConfigInput {
             let (_, resolved) = resolve_provider_scheme_url_with_provider(url, Some(provider))?;
             Ok(resolved)
         } else {
-            Err(TuliproxError::ConfigInput(format!("Provider config for '{}' not found in input '{}'", host, self.name)))
+            Err(TuliproxError::ConfigInput(format!(
+                "Provider config for '{}' not found in input '{}'",
+                host, self.name
+            )))
         }
     }
 
-    pub fn resolve(&self) -> Result<Cow<'_, str>, TuliproxError> {
-        self.resolve_url(&self.url)
-    }
+    pub fn resolve(&self) -> Result<Cow<'_, str>, TuliproxError> { self.resolve_url(&self.url) }
 
     pub fn get_resolve_provider(&self, url: &str) -> Option<Arc<ConfigProvider>> {
         if !url.starts_with(PROVIDER_SCHEME_PREFIX) {
@@ -664,10 +898,8 @@ impl ConfigInput {
 macros::from_impl!(ConfigInput);
 impl From<&ConfigInputDto> for ConfigInput {
     fn from(dto: &ConfigInputDto) -> Self {
-        let options = dto
-            .options
-            .as_ref()
-            .map_or_else(|| ConfigInputOptions::defaults().clone(), ConfigInputOptions::from);
+        let options =
+            dto.options.as_ref().map_or_else(|| ConfigInputOptions::defaults().clone(), ConfigInputOptions::from);
 
         Self {
             id: dto.id,
@@ -680,6 +912,7 @@ impl From<&ConfigInputDto> for ConfigInput {
             password: dto.password.clone(),
             persist: dto.persist.clone(),
             enabled: dto.enabled,
+            sequential_group: dto.sequential_group,
             options: Some(options),
             media_server: dto.media_server.as_ref().map(MediaServerInputConfig::from),
             aliases: dto.aliases.as_ref().map(|list| list.iter().map(ConfigInputAlias::from).collect()),
@@ -693,6 +926,10 @@ impl From<&ConfigInputDto> for ConfigInput {
             panel_api: dto.panel_api.as_ref().map(PanelApiConfig::from),
             cache_duration_seconds: dto.cache_duration_seconds,
             provider_configs: None,
+            stalker: dto
+                .stalker
+                .as_ref()
+                .map(|s| StalkerInputConfig::from(s).with_credentials(dto.username.as_ref(), dto.password.as_ref())),
         }
     }
 }
@@ -721,7 +958,6 @@ impl fmt::Display for ConfigInput {
         Ok(())
     }
 }
-
 
 pub fn is_input_expired(exp_date: Option<i64>) -> bool {
     match exp_date {
@@ -754,7 +990,10 @@ pub fn resolve_provider_scheme_url_with_provider_index(
     let (_host, path_and_query) = parse_provider_scheme_url_parts(stream_url)?;
 
     let provider = provider_config.ok_or_else(|| {
-        TuliproxError::ConfigInput(format!("Provider config missing for resolution of: '{}'", sanitize_sensitive_info(stream_url)))
+        TuliproxError::ConfigInput(format!(
+            "Provider config missing for resolution of: '{}'",
+            sanitize_sensitive_info(stream_url)
+        ))
     })?;
 
     let final_url = assemble_provider_url_at_index(&provider, path_and_query, provider_url_index)?;
@@ -773,11 +1012,7 @@ fn assemble_provider_url_at_index(
         .ok_or_else(|| TuliproxError::ConfigInput(format!("Provider '{}' has no URLs available", provider.name)))?;
 
     // Add http:// scheme if no scheme is present
-    let base_with_scheme = if base.contains("://") {
-        base.to_string()
-    } else {
-        concat_string!("http://", base)
-    };
+    let base_with_scheme = if base.contains("://") { base.to_string() } else { concat_string!("http://", base) };
 
     let mut final_url = base_with_scheme.trim_end_matches('/').to_string();
     if !path_and_query.is_empty() {
@@ -790,9 +1025,10 @@ fn assemble_provider_url_at_index(
 mod tests {
     use super::*;
     use crate::model::ConfigProvider;
-    use shared::model::{ConfigProviderDto, MediaServerInputConfigDto, MediaServerLibrarySelector, ProviderUrlSelectionPolicy};
-    use std::borrow::Cow;
-    use std::sync::Arc;
+    use shared::model::{
+        ConfigProviderDto, MediaServerInputConfigDto, MediaServerLibrarySelector, ProviderUrlSelectionPolicy,
+    };
+    use std::{borrow::Cow, sync::Arc};
 
     fn media_server_config_with_library() -> MediaServerInputConfig {
         MediaServerInputConfig::from(&MediaServerInputConfigDto {
@@ -1013,10 +1249,7 @@ mod tests {
 
     #[test]
     fn test_resolve_url_normal() {
-        let input = ConfigInput {
-            url: "http://example.com/stream".to_string(),
-            ..Default::default()
-        };
+        let input = ConfigInput { url: "http://example.com/stream".to_string(), ..Default::default() };
         let resolved = input.resolve_url("http://example.com/stream").unwrap();
         assert_eq!(resolved, "http://example.com/stream");
         assert!(matches!(resolved, Cow::Borrowed(_)));
@@ -1080,11 +1313,7 @@ mod tests {
 
     #[test]
     fn test_resolve_url_provider_missing() {
-        let input = ConfigInput {
-            name: "test_input".into(),
-            provider_configs: Some(vec![]),
-            ..Default::default()
-        };
+        let input = ConfigInput { name: "test_input".into(), provider_configs: Some(vec![]), ..Default::default() };
 
         let err = input.resolve_url("provider://myprovider/stream").unwrap_err();
         assert!(err.to_string().contains("Provider config for 'myprovider' not found"));
@@ -1092,10 +1321,7 @@ mod tests {
 
     #[test]
     fn test_resolve_default() {
-        let input = ConfigInput {
-            url: "http://example.com/stream".to_string(),
-            ..Default::default()
-        };
+        let input = ConfigInput { url: "http://example.com/stream".to_string(), ..Default::default() };
         let resolved = input.resolve().unwrap();
         assert_eq!(resolved, "http://example.com/stream");
     }
@@ -1131,6 +1357,7 @@ mod tests {
                 max_connections: 0,
                 exp_date: None,
                 enabled: true,
+                stalker: None,
             }]),
             ..Default::default()
         };
@@ -1229,13 +1456,13 @@ mod tests {
                 max_connections: 0,
                 exp_date: None,
                 enabled: true,
+                stalker: None,
             }]),
             ..Default::default()
         };
 
-        let err = input
-            .prepare(&[])
-            .expect_err("prepare must require root URL even when aliases are attached directly");
+        let err =
+            input.prepare(&[]).expect_err("prepare must require root URL even when aliases are attached directly");
         assert!(err.to_string().contains("url for input is mandatory"), "Error: {err}");
         assert!(err.to_string().contains("xtream_batch_missing_root_url"), "Error: {err}");
     }
@@ -1257,13 +1484,12 @@ mod tests {
                 max_connections: 0,
                 exp_date: None,
                 enabled: true,
+                stalker: None,
             }]),
             ..Default::default()
         };
 
-        let err = input
-            .prepare(&[])
-            .expect_err("prepare must require root credentials for non-batch xtream-batch URL");
+        let err = input.prepare(&[]).expect_err("prepare must require root credentials for non-batch xtream-batch URL");
         assert!(err.to_string().contains("xtream-batch without batch:// URL"), "Error: {err}");
         assert!(err.to_string().contains("xtream_batch_missing_root_creds"), "Error: {err}");
     }
@@ -1280,10 +1506,124 @@ mod tests {
             ..Default::default()
         };
 
-        let err = input
-            .prepare(&[])
-            .expect_err("prepare must reject root credentials for batch:// xtream-batch URL");
+        let err = input.prepare(&[]).expect_err("prepare must reject root credentials for batch:// xtream-batch URL");
         assert!(err.to_string().contains("with batch:// URL should not define username or password"), "Error: {err}");
         assert!(err.to_string().contains("xtream_batch_root_creds_not_allowed"), "Error: {err}");
+    }
+
+    #[test]
+    fn stalker_alias_configuration_overrides_parent() {
+        let parent = ConfigInput {
+            input_type: InputType::StalkerBatch,
+            stalker: Some(StalkerInputConfig {
+                auth_mode: StalkerAuthMode::MacOnly,
+                size_caps: Some(StalkerSizeCaps { create_link_kb: 96, ..Default::default() }),
+                catalog_max_pages: Some(200),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let alias = ConfigInputAlias {
+            id: 1,
+            name: "alias".into(),
+            url: "http://portal.example".to_string(),
+            username: Some("user".to_string()),
+            password: Some("password".to_string()),
+            priority: 0,
+            max_connections: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: Some(StalkerInputConfig { auth_mode: StalkerAuthMode::CredentialsOnly, ..Default::default() }),
+        };
+
+        let stalker = parent.as_input(&alias).stalker.expect("stalker config");
+        assert_eq!(stalker.auth_mode, StalkerAuthMode::CredentialsOnly);
+        assert_eq!(stalker.size_caps.map(|caps| caps.create_link_kb), Some(96));
+        assert_eq!(stalker.catalog_max_pages, Some(200));
+    }
+
+    #[test]
+    fn stalker_batch_promotes_first_alias_configuration() -> Result<(), TuliproxError> {
+        let mut input = ConfigInput {
+            input_type: InputType::StalkerBatch,
+            url: "batch:///tmp/stalker.csv".to_string(),
+            enabled: true,
+            stalker: Some(StalkerInputConfig {
+                auth_mode: StalkerAuthMode::MacOnly,
+                device: Some(StalkerDeviceProfile { locale: Some("de_DE".to_string()), ..Default::default() }),
+                size_caps: Some(StalkerSizeCaps { create_link_kb: 96, ..Default::default() }),
+                catalog_max_pages: Some(200),
+                ..Default::default()
+            }),
+            aliases: Some(vec![ConfigInputAlias {
+                id: 7,
+                name: "alias".into(),
+                url: "http://portal.example/c/".to_string(),
+                username: Some("user".to_string()),
+                password: Some("password".to_string()),
+                priority: 0,
+                max_connections: 1,
+                exp_date: None,
+                enabled: true,
+                stalker: Some(StalkerInputConfig {
+                    auth_mode: StalkerAuthMode::CredentialsOnly,
+                    device: Some(StalkerDeviceProfile {
+                        mac_address: Some("00:1a:79:12:34:56".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            }]),
+            ..Default::default()
+        };
+
+        let _ = input.prepare_batch();
+
+        let stalker = input
+            .stalker
+            .ok_or_else(|| TuliproxError::ConfigInput("missing promoted Stalker configuration".to_string()))?;
+        assert_eq!(stalker.auth_mode, StalkerAuthMode::CredentialsOnly);
+        assert_eq!(stalker.username.as_deref(), Some("user"));
+        assert_eq!(stalker.password.as_deref(), Some("password"));
+        assert_eq!(stalker.size_caps.map(|caps| caps.create_link_kb), Some(96));
+        assert_eq!(stalker.catalog_max_pages, Some(200));
+        let device =
+            stalker.device.ok_or_else(|| TuliproxError::ConfigInput("missing merged Stalker device".to_string()))?;
+        assert_eq!(device.mac_address.as_deref(), Some("00:1a:79:12:34:56"));
+        assert_eq!(device.locale.as_deref(), Some("de_DE"));
+        Ok(())
+    }
+
+    #[test]
+    fn stalker_alias_inherits_parent_config_and_carries_alias_credentials() {
+        let parent = ConfigInput {
+            input_type: InputType::StalkerBatch,
+            username: Some("parent_user".to_string()),
+            password: Some("parent_pass".to_string()),
+            stalker: Some(StalkerInputConfig {
+                auth_mode: StalkerAuthMode::MacPlusCredentials,
+                username: Some("parent_user".to_string()),
+                password: Some("parent_pass".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let alias = ConfigInputAlias {
+            id: 1,
+            name: "alias".into(),
+            url: "http://portal.example".to_string(),
+            username: Some("alias_user".to_string()),
+            password: Some("alias_pass".to_string()),
+            priority: 0,
+            max_connections: 1,
+            exp_date: None,
+            enabled: true,
+            stalker: None,
+        };
+
+        let merged = parent.as_input(&alias).stalker.expect("inherited stalker config");
+        assert_eq!(merged.auth_mode, StalkerAuthMode::MacPlusCredentials);
+        assert_eq!(merged.username.as_deref(), Some("alias_user"));
+        assert_eq!(merged.password.as_deref(), Some("alias_pass"));
     }
 }

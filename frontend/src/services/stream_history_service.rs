@@ -47,9 +47,9 @@ impl StreamHistoryService {
     ) -> Result<Option<Vec<StreamHistoryProviderSummaryDto>>, crate::error::Error> {
         let summary_path = format!("{}/summary", self.path);
         let url = match (from, to) {
-            (Some(f), Some(t)) => format!("{}?from={}&to={}", summary_path, f, t),
-            (Some(f), None) => format!("{}?from={}", summary_path, f),
-            (None, Some(t)) => format!("{}?to={}", summary_path, t),
+            (Some(f), Some(t)) => format!("{summary_path}?from={f}&to={t}"),
+            (Some(f), None) => format!("{summary_path}?from={f}"),
+            (None, Some(t)) => format!("{summary_path}?to={t}"),
             (None, None) => summary_path,
         };
         request_get::<Vec<StreamHistoryProviderSummaryDto>>(&url, None, None).await

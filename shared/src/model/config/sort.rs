@@ -80,7 +80,7 @@ impl FromStr for SortTarget {
         } else if s.eq_ignore_ascii_case(Self::CHANNEL) {
             Ok(Self::Channel)
         } else {
-            Err(TuliproxError::ConfigSort(format!("Unknown SortTarget: {}", s)))
+            Err(TuliproxError::ConfigSort(format!("Unknown SortTarget: {s}")))
         }
     }
 }

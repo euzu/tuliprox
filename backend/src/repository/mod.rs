@@ -18,6 +18,8 @@ mod playlist_stream;
 mod provider_dns_repository;
 mod stream_history;
 mod qos_snapshot_repository;
+pub mod stalker_repository;
+pub mod stalker_generation_repository;
 
 pub use storage::*;
 pub use target_id_mapping::*;
@@ -38,3 +40,4 @@ pub use playlist_stream::*;
 pub use provider_dns_repository::*;
 pub use stream_history::*;
 pub use qos_snapshot_repository::*;
+pub use stalker_repository::*;

@@ -17,6 +17,7 @@ pub enum BlockType {
     InputEmby,
     InputJellyfin,
     InputPlex,
+    InputStalker,
     InputStaged,
     Target,
     OutputM3u,
@@ -33,6 +34,7 @@ impl BlockType {
     pub const INPUT_EMBY: &'static str = "InputEmby";
     pub const INPUT_JELLYFIN: &'static str = "InputJellyfin";
     pub const INPUT_PLEX: &'static str = "InputPlex";
+    pub const INPUT_STALKER: &'static str = "InputStalker";
     pub const INPUT_STAGED: &'static str = "InputStaged";
     pub const TARGET: &'static str = "Target";
     pub const OUTPUT_M3U: &'static str = "OutputM3u";
@@ -49,6 +51,7 @@ impl BlockType {
                 | Self::InputEmby
                 | Self::InputJellyfin
                 | Self::InputPlex
+                | Self::InputStalker
                 | Self::InputStaged
         )
     }
@@ -78,6 +81,7 @@ impl From<&str> for BlockType {
             BlockType::INPUT_EMBY => BlockType::InputEmby,
             BlockType::INPUT_JELLYFIN => BlockType::InputJellyfin,
             BlockType::INPUT_PLEX => BlockType::InputPlex,
+            BlockType::INPUT_STALKER => BlockType::InputStalker,
             BlockType::INPUT_STAGED => BlockType::InputStaged,
             BlockType::TARGET => BlockType::Target,
             BlockType::OUTPUT_M3U => BlockType::OutputM3u,
@@ -102,6 +106,7 @@ impl From<InputType> for BlockType {
             InputType::Emby => BlockType::InputEmby,
             InputType::Jellyfin => BlockType::InputJellyfin,
             InputType::Plex => BlockType::InputPlex,
+            InputType::Stalker | InputType::StalkerBatch => BlockType::InputStalker,
             InputType::Staged => BlockType::InputStaged,
         }
     }
@@ -117,6 +122,7 @@ impl fmt::Display for BlockType {
             BlockType::InputEmby => Self::INPUT_EMBY,
             BlockType::InputJellyfin => Self::INPUT_JELLYFIN,
             BlockType::InputPlex => Self::INPUT_PLEX,
+            BlockType::InputStalker => Self::INPUT_STALKER,
             BlockType::InputStaged => Self::INPUT_STAGED,
             BlockType::Target => Self::TARGET,
             BlockType::OutputM3u => Self::OUTPUT_M3U,
@@ -124,7 +130,7 @@ impl fmt::Display for BlockType {
             BlockType::OutputHdHomeRun => Self::OUTPUT_HDHOMERUN,
             BlockType::OutputStrm => Self::OUTPUT_STRM,
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 pub(crate) type BlockId = u16;
@@ -145,6 +151,13 @@ mod tests {
         assert!(BlockType::InputEmby.is_input());
         assert!(BlockType::InputJellyfin.is_input());
         assert!(BlockType::InputPlex.is_input());
+    }
+
+    #[test]
+    fn stalker_input_types_share_source_editor_block() {
+        assert_eq!(BlockType::from(InputType::Stalker), BlockType::InputStalker);
+        assert_eq!(BlockType::from(InputType::StalkerBatch), BlockType::InputStalker);
+        assert!(BlockType::InputStalker.is_input());
     }
 }
 

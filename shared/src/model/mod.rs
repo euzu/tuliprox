@@ -23,6 +23,8 @@ mod progress;
 mod regex_cache;
 mod search_request;
 mod short_epg;
+pub mod stalker;
+pub mod stalker_item;
 mod stats;
 mod status_check;
 mod stream_history;
@@ -46,8 +48,8 @@ pub use self::{
     active_user_connection_change::*, auth::*, cluster_flags::*, config::*, download::*, epg::*, epg_request::*,
     ip_check::*, item_field::*, library_request::*, mapping::*, media_properties::*, messaging::*, pagination::*,
     playlist::*, playlist_categories::*, playlist_info_document::*, playlist_request::*, processing_order::*,
-    progress::*, regex_cache::*, search_request::*, short_epg::*, stats::*, status_check::*, stream_history::*,
-    stream_history_record::*, stream_info::*, stream_meter::*, stream_properties::*, strm_export_style::*,
-    system_info::*, target_type::*, transfer::*, ui_playlist_item::*, user_command::*, uuidtype::*, web_socket::*,
-    xtream::*,
+    progress::*, regex_cache::*, search_request::*, short_epg::*, stalker::*, stalker_item::*, stats::*,
+    status_check::*, stream_history::*, stream_history_record::*, stream_info::*, stream_meter::*,
+    stream_properties::*, strm_export_style::*, system_info::*, target_type::*, transfer::*, ui_playlist_item::*,
+    user_command::*, uuidtype::*, web_socket::*, xtream::*,
 };

@@ -101,7 +101,7 @@ impl FromStr for TableAction {
         } else if s.eq("copy_credentials") {
             Ok(Self::CopyCredentials)
         } else {
-            Err(TuliproxError::Config(format!("Unknown TableAction: {}", s)))
+            Err(TuliproxError::Config(format!("Unknown TableAction: {s}")))
         }
     }
 }

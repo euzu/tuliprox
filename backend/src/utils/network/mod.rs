@@ -6,6 +6,7 @@ pub mod epg;
 pub mod ip_checker;
 pub mod m3u;
 pub mod request;
+pub mod stalker;
 pub mod xtream;
 
 /// Type-erased asynchronous reader used by the existing network download stack.

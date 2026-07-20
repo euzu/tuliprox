@@ -212,7 +212,7 @@ where
     ciborium::de::from_reader(value).map_err(to_io_error)
 }
 
-pub fn u8_16_to_hex(bytes: &[u8; 16]) -> String { bytes.iter().map(|b| format!("{:02X}", b)).collect() }
+pub fn u8_16_to_hex(bytes: &[u8; 16]) -> String { bytes.iter().map(|b| format!("{b:02X}")).collect() }
 
 pub fn hex_to_u8_16(hex: &str) -> Result<[u8; 16], String> {
     if hex.len() != 32 {

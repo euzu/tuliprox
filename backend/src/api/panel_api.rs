@@ -1180,6 +1180,7 @@ fn append_sources_yml_alias(
         max_connections: 1,
         exp_date,
         enabled: true,
+        stalker: None,
     };
     alias.prepare(next_index, &input_type)?;
     aliases.push(alias);
@@ -4132,6 +4133,7 @@ mod tests {
             max_connections: 1,
             exp_date,
             enabled: true,
+            stalker: None,
         }
     }
 

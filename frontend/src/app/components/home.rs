@@ -214,6 +214,9 @@ pub fn Home() -> Html {
                     PlaylistUpdateState::Failure => {
                         services_ctx_clone.toastr.error(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.FAIL_FINISH"))
                     }
+                    PlaylistUpdateState::Partial => {
+                        services_ctx_clone.toastr.warning(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.PARTIAL_FINISH"))
+                    }
                 },
                 EventMessage::LibraryScanProgress(progress) => match progress.summary.status {
                     LibraryScanSummaryStatus::Success => services_ctx_clone.toastr.success(progress.summary.message),

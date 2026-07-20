@@ -42,6 +42,7 @@ mod reveal_content;
 mod role_based_content;
 mod search;
 mod select;
+mod select_helpers;
 mod sidebar;
 mod svg_icon;
 mod table;
@@ -79,8 +80,8 @@ pub(crate) use self::{
     field_id::*, field_wrapper::*, filter::*, health_banner::*, hide_content::*, home::*, icon_button::*,
     key_value_editor::*, language_picker::*, loading_screen::*, login::*, no_access::*, no_content::*, panel::*,
     particle_flow_background::*, playlist::*, radio_button_group::*, rbac::*, reveal_content::*, role_based_content::*,
-    search::*, select::*, setup::*, sidebar::*, source_editor::*, svg_icon::*, table::*, tabset::*, tag_list::*,
-    text_button::*, textarea::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*, userlist::*,
+    search::*, select::*, select_helpers::*, setup::*, sidebar::*, source_editor::*, svg_icon::*, table::*, tabset::*,
+    tag_list::*, text_button::*, textarea::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*, userlist::*,
     websocket_status::*,
 };
 pub use self::{confirm_dialog::*, content_dialog::*};

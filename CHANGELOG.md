@@ -4,6 +4,12 @@
 
 ## ⚠️ Breaking Changes
 
+- **Shared Input Skip Option Names**:
+  - Input options now serialize as `skip_live`, `skip_vod`, and `skip_series` instead of the old
+    type-prefixed `xtream_skip_*` / `stalker_skip_*` names.
+  - Existing config files remain read-compatible because the old names are still accepted as aliases.
+  - This is still a breaking change for generated config, API payloads, docs snippets, and any tooling that depends on
+    the old serialized field names.
 - **Staged inputs reworked into a first-class `staged` input type.** The old nested `staged:` block on
   provider inputs (with `enabled`, `live_source`, `vod_source`, and `series_source`) has been removed.
   A staged source is now its own input with `type: staged`. It points to one non-staged `m3u` /
@@ -60,6 +66,31 @@
 
 ## 🌟 New Features
 
+- **Dependency-aware parallel playlist updates**:
+  - `process_parallel: true` now downloads independent inputs concurrently and starts each source's targets as soon as
+    its required inputs are ready.
+  - Added optional non-zero `inputs[].sequential_group` IDs to serialize complete refreshes that share provider
+    credentials or another upstream ban constraint.
+  - Target preparation remains configuration-ordered, while final persistence overlaps only for disjoint normalized
+    storage, M3U, and STRM paths.
+  - Stalker Live/VOD/Series/EPG selections publish atomically and resume a durable completion checkpoint after a crash.
+  - Playlist update progress messages identify the affected input.
+
+- **New Stalker Portal Integration**:
+  - Added first-class Stalker input support to Tuliprox.
+  - Added Stalker catalog preview support in the protected Web UI playlist endpoints.
+  - Added Stalker playback URL materialization with runtime `create_link` refresh for stale or expired temp links.
+  - Added typed handling for portal-internal auth/session body codes such as `44` and `440..449` so Stalker playback refresh can react to them.
+  - Added Stalker bulk-EPG ingestion with streaming parse and batched persistence to avoid buffering the full payload in memory first.
+  - Added explicit unresolved-item semantics for Stalker playlist entries: Tuliprox keeps Stalker playback metadata without
+    exposing raw portal `cmd` values as playlist URLs.
+  - Added follow-up hardening for Stalker temp-link playback modes, runtime stale-URL invalidation, endpoint-preference ordering,
+    and soft session-TTL refresh behavior.
+  - Added explicit Stalker transport-policy handling: Tuliprox only proxies `http`/`https` playback URLs and rejects unsupported `rtmp`/`rtsp`
+    commands up front.
+  - Added the remaining Stalker config fields to the Web UI, including device identity overrides and per-action response-size caps.
+  - The remaining open edge case is portal-specific header/cookie forwarding for temp-link media requests; fresh temp-link resolution
+    itself is already implemented.
 - **ICS Calendar EPG Sources**: Import iCalendar (`.ics`) events as XMLTV EPG data with M3U and Xtream channel
   assignment, Smart Match support, configurable four-hour dummy gap filling, bounded atomic cache downloads, and
   aggregated warnings for recurring events that are detected but not expanded yet.

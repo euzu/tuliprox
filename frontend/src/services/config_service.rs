@@ -210,7 +210,7 @@ impl ConfigService {
                             if let Some(sort) = target.sort.as_mut() {
                                 for rule in sort.rules.iter_mut() {
                                     rule.t_filter = get_filter(&rule.filter, prepared_templates)
-                                        .map_err(|e| error!("Failed to parse sort rule filter: {}", e))
+                                        .map_err(|e| error!("Failed to parse sort rule filter: {e}"))
                                         .ok();
                                 }
                             }
@@ -219,21 +219,21 @@ impl ConfigService {
                                     TargetOutputDto::Xtream(o) => {
                                         o.t_filter = o.filter.as_ref().and_then(|flt| {
                                             get_filter(flt, prepared_templates)
-                                                .map_err(|e| error!("Failed to parse Xtream output filter: {}", e))
+                                                .map_err(|e| error!("Failed to parse Xtream output filter: {e}"))
                                                 .ok()
                                         })
                                     }
                                     TargetOutputDto::M3u(o) => {
                                         o.t_filter = o.filter.as_ref().and_then(|flt| {
                                             get_filter(flt, prepared_templates)
-                                                .map_err(|e| error!("Failed to parse M3U output filter: {}", e))
+                                                .map_err(|e| error!("Failed to parse M3U output filter: {e}"))
                                                 .ok()
                                         })
                                     }
                                     TargetOutputDto::Strm(o) => {
                                         o.t_filter = o.filter.as_ref().and_then(|flt| {
                                             get_filter(flt, prepared_templates)
-                                                .map_err(|e| error!("Failed to parse Strm output filter: {}", e))
+                                                .map_err(|e| error!("Failed to parse Strm output filter: {e}"))
                                                 .ok()
                                         })
                                     }

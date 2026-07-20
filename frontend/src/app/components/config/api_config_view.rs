@@ -71,7 +71,7 @@ impl FromStr for ServerTableAction {
         } else if s.eq("Edit") {
             Ok(Self::Edit)
         } else {
-            Err(TuliproxError::Config(format!("Unknown Server Action: {}", s)))
+            Err(TuliproxError::Config(format!("Unknown Server Action: {s}")))
         }
     }
 }

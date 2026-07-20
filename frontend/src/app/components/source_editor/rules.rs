@@ -31,8 +31,9 @@ pub fn can_connect(from_block: &Block, to_block: &Block, connections: &[Connecti
     }
     // A provider input can have only one staged overlay connection.
     if from_is_staged && to_is_child_input {
-        let has_stage_already = connections.iter().any(|c| c.to == to_block.id);
-        if has_stage_already {
+        let stage_has_provider = connections.iter().any(|c| c.from == from_block.id);
+        let provider_has_stage = connections.iter().any(|c| c.to == to_block.id);
+        if stage_has_provider || provider_has_stage {
             return false;
         }
     }
@@ -116,5 +117,20 @@ mod tests {
         let provider = block(2, BlockType::InputXtream);
 
         assert!(can_connect(&staged, &provider, &[], &[staged.clone(), provider.clone()]));
+    }
+
+    #[test]
+    fn staged_input_can_connect_to_only_one_provider_input() {
+        let staged = block(1, BlockType::InputStaged);
+        let first_provider = block(2, BlockType::InputXtream);
+        let second_provider = block(3, BlockType::InputXtream);
+        let connections = [Connection { from: staged.id, to: first_provider.id }];
+
+        assert!(!can_connect(
+            &staged,
+            &second_provider,
+            &connections,
+            &[staged.clone(), first_provider, second_provider.clone()],
+        ));
     }
 }

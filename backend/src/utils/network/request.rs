@@ -36,7 +36,7 @@ use shared::{
 use std::{
     collections::{HashMap, HashSet},
     io::{Error, ErrorKind},
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Arc, Once},
     time::Duration,
@@ -49,6 +49,70 @@ use tokio::{
 use url::Url;
 
 static PROXY_DIAGNOSTICS_ONCE: Once = Once::new();
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PublicIpResolver;
+
+impl reqwest::dns::Resolve for PublicIpResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addresses = resolve_public_socket_addrs(&host, 0)
+                .await
+                .map_err(|err| Box::new(err) as Box<dyn std::error::Error + Send + Sync>)?;
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+pub(crate) async fn resolve_public_socket_addrs(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    let addresses = if let Ok(address) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(address, port)]
+    } else {
+        tokio::net::lookup_host((host, port)).await?.collect()
+    };
+    if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "destination resolves to a non-public address",
+        ));
+    }
+    Ok(addresses)
+}
+
+pub(crate) fn is_public_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => is_public_ipv4(address),
+        IpAddr::V6(address) => is_public_ipv6(address),
+    }
+}
+
+fn is_public_ipv4(address: Ipv4Addr) -> bool {
+    let [a, b, _, _] = address.octets();
+    !(address.is_private()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_broadcast()
+        || address.is_documentation()
+        || address.is_multicast()
+        || address.is_unspecified()
+        || a == 0
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 198 && matches!(b, 18 | 19))
+        || a >= 240)
+}
+
+fn is_public_ipv6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    !(address.is_loopback()
+        || address.is_unspecified()
+        || address.is_multicast()
+        || segments[0] & 0xfe00 == 0xfc00
+        || segments[0] & 0xffc0 == 0xfe80
+        || segments[0] & 0xffc0 == 0xfec0
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8))
+        && address.to_ipv4_mapped().is_none_or(is_public_ipv4)
+}
 
 /// Options applied at the final boundary of every physical request attempt.
 #[derive(Debug, Clone, Copy, Default)]
@@ -2949,7 +3013,7 @@ mod tests {
         send_input_with_retry_and_provider_policy_with_options_result, send_with_retry_and_provider,
         send_with_retry_and_provider_policy, should_retry_text_body_error, should_try_next_ip_on_connect_error,
         strip_sensitive_headers_for_cross_origin_redirect, text_response_error_log_label, InputEpgFileRequest,
-        RequestFetchOptions, TextContentBodyOptions, TextContentFetchOptions,
+        PublicIpResolver, RequestFetchOptions, TextContentBodyOptions, TextContentFetchOptions,
     };
     use crate::{
         model::{
@@ -3777,6 +3841,26 @@ mod tests {
         start_plain_http_server_with_body(b"ok").await
     }
 
+    #[tokio::test]
+    async fn public_resolver_rejects_loopback_at_connection_time() {
+        let (address, accepted, server) = match start_plain_http_server().await {
+            Ok(server) => server,
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("failed to start test server: {err}"),
+        };
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(PublicIpResolver)
+            .build()
+            .expect("public-only client should build");
+
+        let result = client.get(format!("http://localhost:{}/", address.port())).send().await;
+
+        assert!(result.is_err());
+        assert_eq!(accepted.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
     async fn start_recording_http_server(
         responses: Vec<String>,
     ) -> std::io::Result<(SocketAddr, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>)> {
@@ -3982,10 +4066,10 @@ mod tests {
             panic!("provider-only request lost the default idle-timeout guard");
         }
 
-        let Err(error) = request.await.expect("request task should join") else {
-            panic!("hanging request must time out");
-        };
-        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        match request.await.expect("request task should join") {
+            Ok(_) => panic!("hanging request must time out"),
+            Err(error) => assert_eq!(error.kind(), ErrorKind::TimedOut),
+        }
         server.abort();
     }
 

@@ -2,13 +2,13 @@ use crate::{
     create_bitset,
     error::TuliproxError,
     model::{
-        xtream_const, CatchupAttribute, CatchupProperties, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions,
-        EpisodeStreamProperties, SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties,
-        XtreamInfoDocument,
+        stalker::StalkerStreamKind, stalker_item::StalkerPlaylistItem, xtream_const, CatchupAttribute,
+        CatchupProperties, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
+        SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamInfoDocument,
     },
     utils::{
-        arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_runtime_playlist_uuid,
-        get_provider_id, obfuscate_text, Internable,
+        arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_provider_playlist_uuid,
+        generate_runtime_playlist_uuid, get_provider_id, obfuscate_text, Internable,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -1382,6 +1382,75 @@ impl From<&M3uPlaylistItem> for PlaylistItem {
     }
 }
 
+impl PlaylistItem {
+    /// Canonical `StalkerPlaylistItem` → `PlaylistItem` conversion.
+    ///
+    /// This is the single conversion used by both the download path
+    /// (processor) and the disk-load path so the generated identity is stable
+    /// across processing modes: the UUID is always seeded with the owning
+    /// input name and the `input_name` header field is always populated.
+    /// The group falls back to a cluster default only when the portal did
+    /// not supply a category name.
+    pub fn from_stalker(item: &StalkerPlaylistItem, input_name: &str) -> Self {
+        let item_type = match item.stream_kind {
+            StalkerStreamKind::Live | StalkerStreamKind::Archive => PlaylistItemType::Live,
+            StalkerStreamKind::Movie => PlaylistItemType::Video,
+            StalkerStreamKind::Episode => {
+                if item.is_series_root() {
+                    PlaylistItemType::SeriesInfo
+                } else {
+                    PlaylistItemType::Series
+                }
+            }
+        };
+        let xtream_cluster = match item.stream_kind {
+            StalkerStreamKind::Live | StalkerStreamKind::Archive => XtreamCluster::Live,
+            StalkerStreamKind::Movie => XtreamCluster::Video,
+            StalkerStreamKind::Episode => XtreamCluster::Series,
+        };
+        let stream_id_str: Arc<str> = Internable::intern(item.stream_id.to_string());
+        let logo: Arc<str> = item.logo_url.clone().unwrap_or_else(|| Internable::intern(String::new()));
+        // Keep unresolved commands private; playback resolves them from the persisted Stalker metadata.
+        let url = Arc::clone(&item.stream_url);
+        let group: Arc<str> = if item.category_name.is_empty() {
+            let fallback = match item.stream_kind {
+                StalkerStreamKind::Live | StalkerStreamKind::Archive => "Live",
+                StalkerStreamKind::Movie => "Movies",
+                StalkerStreamKind::Episode => "Series",
+            };
+            Internable::intern(fallback.to_string())
+        } else {
+            Arc::clone(&item.category_name)
+        };
+        let header = PlaylistItemHeader {
+            uuid: generate_provider_playlist_uuid(input_name, &stream_id_str, item_type),
+            virtual_id: item.stream_id,
+            id: Arc::clone(&stream_id_str),
+            name: Arc::clone(&item.name),
+            title: Arc::clone(&item.name),
+            logo: Arc::clone(&logo),
+            logo_small: Internable::intern(String::new()),
+            group,
+            parent_code: Internable::intern(String::new()),
+            audio_track: Internable::intern(String::new()),
+            time_shift: Internable::intern(String::new()),
+            rec: Internable::intern(String::new()),
+            url,
+            epg_channel_id: item.epg_channel_id.clone(),
+            item_type,
+            xtream_cluster,
+            additional_properties: None,
+            input_name: Internable::intern(input_name.to_string()),
+            chno: item.number,
+            category_id: item.category_id,
+            source_ordinal: 0,
+            input_stream_id: stream_id_str,
+        };
+
+        PlaylistItem { header }
+    }
+}
+
 impl PlaylistEntry for PlaylistItem {
     #[inline]
     fn get_virtual_id(&self) -> VirtualId { self.header.virtual_id }
@@ -1472,6 +1541,51 @@ mod tests {
         CatchupAttribute, CatchupProperties, LiveStreamProperties, PlaylistItemType, StreamProperties, XtreamCluster,
         XtreamMappingFlags,
     };
+
+    #[test]
+    fn from_stalker_uuid_is_seeded_with_input_name_not_category() {
+        let mut item = StalkerPlaylistItem {
+            stream_id: 42,
+            category_name: Internable::intern("News".to_string()),
+            ..StalkerPlaylistItem::default()
+        };
+        let converted_a = PlaylistItem::from_stalker(&item, "input_a");
+        // A category rename must not change the identity of the channel.
+        item.category_name = Internable::intern("World News".to_string());
+        let converted_b = PlaylistItem::from_stalker(&item, "input_a");
+        assert_eq!(converted_a.header.uuid, converted_b.header.uuid);
+        // A different input owning the same stream id must produce a distinct identity.
+        let converted_c = PlaylistItem::from_stalker(&item, "input_b");
+        assert_ne!(converted_a.header.uuid, converted_c.header.uuid);
+    }
+
+    #[test]
+    fn from_stalker_populates_input_name_and_group() {
+        let item = StalkerPlaylistItem {
+            stream_id: 7,
+            stream_kind: StalkerStreamKind::Movie,
+            category_name: Internable::intern("Action".to_string()),
+            cmd: Internable::intern("ffmpeg http://streams.example/movie/7".to_string()),
+            ..StalkerPlaylistItem::default()
+        };
+        let converted = PlaylistItem::from_stalker(&item, "my_input");
+        assert_eq!(&*converted.header.input_name, "my_input");
+        assert_eq!(&*converted.header.input_stream_id, "7");
+        assert!(converted.header.url.is_empty());
+        assert_eq!(&*converted.header.group, "Action");
+        assert_eq!(converted.header.item_type, PlaylistItemType::Video);
+    }
+
+    #[test]
+    fn from_stalker_group_falls_back_to_cluster_default() {
+        let item = StalkerPlaylistItem {
+            stream_id: 7,
+            stream_kind: StalkerStreamKind::Movie,
+            ..StalkerPlaylistItem::default()
+        };
+        let converted = PlaylistItem::from_stalker(&item, "my_input");
+        assert_eq!(&*converted.header.group, "Movies");
+    }
 
     fn sample_options() -> XtreamMappingOptions {
         XtreamMappingOptions {

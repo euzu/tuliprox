@@ -1,9 +1,8 @@
 ## **tuliprox** - A Powerful IPTV Proxy & Playlist Processor
 
 `tuliprox` is a high-performance IPTV proxy and playlist processor written in Rust 🦀.
-It ingests M3U/M3U8 playlists, Xtream sources and local media, reshapes them into clean outputs, and serves them to
-Plex,  
-Jellyfin, Emby, Kodi and similar clients.
+It unifies M3U/M3U8 playlists, Xtream providers, Stalker/Ministra portals, Plex, Emby, Jellyfin and local media,
+reshapes them into clean outputs, and serves them to IPTV players and media clients from one place.
 
 ![tuliprox logo](https://github.com/user-attachments/assets/8ef9ea79-62ff-4298-978f-22326c5c3d02)
 
@@ -40,7 +39,22 @@ See [`LICENSE`](https://github.com/euzu/tuliprox/blob/develop/LICENSE).
 - String interning (`Arc<str>`) for playlist entries reduces memory footprint
 - Page-local updates, tombstone reuse, free-page reuse, and explicit compaction reclaim disk space
 
-### 3. Four Output Formats — One Tool to Rule Them All
+### 3. Input Sources — Bring Everything Together
+
+- **Xtream Codes**: Import Live, VOD, Series, Catchup and EPG metadata through the native provider API. Alias pools and
+  CSV batch inputs make large account sets manageable.
+- **M3U/M3U8**: Load remote or local playlists with custom headers, credentials and EPG sources. CSV batch inputs cover
+  providers that expose multiple playlist URLs.
+- **Stalker & Ministra**: Process complete portal catalogs with MAC, credentials or combined authentication, configurable
+  MAG profiles, reliable `create_link` playback resolution, resumable refreshes and per-alias CSV configuration.
+- **Local Media Library**: Scan movies and series directly from disk, enrich them with NFO or TMDB metadata and publish
+  them through the same M3U, Xtream and STRM outputs as provider content.
+- **Plex, Emby & Jellyfin**: Import selected movie and TV libraries directly from an existing media server, refresh them
+  manually or on a schedule and resolve protected playback and artwork through Tuliprox.
+- **Staged Sources**: Overlay a prepared Live, VOD or Series catalog onto another provider while keeping the original
+  provider responsible for stream delivery.
+
+### 4. Four Output Formats — One Tool to Rule Them All
 
 | Format               | Description                                                               |
 |----------------------|---------------------------------------------------------------------------|
@@ -51,11 +65,31 @@ See [`LICENSE`](https://github.com/euzu/tuliprox/blob/develop/LICENSE).
 
 Generate all four formats simultaneously from the same source — one setup, every platform covered.
 
-### 4. Reverse Proxy & Stream Management — Enterprise-Grade
+### 5. Multi-Tenant IPTV Edge Gateway
+
+- **Advertised Server Profiles**: Define multiple LAN or public reverse-proxy profiles with independent protocol, host,
+  port, path, timezone and Xtream welcome message, then assign one profile to each user.
+- **Target-Based User Access**: Bind every account to a curated target and expose it through M3U or the Xtream Codes API
+- **Per-User Delivery Policies**: Choose reverse proxy or redirect behavior, Live/VOD/Series access, category selection,
+  connection limits and priorities independently for every account
+- **Multiple Deployment Profiles**: Advertise LAN and public HTTPS endpoints without duplicating playlists or provider
+  configuration
+- **Flexible User Storage**: Keep accounts in versionable YAML or migrate them to the integrated user database and
+  manage them from the Web UI
+- **Hot-Reloaded Gateway Configuration**: Apply server, user and access-policy changes without restarting the service
+
+### 6. Reverse Proxy, Shared HLS & Stream Management — Enterprise-Grade
 
 - **Reverse Proxy Mode**: Streams are proxied through Tuliprox — provider URLs stay invisible to end users
 - **Redirect Mode**: Lightweight redirection for resource-efficient operation
-- **Shared Live Streams**: One provider stream shared across multiple users — saves valuable provider slots
+- **Shared MPEG-TS Streams**: One provider stream shared across multiple users — saves valuable provider slots
+- **Shared HLS Sessions**: Multiple viewers reuse one server-side HLS session while retaining individual access leases,
+  user limits and accounting
+- **HLS Segment Cache & Prefetch**: Fetch manifests, segments and initialization maps once, serve them locally and
+  prefetch upcoming segments within configurable disk and concurrency budgets
+- **HLS Recovery Tools**: Optional manifest recovery, bounded segment repair and corrupt-segment diagnostics for
+  difficult upstream streams
+- **HLS Session Management**: Short-lived provider reservations for HLS/Catchup without blocking real slots
 - **User Connection Priority**: Higher-priority users evict lower-priority connections when all provider slots are full
 - **Soft Connections & Soft Priority**: Users can temporarily exceed their normal slot limit with preemptible soft slots;  
   a dedicated `soft_priority` applies only while a connection is on a soft slot and automatically switches back to the normal  
@@ -67,12 +101,15 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **QoS Aggregation**: Optional background reliability snapshots built from stream history for long-term stream quality analysis
 - **Custom Fallback Videos**: User-defined video files for channel unavailable, connections exhausted, account expired,
   etc.
-- **HLS Session Management**: Short-lived provider reservations for HLS/Catchup without blocking real slots
 - **Channel-Switch Friendly Reservations**: Instant takeover on channel switch — no TTL wait
 - **Custom Stream Response Timeout**: Auto-stop fallback streams after configurable duration
 - **Buffer Reuse**: Reusable serialization buffers minimize heap allocations during streaming
+- **Universal Catchup**: Serve provider catchup/archive as plain M3U with `.ts` segments proxied through Tuliprox —
+  any player, any timeline, no vendor lock-in
+- **Smart Background Work**: Skip metadata resolution and probing for entries you don't need — save CPU and
+  provider slots on huge providers that only need partial coverage
 
-### 5. Provider Failover & DNS Rotation — Maximum Availability
+### 7. Provider Connectivity, Failover & VPN Routing
 
 - **Provider URL Failover**: Automatic rotation on errors (5xx, timeout) — seamless switching, no viewer disruption
 - **Configurable Provider URL Start Policy**: Per provider, choose whether new requests resume from the last working URL or  
@@ -80,14 +117,18 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **`provider://` URL Scheme**: Reference providers by name — Tuliprox resolves to the active URL automatically
 - **DNS-Aware Connection Routing**: Provider DNS resolved asynchronously and cached
 - **Resolved DNS Persistence**: Resolved IPs persisted separately — no source config overwrite during hot reloads
+- **Outgoing HTTP/HTTPS/SOCKS5 Proxy**: Route playlist downloads, metadata requests, probing and proxied streams through
+  a corporate proxy, VPN gateway or Gluetun container
+- **Public IP Verification**: Display the effective public IPv4/IPv6 in the Web UI to confirm that VPN and proxy routing
+  are working as intended
 - **Provider Aliases**: Manage multiple accounts from the same provider with different credentials
-- **Batch Input**: Xtream and M3U batch inputs via CSV files for mass provider management
+- **Batch Input**: Xtream, M3U and Stalker batch inputs via CSV files for mass provider management
 - **Staged Cluster Source Routing**: Per-cluster decision whether Live/VOD/Series comes from staged input, main input,
   or is skipped entirely
 
-### 6. Multi-Source Merging & Advanced Processing Pipeline
+### 8. Multi-Source Merging & Advanced Processing Pipeline
 
-- Merge multiple input sources (M3U, Xtream, Local Library) into a single target
+- Merge multiple input sources (M3U, Xtream, Stalker, Plex, Emby, Jellyfin, Local Library) into a single target
 - **Filter Engine**: Complex boolean expressions — `(Group ~ "^DE.*") AND NOT (Name ~ ".*XXX.*")`
 - **Mapper DSL**: A custom Domain-Specific Language for powerful transformations
   - Regex-based renaming with capture groups and backreferences
@@ -109,8 +150,10 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Deunicoding**: On-the-fly Unicode normalization in filters and value comparisons
 - **Output Filters**: Apply filters to the final playlist state after all transformations
 - **Favorites System**: Explicit `add_favourite(group_name)` script function for bouquet management
+- **Auto-Curated Trakt Bouquets**: Drop in Trakt Charts and serve "Trending Now" and "Most Popular" as live Xtream
+  categories — your playlist refreshes itself with what people are actually watching, no manual curation
 
-### 7. Local Media Library — Integrate Your Own Movies & Series
+### 9. Local Media Library — Integrate Your Own Movies & Series
 
 - Recursive directory scanning for local video files
 - Automatic classification (Movie vs. Series)
@@ -122,7 +165,7 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - Episode backgrounds with direct TMDB image URLs
 - Virtual ID management for stable assignment
 
-### 8. Metadata Resolution & Stream Probing
+### 10. Metadata Resolution & Stream Probing
 
 - **Background Metadata Queue**: Metadata resolution and stream analysis run in the background when provider
   connections  
@@ -140,7 +183,7 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **No-Change Cache**: Deduplication cache prevents unnecessary re-resolution of unchanged items
 - **Live Stream Probing**: Periodic re-probing of live streams with configurable interval
 
-### 9. Role-Based Access Control (RBAC) — Enterprise-Grade Security
+### 11. Role-Based Access Control (RBAC) — Enterprise-Grade Security
 
 - **14 permissions** across 7 domains (config, source, user, playlist, library, system, epg)
 - Each permission with independent `.read` and `.write` grants
@@ -153,10 +196,11 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - Built-in `admin` group — always full permissions, cannot be deleted
 - Backward compatible — existing `user.txt` files work without changes
 
-### 10. Web UI — Full Control in the Browser
+### 12. Web UI — Full Control in the Browser
 
 - **Dashboard**: System status, active streams, CPU usage, provider connections in real-time via WebSocket
-- **Source Editor**: Global input management with drag & drop, block selection, batch mode, scroll wheel support
+- **Source Editor**: Dedicated forms for M3U, Xtream, Stalker, Plex, Emby, Jellyfin and local-library inputs, with
+  drag & drop, block selection and batch mode
 - **Playlist Explorer**: Tree and gallery view for channels with EPG timeline and search
 - **Download & Recording Manager**: Provider-aware VOD downloads and live recordings with retries, fairness, and RBAC-controlled actions
 - **Config Editor**: Direct editing of config.yml, source.yml, mapping.yml in the browser
@@ -174,9 +218,36 @@ Generate all four formats simultaneously from the same source — one setup, eve
   render behind HTTPS frontends
 - **Mobile-friendly**: Responsive design for all screen sizes
 
-### 11. EPG (Electronic Program Guide)
+**UI/UX Highlights:**
+
+- **Status Health Banner**: Single green/amber/red health indicator in the header aggregates realtime connection,
+  backend, and provider capacity with hover breakdown and click-through to the Stats view
+- **Live Metric Sparklines**: Stats cards show interactive time-series sparklines for CPU, memory, network, active
+  users, and active user connections — hover shows cursor + tooltip, system metrics sampled every 2 s for responsive
+  charts
+- **Bookmarkable Views (Deep Linking)**: The active view is reflected in the URL hash (`#stats`,
+  `#source_editor`) so views can be bookmarked, shared, and navigated directly; browser back/forward works as
+  expected
+- **At a glance**: Single green/amber/red health banner in the header aggregates every signal that matters
+  (realtime connection, backend, provider capacity), with hover breakdown and click-through to detailed Stats.
+  Live metric sparklines for CPU, memory, network, active users and connections — hover for cursor + tooltip,
+  sampled every 2 s so the charts never feel stale.
+- **A UI that feels right**: Micro-interactions (cards lift, buttons ripple, chevrons rotate), animated
+  theme transitions, debounced filter input that stays responsive on huge expressions, shift+click range
+  selection in the category editor, guided empty states that tell you what to do next, paged tables with
+  localized empty messages. Every effect honors `prefers-reduced-motion: reduce`.
+- **Works the way you work**: Bookmarkable views via URL hash (`#stats`, `#source_editor`) so you can share
+  links and the browser back/forward buttons just work. Persisted sidebar state and table page size
+  survive reloads. Sessions auto-logout cleanly when the JWT expires — no mysterious 401s.
+- **For everyone**: UI languages with full RTL  support (drop a file in `assets/i18n` and a new language is live — no rebuild),
+  a recoverable error boundary that keeps one misbehaving view from taking the app down, and confirmation dialogs before any
+  destructive download/recording action.
+
+### 13. EPG (Electronic Program Guide)
 
 - **Multi-Source EPG**: Multiple EPG sources with priorities — best coverage through combination
+- **ICS Calendar Sources**: Convert iCalendar events into XMLTV programmes, assign them through Smart Match and
+  optionally fill schedule gaps with configurable dummy blocks
 - **Auto-EPG**: Automatic EPG URL generation from providers
 - **Smart Match**: Fuzzy matching with configurable threshold for automatic channel-to-EPG assignment
 - **XMLTV Timeshift**: Full timezone support (`Europe/Paris`, `America/New_York`, `-2:30`, `+0:15`, etc.) with automatic
@@ -188,7 +259,7 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Strip & Normalize**: Configurable terms and regex for better channel matching
 - **EPG Title Synchronization**: Automatic sync after playlist updates
 
-### 12. Notifications & Monitoring
+### 14. Notifications & Monitoring
 
 - **Telegram**: Bot notifications with markdown support and thread support (`chat-id:thread-id`)
 - **Discord**: Webhook notifications with Handlebars templates
@@ -199,8 +270,11 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Per-Message Templates**: Individual Handlebars templates per message type (Info, Stats, Error, Watch) and channel
 - **Template Loading**: Templates from files or HTTP/HTTPS URIs with automatic discovery
 - **Typed Messaging Pipeline**: Strictly typed pipeline instead of raw JSON strings — robust and maintainable
+- **Never Fill Up Unnoticed**: Disk-usage alerts through your existing Telegram/Discord/Pushover channels
+  — opt-in, configurable thresholds, hourly re-arm so a stuck-at-95% disk keeps nagging until you actually
+  fix it
 
-### 13. Scheduling & Automation
+### 15. Scheduling & Automation
 
 - **Cron-based scheduler**: Multiple schedules with optional target selection
 - **Scheduled library scans**: Automatic local library scans alongside playlist updates
@@ -212,7 +286,16 @@ Generate all four formats simultaneously from the same source — one setup, eve
   accounts
 - **Playlist caching**: Configurable cache duration for provider playlists (`60s`, `5m`, `12h`, `1d`)
 
-### 14. Complete Xtream Codes API Implementation
+### 16. Management REST API — Automate Everything
+
+- **Configuration Management**: Read and update application, source and API-gateway configuration remotely
+- **Processing Control**: Trigger playlist refreshes, target-scoped updates, library scans and GeoIP database updates
+- **Playlist Inspection**: Preview Live, VOD and Series content before publishing it to users
+- **Transfer Automation**: Queue, pause, resume, retry and cancel downloads or live recordings from external tools
+- **Operational Visibility**: Query status, active streams, stream history, QoS snapshots and system information
+- **Script-Friendly Formats**: Use JSON for broad compatibility or CBOR on supported endpoints for compact responses
+
+### 17. Complete Xtream Codes API Implementation
 
 - Player API (Live, VOD, Series streams)
 - Category listings with icons
@@ -226,7 +309,7 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - Custom server message support
 - Multi-server configuration with different protocols and ports
 
-### 15. Security
+### 18. Security
 
 - **Argon2 password hashing**: Industry standard for password storage
 - **JWT authentication**: Compact bitmask encoding with password-version tracking for automatic token invalidation
@@ -239,14 +322,15 @@ Generate all four formats simultaneously from the same source — one setup, eve
   loaded. Operators can explicitly accept that risk with `reverse_proxy.geoip.unavailable_policy: allow`; CIDR-only misses,
   unknown countries, and country mismatches still deny.
 - **SSL/TLS support**: Configurable including `accept_insecure_ssl_certificates` option
-- **Proxy support**: HTTP, HTTPS, SOCKS5 proxies for all outgoing requests
 - **Header stripping**: Configurable removal of referer, Cloudflare, and X-headers
 - **Rewrite secret**: Mandatory secret for stable resource URLs in reverse proxy mode
 
-### 16. Operations & Deployment
+### 19. Operations & Deployment
 
 - **Docker**: Alpine and Scratch images — minimal image size
 - **Docker Compose templates**: traefik, crowdsec, gluetun/socks5, iptv-org/epg templates ready to use
+- **One-Click Dev Setup**: Open in GitHub Codespaces or VS Code Dev Containers and start hacking — Rust
+  toolchain, WASM targets, and every build tool pre-configured
 - **Zero-downtime config reload**: `ArcSwap<Config>` for atomic configuration swaps without interruption
 - **Disk-based processing**: Playlist processing from disk instead of RAM — massively reduced memory consumption
 - **CLI mode**: One-shot processing without a server — ideal for scripting and CI/CD
@@ -272,11 +356,13 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - Single Docker container — no database stack needed
 - Runs on Raspberry Pi and tiny VPS instances
 - Minimal resource usage thanks to Rust and disk-based processing
+- Route all upstream traffic through a VPN or SOCKS5 gateway and verify the public IP from the Web UI
 - **Runs 24/7 for months with rock-solid stability and near-zero maintenance**
 - Traefik/Crowdsec/Gluetun/IPTV-org-epg templates ready to deploy
 
 ### For Multi-User Operations
 
+- Publish multiple virtual IPTV endpoints and plans from one Tuliprox instance
 - User management with connection limits and priority levels
 - RBAC with 14 granular permissions across 7 domains
 - Provider slot sharing for live streams
@@ -287,7 +373,7 @@ Generate all four formats simultaneously from the same source — one setup, eve
 
 - Mapper DSL for arbitrary transformations
 - Template system for reusability
-- REST API for automation
+- Management REST API for configuration, processing, transfers and operational automation
 - CLI mode for scripting and CI/CD
 - Database viewer for debugging and analysis
 

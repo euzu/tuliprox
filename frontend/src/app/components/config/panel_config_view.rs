@@ -763,11 +763,7 @@ pub fn PanelConfigView() -> Html {
         let type_label = input.input_type.to_string().to_uppercase();
         let provisioning_method_label = provisioning_method.to_string();
         let provisioning_summary = format!(
-            "{} / {}s / {}s / {}s",
-            provisioning_method_label,
-            provisioning_timeout_val,
-            provisioning_probe_interval_val,
-            provisioning_cooldown_val
+            "{provisioning_method_label} / {provisioning_timeout_val}s / {provisioning_probe_interval_val}s / {provisioning_cooldown_val}s"
         );
         let alias_pool_min_label =
             if alias_pool_min_val.is_empty() { "—".to_string() } else { alias_pool_min_val.clone() };

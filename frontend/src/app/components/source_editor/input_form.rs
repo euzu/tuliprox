@@ -1,28 +1,42 @@
+mod common;
+mod library;
+mod m3u;
+mod media_server;
+mod staged;
+mod stalker;
+mod xtream;
+
+use self::{
+    common::{InputOptionsForm, OptionsKind},
+    library::LibraryInputForm,
+    m3u::M3uInputForm,
+    media_server::{MediaServerInputForm, MediaServerSettingsForm},
+    staged::StagedInputForm,
+    stalker::{
+        empty_device_form_state, stalker_options_fields, StalkerDeviceFormAction, StalkerDeviceFormState,
+        StalkerDeviceInputForm, StalkerInputForm,
+    },
+    xtream::XtreamInputForm,
+};
 use crate::{
     app::{
         components::{
-            config::HasFormData, input::Input, key_value_editor::KeyValueEditor, AliasItemForm, BlockId, BlockInstance,
-            Card, ClusterFlagsInput, ClusterFlagsInputMode, EditMode, EpgSmartMatchForm, EpgSourceItemForm,
-            FilterInput, HideContent, IconButton, Panel, ProviderItemForm, RadioButtonGroup, SourceEditorContext,
-            TextButton, TitledCard, ToggleSwitch, ToolAction,
+            config::HasFormData, AliasItemForm, BlockId, BlockInstance, Card, EditMode, EpgSmartMatchForm,
+            EpgSourceItemForm, IconButton, Panel, ProviderItemForm, SourceEditorContext, TextButton,
         },
         ConfigContext,
     },
-    config_field, config_field_bool, config_field_child, config_field_custom, config_field_optional,
-    config_field_optional_hide, edit_field_bool, edit_field_exp_date, edit_field_number_i16, edit_field_number_u16,
-    edit_field_number_u32, edit_field_text, edit_field_text_option, generate_form_reducer,
-    hooks::use_service_context,
-    html_if,
+    config_field_child, generate_form_reducer, html_if,
     i18n::use_translation,
 };
 use shared::{
     concat_string,
     error::TuliproxError,
     model::{
-        ClusterFlags, ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto,
-        ConfigProviderDto, EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, MediaServerInputConfigDto,
-        MediaServerLibrarySelector, OnConnectErrorPolicy, ProviderUrlSelectionPolicy, StagedInputType,
-        XtreamLoginRequest,
+        ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigInputStagedDto, ConfigProviderDto,
+        EpgSmartMatchConfigDto, EpgSourceDto, InputFetchMethod, MediaServerInputConfigDto, MediaServerLibrarySelector,
+        OnConnectErrorPolicy, ProviderUrlSelectionPolicy, StagedInputType, StalkerDeviceProfileDto,
+        StalkerInputConfigDto,
     },
     utils::{Internable, BATCH_SCHEME_PREFIX},
 };
@@ -35,8 +49,7 @@ use std::{
 };
 use web_sys::MouseEvent;
 use yew::{
-    component, html, platform::spawn_local, use_context, use_effect_with, use_memo, use_mut_ref, use_reducer,
-    use_state, Callback, Html, Properties, UseReducerHandle,
+    component, html, use_context, use_effect_with, use_reducer, use_state, Callback, Html, Properties, UseReducerHandle,
 };
 
 const LABEL_NAME: &str = "LABEL.NAME";
@@ -52,6 +65,7 @@ const LABEL_DISABLED: &str = "LABEL.DISABLED";
 const LABEL_ALIASES: &str = "LABEL.ALIASES";
 const LABEL_PRIORITY: &str = "LABEL.PRIORITY";
 const LABEL_MAX_CONNECTIONS: &str = "LABEL.MAX_CONNECTIONS";
+const LABEL_SEQUENTIAL_GROUP: &str = "LABEL.SEQUENTIAL_GROUP";
 const LABEL_EXP_DATE: &str = "LABEL.EXP_DATE";
 const LABEL_SELECTION_POLICY: &str = "LABEL.SELECTION_POLICY";
 const LABEL_PROVIDER_URL_SELECTION_RESUME_LAST_WORKING: &str = "LABEL.PROVIDER_URL_SELECTION_RESUME_LAST_WORKING";
@@ -66,9 +80,9 @@ const LABEL_ADD_ALIAS: &str = "LABEL.ADD_ALIAS";
 const LABEL_ADD_PROVIDER: &str = "LABEL.ADD_PROVIDER";
 const LABEL_PROVIDERS: &str = "LABEL.PROVIDER";
 const LABEL_SKIP: &str = "LABEL.SKIP";
-const LABEL_XTREAM_SKIP_LIVE: &str = "LABEL.LIVE";
-const LABEL_XTREAM_SKIP_VOD: &str = "LABEL.VOD";
-const LABEL_XTREAM_SKIP_SERIES: &str = "LABEL.SERIES";
+const LABEL_SKIP_LIVE: &str = "LABEL.LIVE";
+const LABEL_SKIP_VOD: &str = "LABEL.VOD";
+const LABEL_SKIP_SERIES: &str = "LABEL.SERIES";
 const LABEL_XTREAM_LIVE_STREAM_USE_PREFIX: &str = "LABEL.LIVE_STREAM_USE_PREFIX";
 const LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION: &str = "LABEL.LIVE_STREAM_WITHOUT_EXTENSION";
 const LABEL_RESOLVE_TMDB: &str = "LABEL.RESOLVE_TMDB";
@@ -80,6 +94,11 @@ const LABEL_RESOLVE_BACKGROUND: &str = "LABEL.RESOLVE_BACKGROUND";
 const LABEL_RESOLVE_FILTER: &str = "LABEL.RESOLVE_FILTER";
 const LABEL_PROBE_FILTER: &str = "LABEL.PROBE_FILTER";
 const LABEL_PROBE_LIVE_INTERVAL_HOURS: &str = "LABEL.PROBE_LIVE_INTERVAL_HOURS";
+const LABEL_PROBE_LIVE: &str = "LABEL.PROBE_LIVE";
+const LABEL_PROBE_VOD: &str = "LABEL.PROBE_VOD";
+const LABEL_PROBE_SERIES: &str = "LABEL.PROBE_SERIES";
+const LABEL_RESOLVE_VOD: &str = "LABEL.RESOLVE_VOD";
+const LABEL_RESOLVE_SERIES: &str = "LABEL.RESOLVE_SERIES";
 const LABEL_METADATA: &str = "LABEL.METADATA";
 const LABEL_CACHE_DURATION: &str = "LABEL.CACHE_DURATION";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
@@ -206,6 +225,7 @@ const LABEL_EDIT_EPG_SMART_MATCH: &str = "LABEL.EDIT_EPG_SMART_MATCH";
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum InputFormPage {
     Main,
+    Device,
     Options,
     Libraries,
     Epg,
@@ -215,6 +235,7 @@ enum InputFormPage {
 
 impl InputFormPage {
     const MAIN: &str = "Main";
+    const DEVICE: &str = "Device";
     const OPTIONS: &str = "Options";
     const LIBRARIES: &str = "Libraries";
     const EPG: &str = "Epg";
@@ -228,6 +249,7 @@ impl FromStr for InputFormPage {
     fn from_str(s: &str) -> Result<Self, TuliproxError> {
         match s {
             Self::MAIN => Ok(InputFormPage::Main),
+            Self::DEVICE => Ok(InputFormPage::Device),
             Self::OPTIONS => Ok(InputFormPage::Options),
             Self::LIBRARIES => Ok(InputFormPage::Libraries),
             Self::EPG => Ok(InputFormPage::Epg),
@@ -245,6 +267,7 @@ impl Display for InputFormPage {
             "{}",
             match *self {
                 InputFormPage::Main => Self::MAIN,
+                InputFormPage::Device => Self::DEVICE,
                 InputFormPage::Options => Self::OPTIONS,
                 InputFormPage::Libraries => Self::LIBRARIES,
                 InputFormPage::Epg => Self::EPG,
@@ -259,6 +282,7 @@ impl Internable for InputFormPage {
     fn intern(self) -> Arc<str> {
         match self {
             Self::Main => Self::MAIN,
+            Self::Device => Self::DEVICE,
             Self::Options => Self::OPTIONS,
             Self::Libraries => Self::LIBRARIES,
             Self::Epg => Self::EPG,
@@ -269,13 +293,59 @@ impl Internable for InputFormPage {
     }
 }
 
+fn input_form_pages(input_type: shared::model::InputType) -> Vec<InputFormPage> {
+    let mut pages = vec![InputFormPage::Main];
+    if input_type.is_stalker() {
+        pages.push(InputFormPage::Device);
+    }
+    if input_type.is_media_server() {
+        pages.push(InputFormPage::Libraries);
+    }
+    if !input_type.is_library() && !input_type.is_staged() && !input_type.is_media_server() {
+        pages.push(InputFormPage::Alias);
+    }
+    if !input_type.is_library() && !input_type.is_media_server() {
+        pages.push(InputFormPage::Options);
+    }
+    if !input_type.is_library() && !input_type.is_staged() && !input_type.is_media_server() {
+        pages.extend([InputFormPage::Epg, InputFormPage::Provider]);
+    }
+    pages
+}
+
+fn normalize_optional_device_field(value: &mut Option<String>) {
+    *value = value.take().and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_string())
+    });
+}
+
+fn materialize_stalker_config(
+    mut config: StalkerInputConfigDto,
+    mut device: StalkerDeviceProfileDto,
+) -> StalkerInputConfigDto {
+    config.catalog_max_pages = config.catalog_max_pages.filter(|value| *value > 0);
+    normalize_optional_device_field(&mut device.mac_address);
+    normalize_optional_device_field(&mut device.device_profile);
+    normalize_optional_device_field(&mut device.serial_number);
+    normalize_optional_device_field(&mut device.device_id);
+    normalize_optional_device_field(&mut device.device_id2);
+    normalize_optional_device_field(&mut device.signature);
+    normalize_optional_device_field(&mut device.timezone);
+    normalize_optional_device_field(&mut device.locale);
+    normalize_optional_device_field(&mut device.user_agent);
+    normalize_optional_device_field(&mut device.x_user_agent);
+    config.device = (!device.is_empty()).then_some(device);
+    config
+}
+
 generate_form_reducer!(
     state: ConfigInputOptionsDtoFormState { form: ConfigInputOptionsDto },
     action_name: ConfigInputOptionsFormAction,
     fields {
-      XtreamSkipLive => xtream_skip_live: bool,
-      XtreamSkipVod => xtream_skip_vod: bool,
-      XtreamSkipSeries => xtream_skip_series: bool,
+      SkipLive => skip_live: bool,
+      SkipVod => skip_vod: bool,
+      SkipSeries => skip_series: bool,
       XtreamLiveStreamUsePrefix => xtream_live_stream_use_prefix: bool,
       XtreamLiveStreamWithoutExtension => xtream_live_stream_without_extension: bool,
       ResolveTmdb => resolve_tmdb: bool,
@@ -290,6 +360,7 @@ generate_form_reducer!(
       ProbeLiveIntervalHours => probe_live_interval_hours: u32,
       ResolveFilter => resolve_filter: Option<String>,
       ProbeFilter => probe_filter: Option<String>,
+      StalkerBulkEpg => stalker_bulk_epg: bool,
     }
 );
 
@@ -305,6 +376,7 @@ generate_form_reducer!(
         Enabled => enabled: bool,
         Priority => priority: i16,
         MaxConnections => max_connections: u16,
+        SequentialGroup => sequential_group: Option<u32>,
         Method => method: InputFetchMethod,
         StagedType => staged_type: StagedInputType,
         Staged => staged: Option<ConfigInputStagedDto>,
@@ -330,18 +402,9 @@ pub struct ConfigInputViewProps {
 #[component]
 pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let translate = use_translation();
-    let services = use_service_context();
     let source_editor_ctx = use_context::<SourceEditorContext>();
     let config_ctx = use_context::<ConfigContext>();
-    let fetch_methods = use_memo((), |_| {
-        [InputFetchMethod::GET, InputFetchMethod::POST].iter().map(ToString::to_string).collect::<Vec<String>>()
-    });
     let view_visible = use_state(|| InputFormPage::Main);
-
-    // let on_tab_click = {
-    //     let view_visible = view_visible.clone();
-    //     Callback::from(move |page: InputFormPage| view_visible.set(page))
-    // };
 
     let handle_menu_click = {
         let active_menu = view_visible.clone();
@@ -363,6 +426,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let headers_state = use_state(HashMap::<String, String>::new);
     let providers_state = use_state(Vec::<ConfigProviderDto>::new);
     let providers_dirty_state = use_state(|| false);
+    let stalker_config_state = use_state(StalkerInputConfigDto::default);
+    let stalker_device_state: UseReducerHandle<StalkerDeviceFormState> = use_reducer(empty_device_form_state);
 
     let epg_smart_match_state = use_state(|| None::<EpgSmartMatchConfigDto>);
     let show_smart_match_form_state = use_state(|| false);
@@ -374,10 +439,6 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let edit_alias = use_state(|| None::<ConfigInputAliasDto>);
     let edit_provider = use_state(|| None::<ConfigProviderDto>);
     let edit_epg_source = use_state(|| None::<EpgSourceDto>);
-    let exp_date_loading = use_state(|| false);
-    let exp_date_request_in_flight = use_mut_ref(|| false);
-    let exp_date_request_token = use_mut_ref(|| 0_u64);
-
     {
         let input_form_state = input_form_state.clone();
         let input_options_state = input_options_state.clone();
@@ -387,6 +448,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let headers_state = headers_state.clone();
         let providers_state = providers_state.clone();
         let providers_dirty_state = providers_dirty_state.clone();
+        let stalker_config_state = stalker_config_state.clone();
+        let stalker_device_state = stalker_device_state.clone();
         let deps = (props.block_id, props.input.clone(), config_ctx.clone());
         let view_visible = view_visible.clone();
         use_effect_with(deps, move |(_, cfg, config_ctx)| {
@@ -396,19 +459,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 .and_then(|cfg| cfg.sources.provider.clone())
                 .unwrap_or_default();
             if let Some(input) = cfg {
-                let is_library = input.input_type.is_library();
-                let is_media_server = input.input_type.is_media_server();
-                let is_staged = input.input_type.is_staged();
                 let current_page = *view_visible;
-                let page_allowed = match current_page {
-                    InputFormPage::Main => true,
-                    InputFormPage::Libraries => is_media_server,
-                    InputFormPage::Alias | InputFormPage::Options | InputFormPage::Provider => {
-                        !is_library && !is_staged && !is_media_server
-                    }
-                    InputFormPage::Epg => !is_library && !is_staged && !is_media_server,
-                };
-                if !page_allowed {
+                if !input_form_pages(input.input_type).contains(&current_page) {
                     view_visible.set(InputFormPage::Main);
                 }
 
@@ -450,6 +502,10 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 }
                 providers_state.set(display_providers);
                 providers_dirty_state.set(false);
+                stalker_config_state.set(input.stalker.clone().unwrap_or_default());
+                stalker_device_state.dispatch(StalkerDeviceFormAction::SetAll(
+                    input.stalker.as_ref().and_then(|config| config.device.clone()).unwrap_or_default(),
+                ));
             } else {
                 input_form_state.dispatch(ConfigInputFormAction::SetAll(ConfigInputDto::default()));
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(ConfigInputOptionsDto::default()));
@@ -459,6 +515,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 aliases_state.set(Vec::new());
                 providers_state.set(Vec::new());
                 providers_dirty_state.set(false);
+                stalker_config_state.set(StalkerInputConfigDto::default());
+                stalker_device_state.dispatch(StalkerDeviceFormAction::SetAll(StalkerDeviceProfileDto::default()));
             }
             || ()
         });
@@ -782,527 +840,48 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let library_input = input_form_state.form.input_type.is_library();
     let media_server_input = input_form_state.form.input_type.is_media_server();
     let xtream_input = input_form_state.form.input_type.is_xtream();
+    let stalker_input = input_form_state.form.input_type.is_stalker();
     let staged_input = input_form_state.form.input_type.is_staged();
     let staged_xtream_input = staged_input && input_form_state.form.staged_type == StagedInputType::Xtream;
-    let credentials_input = xtream_input || staged_xtream_input || media_server_input;
     let options_input = !library_input && !media_server_input;
 
+    let render_main = || match input_form_state.form.input_type {
+        shared::model::InputType::M3u | shared::model::InputType::M3uBatch => html! {
+            <M3uInputForm state={input_form_state.clone()} allow_write={props.allow_write} />
+        },
+        shared::model::InputType::Xtream | shared::model::InputType::XtreamBatch => html! {
+            <XtreamInputForm state={input_form_state.clone()} providers={(*providers_state).clone()} allow_write={props.allow_write} />
+        },
+        shared::model::InputType::Stalker | shared::model::InputType::StalkerBatch => html! {
+            <StalkerInputForm state={input_form_state.clone()} config={stalker_config_state.clone()} allow_write={props.allow_write} />
+        },
+        shared::model::InputType::Staged => html! {
+            <StagedInputForm state={input_form_state.clone()} allow_write={props.allow_write} />
+        },
+        shared::model::InputType::Emby | shared::model::InputType::Jellyfin | shared::model::InputType::Plex => html! {
+            <MediaServerInputForm state={input_form_state.clone()} allow_write={props.allow_write} />
+        },
+        shared::model::InputType::Library => html! {
+            <LibraryInputForm state={input_form_state.clone()} allow_write={props.allow_write} />
+        },
+    };
+
     let render_options = || {
-        let headers = headers_state.clone();
-        if !props.allow_write {
-            return html! {
-                <Card class="tp__config-view__card">
-                { html_if!(xtream_input || staged_xtream_input, {
-                    <>
-                    <TitledCard title={translate.t(LABEL_SKIP)}>
-                      <div class="tp__config-view__cols-3">
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_LIVE), xtream_skip_live) }
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_VOD), xtream_skip_vod) }
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_SERIES), xtream_skip_series) }
-                      </div>
-                    </TitledCard>
-                    <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}>
-                      <div class="tp__config-view__cols-2">
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix) }
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension) }
-                      </div>
-                    </TitledCard>
-                    <TitledCard title={translate.t(LABEL_RESOLVE)}>
-                        <div class="tp__config-view__cols-3">
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_VOD), resolve_vod) }
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_SERIES), resolve_series) }
-                        </div>
-                        <div class="tp__config-view__cols-2">
-                        { config_field_custom!(translate.t(LABEL_RESOLVE_DELAY_SEC), input_options_state.form.resolve_delay.to_string()) }
-                        </div>
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_RESOLVE_BACKGROUND), resolve_background) }
-                        { config_field_optional!(input_options_state.form, translate.t(LABEL_RESOLVE_FILTER), resolve_filter) }
-                    </TitledCard>
-                    <TitledCard title={translate.t(LABEL_PROBE)}>
-                        <div class="tp__config-view__cols-3">
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_LIVE), probe_live) }
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_VOD), probe_vod) }
-                        { config_field_bool!(input_options_state.form, translate.t(LABEL_XTREAM_SKIP_SERIES), probe_series) }
-                        </div>
-                        <div class="tp__config-view__cols-2">
-                        { config_field_custom!(translate.t(LABEL_PROBE_DELAY_SEC), input_options_state.form.probe_delay.to_string()) }
-                        { config_field_custom!(translate.t(LABEL_PROBE_LIVE_INTERVAL_HOURS), input_options_state.form.probe_live_interval_hours.to_string()) }
-                        </div>
-                        { config_field_optional!(input_options_state.form, translate.t(LABEL_PROBE_FILTER), probe_filter) }
-                    </TitledCard>
-                    </>
-                })}
-                <TitledCard title={translate.t(LABEL_METADATA)}>
-                  { config_field_bool!(input_options_state.form, translate.t(LABEL_RESOLVE_TMDB), resolve_tmdb) }
-                </TitledCard>
-                { config_field_child!(translate.t(LABEL_HEADERS), "INPUT_FORM.HEADERS", {
-                    let headers_set = headers.clone();
-                    html! {
-                        <KeyValueEditor
-                            entries={(*headers).clone()}
-                            readonly={!props.allow_write}
-                            key_placeholder={translate.t("LABEL.HEADER_NAME")}
-                            value_placeholder={translate.t("LABEL.HEADER_VALUE")}
-                            on_change={Callback::from(move |new_headers: HashMap<String, String>| {
-                                headers_set.set(new_headers);
-                            })}
-                        />
-                    }
-                })}
-                </Card>
-            };
-        }
-        html! {
-            <Card class="tp__config-view__card">
-            { html_if!(xtream_input || staged_xtream_input, {
-                <>
-                <TitledCard title={translate.t(LABEL_SKIP)}>
-                  <div class="tp__config-view__cols-3">
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_LIVE), xtream_skip_live, ConfigInputOptionsFormAction::XtreamSkipLive) }
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_VOD), xtream_skip_vod, ConfigInputOptionsFormAction::XtreamSkipVod) }
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), xtream_skip_series, ConfigInputOptionsFormAction::XtreamSkipSeries) }
-                  </div>
-                </TitledCard>
-                <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}>
-                  <div class="tp__config-view__cols-2">
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix, ConfigInputOptionsFormAction::XtreamLiveStreamUsePrefix) }
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension, ConfigInputOptionsFormAction::XtreamLiveStreamWithoutExtension) }
-                  </div>
-                </TitledCard>
-                <TitledCard title={translate.t(LABEL_RESOLVE)}>
-                    <div class="tp__config-view__cols-3">
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_VOD), resolve_vod,  ConfigInputOptionsFormAction::ResolveVod) }
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), resolve_series,  ConfigInputOptionsFormAction::ResolveSeries) }
-                    </div>
-                    <div class="tp__config-view__cols-2">
-                    { edit_field_number_u16!(input_options_state, translate.t(LABEL_RESOLVE_DELAY_SEC), resolve_delay,  ConfigInputOptionsFormAction::ResolveDelay) }
-                    </div>
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_RESOLVE_BACKGROUND), resolve_background,  ConfigInputOptionsFormAction::ResolveBackground) }
-                    { config_field_child!(translate.t(LABEL_RESOLVE_FILTER), "INPUT_FORM.RESOLVE_FILTER", {
-                        let input_options_state_filter = input_options_state.clone();
-                        html! {
-                            <FilterInput filter={input_options_state.form.resolve_filter.clone().unwrap_or_default()} on_change={Callback::from(move |new_filter: Option<String>| {
-                                input_options_state_filter.dispatch(ConfigInputOptionsFormAction::ResolveFilter(new_filter));
-                            })} />
-                        }
-                    })}
-                </TitledCard>
-                <TitledCard title={translate.t(LABEL_PROBE)}>
-                    <div class="tp__config-view__cols-3">
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_LIVE), probe_live,  ConfigInputOptionsFormAction::ProbeLive) }
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_VOD), probe_vod,  ConfigInputOptionsFormAction::ProbeVod) }
-                    { edit_field_bool!(input_options_state, translate.t(LABEL_XTREAM_SKIP_SERIES), probe_series,  ConfigInputOptionsFormAction::ProbeSeries) }
-                    </div>
-                    <div class="tp__config-view__cols-2">
-                    { edit_field_number_u16!(input_options_state, translate.t(LABEL_PROBE_DELAY_SEC), probe_delay,  ConfigInputOptionsFormAction::ProbeDelay) }
-                    { edit_field_number_u32!(input_options_state, translate.t(LABEL_PROBE_LIVE_INTERVAL_HOURS), probe_live_interval_hours,  ConfigInputOptionsFormAction::ProbeLiveIntervalHours) }
-                    </div>
-                    { config_field_child!(translate.t(LABEL_PROBE_FILTER), "INPUT_FORM.PROBE_FILTER", {
-                        let input_options_state_filter = input_options_state.clone();
-                        html! {
-                            <FilterInput filter={input_options_state.form.probe_filter.clone().unwrap_or_default()} on_change={Callback::from(move |new_filter: Option<String>| {
-                                input_options_state_filter.dispatch(ConfigInputOptionsFormAction::ProbeFilter(new_filter));
-                            })} />
-                        }
-                    })}
-                </TitledCard>
-                </>
-            })}
-            <TitledCard title={translate.t(LABEL_METADATA)}>
-              { edit_field_bool!(input_options_state, translate.t(LABEL_RESOLVE_TMDB), resolve_tmdb, ConfigInputOptionsFormAction::ResolveTmdb) }
-            </TitledCard>
-            { config_field_child!(translate.t(LABEL_HEADERS), "INPUT_FORM.HEADERS", {
-                let headers_set = headers.clone();
-                html! {
-                    <KeyValueEditor
-                        entries={(*headers).clone()}
-                        readonly={!props.allow_write}
-                        key_placeholder={translate.t("LABEL.HEADER_NAME")}
-                        value_placeholder={translate.t("LABEL.HEADER_VALUE")}
-                        on_change={Callback::from(move |new_headers: HashMap<String, String>| {
-                            headers_set.set(new_headers);
-                        })}
-                    />
-                }
-            })}
-            </Card>
-        }
-    };
-
-    let render_input = || {
-        let providers_state = providers_state.clone();
-        let input_method_selection = Rc::new(vec![input_form_state.form.method.to_string()]);
-        let staged_type_selection = Rc::new(vec![input_form_state.form.staged_type.to_string()]);
-        let staged_type_options = staged_type_options();
-        let staged_type_labels = Rc::new(vec![translate.t("LABEL.M3U"), translate.t("LABEL.XTREAM")]);
-        let staged_clusters = input_form_state.form.staged.as_ref().map(|staged| staged.clusters);
-        let is_csv_batch = input_form_state.form.url.starts_with(BATCH_SCHEME_PREFIX);
-        let simple_input = staged_input || media_server_input;
-        let input_form_state_disp = input_form_state.clone();
-        let exp_date_tool_action = if input_form_state.form.input_type.is_xtream() {
-            let services = services.clone();
-            let input_form_state = input_form_state.clone();
-            let exp_date_loading = exp_date_loading.clone();
-            let exp_date_request_in_flight = exp_date_request_in_flight.clone();
-            let exp_date_request_token = exp_date_request_token.clone();
-            let translate = translate.clone();
-
-            Some(ToolAction {
-                name: Some("RefreshExpDate".to_string()),
-                icon: "Refresh".to_string(),
-                hint: Some(translate.t(LABEL_RESOLVE)),
-                class: (*exp_date_loading).then(|| "loading".to_string()),
-                onclick: Callback::from(move |_event: MouseEvent| {
-                    if *exp_date_request_in_flight.borrow() {
-                        return;
-                    }
-
-                    let url = input_form_state.form.url.clone();
-                    let username = input_form_state.form.username.clone().unwrap_or_default();
-                    let password = input_form_state.form.password.clone().unwrap_or_default();
-
-                    if url.trim().is_empty() || username.trim().is_empty() || password.trim().is_empty() {
-                        services
-                            .toastr
-                            .error(translate.t("MESSAGES.SOURCE_EDITOR.URL_USERNAME_AND_PASSWORD_MANDATORY"));
-                        return;
-                    }
-
-                    *exp_date_request_in_flight.borrow_mut() = true;
-                    let request_token = {
-                        let mut token = exp_date_request_token.borrow_mut();
-                        *token += 1;
-                        *token
-                    };
-                    exp_date_loading.set(true);
-                    let services = services.clone();
-                    let input_form_state = input_form_state.clone();
-                    let exp_date_loading = exp_date_loading.clone();
-                    let exp_date_request_in_flight = exp_date_request_in_flight.clone();
-                    let exp_date_request_token = exp_date_request_token.clone();
-                    let providers = (!(*providers_state).is_empty()).then_some((*providers_state).clone());
-                    let request = XtreamLoginRequest { url, username, password, providers };
-
-                    spawn_local(async move {
-                        let current_snapshot = || {
-                            (
-                                input_form_state.form.url.clone(),
-                                input_form_state.form.username.clone().unwrap_or_default(),
-                                input_form_state.form.password.clone().unwrap_or_default(),
-                            )
-                        };
-                        match services.config.get_xtream_login_info(&request).await {
-                            Ok(login_info) => {
-                                if *exp_date_request_token.borrow() == request_token {
-                                    let snapshot_matches = current_snapshot()
-                                        == (request.url.clone(), request.username.clone(), request.password.clone());
-                                    if snapshot_matches {
-                                        if let Some(exp_date) = login_info.exp_date {
-                                            input_form_state.dispatch(ConfigInputFormAction::ExpDate(Some(exp_date)));
-                                        } else {
-                                            services.toastr.warning("No expiration date returned by provider");
-                                        }
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                if *exp_date_request_token.borrow() == request_token {
-                                    services.toastr.error(err.to_string());
-                                }
-                            }
-                        }
-                        if *exp_date_request_token.borrow() == request_token {
-                            *exp_date_request_in_flight.borrow_mut() = false;
-                            exp_date_loading.set(false);
-                        }
-                    });
-                }),
-            })
+        let kind = if stalker_input {
+            OptionsKind::Stalker
+        } else if xtream_input || staged_xtream_input {
+            OptionsKind::Xtream
         } else {
-            None
+            OptionsKind::Basic
         };
-
-        if !props.allow_write {
-            return html! {
-                 <Card class="tp__config-view__card">
-                   <div class="tp__config-view__cols-2">
-                   { config_field!(input_form_state.form, translate.t(LABEL_NAME), name) }
-                   { config_field_bool!(input_form_state.form, translate.t(LABEL_ENABLED), enabled) }
-                   </div>
-                   { html_if!(staged_input, {
-                     <>
-                     { config_field_custom!(translate.t(LABEL_TYPE), input_form_state.form.staged_type.to_string()) }
-                     { config_field_custom!(translate.t(LABEL_CLUSTER), staged_clusters.map_or_else(String::new, |clusters| clusters.to_string())) }
-                     </>
-                   })}
-                   { html_if!(!library_input, {
-                    <>
-                     { config_field!(input_form_state.form, translate.t(LABEL_URL), url, Some(input_url_hint_key(simple_input).to_string())) }
-                     <div class="tp__config-view__cols-2">
-                     { html_if!(credentials_input && !is_csv_batch, {
-                       <>
-                       { config_field_optional!(input_form_state.form, translate.t(LABEL_USERNAME), username) }
-                       { config_field_optional_hide!(input_form_state.form, translate.t(LABEL_PASSWORD), password) }
-                       </>
-                     })}
-                     { html_if!(!staged_input && !is_csv_batch, {
-                         <>
-                         { config_field_custom!(translate.t(LABEL_MAX_CONNECTIONS), input_form_state.form.max_connections.to_string()) }
-                         { config_field_custom!(translate.t(LABEL_PRIORITY), input_form_state.form.priority.to_string()) }
-                         { config_field_custom!(translate.t(LABEL_EXP_DATE), input_form_state.form.exp_date.map_or_else(String::new, |exp_date| exp_date.to_string())) }
-                         </>
-                     })}
-                     { html_if!(!staged_input, {
-                         { config_field_optional!(input_form_state.form, translate.t(LABEL_CACHE_DURATION), cache_duration) }
-                     })}
-                     { config_field_custom!(translate.t(LABEL_FETCH_METHOD), input_form_state.form.method.to_string()) }
-                     </div>
-                     { config_field_optional!(input_form_state.form, translate.t(LABEL_PERSIST), persist, Some(input_persist_hint_key(staged_input).to_string())) }
-                    </>
-                   })}
-                </Card>
-            };
-        }
-        html! {
-             <Card class="tp__config-view__card">
-               <div class="tp__config-view__cols-2">
-               { edit_field_text!(input_form_state, translate.t(LABEL_NAME),  name, ConfigInputFormAction::Name) }
-               { edit_field_bool!(input_form_state, translate.t(LABEL_ENABLED), enabled, ConfigInputFormAction::Enabled) }
-               </div>
-               { html_if!(staged_input, {
-                 <>
-                 { config_field_child!(translate.t(LABEL_TYPE), "INPUT_FORM.STAGED_TYPE", {
-                   let input_form_state = input_form_state.clone();
-                   html! {
-                       <RadioButtonGroup
-                        multi_select={false}
-                        none_allowed={false}
-                        options={staged_type_options}
-                        labels={Some(staged_type_labels)}
-                        selected={staged_type_selection}
-                        on_select={Callback::from(move |selections: Rc<Vec<String>>| {
-                            input_form_state.dispatch(ConfigInputFormAction::StagedType(staged_type_from_selection(&selections)));
-                        })}
-                    />
-                 }})}
-                 { config_field_child!(translate.t(LABEL_CLUSTER), "INPUT_FORM.STAGED_CLUSTERS", {
-                   let input_form_state = input_form_state.clone();
-                   html! {
-                       <ClusterFlagsInput
-                        name={"staged_clusters"}
-                        value={staged_clusters}
-                        mode={ClusterFlagsInputMode::NoneIsAll}
-                        on_change={Callback::from(move |(_, flags): (String, Option<ClusterFlags>)| {
-                            // Staged inputs must keep at least one cluster; mirror ConfigInputStagedDto::default() when the user clears the last chip.
-                            let clusters = flags.filter(|f| !f.is_empty()).unwrap_or_else(ClusterFlags::all);
-                            let next = mutate_staged(&input_form_state.form.staged, |staged| {
-                                staged.clusters = clusters;
-                            });
-                            input_form_state.dispatch(ConfigInputFormAction::Staged(next));
-                        })}
-                    />
-                 }})}
-                 </>
-               })}
-               { html_if!(!library_input, {
-                <>
-                 <div class="tp__form-field tp__form-field__text">
-                     <Input
-                        label={translate.t(LABEL_URL)}
-                        name={"url"}
-                        field_id={Some(crate::app::components::dto_field_id(&input_form_state.form, "url"))}
-                        autocomplete={true}
-                        value={input_form_state.form.url.clone()}
-                        hint_key={Some(input_url_hint_key(simple_input).to_string())}
-                        on_change={Callback::from({
-                            let input_form_state = input_form_state.clone();
-                            move |value: String| input_form_state.dispatch(ConfigInputFormAction::Url(value))
-                        })}
-                     />
-                 </div>
-                 <div class="tp__config-view__cols-2">
-                 { html_if!(credentials_input && !is_csv_batch, {
-                   <>
-                   { edit_field_text_option!(input_form_state, translate.t(LABEL_USERNAME), username, ConfigInputFormAction::Username) }
-                   { edit_field_text_option!(input_form_state, translate.t(LABEL_PASSWORD), password, ConfigInputFormAction::Password, true) }
-                   </>
-                 })}
-                 { html_if!(!staged_input && !is_csv_batch, {
-                   <>
-                   { edit_field_number_u16!(input_form_state, translate.t(LABEL_MAX_CONNECTIONS), max_connections, ConfigInputFormAction::MaxConnections) }
-                   { edit_field_number_i16!(input_form_state, translate.t(LABEL_PRIORITY), priority, ConfigInputFormAction::Priority) }
-                   { edit_field_exp_date!(input_form_state, translate.t(LABEL_EXP_DATE), exp_date, ConfigInputFormAction::ExpDate, exp_date_tool_action) }
-                   </>
-                 })}
-                 { html_if!(!staged_input, {
-                   { edit_field_text_option!(input_form_state, translate.t(LABEL_CACHE_DURATION), cache_duration, ConfigInputFormAction::CacheDuration) }
-                 })}
-                 { config_field_child!(translate.t(LABEL_FETCH_METHOD), "INPUT_FORM.FETCH_METHOD", {
-                   html! {
-                       <RadioButtonGroup
-                        multi_select={false} none_allowed={false}
-                        on_select={Callback::from(move |selections: Rc<Vec<String>>| {
-                            if let Some(first) = selections.first() {
-                                input_form_state_disp.dispatch(ConfigInputFormAction::Method(first.parse::<InputFetchMethod>().unwrap_or(InputFetchMethod::GET)));
-                            }
-                        })}
-                        options={fetch_methods.clone()}
-                        selected={input_method_selection}
-                    />
-                 }})}
-                 </div>
-                 <div class="tp__form-field tp__form-field__text">
-                     <Input
-                        label={translate.t(LABEL_PERSIST)}
-                        name={"persist"}
-                        field_id={Some(crate::app::components::dto_field_id(&input_form_state.form, "persist"))}
-                        autocomplete={true}
-                        value={input_form_state.form.persist.clone().unwrap_or_default()}
-                        hint_key={Some(input_persist_hint_key(staged_input).to_string())}
-                        on_change={Callback::from({
-                            let input_form_state = input_form_state.clone();
-                            move |value: String| {
-                                input_form_state.dispatch(ConfigInputFormAction::Persist((!value.is_empty()).then_some(value)));
-                            }
-                        })}
-                     />
-                 </div>
-                </>
-               })}
-            </Card>
-        }
-    };
-
-    let render_media_server = || {
-        let media_server = input_form_state.form.media_server.clone().unwrap_or_default();
-        let token = media_server.token.clone().unwrap_or_default();
-        let api_key = media_server.api_key.clone().unwrap_or_default();
-        let user_id = media_server.user_id.clone().unwrap_or_default();
-        let account_token = media_server.account_token.clone().unwrap_or_default();
-        let server_id = media_server.server_id.clone().unwrap_or_default();
-        let server_name = media_server.server_name.clone().unwrap_or_default();
-
-        if !props.allow_write {
-            return html! {
-                <Card class="tp__config-view__card">
-                    <TitledCard title={translate.t(LABEL_MEDIA_SERVER)}>
-                        { config_field_child!(translate.t(LABEL_TOKEN), "MEDIA_SERVER.TOKEN", {
-                            html! { <span class="tp__form-field__value"><HideContent content={token} /></span> }
-                        })}
-                        { config_field_child!(translate.t(LABEL_API_KEY), "MEDIA_SERVER.API_KEY", {
-                            html! { <span class="tp__form-field__value"><HideContent content={api_key} /></span> }
-                        })}
-                        { config_field_child!(translate.t(LABEL_USER_ID), "MEDIA_SERVER.USER_ID", {
-                            html! { <span class="tp__form-field__value">{user_id}</span> }
-                        })}
-                        { config_field_child!(translate.t(LABEL_ACCOUNT_TOKEN), "MEDIA_SERVER.ACCOUNT_TOKEN", {
-                            html! { <span class="tp__form-field__value"><HideContent content={account_token} /></span> }
-                        })}
-                        { config_field_child!(translate.t(LABEL_SERVER_ID), "MEDIA_SERVER.SERVER_ID", {
-                            html! { <span class="tp__form-field__value">{server_id}</span> }
-                        })}
-                        { config_field_child!(translate.t(LABEL_SERVER_NAME), "MEDIA_SERVER.SERVER_NAME", {
-                            html! { <span class="tp__form-field__value">{server_name}</span> }
-                        })}
-                        <div class="tp__config-view__cols-2">
-                            { config_field_child!(translate.t(LABEL_PREFER_HTTPS), "MEDIA_SERVER.PREFER_HTTPS", {
-                                html! { <ToggleSwitch value={media_server.prefer_https} readonly={true} /> }
-                            })}
-                            { config_field_child!(translate.t(LABEL_ALLOW_RELAY), "MEDIA_SERVER.ALLOW_RELAY", {
-                                html! { <ToggleSwitch value={media_server.allow_relay} readonly={true} /> }
-                            })}
-                        </div>
-                    </TitledCard>
-                </Card>
-            };
-        }
-
-        let dispatch_media = |change: fn(&mut MediaServerInputConfigDto, String)| {
-            let state = input_form_state.clone();
-            Callback::from(move |value: String| {
-                let next = mutate_media_server(&state.form.media_server, |media_server| change(media_server, value));
-                state.dispatch(ConfigInputFormAction::MediaServer(next));
-            })
+        let extra = if stalker_input {
+            stalker_options_fields(&stalker_config_state, props.allow_write, &translate)
+        } else {
+            Html::default()
         };
-        let dispatch_media_bool = |change: fn(&mut MediaServerInputConfigDto, bool)| {
-            let state = input_form_state.clone();
-            Callback::from(move |value: bool| {
-                let next = mutate_media_server(&state.form.media_server, |media_server| change(media_server, value));
-                state.dispatch(ConfigInputFormAction::MediaServer(next));
-            })
-        };
-
-        let on_token = dispatch_media(|media_server, value| {
-            media_server.token = (!value.is_empty()).then_some(value);
-        });
-        let on_api_key = dispatch_media(|media_server, value| {
-            media_server.api_key = (!value.is_empty()).then_some(value);
-        });
-        let on_user_id = dispatch_media(|media_server, value| {
-            media_server.user_id = (!value.is_empty()).then_some(value);
-        });
-        let on_account_token = dispatch_media(|media_server, value| {
-            media_server.account_token = (!value.is_empty()).then_some(value);
-        });
-        let on_server_id = dispatch_media(|media_server, value| {
-            media_server.server_id = (!value.is_empty()).then_some(value);
-        });
-        let on_server_name = dispatch_media(|media_server, value| {
-            media_server.server_name = (!value.is_empty()).then_some(value);
-        });
-        let on_prefer_https = dispatch_media_bool(|media_server, value| media_server.prefer_https = value);
-        let on_allow_relay = dispatch_media_bool(|media_server, value| media_server.allow_relay = value);
-
         html! {
-            <Card class="tp__config-view__card">
-                <TitledCard title={translate.t(LABEL_MEDIA_SERVER)}>
-                    <div class="tp__config-view__cols-2">
-                        <Input name="media_server_token" field_id={Some("MEDIA_SERVER.TOKEN".to_string())} label={Some(translate.t(LABEL_TOKEN))} value={token} hidden={true} on_change={Some(on_token)} />
-                        <Input name="media_server_api_key" field_id={Some("MEDIA_SERVER.API_KEY".to_string())} label={Some(translate.t(LABEL_API_KEY))} value={api_key} hidden={true} on_change={Some(on_api_key)} />
-                        <Input name="media_server_user_id" field_id={Some("MEDIA_SERVER.USER_ID".to_string())} label={Some(translate.t(LABEL_USER_ID))} value={user_id} on_change={Some(on_user_id)} />
-                        <Input name="media_server_account_token" field_id={Some("MEDIA_SERVER.ACCOUNT_TOKEN".to_string())} label={Some(translate.t(LABEL_ACCOUNT_TOKEN))} value={account_token} hidden={true} on_change={Some(on_account_token)} />
-                        <Input name="media_server_server_id" field_id={Some("MEDIA_SERVER.SERVER_ID".to_string())} label={Some(translate.t(LABEL_SERVER_ID))} value={server_id} on_change={Some(on_server_id)} />
-                        <Input name="media_server_server_name" field_id={Some("MEDIA_SERVER.SERVER_NAME".to_string())} label={Some(translate.t(LABEL_SERVER_NAME))} value={server_name} on_change={Some(on_server_name)} />
-                    </div>
-                    <div class="tp__config-view__cols-2">
-                        { config_field_child!(translate.t(LABEL_PREFER_HTTPS), "MEDIA_SERVER.PREFER_HTTPS", {
-                            html! { <ToggleSwitch value={media_server.prefer_https} on_change={on_prefer_https} /> }
-                        })}
-                        { config_field_child!(translate.t(LABEL_ALLOW_RELAY), "MEDIA_SERVER.ALLOW_RELAY", {
-                            html! { <ToggleSwitch value={media_server.allow_relay} on_change={on_allow_relay} /> }
-                        })}
-                    </div>
-                </TitledCard>
-            </Card>
-        }
-    };
-
-    let render_media_server_libraries = || {
-        let media_server = input_form_state.form.media_server.clone().unwrap_or_default();
-        let libraries = libraries_to_text(&media_server.libraries);
-
-        if !props.allow_write {
-            return html! {
-                <Card class="tp__config-view__card">
-                    { config_field_child!(translate.t(LABEL_LIBRARIES), "MEDIA_SERVER.LIBRARIES", {
-                        html! { <span class="tp__form-field__value">{libraries}</span> }
-                    })}
-                </Card>
-            };
-        }
-
-        let input_form_state = input_form_state.clone();
-        let on_libraries = Callback::from(move |value: String| {
-            let next = mutate_media_server(&input_form_state.form.media_server, |media_server| {
-                media_server.libraries = libraries_from_text(&value, &media_server.libraries);
-            });
-            input_form_state.dispatch(ConfigInputFormAction::MediaServer(next));
-        });
-
-        html! {
-            <Card class="tp__config-view__card">
-                <Input name="media_server_libraries" field_id={Some("MEDIA_SERVER.LIBRARIES".to_string())} label={Some(translate.t(LABEL_LIBRARIES))} value={libraries} on_change={Some(on_libraries)} />
-            </Card>
+            <InputOptionsForm state={input_options_state.clone()} headers={headers_state.clone()}
+                allow_write={props.allow_write} kind={kind} {extra} />
         }
     };
 
@@ -1316,6 +895,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
               if *show_alias_form {
                     <AliasItemForm
                         input_type={input_form_state.form.input_type}
+                        stalker_auth_mode={stalker_config_state.auth_mode}
                         providers={(*providers_state).clone()}
                         initial={(*edit_alias).clone()}
                         on_submit={handle_add_alias_item}
@@ -1655,6 +1235,8 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         let aliases_state = aliases_state.clone();
         let providers_state = providers_state.clone();
         let providers_dirty_state = providers_dirty_state.clone();
+        let stalker_config_state = stalker_config_state.clone();
+        let stalker_device_state = stalker_device_state.clone();
 
         Callback::from(move |_| {
             let mut input = input_form_state.data().clone();
@@ -1664,6 +1246,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
             if input.input_type.is_staged() {
                 input.staged.get_or_insert_with(ConfigInputStagedDto::default);
+                input.sequential_group = None;
             } else {
                 input.staged = None;
             }
@@ -1701,6 +1284,15 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 input.provider = Some(providers);
             }
 
+            if input.input_type.is_stalker() {
+                input.stalker = Some(materialize_stalker_config(
+                    (*stalker_config_state).clone(),
+                    stalker_device_state.data().clone(),
+                ));
+            } else {
+                input.stalker = None;
+            }
+
             if let Some(on_apply) = &on_apply {
                 on_apply.emit(input);
             } else if let (Some(ctx), Some(block_id)) = (&source_editor_ctx, block_id) {
@@ -1727,12 +1319,16 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
             <div class="tp__source-editor-form__body__pages">
                 <Panel value={InputFormPage::Main.intern()} active={view_visible.intern()}>
-                    {render_input()}
+                    {render_main()}
                 </Panel>
+                { html_if!(stalker_input, {
+                    <Panel value={InputFormPage::Device.intern()} active={view_visible.intern()}>
+                        <StalkerDeviceInputForm state={stalker_device_state.clone()} allow_write={props.allow_write} />
+                    </Panel>
+                })}
                 { html_if!(media_server_input, {
                     <Panel value={InputFormPage::Libraries.intern()} active={view_visible.intern()}>
-                    {render_media_server()}
-                    {render_media_server_libraries()}
+                    <MediaServerSettingsForm state={input_form_state.clone()} allow_write={props.allow_write} />
                     </Panel>
                 })}
                 { html_if!(!library_input && !staged_input && !media_server_input, {
@@ -1769,6 +1365,9 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
         html! {
             <div class={concat_string!("tp__source-editor-form__sidebar", if button_disabled {" disabled"} else {""})}>
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Main, if *view_visible == InputFormPage::Main { " active" } else {""})}  icon="Settings" hint={translate.t(LABEL_MAIN)} name={InputFormPage::Main.to_string()} onclick={&handle_menu_click}></IconButton>
+            {html_if!(stalker_input, {
+            <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Device, if *view_visible == InputFormPage::Device { " active" } else {""})} icon="Receiver" hint={translate.t("LABEL.DEVICE")} name={InputFormPage::Device.to_string()} onclick={&handle_menu_click}></IconButton>
+            })}
             {html_if!(media_server_input, {
             <IconButton class={format!("tp__app-sidebar-menu--{}{}", InputFormPage::Libraries, if *view_visible == InputFormPage::Libraries { " active" } else {""})}  icon="VideoConfig" hint={translate.t(LABEL_MEDIA_SERVER)} name={InputFormPage::Libraries.to_string()} onclick={&handle_menu_click}></IconButton>
             })}
@@ -1815,12 +1414,49 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::{MediaServerLibraryKind, MediaServerLibrarySelectorDetailsDto};
+    use shared::model::{MediaServerLibraryKind, MediaServerLibrarySelectorDetailsDto, StalkerAuthMode};
 
     #[test]
     fn media_server_libraries_page_round_trips() {
         assert_eq!(InputFormPage::from_str(InputFormPage::LIBRARIES).ok(), Some(InputFormPage::Libraries));
         assert_eq!(InputFormPage::Libraries.to_string(), InputFormPage::LIBRARIES);
+    }
+
+    #[test]
+    fn stalker_device_page_is_directly_after_main() {
+        assert_eq!(InputFormPage::from_str(InputFormPage::DEVICE).ok(), Some(InputFormPage::Device));
+        assert_eq!(InputFormPage::Device.to_string(), InputFormPage::DEVICE);
+        assert_eq!(
+            input_form_pages(shared::model::InputType::Stalker)[..2],
+            [InputFormPage::Main, InputFormPage::Device]
+        );
+        assert!(!input_form_pages(shared::model::InputType::Xtream).contains(&InputFormPage::Device));
+    }
+
+    #[test]
+    fn stalker_materialization_normalizes_device_without_losing_settings() {
+        let config = StalkerInputConfigDto {
+            auth_mode: StalkerAuthMode::CredentialsOnly,
+            size_caps: Some(shared::model::stalker::StalkerActionSizeCapDto::default()),
+            catalog_max_pages: Some(0),
+            ..Default::default()
+        };
+        let device = StalkerDeviceProfileDto {
+            mac_address: Some("  ".to_string()),
+            signature: Some(" signature ".to_string()),
+            ..Default::default()
+        };
+
+        let materialized = materialize_stalker_config(config, device);
+
+        assert_eq!(materialized.auth_mode, StalkerAuthMode::CredentialsOnly);
+        assert!(materialized.size_caps.is_some());
+        assert_eq!(materialized.catalog_max_pages, None);
+        assert_eq!(materialized.device.as_ref().and_then(|value| value.mac_address.as_deref()), None);
+        assert_eq!(materialized.device.and_then(|value| value.signature), Some("signature".to_string()));
+        assert!(materialize_stalker_config(StalkerInputConfigDto::default(), StalkerDeviceProfileDto::default())
+            .device
+            .is_none());
     }
 
     #[test]

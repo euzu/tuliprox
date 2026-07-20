@@ -32,6 +32,7 @@ $mobile-header-sidebar-offset: 3rem;
     gap: var(--gap-small);
     .tp__icon-button {
       .svg-icon {
+          min-width: 1.5rem;
           width: 1.5rem;
           height: 1.5rem;
       }

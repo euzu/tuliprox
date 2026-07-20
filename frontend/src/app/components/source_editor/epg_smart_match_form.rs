@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{select::Select, Card, DropDownOption, DropDownSelection, TextButton},
+    app::components::{select::Select, selection_first_owned, Card, DropDownOption, DropDownSelection, TextButton},
     config_field_bool, config_field_child, config_field_custom, config_field_optional, edit_field_bool,
     edit_field_list_option, edit_field_number_u16, edit_field_text_option, generate_form_reducer,
     i18n::use_translation,
@@ -187,13 +187,8 @@ pub fn EpgSmartMatchForm(props: &EpgSmartMatchFormProps) -> Html {
                         name={"name_prefix_mode"}
                         multi_select={false}
                         on_select={Callback::from(move |(_, selection): (String, DropDownSelection)| {
-                            let mode = match selection {
-                                DropDownSelection::Single(mode) => mode,
-                                DropDownSelection::Multi(modes) => {
-                                    modes.first().cloned().unwrap_or_else(|| NAME_PREFIX_MODE_IGNORE.to_string())
-                                }
-                                DropDownSelection::Empty => NAME_PREFIX_MODE_IGNORE.to_string(),
-                            };
+                            let mode = selection_first_owned(selection)
+                                .unwrap_or_else(|| NAME_PREFIX_MODE_IGNORE.to_string());
                             form_state_mode.dispatch(EpgSmartMatchFormAction::NamePrefixMode(mode));
                         })}
                         options={name_prefix_options.clone()}

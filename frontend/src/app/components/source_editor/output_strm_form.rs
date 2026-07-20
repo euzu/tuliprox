@@ -1,7 +1,7 @@
 use crate::{
     app::components::{
-        config::HasFormData, select::Select, BlockId, BlockInstance, Card, DropDownOption, DropDownSelection, EditMode,
-        FilterInput, IconButton, Panel, SourceEditorContext, TextButton,
+        build_options, config::HasFormData, select::Select, selection_parse_first, BlockId, BlockInstance, Card,
+        DropDownSelection, EditMode, FilterInput, IconButton, Panel, SourceEditorContext, TextButton,
     },
     config_field, config_field_bool, config_field_child, config_field_custom, config_field_optional, edit_field_bool,
     edit_field_list_option, edit_field_text, edit_field_text_option, generate_form_reducer,
@@ -122,14 +122,11 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
 
     let export_styles = use_memo(output_form_state.form.style, |style| {
         let default_style = *style;
-        [StrmExportStyle::Kodi, StrmExportStyle::Emby, StrmExportStyle::Jellyfin]
-            .iter()
-            .map(|s| DropDownOption {
-                id: s.to_string(),
-                label: html! { s.to_string() },
-                selected: *s == default_style,
-            })
-            .collect::<Vec<DropDownOption>>()
+        build_options(
+            [StrmExportStyle::Kodi, StrmExportStyle::Emby, StrmExportStyle::Jellyfin],
+            &default_style,
+            |value| html! { value.to_string() },
+        )
     });
 
     {
@@ -172,19 +169,9 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
                                 name={"export_style"}
                                 multi_select={false}
                                 on_select={Callback::from(move |(_, selections):(String, DropDownSelection)| {
-                                    match selections {
-                                        DropDownSelection::Empty => {
-                                            output_form_state_1.dispatch(StrmTargetOutputFormAction::Style(StrmExportStyle::Kodi));
-                                        }
-                                        DropDownSelection::Single(option) => {
-                                            output_form_state_1.dispatch(StrmTargetOutputFormAction::Style(option.parse::<StrmExportStyle>().unwrap_or(StrmExportStyle::Kodi)));
-                                        }
-                                        DropDownSelection::Multi(options) => {
-                                            if let Some(first) = options.first() {
-                                                output_form_state_1.dispatch(StrmTargetOutputFormAction::Style(first.parse::<StrmExportStyle>().unwrap_or(StrmExportStyle::Kodi)));
-                                            }
-                                        }
-                                    }
+                                    let style =
+                                        selection_parse_first::<StrmExportStyle>(&selections).unwrap_or(StrmExportStyle::Kodi);
+                                    output_form_state_1.dispatch(StrmTargetOutputFormAction::Style(style));
                                 })}
                                 options={export_styles.clone()}
                             />

@@ -191,7 +191,7 @@ fn concat_text(t1: Option<&Arc<str>>, t2: &str) -> Arc<str> {
 }
 
 pub fn get_attr_value(attr: &quick_xml::events::attributes::Attribute) -> Option<Arc<str>> {
-    attr.unescape_value().ok().map(|v| v.intern())
+    attr.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok().map(|v| v.intern())
 }
 
 // This function filters a timeslot starting from yesterday.

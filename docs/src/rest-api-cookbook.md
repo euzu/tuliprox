@@ -223,6 +223,39 @@ Typical use:
 - verify `playlist.write` permission
 - integrate Tuliprox into external automation
 
+## Example 9: Preview a Stalker live input in the Web UI playlist API
+
+```bash
+#!/bin/bash
+
+BASE_URL="http://localhost:8901"
+TOKEN="PUT_YOUR_TOKEN_HERE"
+
+curl -s -X POST "$BASE_URL/api/v1/playlist/live" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    --data-raw '{"Input":"stalker"}' | jq .
+```
+
+Typical use:
+
+- verify that a configured Stalker input handshakes and returns playlist preview rows
+- confirm that the Web UI playlist explorer can inspect Stalker live content
+- distinguish preview/catalog problems from later playback-resolution problems
+
+Notes:
+
+- Replace `"stalker"` with the configured input name.
+- The preview endpoint returns catalog items. Actual playback can still require Stalker `create_link` resolution later, depending
+  on your `stalker_pre_resolve_playback` / `stalker_runtime_resolve_playback` settings.
+- If a Stalker item has not been materialized yet, Tuliprox no longer exposes the raw portal `cmd` as the playlist URL. Runtime
+  playback resolves a real media URL later through the reverse-proxy path.
+- Expired temp links are refreshed automatically when `stalker_runtime_resolve_playback` is enabled. Only portal-specific extra
+  header/cookie requirements remain a possible follow-up.
+- Runtime refresh only produces `http`/`https` playback URLs; Stalker `rtmp://` / `rtsp://` commands are rejected explicitly rather
+  than proxied half-supported.
+
 ## Available `/api/v1` Endpoints
 
 This is a compact operator-oriented overview of the `/api/v1` REST API groups currently registered by the backend.
@@ -257,7 +290,7 @@ This is a compact operator-oriented overview of the `/api/v1` REST API groups cu
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/v1/playlist/live` | Query live playlist content for the Web UI |
+| `POST` | `/api/v1/playlist/live` | Query live playlist content for the Web UI, including Stalker inputs |
 | `POST` | `/api/v1/playlist/vod` | Query VOD playlist content |
 | `POST` | `/api/v1/playlist/series` | Query series playlist content |
 | `POST` | `/api/v1/playlist/resolve_url` | Resolve provider-backed stream URLs |

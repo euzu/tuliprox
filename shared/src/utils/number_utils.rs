@@ -33,7 +33,7 @@ pub fn parse_localized_float(s: &str) -> Option<f64> {
         let combined = if right.is_empty() {
             left
         } else {
-            format!("{}.{}", left, right) // '.' for Rust parsing
+            format!("{left}.{right}") // '.' for Rust parsing
         };
 
         combined.parse::<f64>().ok()
@@ -48,7 +48,7 @@ pub fn parse_localized_float(s: &str) -> Option<f64> {
 /// Thousand grouping (`groups`) is optional — if `true`, groups are separated by underscore.
 /// Always uses a comma (`,`) as the decimal separator.
 pub fn format_float_localized(value: f64, decimals: usize, groups: bool) -> String {
-    let s = format!("{:.*}", decimals, value); // "1234.5678"
+    let s = format!("{value:.decimals$}"); // "1234.5678"
     let parts: Vec<&str> = s.split('.').collect();
     let int_part = parts[0];
     let frac_part = parts.get(1).unwrap_or(&"");
@@ -70,7 +70,7 @@ pub fn format_float_localized(value: f64, decimals: usize, groups: bool) -> Stri
     if frac_part.is_empty() {
         grouped
     } else {
-        format!("{},{}", grouped, frac_part)
+        format!("{grouped},{frac_part}")
     }
 }
 

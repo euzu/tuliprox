@@ -775,7 +775,7 @@ impl<'a> MapperContext<'a> {
         match expr {
             Expression::Identifier(ident) | Expression::VarAccess(ident, _) => {
                 if !identifiers.contains(ident.as_str()) {
-                    return Err(TuliproxError::Mapper(format!("Identifier unknown {}, {:?}", ident, expr)));
+                    return Err(TuliproxError::Mapper(format!("Identifier unknown {ident}, {expr:?}")));
                 }
             }
             Expression::NullValue
@@ -785,7 +785,7 @@ impl<'a> MapperContext<'a> {
             Expression::RegexExpr { field, pattern: _pattern, re_pattern: _re_pattern } => match field {
                 RegexSource::Identifier(ident) => {
                     if !identifiers.contains(ident.as_str()) {
-                        return Err(TuliproxError::Mapper(format!("Regex identifier unknown {}, {:?}", ident, expr)));
+                        return Err(TuliproxError::Mapper(format!("Regex identifier unknown {ident}, {expr:?}")));
                     }
                 }
                 RegexSource::Field(_) => {}
@@ -801,7 +801,7 @@ impl<'a> MapperContext<'a> {
             }
             Expression::FunctionCall { name, args } => {
                 if args.is_empty() {
-                    return Err(TuliproxError::Mapper(format!("Function needs at least one argument {:?}", name)));
+                    return Err(TuliproxError::Mapper(format!("Function needs at least one argument {name:?}")));
                 }
                 match name {
                     BuiltInFunction::ToNumber
@@ -874,7 +874,7 @@ impl<'a> MapperContext<'a> {
                 match identifier {
                     MatchCaseKey::Identifier(ident) => {
                         if !identifiers.contains(ident.as_str()) {
-                            return Err(TuliproxError::Mapper(format!("Match case identifier unknown {}", ident)));
+                            return Err(TuliproxError::Mapper(format!("Match case identifier unknown {ident}")));
                         }
                         identifier_key.push_str(ident.as_str());
                         identifier_key.push_str(", ");
@@ -889,7 +889,7 @@ impl<'a> MapperContext<'a> {
                 }
             }
             if case_keys.contains(&identifier_key) {
-                return Err(TuliproxError::Mapper(format!("Duplicate case {}", identifier_key)));
+                return Err(TuliproxError::Mapper(format!("Duplicate case {identifier_key}")));
             }
             case_keys.insert(identifier_key);
             self.validate_expr(match_case.expression, identifiers)?;
@@ -906,7 +906,7 @@ impl<'a> MapperContext<'a> {
         match key {
             MapKey::Identifier(ident) | MapKey::VarAccess(ident, _) => {
                 if !identifiers.contains(ident.as_str()) {
-                    return Err(TuliproxError::Mapper(format!("Map key identifier unknown {}", ident)));
+                    return Err(TuliproxError::Mapper(format!("Map key identifier unknown {ident}")));
                 }
             }
             MapKey::FieldAccess(_) => {}
@@ -918,7 +918,7 @@ impl<'a> MapperContext<'a> {
                 match key {
                     MapCaseKey::Text(value) => {
                         if case_keys.contains(value.as_str()) {
-                            return Err(TuliproxError::Mapper(format!("Duplicate case {}", value)));
+                            return Err(TuliproxError::Mapper(format!("Duplicate case {value}")));
                         }
                         case_keys.insert(value.as_str());
                     }
@@ -950,7 +950,7 @@ impl<'a> MapperContext<'a> {
         match key {
             ForEachKey::Identifier(ident) | ForEachKey::VarAccess(ident, _) => {
                 if !identifiers.contains(ident.as_str()) {
-                    return Err(TuliproxError::Mapper(format!("For each key identifier unknown {}", ident)));
+                    return Err(TuliproxError::Mapper(format!("For each key identifier unknown {ident}")));
                 }
             }
         }
@@ -959,8 +959,7 @@ impl<'a> MapperContext<'a> {
         if let Some(key_var) = &expr.key_var {
             if local_identifiers.contains(key_var) {
                 return Err(TuliproxError::Mapper(format!(
-                    "For each key variable shadows existing identifier {}",
-                    key_var
+                    "For each key variable shadows existing identifier {key_var}"
                 )));
             }
             local_identifiers.insert(key_var.clone());
@@ -969,8 +968,7 @@ impl<'a> MapperContext<'a> {
         if let Some(value_var) = &expr.value_var {
             if local_identifiers.contains(value_var) {
                 return Err(TuliproxError::Mapper(format!(
-                    "For each value variable shadows existing identifier {}",
-                    value_var
+                    "For each value variable shadows existing identifier {value_var}"
                 )));
             }
             local_identifiers.insert(value_var.clone());
@@ -1293,7 +1291,7 @@ impl Expression {
                                             .map(|(i, s)| (i.to_string(), s.trim().to_string()))
                                             .collect(),
                                     ),
-                                    Err(e) => Failure(format!("Invalid regex pattern '{}': {}", pat, e)),
+                                    Err(e) => Failure(format!("Invalid regex pattern '{pat}': {e}")),
                                 }
                             } else {
                                 Undefined
@@ -1420,7 +1418,7 @@ impl Expression {
                                     if ch == '{' && chars.peek() == Some(&'}') {
                                         chars.next();
                                         if let Some(Some(arg)) = arg_iter.next() {
-                                            write!(formatted, "{}", arg).unwrap();
+                                            write!(formatted, "{arg}").unwrap();
                                         } else {
                                             formatted.push_str("{}");
                                         }

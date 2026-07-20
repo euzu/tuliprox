@@ -74,6 +74,27 @@ macro_rules! check_input_credentials {
                     }
                 }
             }
+            InputType::Stalker => {
+                // Stalker portals accept MAC-only or credentials or both. We only require
+                // a non-empty URL here; the identity check (MAC in
+                // `stalker.device.mac_address` OR username/password) happens in
+                // `prepare_stalker_config`, which can see both the credentials and the
+                // stalker block.
+                if $this.url.trim().is_empty() {
+                    return Err($crate::error::TuliproxError::ConfigInput(format!(
+                        "for input type stalker: url is mandatory{input_name_suffix}",
+                    )));
+                }
+            }
+            InputType::StalkerBatch => {
+                if $definition {
+                    if $this.url.trim().is_empty() {
+                        return Err($crate::error::TuliproxError::ConfigInput(format!(
+                            "for input type stalker-batch: url is mandatory{input_name_suffix}",
+                        )));
+                    }
+                }
+            }
             InputType::Library | InputType::Emby | InputType::Jellyfin | InputType::Plex => {
                 // Media-server credentials live in the dedicated media_server block; detailed
                 // validation happens in ConfigInputDto/ConfigInput prepare methods.
@@ -119,6 +140,21 @@ macro_rules! check_input_connections {
                     if $this.priority != 0 {
                         return Err($crate::error::TuliproxError::ConfigInput(format!(
                             "input type xtream-batch should not define priority attribute{input_name_suffix}",
+                        )));
+                    }
+                }
+            }
+            InputType::Stalker => {}
+            InputType::StalkerBatch => {
+                if !$alias {
+                    if $this.max_connections > 0 {
+                        return Err($crate::error::TuliproxError::ConfigInput(format!(
+                            "input type stalker-batch should not define max_connections attribute{input_name_suffix}",
+                        )));
+                    }
+                    if $this.priority != 0 {
+                        return Err($crate::error::TuliproxError::ConfigInput(format!(
+                            "input type stalker-batch should not define priority attribute{input_name_suffix}",
                         )));
                     }
                 }

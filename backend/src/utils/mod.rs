@@ -1,7 +1,7 @@
 mod sys_utils;
 mod compression;
 mod file;
-mod network;
+pub(crate) mod network;
 mod crypto_utils;
 mod step_measure;
 mod logging;
