@@ -1772,7 +1772,7 @@ async fn resolve_streaming_strategy(
     options: StreamingAcquireOptions<'_>,
 ) -> StreamingStrategy {
     // allocate a provider connection
-    let accept_requested_stream_url = options.accept_requested_stream_url;
+    let accept_requested_stream_url = options.accept_requested_stream_url || input.input_type.is_stalker();
     let mut provider_connection_handle = acquire_stream_provider_handle(app_state, input, fingerprint, options).await;
 
     // panel_api provisioning/loading is handled later in the stream creation flow
@@ -5285,6 +5285,59 @@ mod tests {
             strategy.provider_stream_state,
             ProviderStreamState::Custom { reason: ProviderStreamCustomReason::UnmappedProviderUrl, .. }
         ));
+
+        app_state.active_provider.release_connection(&addr).await;
+    }
+
+    #[tokio::test]
+    async fn resolve_streaming_strategy_accepts_stalker_portal_url() {
+        let app_config = create_test_provider_app_config();
+        let Some(configured_input) = app_config.sources.load().inputs.first().cloned() else {
+            unreachable!()
+        };
+        let mut stalker_input = (*configured_input).clone();
+        stalker_input.input_type = InputType::Stalker;
+        stalker_input.username = None;
+        stalker_input.password = None;
+        app_config.sources.store(Arc::new(SourcesConfig {
+            inputs: vec![Arc::new(stalker_input)],
+            ..SourcesConfig::default()
+        }));
+        let app_state = create_test_app_state_for_config(Arc::new(app_config));
+        let input_name = "provider_1".intern();
+        let input = app_state
+            .app_config
+            .sources
+            .load()
+            .get_input_by_name(&input_name)
+            .cloned()
+            .unwrap_or_else(|| unreachable!());
+        let addr: SocketAddr = "127.0.0.1:55307".parse().unwrap_or_else(|_| unreachable!());
+        let stream_url =
+            "http://line.example/play/live.php?mac=00:11:22:33:44:55&stream=347&extension=ts&play_token=abc";
+
+        let strategy = resolve_streaming_strategy(
+            &app_state,
+            stream_url,
+            &create_test_fingerprint(addr),
+            &input,
+            StreamingAcquireOptions {
+                force_provider: None,
+                allow_forced_provider_fallback: false,
+                allow_provider_grace: false,
+                user_priority: 0,
+                connection_kind: crate::api::model::ConnectionKind::Normal,
+                session_owner: Some("live-session"),
+                accept_requested_stream_url: false,
+            },
+        )
+        .await;
+
+        let ProviderStreamState::Available(Some(provider), url) = strategy.provider_stream_state else {
+            unreachable!()
+        };
+        assert_eq!(provider.as_ref(), "provider_1");
+        assert_eq!(url.as_ref(), stream_url);
 
         app_state.active_provider.release_connection(&addr).await;
     }

@@ -25,7 +25,7 @@ impl StalkerCategory {
     fn from_js_value(value: &Value) -> Option<Self> {
         let obj = value.as_object()?;
         Some(Self {
-            id: obj.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+            id: value_string(value, "id").unwrap_or_default(),
             title: obj.get("title").and_then(Value::as_str).unwrap_or_default().to_string(),
             alias: obj.get("alias").and_then(Value::as_str).map(String::from),
             number: obj
@@ -45,7 +45,10 @@ pub struct StalkerRawItem {
     pub number: Option<String>,
     pub name: Option<String>,
     pub title: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_as_option_string")]
     pub category_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_as_option_string")]
+    pub tv_genre_id: Option<String>,
     #[serde(default)]
     pub cmd: Option<String>,
     #[serde(default)]
@@ -86,6 +89,7 @@ pub struct StalkerRawItem {
 
 impl StalkerRawItem {
     pub fn stream_id(&self) -> Option<u32> { self.id.as_ref().and_then(|s| s.parse::<u32>().ok()) }
+    pub fn category_id(&self) -> Option<&str> { self.category_id.as_deref().or(self.tv_genre_id.as_deref()) }
     pub fn stream_kind(&self) -> StalkerStreamKind {
         if self.series_id.is_some() { StalkerStreamKind::Episode } else { StalkerStreamKind::Live }
     }
@@ -1069,6 +1073,24 @@ mod tests {
         let v: Value = serde_json::from_str(r#"{"js":[{"id":"1","name":"A"}]}"#).unwrap();
         let (items, _, _, _) = parse_items_page(&v);
         assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn tv_genre_id_is_preserved_for_string_and_numeric_values() {
+        let value = serde_json::json!({
+            "js": [
+                {"id": "1", "tv_genre_id": "10"},
+                {"id": "2", "tv_genre_id": 11},
+                {"id": "3", "category_id": "12", "tv_genre_id": "13"}
+            ]
+        });
+
+        let (items, _, _, _) = parse_items_page(&value);
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].category_id(), Some("10"));
+        assert_eq!(items[1].category_id(), Some("11"));
+        assert_eq!(items[2].category_id(), Some("12"));
     }
 
     #[test]

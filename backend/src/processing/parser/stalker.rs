@@ -91,8 +91,7 @@ pub fn map_stalker_to_playlist_item(
 ) -> StalkerPlaylistItem {
     let name = raw.display_name();
     let category_id = raw
-        .category_id
-        .as_deref()
+        .category_id()
         .and_then(|s| s.parse::<u32>().ok())
         .or_else(|| category.and_then(|c| c.id.parse::<u32>().ok()))
         .unwrap_or(0);
@@ -489,6 +488,21 @@ mod tests {
         assert_eq!(item.stream_kind, StalkerStreamKind::Live);
         assert_eq!(item.category_id, 0);
         assert!(item.stream_url.is_empty());
+    }
+
+    #[test]
+    fn map_live_item_preserves_unmatched_tv_genre_id() {
+        let raw: StalkerRawItem = serde_json::from_value(serde_json::json!({
+            "id": "42",
+            "name": "Channel 42",
+            "tv_genre_id": 10
+        }))
+        .expect("raw item");
+
+        let item = map_stalker_to_playlist_item(&raw, None, StalkerStreamKind::Live, 0);
+
+        assert_eq!(item.category_id, 10);
+        assert!(item.category_name.is_empty());
     }
 
     #[test]

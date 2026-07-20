@@ -2,6 +2,7 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use shared::model::stalker::{StalkerPlaybackMode, StalkerStreamKind};
+use url::Url;
 
 use crate::utils::network::stalker::client::{validate_playable_scheme, StalkerApiClient};
 use crate::utils::network::stalker::cmd_parser::scheme_is_playable;
@@ -48,7 +49,7 @@ pub async fn create_link(
         let builder = build_create_link_builder(client, &load_url, handshake, &spec, kind, cmd, series_number, archive_start, archive_end);
         match client.send_json::<StalkerCreateLinkResponse>(builder, "create_link").await {
             Ok(resp) => {
-                return resolve_response(resp, kind, requested_mode);
+                return resolve_response(resp, kind, requested_mode, cmd);
             }
             Err(err) => {
                 last_err = Some(err);
@@ -113,6 +114,7 @@ fn resolve_response(
     resp: StalkerCreateLinkResponse,
     kind: StalkerStreamKind,
     requested_mode: StalkerPlaybackMode,
+    source_cmd: &str,
 ) -> StalkerResult<StalkerResolvedStream> {
     if let Some(err) = &resp.error {
         if !err.is_empty() {
@@ -132,6 +134,7 @@ fn resolve_response(
         });
     };
     let url = crate::utils::network::stalker::cmd_parser::extract_url_from_cmd(&raw_cmd)?;
+    let url = repair_live_stream_target(url, source_cmd, kind);
     let scheme = validate_playable_scheme(&url)?;
     if !scheme_is_playable(scheme) {
         return Err(StalkerError::UnsupportedScheme { scheme: scheme.to_string() });
@@ -142,6 +145,87 @@ fn resolve_response(
         playback_mode: requested_mode,
         candidates: vec![raw_cmd],
     })
+}
+
+fn repair_live_stream_target(url: String, source_cmd: &str, kind: StalkerStreamKind) -> String {
+    if kind != StalkerStreamKind::Live {
+        return url;
+    }
+    let Ok(resolved) = Url::parse(&url) else { return url };
+    if !resolved.path().to_ascii_lowercase().ends_with("/play/live.php") {
+        return url;
+    }
+    let needs_target = resolved
+        .query_pairs()
+        .find(|(key, _)| key.eq_ignore_ascii_case("stream"))
+        .is_none_or(|(_, value)| !is_usable_stream_target(&value));
+    if !needs_target {
+        return url;
+    }
+    let Some(target) = source_live_stream_target(source_cmd) else { return url };
+    upsert_raw_query_parameter(&url, "stream", &target)
+}
+
+fn source_live_stream_target(source_cmd: &str) -> Option<String> {
+    let source_url = crate::utils::network::stalker::cmd_parser::extract_url_from_cmd(source_cmd).ok()?;
+    let parsed = Url::parse(&source_url).ok()?;
+    if let Some(target) = parsed
+        .query_pairs()
+        .find_map(|(key, value)| key.eq_ignore_ascii_case("stream").then_some(value))
+        .filter(|value| is_usable_stream_target(value))
+    {
+        return Some(target.into_owned());
+    }
+    let mut channel_segment = false;
+    for segment in parsed.path_segments()? {
+        if channel_segment {
+            let target = segment.trim_end_matches('_');
+            return is_usable_stream_target(target).then(|| target.to_string());
+        }
+        channel_segment = segment.eq_ignore_ascii_case("ch");
+    }
+    None
+}
+
+fn is_usable_stream_target(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("null")
+}
+
+fn upsert_raw_query_parameter(url: &str, name: &str, value: &str) -> String {
+    let (without_fragment, fragment) = url.split_once('#').map_or((url, None), |(base, fragment)| (base, Some(fragment)));
+    let (base, query) = without_fragment.split_once('?').unwrap_or((without_fragment, ""));
+    let mut result = String::with_capacity(url.len() + value.len());
+    result.push_str(base);
+    result.push('?');
+    let mut replaced = false;
+    for part in query.split('&').filter(|part| !part.is_empty()) {
+        if result.as_bytes().last() != Some(&b'?') {
+            result.push('&');
+        }
+        let key = part.split_once('=').map_or(part, |(key, _)| key);
+        if key.eq_ignore_ascii_case(name) && !replaced {
+            result.push_str(key);
+            result.push('=');
+            result.push_str(value);
+            replaced = true;
+        } else {
+            result.push_str(part);
+        }
+    }
+    if !replaced {
+        if result.as_bytes().last() != Some(&b'?') {
+            result.push('&');
+        }
+        result.push_str(name);
+        result.push('=');
+        result.push_str(value);
+    }
+    if let Some(fragment) = fragment {
+        result.push('#');
+        result.push_str(fragment);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -188,7 +272,7 @@ mod tests {
         resp: StalkerCreateLinkResponse,
         kind: StalkerStreamKind,
     ) -> StalkerResult<StalkerResolvedStream> {
-        resolve_response(resp, kind, StalkerPlaybackMode::DirectUrl)
+        resolve_response(resp, kind, StalkerPlaybackMode::DirectUrl, "")
     }
 
     #[test]
@@ -206,8 +290,49 @@ mod tests {
         }))
         .unwrap();
         let parsed: StalkerCreateLinkResponse = serde_json::from_str(&body).unwrap();
-        let resolved = resolve_response(parsed, StalkerStreamKind::Live, StalkerPlaybackMode::TempLinkNginx)
+        let resolved = resolve_response(parsed, StalkerStreamKind::Live, StalkerPlaybackMode::TempLinkNginx, "")
             .expect("ok");
         assert_eq!(resolved.playback_mode, StalkerPlaybackMode::TempLinkNginx);
+    }
+
+    #[test]
+    fn repair_blank_live_stream_from_source_channel_command() {
+        let body = serde_json::json!({
+            "js": {
+                "cmd": "ffmpeg http://line.example/play/live.php?mac=00:11:22:33:44:55&stream=&extension=ts&play_token=abc&quality=hd"
+            }
+        });
+        let parsed: StalkerCreateLinkResponse = serde_json::from_value(body).expect("response");
+
+        let resolved = resolve_response(
+            parsed,
+            StalkerStreamKind::Live,
+            StalkerPlaybackMode::DirectUrl,
+            "ffmpeg http://localhost/ch/590_",
+        )
+            .expect("resolved response");
+
+        assert_eq!(
+            resolved.stream_url,
+            "http://line.example/play/live.php?mac=00:11:22:33:44:55&stream=590&extension=ts&play_token=abc&quality=hd"
+        );
+    }
+
+    #[test]
+    fn usable_live_and_movie_stream_targets_are_unchanged() {
+        for (kind, url) in [
+            (StalkerStreamKind::Live, "http://line.example/play/live.php?stream=591&play_token=abc"),
+            (StalkerStreamKind::Movie, "http://line.example/play/movie.php?stream=&play_token=abc"),
+        ] {
+            let parsed: StalkerCreateLinkResponse = serde_json::from_value(serde_json::json!({
+                "js": {"cmd": format!("ffmpeg {url}")}
+            }))
+            .expect("response");
+
+            let resolved = resolve_response(parsed, kind, StalkerPlaybackMode::DirectUrl, "")
+                .expect("resolved response");
+
+            assert_eq!(resolved.stream_url, url);
+        }
     }
 }

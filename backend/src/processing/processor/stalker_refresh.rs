@@ -228,8 +228,7 @@ fn map_items(
         .iter()
         .map(|raw| {
             let category = raw
-                .category_id
-                .as_deref()
+                .category_id()
                 .and_then(|value| value.parse::<u32>().ok())
                 .and_then(|id| categories.get(&id));
             parser::map_stalker_to_playlist_item(raw, category, kind, added_at)
@@ -641,6 +640,26 @@ mod tests {
     fn category_errors_are_not_silently_downgraded() {
         let result = category_map_result(Err(StalkerError::BodyDecode { message: "broken".to_string() }));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn map_items_uses_tv_genre_id_for_live_category() {
+        let raw: StalkerRawItem = serde_json::from_value(serde_json::json!({
+            "id": "590",
+            "name": "News",
+            "tv_genre_id": "10"
+        }))
+        .expect("raw item");
+        let categories = HashMap::from([(
+            10,
+            StalkerCategory { id: "10".to_string(), title: "News".to_string(), alias: None, number: 1 },
+        )]);
+
+        let items = map_items(&[raw], &categories, StalkerStreamKind::Live, 0);
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].category_id, 10);
+        assert_eq!(items[0].category_name.as_ref(), "News");
     }
 
     #[test]
