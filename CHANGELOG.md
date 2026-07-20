@@ -95,6 +95,15 @@
   assignment, Smart Match support, configurable four-hour dummy gap filling, bounded atomic cache downloads, and
   aggregated warnings for recurring events that are detected but not expanded yet.
 
+- **Extended EPG Programme Metadata**:
+  - XMLTV imports now preserve all programme `<category>` elements, including optional `lang` attributes, as well as
+    the presence of `<live/>` and `<new/>` tags.
+  - The metadata is retained while merging EPG sources, persisted for M3U and Xtream targets, and included in served
+    XMLTV output and Web UI EPG previews.
+  - ICS `CATEGORIES` properties are converted into individual XMLTV categories, including repeated properties and
+    escaped commas; ICS events do not infer `live` or `new` without an unambiguous source value.
+  - Existing persisted EPG data remains readable and defaults the new metadata to empty categories and unset flags.
+
 - **Trakt Charts**: Xtream Trakt integration can now build virtual categories from public Trakt charts via `trakt.charts[]`.
   - MVP supports `movies/shows` with `trending` and `popular`.
   - User-owned Trakt lists remain configured separately under `trakt.lists[]`.

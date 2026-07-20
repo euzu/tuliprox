@@ -115,6 +115,13 @@ mod tests {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct EpgCategory {
+    pub value: Arc<str>,
+    #[serde(default)]
+    pub lang: Option<Arc<str>>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EpgProgramme {
     pub start: i64,
@@ -123,6 +130,12 @@ pub struct EpgProgramme {
     pub desc: Option<Arc<str>>,
     #[serde(default)]
     pub catchup_id: Option<Arc<str>>,
+    #[serde(default)]
+    pub categories: Vec<EpgCategory>,
+    #[serde(default)]
+    pub is_live: bool,
+    #[serde(default)]
+    pub is_new: bool,
     #[serde(skip)]
     channel: Arc<str>,
 }
@@ -134,7 +147,17 @@ impl EpgProgramme {
 
 impl EpgProgramme {
     pub fn new(start: i64, stop: i64, channel: Arc<str>) -> Self {
-        Self { start, stop, channel, title: None, desc: None, catchup_id: None }
+        Self {
+            start,
+            stop,
+            channel,
+            title: None,
+            desc: None,
+            catchup_id: None,
+            categories: Vec::new(),
+            is_live: false,
+            is_new: false,
+        }
     }
     pub fn new_all(
         start: i64,
@@ -144,7 +167,7 @@ impl EpgProgramme {
         desc: Option<Arc<str>>,
         catchup_id: Option<Arc<str>>,
     ) -> Self {
-        Self { start, stop, channel, title, desc, catchup_id }
+        Self { start, stop, channel, title, desc, catchup_id, categories: Vec::new(), is_live: false, is_new: false }
     }
 }
 

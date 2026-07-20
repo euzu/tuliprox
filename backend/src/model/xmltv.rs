@@ -9,7 +9,7 @@ use futures::TryFutureExt;
 use quick_xml::events::{Event};
 use shared::concat_string;
 use shared::error::TuliproxError;
-use shared::model::{EpgChannel, EpgProgramme, InputFetchMethod};
+use shared::model::{EpgCategory, EpgChannel, EpgProgramme, InputFetchMethod};
 use shared::utils::{sanitize_sensitive_info, Internable};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,10 +26,14 @@ pub const EPG_TAG_DISPLAY_NAME: &str = "display-name";
 pub const EPG_TAG_ICON: &str = "icon";
 pub const EPG_TAG_TITLE: &str = "title";
 pub const EPG_TAG_DESC: &str = "desc";
+pub const EPG_TAG_CATEGORY: &str = "category";
+pub const EPG_TAG_LIVE: &str = "live";
+pub const EPG_TAG_NEW: &str = "new";
 pub const EPG_ATTRIB_START: &str = "start";
 pub const EPG_ATTRIB_STOP: &str = "stop";
 pub const EPG_ATTRIB_CATCHUP_ID: &str = "catchup-id";
 pub const EPG_ATTRIB_SRC: &str = "src";
+pub const EPG_ATTRIB_LANG: &str = "lang";
 
 // https://github.com/XMLTV/xmltv/blob/master/xmltv.dtd
 
@@ -204,6 +208,7 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
         DisplayName,
         Title,
         Desc,
+        Category,
         Other,
     }
 
@@ -217,6 +222,7 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
     let mut current_programme: Option<EpgProgramme> = None;
 
     let mut current_tag = TextTag::Other;
+    let mut current_category_lang = None;
 
     // only 1 day old epg
     let now = Utc::now();
@@ -236,8 +242,10 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                     EPG_TAG_DISPLAY_NAME => TextTag::DisplayName,
                     EPG_TAG_TITLE => TextTag::Title,
                     EPG_TAG_DESC => TextTag::Desc,
+                    EPG_TAG_CATEGORY => TextTag::Category,
                     _ => TextTag::Other,
                 };
+                current_category_lang = None;
 
                 match tag.as_ref() {
                     EPG_TAG_CHANNEL => {
@@ -297,6 +305,23 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                             }
                         }
                     }
+                    EPG_TAG_CATEGORY => {
+                        current_category_lang = e
+                            .attributes()
+                            .flatten()
+                            .find(|attr| attr.key.as_ref() == EPG_ATTRIB_LANG.as_bytes())
+                            .and_then(|attr| get_attr_value(&attr));
+                    }
+                    EPG_TAG_LIVE => {
+                        if let Some(programme) = &mut current_programme {
+                            programme.is_live = true;
+                        }
+                    }
+                    EPG_TAG_NEW => {
+                        if let Some(programme) = &mut current_programme {
+                            programme.is_new = true;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -315,6 +340,11 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                                 program.title = Some(concat_text(program.title.as_ref(), text));
                             } else if current_tag == TextTag::Desc {
                                 program.desc = Some(concat_text(program.desc.as_ref(), text));
+                            } else if current_tag == TextTag::Category {
+                                program.categories.push(EpgCategory {
+                                    value: text.intern(),
+                                    lang: current_category_lang.take(),
+                                });
                             }
                         }
                     }
@@ -336,6 +366,7 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                     _ => {}
                 }
                 current_tag = TextTag::Other;
+                current_category_lang = None;
             }
             Ok(Event::Eof) => break,
             Err(err) => return Err(TuliproxError::Parse(err.to_string())),
@@ -348,4 +379,37 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
     filter_channels_and_programmes(&mut channels, &mut programmes);
 
     Ok(channels)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_xmltv_for_web_ui;
+
+    #[tokio::test]
+    async fn web_ui_parser_preserves_programme_tags() {
+        let channels = parse_xmltv_for_web_ui(
+            br#"<tv>
+  <channel id="ESPN.us"><display-name>ESPN</display-name></channel>
+  <programme start="20990718180000 +0000" stop="20990718200000 +0000" channel="ESPN.us">
+    <title>Softball</title>
+    <category lang="en">Softball</category>
+    <category>Sports</category>
+    <live/>
+    <new></new>
+  </programme>
+</tv>"#
+                .as_slice(),
+        )
+        .await
+        .expect("parse XMLTV");
+
+        let programme = &channels[0].programmes[0];
+        assert_eq!(programme.categories.len(), 2);
+        assert_eq!(programme.categories[0].value.as_ref(), "Softball");
+        assert_eq!(programme.categories[0].lang.as_deref(), Some("en"));
+        assert_eq!(programme.categories[1].value.as_ref(), "Sports");
+        assert!(programme.categories[1].lang.is_none());
+        assert!(programme.is_live);
+        assert!(programme.is_new);
+    }
 }

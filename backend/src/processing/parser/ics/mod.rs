@@ -8,7 +8,7 @@ pub use event::IcsEvent;
 use shared::{
     defaults::{MAX_ICS_DESCRIPTION_LENGTH, MAX_ICS_SUMMARY_LENGTH},
     error::TuliproxError,
-    model::{EpgChannel, EpgProgramme},
+    model::{EpgCategory, EpgChannel, EpgProgramme},
     utils::Internable,
 };
 use std::{path::Path, sync::Arc};
@@ -80,8 +80,10 @@ fn events_to_programmes(
             continue;
         }
 
-        let title = render_event_template(&config.event.title, &event, MAX_ICS_SUMMARY_LENGTH);
-        let mut desc = render_event_template(&config.event.description, &event, MAX_ICS_DESCRIPTION_LENGTH);
+        let categories_text = event.categories.join(",");
+        let title = render_event_template(&config.event.title, &event, &categories_text, MAX_ICS_SUMMARY_LENGTH);
+        let mut desc =
+            render_event_template(&config.event.description, &event, &categories_text, MAX_ICS_DESCRIPTION_LENGTH);
 
         if config.event.include_location {
             if let Some(location) = event.location.as_deref().filter(|value| !value.is_empty()) {
@@ -89,31 +91,37 @@ fn events_to_programmes(
             }
         }
 
-        if config.event.include_categories {
-            if let Some(categories) = event.categories.as_deref().filter(|value| !value.is_empty()) {
-                append_description_metadata(&mut desc, "Categories: ", categories);
-            }
+        if config.event.include_categories && !categories_text.is_empty() {
+            append_description_metadata(&mut desc, "Categories: ", &categories_text);
         }
 
-        result.push(EpgProgramme::new_all(
+        let categories: Vec<EpgCategory> = event
+            .categories
+            .into_iter()
+            .map(|value| EpgCategory { value: value.intern(), lang: None })
+            .collect();
+
+        let mut programme = EpgProgramme::new_all(
             start,
             stop,
             Arc::clone(channel_id),
             (!title.is_empty()).then(|| title.intern()),
             (!desc.is_empty()).then(|| desc.intern()),
             None,
-        ));
+        );
+        programme.categories = categories;
+        result.push(programme);
     }
 
     result
 }
 
-fn render_event_template(template: &str, event: &IcsEvent, max_bytes: usize) -> String {
+fn render_event_template(template: &str, event: &IcsEvent, categories: &str, max_bytes: usize) -> String {
     let replacements = [
         ("{summary}", event.summary.as_deref().unwrap_or_default()),
         ("{description}", event.description.as_deref().unwrap_or_default()),
         ("{location}", event.location.as_deref().unwrap_or_default()),
-        ("{categories}", event.categories.as_deref().unwrap_or_default()),
+        ("{categories}", categories),
         ("{uid}", event.uid.as_deref().unwrap_or_default()),
         ("{start}", event.start_display.as_deref().unwrap_or_default()),
         ("{end}", event.stop_display.as_deref().unwrap_or_default()),
@@ -164,6 +172,8 @@ fn append_utf8_bounded(target: &mut String, value: &str, max_bytes: usize) {
 mod tests {
     use super::*;
     use crate::model::{IcsEpgSourceConfig, IcsEventMapping};
+    use shared::model::EpgCategory;
+    use shared::utils::Internable;
     use std::fs;
     use tempfile::tempdir;
 
@@ -195,6 +205,15 @@ mod tests {
         assert_eq!(channel.programmes.len(), 1);
         assert_eq!(channel.programmes[0].title.as_deref(), Some("Formula 1: Practice 1"));
         assert_eq!(channel.programmes[0].desc.as_deref(), Some("Session\nLocation: Bahrain\nCategories: F1,Race"));
+        assert_eq!(
+            channel.programmes[0].categories,
+            vec![
+                EpgCategory { value: "F1".intern(), lang: None },
+                EpgCategory { value: "Race".intern(), lang: None },
+            ],
+        );
+        assert!(!channel.programmes[0].is_live);
+        assert!(!channel.programmes[0].is_new);
     }
 
     #[tokio::test]
@@ -238,11 +257,12 @@ mod tests {
             ..IcsEvent::default()
         };
         let repeated_description = "{description}".repeat(MAX_ICS_SUMMARY_LENGTH / "{description}".len());
-        let rendered_description = render_event_template(&repeated_description, &event, MAX_ICS_SUMMARY_LENGTH);
+        let rendered_description =
+            render_event_template(&repeated_description, &event, "", MAX_ICS_SUMMARY_LENGTH);
         assert!(rendered_description.len() <= MAX_ICS_SUMMARY_LENGTH);
         assert!(rendered_description.chars().all(|character| character == '€'));
 
-        let rendered_uid = render_event_template("{uid}{uid}", &event, MAX_ICS_SUMMARY_LENGTH);
+        let rendered_uid = render_event_template("{uid}{uid}", &event, "", MAX_ICS_SUMMARY_LENGTH);
         assert_eq!(rendered_uid.len(), MAX_ICS_SUMMARY_LENGTH);
     }
 
@@ -253,7 +273,7 @@ mod tests {
             stop: Some(2),
             description: Some("Description".to_string()),
             location: Some("L".repeat(MAX_ICS_DESCRIPTION_LENGTH / 2)),
-            categories: Some("ä".repeat(MAX_ICS_DESCRIPTION_LENGTH)),
+            categories: vec!["ä".repeat(MAX_ICS_DESCRIPTION_LENGTH)],
             ..IcsEvent::default()
         };
         let config = IcsEpgSourceConfig {

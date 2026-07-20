@@ -196,7 +196,7 @@ mod tests {
     use shared::{
         foundation::Filter,
         model::{
-            EpgChannel, EpgProgramme, PlaylistItem, PlaylistItemHeader, ProcessingOrder, XtreamCluster,
+            EpgCategory, EpgChannel, EpgProgramme, PlaylistItem, PlaylistItemHeader, ProcessingOrder, XtreamCluster,
         },
         utils::Internable,
     };
@@ -285,6 +285,7 @@ mod tests {
                 "DTEND:20300101T130000Z\r\n",
                 "SUMMARY:Formula 1 Practice\r\n",
                 "DESCRIPTION:Imported from ICS\r\n",
+                "CATEGORIES:Motorsport,Practice\r\n",
                 "END:VEVENT\r\n",
                 "END:VCALENDAR\r\n",
             ),
@@ -334,6 +335,15 @@ mod tests {
             assert_eq!(stored.title.as_deref(), Some("Formula 1"));
             assert_eq!(stored.programmes.len(), 1);
             assert_eq!(stored.programmes[0].title.as_deref(), Some("Formula 1 Practice"));
+            assert_eq!(
+                stored.programmes[0].categories,
+                vec![
+                    EpgCategory { value: "Motorsport".intern(), lang: None },
+                    EpgCategory { value: "Practice".intern(), lang: None },
+                ],
+            );
+            assert!(!stored.programmes[0].is_live);
+            assert!(!stored.programmes[0].is_new);
         }
     }
 
