@@ -101,6 +101,19 @@ fn is_m3u_catchup_session_token(session_token: &str) -> bool {
     session_token.starts_with("m3u-catchup|") || session_token.starts_with("catchup|")
 }
 
+fn legacy_hls_route_allowed_with_cache(
+    cache_enabled: bool,
+    decoded_session_token: Option<&str>,
+    existing_session_token: Option<&str>,
+) -> bool {
+    !cache_enabled
+        || decoded_session_token.is_some_and(|decoded| {
+            existing_session_token.is_some_and(|existing| {
+                decoded == existing && is_m3u_catchup_session_token(existing)
+            })
+        })
+}
+
 fn query_flag_is_archive(key: &str) -> bool { key.eq_ignore_ascii_case("utc") }
 
 fn query_flag_marks_start_context(key: &str) -> bool {
@@ -5725,7 +5738,17 @@ async fn hls_api_stream_resolved(
     let Some(decoded_hls_token) = get_hls_session_token_and_url_from_token(&encrypt_secret, &token) else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
-    if hls_cache_enabled_for_target(&app_state, &target) {
+    let lookup_session_token = decoded_hls_token
+        .0
+        .clone()
+        .unwrap_or_else(|| create_session_fingerprint(&fingerprint, &user.username, virtual_id, false));
+    let mut user_session =
+        app_state.active_users.get_and_update_user_session(&user.username, &lookup_session_token).await;
+    if !legacy_hls_route_allowed_with_cache(
+        hls_cache_enabled_for_target(&app_state, &target),
+        decoded_hls_token.0.as_deref(),
+        user_session.as_ref().map(|session| session.token.as_str()),
+    ) {
         return hls_custom_video_manifest_redirect_response_for_username(
             &app_state,
             &user.username,
@@ -5733,12 +5756,6 @@ async fn hls_api_stream_resolved(
             StatusCode::NOT_FOUND,
         );
     }
-    let lookup_session_token = decoded_hls_token
-        .0
-        .clone()
-        .unwrap_or_else(|| create_session_fingerprint(&fingerprint, &user.username, virtual_id, false));
-    let mut user_session =
-        app_state.active_users.get_and_update_user_session(&user.username, &lookup_session_token).await;
 
     if let Some(session) = &mut user_session {
         let decoded_archive_reference = m3u_archive_epg_reference_ts(&decoded_hls_token.1);
@@ -9789,6 +9806,28 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(app_state.hls_proxy.access_leases().read().await.is_empty());
         assert!(app_state.active_users.active_streams().await.is_empty());
+    }
+
+    #[test]
+    fn cache_enabled_legacy_hls_route_only_allows_existing_m3u_catchup_session() {
+        assert!(super::legacy_hls_route_allowed_with_cache(
+            true,
+            Some("m3u-catchup|session"),
+            Some("m3u-catchup|session")
+        ));
+        assert!(super::legacy_hls_route_allowed_with_cache(
+            true,
+            Some("catchup|session"),
+            Some("catchup|session")
+        ));
+        assert!(!super::legacy_hls_route_allowed_with_cache(
+            true,
+            Some("m3u-catchup|session"),
+            Some("m3u-catchup|other")
+        ));
+        assert!(!super::legacy_hls_route_allowed_with_cache(true, Some("legacy-session"), Some("legacy-session")));
+        assert!(!super::legacy_hls_route_allowed_with_cache(true, None, None));
+        assert!(super::legacy_hls_route_allowed_with_cache(false, None, None));
     }
 
     #[tokio::test]

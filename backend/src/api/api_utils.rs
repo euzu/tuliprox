@@ -8,7 +8,7 @@ use crate::{
             tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason,
             ProviderAllocation, ProviderConfig, ProviderHandle, ProviderStreamCustomReason,
             ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamManager, StreamDetails,
-            StreamError, StreamingStrategy, ThrottledStream, UserApiRequest, UserSession,
+            StreamError, StreamingStrategy, ThrottledStream, UserApiRequest, UserSession, MAX_HLS_MANIFEST_BYTES,
         },
     },
     auth::Fingerprint,
@@ -22,7 +22,10 @@ use crate::{
         MediaServerError, MediaServerErrorKind, MediaServerHttpClient, MediaServerImageRef,
     },
     model::{AppConfig, ConfigInput, ConfigTarget, InputUserInfo, ProxyUserCredentials},
-    processing::processor::re_resolve_stalker_url,
+    processing::{
+        parser::hls::{rewrite_hls, RewriteHlsProps},
+        processor::re_resolve_stalker_url,
+    },
     utils::{
         async_file_reader, async_file_writer, create_new_file_for_write, debug_if_enabled, get_file_extension, request,
         request::{content_type_from_ext, parse_range, send_with_retry_and_provider},
@@ -64,6 +67,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
+    time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
@@ -1871,7 +1875,12 @@ fn should_defer_provider_open_for_grace_hold(
         return false;
     }
 
-    // v3.3.0 opened provider-affine VOD/Series/Catchup reopens immediately, even when
+    // Catch-up must open immediately so its payload can be classified before response headers are committed.
+    if item_type == PlaylistItemType::Catchup {
+        return false;
+    }
+
+    // v3.3.0 opened provider-affine VOD/Series reopens immediately, even when
     // provider grace was temporarily in effect. Parking these requests in GracePending
     // was introduced later and breaks players like libmpv during seek/reopen retries.
     // Keep hold-stream behavior for live/admission paths, but restore direct-open behavior
@@ -2050,6 +2059,7 @@ async fn create_stream_response_details(
                 provider_name: Some(provider_name),
                 request_url: None,
                 session_headers: session_headers.cloned(),
+                provider_session_headers: HashMap::new(),
                 grace_period: grace_period_options,
                 provider_grace_active: false,
                 disable_provider_grace: false,
@@ -2081,24 +2091,26 @@ async fn create_stream_response_details(
             } else {
                 false
             };
-            let (stream, stream_info, reconnect_flag) = if defer_provider_stream_until_grace_check {
+            let (stream, stream_info, provider_session_headers, reconnect_flag) =
+                if defer_provider_stream_until_grace_check {
                 debug_if_enabled!(
                     "Deferring provider stream open until grace check completes for {}",
                     sanitize_sensitive_info(resolve_request_url_for_logging(input, request_url.as_ref()).as_ref())
                 );
-                (None, None, None)
+                (None, None, HashMap::new(), None)
             } else if is_media_server_stream_ref_url(request_url.as_ref()) {
                 match open_media_server_stream_for_input(app_state, input, request_url.as_ref(), req_headers).await {
-                    Ok((stream, stream_info)) => (Some(stream), stream_info, None),
+                    Ok((stream, stream_info)) => (Some(stream), stream_info, HashMap::new(), None),
                     Err(err) => {
                         error!("Can't open media-server stream: {err}");
-                        (None, None, None)
+                        (None, None, HashMap::new(), None)
                     }
                 }
             } else {
                 let parsed_url = Url::parse(&request_url);
                 let request_url_valid = parsed_url.is_ok();
-                let ((mut stream, mut stream_info), mut reconnect_flag) = if let Ok(url) = parsed_url {
+                let ((mut stream, mut stream_info, mut provider_session_headers), mut reconnect_flag) =
+                    if let Ok(url) = parsed_url {
                     let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
                     let disabled_headers = app_state.get_disabled_headers();
                     let mut provider_stream_factory_options =
@@ -2134,12 +2146,13 @@ async fn create_stream_response_details(
                     )
                     .await
                     {
-                        None => (None, None),
-                        Some((stream, info)) => (Some(stream), info),
+                        None => (None, None, HashMap::new()),
+                        Some(response) =>
+                            (Some(response.stream), response.info, response.provider_session_headers),
                     };
                     (provider_stream, Some(reconnect_flag))
                 } else {
-                    ((None, None), None)
+                    ((None, None, HashMap::new()), None)
                 };
                 let should_refresh_stalker = should_refresh_stalker_playback(
                     input.input_type,
@@ -2192,9 +2205,10 @@ async fn create_stream_response_details(
                                     options,
                                 )
                                 .await;
-                                if let Some((retry_stream, retry_info)) = retried {
-                                    stream = Some(retry_stream);
-                                    stream_info = retry_info;
+                                if let Some(response) = retried {
+                                    stream = Some(response.stream);
+                                    stream_info = response.info;
+                                    provider_session_headers = response.provider_session_headers;
                                     reconnect_flag = Some(retry_reconnect_flag);
                                     request_url = refreshed_url;
                                 } else {
@@ -2210,7 +2224,7 @@ async fn create_stream_response_details(
                         }
                     }
                 }
-                (stream, stream_info, reconnect_flag)
+                (stream, stream_info, provider_session_headers, reconnect_flag)
             };
 
             if log_enabled!(log::Level::Debug) {
@@ -2241,6 +2255,7 @@ async fn create_stream_response_details(
                 provider_name: guard_provider_name.clone(),
                 request_url: Some(request_url.clone()),
                 session_headers: session_headers.cloned(),
+                provider_session_headers,
                 grace_period: grace_period_options,
                 provider_grace_active,
                 disable_provider_grace: false,
@@ -2817,7 +2832,11 @@ pub(crate) async fn stream_response(
         input,
         &stream_channel,
         item_type,
-        crate::api::model::ProviderContentRepresentationMode::PreserveOrigin,
+        if item_type == PlaylistItemType::Catchup {
+            crate::api::model::ProviderContentRepresentationMode::Identity
+        } else {
+            crate::api::model::ProviderContentRepresentationMode::PreserveOrigin
+        },
         share_stream,
         connection_permission,
         pinned_provider,
@@ -2850,6 +2869,43 @@ pub(crate) async fn stream_response(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+
+    if item_type == PlaylistItemType::Catchup {
+        if let Some(provider_stream) = stream_details.stream.take() {
+            let probe_deadline = Duration::from_millis(app_state.hls_proxy.origin_manifest_timeout_ms().max(1));
+            match probe_catchup_payload(provider_stream, probe_deadline).await {
+                Ok(CatchupPayload::Direct(provider_stream)) => stream_details.stream = Some(provider_stream),
+                Ok(CatchupPayload::HlsManifest(manifest)) => {
+                    return detected_catchup_hls_response(DetectedCatchupHlsResponseParams {
+                        app_state,
+                        stream_details,
+                        manifest,
+                        user,
+                        target,
+                        input,
+                        fingerprint,
+                        session_token,
+                        virtual_id,
+                        connection_permission,
+                        connection_kind,
+                        fallback_stream_url: stream_url,
+                    })
+                    .await;
+                }
+                Err(err) => {
+                    error!("Failed to inspect catch-up payload: {err}");
+                    cleanup_failed_detected_catchup_hls(
+                        app_state,
+                        &mut stream_details,
+                        &user.username,
+                        session_token,
+                    )
+                    .await;
+                    return StatusCode::BAD_GATEWAY.into_response();
+                }
+            }
+        }
+    }
 
     // When no provider stream is available, still create an ActiveClientStream if a grace period
     // needs to resolve (provider-grace with hold_stream, or user-grace). The grace task will
@@ -3066,6 +3122,188 @@ pub(crate) async fn stream_response(
         )
         .await;
     no_custom_video_fallback_status(&app_state.app_config).into_response()
+}
+
+enum CatchupPayload {
+    Direct(BoxedProviderStream),
+    HlsManifest(Bytes),
+}
+
+struct DetectedCatchupHlsResponseParams<'a> {
+    app_state: &'a Arc<AppState>,
+    stream_details: StreamDetails,
+    manifest: Bytes,
+    user: &'a ProxyUserCredentials,
+    target: &'a ConfigTarget,
+    input: &'a ConfigInput,
+    fingerprint: &'a Fingerprint,
+    session_token: &'a str,
+    virtual_id: VirtualId,
+    connection_permission: UserConnectionPermission,
+    connection_kind: crate::api::model::ConnectionKind,
+    fallback_stream_url: &'a str,
+}
+
+async fn detected_catchup_hls_response(
+    params: DetectedCatchupHlsResponseParams<'_>,
+) -> axum::response::Response {
+    let DetectedCatchupHlsResponseParams {
+        app_state,
+        mut stream_details,
+        manifest,
+        user,
+        target,
+        input,
+        fingerprint,
+        session_token,
+        virtual_id,
+        connection_permission,
+        connection_kind,
+        fallback_stream_url,
+    } = params;
+
+    let Some(provider) = stream_details.provider_name.clone() else {
+        cleanup_failed_detected_catchup_hls(app_state, &mut stream_details, &user.username, session_token).await;
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    let Some(server_info) = app_state.app_config.get_user_server_info(user) else {
+        cleanup_failed_detected_catchup_hls(app_state, &mut stream_details, &user.username, session_token).await;
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+    let Ok(content) = std::str::from_utf8(&manifest) else {
+        cleanup_failed_detected_catchup_hls(app_state, &mut stream_details, &user.username, session_token).await;
+        return StatusCode::BAD_GATEWAY.into_response();
+    };
+
+    let response_url = stream_details
+        .stream_info
+        .as_ref()
+        .and_then(|(_, _, response_url, _)| response_url.as_ref())
+        .map_or_else(|| fallback_stream_url.to_string(), ToString::to_string);
+    let base_url = server_info.get_base_url();
+    let encrypt_secret = app_state.get_encrypt_secret();
+    let rewritten = rewrite_hls(
+        user,
+        &RewriteHlsProps {
+            secret: &encrypt_secret,
+            base_url: &base_url,
+            content,
+            hls_url: response_url,
+            target_id: target.id,
+            virtual_id,
+            input_id: input.id,
+            user_token: Some(session_token),
+        },
+    );
+
+    let request_url = stream_details.request_url.as_deref().unwrap_or(fallback_stream_url);
+    let created_session_token = app_state
+        .active_users
+        .create_user_session(crate::api::model::CreateUserSessionParams {
+            user,
+            session_token,
+            virtual_id,
+            provider: &provider,
+            stream_url: request_url,
+            addr: &fingerprint.addr,
+            connection_permission,
+            connection_kind: Some(connection_kind),
+            socket_bound: false,
+        })
+        .await;
+    if !stream_details.provider_session_headers.is_empty() {
+        app_state
+            .active_users
+            .update_session_provider_headers(
+                &user.username,
+                &created_session_token,
+                &stream_details.provider_session_headers,
+            )
+            .await;
+    }
+    app_state
+        .active_provider
+        .refresh_provider_reservation(
+            &provider,
+            &created_session_token,
+            get_catchup_session_ttl_secs(app_state),
+        )
+        .await;
+    app_state.connection_manager.release_provider_handle(stream_details.provider_handle.take()).await;
+    app_state
+        .active_users
+        .release_unbound_session_reservation(
+            &user.username,
+            &created_session_token,
+            None,
+            false,
+        )
+        .await;
+    app_state
+        .active_users
+        .clear_unbound_session_addr(&user.username, &created_session_token, &fingerprint.addr)
+        .await;
+
+    catchup_hls_manifest_response(rewritten)
+}
+
+fn catchup_hls_manifest_response(content: String) -> axum::response::Response {
+    let mut response = try_unwrap_body!(axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+        .header(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate")
+        .body(Body::from(content)));
+    mark_response_as_uncompressed(&mut response);
+    response
+}
+
+async fn cleanup_failed_detected_catchup_hls(
+    app_state: &Arc<AppState>,
+    stream_details: &mut StreamDetails,
+    username: &str,
+    session_token: &str,
+) {
+    app_state.connection_manager.release_provider_handle(stream_details.provider_handle.take()).await;
+    app_state.active_users.terminate_session(username, session_token).await;
+    app_state.active_provider.clear_provider_reservation(session_token).await;
+}
+
+async fn probe_catchup_payload(
+    stream: BoxedProviderStream,
+    deadline: Duration,
+) -> Result<CatchupPayload, StreamError> {
+    tokio::time::timeout(deadline, probe_catchup_payload_inner(stream))
+        .await
+        .map_err(|_| StreamError::Stream("catch-up payload probe timed out".to_string()))?
+}
+
+async fn probe_catchup_payload_inner(mut stream: BoxedProviderStream) -> Result<CatchupPayload, StreamError> {
+    const HLS_SIGNATURE: &[u8] = b"#EXTM3U";
+
+    let mut prefix = BytesMut::new();
+    while prefix.len() < HLS_SIGNATURE.len() {
+        let Some(chunk) = stream.next().await else {
+            return Ok(CatchupPayload::Direct(stream::once(async move { Ok(prefix.freeze()) }).chain(stream).boxed()));
+        };
+        prefix.extend_from_slice(&chunk?);
+    }
+
+    if !prefix.starts_with(HLS_SIGNATURE) {
+        return Ok(CatchupPayload::Direct(stream::once(async move { Ok(prefix.freeze()) }).chain(stream).boxed()));
+    }
+    if prefix.len() > MAX_HLS_MANIFEST_BYTES {
+        return Err(StreamError::Stream("catch-up HLS manifest exceeds size limit".to_string()));
+    }
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if prefix.len().saturating_add(chunk.len()) > MAX_HLS_MANIFEST_BYTES {
+            return Err(StreamError::Stream("catch-up HLS manifest exceeds size limit".to_string()));
+        }
+        prefix.extend_from_slice(&chunk);
+    }
+
+    Ok(CatchupPayload::HlsManifest(prefix.freeze()))
 }
 
 fn get_stream_throttle(app_state: &Arc<AppState>) -> u64 {
@@ -4413,6 +4651,70 @@ mod tests {
         assert!(frames <= 2, "small JSON entries should be coalesced, got {frames} frames");
         let decoded = serde_json::from_slice::<Vec<u32>>(&bytes);
         assert!(decoded.is_ok_and(|values| values.len() == 4_096));
+    }
+
+    #[tokio::test]
+    async fn catchup_payload_probe_detects_fragmented_hls() {
+        let source = stream::iter([
+            Ok::<_, StreamError>(Bytes::from_static(b"#EX")),
+            Ok(Bytes::from_static(b"TM3U\nsegment.ts\n")),
+        ])
+        .boxed();
+
+        let result = probe_catchup_payload(source, std::time::Duration::from_secs(1)).await;
+
+        assert!(matches!(&result, Ok(CatchupPayload::HlsManifest(_))));
+        if let Ok(CatchupPayload::HlsManifest(manifest)) = result {
+            assert_eq!(manifest, b"#EXTM3U\nsegment.ts\n".as_slice());
+        }
+    }
+
+    #[tokio::test]
+    async fn catchup_payload_probe_replays_ts_bytes() {
+        let expected = Bytes::from_static(b"\x47direct-ts-payload");
+        let source = stream::iter([Ok::<_, StreamError>(expected.clone())]).boxed();
+
+        let result = probe_catchup_payload(source, std::time::Duration::from_secs(1)).await;
+
+        assert!(matches!(&result, Ok(CatchupPayload::Direct(_))));
+        if let Ok(CatchupPayload::Direct(mut stream)) = result {
+            let mut actual = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                if let Ok(chunk) = chunk {
+                    actual.extend_from_slice(&chunk);
+                }
+            }
+            assert_eq!(actual, expected.as_ref());
+        }
+    }
+
+    #[tokio::test]
+    async fn catchup_payload_probe_replays_partial_signature_at_eof() {
+        let expected = Bytes::from_static(b"#EXT");
+        let source = stream::iter([Ok::<_, StreamError>(expected.clone())]).boxed();
+
+        let result = probe_catchup_payload(source, std::time::Duration::from_secs(1)).await;
+
+        assert!(matches!(&result, Ok(CatchupPayload::Direct(_))));
+        if let Ok(CatchupPayload::Direct(mut stream)) = result {
+            let actual = stream.next().await.and_then(Result::ok);
+            assert_eq!(actual.as_ref(), Some(&expected));
+            assert!(stream.next().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn catchup_payload_probe_rejects_oversized_manifest() {
+        let oversized = vec![b'x'; MAX_HLS_MANIFEST_BYTES];
+        let source = stream::iter([
+            Ok::<_, StreamError>(Bytes::from_static(b"#EXTM3U")),
+            Ok(Bytes::from(oversized)),
+        ])
+        .boxed();
+
+        let result = probe_catchup_payload(source, std::time::Duration::from_secs(1)).await;
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -8241,6 +8543,7 @@ mod tests {
             provider_name: Some("provider_1".intern()),
             request_url: None,
             session_headers: None,
+            provider_session_headers: HashMap::new(),
             grace_period: GracePeriodOptions::default(),
             provider_grace_active: false,
             disable_provider_grace: false,
@@ -8260,6 +8563,7 @@ mod tests {
             provider_name: Some("provider_1".intern()),
             request_url: None,
             session_headers: None,
+            provider_session_headers: HashMap::new(),
             grace_period: GracePeriodOptions::default(),
             provider_grace_active: false,
             disable_provider_grace: false,
@@ -8286,6 +8590,7 @@ mod tests {
                 provider_name: Some("provider_1".intern()),
                 request_url: None,
                 session_headers: None,
+                provider_session_headers: HashMap::new(),
                 grace_period: GracePeriodOptions::default(),
                 provider_grace_active: false,
                 disable_provider_grace: false,
@@ -9272,9 +9577,10 @@ mod tests {
     }
 
     #[test]
-    fn grace_hold_defers_live_but_not_provider_affine_session_reopens() {
+    fn grace_hold_defers_live_and_fresh_video_but_not_catchup_or_affine_reopens() {
         assert!(should_defer_provider_open_for_grace_hold(true, true, PlaylistItemType::LiveHls, false));
         assert!(should_defer_provider_open_for_grace_hold(true, true, PlaylistItemType::Video, false));
+        assert!(!should_defer_provider_open_for_grace_hold(true, true, PlaylistItemType::Catchup, false));
         assert!(!should_defer_provider_open_for_grace_hold(true, true, PlaylistItemType::Catchup, true));
         assert!(!should_defer_provider_open_for_grace_hold(true, true, PlaylistItemType::Video, true));
         assert!(!should_defer_provider_open_for_grace_hold(true, false, PlaylistItemType::Video, true));

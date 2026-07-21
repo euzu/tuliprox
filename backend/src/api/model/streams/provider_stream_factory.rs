@@ -2,7 +2,8 @@ use crate::{
     api::{
         api_utils::{get_headers_from_request, StreamOptions},
         model::{
-            create_channel_unavailable_stream, get_header_filter_for_item_type, get_response_headers,
+            create_channel_unavailable_stream, extract_hls_provider_session_headers, get_header_filter_for_item_type,
+            get_response_headers,
             log_hls_origin_content_coding,
             model_utils::{provider_response_headers, ProviderResponseHeaderError},
             streams::{buffered_stream::BufferedStream, client_stream::ClientStream},
@@ -754,6 +755,7 @@ async fn prepare_provider_stream_response_with_context(
     context: ProviderStreamPreparationContext,
     idle_timeout: Duration,
 ) -> Result<ProviderStreamFactoryResponse, ProviderStreamPreparationError> {
+    let provider_session_headers = extract_hls_provider_session_headers(response.headers());
     match context.representation {
         ProviderContentRepresentationMode::PreserveOrigin => {
             if matches!(context.response_head_availability, ProviderResponseHeadAvailability::Unavailable) {
@@ -765,7 +767,7 @@ async fn prepare_provider_stream_response_with_context(
             let headers = provider_response_headers(response.headers(), context.representation)?;
             let response_info = Some((headers, response.status(), Some(response.url().clone()), None));
             let stream = response.bytes_stream().map_err(|error| StreamError::reqwest(&error)).boxed();
-            Ok((stream, response_info))
+            Ok(ProviderStreamFactoryResponse { stream, info: response_info, provider_session_headers })
         }
         ProviderContentRepresentationMode::Identity => {
             let origin_status = response.status();
@@ -804,7 +806,7 @@ async fn prepare_provider_stream_response_with_context(
             let headers = provider_response_headers(&decoded.headers, context.representation)?;
             let response_info = Some((headers, decoded.status, Some(decoded.final_url), None));
             let stream = ReaderStream::new(decoded.body).map_err(|error| provider_decoded_body_error(&error)).boxed();
-            Ok((stream, response_info))
+            Ok(ProviderStreamFactoryResponse { stream, info: response_info, provider_session_headers })
         }
     }
 }
@@ -899,7 +901,7 @@ async fn provider_stream_request(
                     });
                 }
                 let response = prepare_provider_stream_response_for_request(response, stream_options).await;
-                let (provider_stream, response_info) = match response {
+                let response = match response {
                     Ok(response) => response,
                     Err(error) => {
                         let provider_error_class = error.provider_error_class();
@@ -913,10 +915,10 @@ async fn provider_stream_request(
                 if log_enabled!(log::Level::Debug) {
                     // Unfortunately, the HEAD request does not work, so we need this workaround.
                     // We need some header information from the provider, we extract the necessary headers and forward them to the client
-                    let message = format!("Provider response info: {response_info:?}");
+                    let message = format!("Provider response info: {:?}", response.info);
                     debug!("{}", sanitize_sensitive_info(&message));
                 }
-                return Ok(Some((provider_stream, response_info)));
+                return Ok(Some(response));
             }
 
             if status.is_client_error() {
@@ -1067,7 +1069,7 @@ pub async fn create_provider_stream(
     stream_options: ProviderStreamFactoryOptions,
 ) -> Option<ProviderStreamFactoryResponse> {
     match get_provider_stream(app_state, client, &stream_options).await {
-        Ok(Some((init_stream, info))) => {
+        Ok(Some(ProviderStreamFactoryResponse { stream: init_stream, info, provider_session_headers })) => {
             if let Some((_headers, _status, _response_url, Some(custom_video_type))) = &info {
                 let reason = match custom_video_type {
                     CustomVideoStreamType::ChannelUnavailable => Some(ConnectFailureReason::ChannelUnavailable),
@@ -1094,10 +1096,11 @@ pub async fn create_provider_stream(
             } else {
                 stream
             };
-            Some((
-                ClientStream::new(stream, continue_signal.clone(), None, stream_options.get_url_as_str()).boxed(),
+            Some(ProviderStreamFactoryResponse {
+                stream: ClientStream::new(stream, continue_signal.clone(), None, stream_options.get_url_as_str()).boxed(),
                 info,
-            ))
+                provider_session_headers,
+            })
         }
         Ok(None) => None,
         Err(failure) => {
@@ -1115,7 +1118,11 @@ pub async fn create_provider_stream(
                 &get_response_headers(stream_options.get_headers()),
                 StatusCode::OK,
             ) {
-                return Some((boxed_provider_stream, response_info));
+                return Some(ProviderStreamFactoryResponse {
+                    stream: boxed_provider_stream,
+                    info: response_info,
+                    provider_session_headers: HashMap::new(),
+                });
             }
             None
         }
@@ -1261,7 +1268,7 @@ mod tests {
     ) {
         const IDENTITY_BODY: &[u8] = b"decoded redirect body";
 
-        let (stream, info) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::Identity,
             ProviderResponseHeadAvailability::Available,
@@ -1717,6 +1724,32 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn provider_stream_factory_captures_session_cookies_separately() {
+        let (response, _) = local_response(
+            StatusCode::OK,
+            &[("content-type", "application/vnd.apple.mpegurl"), ("set-cookie", "sid=abc; Path=/")],
+            b"#EXTM3U\nsegment.ts\n".to_vec(),
+        )
+        .await;
+
+        let result = prepare_provider_stream_response(
+            response,
+            ProviderContentRepresentationMode::Identity,
+            ProviderResponseHeadAvailability::Available,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        if let Ok(response) = result {
+            assert_eq!(response.provider_session_headers.get("cookie").map(String::as_str), Some("sid=abc"));
+            assert!(response
+                .info
+                .as_ref()
+                .is_some_and(|(headers, _, _, _)| headers.iter().all(|(name, _)| !name.eq_ignore_ascii_case("set-cookie"))));
+        }
+    }
+
     #[test]
     fn cross_origin_provider_requests_keep_only_redirect_safe_headers() {
         let stream_url = Url::parse("http://provider-a.example/live/segment.ts").unwrap();
@@ -1937,7 +1970,7 @@ mod tests {
 
         let encoded = encode(IDENTITY_BODY, TestEncoding::Gzip).await;
         let (response, _) = local_response(StatusCode::OK, &[("Content-Encoding", "gzip")], encoded).await;
-        let (stream, info) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::Identity,
             ProviderResponseHeadAvailability::Unavailable,
@@ -2039,7 +2072,7 @@ mod tests {
             let (response, _) =
                 local_response(StatusCode::OK, &[("Content-Encoding", content_encoding)], encoded).await;
 
-            let (stream, info) = prepare_provider_stream_response(
+            let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
                 response,
                 ProviderContentRepresentationMode::Identity,
                 ProviderResponseHeadAvailability::Available,
@@ -2060,7 +2093,7 @@ mod tests {
         let body = Bytes::from_static(b"\x1f\x8bnot-an-encoded-key");
         let (response, _) = local_response(StatusCode::OK, &[], body.to_vec()).await;
 
-        let (stream, _) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::Identity,
             ProviderResponseHeadAvailability::Available,
@@ -2078,7 +2111,7 @@ mod tests {
             local_response(StatusCode::PARTIAL_CONTENT, &[("Content-Range", "bytes 0-2/10")], PARTIAL_BODY.to_vec())
                 .await;
 
-        let (stream, info) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::Identity,
             ProviderResponseHeadAvailability::Available,
@@ -2102,7 +2135,7 @@ mod tests {
             local_response(StatusCode::OK, &[("Content-Encoding", "gzip"), ("Content-Range", "bytes 0-9/10")], encoded)
                 .await;
 
-        let (stream, info) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::Identity,
             ProviderResponseHeadAvailability::Available,
@@ -2173,7 +2206,7 @@ mod tests {
         )
         .await;
 
-        let (stream, info) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::PreserveOrigin,
             ProviderResponseHeadAvailability::Available,
@@ -2202,7 +2235,7 @@ mod tests {
         )
         .await;
 
-        let (stream, info) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::PreserveOrigin,
             ProviderResponseHeadAvailability::Available,
@@ -2223,7 +2256,7 @@ mod tests {
         let body = Bytes::from_static(b"\x1f\x8bopaque non-hls bytes");
         let (response, _) = local_response(StatusCode::OK, &[], body.to_vec()).await;
 
-        let (stream, _) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::PreserveOrigin,
             ProviderResponseHeadAvailability::Available,
@@ -2240,7 +2273,7 @@ mod tests {
         truncated.truncate(truncated.len().saturating_sub(5));
         let (response, requests) = local_response(StatusCode::OK, &[("Content-Encoding", "gzip")], truncated).await;
 
-        let (stream, _) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::Identity,
             ProviderResponseHeadAvailability::Available,
