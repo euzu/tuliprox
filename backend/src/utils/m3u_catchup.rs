@@ -1,4 +1,5 @@
 use crate::utils::{encode_m3u_catchup_token, M3uCatchupToken};
+use chrono::{DateTime, NaiveDateTime};
 use shared::{
     error::TuliproxError,
     model::CatchupProperties,
@@ -13,6 +14,12 @@ const COLLECTOR_PREFIX: &str = "v";
 const SIPTV_APPEND_TEMPLATE: &str = "?utc={utc}&lutc={lutc}";
 const XC_START_TEMPLATE: &str = "{Y}-{m}-{d}:{H}-{M}-{S}";
 const FLUSSONIC_TEMPLATE: &str = "timeshift_abs-{utc}";
+const XTREAM_BRIDGE_START_FORMATS: [&str; 4] = [
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d:%H-%M",
+    "%Y-%m-%d:%H:%M",
+    "%Y-%m-%d-%H-%M",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M3uCatchupRewrite {
@@ -310,6 +317,85 @@ pub fn has_m3u_catchup_marker(raw_query: Option<&str>) -> bool {
     })
 }
 
+pub fn is_xtream_m3u_catchup_supported(source_url: &str, catchup: &CatchupProperties) -> bool {
+    xtream_m3u_catchup_segments(source_url, catchup).is_some()
+}
+
+fn xtream_m3u_catchup_segments(
+    source_url: &str,
+    catchup: &CatchupProperties,
+) -> Option<Vec<TemplateSegment>> {
+    let template = derived_template_for_mode(source_url, catchup)?;
+    let segments = parse_template(template.as_ref());
+    let mut has_placeholder = false;
+    for segment in &segments {
+        if let TemplateSegment::Placeholder(value) = segment {
+            has_placeholder = true;
+            if !matches!(value.as_str(), "{utc}" | "{duration}") {
+                return None;
+            }
+        }
+    }
+    has_placeholder.then_some(segments)
+}
+
+fn parse_xtream_bridge_start(start: &str) -> Result<i64, TuliproxError> {
+    if let Ok(ts) = start.parse::<i64>() {
+        return DateTime::from_timestamp(ts, 0).map(|_| ts).ok_or_else(|| {
+            TuliproxError::RepositoryM3u(format!("Invalid Xtream start timestamp: {start}"))
+        });
+    }
+    for fmt in XTREAM_BRIDGE_START_FORMATS {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(start, fmt) {
+            return Ok(dt.and_utc().timestamp());
+        }
+    }
+    Err(TuliproxError::RepositoryM3u(format!(
+        "Unsupported Xtream start time format: {start}"
+    )))
+}
+
+pub fn resolve_xtream_m3u_catchup_url(
+    source_url: &str,
+    catchup: &CatchupProperties,
+    start: &str,
+    duration_minutes: &str,
+) -> Result<ResolvedM3uCatchup, TuliproxError> {
+    let segments = xtream_m3u_catchup_segments(source_url, catchup).ok_or_else(|| {
+        TuliproxError::RepositoryM3u(
+            "M3U catch-up template is not supported by the Xtream bridge".to_string(),
+        )
+    })?;
+    let utc_start = parse_xtream_bridge_start(start)?;
+    let minutes: u64 = duration_minutes.parse().map_err(|_| {
+        TuliproxError::RepositoryM3u(format!("Invalid Xtream duration minutes: {duration_minutes}"))
+    })?;
+    let duration_secs = minutes.checked_mul(60).ok_or_else(|| {
+        TuliproxError::RepositoryM3u("Xtream duration minutes overflow seconds".to_string())
+    })?;
+
+    let collectors: Vec<(usize, String)> = segments
+        .iter()
+        .filter_map(|segment| match segment {
+            TemplateSegment::Placeholder(value) => Some(value.as_str()),
+            TemplateSegment::Literal(_) => None,
+        })
+        .enumerate()
+        .map(|(idx, p)| {
+            let value = if p == "{utc}" {
+                utc_start.to_string()
+            } else {
+                duration_secs.to_string()
+            };
+            (idx, value)
+        })
+        .collect();
+
+    let url = render_template(&segments, &collectors)?;
+    let discriminator = short_hash(&url);
+    Ok(ResolvedM3uCatchup { url, discriminator })
+}
+
 pub fn resolve_m3u_catchup_url(
     source_url: &str,
     catchup: &CatchupProperties,
@@ -342,9 +428,10 @@ pub fn resolve_m3u_catchup_url(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_m3u_catchup_rewrite, has_m3u_catchup_marker, resolve_m3u_catchup_url, M3U_CATCHUP_MARKER,
+        build_m3u_catchup_rewrite, has_m3u_catchup_marker, is_xtream_m3u_catchup_supported,
+        resolve_m3u_catchup_url, resolve_xtream_m3u_catchup_url, M3U_CATCHUP_MARKER,
     };
-    use shared::{model::CatchupProperties, utils::Internable};
+    use shared::{error::TuliproxError, model::CatchupProperties, utils::Internable};
 
     #[test]
     fn explicit_append_rewrite_uses_live_route_marker() {
@@ -528,5 +615,101 @@ mod tests {
         assert!(has_m3u_catchup_marker(Some(&format!("{M3U_CATCHUP_MARKER}=abc&v0=1"))));
         assert!(!has_m3u_catchup_marker(Some("v0=1")));
         assert!(!has_m3u_catchup_marker(None));
+    }
+
+    #[test]
+    fn xtream_bridge_resolves_flussonic_utc_and_duration() {
+        let catchup = CatchupProperties {
+            mode: Some("flussonic".intern()),
+            source: Some("http://provider.example/channel/video-{utc}-{duration}.m3u8".intern()),
+            ..CatchupProperties::default()
+        };
+        let resolved = resolve_xtream_m3u_catchup_url(
+            "http://provider.example/channel/index.m3u8",
+            &catchup,
+            "2024-01-01:00-00",
+            "60",
+        )
+        .expect("valid Flussonic template");
+        assert_eq!(
+            resolved.url,
+            "http://provider.example/channel/video-1704067200-3600.m3u8"
+        );
+        assert!(!resolved.discriminator.is_empty());
+    }
+
+    #[test]
+    fn xtream_bridge_rejects_unsupported_placeholder() {
+        let catchup = CatchupProperties {
+            mode: Some("flussonic".intern()),
+            source: Some("http://provider.example/channel/${timestamp}.m3u8".intern()),
+            ..CatchupProperties::default()
+        };
+        assert!(!is_xtream_m3u_catchup_supported(
+            "http://provider.example/channel/index.m3u8",
+            &catchup
+        ));
+        let err = resolve_xtream_m3u_catchup_url(
+            "http://provider.example/channel/index.m3u8",
+            &catchup,
+            "2024-01-01:00-00",
+            "60",
+        )
+        .unwrap_err();
+        assert!(matches!(err, TuliproxError::RepositoryM3u(_)));
+    }
+
+    #[test]
+    fn xtream_bridge_rejects_invalid_start_time() {
+        let catchup = CatchupProperties {
+            mode: Some("flussonic".intern()),
+            source: Some("http://provider.example/channel/video-{utc}-{duration}.m3u8".intern()),
+            ..CatchupProperties::default()
+        };
+        let err = resolve_xtream_m3u_catchup_url(
+            "http://provider.example/channel/index.m3u8",
+            &catchup,
+            "not-a-timestamp",
+            "60",
+        )
+        .unwrap_err();
+        assert!(matches!(err, TuliproxError::RepositoryM3u(_)));
+    }
+
+    #[test]
+    fn xtream_bridge_rejects_overflowing_duration_minutes() {
+        let catchup = CatchupProperties {
+            mode: Some("flussonic".intern()),
+            source: Some("http://provider.example/channel/video-{utc}-{duration}.m3u8".intern()),
+            ..CatchupProperties::default()
+        };
+        let err = resolve_xtream_m3u_catchup_url(
+            "http://provider.example/channel/index.m3u8",
+            &catchup,
+            "2024-01-01:00-00",
+            &u64::MAX.to_string(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, TuliproxError::RepositoryM3u(_)));
+    }
+
+    #[test]
+    fn xtream_bridge_accepts_unix_seconds_start() {
+        let catchup = CatchupProperties {
+            mode: Some("flussonic".intern()),
+            source: Some("http://provider.example/channel/video-{utc}-{duration}.m3u8".intern()),
+            ..CatchupProperties::default()
+        };
+        let resolved = resolve_xtream_m3u_catchup_url(
+            "http://provider.example/channel/index.m3u8",
+            &catchup,
+            "1704067200",
+            "60",
+        )
+        .expect("unix seconds start");
+        assert_eq!(
+            resolved.url,
+            "http://provider.example/channel/video-1704067200-3600.m3u8"
+        );
     }
 }

@@ -524,6 +524,7 @@ fn from_programme(
     epg_id: &Arc<str>,
     programme: &EpgProgramme,
     epg_processing_options: &EpgProcessingOptions,
+    has_archive: bool,
 ) -> ShortEpgDto {
     let (start_str, end_str, start_ts, stop_ts) = get_applied_epg_timeshift(programme, epg_processing_options);
 
@@ -540,12 +541,13 @@ fn from_programme(
         stop_timestamp: stop_ts.to_string(),
         stream_id: Arc::clone(stream_id),
         now_playing: None,
-        has_archive: None,
+        has_archive: has_archive.then_some(1),
     }
 }
 
 const DEFAULT_SHORT_EPG_LIMIT: u32 = 4;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_short_epg(
     app_state: &Arc<AppState>,
     epg_path: &Path,
@@ -554,6 +556,7 @@ pub async fn serve_short_epg(
     channel_id: &Arc<str>,
     stream_id: Arc<str>,
     limit: u32,
+    has_archive: bool,
 ) -> axum::response::Response {
     let lowercase_ids = target
         .options
@@ -569,19 +572,13 @@ pub async fn serve_short_epg(
             if let Some(epg_channel) = get_epg_channel_by_storage_key(app_state, &storage_key, epg_path).await {
                 let epg_processing_options = get_epg_processing_options(app_state, user, target);
                 ShortEpgResultDto {
-                    epg_listings: if limit > 0 {
-                        epg_channel
-                            .get_programme_with_limit(limit)
-                            .iter()
-                            .map(|p| from_programme(&stream_id, &response_channel_id, p, &epg_processing_options))
-                            .collect()
-                    } else {
-                        epg_channel
-                            .programmes
-                            .iter()
-                            .map(|p| from_programme(&stream_id, &response_channel_id, p, &epg_processing_options))
-                            .collect()
-                    },
+                    epg_listings: epg_channel
+                        .get_programme_with_limit(limit)
+                        .iter()
+                        .map(|p| {
+                            from_programme(&stream_id, &response_channel_id, p, &epg_processing_options, has_archive)
+                        })
+                        .collect(),
                 }
             } else {
                 ShortEpgResultDto::default()
@@ -1422,10 +1419,35 @@ mod tests {
             encrypt_secret: [0; 16],
         };
 
-        let result = from_programme(&stream_id, &epg_id, &programme, &options);
+        let result = from_programme(&stream_id, &epg_id, &programme, &options, false);
 
         assert_eq!(result.epg_id.as_ref(), "example.channel");
         assert_eq!(result.channel_id.as_ref(), "example.channel");
+    }
+
+    #[test]
+    fn from_programme_sets_has_archive_only_when_capability_true() {
+        let stream_id = "42".intern();
+        let epg_id = "example.channel".intern();
+        let programme = EpgProgramme::new_all(
+            100,
+            200,
+            Arc::clone(&epg_id),
+            Some("News".intern()),
+            None,
+            None,
+        );
+        let options = EpgProcessingOptions {
+            rewrite_urls: false,
+            time_shift: EpgTimeShift::None,
+            encrypt_secret: [0; 16],
+        };
+
+        let archived = from_programme(&stream_id, &epg_id, &programme, &options, true);
+        let live_only = from_programme(&stream_id, &epg_id, &programme, &options, false);
+
+        assert_eq!(archived.has_archive, Some(1));
+        assert_eq!(live_only.has_archive, None);
     }
 
     #[test]
@@ -1721,6 +1743,7 @@ mod tests {
             &request_id,
             "42".intern(),
             4,
+            false,
         )
         .await;
         let body = response_body_text(response).await;
@@ -1740,6 +1763,7 @@ mod tests {
             &request_id,
             "42".intern(),
             4,
+            false,
         )
         .await;
         let disabled_body = response_body_text(disabled_response).await;
