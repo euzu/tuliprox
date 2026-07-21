@@ -1,6 +1,5 @@
 use crate::i18n::use_translation;
 use shared::model::MappingCounter;
-use std::sync::atomic::Ordering;
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq, Clone)]
@@ -32,7 +31,7 @@ pub fn MapperCounterView(props: &MapperCounterViewProps) -> Html {
         </div>
         <div class="tp__mapper-counter__row">
             <label>{translate.t("LABEL.VALUE")}</label>
-            {props.counter.value.load(Ordering::Relaxed)}
+            {props.counter.start}
         </div>
         <div class="tp__mapper-counter__row">
             <label>{translate.t("LABEL.PADING")}</label>

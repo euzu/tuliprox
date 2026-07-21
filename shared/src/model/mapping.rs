@@ -4,7 +4,6 @@ use crate::{
     model::PatternTemplate,
 };
 use log::trace;
-use std::sync::{atomic::AtomicU32, Arc};
 use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 
 pub const COUNTER_FIELDS: &[&str] = &["name", "title", "caption", "chno"];
@@ -78,7 +77,7 @@ pub struct MappingCounter {
     pub field: String,
     pub concat: String,
     pub modifier: CounterModifier,
-    pub value: Arc<AtomicU32>,
+    pub start: u32,
     pub padding: u8,
 }
 
@@ -88,8 +87,8 @@ impl PartialEq for MappingCounter {
             && self.field == other.field
             && self.concat == other.concat
             && self.modifier == other.modifier
+            && self.start == other.start
             && self.padding == other.padding
-        // value is not compared!
     }
 }
 
@@ -206,7 +205,7 @@ impl MappingDto {
                         field: def.field.clone(),
                         concat: def.concat.clone(),
                         modifier: def.modifier,
-                        value: Arc::new(AtomicU32::new(def.value)),
+                        start: def.value,
                         padding: def.padding,
                     });
                 }
