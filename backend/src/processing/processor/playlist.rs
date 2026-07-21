@@ -323,11 +323,14 @@ fn map_playlist_counter(target: &ConfigTarget, playlist: &mut [PlaylistGroup]) {
         for mapping in mappings {
             if let Some(counter_list) = &mapping.t_counter {
                 for counter in counter_list {
+                    // fresh per target/call. No shared atomic, no cross-refresh carry-over.
+                    let mut current = counter.start;
                     for plg in &mut *playlist {
                         for channel in &mut plg.channels {
                             let provider = ValueProvider { pli: channel, match_as_ascii: mapping.match_as_ascii };
                             if counter.filter.filter(&provider) {
-                                let cntval = counter.value.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                                let cntval = current;
+                                current += 1;
                                 let padded_cntval = if counter.padding > 0 {
                                     format!("{:0width$}", cntval, width = counter.padding as usize)
                                 } else {
