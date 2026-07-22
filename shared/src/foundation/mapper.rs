@@ -37,13 +37,16 @@ number_range_to = { ".." ~ number }
 number_range_full = { number ~ ".." ~ number }
 number_range_eq = { number }
 number_range = _{ number_range_full | number_range_from | number_range_to | number_range_eq}
-field = { ^"name" | ^"title" | ^"caption" | ^"group" | ^"id" | ^"chno" | ^"logo" | ^"logo_small" | ^"parent_code" | ^"audio_track" | ^"time_shift" | ^"rec" | ^"url" | ^"epg_channel_id" | ^"epg_id" | ^"genre" }
+read_write_field = _{ ^"name" | ^"title" | ^"caption" | ^"group" | ^"id" | ^"chno" | ^"logo" | ^"logo_small" | ^"parent_code" | ^"audio_track" | ^"time_shift" | ^"rec" | ^"url" | ^"epg_channel_id" | ^"epg_id" | ^"genre" }
+read_only_field = _{ ^"input" | ^"type" }
+field = { read_write_field | read_only_field }
+assignment_field = { read_write_field }
 field_access = _{ "@" ~ field }
 regex_source = _{ field_access | identifier }
 regex_expr = { regex_source ~ regex_op ~ string_literal }
 block_expr = { "{" ~ statements ~ "}" }
 condition = { function_call | var_access | field_access }
-assignment = { (field_access | identifier) ~ "=" ~ expression }
+assignment = { (("@" ~ assignment_field) | identifier) ~ "=" ~ expression }
 expression = { assignment | map_block | match_block | for_each_block | function_call | regex_expr | string_literal | number | var_access | field_access | null | block_expr }
 function_name = { "concat" | "uppercase" | "lowercase" | "capitalize" | "split" | "trim" | "print" | "number" | "first" | "template" | "replace" | "pad" | "format" | "add_favourite" }
 function_call = { function_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" }
@@ -384,7 +387,7 @@ impl MapperScript {
         let name = inner.next().unwrap();
         let target = match name.as_rule() {
             Rule::identifier => AssignmentTarget::Identifier(name.as_str().to_string()),
-            Rule::field => AssignmentTarget::Field(name.as_str().to_string()),
+            Rule::assignment_field => AssignmentTarget::Field(name.as_str().to_string()),
             _ => return Err(TuliproxError::Mapper(format!("Assignment target isn't supported {}", name.as_str()))),
         };
         let next = inner.next().unwrap();
@@ -1086,17 +1089,19 @@ fn eval_regex(source: &str, re_pattern: &Regex, match_as_ascii: bool) -> EvalRes
     let source = if match_as_ascii { deunicode_string(source) } else { Cow::Borrowed(source) };
     let mut values = vec![];
 
-    for caps in re_pattern.captures_iter(&source) {
-        for i in 1..caps.len() {
-            if let Some(value) = caps.get(i) {
-                values.push((i.to_string(), value.as_str().to_string()));
-            }
-        }
+    let Some(caps) = re_pattern.captures(&source) else {
+        return Undefined;
+    };
 
-        for name in re_pattern.capture_names().flatten() {
-            if let Some(value) = caps.name(name) {
-                values.push((name.to_string(), value.as_str().to_string()));
-            }
+    for i in 1..caps.len() {
+        if let Some(value) = caps.get(i) {
+            values.push((i.to_string(), value.as_str().to_string()));
+        }
+    }
+
+    for name in re_pattern.capture_names().flatten() {
+        if let Some(value) = caps.name(name) {
+            values.push((name.to_string(), value.as_str().to_string()));
         }
     }
 
@@ -1164,6 +1169,7 @@ impl Expression {
                 None => Failure(format!("Variable with name {name} not found.")),
                 Some(value) => match value {
                     Undefined => Undefined,
+                    Value(value) if field == "1" => Value(value.clone()),
                     Number(_) | Value(_) => Failure(format!("Variable with name {name} has no fields.")),
                     Named(values) => {
                         for (key, val) in values {
@@ -1488,6 +1494,14 @@ impl Expression {
                         None => Failure(format!("Variable with name {name} not found.")),
                         Some(value) => match value {
                             Undefined => Undefined,
+                            Value(value) if field == "1" => {
+                                let value = if accessor.match_as_ascii {
+                                    deunicode_string(value).into_owned()
+                                } else {
+                                    value.clone()
+                                };
+                                Value(value)
+                            }
                             Number(_) | Value(_) => Failure(format!("Variable with name {name} has no fields.")),
                             Named(values) => {
                                 for (key, val) in values {
@@ -1802,6 +1816,110 @@ mod tests {
         mapper.eval(&mut accessor, None);
 
         assert_eq!(accessor.pli.header.group.as_ref(), "matched");
+    }
+
+    #[test]
+    fn regex_evaluation_keeps_all_groups_from_only_the_first_match() -> Result<(), Box<dyn std::error::Error>> {
+        let regex = Regex::new(r"(?P<one>[A-Z])([A-Z])(?P<three>[A-Z])([A-Z])(?P<five>[A-Z])([A-Z])")?;
+
+        let Named(values) = eval_regex("ABCDEFUVWXYZ", &regex, false) else {
+            return Err("regex captures should produce a named result".into());
+        };
+
+        assert_eq!(
+            values,
+            [
+                ("1", "A"),
+                ("2", "B"),
+                ("3", "C"),
+                ("4", "D"),
+                ("5", "E"),
+                ("6", "F"),
+                ("one", "A"),
+                ("three", "C"),
+                ("five", "E"),
+            ]
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn regex_capture_groups_are_available_by_index_and_name() -> Result<(), Box<dyn std::error::Error>> {
+        let dsl = r#"
+            captures = @Name ~ "(?P<one>[A-Z])([A-Z])(?P<three>[A-Z])([A-Z])(?P<five>[A-Z])([A-Z])"
+            @Title = concat(captures.1, captures.2, captures.3, captures.4, captures.5, captures.6)
+            @Group = concat(captures.one, captures.three, captures.five)
+        "#;
+        let mapper = MapperScript::parse(dsl, None)?;
+        let mut channel = PlaylistItem { header: PlaylistItemHeader { name: "ABCDEF".intern(), ..Default::default() } };
+        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false };
+
+        mapper.eval(&mut accessor, None);
+
+        assert_eq!(accessor.pli.header.title.as_ref(), "ABCDEF");
+        assert_eq!(accessor.pli.header.group.as_ref(), "ACE");
+        Ok(())
+    }
+
+    #[test]
+    fn single_regex_capture_is_available_as_scalar_and_by_index() -> Result<(), Box<dyn std::error::Error>> {
+        let dsl = r#"
+            capture = @Name ~ "([A-Z]+)"
+            @Group = map capture.1 {
+                "ABC" => concat(capture, ":", capture.1),
+                _ => "missed",
+            }
+        "#;
+        let mapper = MapperScript::parse(dsl, None)?;
+        let mut channel = PlaylistItem { header: PlaylistItemHeader { name: "ABC".intern(), ..Default::default() } };
+        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false };
+
+        mapper.eval(&mut accessor, None);
+
+        assert_eq!(accessor.pli.header.group.as_ref(), "ABC:ABC");
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_fields_work_in_direct_regex_and_map_expressions() -> Result<(), Box<dyn std::error::Error>> {
+        let dsl = r#"
+            input_match = @Input ~ "(source)"
+            type_match = @Type ~ "(live)"
+            @Title = concat(@Input, ":", @Type, ":", input_match, ":", type_match)
+            @Group = map @Input {
+                "source" => "input-map",
+                _ => "missed",
+            }
+            @Name = map @Type {
+                "live" => concat(@Group, ":type-map"),
+                _ => "missed",
+            }
+        "#;
+        let mapper = MapperScript::parse(dsl, None)?;
+        let mut channel = PlaylistItem {
+            header: PlaylistItemHeader {
+                input_name: "source".intern(),
+                item_type: PlaylistItemType::Live,
+                ..Default::default()
+            },
+        };
+        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false };
+
+        mapper.eval(&mut accessor, None);
+
+        assert_eq!(accessor.pli.header.title.as_ref(), "source:live:source:live");
+        assert_eq!(accessor.pli.header.group.as_ref(), "input-map");
+        assert_eq!(accessor.pli.header.name.as_ref(), "input-map:type-map");
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_field_assignments_are_rejected() {
+        for script in [r#"@Input = "changed""#, r#"@Type = "movie""#] {
+            assert!(MapperScript::parse(script, None).is_err());
+        }
+        assert!(MapperScript::parse(r#"@Group = "changed""#, None).is_ok());
     }
 
     #[test]
