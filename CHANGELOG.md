@@ -66,6 +66,13 @@
 
 ## 🌟 New Features
 
+- **Mapping block `stage` (`processing` / `after_epg`)**:
+  - Each `mapping.yml` block now accepts an optional `stage`. The default `processing` keeps the block at the
+    target's `M` slot; `after_epg` runs once EPG channel IDs and logos are enriched so mappers can react to
+    them. Counters still run after the final merge and sort. The shared `MappingStage` enum rejects unknown
+    values, and the directory merge fails configuration loading when one mapping id uses conflicting stages.
+  - Mapping-directory merges now preserve declaration order and the first block's `match_as_ascii` value.
+
 - **Mapper Read-Only Metadata Fields**:
   - Mapper scripts can read `@Input` and `@Type` directly and use them as regex sources or map keys.
   - Assignments to these immutable fields are rejected while all existing read-write fields remain assignable.

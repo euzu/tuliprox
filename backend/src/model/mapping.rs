@@ -1,6 +1,9 @@
 use shared::foundation::Filter;
 use shared::foundation::MapperScript;
-use shared::model::{MapperDto, MappingCounter, MappingCounterDefinition, MappingDefinitionDto, MappingDto, MappingsDto, PatternTemplate};
+use shared::model::{
+    MapperDto, MappingCounter, MappingCounterDefinition, MappingDefinitionDto, MappingDto, MappingStage,
+    MappingsDto, PatternTemplate,
+};
 use crate::model::macros;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -30,6 +33,8 @@ pub struct Mapping {
     pub id: String,
     #[serde(default)]
     pub match_as_ascii: bool,
+    #[serde(default, skip_serializing_if = "MappingStage::is_processing")]
+    pub stage: MappingStage,
     pub mapper: Option<Vec<Mapper>>,
     pub counter: Option<Vec<MappingCounterDefinition>>,
     #[serde(skip_serializing, skip_deserializing)]
@@ -43,6 +48,7 @@ impl From<&MappingDto>  for Mapping {
         Self {
             id: dto.id.clone(),
             match_as_ascii: dto.match_as_ascii,
+            stage: dto.stage,
             mapper: dto.mapper.as_ref().map(|l| l.iter().map(Mapper::from).collect()),
             counter: dto.counter.clone(),
             t_counter: dto.t_counter.clone(),

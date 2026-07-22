@@ -1156,6 +1156,9 @@ Valid values are:
 > For example, if renaming occurs before filtering, the filter must match the renamed state rather than the original
 > source value.
 
+`processing_order` only arranges the `processing`-stage mapping blocks around filter and rename. Mapping blocks that
+opt into `stage: after_epg` always run once EPG enrichment has completed, regardless of `processing_order`.
+
 ---
 
 ### 3.2.2 `filter`
