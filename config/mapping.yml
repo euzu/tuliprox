@@ -41,7 +41,7 @@ mappings:
     #   mapper:
     #     - filter: 'Name ~ ".*"'
     #       script: |
-    #         epg = @epg_id ~ "(.+)"
+    #         epg = @epg_channel_id ~ "(.+)"
     #         match {
     #           epg => @Name = epg.1
     #         }

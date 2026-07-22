@@ -291,13 +291,14 @@ fn map_channel_and_flatten(channel: PlaylistItem, mapping: &Mapping) -> Vec<Play
 }
 
 fn map_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
-    map_playlist_at_stage(source, target, MappingStage::Processing)
+    map_playlist_at_stage(source, target, MappingStage::Processing, None)
 }
 
 fn map_playlist_at_stage(
     source: &mut PlaylistSource,
     target: &ConfigTarget,
     stage: MappingStage,
+    duplicates: Option<&mut HashSet<UUIDType>>,
 ) -> Option<Vec<PlaylistGroup>> {
     let mapping_binding = target.mapping.load();
     let mappings = mapping_binding.as_ref()?;
@@ -306,6 +307,11 @@ fn map_playlist_at_stage(
         .filter(|m| m.stage == stage && m.mapper.as_ref().is_some_and(|items| !items.is_empty()))
         .peekable();
     valid_mappings.peek()?;
+    let original_ids = if duplicates.is_some() {
+        Some(source.items().map(|item| *item.header.get_uuid()).collect::<HashSet<_>>())
+    } else {
+        None
+    };
     let iter: Box<dyn Iterator<Item=PlaylistItem>> = Box::new(source.into_items());
     let mapped_iter = valid_mappings.fold(iter, |iter, mapping| {
         Box::new(iter.flat_map(move |chan| map_channel_and_flatten(chan, mapping)))
@@ -326,7 +332,16 @@ fn map_playlist_at_stage(
             .push(channel);
     }
 
-    Some(next_groups.into_values().collect())
+    let mut groups = next_groups.into_values().collect::<Vec<_>>();
+    if let (Some(original_ids), Some(duplicates)) = (original_ids, duplicates) {
+        for group in &mut groups {
+            group.channels.retain(|item| {
+                let uuid = *item.header.get_uuid();
+                original_ids.contains(&uuid) || duplicates.insert(uuid)
+            });
+        }
+    }
+    Some(groups)
 }
 
 fn map_playlist_counter(target: &ConfigTarget, playlist: &mut [PlaylistGroup]) {
@@ -1484,7 +1499,13 @@ async fn prepare_playlist_for_target(
         log_memory_snapshot(
             format!("target '{}' input '{}' after_epg_apply", target.name, processed_fpl.input.name).as_str(),
         );
-        if let Some(groups) = map_playlist_at_stage(&mut processed_fpl.source, target, MappingStage::AfterEpg) {
+        let deduplicate = target.options.as_ref().is_some_and(|options| options.remove_duplicates);
+        if let Some(groups) = map_playlist_at_stage(
+            &mut processed_fpl.source,
+            target,
+            MappingStage::AfterEpg,
+            deduplicate.then_some(&mut duplicates),
+        ) {
             processed_fpl.source = MemoryPlaylistSource::new(groups).into_source();
         }
         if let Some(stat) = stats.get_mut(&processed_fpl.input.name) {
@@ -2859,7 +2880,7 @@ mod tests {
             assert_eq!(groups[0].channels[0].header.name.as_ref(), "Alpha-P");
 
             let mut source = MemoryPlaylistSource::new(groups).into_source();
-            let groups = map_playlist_at_stage(&mut source, &target, MappingStage::AfterEpg)
+            let groups = map_playlist_at_stage(&mut source, &target, MappingStage::AfterEpg, None)
                 .expect("after_epg mapping should run");
             assert_eq!(groups[0].channels[0].header.name.as_ref(), "Alpha-P-E");
         }
@@ -2869,7 +2890,7 @@ mod tests {
             let target = build_target(Vec::new(), false);
             let mut source = memory_source(vec![make_channel("Alpha")]);
 
-            let result = map_playlist_at_stage(&mut source, &target, MappingStage::AfterEpg);
+            let result = map_playlist_at_stage(&mut source, &target, MappingStage::AfterEpg, None);
             assert!(result.is_none(), "no matching stage must return None");
             assert_eq!(channel_count(&mut source), 1, "source must remain intact");
         }
@@ -2927,7 +2948,7 @@ mod tests {
                 let rename_from_epg = build_mapping(
                     "rename",
                     MappingStage::AfterEpg,
-                    r#"epg = @epg_id ~ "(.+)"
+                    r#"epg = @epg_channel_id ~ "(.+)"
 match {
   epg => @Name = epg.1
 }"#,
@@ -3010,7 +3031,7 @@ match {
             .expect("processing pipe must run");
             assert_eq!(processed.get_channel_count(), 1, "processing pipe must remove the duplicate");
 
-            let groups = map_playlist_at_stage(&mut processed.source, &target, MappingStage::AfterEpg)
+            let groups = map_playlist_at_stage(&mut processed.source, &target, MappingStage::AfterEpg, None)
                 .expect("after_epg hook must run");
 
             assert_eq!(groups.len(), 2);
@@ -3018,6 +3039,42 @@ match {
             assert_eq!(groups[0].channels.len(), 1);
             assert_eq!(groups[1].title.as_ref(), "Echo");
             assert_eq!(groups[1].channels.len(), 1);
+        }
+
+        #[test]
+        fn prepare_target_deduplicates_virtual_items_created_by_after_epg_mappings() {
+            let runtime = Runtime::new().expect("runtime");
+            runtime.block_on(async {
+                let first = build_mapping("first", MappingStage::AfterEpg, r#"add_favourite("Echo")"#);
+                let second = build_mapping("second", MappingStage::AfterEpg, r#"add_favourite("Echo")"#);
+                let target = build_target(vec![first, second], true);
+                let input = ConfigInput { name: "input".intern(), ..Default::default() };
+                let mut playlist = FetchedPlaylist {
+                    input: &input,
+                    source: memory_source(vec![make_channel("Alpha")]),
+                    epg: None,
+                };
+                let mut stats = HashMap::from([(
+                    Arc::clone(&input.name),
+                    create_input_stat(1, 1, 0, input.input_type, &input.name, 0),
+                )]);
+                let mut errors = Vec::new();
+
+                let prepared = prepare_playlist_for_target(
+                    &processing_context(),
+                    std::slice::from_mut(&mut playlist),
+                    &target,
+                    &mut stats,
+                    &mut errors,
+                    false,
+                )
+                .await
+                .expect("target preparation");
+
+                assert!(errors.is_empty());
+                assert_eq!(prepared.playlist.iter().map(|group| group.channels.len()).sum::<usize>(), 3);
+                assert_eq!(stats[&input.name].processed_stats.channel_count, 3);
+            });
         }
     }
 }

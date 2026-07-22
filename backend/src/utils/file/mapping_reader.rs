@@ -250,8 +250,8 @@ mod tests {
         let merged = merge_mapping_definitions(sources(vec![first, second])).expect("same stage must merge");
         let mapping = &merged.mappings.mapping;
         assert_eq!(mapping.len(), 1, "same id must collapse");
-        assert_eq!(mapping[0].mapper.as_ref().map(|m| m.len()), Some(2));
-        assert_eq!(mapping[0].counter.as_ref().map(|c| c.len()), Some(2));
+        assert_eq!(mapping[0].mapper.as_ref().map(Vec::len), Some(2));
+        assert_eq!(mapping[0].counter.as_ref().map(Vec::len), Some(2));
     }
 
     #[test]
