@@ -17,7 +17,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    fmt::{Display, Write},
+    fmt::Display,
     ops::Deref,
     str::FromStr,
     sync::Arc,
@@ -37,13 +37,16 @@ number_range_to = { ".." ~ number }
 number_range_full = { number ~ ".." ~ number }
 number_range_eq = { number }
 number_range = _{ number_range_full | number_range_from | number_range_to | number_range_eq}
-field = { ^"name" | ^"title" | ^"caption" | ^"group" | ^"id" | ^"chno" | ^"logo" | ^"logo_small" | ^"parent_code" | ^"audio_track" | ^"time_shift" | ^"rec" | ^"url" | ^"epg_channel_id" | ^"epg_id" | ^"genre" }
+read_write_field = _{ ^"name" | ^"title" | ^"caption" | ^"group" | ^"id" | ^"chno" | ^"logo" | ^"logo_small" | ^"parent_code" | ^"audio_track" | ^"time_shift" | ^"rec" | ^"url" | ^"epg_channel_id" | ^"epg_id" | ^"genre" }
+read_only_field = _{ ^"input" | ^"type" }
+field = { read_write_field | read_only_field }
+assignment_field = { read_write_field }
 field_access = _{ "@" ~ field }
 regex_source = _{ field_access | identifier }
 regex_expr = { regex_source ~ regex_op ~ string_literal }
 block_expr = { "{" ~ statements ~ "}" }
 condition = { function_call | var_access | field_access }
-assignment = { (field_access | identifier) ~ "=" ~ expression }
+assignment = { (("@" ~ assignment_field) | identifier) ~ "=" ~ expression }
 expression = { assignment | map_block | match_block | for_each_block | function_call | regex_expr | string_literal | number | var_access | field_access | null | block_expr }
 function_name = { "concat" | "uppercase" | "lowercase" | "capitalize" | "split" | "trim" | "print" | "number" | "first" | "template" | "replace" | "pad" | "format" | "add_favourite" }
 function_call = { function_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" }
@@ -197,7 +200,7 @@ impl FromStr for BuiltInFunction {
 
 impl Display for BuiltInFunction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let str = match &self {
+        f.write_str(match self {
             Self::Concat => "concat",
             Self::Capitalize => "capitalize",
             Self::Lowercase => "lowercase",
@@ -212,9 +215,7 @@ impl Display for BuiltInFunction {
             Self::Pad => "pad",
             Self::Format => "format",
             Self::AddFavourite => "add_favourite",
-        }
-        .to_owned();
-        write!(f, "{str}")
+        })
     }
 }
 
@@ -323,8 +324,8 @@ impl Statement {
 
 impl MapperScript {
     fn validate(
-        expressions: &Vec<Expression>,
-        statements: &Vec<Statement>,
+        expressions: &[Expression],
+        statements: &[Statement],
         templates: Option<&[PatternTemplate]>,
     ) -> Result<(), TuliproxError> {
         let ctx = &mut MapperContext::new(expressions, templates);
@@ -386,7 +387,7 @@ impl MapperScript {
         let name = inner.next().unwrap();
         let target = match name.as_rule() {
             Rule::identifier => AssignmentTarget::Identifier(name.as_str().to_string()),
-            Rule::field => AssignmentTarget::Field(name.as_str().to_string()),
+            Rule::assignment_field => AssignmentTarget::Field(name.as_str().to_string()),
             _ => return Err(TuliproxError::Mapper(format!("Assignment target isn't supported {}", name.as_str()))),
         };
         let next = inner.next().unwrap();
@@ -723,41 +724,30 @@ impl MapperScript {
 }
 
 pub struct MapperContext<'a> {
-    expressions: &'a Vec<Expression>,
+    expressions: &'a [Expression],
     variables: HashMap<String, EvalResult>,
-    templates: Option<HashMap<String, &'a PatternTemplate>>,
+    templates: Option<&'a [PatternTemplate]>,
 }
 
 impl<'a> MapperContext<'a> {
-    fn new(expressions: &'a Vec<Expression>, templates: Option<&'a [PatternTemplate]>) -> Self {
-        Self {
-            expressions,
-            variables: HashMap::new(),
-            templates: templates.and_then(|vec_templates| {
-                if vec_templates.is_empty() {
-                    None
-                } else {
-                    let mut hash_map = HashMap::new();
-                    for template in vec_templates {
-                        hash_map.insert(template.name.to_string(), template);
-                    }
-                    Some(hash_map)
-                }
-            }),
-        }
+    fn new(expressions: &'a [Expression], templates: Option<&'a [PatternTemplate]>) -> Self {
+        Self { expressions, variables: HashMap::new(), templates: templates.filter(|templates| !templates.is_empty()) }
     }
 
     fn get_template(&self, name: &str) -> Option<&str> {
-        match self.templates.as_ref() {
-            None => None,
-            Some(templates) => templates.get(name).and_then(|&template| match &template.value {
-                TemplateValue::Single(v) => Some(v.as_str()),
-                TemplateValue::Multi(_) => None,
-            }),
-        }
+        self.templates?.iter().rev().find(|template| template.name == name).and_then(|template| match &template.value {
+            TemplateValue::Single(v) => Some(v.as_str()),
+            TemplateValue::Multi(_) => None,
+        })
     }
 
-    fn set_var(&mut self, name: &str, value: EvalResult) { self.variables.insert(name.to_string(), value); }
+    fn set_var(&mut self, name: &str, value: EvalResult) {
+        if let Some(current) = self.variables.get_mut(name) {
+            *current = value;
+        } else {
+            self.variables.insert(name.to_string(), value);
+        }
+    }
 
     fn has_var(&self, name: &str) -> bool { self.variables.contains_key(name) }
 
@@ -1043,18 +1033,6 @@ fn cmp_number(num: f64, s: &str) -> Option<Ordering> {
 }
 
 impl EvalResult {
-    fn matches(&self, other: &EvalResult) -> bool {
-        match (self, other) {
-            (AnyValue, _) | (_, AnyValue) => true,
-            (Value(a), Value(b)) => a == b,
-            (Number(a), Value(b)) => match_number(*a, b),
-            (Value(a), Number(b)) => match_number(*b, a),
-            (Number(a), Number(b)) => compare_number(*a, *b) == Ordering::Equal,
-            (Named(a), Named(b)) => compare_tuple_vec(a, b),
-            _ => false,
-        }
-    }
-
     fn compare(&self, other: &EvalResult) -> Option<Ordering> {
         match (self, other) {
             (AnyValue, _) | (_, AnyValue) => Some(Ordering::Equal),
@@ -1107,6 +1085,42 @@ fn concat_args(args: &Vec<EvalResult>) -> Vec<Cow<'_, str>> {
     result
 }
 
+fn eval_regex(source: &str, re_pattern: &Regex, match_as_ascii: bool) -> EvalResult {
+    let source = if match_as_ascii { deunicode_string(source) } else { Cow::Borrowed(source) };
+    let mut values = vec![];
+
+    let Some(caps) = re_pattern.captures(&source) else {
+        return Undefined;
+    };
+
+    for i in 1..caps.len() {
+        if let Some(value) = caps.get(i) {
+            values.push((i.to_string(), value.as_str().to_string()));
+        }
+    }
+
+    for name in re_pattern.capture_names().flatten() {
+        if let Some(value) = caps.name(name) {
+            values.push((name.to_string(), value.as_str().to_string()));
+        }
+    }
+
+    match values.len() {
+        0 => Undefined,
+        1 => values.pop().map_or(Undefined, |(_, value)| Value(value)),
+        _ => Named(values),
+    }
+}
+
+fn matches_text(value: &EvalResult, expected: &str) -> bool {
+    match value {
+        AnyValue => true,
+        Value(actual) => actual == expected,
+        Number(actual) => match_number(*actual, expected),
+        Undefined | Named(_) | Failure(_) => false,
+    }
+}
+
 macro_rules! extract_evaluated_arg_value {
     ($evaluated_args:expr, $index:expr) => {{
         if $index >= $evaluated_args.len() {
@@ -1155,6 +1169,7 @@ impl Expression {
                 None => Failure(format!("Variable with name {name} not found.")),
                 Some(value) => match value {
                     Undefined => Undefined,
+                    Value(value) if field == "1" => Value(value.clone()),
                     Number(_) | Value(_) => Failure(format!("Variable with name {name} has no fields.")),
                     Named(values) => {
                         for (key, val) in values {
@@ -1169,43 +1184,15 @@ impl Expression {
             },
             Expression::StringLiteral(s) => Value(s.clone()),
             Expression::NumberLiteral(num) => Number(*num),
-            Expression::RegexExpr { field, pattern: _pattern, re_pattern } => {
-                let source = match field {
-                    RegexSource::Identifier(ident) => match ctx.get_var(ident) {
-                        Value(text) => Some(text.as_str().into()),
-                        _ => None,
-                    },
-                    RegexSource::Field(field) => accessor.get(field),
-                };
-                if let Some(mut val) = source {
-                    if accessor.match_as_ascii {
-                        val = deunicode_string(&val).into_owned().into();
-                    }
-                    let mut values = vec![];
-                    for caps in re_pattern.captures_iter(&val) {
-                        // Positional groups
-                        for i in 1..caps.len() {
-                            if let Some(m) = caps.get(i) {
-                                values.push((i.to_string(), m.as_str().to_string()));
-                            }
-                        }
-
-                        // named groups
-                        for name in re_pattern.capture_names().flatten() {
-                            if let Some(m) = caps.name(name) {
-                                values.push((name.to_string(), m.as_str().to_string()));
-                            }
-                        }
-                    }
-                    if values.is_empty() {
-                        return Undefined;
-                    } else if values.len() == 1 {
-                        return Value(values[0].1.to_string());
-                    }
-                    return Named(values);
-                }
-                Undefined
-            }
+            Expression::RegexExpr { field, pattern: _pattern, re_pattern } => match field {
+                RegexSource::Identifier(ident) => match ctx.get_var(ident) {
+                    Value(text) => eval_regex(text, re_pattern, accessor.match_as_ascii),
+                    _ => Undefined,
+                },
+                RegexSource::Field(field) => accessor
+                    .get(field)
+                    .map_or(Undefined, |value| eval_regex(&value, re_pattern, accessor.match_as_ascii)),
+            },
             Expression::Assignment { target, expr } => {
                 let val = expr.eval(ctx, accessor);
                 match target {
@@ -1418,7 +1405,7 @@ impl Expression {
                                     if ch == '{' && chars.peek() == Some(&'}') {
                                         chars.next();
                                         if let Some(Some(arg)) = arg_iter.next() {
-                                            write!(formatted, "{arg}").unwrap();
+                                            formatted.push_str(arg);
                                         } else {
                                             formatted.push_str("{}");
                                         }
@@ -1507,6 +1494,14 @@ impl Expression {
                         None => Failure(format!("Variable with name {name} not found.")),
                         Some(value) => match value {
                             Undefined => Undefined,
+                            Value(value) if field == "1" => {
+                                let value = if accessor.match_as_ascii {
+                                    deunicode_string(value).into_owned()
+                                } else {
+                                    value.clone()
+                                };
+                                Value(value)
+                            }
                             Number(_) | Value(_) => Failure(format!("Variable with name {name} has no fields.")),
                             Named(values) => {
                                 for (key, val) in values {
@@ -1529,7 +1524,7 @@ impl Expression {
                     let mut matches = false;
                     for key in &map_case.keys {
                         if match key {
-                            MapCaseKey::Text(value) => key_value.matches(&Value(value.to_string())),
+                            MapCaseKey::Text(value) => matches_text(&key_value, value),
                             MapCaseKey::AnyMatch => true,
                             MapCaseKey::RangeFrom(num) => match key_value.compare(&Number(*num)) {
                                 None => false,
@@ -1619,6 +1614,9 @@ impl Expression {
                     Failure(_) => return key_value,
                     _ => Vec::new(),
                 };
+                let previous_key_var = expr.key_var.as_ref().and_then(|key_var| ctx.variables.get(key_var).cloned());
+                let previous_value_var =
+                    expr.value_var.as_ref().and_then(|value_var| ctx.variables.get(value_var).cloned());
                 for (k, val) in values {
                     if let Some(key_var) = &expr.key_var {
                         ctx.set_var(key_var, EvalResult::Value(k));
@@ -1629,10 +1627,18 @@ impl Expression {
                     expr.expression.eval(ctx, accessor);
                 }
                 if let Some(key_var) = &expr.key_var {
-                    ctx.variables.remove(key_var);
+                    if let Some(previous) = previous_key_var {
+                        ctx.set_var(key_var, previous);
+                    } else {
+                        ctx.variables.remove(key_var);
+                    }
                 }
                 if let Some(value_var) = &expr.value_var {
-                    ctx.variables.remove(value_var);
+                    if let Some(previous) = previous_value_var {
+                        ctx.set_var(value_var, previous);
+                    } else {
+                        ctx.variables.remove(value_var);
+                    }
                 }
                 Undefined
             }
@@ -1804,6 +1810,154 @@ mod tests {
     }
 
     #[test]
+    fn regex_identifier_ascii_normalization_preserves_map_selection() {
+        let dsl = r#"
+            source = @Name
+            capture = source ~ "(Cinema)"
+            @Group = map capture {
+                "Cinema" => "matched",
+                _ => "missed",
+            }
+        "#;
+        let mapper = MapperScript::parse(dsl, None).expect("mapper should parse");
+        let mut channel =
+            PlaylistItem { header: PlaylistItemHeader { name: "Cinéma".intern(), ..Default::default() } };
+        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: true };
+
+        mapper.eval(&mut accessor, None);
+
+        assert_eq!(accessor.pli.header.group.as_ref(), "matched");
+    }
+
+    #[test]
+    fn regex_evaluation_keeps_all_groups_from_only_the_first_match() -> Result<(), Box<dyn std::error::Error>> {
+        let regex = Regex::new(r"(?P<one>[A-Z])([A-Z])(?P<three>[A-Z])([A-Z])(?P<five>[A-Z])([A-Z])")?;
+
+        let Named(values) = eval_regex("ABCDEFUVWXYZ", &regex, false) else {
+            return Err("regex captures should produce a named result".into());
+        };
+
+        assert_eq!(
+            values,
+            [
+                ("1", "A"),
+                ("2", "B"),
+                ("3", "C"),
+                ("4", "D"),
+                ("5", "E"),
+                ("6", "F"),
+                ("one", "A"),
+                ("three", "C"),
+                ("five", "E"),
+            ]
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn regex_capture_groups_are_available_by_index_and_name() -> Result<(), Box<dyn std::error::Error>> {
+        let dsl = r#"
+            captures = @Name ~ "(?P<one>[A-Z])([A-Z])(?P<three>[A-Z])([A-Z])(?P<five>[A-Z])([A-Z])"
+            @Title = concat(captures.1, captures.2, captures.3, captures.4, captures.5, captures.6)
+            @Group = concat(captures.one, captures.three, captures.five)
+        "#;
+        let mapper = MapperScript::parse(dsl, None)?;
+        let mut channel = PlaylistItem { header: PlaylistItemHeader { name: "ABCDEF".intern(), ..Default::default() } };
+        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false };
+
+        mapper.eval(&mut accessor, None);
+
+        assert_eq!(accessor.pli.header.title.as_ref(), "ABCDEF");
+        assert_eq!(accessor.pli.header.group.as_ref(), "ACE");
+        Ok(())
+    }
+
+    #[test]
+    fn single_regex_capture_is_available_as_scalar_and_by_index() -> Result<(), Box<dyn std::error::Error>> {
+        let dsl = r#"
+            capture = @Name ~ "([A-Z]+)"
+            @Group = map capture.1 {
+                "ABC" => concat(capture, ":", capture.1),
+                _ => "missed",
+            }
+        "#;
+        let mapper = MapperScript::parse(dsl, None)?;
+        let mut channel = PlaylistItem { header: PlaylistItemHeader { name: "ABC".intern(), ..Default::default() } };
+        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false };
+
+        mapper.eval(&mut accessor, None);
+
+        assert_eq!(accessor.pli.header.group.as_ref(), "ABC:ABC");
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_fields_work_in_direct_regex_and_map_expressions() -> Result<(), Box<dyn std::error::Error>> {
+        let dsl = r#"
+            input_match = @Input ~ "(source)"
+            type_match = @Type ~ "(live)"
+            @Title = concat(@Input, ":", @Type, ":", input_match, ":", type_match)
+            @Group = map @Input {
+                "source" => "input-map",
+                _ => "missed",
+            }
+            @Name = map @Type {
+                "live" => concat(@Group, ":type-map"),
+                _ => "missed",
+            }
+        "#;
+        let mapper = MapperScript::parse(dsl, None)?;
+        let mut channel = PlaylistItem {
+            header: PlaylistItemHeader {
+                input_name: "source".intern(),
+                item_type: PlaylistItemType::Live,
+                ..Default::default()
+            },
+        };
+        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false };
+
+        mapper.eval(&mut accessor, None);
+
+        assert_eq!(accessor.pli.header.title.as_ref(), "source:live:source:live");
+        assert_eq!(accessor.pli.header.group.as_ref(), "input-map");
+        assert_eq!(accessor.pli.header.name.as_ref(), "input-map:type-map");
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_field_assignments_are_rejected() {
+        for script in [r#"@Input = "changed""#, r#"@Type = "movie""#] {
+            assert!(MapperScript::parse(script, None).is_err());
+        }
+        assert!(MapperScript::parse(r#"@Group = "changed""#, None).is_ok());
+    }
+
+    #[test]
+    fn template_lookup_keeps_last_duplicate_value() {
+        let dsl = r#"@Group = template("label")"#;
+        let templates = vec![
+            PatternTemplate {
+                name: "label".to_string(),
+                value: TemplateValue::Single("first".to_string()),
+                placeholder: "!label!".to_string(),
+            },
+            PatternTemplate {
+                name: "label".to_string(),
+                value: TemplateValue::Single("second".to_string()),
+                placeholder: "!label!".to_string(),
+            },
+        ];
+        let mapper = MapperScript::parse(dsl, Some(&templates)).expect("mapper should parse");
+        let mut channel = PlaylistItem { header: PlaylistItemHeader::default() };
+        let mut accessor = ValueAccessor { pli: &mut channel, virtual_items: vec![], match_as_ascii: false };
+
+        mapper.eval(&mut accessor, Some(&templates));
+
+        assert_eq!(accessor.pli.header.group.as_ref(), "second");
+    }
+
+    #[test]
     fn test_mapper_add_favourite() {
         use crate::model::PlaylistItemType;
         let dsl = r#"
@@ -1900,5 +2054,30 @@ mod tests {
         let mut accessor = ValueAccessor { pli: &mut series_info, virtual_items: vec![], match_as_ascii: false };
         mapper.eval(&mut accessor, None);
         assert_eq!(accessor.virtual_items.len(), 3);
+    }
+
+    #[test]
+    fn for_each_restores_existing_loop_variables() {
+        let expressions = vec![
+            Expression::Identifier("value".to_string()),
+            Expression::ForEachBlock {
+                key: ForEachKey::Identifier("items".to_string()),
+                expr: ForEachExpr {
+                    key_var: Some("key".to_string()),
+                    value_var: Some("value".to_string()),
+                    expression: ExprId(0),
+                },
+            },
+        ];
+        let mut ctx = MapperContext::new(&expressions, None);
+        ctx.set_var("items", Named(vec![("first".to_string(), "current".to_string())]));
+        ctx.set_var("value", Value("outer".to_string()));
+        let mut item = PlaylistItem { header: PlaylistItemHeader::default() };
+        let mut accessor = ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false };
+
+        ExprId(1).eval(&mut ctx, &mut accessor);
+
+        assert!(matches!(ctx.get_var("value"), Value(value) if value == "outer"));
+        assert!(matches!(ctx.get_var("key"), Undefined));
     }
 }

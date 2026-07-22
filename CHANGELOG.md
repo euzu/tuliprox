@@ -66,6 +66,10 @@
 
 ## 🌟 New Features
 
+- **Mapper Read-Only Metadata Fields**:
+  - Mapper scripts can read `@Input` and `@Type` directly and use them as regex sources or map keys.
+  - Assignments to these immutable fields are rejected while all existing read-write fields remain assignable.
+
 - **Dependency-aware parallel playlist updates**:
   - `process_parallel: true` now downloads independent inputs concurrently and starts each source's targets as soon as
     its required inputs are ready.
@@ -433,6 +437,12 @@
   - Added smarter HLS playback access/admission handling for consistent manifest responses.
 
 ## 🐛 Fixes
+
+- **Mapper Regex Capture Results**:
+  - Regex expressions now evaluate one complete match instead of flattening later matches into duplicate,
+    unreachable capture keys.
+  - Every capture group from that match remains accessible by index (`.1` through `.n`), and named groups remain
+    accessible by both index and name. A single unnamed capture also supports `.1` without losing scalar use.
 
 - **Media servers no longer show a duplicate movie for every extra provider listing (STRM `flat` mode)**: under
   `flat: true` the movie folder is deduplicated by TMDB id, but each file was still named after *its own*

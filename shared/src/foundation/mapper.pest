@@ -10,13 +10,16 @@ number_range_to = { ".." ~ number }
 number_range_full = { number ~ ".." ~ number }
 number_range_eq = { number }
 number_range = _{ number_range_full | number_range_from | number_range_to | number_range_eq}
-field = { ^"name" | ^"title" | ^"caption" | ^"group" | ^"id" | ^"chno" | ^"logo" | ^"logo_small" | ^"parent_code" | ^"audio_track" | ^"time_shift" | ^"rec" | ^"url" | ^"epg_channel_id" | ^"epg_id" | ^"genre" }
+read_write_field = _{ ^"name" | ^"title" | ^"caption" | ^"group" | ^"id" | ^"chno" | ^"logo" | ^"logo_small" | ^"parent_code" | ^"audio_track" | ^"time_shift" | ^"rec" | ^"url" | ^"epg_channel_id" | ^"epg_id" | ^"genre" }
+read_only_field = _{ ^"input" | ^"type" }
+field = { read_write_field | read_only_field }
+assignment_field = { read_write_field }
 field_access = _{ "@" ~ field }
 regex_source = _{ field_access | identifier }
 regex_expr = { regex_source ~ regex_op ~ string_literal }
 block_expr = { "{" ~ statements ~ "}" }
 condition = { function_call | var_access | field_access }
-assignment = { (field_access | identifier) ~ "=" ~ expression }
+assignment = { (("@" ~ assignment_field) | identifier) ~ "=" ~ expression }
 expression = { assignment | map_block | match_block | for_each_block | function_call | regex_expr | string_literal | number | var_access | field_access | null | block_expr }
 function_name = { "concat" | "uppercase" | "lowercase" | "capitalize" | "split" | "trim" | "print" | "number" | "first" | "template" | "replace" | "pad" | "format" | "add_favourite" }
 function_call = { function_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" }

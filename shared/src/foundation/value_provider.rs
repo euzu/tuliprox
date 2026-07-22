@@ -1,8 +1,8 @@
 use crate::{
-    model::{FieldGetAccessor, ItemField, PlaylistItem},
+    model::{FieldGetAccessor, ItemField, PlaylistItem, StreamProperties},
     utils::{deunicode_string, Internable},
 };
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
 #[macro_export]
 macro_rules! set_genre {
@@ -173,6 +173,32 @@ pub struct ValueProvider<'a> {
 }
 
 impl ValueProvider<'_> {
+    pub(crate) fn get_filter_value(&self, field: ItemField) -> Option<Cow<'_, str>> {
+        let header = &self.pli.header;
+        let value = match field {
+            ItemField::Group => header.group.as_ref(),
+            ItemField::Name => header.name.as_ref(),
+            ItemField::Title => header.title.as_ref(),
+            ItemField::Genre => match header.additional_properties.as_ref()? {
+                StreamProperties::Video(video) => video.details.as_ref()?.genre.as_deref()?,
+                StreamProperties::Series(series) => series.genre.as_deref()?,
+                StreamProperties::Live(_) | StreamProperties::Episode(_) => return None,
+            },
+            ItemField::Url => header.url.as_ref(),
+            ItemField::Input => header.input_name.as_ref(),
+            ItemField::Type => header.item_type.as_str(),
+            ItemField::Caption => {
+                if header.title.is_empty() {
+                    header.name.as_ref()
+                } else {
+                    header.title.as_ref()
+                }
+            }
+        };
+
+        Some(if self.match_as_ascii { deunicode_string(value) } else { Cow::Borrowed(value) })
+    }
+
     pub fn get(&self, field: &str) -> Option<Arc<str>> {
         let val = self.pli.header.get_field(field)?;
         if self.match_as_ascii {

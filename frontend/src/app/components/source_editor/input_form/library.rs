@@ -1,10 +1,14 @@
 use super::{common::CommonInputForm, ConfigInputFormState};
 use yew::{component, html, Html, Properties, UseReducerHandle};
 
-#[derive(Properties, Clone, PartialEq)]
+#[derive(Properties, Clone)]
 pub(super) struct LibraryInputFormProps {
     pub state: UseReducerHandle<ConfigInputFormState>,
     pub allow_write: bool,
+}
+
+impl PartialEq for LibraryInputFormProps {
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]

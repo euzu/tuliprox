@@ -20,7 +20,7 @@ use shared::{model::InputFetchMethod, utils::BATCH_SCHEME_PREFIX};
 use std::{collections::HashMap, rc::Rc};
 use yew::{component, html, use_memo, Callback, Html, Properties, UseReducerHandle, UseStateHandle};
 
-#[derive(Properties, Clone, PartialEq)]
+#[derive(Properties, Clone)]
 pub(super) struct CommonInputFormProps {
     pub state: UseReducerHandle<ConfigInputFormState>,
     pub allow_write: bool,
@@ -42,6 +42,10 @@ pub(super) struct CommonInputFormProps {
     pub extra: Html,
     #[prop_or_default]
     pub exp_date_tool_action: Option<ToolAction>,
+}
+
+impl PartialEq for CommonInputFormProps {
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]
@@ -169,7 +173,7 @@ pub(super) enum OptionsKind {
     Stalker,
 }
 
-#[derive(Properties, Clone, PartialEq)]
+#[derive(Properties, Clone)]
 pub(super) struct InputOptionsFormProps {
     pub state: UseReducerHandle<ConfigInputOptionsDtoFormState>,
     pub headers: UseStateHandle<HashMap<String, String>>,
@@ -177,6 +181,10 @@ pub(super) struct InputOptionsFormProps {
     pub kind: OptionsKind,
     #[prop_or_default]
     pub extra: Html,
+}
+
+impl PartialEq for InputOptionsFormProps {
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]
