@@ -6,11 +6,15 @@ use yew::{
     component, html, platform::spawn_local, use_mut_ref, use_state, Callback, Html, Properties, UseReducerHandle,
 };
 
-#[derive(Properties, Clone, PartialEq)]
+#[derive(Properties, Clone)]
 pub(super) struct XtreamInputFormProps {
     pub state: UseReducerHandle<ConfigInputFormState>,
     pub providers: Vec<ConfigProviderDto>,
     pub allow_write: bool,
+}
+
+impl PartialEq for XtreamInputFormProps {
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]

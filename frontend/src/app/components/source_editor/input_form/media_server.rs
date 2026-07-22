@@ -11,10 +11,14 @@ use crate::{
 use shared::model::MediaServerInputConfigDto;
 use yew::{component, html, Callback, Html, Properties, UseReducerHandle};
 
-#[derive(Properties, Clone, PartialEq)]
+#[derive(Properties, Clone)]
 pub(super) struct MediaServerInputFormProps {
     pub state: UseReducerHandle<ConfigInputFormState>,
     pub allow_write: bool,
+}
+
+impl PartialEq for MediaServerInputFormProps {
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]
@@ -25,10 +29,14 @@ pub(super) fn MediaServerInputForm(props: &MediaServerInputFormProps) -> Html {
     }
 }
 
-#[derive(Properties, Clone, PartialEq)]
+#[derive(Properties, Clone)]
 pub(super) struct MediaServerSettingsFormProps {
     pub state: UseReducerHandle<ConfigInputFormState>,
     pub allow_write: bool,
+}
+
+impl PartialEq for MediaServerSettingsFormProps {
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]

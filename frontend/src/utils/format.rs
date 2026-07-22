@@ -98,6 +98,8 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     use super::format_local_day_boundary_utc;
     use super::{format_bandwidth, format_transferred};
+    #[cfg(target_arch = "wasm32")]
+    use chrono::TimeZone;
 
     fn format_local_with_offset(ts: i64, js_offset_minutes_west: i32, fmt: &str) -> String {
         let utc = match chrono::DateTime::from_timestamp(ts, 0) {
