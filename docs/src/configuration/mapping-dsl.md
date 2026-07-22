@@ -106,6 +106,9 @@ the `@` prefix.
 `@time_shift`,  
 `@rec`, `@url`, `@epg_channel_id`, `@epg_id`, `@genre`.
 
+**Read-only `@Fields`:** `@input`, `@type`. They can be used as values, regex sources, and map keys, but assignments
+such as `@Input = "provider"` or `@Type = "vod"` are rejected.
+
 *(Special note on `@Caption`: Acts as an alias for Title/Name. If you write to `@Caption`,
 Tuliprox updates both the `Title` AND the `Name` to the same value).*
 
@@ -131,7 +134,9 @@ Tuliprox updates both the `Title` AND the `Name` to the same value).*
 ### 2. RegEx Captures & Extraction
 
 Regular expressions are executed using the tilde `~` operator. The results are placed in a
-capture object. You can access them via index (`.1`, `.2`) or via "Named Captures".
+capture object. Only the first complete regex match is evaluated, while every participating capture group from that
+match remains available by index (`.1` through `.n`). Named groups are available both by index and by name. A single
+unnamed capture can be used directly as a scalar and through `.1`.
 
 ```dsl
 # Extract the year from the title using named captures

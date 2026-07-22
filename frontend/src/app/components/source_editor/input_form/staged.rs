@@ -11,10 +11,14 @@ use shared::model::{ClusterFlags, StagedInputType};
 use std::rc::Rc;
 use yew::{component, html, Callback, Html, Properties, UseReducerHandle};
 
-#[derive(Properties, Clone, PartialEq)]
+#[derive(Properties, Clone)]
 pub(super) struct StagedInputFormProps {
     pub state: UseReducerHandle<ConfigInputFormState>,
     pub allow_write: bool,
+}
+
+impl PartialEq for StagedInputFormProps {
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]

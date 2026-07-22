@@ -1486,3 +1486,78 @@ mod tests {
         assert_eq!(libraries, vec![detailed, MediaServerLibrarySelector::Name("Kids".to_string())]);
     }
 }
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod browser_tests {
+    use super::*;
+    use crate::{hooks::IconContext, i18n::I18nProvider, provider::DialogProvider};
+    use gloo_timers::future::TimeoutFuture;
+    use std::{rc::Rc, sync::Arc};
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
+    use web_sys::{HtmlElement, HtmlInputElement};
+    use yew::{component, html, use_state, Callback, Html, Renderer};
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    fn m3u_input(name: &str) -> ConfigInputDto {
+        ConfigInputDto { name: Arc::<str>::from(name), input_type: shared::model::InputType::M3u, ..Default::default() }
+    }
+
+    #[component]
+    fn M3uRefreshHarness() -> Html {
+        let input = use_state(|| m3u_input("first"));
+        let icons = use_state(|| IconContext::new(&vec![]));
+        let on_switch = {
+            let input = input.clone();
+            Callback::from(move |_| input.set(m3u_input("second")))
+        };
+
+        html! {
+            <yew::ContextProvider<yew::UseStateHandle<IconContext>> context={icons}>
+                <DialogProvider>
+                    <I18nProvider>
+                        <button id="switch-m3u-input" onclick={on_switch}>{"switch"}</button>
+                        <ConfigInputView input={Some(Rc::new((*input).clone()))} />
+                    </I18nProvider>
+                </DialogProvider>
+            </yew::ContextProvider<yew::UseStateHandle<IconContext>>>
+        }
+    }
+
+    async fn settle_render() {
+        TimeoutFuture::new(0).await;
+        TimeoutFuture::new(0).await;
+    }
+
+    fn rendered_name(root: &web_sys::Element) -> Option<String> {
+        root.query_selector("input[name=\"name\"]")
+            .ok()
+            .flatten()
+            .and_then(|element| element.dyn_into::<HtmlInputElement>().ok())
+            .map(|input| input.value())
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn m3u_form_refreshes_when_selected_input_changes() -> Result<(), wasm_bindgen::JsValue> {
+        let document = gloo_utils::document();
+        let body = document.body().ok_or_else(|| wasm_bindgen::JsValue::from_str("test document has no body"))?;
+        let root = document.create_element("div")?;
+        body.append_child(&root)?;
+        Renderer::<M3uRefreshHarness>::with_root(root.clone()).render();
+        settle_render().await;
+        assert_eq!(rendered_name(&root).as_deref(), Some("first"));
+
+        let switch = root
+            .query_selector("#switch-m3u-input")?
+            .ok_or_else(|| wasm_bindgen::JsValue::from_str("switch button was not rendered"))?
+            .dyn_into::<HtmlElement>()
+            .map_err(|_| wasm_bindgen::JsValue::from_str("switch button has the wrong element type"))?;
+        switch.click();
+        settle_render().await;
+
+        assert_eq!(rendered_name(&root).as_deref(), Some("second"));
+        root.remove();
+        Ok(())
+    }
+}

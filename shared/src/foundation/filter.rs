@@ -4,13 +4,14 @@ pub use crate::model::{ItemField, PatternTemplate, PlaylistItemType, TemplateVal
 use crate::{
     error::TuliproxError,
     foundation::value_provider::ValueProvider,
-    utils::{DirectedGraph, Internable, CONSTANTS},
+    utils::{DirectedGraph, CONSTANTS},
 };
 use indexmap::IndexSet;
 use log::{error, log_enabled, trace, Level};
 use pest::{iterators::Pair, Parser};
 use pest_derive::Parser;
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -100,19 +101,19 @@ impl Default for Filter {
     }
 }
 
-fn get_caption<'a>(provider: &'a ValueProvider<'a>, rewc: &'a CompiledRegex) -> (bool, Arc<str>) {
-    if let Some(value) = provider.get("title") {
+fn get_caption<'a>(provider: &'a ValueProvider<'_>, rewc: &CompiledRegex) -> (bool, Cow<'a, str>) {
+    if let Some(value) = provider.get_filter_value(ItemField::Title) {
         if rewc.re.is_match(&value) {
             return (true, value);
         }
     }
 
-    if let Some(value) = provider.get("name") {
+    if let Some(value) = provider.get_filter_value(ItemField::Name) {
         if rewc.re.is_match(&value) {
             return (true, value);
         }
     }
-    (false, "".intern())
+    (false, Cow::Borrowed(""))
 }
 
 impl Filter {
@@ -121,10 +122,10 @@ impl Filter {
             Self::FieldComparison(field, rewc) => {
                 let (is_match, value) = if field == &ItemField::Caption {
                     get_caption(provider, rewc)
-                } else if let Some(value) = provider.get(field.as_ref()) {
+                } else if let Some(value) = provider.get_filter_value(*field) {
                     (rewc.re.is_match(&value), value)
                 } else {
-                    (false, "".intern())
+                    (false, Cow::Borrowed(""))
                 };
                 if log_enabled!(Level::Trace) {
                     if is_match {
@@ -136,25 +137,24 @@ impl Filter {
                 is_match
             }
             Self::TypeComparison(field, item_type) => {
-                if let Some(value) = provider.get(field.as_ref()) {
-                    get_filter_item_type(&value).is_some_and(|pli_type| {
-                        let is_match = match item_type {
-                            PlaylistItemType::Video => pli_type.is_video(),
-                            PlaylistItemType::Series => pli_type.is_series(),
-                            _ => pli_type.eq(item_type),
-                        };
-                        if log_enabled!(Level::Trace) {
-                            if is_match {
-                                trace!("Match found: {field:?} {value}");
-                            } else {
-                                trace!("Match failed: {self}: {field:?} {value}");
-                            }
-                        }
-                        is_match
-                    })
-                } else {
-                    false
+                let actual = provider.pli.header.item_type;
+                let is_match = match item_type {
+                    PlaylistItemType::Live => actual.is_live(),
+                    PlaylistItemType::Video => actual.is_video(),
+                    PlaylistItemType::Series => {
+                        actual.is_series()
+                            || matches!(actual, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
+                    }
+                    _ => actual == *item_type,
+                };
+                if log_enabled!(Level::Trace) {
+                    if is_match {
+                        trace!("Match found: {field:?} {}", actual.as_str());
+                    } else {
+                        trace!("Match failed: {self}: {field:?} {}", actual.as_str());
+                    }
                 }
+                is_match
             }
             Self::Group(expr) => expr.filter(provider),
             Self::UnaryExpression(op, expr) => match op {
@@ -312,7 +312,7 @@ fn get_parser_expression(
     templates: Option<&[PatternTemplate]>,
     errors: &mut Vec<String>,
 ) -> Result<Filter, String> {
-    let mut stmts = Vec::with_capacity(128);
+    let mut stmts = Vec::new();
     let pairs = expr.into_inner();
     let mut bop: Option<BinaryOperator> = None;
     let mut uop: Option<UnaryOperator> = None;
@@ -640,9 +640,10 @@ mod tests {
             filter::{get_filter, ValueProvider},
             prepare_templates,
         },
-        model::{PatternTemplate, PlaylistItem, PlaylistItemHeader, TemplateValue},
+        model::{ItemField, PatternTemplate, PlaylistItem, PlaylistItemHeader, PlaylistItemType, TemplateValue},
         utils::{Internable, CONSTANTS},
     };
+    use std::borrow::Cow;
 
     fn create_mock_pli(name: &str, group: &str) -> PlaylistItem {
         PlaylistItem { header: PlaylistItemHeader { name: name.into(), group: group.intern(), ..Default::default() } }
@@ -831,6 +832,46 @@ mod tests {
             }
             Err(e) => panic!("{e}"),
         }
+    }
+
+    #[test]
+    fn filter_value_borrows_stored_field() {
+        let channel = create_mock_pli("Channel", "Group");
+        let provider = ValueProvider { pli: &channel, match_as_ascii: false };
+
+        assert!(matches!(provider.get_filter_value(ItemField::Name), Some(Cow::Borrowed("Channel"))));
+    }
+
+    #[test]
+    fn missing_genre_does_not_match_empty_pattern() {
+        let filter = get_filter(r#"Genre ~ "^$""#, None).expect("filter should parse");
+        let channel = create_mock_pli("Channel", "Group");
+        let provider = ValueProvider { pli: &channel, match_as_ascii: false };
+
+        assert!(!filter.filter(&provider));
+    }
+
+    #[test]
+    fn caption_checks_name_when_title_does_not_match() {
+        let filter = get_filter(r#"Caption ~ "Channel""#, None).expect("filter should parse");
+        let mut channel = create_mock_pli("Channel", "Group");
+        channel.header.title = "Different title".intern();
+        let provider = ValueProvider { pli: &channel, match_as_ascii: false };
+
+        assert!(filter.filter(&provider));
+    }
+
+    #[test]
+    fn type_filter_matches_normalized_type_families() {
+        let live_filter = get_filter("Type = live", None).expect("live filter should parse");
+        let series_filter = get_filter("Type = series", None).expect("series filter should parse");
+        let mut channel = create_mock_pli("Channel", "Group");
+
+        channel.header.item_type = PlaylistItemType::LiveHls;
+        assert!(live_filter.filter(&ValueProvider { pli: &channel, match_as_ascii: false }));
+
+        channel.header.item_type = PlaylistItemType::LocalSeriesInfo;
+        assert!(series_filter.filter(&ValueProvider { pli: &channel, match_as_ascii: false }));
     }
 
     #[test]

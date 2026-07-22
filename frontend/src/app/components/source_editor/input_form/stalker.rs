@@ -182,10 +182,14 @@ where
     })
 }
 
-#[derive(Properties, Clone, PartialEq)]
+#[derive(Properties, Clone)]
 pub(super) struct StalkerDeviceInputFormProps {
     pub state: UseReducerHandle<StalkerDeviceFormState>,
     pub allow_write: bool,
+}
+
+impl PartialEq for StalkerDeviceInputFormProps {
+    fn eq(&self, _other: &Self) -> bool { false }
 }
 
 #[component]
