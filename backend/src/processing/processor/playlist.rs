@@ -46,8 +46,8 @@ use shared::{
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
         ClusterFlags, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType, ItemField,
-        PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, ProcessingOrder, SourceStats, StreamProperties,
-        TargetStats, UUIDType, XtreamCluster,
+        MappingStage, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, ProcessingOrder, SourceStats,
+        StreamProperties, TargetStats, UUIDType, XtreamCluster,
     },
     utils::{
         create_alias_uuid, interner_gc,
@@ -291,9 +291,21 @@ fn map_channel_and_flatten(channel: PlaylistItem, mapping: &Mapping) -> Vec<Play
 }
 
 fn map_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
+    map_playlist_at_stage(source, target, MappingStage::Processing)
+}
+
+fn map_playlist_at_stage(
+    source: &mut PlaylistSource,
+    target: &ConfigTarget,
+    stage: MappingStage,
+) -> Option<Vec<PlaylistGroup>> {
     let mapping_binding = target.mapping.load();
     let mappings = mapping_binding.as_ref()?;
-    let valid_mappings = mappings.iter().filter(|m| m.mapper.as_ref().is_some_and(|v| !v.is_empty()));
+    let mut valid_mappings = mappings
+        .iter()
+        .filter(|m| m.stage == stage && m.mapper.as_ref().is_some_and(|items| !items.is_empty()))
+        .peekable();
+    valid_mappings.peek()?;
     let iter: Box<dyn Iterator<Item=PlaylistItem>> = Box::new(source.into_items());
     let mapped_iter = valid_mappings.fold(iter, |iter, mapping| {
         Box::new(iter.flat_map(move |chan| map_channel_and_flatten(chan, mapping)))
@@ -1468,18 +1480,17 @@ async fn prepare_playlist_for_target(
         log_memory_snapshot(
             format!("target '{}' input '{}' after_vod_resolve", target.name, provider_fpl.input.name).as_str(),
         );
-        // stats
-        let input_entry_name = processed_fpl.input.name.clone();
-        let group_count = processed_fpl.get_group_count();
-        let channel_count = processed_fpl.get_channel_count();
-        if let Some(stat) = stats.get_mut(&input_entry_name) {
-            stat.processed_stats.group_count = group_count;
-            stat.processed_stats.channel_count = channel_count;
-        }
         process_playlist_epg(&mut processed_fpl, &mut new_epg).await;
         log_memory_snapshot(
             format!("target '{}' input '{}' after_epg_apply", target.name, processed_fpl.input.name).as_str(),
         );
+        if let Some(groups) = map_playlist_at_stage(&mut processed_fpl.source, target, MappingStage::AfterEpg) {
+            processed_fpl.source = MemoryPlaylistSource::new(groups).into_source();
+        }
+        if let Some(stat) = stats.get_mut(&processed_fpl.input.name) {
+            stat.processed_stats.group_count = processed_fpl.get_group_count();
+            stat.processed_stats.channel_count = processed_fpl.get_channel_count();
+        }
         new_playlist.extend(processed_fpl.source.take_groups());
         log_memory_snapshot(
             format!("target '{}' input '{}' after_take_groups", target.name, processed_fpl.input.name).as_str(),
@@ -2038,8 +2049,9 @@ mod tests {
     use super::*;
     use shared::foundation::{get_filter, MapperScript, ValueProvider};
     use shared::model::{
-        ClusterFlags, ConfigRenameDto, ConfigTargetDto, M3uPlaylistItem, PlaylistEntry, PlaylistItem,
-        PlaylistItemHeader, PlaylistItemType, XtreamCluster, XtreamPlaylistItem,
+        ClusterFlags, ConfigInputDto, ConfigRenameDto, ConfigTargetDto, ConfigTargetOptions, M3uPlaylistItem,
+        MappingStage, PlaylistEntry, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster,
+        XtreamPlaylistItem,
     };
     use shared::utils::Internable;
     use crate::model::Config;
@@ -2699,5 +2711,313 @@ mod tests {
         })];
         assert!(!target_mutated_resources(&config, &spaced)
             .is_disjoint(&target_mutated_resources(&config, &underscored)));
+    }
+
+    mod mapping_stage {
+        use super::*;
+        use crate::model::{
+            EpgConfig, EpgSmartMatchConfig, IcsEpgSourceConfig, Mapper, MediaToolCapabilities, PersistedEpgSource,
+            PersistedEpgSourceKind, SourcesConfig,
+        };
+        use crate::utils::FileLockManager;
+        use arc_swap::{ArcSwap, ArcSwapOption};
+        use shared::model::{ConfigPaths, EpgSmartMatchConfigDto};
+        use std::sync::Arc;
+        use tempfile::tempdir;
+        use tokio::runtime::Runtime;
+
+        fn build_mapping(id: &str, stage: MappingStage, script: &str) -> Mapping {
+            let script = script.to_string();
+            let t_filter = get_filter(r#"name ~ ".*""#, None).expect("filter parses");
+            let t_script = MapperScript::parse(&script, None).expect("script parses");
+            Mapping {
+                id: id.to_string(),
+                match_as_ascii: false,
+                stage,
+                mapper: Some(vec![Mapper {
+                    filter: r#"name ~ ".*""#.to_string(),
+                    script,
+                    t_filter: Some(t_filter),
+                    t_script: Some(t_script),
+                }]),
+                counter: None,
+                t_counter: None,
+                templates: None,
+            }
+        }
+
+        fn build_target(mappings: Vec<Mapping>, remove_duplicates: bool) -> ConfigTarget {
+            let dto = ConfigTargetDto {
+                options: if remove_duplicates {
+                    Some(ConfigTargetOptions { remove_duplicates, ..Default::default() })
+                } else {
+                    None
+                },
+                ..Default::default()
+            };
+            let mut target = ConfigTarget::from(&dto);
+            target.mapping = Arc::new(ArcSwapOption::from(Some(Arc::new(mappings))));
+            target
+        }
+
+        fn processing_context() -> PlaylistProcessingContext {
+            let paths = ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            };
+            let config = AppConfig {
+                config: Arc::new(ArcSwap::from_pointee(Config::default())),
+                sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+                hdhomerun: Arc::new(ArcSwapOption::default()),
+                api_proxy: Arc::new(ArcSwapOption::default()),
+                file_locks: Arc::new(FileLockManager::default()),
+                paths: Arc::new(ArcSwap::from_pointee(paths)),
+                custom_stream_response: Arc::new(ArcSwapOption::default()),
+                access_token_secret: [0; 32],
+                encrypt_secret: [0; 16],
+                media_tools: Arc::new(MediaToolCapabilities::new()),
+            };
+            PlaylistProcessingContext {
+                client: reqwest::Client::new(),
+                config: Arc::new(config),
+                user_targets: Arc::new(ProcessTargets {
+                    enabled: false,
+                    inputs: Vec::new(),
+                    targets: Vec::new(),
+                    target_names: Vec::new(),
+                }),
+                event_manager: None,
+                playlist_state: None,
+                disabled_headers: None,
+                processed_inputs: Arc::new(Mutex::new(HashSet::new())),
+                input_locks: Arc::new(Mutex::new(HashMap::new())),
+                provider_manager: None,
+                metadata_manager: None,
+                pre_processed_inputs: None,
+                stalker_refresh_mode: StalkerRefreshMode::Complete,
+                partial_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+
+        fn make_channel(name: &str) -> PlaylistItem {
+            let mut item = PlaylistItem {
+                header: PlaylistItemHeader {
+                    name: name.intern(),
+                    group: "Originals".intern(),
+                    xtream_cluster: XtreamCluster::Live,
+                    item_type: PlaylistItemType::Live,
+                    ..Default::default()
+                },
+            };
+            item.header.freeze_input_stream_id();
+            item
+        }
+
+        fn memory_source(channels: Vec<PlaylistItem>) -> PlaylistSource {
+            MemoryPlaylistSource::new(vec![PlaylistGroup {
+                id: 1,
+                title: "Live".intern(),
+                channels,
+                xtream_cluster: XtreamCluster::Live,
+            }])
+            .into_source()
+        }
+
+        fn channel_count(source: &mut PlaylistSource) -> usize {
+            source
+                .take_groups()
+                .iter()
+                .map(|g| g.channels.len())
+                .sum()
+        }
+
+        #[test]
+        fn map_playlist_applies_only_the_requested_stage() {
+            let processing = build_mapping(
+                "processing",
+                MappingStage::Processing,
+                r#"@name = concat(@Name, "-P")"#,
+            );
+            let after_epg = build_mapping(
+                "after_epg",
+                MappingStage::AfterEpg,
+                r#"@name = concat(@Name, "-E")"#,
+            );
+            let target = build_target(vec![processing, after_epg], false);
+
+            let mut source = memory_source(vec![make_channel("Alpha")]);
+            let groups = map_playlist(&mut source, &target).expect("processing mapping should run");
+            assert_eq!(groups[0].channels[0].header.name.as_ref(), "Alpha-P");
+
+            let mut source = MemoryPlaylistSource::new(groups).into_source();
+            let groups = map_playlist_at_stage(&mut source, &target, MappingStage::AfterEpg)
+                .expect("after_epg mapping should run");
+            assert_eq!(groups[0].channels[0].header.name.as_ref(), "Alpha-P-E");
+        }
+
+        #[test]
+        fn map_playlist_at_stage_returns_none_without_consuming_source_when_no_match() {
+            let target = build_target(Vec::new(), false);
+            let mut source = memory_source(vec![make_channel("Alpha")]);
+
+            let result = map_playlist_at_stage(&mut source, &target, MappingStage::AfterEpg);
+            assert!(result.is_none(), "no matching stage must return None");
+            assert_eq!(channel_count(&mut source), 1, "source must remain intact");
+        }
+
+        #[test]
+        fn prepare_target_applies_after_epg_mapping_before_sampling_stats() {
+            let runtime = Runtime::new().expect("runtime");
+            runtime.block_on(async {
+                let dir = tempdir().expect("tempdir");
+                let ics_path = dir.path().join("bbc.ics");
+                std::fs::write(
+                    &ics_path,
+                    "BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:News\nDTSTART:20260306T120000Z\nDTEND:20260306T130000Z\nEND:VEVENT\nEND:VCALENDAR",
+                )
+                .expect("write ics");
+
+                let mut smart_dto = EpgSmartMatchConfigDto {
+                    enabled: true,
+                    fuzzy_matching: false,
+                    ..EpgSmartMatchConfigDto::default()
+                };
+                smart_dto.prepare().expect("smart config");
+                let mut input = ConfigInput::from(ConfigInputDto::default());
+                input.name = "input".intern();
+                input.epg = Some(EpgConfig {
+                    sources: vec![],
+                    smart_match: Some(EpgSmartMatchConfig::from(smart_dto)),
+                });
+
+                let channels = vec![live_item_for_epg("BBC One")];
+                let groups = vec![PlaylistGroup {
+                    id: 1,
+                    title: "Live".intern(),
+                    channels,
+                    xtream_cluster: XtreamCluster::Live,
+                }];
+                let tv_guide = TVGuide::new(vec![PersistedEpgSource {
+                    file_path: ics_path,
+                    priority: 0,
+                    logo_override: false,
+                    kind: PersistedEpgSourceKind::Ics {
+                        channel_id: "bbc.one".intern(),
+                        channel_title: Some("BBC One".intern()),
+                        match_names: vec!["BBC One".intern()],
+                        config: Box::new(IcsEpgSourceConfig::default()),
+                    },
+                }]);
+
+                let mut playlist = FetchedPlaylist {
+                    input: &input,
+                    source: MemoryPlaylistSource::new(groups).into_source(),
+                    epg: Some(tv_guide),
+                };
+
+                let rename_from_epg = build_mapping(
+                    "rename",
+                    MappingStage::AfterEpg,
+                    r#"epg = @epg_id ~ "(.+)"
+match {
+  epg => @Name = epg.1
+}"#,
+                );
+                let add_virtual = build_mapping("virtual", MappingStage::AfterEpg, r#"add_favourite("Echo")"#);
+                let target = build_target(vec![rename_from_epg, add_virtual], false);
+                let mut stats = HashMap::from([(
+                    Arc::clone(&input.name),
+                    create_input_stat(1, 1, 0, input.input_type, &input.name, 0),
+                )]);
+                let mut errors = Vec::new();
+                let prepared = prepare_playlist_for_target(
+                    &processing_context(),
+                    std::slice::from_mut(&mut playlist),
+                    &target,
+                    &mut stats,
+                    &mut errors,
+                    false,
+                )
+                .await
+                .expect("target preparation");
+
+                assert!(errors.is_empty());
+                assert_eq!(prepared.playlist.iter().map(|group| group.channels.len()).sum::<usize>(), 2);
+                let channel = prepared
+                    .playlist
+                    .iter()
+                    .flat_map(|group| &group.channels)
+                    .find(|channel| channel.header.group.as_ref() != "Echo")
+                    .expect("original channel");
+                assert_eq!(channel.header.epg_channel_id.as_deref(), Some("bbc.one"));
+                assert_eq!(
+                    channel.header.name.as_ref(),
+                    "bbc.one",
+                    "after_epg mapper must consume the EPG-enriched field"
+                );
+                let processed_stats = &stats[&input.name].processed_stats;
+                assert_eq!(processed_stats.group_count, 2);
+                assert_eq!(processed_stats.channel_count, 2);
+            });
+        }
+
+        fn live_item_for_epg(name: &str) -> PlaylistItem {
+            PlaylistItem {
+                header: PlaylistItemHeader {
+                    name: name.intern(),
+                    group: "Live".intern(),
+                    xtream_cluster: XtreamCluster::Live,
+                    item_type: PlaylistItemType::Live,
+                    ..Default::default()
+                },
+            }
+        }
+
+        #[test]
+        fn after_epg_hook_runs_on_source_already_deduplicated_by_processing_pipe() {
+            let processing = build_mapping(
+                "processing",
+                MappingStage::Processing,
+                r#"@group = "PROCESSED""#,
+            );
+            let after_epg = build_mapping("after_epg", MappingStage::AfterEpg, r#"add_favourite("Echo")"#);
+            let target = build_target(vec![processing, after_epg], true);
+
+            let input = ConfigInput::default();
+            let channel = make_channel("Alpha");
+            let mut fetched = FetchedPlaylist {
+                input: &input,
+                source: memory_source(vec![channel.clone(), channel]),
+                epg: None,
+            };
+            let mut duplicates = HashSet::new();
+            let mut processed = execute_pipe(
+                &target,
+                &get_processing_pipe(&target),
+                &mut fetched,
+                &mut duplicates,
+                false,
+            )
+            .expect("processing pipe must run");
+            assert_eq!(processed.get_channel_count(), 1, "processing pipe must remove the duplicate");
+
+            let groups = map_playlist_at_stage(&mut processed.source, &target, MappingStage::AfterEpg)
+                .expect("after_epg hook must run");
+
+            assert_eq!(groups.len(), 2);
+            assert_eq!(groups[0].title.as_ref(), "PROCESSED");
+            assert_eq!(groups[0].channels.len(), 1);
+            assert_eq!(groups[1].title.as_ref(), "Echo");
+            assert_eq!(groups[1].channels.len(), 1);
+        }
     }
 }

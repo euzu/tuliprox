@@ -26,6 +26,32 @@ pub const MAPPER_FIELDS: &[&str] = &[
     "epg_id",
 ];
 
+#[derive(
+    Debug,
+    Default,
+    Copy,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    PartialEq,
+    Eq,
+    EnumIter,
+    EnumString,
+    AsRefStr,
+    Display,
+)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum MappingStage {
+    #[default]
+    Processing,
+    AfterEpg,
+}
+
+impl MappingStage {
+    pub fn is_processing(&self) -> bool { *self == Self::Processing }
+}
+
 #[macro_export]
 macro_rules! valid_property {
     ($key:expr, $array:expr) => {{
@@ -175,6 +201,8 @@ pub struct MappingDto {
     pub id: String,
     #[serde(default)]
     pub match_as_ascii: bool,
+    #[serde(default, skip_serializing_if = "MappingStage::is_processing")]
+    pub stage: MappingStage,
     pub mapper: Option<Vec<MapperDto>>,
     pub counter: Option<Vec<MappingCounterDefinition>>,
     #[serde(skip_serializing, skip_deserializing)]
@@ -301,5 +329,22 @@ mod tests {
         mapping_definition.prepare(None).expect("mapping definition should prepare");
 
         assert_eq!(mapping_definition.templates, original_templates);
+    }
+
+    #[test]
+    fn mapping_stage_defaults_to_processing() {
+        let dto: MappingDto = serde_saphyr::from_str("id: test\n").expect("mapping should parse");
+        assert_eq!(dto.stage, MappingStage::Processing);
+        assert!(
+            !serde_saphyr::to_string(&dto).expect("mapping should serialize").contains("stage:"),
+            "default stage must be omitted from serialized output"
+        );
+    }
+
+    #[test]
+    fn mapping_stage_parses_after_epg_and_rejects_unknown_values() {
+        let dto: MappingDto = serde_saphyr::from_str("id: test\nstage: after_epg\n").expect("stage should parse");
+        assert_eq!(dto.stage, MappingStage::AfterEpg);
+        assert!(serde_saphyr::from_str::<MappingDto>("id: test\nstage: before_persistence\n").is_err());
     }
 }

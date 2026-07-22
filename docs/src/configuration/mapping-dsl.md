@@ -74,12 +74,59 @@ mappings:
           modifier: assign
 ```
 
+### Processing pipeline and mapping stages
+
+For every target, Tuliprox processes each input through the following pipeline. The two supported mapping stages are
+marked explicitly:
+
+```text
+Input playlist
+  |
+  v
+Freeze input identity and optionally remove duplicates
+  |
+  v
+Processing pipe (`processing_order`, for example F-R-M)
+  ├─ F: filter
+  ├─ R: rename
+  └─ M: mapper blocks with `stage: processing` (default)
+  |
+  v
+Resolve series, VOD metadata, and stream probes
+  |
+  v
+EPG enrichment
+  |
+  v
+Mapper blocks with `stage: after_epg`
+  |
+  v
+Collect all processed inputs for the target
+  |
+  v
+Favourites and Trakt categories
+  |
+  v
+Merge groups -> Sort -> Assign channel numbers -> Mapping counters -> Watches -> Persistence
+```
+
+`processing_order` controls only the order of filter (`F`), rename (`R`), and the default mapping position (`M`).
+`after_epg` is a separate stage outside that configurable pipe. Mapping counters are also outside the pipe and always
+run on the consolidated target playlist after merging, sorting, and initial channel-number assignment.
+
 | Parameter            | Type   | Description                                                                                                                                                                                                                 |
 |:---------------------|:-------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **`id`**             | String | **Mandatory.** The unique identifier of the mapping.                                                                                                                                                                        |
 | **`match_as_ascii`** | Bool   | If `true`, Tuliprox normalizes (de-unicodes) values on-the-fly during regex evaluation, e.g., `Cinéma` is treated as `Cinema`. The actual assignment in the DSL, however, retains the original accents! Default is `false`. |
+| **`stage`**          | Enum   | When the block runs. `processing` (default) places the block at the `M` position of the target's `processing_order`; `after_epg` runs once EPG channel IDs and logos are enriched. Counters always run after the final merge and sort regardless of the block's stage. |
 | **`mapper`**         | List   | A list of scripts (executed sequentially) containing the DSL logic. Can optionally be gated by a `filter`. [See Mapper DSL](#21-the-mapper-dsl-mapper).                                                                     |
 | **`counter`**        | List   | Logic for assigning channel numbers sequentially. [See Counters](#22-counters-sequential-numbering-counter).                                                                                                                |
+
+> The `after_epg` stage sees fields populated by EPG enrichment (for example `epg_channel_id` and `logo`). Inspect these
+> fields inside the mapper script; the outer `filter` continues to support only the fields listed below. EPG enrichment
+> is not re-run after the late mapping, so changed EPG channel IDs and virtual channels skip another matching round. The
+> `stage` field only affects `mapper` rules; counters keep their final-output timing. Hot-reloaded stage changes take
+> effect on the next target processing run.
 
 ## Filter & Operator Basics
 

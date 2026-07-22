@@ -33,3 +33,15 @@ mappings:
         - filter: 'Input ~ "iptv-org"'
           script: |
             @Caption = concat(@Caption, " (iptv-org)")
+
+    # stage: after_epg runs once EPG channel IDs and logos are enriched.
+    # Uncomment to mirror the EPG channel id onto the channel name (sample only).
+    # - id: epg-name-sync
+    #   stage: after_epg
+    #   mapper:
+    #     - filter: 'Name ~ ".*"'
+    #       script: |
+    #         epg = @epg_id ~ "(.+)"
+    #         match {
+    #           epg => @Name = epg.1
+    #         }
