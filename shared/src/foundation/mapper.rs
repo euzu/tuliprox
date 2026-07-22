@@ -1614,6 +1614,9 @@ impl Expression {
                     Failure(_) => return key_value,
                     _ => Vec::new(),
                 };
+                let previous_key_var = expr.key_var.as_ref().and_then(|key_var| ctx.variables.get(key_var).cloned());
+                let previous_value_var =
+                    expr.value_var.as_ref().and_then(|value_var| ctx.variables.get(value_var).cloned());
                 for (k, val) in values {
                     if let Some(key_var) = &expr.key_var {
                         ctx.set_var(key_var, EvalResult::Value(k));
@@ -1624,10 +1627,18 @@ impl Expression {
                     expr.expression.eval(ctx, accessor);
                 }
                 if let Some(key_var) = &expr.key_var {
-                    ctx.variables.remove(key_var);
+                    if let Some(previous) = previous_key_var {
+                        ctx.set_var(key_var, previous);
+                    } else {
+                        ctx.variables.remove(key_var);
+                    }
                 }
                 if let Some(value_var) = &expr.value_var {
-                    ctx.variables.remove(value_var);
+                    if let Some(previous) = previous_value_var {
+                        ctx.set_var(value_var, previous);
+                    } else {
+                        ctx.variables.remove(value_var);
+                    }
                 }
                 Undefined
             }
@@ -2043,5 +2054,30 @@ mod tests {
         let mut accessor = ValueAccessor { pli: &mut series_info, virtual_items: vec![], match_as_ascii: false };
         mapper.eval(&mut accessor, None);
         assert_eq!(accessor.virtual_items.len(), 3);
+    }
+
+    #[test]
+    fn for_each_restores_existing_loop_variables() {
+        let expressions = vec![
+            Expression::Identifier("value".to_string()),
+            Expression::ForEachBlock {
+                key: ForEachKey::Identifier("items".to_string()),
+                expr: ForEachExpr {
+                    key_var: Some("key".to_string()),
+                    value_var: Some("value".to_string()),
+                    expression: ExprId(0),
+                },
+            },
+        ];
+        let mut ctx = MapperContext::new(&expressions, None);
+        ctx.set_var("items", Named(vec![("first".to_string(), "current".to_string())]));
+        ctx.set_var("value", Value("outer".to_string()));
+        let mut item = PlaylistItem { header: PlaylistItemHeader::default() };
+        let mut accessor = ValueAccessor { pli: &mut item, virtual_items: vec![], match_as_ascii: false };
+
+        ExprId(1).eval(&mut ctx, &mut accessor);
+
+        assert!(matches!(ctx.get_var("value"), Value(value) if value == "outer"));
+        assert!(matches!(ctx.get_var("key"), Undefined));
     }
 }
