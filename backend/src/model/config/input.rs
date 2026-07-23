@@ -38,6 +38,7 @@ create_bitset!(
     SkipSeries,
     XtreamLiveStreamUsePrefix,
     XtreamLiveStreamWithoutExtension,
+    DisableHlsStreaming,
     ResolveTmdb,
     ResolveBackground,
     ResolveSeries,
@@ -82,6 +83,7 @@ impl From<&ConfigInputOptionsDto> for ConfigInputOptions {
             (skip_series, SkipSeries),
             (xtream_live_stream_use_prefix, XtreamLiveStreamUsePrefix),
             (xtream_live_stream_without_extension, XtreamLiveStreamWithoutExtension),
+            (disable_hls_streaming, DisableHlsStreaming),
             (resolve_tmdb, ResolveTmdb),
             (resolve_background, ResolveBackground),
             (resolve_series, ResolveSeries),
@@ -1035,6 +1037,18 @@ mod tests {
             libraries: vec![MediaServerLibrarySelector::Name("Movies".to_string())],
             ..MediaServerInputConfigDto::default()
         })
+    }
+
+    #[test]
+    fn input_options_conversion_sets_disable_hls_streaming_flag() {
+        let dto = ConfigInputOptionsDto {
+            disable_hls_streaming: true,
+            ..ConfigInputOptionsDto::default()
+        };
+
+        let options = ConfigInputOptions::from(&dto);
+
+        assert!(options.has_flag(ConfigInputFlags::DisableHlsStreaming));
     }
 
     #[test]

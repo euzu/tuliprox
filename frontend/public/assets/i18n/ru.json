@@ -343,6 +343,7 @@
       "RESOLVE_VOD": "Включает разрешение метаданных (TMDB/NFO) для записей VOD.",
       "XTREAM_LIVE_STREAM_USE_PREFIX": "Если true, добавляет префикс /live/ к ссылкам на прямые трансляции Xtream (по умолчанию true).",
       "XTREAM_LIVE_STREAM_WITHOUT_EXTENSION": "Если true, удаляет расширение .ts из ссылок на прямые трансляции Xtream (по умолчанию false).",
+      "DISABLE_HLS_STREAMING": "Заменяет запросы прямых трансляций Xtream в формате .m3u8 на .ts. Включайте, только если провайдер поддерживает конечные точки MPEG-TS; перекодирование HLS не выполняется.",
       "XTREAM_SKIP_LIVE": "Если true, раздел прямых трансляций провайдера Xtream пропускается при обновлении.",
       "XTREAM_SKIP_SERIES": "Если true, раздел сериалов провайдера Xtream пропускается при обновлении.",
       "XTREAM_SKIP_VOD": "Если true, раздел VOD провайдера Xtream пропускается при обновлении."
@@ -1086,6 +1087,7 @@
     "LIVE_STREAMS": "Прямые трансляции",
     "LIVE_STREAM_USE_PREFIX": "Использовать префикс",
     "LIVE_STREAM_WITHOUT_EXTENSION": "Без расширения",
+    "DISABLE_HLS_STREAMING": "Принудительный MPEG-TS",
     "LOG": "Лог",
     "LOGIN": "Вход",
     "LOGOUT": "Выход",

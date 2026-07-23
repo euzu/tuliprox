@@ -280,6 +280,8 @@ pub struct ConfigInputOptionsDto {
     #[serde(default, skip_serializing_if = "is_false")]
     pub xtream_live_stream_without_extension: bool,
     #[serde(default, skip_serializing_if = "is_false")]
+    pub disable_hls_streaming: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
     pub resolve_tmdb: bool,
     #[serde(default = "default_resolve_background", skip_serializing_if = "is_true")]
     pub resolve_background: bool,
@@ -324,6 +326,7 @@ impl Default for ConfigInputOptionsDto {
             skip_series: false,
             xtream_live_stream_use_prefix: default_xtream_live_stream_use_prefix(),
             xtream_live_stream_without_extension: false,
+            disable_hls_streaming: false,
             resolve_tmdb: false,
             resolve_background: default_resolve_background(),
             resolve_series: false,
@@ -350,6 +353,7 @@ impl ConfigInputOptionsDto {
             && !self.skip_series
             && self.xtream_live_stream_use_prefix
             && !self.xtream_live_stream_without_extension
+            && !self.disable_hls_streaming
             && !self.resolve_tmdb
             && self.resolve_background
             && !self.resolve_series
@@ -371,6 +375,7 @@ impl ConfigInputOptionsDto {
         self.skip_series = false;
         self.xtream_live_stream_use_prefix = default_as_true();
         self.xtream_live_stream_without_extension = false;
+        self.disable_hls_streaming = false;
         self.resolve_tmdb = false;
         self.resolve_background = default_as_true();
         self.resolve_series = false;
@@ -923,6 +928,21 @@ impl ConfigInputDto {
 
         self.url = self.url.trim().to_string();
         self.normalize_input_type_from_batch_url();
+        if let Some(options) = self.options.as_ref() {
+            if options.disable_hls_streaming && !self.input_type.is_xtream() {
+                return Err(TuliproxError::ConfigInput(format!(
+                    "`disable_hls_streaming` is supported only for Xtream inputs (input: {})",
+                    self.name
+                )));
+            }
+            if options.disable_hls_streaming && options.xtream_live_stream_without_extension {
+                return Err(TuliproxError::ConfigInput(format!(
+                    "`disable_hls_streaming` cannot be combined with \
+                     `xtream_live_stream_without_extension` (input: {})",
+                    self.name
+                )));
+            }
+        }
         if let Some(media_server) = self.media_server.as_mut() {
             media_server.normalize();
         }
@@ -1676,6 +1696,52 @@ mod tests {
     }
 
     #[test]
+    fn disable_hls_streaming_rejects_non_xtream_input() -> Result<(), String> {
+        let mut input = ConfigInputDto {
+            name: "hls-only".intern(),
+            input_type: InputType::M3u,
+            url: "http://provider.example/list.m3u".to_string(),
+            options: Some(ConfigInputOptionsDto { disable_hls_streaming: true, ..ConfigInputOptionsDto::default() }),
+            ..ConfigInputDto::default()
+        };
+
+        let Err(error) = prepare_dto(&mut input) else {
+            return Err("non-Xtream input accepted disable_hls_streaming".to_string());
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("disable_hls_streaming"), "Error: {message}");
+        assert!(message.contains("Xtream"), "Error: {message}");
+        Ok(())
+    }
+
+    #[test]
+    fn disable_hls_streaming_rejects_extension_removal() -> Result<(), String> {
+        let mut input = ConfigInputDto {
+            name: "xtream".intern(),
+            input_type: InputType::Xtream,
+            url: "http://provider.example".to_string(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            options: Some(ConfigInputOptionsDto {
+                disable_hls_streaming: true,
+                xtream_live_stream_without_extension: true,
+                ..ConfigInputOptionsDto::default()
+            }),
+            ..ConfigInputDto::default()
+        };
+
+        let Err(error) = prepare_dto(&mut input) else {
+            return Err("conflicting extension options were accepted".to_string());
+        };
+        let message = error.to_string();
+
+        assert!(message.contains("disable_hls_streaming"), "Error: {message}");
+        assert!(message.contains("xtream_live_stream_without_extension"), "Error: {message}");
+        Ok(())
+    }
+
+    #[test]
     fn prepare_rejects_missing_input_url_even_with_aliases() {
         let mut dto = ConfigInputDto {
             name: "xtream_missing_root_url".intern(),
@@ -1924,6 +1990,33 @@ mod tests {
         assert_eq!(value.get("skip_vod"), Some(&serde_json::Value::Bool(true)));
         assert!(value.get("xtream_skip_live").is_none());
         assert!(value.get("stalker_skip_vod").is_none());
+    }
+
+    #[test]
+    fn disable_hls_streaming_defaults_to_false() -> Result<(), serde_json::Error> {
+        let options: ConfigInputOptionsDto = serde_json::from_str("{}")?;
+        assert!(!options.disable_hls_streaming);
+        Ok(())
+    }
+
+    #[test]
+    fn disable_hls_streaming_keeps_options_non_empty_and_clean_resets_it() {
+        let mut options = ConfigInputOptionsDto { disable_hls_streaming: true, ..ConfigInputOptionsDto::default() };
+
+        assert!(!options.is_empty());
+        options.clean();
+        assert!(!options.disable_hls_streaming);
+        assert!(options.is_empty());
+    }
+
+    #[test]
+    fn disable_hls_streaming_round_trips() -> Result<(), serde_json::Error> {
+        let options = ConfigInputOptionsDto { disable_hls_streaming: true, ..ConfigInputOptionsDto::default() };
+        let json = serde_json::to_string(&options)?;
+        let restored: ConfigInputOptionsDto = serde_json::from_str(&json)?;
+
+        assert!(restored.disable_hls_streaming);
+        Ok(())
     }
 
     #[test]

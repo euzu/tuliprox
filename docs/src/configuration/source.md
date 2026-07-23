@@ -247,7 +247,7 @@ specific provider.
 | `skip_live` / `skip_vod` / `skip_series`   | Bool     | `false` | Immediately ignores entire categories during Xtream or Stalker ingestion. Saves massive amounts of RAM and runtime if you only want specific clusters from a provider.                                                                 |
 | `xtream_live_stream_without_extension`     | Bool     | `false` | Strips `.ts` from generated stream URLs.                                                                                                                                                                                               |
 | `xtream_live_stream_use_prefix`            | Bool     | `true`  | Injects the `/live/` prefix into URLs.                                                                                                                                                                                                 |
-| `disable_hls_streaming`                    | Bool     | `false` | Forces Tuliprox to play Live-TV as a raw MPEG-TS (`.ts`) stream, skipping HLS (`.m3u8`) reverse-proxy handling, and forcing direct TS endpoints.                                                                                       |
+| `disable_hls_streaming`                    | Bool     | `false` | Rewrites live `.m3u8` requests to `.ts` and bypasses Tuliprox HLS handling; it does not transcode. Requires provider TS support and conflicts with `xtream_live_stream_without_extension`.                    |
 | `resolve_tmdb`                             | Bool     | `false` | Enables TMDB queries for this specific input based on parsed titles to fill missing posters and release years.                                                                                                                         |
 | `probe_stream`                             | Bool     | `false` | Uses FFprobe to read A/V details (HDR, 4K). Respects `max_connections`.                                                                                                                                                                |
 | `resolve_background`                       | Bool     | `true`  | Metadata scans run asynchronously in the background so the general playlist update (which blocks clients) finishes instantly.                                                                                                          |
@@ -263,6 +263,19 @@ specific provider.
 
 > **Note:** For `resolve_vod` and `resolve_series`, data is cached per input and only new or changed entries are
 > updated.
+
+#### Minimal Xtream MPEG-TS Example
+
+```yaml
+inputs:
+  - name: ts-capable-provider
+    type: xtream
+    url: http://provider.example
+    username: user
+    password: pass
+    options:
+      disable_hls_streaming: true
+```
 
 #### Stalker playback notes
 
