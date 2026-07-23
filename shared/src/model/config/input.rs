@@ -935,13 +935,6 @@ impl ConfigInputDto {
                     self.name
                 )));
             }
-            if options.disable_hls_streaming && options.xtream_live_stream_without_extension {
-                return Err(TuliproxError::ConfigInput(format!(
-                    "`disable_hls_streaming` cannot be combined with \
-                     `xtream_live_stream_without_extension` (input: {})",
-                    self.name
-                )));
-            }
         }
         if let Some(media_server) = self.media_server.as_mut() {
             media_server.normalize();
@@ -1716,7 +1709,7 @@ mod tests {
     }
 
     #[test]
-    fn disable_hls_streaming_rejects_extension_removal() -> Result<(), String> {
+    fn disable_hls_streaming_allows_extensionless_live_streams() -> Result<(), String> {
         let mut input = ConfigInputDto {
             name: "xtream".intern(),
             input_type: InputType::Xtream,
@@ -1731,14 +1724,7 @@ mod tests {
             ..ConfigInputDto::default()
         };
 
-        let Err(error) = prepare_dto(&mut input) else {
-            return Err("conflicting extension options were accepted".to_string());
-        };
-        let message = error.to_string();
-
-        assert!(message.contains("disable_hls_streaming"), "Error: {message}");
-        assert!(message.contains("xtream_live_stream_without_extension"), "Error: {message}");
-        Ok(())
+        prepare_dto(&mut input).map(|_| ()).map_err(|error| error.to_string())
     }
 
     #[test]
