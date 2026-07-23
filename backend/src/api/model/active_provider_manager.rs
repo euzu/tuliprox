@@ -497,20 +497,9 @@ impl ActiveProviderManager {
     async fn acquire_connection_inner(
         &self,
         provider_or_input_name: &Arc<str>,
-        force: bool,
-        allow_grace_override: Option<bool>,
+        allow_grace: bool,
         params: &AcquireProviderParams<'_>,
     ) -> Option<ProviderHandle> {
-        let allow_grace = if force { true } else { allow_grace_override.unwrap_or(true) };
-
-        if force {
-            let allocation = self.providers.force_exact_acquire_connection(provider_or_input_name).await;
-            if matches!(allocation, ProviderAllocation::Exhausted) {
-                return None;
-            }
-            return self.register_allocation(allocation, params.addr, params.priority, params.kind).await;
-        }
-
         if let Some(owner) = params.session_owner {
             if let Some(reserved_provider) = self.get_reserved_provider_for_owner(provider_or_input_name, owner).await {
                 return self
@@ -938,7 +927,7 @@ impl ActiveProviderManager {
         priority: i8,
         kind: ConnectionKind,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, false, None, &AcquireProviderParams {
+        self.acquire_connection_inner(input_name, true, &AcquireProviderParams {
             addr, priority, kind, session_owner: None,
         }).await
     }
@@ -964,7 +953,7 @@ impl ActiveProviderManager {
         kind: ConnectionKind,
         session_owner: Option<&str>,
     ) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, false, Some(allow_grace), &AcquireProviderParams {
+        self.acquire_connection_inner(input_name, allow_grace, &AcquireProviderParams {
             addr, priority, kind, session_owner,
         }).await
     }
@@ -972,7 +961,7 @@ impl ActiveProviderManager {
     /// Acquire a provider connection for probe tasks with configurable priority.
     /// Probes never consume grace capacity.
     pub async fn acquire_connection_for_probe(&self, input_name: &Arc<str>, priority: i8) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, false, Some(false), &AcquireProviderParams {
+        self.acquire_connection_inner(input_name, false, &AcquireProviderParams {
             addr: &DUMMY_ADDR, priority, kind: ConnectionKind::Normal, session_owner: None,
         }).await
     }
@@ -981,7 +970,7 @@ impl ActiveProviderManager {
     /// Transfers participate in the same provider priority/preemption model as normal
     /// streams, but they never consume grace capacity and wait externally on notifications.
     pub async fn acquire_connection_for_download(&self, input_name: &Arc<str>, priority: i8) -> Option<ProviderHandle> {
-        self.acquire_connection_inner(input_name, false, Some(false), &AcquireProviderParams {
+        self.acquire_connection_inner(input_name, false, &AcquireProviderParams {
             addr: &DUMMY_ADDR, priority, kind: ConnectionKind::Normal, session_owner: None,
         }).await
     }
