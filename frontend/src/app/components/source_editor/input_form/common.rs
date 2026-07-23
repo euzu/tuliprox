@@ -1,12 +1,13 @@
 use super::{
     input_persist_hint_key, input_url_hint_key, ConfigInputFormAction, ConfigInputFormState,
-    ConfigInputOptionsDtoFormState, ConfigInputOptionsFormAction, LABEL_CACHE_DURATION, LABEL_ENABLED, LABEL_EXP_DATE,
-    LABEL_FETCH_METHOD, LABEL_HEADERS, LABEL_LIVE_STREAMS, LABEL_MAX_CONNECTIONS, LABEL_METADATA, LABEL_NAME,
-    LABEL_PASSWORD, LABEL_PERSIST, LABEL_PRIORITY, LABEL_PROBE, LABEL_PROBE_DELAY_SEC, LABEL_PROBE_FILTER,
-    LABEL_PROBE_LIVE, LABEL_PROBE_LIVE_INTERVAL_HOURS, LABEL_PROBE_SERIES, LABEL_PROBE_VOD, LABEL_RESOLVE,
-    LABEL_RESOLVE_BACKGROUND, LABEL_RESOLVE_DELAY_SEC, LABEL_RESOLVE_FILTER, LABEL_RESOLVE_SERIES, LABEL_RESOLVE_TMDB,
-    LABEL_RESOLVE_VOD, LABEL_SEQUENTIAL_GROUP, LABEL_SKIP, LABEL_SKIP_LIVE, LABEL_SKIP_SERIES, LABEL_SKIP_VOD,
-    LABEL_URL, LABEL_USERNAME, LABEL_XTREAM_LIVE_STREAM_USE_PREFIX, LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION,
+    ConfigInputOptionsDtoFormState, ConfigInputOptionsFormAction, LABEL_CACHE_DURATION, LABEL_DISABLE_HLS_STREAMING,
+    LABEL_ENABLED, LABEL_EXP_DATE, LABEL_FETCH_METHOD, LABEL_HEADERS, LABEL_LIVE_STREAMS, LABEL_MAX_CONNECTIONS,
+    LABEL_METADATA, LABEL_NAME, LABEL_PASSWORD, LABEL_PERSIST, LABEL_PRIORITY, LABEL_PROBE, LABEL_PROBE_DELAY_SEC,
+    LABEL_PROBE_FILTER, LABEL_PROBE_LIVE, LABEL_PROBE_LIVE_INTERVAL_HOURS, LABEL_PROBE_SERIES, LABEL_PROBE_VOD,
+    LABEL_RESOLVE, LABEL_RESOLVE_BACKGROUND, LABEL_RESOLVE_DELAY_SEC, LABEL_RESOLVE_FILTER, LABEL_RESOLVE_SERIES,
+    LABEL_RESOLVE_TMDB, LABEL_RESOLVE_VOD, LABEL_SEQUENTIAL_GROUP, LABEL_SKIP, LABEL_SKIP_LIVE, LABEL_SKIP_SERIES,
+    LABEL_SKIP_VOD, LABEL_URL, LABEL_USERNAME, LABEL_XTREAM_LIVE_STREAM_USE_PREFIX,
+    LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION,
 };
 use crate::{
     app::components::{Card, FilterInput, KeyValueEditor, RadioButtonGroup, TitledCard, ToolAction},
@@ -253,6 +254,7 @@ fn xtream_options_readonly(state: &UseReducerHandle<ConfigInputOptionsDtoFormSta
         <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}><div class="tp__config-view__cols-2">
             { config_field_bool!(state.form, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix) }
             { config_field_bool!(state.form, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension) }
+            { config_field_bool!(state.form, translate.t(LABEL_DISABLE_HLS_STREAMING), disable_hls_streaming) }
         </div></TitledCard>
         <TitledCard title={translate.t(LABEL_RESOLVE)}>
             <div class="tp__config-view__cols-2">
@@ -264,9 +266,11 @@ fn xtream_options_readonly(state: &UseReducerHandle<ConfigInputOptionsDtoFormSta
             { config_field_optional!(state.form, translate.t(LABEL_RESOLVE_FILTER), resolve_filter) }
         </TitledCard>
         <TitledCard title={translate.t(LABEL_PROBE)}>
-            <div class="tp__config-view__cols-3">
+            <div class="tp__config-view__cols-2">
                 { config_field_bool!(state.form, translate.t(LABEL_PROBE_LIVE), probe_live) }
                 { config_field_bool!(state.form, translate.t(LABEL_PROBE_VOD), probe_vod) }
+            </div>
+            <div class="tp__config-view__cols-2">
                 { config_field_bool!(state.form, translate.t(LABEL_PROBE_SERIES), probe_series) }
             </div>
             <div class="tp__config-view__cols-2">
@@ -288,6 +292,7 @@ fn xtream_options_editable(state: &UseReducerHandle<ConfigInputOptionsDtoFormSta
         <TitledCard title={translate.t(LABEL_LIVE_STREAMS)}><div class="tp__config-view__cols-2">
             { edit_field_bool!(state, translate.t(LABEL_XTREAM_LIVE_STREAM_USE_PREFIX), xtream_live_stream_use_prefix, ConfigInputOptionsFormAction::XtreamLiveStreamUsePrefix) }
             { edit_field_bool!(state, translate.t(LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION), xtream_live_stream_without_extension, ConfigInputOptionsFormAction::XtreamLiveStreamWithoutExtension) }
+            { edit_field_bool!(state, translate.t(LABEL_DISABLE_HLS_STREAMING), disable_hls_streaming, ConfigInputOptionsFormAction::DisableHlsStreaming) }
         </div></TitledCard>
         <TitledCard title={translate.t(LABEL_RESOLVE)}>
             <div class="tp__config-view__cols-2">
@@ -302,9 +307,11 @@ fn xtream_options_editable(state: &UseReducerHandle<ConfigInputOptionsDtoFormSta
             })}
         </TitledCard>
         <TitledCard title={translate.t(LABEL_PROBE)}>
-            <div class="tp__config-view__cols-3">
+            <div class="tp__config-view__cols-2">
                 { edit_field_bool!(state, translate.t(LABEL_PROBE_LIVE), probe_live, ConfigInputOptionsFormAction::ProbeLive) }
                 { edit_field_bool!(state, translate.t(LABEL_PROBE_VOD), probe_vod, ConfigInputOptionsFormAction::ProbeVod) }
+            </div>
+            <div class="tp__config-view__cols-2">
                 { edit_field_bool!(state, translate.t(LABEL_PROBE_SERIES), probe_series, ConfigInputOptionsFormAction::ProbeSeries) }
             </div>
             <div class="tp__config-view__cols-2">

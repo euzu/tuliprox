@@ -366,6 +366,7 @@
       "RESOLVE_VOD": "يُفعّل حل البيانات الوصفية (TMDB/NFO) لإدخالات الفيديو حسب الطلب.",
       "XTREAM_LIVE_STREAM_USE_PREFIX": "إذا كان صحيحًا، يُضيف بادئة /live/ إلى روابط بث Xtream (الافتراضي صحيح).",
       "XTREAM_LIVE_STREAM_WITHOUT_EXTENSION": "إذا كان صحيحًا، يزيل امتداد .ts من روابط بث Xtream (الافتراضي خطأ).",
+      "DISABLE_HLS_STREAMING": "يستبدل طلبات البث المباشر من Xtream بصيغة .m3u8 بصيغة .ts. فعّله فقط عندما يدعم المزوّد نقاط نهاية MPEG-TS؛ هذا الخيار لا يقوم بتحويل ترميز HLS.",
       "XTREAM_SKIP_LIVE": "إذا كان صحيحًا، يتم تخطي قسم البث المباشر لمزود Xtream أثناء التحديث.",
       "XTREAM_SKIP_SERIES": "إذا كان صحيحًا، يتم تخطي قسم المسلسلات لمزود Xtream أثناء التحديث.",
       "XTREAM_SKIP_VOD": "إذا كان صحيحًا، يتم تخطي قسم الفيديو حسب الطلب لمزود Xtream أثناء التحديث."
@@ -1139,6 +1140,7 @@
     "LIVE_STREAMS": "البث المباشر",
     "LIVE_STREAM_USE_PREFIX": "استخدام بادئة",
     "LIVE_STREAM_WITHOUT_EXTENSION": "بدون امتداد",
+    "DISABLE_HLS_STREAMING": "إجبار MPEG-TS",
     "LOG": "سجل",
     "LOGIN": "تسجيل الدخول",
     "LOGOUT": "تسجيل الخروج",

@@ -85,6 +85,7 @@ const LABEL_SKIP_VOD: &str = "LABEL.VOD";
 const LABEL_SKIP_SERIES: &str = "LABEL.SERIES";
 const LABEL_XTREAM_LIVE_STREAM_USE_PREFIX: &str = "LABEL.LIVE_STREAM_USE_PREFIX";
 const LABEL_XTREAM_LIVE_STREAM_WITHOUT_EXTENSION: &str = "LABEL.LIVE_STREAM_WITHOUT_EXTENSION";
+const LABEL_DISABLE_HLS_STREAMING: &str = "LABEL.DISABLE_HLS_STREAMING";
 const LABEL_RESOLVE_TMDB: &str = "LABEL.RESOLVE_TMDB";
 const LABEL_RESOLVE: &str = "LABEL.RESOLVE";
 const LABEL_PROBE: &str = "LABEL.PROBE";
@@ -348,6 +349,7 @@ generate_form_reducer!(
       SkipSeries => skip_series: bool,
       XtreamLiveStreamUsePrefix => xtream_live_stream_use_prefix: bool,
       XtreamLiveStreamWithoutExtension => xtream_live_stream_without_extension: bool,
+      DisableHlsStreaming => disable_hls_streaming: bool,
       ResolveTmdb => resolve_tmdb: bool,
       ResolveBackground => resolve_background: bool,
       ResolveSeries => resolve_series: bool,

@@ -244,7 +244,6 @@ impl fmt::Display for ProviderPriorityGroup {
 }
 
 /// Manages multiple providers, ensuring that connections are allocated in a round-robin manner based on priority.
-#[repr(align(64))]
 #[derive(Debug)]
 struct MultiProviderLineup {
     name: Arc<str>,
@@ -772,19 +771,7 @@ impl ProviderLineupManager {
         }
     }
 
-    pub async fn force_exact_acquire_connection(&self, provider_name: &Arc<str>) -> ProviderAllocation {
-        let snapshot = self.snapshot.load_full();
-        let allocation = match Self::get_provider_config_by_name(provider_name, &snapshot.providers) {
-            None => ProviderAllocation::Exhausted, // No Name matched, we don't have this provider
-            Some((_lineup, config)) => config.force_allocate().await,
-        };
-        Self::log_allocation(&allocation);
-        allocation
-    }
-
     /// Acquire exactly the requested provider account while respecting its configured limits.
-    ///
-    /// Unlike `force_exact_acquire_connection`, this never over-allocates an exhausted account.
     pub(crate) async fn acquire_exact_connection_with_grace_override(
         &self,
         provider_name: &Arc<str>,
@@ -993,7 +980,8 @@ mod tests {
         model::{InputFetchMethod, InputType},
         utils::Internable,
     };
-    use std::sync::atomic::AtomicU16;
+    use tokio::sync::Barrier;
+    use tokio::task::JoinSet;
     use tokio::time::{sleep, Duration};
     use shared::model::StagedInputType;
 
@@ -1282,34 +1270,40 @@ mod tests {
     }
 
     // Test concurrent access to `acquire` using multiple threads
-    #[test]
-    fn test_concurrent_acquire() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_acquire() {
         let cfg = create_config_input(1, &"provider9_1".intern(), 1, 2);
         let change_callback: ProviderConnectionChangeCallback = Arc::new(dummy_callback);
         let provider_connections: DashMap<Arc<str>, Arc<RwLock<ProviderConfigConnection>>> = DashMap::new();
         let connection = get_or_create_provider_connection(&provider_connections, &cfg.name);
         let lineup = Arc::new(SingleProviderLineup::new(&cfg, connection, &change_callback));
-
-        let available_count = Arc::new(AtomicU16::new(2));
-        let grace_period_count = Arc::new(AtomicU16::new(1));
-        let exhausted_count = Arc::new(AtomicU16::new(2));
+        let barrier = Arc::new(Barrier::new(6));
+        let mut tasks = JoinSet::new();
 
         for _ in 0..5 {
-            let lineup_clone = Arc::clone(&lineup);
-            let available = Arc::clone(&available_count);
-            let grace_period = Arc::clone(&grace_period_count);
-            let exhausted = Arc::clone(&exhausted_count);
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async move {
-                match lineup_clone.acquire(true, 5).await {
-                    ProviderAllocation::Exhausted => exhausted.fetch_sub(1, Ordering::Acquire),
-                    ProviderAllocation::Available(_) => available.fetch_sub(1, Ordering::Acquire),
-                    ProviderAllocation::GracePeriod(_) => grace_period.fetch_sub(1, Ordering::Acquire),
-                }
+            let lineup = Arc::clone(&lineup);
+            let barrier = Arc::clone(&barrier);
+            tasks.spawn(async move {
+                barrier.wait().await;
+                lineup.acquire(true, 5).await
             });
         }
-        assert_eq!(exhausted_count.load(Ordering::Acquire), 0);
-        assert_eq!(available_count.load(Ordering::Acquire), 0);
-        assert_eq!(grace_period_count.load(Ordering::Acquire), 0);
+        barrier.wait().await;
+
+        let mut available = 0;
+        let mut grace_period = 0;
+        let mut exhausted = 0;
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(ProviderAllocation::Exhausted) => exhausted += 1,
+                Ok(ProviderAllocation::Available(_)) => available += 1,
+                Ok(ProviderAllocation::GracePeriod(_)) => grace_period += 1,
+                Err(error) => unreachable!("allocation task failed: {error}"),
+            }
+        }
+
+        assert_eq!(available, 2);
+        assert_eq!(grace_period, 1);
+        assert_eq!(exhausted, 2);
     }
 }

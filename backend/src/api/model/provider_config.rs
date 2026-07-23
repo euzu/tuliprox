@@ -213,15 +213,6 @@ impl ProviderConfig {
     //     !self.is_exhausted()
     // }
 
-    async fn force_allocate(&self) -> bool {
-        if is_input_expired(self.exp_date) {
-            return false;
-        }
-        let mut guard = self.connection.write().await;
-        modify_connections!(self, guard, +1);
-        true
-    }
-
     async fn try_allocate(&self, grace: bool, grace_period_timeout_secs: u64) -> ProviderConfigAllocation {
         if is_input_expired(self.exp_date) {
             return ProviderConfigAllocation::Exhausted;
@@ -342,14 +333,6 @@ impl ProviderConfigWrapper {
 
     pub(in crate::api::model) fn config(&self) -> Arc<ProviderConfig> { Arc::clone(&self.inner) }
 
-    pub async fn force_allocate(&self) -> ProviderAllocation {
-        if self.inner.force_allocate().await {
-            ProviderAllocation::new_available(Arc::clone(&self.inner))
-        } else {
-            ProviderAllocation::Exhausted
-        }
-    }
-
     pub async fn try_allocate(&self, grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
         match self.inner.try_allocate(grace, grace_period_timeout_secs).await {
             ProviderConfigAllocation::Available => ProviderAllocation::new_available(Arc::clone(&self.inner)),
@@ -425,8 +408,14 @@ mod tests {
         assert!(provider.is_unlimited());
 
         // Drive connection count up so `release` executes its normal path.
-        assert!(provider.force_allocate().await);
-        assert!(provider.force_allocate().await);
+        assert!(matches!(
+            provider.try_allocate(false, 0).await,
+            ProviderConfigAllocation::Available
+        ));
+        assert!(matches!(
+            provider.try_allocate(false, 0).await,
+            ProviderConfigAllocation::Available
+        ));
         assert_eq!(provider.get_current_connections().await, 2);
 
         {

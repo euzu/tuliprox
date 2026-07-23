@@ -61,7 +61,7 @@ use shared::{
         deserialize_as_string, extract_extension_from_url, generate_provider_playlist_uuid, sanitize_sensitive_info,
         trim_slash, Internable,
     },
-    defaults::{HLS_EXT},
+    defaults::{HLS_EXT, TS_EXT},
 };
 use std::{
     fmt::{Display, Formatter, Write},
@@ -297,6 +297,12 @@ async fn xtream_player_api_stream(
         .into_response();
     };
 
+    let input_option = app_state.app_config.get_input_by_name(&pli.input_name);
+    let stream_ext = input_option
+        .as_deref()
+        .map_or(stream_ext, |input| override_live_hls_extension(stream_req.context, input, stream_ext));
+    let is_hls_manifest_request = stream_ext == Some(HLS_EXT);
+
     let output_allowed = if stream_req.context == ApiStreamContext::Timeshift {
         user.allows_cluster(XtreamCluster::Live)
     } else {
@@ -325,7 +331,7 @@ async fn xtream_player_api_stream(
     }
 
     let input = try_option_bad_request!(
-        app_state.app_config.get_input_by_name(&pli.input_name),
+        input_option,
         true,
         format!(
             "Can't find input {} for target {target_name}, context {}, stream_id {virtual_id}",
@@ -335,7 +341,7 @@ async fn xtream_player_api_stream(
 
     if user.permission_denied(app_state) {
         let stream_channel = create_stream_channel_with_type(target.id, &pli, pli.item_type);
-        if resolve_xtream_playback_extension(stream_ext, &pli).is_some_and(|ext| ext == HLS_EXT) {
+        if is_hls_playback_request(stream_ext, &pli) {
             return hls_admission_failure_manifest_response(
                 app_state,
                 fingerprint,
@@ -781,6 +787,29 @@ fn pli_supports_archive(app_state: &Arc<AppState>, pli: &XtreamPlaylistItem) -> 
     }
 }
 
+fn is_hls_playback_request(stream_ext: Option<&str>, pli: &XtreamPlaylistItem) -> bool {
+    resolve_xtream_playback_extension(stream_ext, pli).as_deref() == Some(HLS_EXT)
+}
+
+/// Rewrites a live Xtream `.m3u8` request to `.ts` when the input has the
+/// `disable_hls_streaming` option enabled. Returns the borrowed/static
+/// extension string and performs no allocation.
+fn override_live_hls_extension<'a>(
+    context: ApiStreamContext,
+    input: &ConfigInput,
+    stream_ext: Option<&'a str>,
+) -> Option<&'a str> {
+    if input.has_flag(ConfigInputFlags::DisableHlsStreaming)
+        && input.input_type.is_xtream()
+        && matches!(context, ApiStreamContext::Live | ApiStreamContext::LiveAlt)
+        && stream_ext == Some(HLS_EXT)
+    {
+        Some(TS_EXT)
+    } else {
+        stream_ext
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 // Used by webui
 pub(in crate::api) async fn xtream_player_api_stream_with_token(
@@ -808,8 +837,12 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
             format!("Failed to read xtream item for stream id {req_virtual_id}")
         );
         let virtual_id = pli.virtual_id;
+        let input_option = app_state.app_config.get_input_by_name(&pli.input_name);
+        let stream_ext = input_option
+            .as_deref()
+            .map_or(stream_ext, |input| override_live_hls_extension(stream_req.context, input, stream_ext));
         let input = try_option_bad_request!(
-            app_state.app_config.get_input_by_name(&pli.input_name),
+            input_option,
             true,
             format!(
                 "Can't find input {} for target {target_name}, context {}, stream_id {}",
@@ -1842,8 +1875,9 @@ pub fn xtream_api_register() -> axum::Router<Arc<AppState>> {
 mod tests {
     use super::{
         empty_stream_info_response, get_xtream_player_api_stream_url, resolve_m3u_xtream_timeshift,
-        resolve_xtream_playback_extension, xtream_get_short_epg, xtream_player_api_stream,
-        xtream_player_api_stream_with_token, ApiStreamContext, ApiStreamRequest, XtreamApiTimeShiftRequest,
+        is_hls_playback_request, override_live_hls_extension, resolve_xtream_playback_extension,
+        xtream_get_short_epg, xtream_player_api_stream, xtream_player_api_stream_with_token, ApiStreamContext,
+        ApiStreamRequest, XtreamApiTimeShiftRequest,
     };
     use crate::auth::Fingerprint;
     use crate::{
@@ -1873,6 +1907,61 @@ mod tests {
     };
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[test]
+    fn live_hls_override_is_scoped_to_enabled_xtream_live_requests() {
+        let enabled_xtream = provider_input_with_flag(InputType::Xtream, true);
+        let disabled_xtream = provider_input_with_flag(InputType::Xtream, false);
+        let enabled_m3u = provider_input_with_flag(InputType::M3u, true);
+        let cases = [
+            (ApiStreamContext::Live, &enabled_xtream, Some(".m3u8"), Some(".ts")),
+            (ApiStreamContext::LiveAlt, &enabled_xtream, Some(".m3u8"), Some(".ts")),
+            (ApiStreamContext::Live, &disabled_xtream, Some(".m3u8"), Some(".m3u8")),
+            (ApiStreamContext::Live, &enabled_m3u, Some(".m3u8"), Some(".m3u8")),
+            (ApiStreamContext::Timeshift, &enabled_xtream, Some(".m3u8"), Some(".m3u8")),
+            (ApiStreamContext::Movie, &enabled_xtream, Some(".m3u8"), Some(".m3u8")),
+            (ApiStreamContext::Series, &enabled_xtream, Some(".m3u8"), Some(".m3u8")),
+            (ApiStreamContext::Live, &enabled_xtream, Some(".ts"), Some(".ts")),
+            (ApiStreamContext::Live, &enabled_xtream, Some(".mpd"), Some(".mpd")),
+            (ApiStreamContext::Live, &enabled_xtream, None, None),
+        ];
+
+        for (context, input, extension, expected) in cases {
+            assert_eq!(
+                override_live_hls_extension(context, input, extension),
+                expected,
+                "case: {context:?} input_type={:?} ext={extension:?}",
+                input.input_type
+            );
+        }
+    }
+
+    fn provider_input_with_flag(input_type: InputType, disable_hls: bool) -> ConfigInput {
+        let dto = shared::model::ConfigInputDto {
+            name: "ts-provider".into(),
+            input_type,
+            url: "http://provider.test".to_string(),
+            username: Some("user".to_string()),
+            password: Some("pass".to_string()),
+            enabled: true,
+            options: Some(shared::model::ConfigInputOptionsDto {
+                disable_hls_streaming: disable_hls,
+                ..shared::model::ConfigInputOptionsDto::default()
+            }),
+            ..shared::model::ConfigInputDto::default()
+        };
+        ConfigInput::from(&dto)
+    }
+
+    #[test]
+    fn hls_failure_response_uses_resolved_playback_extension() {
+        let vod = create_test_vod_item("provider://strong/movie/user/pass/813563.mp4", "mp4", PlaylistItemType::Video);
+        let hls_vod =
+            create_test_vod_item("provider://strong/movie/user/pass/813564.m3u8", "m3u8", PlaylistItemType::Video);
+
+        assert!(!is_hls_playback_request(Some(".m3u8"), &vod));
+        assert!(is_hls_playback_request(None, &hls_vod));
+    }
 
     async fn response_body_text(response: axum::response::Response) -> Result<String, String> {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)

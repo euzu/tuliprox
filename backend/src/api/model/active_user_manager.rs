@@ -6,7 +6,7 @@ use crate::{
 };
 use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
-use log::{debug, info};
+use log::{debug, info, log_enabled};
 use shared::{
     model::{
         ActiveUserConnectionChange, PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo,
@@ -887,15 +887,13 @@ impl ActiveUserManager {
                     }
                 }
                 let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, &username);
-                (removed_stream, username, expiry_entry, preserved_update, connection_changed, promotion, Some(divergence_snapshot))
+                (removed_stream, username, expiry_entry, preserved_update, connection_changed, promotion, divergence_snapshot)
             } else {
                 (None, username, None, None, false, None, None)
             }
         };
 
-        if let Some(snapshot) = divergence_snapshot {
-            self.log_divergence_snapshot(snapshot).await;
-        }
+        self.log_divergence_snapshot(divergence_snapshot).await;
 
         if let Some(entry) = expiry_entry {
             self.enqueue_adaptive_expiry(entry).await;
@@ -3147,7 +3145,14 @@ impl ActiveUserManager {
         now.saturating_sub(session.ts) >= ttl_secs
     }
 
-    fn collect_divergence_snapshot(connection_data: &UserConnectionData, username: &str) -> DivergenceSnapshot {
+    fn collect_divergence_snapshot(
+        connection_data: &UserConnectionData,
+        username: &str,
+    ) -> Option<DivergenceSnapshot> {
+        log_enabled!(log::Level::Debug).then(|| Self::build_divergence_snapshot(connection_data, username))
+    }
+
+    fn build_divergence_snapshot(connection_data: &UserConnectionData, username: &str) -> DivergenceSnapshot {
         let connections = connection_data.connections;
         let counted_sessions = connection_data.sessions.iter().filter(|s| s.lifecycle.is_counted()).count();
         let streams_count = connection_data.streams.len();
@@ -3200,7 +3205,10 @@ impl ActiveUserManager {
         }
     }
 
-    async fn log_divergence_snapshot(&self, snapshot: DivergenceSnapshot) {
+    async fn log_divergence_snapshot(&self, snapshot: Option<DivergenceSnapshot>) {
+        let Some(snapshot) = snapshot else {
+            return;
+        };
         let cooldown = Duration::from_secs(self.divergence_cooldown_secs);
         for kind in &snapshot.kinds {
             let key = divergence_key(&snapshot.username, kind);
@@ -3399,11 +3407,9 @@ impl ActiveUserManager {
                 connections
                     .by_key
                     .get(username)
-                    .map(|data| Self::collect_divergence_snapshot(data, username))
+                    .and_then(|data| Self::collect_divergence_snapshot(data, username))
             };
-            if let Some(snapshot) = snapshot {
-                self.log_divergence_snapshot(snapshot).await;
-            }
+            self.log_divergence_snapshot(snapshot).await;
         }
 
         if let Some(tx) = self.cleanup_tx.get() {
@@ -8601,13 +8607,11 @@ mod tests {
         let mut user = ProxyUserCredentials::default();
         user.username = "div-user-2".to_string();
 
-        // Create session + increment legacy counter without a counted session
+        // Create a counted session without a stream or matching legacy counter.
         {
             let mut connections = manager.connections.write().await;
             let data = connections.by_key.entry(user.username.clone())
                 .or_insert_with(|| UserConnectionData::new(0, 1, 0));
-            // Manually set legacy connections to 1 without any counted session
-            data.increment_kind(ConnectionKind::Normal); // connections = 1
             data.add_session(UserSession {
                 token: "tok-div-2".to_string(),
                 transition_version: 1,
@@ -8622,15 +8626,20 @@ mod tests {
                 started_at: current_time_secs(),
                 permission: UserConnectionPermission::Allowed,
                 connection_kind: None,
-                lifecycle: PlaybackLifecycle::Prepared,
+                lifecycle: PlaybackLifecycle::Active,
             });
         }
 
         let connections = manager.connections.read().await;
         let data = connections.by_key.get(&user.username).expect("user connection data");
-        let snapshot = ActiveUserManager::collect_divergence_snapshot(data, &user.username);
+        let snapshot = ActiveUserManager::build_divergence_snapshot(data, &user.username);
+        assert!(snapshot.kinds.contains(&DivergenceKind::CountedSessionWithoutStream));
+        assert!(snapshot.kinds.contains(&DivergenceKind::ConnectionCountMismatch {
+            legacy: 0,
+            counted: 1,
+        }));
         drop(connections);
-        manager.log_divergence_snapshot(snapshot).await;
+        manager.log_divergence_snapshot(Some(snapshot)).await;
     }
 
     #[tokio::test]
@@ -8703,9 +8712,10 @@ mod tests {
 
         let connections = manager.connections.read().await;
         let data = connections.by_key.get(&user.username).expect("user connection data");
-        let snapshot = ActiveUserManager::collect_divergence_snapshot(data, &user.username);
+        let snapshot = ActiveUserManager::build_divergence_snapshot(data, &user.username);
+        assert!(snapshot.kinds.contains(&DivergenceKind::StreamWithoutCountedSession));
         drop(connections);
-        manager.log_divergence_snapshot(snapshot).await;
+        manager.log_divergence_snapshot(Some(snapshot)).await;
     }
 
     #[tokio::test]
@@ -8745,19 +8755,37 @@ mod tests {
 
         let connections = manager.connections.read().await;
         let data = connections.by_key.get(&user.username).expect("user connection data");
-        let snapshot = ActiveUserManager::collect_divergence_snapshot(data, &user.username);
+        let snapshot = ActiveUserManager::build_divergence_snapshot(data, &user.username);
         drop(connections);
-        manager.log_divergence_snapshot(snapshot).await;
+        manager.log_divergence_snapshot(Some(snapshot)).await;
+        let key = divergence_key(
+            &user.username,
+            &DivergenceKind::ConnectionCountMismatch {
+                legacy: 1,
+                counted: 0,
+            },
+        );
+        let first_logged = {
+            let cache = manager.divergence_cache.lock().await;
+            let entry = cache.peek(&key).expect("first divergence should populate the cache");
+            assert_eq!(entry.count_since_last_log, 0);
+            entry.last_logged
+        };
+
         let connections = manager.connections.read().await;
         let data = connections.by_key.get(&user.username).expect("user connection data");
-        let snapshot = ActiveUserManager::collect_divergence_snapshot(data, &user.username);
+        let snapshot = ActiveUserManager::build_divergence_snapshot(data, &user.username);
         drop(connections);
-        manager.log_divergence_snapshot(snapshot).await;
+        manager.log_divergence_snapshot(Some(snapshot)).await;
         let connections = manager.connections.read().await;
         let data = connections.by_key.get(&user.username).expect("user connection data");
-        let snapshot = ActiveUserManager::collect_divergence_snapshot(data, &user.username);
+        let snapshot = ActiveUserManager::build_divergence_snapshot(data, &user.username);
         drop(connections);
-        manager.log_divergence_snapshot(snapshot).await;
+        manager.log_divergence_snapshot(Some(snapshot)).await;
+        let cache = manager.divergence_cache.lock().await;
+        let entry = cache.peek(&key).expect("repeated divergence should remain cached");
+        assert_eq!(entry.count_since_last_log, 2);
+        assert_eq!(entry.last_logged, first_logged);
     }
 
 }

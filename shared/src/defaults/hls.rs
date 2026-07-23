@@ -31,6 +31,7 @@ pub const fn default_hls_corrupt_segment_watchdog_max_parallel_jobs() -> usize {
 
 // HLS manifest / fallback filename constants.
 pub const HLS_EXT: &str = ".m3u8";
+pub const TS_EXT: &str = ".ts";
 pub const DASH_EXT: &str = ".mpd";
 pub const HLS_PREFIX: &str = "hls";
 pub const CUSTOM_VIDEO_PREFIX: &str = "cvs";
