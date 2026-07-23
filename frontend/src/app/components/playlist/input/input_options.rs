@@ -25,6 +25,7 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                 vec![
                     (false, "LABEL.LIVE_STREAM_USE_PREFIX"),
                     (false, "LABEL.LIVE_STREAM_WITHOUT_EXTENSION"),
+                    (false, "LABEL.DISABLE_HLS_STREAMING"),
                     (false, "LABEL.RESOLVE_TMDB"),
                 ],
                 vec![
@@ -66,6 +67,7 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                     || options.skip_series
                     || !options.xtream_live_stream_use_prefix
                     || options.xtream_live_stream_without_extension
+                    || options.disable_hls_streaming
                     || options.resolve_tmdb
                     || !options.resolve_background
                     || options.resolve_series
@@ -87,6 +89,7 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                     vec![
                         (options.xtream_live_stream_use_prefix, "LABEL.LIVE_STREAM_USE_PREFIX"),
                         (options.xtream_live_stream_without_extension, "LABEL.LIVE_STREAM_WITHOUT_EXTENSION"),
+                        (options.disable_hls_streaming, "LABEL.DISABLE_HLS_STREAMING"),
                         (options.resolve_tmdb, "LABEL.RESOLVE_TMDB"),
                     ],
                     vec![
