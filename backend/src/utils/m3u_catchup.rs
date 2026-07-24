@@ -11,7 +11,9 @@ use url::Url;
 pub const M3U_CATCHUP_ROUTE_PREFIX: &str = "m3u-catchup";
 pub const M3U_CATCHUP_MARKER: &str = "tuliprox-catchup";
 const COLLECTOR_PREFIX: &str = "v";
-const SIPTV_APPEND_TEMPLATE: &str = "?utc={utc}&lutc={lutc}";
+const M3U_APPEND_TEMPLATE: &str = "?utc={utc}&lutc={lutc}";
+const M3U_CATCHUP_PARAM_UTC: &str = "utc";
+const M3U_CATCHUP_PARAM_LUTC: &str = "lutc";
 const XC_START_TEMPLATE: &str = "{Y}-{m}-{d}:{H}-{M}-{S}";
 const FLUSSONIC_TEMPLATE: &str = "timeshift_abs-{utc}";
 const XTREAM_BRIDGE_START_FORMATS: [&str; 4] = [
@@ -143,9 +145,9 @@ fn build_local_source(
 
 fn append_siptv_template(source_url: &str) -> String {
     if source_url.contains('?') {
-        format!("&{}", SIPTV_APPEND_TEMPLATE.trim_start_matches('?'))
+        format!("&{}", M3U_APPEND_TEMPLATE.trim_start_matches('?'))
     } else {
-        SIPTV_APPEND_TEMPLATE.to_string()
+        M3U_APPEND_TEMPLATE.to_string()
     }
 }
 
@@ -230,25 +232,57 @@ fn derived_template_for_mode<'a>(source_url: &'a str, catchup: &'a CatchupProper
     }
 }
 
-fn resolve_collectors(raw_query: Option<&str>) -> Result<Vec<(usize, String)>, TuliproxError> {
-    let mut collectors = Vec::new();
+fn resolve_collectors(raw_query: Option<&str>, placeholders: &[&str]) -> Vec<(usize, String)> {
+    let mut collectors: Vec<Option<String>> = vec![None; placeholders.len()];
     let Some(raw_query) = raw_query else {
-        return Ok(collectors);
+        return into_collectors(collectors);
     };
 
-    for (key, value) in url::form_urlencoded::parse(raw_query.as_bytes()) {
-        if key == M3U_CATCHUP_MARKER {
-            continue;
+    let params: Vec<(String, String)> = url::form_urlencoded::parse(raw_query.as_bytes())
+        .filter(|(key, _)| key != M3U_CATCHUP_MARKER)
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+
+    // First pass: named mapping for native SIPTV-style placeholders.
+    // Smart IPTV strips the proxy marker and indexed `v0`/`v1` keys, leaving
+    // only `utc`/`lutc` in the request. Map those by placeholder name so the
+    // upstream URL still gets the correct values.
+    for (idx, placeholder) in placeholders.iter().enumerate() {
+        let name = placeholder_name(placeholder);
+        if let Some((_, value)) = params.iter().find(|(key, _)| key == name) {
+            collectors[idx] = Some(value.clone());
         }
+    }
+
+    // Second pass: indexed mapping for proxy-rewritten requests carrying
+    // `v0`/`v1` collectors, falling back only where the named pass did not
+    // already fill the slot (so callers can mix both styles in one query).
+    for (key, value) in &params {
         let Some(idx) = key
             .strip_prefix(COLLECTOR_PREFIX)
             .and_then(|suffix| suffix.parse::<usize>().ok()) else {
-            return Err(TuliproxError::Crypto(format!("Unsupported catchup query parameter '{key}'")));
+            continue;
         };
-        collectors.push((idx, value.into_owned()));
+        if idx < collectors.len() && collectors[idx].is_none() {
+            collectors[idx] = Some(value.clone());
+        }
     }
-    collectors.sort_by_key(|(idx, _)| *idx);
-    Ok(collectors)
+
+    into_collectors(collectors)
+}
+
+fn into_collectors(collectors: Vec<Option<String>>) -> Vec<(usize, String)> {
+    collectors
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, val)| val.map(|v| (idx, v)))
+        .collect()
+}
+
+fn placeholder_name(placeholder: &str) -> &str {
+    let trimmed = placeholder.strip_prefix("${").unwrap_or(placeholder);
+    let trimmed = trimmed.strip_prefix('{').unwrap_or(trimmed);
+    trimmed.strip_suffix('}').unwrap_or(trimmed)
 }
 
 fn render_template(segments: &[TemplateSegment], collectors: &[(usize, String)]) -> Result<String, TuliproxError> {
@@ -313,7 +347,9 @@ pub fn build_m3u_catchup_rewrite(
 
 pub fn has_m3u_catchup_marker(raw_query: Option<&str>) -> bool {
     raw_query.is_some_and(|query| {
-        url::form_urlencoded::parse(query.as_bytes()).any(|(key, _)| key == M3U_CATCHUP_MARKER)
+        url::form_urlencoded::parse(query.as_bytes()).any(|(key, _)| {
+            key == M3U_CATCHUP_MARKER || key == M3U_CATCHUP_PARAM_UTC || key == M3U_CATCHUP_PARAM_LUTC
+        })
     })
 }
 
@@ -406,7 +442,7 @@ pub fn resolve_m3u_catchup_url(
     };
     let segments = parse_template(template.as_ref());
     let placeholders = collect_placeholders(&segments);
-    let collectors = resolve_collectors(raw_query)?;
+    let collectors = resolve_collectors(raw_query, &placeholders);
     if collectors.len() != placeholders.len() {
         return Err(TuliproxError::Crypto(format!(
             "Catchup collector mismatch: expected {}, got {}",
@@ -615,6 +651,78 @@ mod tests {
         assert!(has_m3u_catchup_marker(Some(&format!("{M3U_CATCHUP_MARKER}=abc&v0=1"))));
         assert!(!has_m3u_catchup_marker(Some("v0=1")));
         assert!(!has_m3u_catchup_marker(None));
+    }
+
+    #[test]
+    fn siptv_style_catchup_request_is_detected() {
+        // Smart IPTV keeps `utc`/`lutc` and strips the proxy marker.
+        assert!(has_m3u_catchup_marker(Some("utc=1784869500&lutc=1784877418")));
+        assert!(has_m3u_catchup_marker(Some("lutc=1784877418")));
+        assert!(!has_m3u_catchup_marker(Some("foo=1")));
+    }
+
+    #[test]
+    fn resolve_shift_template_from_siptv_native_collectors() {
+        // Smart IPTV strips `tuliprox-catchup`/`v0`/`v1` and forwards only
+        // `utc`/`lutc`. The server must still resolve the upstream URL.
+        let resolved = resolve_m3u_catchup_url(
+            "http://provider.example/live/42.ts",
+            &CatchupProperties {
+                mode: Some("shift".intern()),
+                ..CatchupProperties::default()
+            },
+            Some("utc=20240101120000&lutc=20240101130000"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            resolved.url,
+            "http://provider.example/live/42.ts?utc=20240101120000&lutc=20240101130000"
+        );
+    }
+
+    #[test]
+    fn resolve_append_template_keeps_indexed_collectors() {
+        // Plain indexed collectors without the marker must still work; this
+        // is the path used by Smart STB / non-stripping clients.
+        let resolved = resolve_m3u_catchup_url(
+            "http://provider.example/live/42.m3u8",
+            &CatchupProperties {
+                mode: Some("append".intern()),
+                source: Some("?offset=-${offset}&utcstart=${timestamp}".intern()),
+                ..CatchupProperties::default()
+            },
+            Some("v0=120&v1=1717200000"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            resolved.url,
+            "http://provider.example/live/42.m3u8?offset=-120&utcstart=1717200000"
+        );
+    }
+
+    #[test]
+    fn resolve_collectors_mix_named_and_indexed() {
+        // A request that carries both styles should fill the template
+        // placeholders without overlap.
+        let resolved = resolve_m3u_catchup_url(
+            "http://provider.example/live/42.ts",
+            &CatchupProperties {
+                mode: Some("shift".intern()),
+                ..CatchupProperties::default()
+            },
+            Some("utc=20240101120000&v1=20240101130000"),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            resolved.url,
+            "http://provider.example/live/42.ts?utc=20240101120000&lutc=20240101130000"
+        );
     }
 
     #[test]
