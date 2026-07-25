@@ -27,7 +27,7 @@ use crate::{
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, log_enabled, warn};
 use reqwest::{
-    header::{HeaderMap, CONTENT_RANGE, RANGE},
+    header::{HeaderMap, HeaderValue, CONTENT_RANGE, RANGE},
     StatusCode,
 };
 use shared::{
@@ -86,7 +86,7 @@ pub struct ProviderStreamFactoryOptions {
     url: Url,
     headers: HeaderMap,
     default_user_agent: Option<axum::http::header::HeaderValue>,
-    range_start_bytes: Option<usize>,
+    requested_range: Option<HeaderValue>,
     reconnect_flag: CancellationToken,
     provider: Option<Arc<ConfigProvider>>,
     username: Option<String>,
@@ -143,8 +143,8 @@ impl ProviderStreamFactoryOptions {
             .map(ToString::to_string);
         let filter_header = get_header_filter_for_item_type(*item_type);
         let mut req_headers = get_headers_from_request(req_headers, &filter_header);
-        let requested_range = get_request_range_start_bytes(&req_headers);
-        req_headers.remove("range");
+        let requested_range =
+            req_headers.remove(RANGE.as_str()).and_then(|value| HeaderValue::from_bytes(&value).ok());
 
         let merged_input_headers = merge_provider_request_headers(*input_headers, *session_headers);
 
@@ -163,11 +163,6 @@ impl ProviderStreamFactoryOptions {
             })
             .and_then(|ua| axum::http::header::HeaderValue::from_str(ua).ok());
         let url = (*stream_url).clone();
-        let range_start_bytes = if matches!(item_type, PlaylistItemType::Live | PlaylistItemType::LiveUnknown) {
-            requested_range
-        } else {
-            Some(requested_range.unwrap_or(0))
-        };
         let mut flags = ProviderStreamFactoryFlagsSet::new();
         if stream_options.stream_retry {
             flags.set(ProviderStreamFactoryFlags::RetryEnabled);
@@ -197,7 +192,7 @@ impl ProviderStreamFactoryOptions {
             url,
             headers,
             default_user_agent,
-            range_start_bytes,
+            requested_range,
             provider: None,
             username: username.map(ToString::to_string),
             client_ip: client_ip.map(ToString::to_string),
@@ -263,7 +258,7 @@ impl ProviderStreamFactoryOptions {
     pub fn get_headers(&self) -> &HeaderMap { &self.headers }
 
     #[inline]
-    pub fn get_range_start_bytes(&self) -> Option<usize> { self.range_start_bytes }
+    pub fn get_requested_range(&self) -> Option<&HeaderValue> { self.requested_range.as_ref() }
 
     #[inline]
     pub fn should_continue(&self) -> bool { !self.reconnect_flag.is_cancelled() }
@@ -468,23 +463,6 @@ fn should_wrap_provider_stream_in_buffer(stream_options: &ProviderStreamFactoryO
         && stream_options.is_buffer_enabled()
 }
 
-fn get_request_range_start_bytes(req_headers: &HashMap<String, Vec<u8>>) -> Option<usize> {
-    // range header looks like  bytes=1234-5566/2345345 or bytes=0-
-    if let Some(req_range) = req_headers.get(axum::http::header::RANGE.as_str()) {
-        if let Some(bytes_range) = req_range.strip_prefix(b"bytes=") {
-            if let Some(index) = bytes_range.iter().position(|&x| x == b'-') {
-                let start_bytes = &bytes_range[..index];
-                if let Ok(start_str) = std::str::from_utf8(start_bytes) {
-                    if let Ok(bytes_requested) = start_str.parse::<usize>() {
-                        return Some(bytes_requested);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 // fn get_host_and_optional_port(url: &Url) -> Option<String> {
 //     let host = url.host_str()?;
 //     match url.port() {
@@ -515,7 +493,7 @@ fn prepare_client(
 ) -> (reqwest::RequestBuilder, bool) {
     let original_url = stream_options.get_url();
     let url = url_override.unwrap_or(original_url);
-    let range_start = stream_options.get_range_start_bytes();
+    let requested_range = stream_options.get_requested_range();
     let original_headers = stream_options.get_headers();
 
     if log_enabled!(log::Level::Debug) {
@@ -535,7 +513,7 @@ fn prepare_client(
         remove_sensitive_headers(&mut headers);
     }
     prepare_default_headers(&mut headers, stream_options);
-    let partial = prepare_partial_request_headers(&mut headers, stream_options, range_start);
+    let partial = prepare_partial_request_headers(&mut headers, requested_range);
     let content_coding_policy = match stream_options.content_representation() {
         ProviderContentRepresentationMode::PreserveOrigin => OutboundContentCodingPolicy::Inherit,
         ProviderContentRepresentationMode::Identity => OutboundContentCodingPolicy::Identity,
@@ -592,21 +570,10 @@ fn prepare_default_headers(headers: &mut axum::http::HeaderMap, stream_options: 
     }
 }
 
-fn prepare_partial_request_headers(
-    headers: &mut HeaderMap,
-    stream_options: &ProviderStreamFactoryOptions,
-    range_start: Option<usize>,
-) -> bool {
-    if let Some(range) = range_start {
-        if range > 0 || stream_options.was_range_requested() {
-            let range_header = format!("bytes={range}-");
-            if let Ok(header_value) = axum::http::header::HeaderValue::from_str(&range_header) {
-                headers.insert(RANGE, header_value);
-            }
-            true
-        } else {
-            false
-        }
+fn prepare_partial_request_headers(headers: &mut HeaderMap, requested_range: Option<&HeaderValue>) -> bool {
+    if let Some(range) = requested_range {
+        headers.insert(RANGE, range.clone());
+        true
     } else {
         false
     }
@@ -1434,6 +1401,67 @@ mod tests {
     }
 
     #[test]
+    fn provider_requests_preserve_complete_client_range_header() {
+        let stream_url = Url::parse("http://provider.example/movie").unwrap();
+        let client = reqwest::Client::new();
+
+        for requested_range in [
+            "bytes=100-199",
+            "bytes=100-",
+            "bytes=-100",
+            "bytes=0-0",
+            "bytes=0-0,200-299",
+        ] {
+            let mut req_headers = HeaderMap::new();
+            req_headers.insert(reqwest::header::RANGE, requested_range.parse().unwrap());
+            let options = test_options(
+                ProviderContentRepresentationMode::PreserveOrigin,
+                &stream_url,
+                &req_headers,
+                None,
+                None,
+            );
+
+            let (request, partial) =
+                prepare_client(&client, &options, None, ProviderRequestCredentialState::OriginalOrigin);
+            let request = request.build().unwrap();
+
+            assert!(partial, "Range request was not recognized: {requested_range}");
+            assert_eq!(
+                request.headers().get(reqwest::header::RANGE).and_then(|value| value.to_str().ok()),
+                Some(requested_range)
+            );
+        }
+    }
+
+    #[test]
+    fn client_range_takes_precedence_over_configured_provider_range() {
+        let stream_url = Url::parse("http://provider.example/movie").unwrap();
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(reqwest::header::RANGE, "bytes=100-199".parse().unwrap());
+        let input_headers = HashMap::from([("Range".to_string(), "bytes=0-".to_string())]);
+        let options = test_options(
+            ProviderContentRepresentationMode::PreserveOrigin,
+            &stream_url,
+            &req_headers,
+            Some(&input_headers),
+            None,
+        );
+
+        let request = prepare_client(
+            &reqwest::Client::new(),
+            &options,
+            None,
+            ProviderRequestCredentialState::OriginalOrigin,
+        )
+        .0
+        .build()
+        .unwrap();
+
+        assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=100-199");
+    }
+
+    #[test]
     fn test_provider_stream_factory_options_range_logic() {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let stream_url = Url::parse("http://example.com/stream").unwrap();
@@ -1461,7 +1489,7 @@ mod tests {
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
         });
         assert!(!options.was_range_requested());
-        assert_eq!(options.get_range_start_bytes(), Some(0)); // Should track range start even if not requested
+        assert!(options.get_requested_range().is_none());
 
         // Case 2: VOD, range requested
         req_headers.insert("Range", "bytes=100-".parse().unwrap());
@@ -1483,7 +1511,7 @@ mod tests {
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
         });
         assert!(options.was_range_requested());
-        assert_eq!(options.get_range_start_bytes(), Some(100));
+        assert_eq!(options.get_requested_range().and_then(|value| value.to_str().ok()), Some("bytes=100-"));
 
         // Case 3: Live, no initial range requested
         let req_headers = HeaderMap::new();
@@ -1505,7 +1533,7 @@ mod tests {
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
         });
         assert!(!options.was_range_requested());
-        assert_eq!(options.get_range_start_bytes(), None); // Should NOT track range start
+        assert!(options.get_requested_range().is_none());
 
         // Case 4: Live, range requested (should be stripped)
         let mut req_headers = HeaderMap::new();
@@ -1528,7 +1556,7 @@ mod tests {
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
         });
         assert!(!options.was_range_requested()); // Stripped by filter
-        assert_eq!(options.get_range_start_bytes(), None);
+        assert!(options.get_requested_range().is_none());
     }
 
     #[test]
@@ -1722,7 +1750,7 @@ mod tests {
         let stream_url = Url::parse("http://provider-a.example/live/segment.ts").unwrap();
         let mut req_headers = HeaderMap::new();
         req_headers.insert(reqwest::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
-        req_headers.insert(reqwest::header::RANGE, "bytes=17-".parse().unwrap());
+        req_headers.insert(reqwest::header::RANGE, "bytes=17-31".parse().unwrap());
         req_headers.insert(reqwest::header::USER_AGENT, "test-agent".parse().unwrap());
         req_headers.insert(reqwest::header::AUTHORIZATION, "Bearer client".parse().unwrap());
         req_headers.insert(reqwest::header::COOKIE, "client=1".parse().unwrap());
@@ -1742,7 +1770,7 @@ mod tests {
 
         let mut safe_headers = HeaderMap::new();
         safe_headers.insert(reqwest::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
-        safe_headers.insert(reqwest::header::RANGE, "bytes=17-".parse().unwrap());
+        safe_headers.insert(reqwest::header::RANGE, "bytes=17-31".parse().unwrap());
         let safe_options =
             test_options(ProviderContentRepresentationMode::PreserveOrigin, &stream_url, &safe_headers, None, None);
         assert!(!provider_headers_require_manual_redirects(safe_options.get_headers()));
@@ -1774,7 +1802,7 @@ mod tests {
                 assert!(!request.headers().contains_key(name), "cross-origin request retained {name}");
             }
             assert_eq!(request.headers()[reqwest::header::ACCEPT_ENCODING], "gzip");
-            assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=17-");
+            assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=17-31");
             assert_eq!(request.headers()[reqwest::header::USER_AGENT], "test-agent");
         }
     }
@@ -1811,7 +1839,7 @@ mod tests {
         let stream_url = Url::parse("http://provider-a.example/live/segment.ts").unwrap();
         let mut req_headers = HeaderMap::new();
         req_headers.insert(reqwest::header::ACCEPT_ENCODING, "br".parse().unwrap());
-        req_headers.insert(reqwest::header::RANGE, "bytes=17-".parse().unwrap());
+        req_headers.insert(reqwest::header::RANGE, "bytes=17-31".parse().unwrap());
         req_headers.insert(reqwest::header::AUTHORIZATION, "Bearer client".parse().unwrap());
         req_headers.insert(reqwest::header::COOKIE, "client=1".parse().unwrap());
         let input_headers = HashMap::from([("Accept-Encoding".to_string(), "gzip".to_string())]);
@@ -1838,7 +1866,7 @@ mod tests {
                 .build()
                 .unwrap();
             assert_eq!(request.headers()[reqwest::header::ACCEPT_ENCODING], "identity");
-            assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=17-");
+            assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=17-31");
             if target == Some(&cross_origin) {
                 assert!(!request.headers().contains_key(reqwest::header::AUTHORIZATION));
                 assert!(!request.headers().contains_key(reqwest::header::COOKIE));
