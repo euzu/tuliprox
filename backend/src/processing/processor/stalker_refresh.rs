@@ -18,10 +18,10 @@ use crate::repository::stalker_repository::{
     remove_stalker_file, snapshot_stalker_epg_at, snapshot_stalker_items_at,
     upsert_stalker_epg_at, upsert_stalker_items_at,
 };
-use crate::utils::network::stalker::catalog::{StalkerCategory, StalkerRawItem};
-use crate::utils::network::stalker::client::StalkerApiClient;
-use crate::utils::network::stalker::error::StalkerError;
-use crate::utils::network::stalker::profile::StalkerHandshake;
+use crate::iptv::stalker::catalog::{StalkerCategory, StalkerRawItem};
+use crate::iptv::stalker::client::StalkerApiClient;
+use crate::iptv::stalker::error::StalkerError;
+use crate::iptv::stalker::profile::StalkerHandshake;
 use super::stalker::StalkerCluster;
 
 const MAX_RETRIES: u8 = 3;

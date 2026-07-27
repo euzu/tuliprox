@@ -19,7 +19,11 @@ pub type ProviderStreamInfo = Option<(ProviderStreamHeader, StatusCode, Option<U
 
 pub type ProviderStreamResponse = (Option<BoxedProviderStream>, ProviderStreamInfo);
 
-pub type ProviderStreamFactoryResponse = (BoxedProviderStream, ProviderStreamInfo);
+pub struct ProviderStreamFactoryResponse {
+    pub stream: BoxedProviderStream,
+    pub info: ProviderStreamInfo,
+    pub provider_session_headers: HashMap<String, String>,
+}
 
 /// Controls whether a provider stream preserves its origin representation or normalizes it to identity bytes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -71,6 +75,7 @@ pub struct StreamDetails {
     pub provider_name: Option<Arc<str>>,
     pub request_url: Option<Arc<str>>,
     pub session_headers: Option<HashMap<String, String>>,
+    pub provider_session_headers: HashMap<String, String>,
     pub grace_period: GracePeriodOptions,
     pub provider_grace_active: bool,
     pub disable_provider_grace: bool,
@@ -93,6 +98,7 @@ impl Clone for StreamDetails {
             provider_name: self.provider_name.clone(),
             request_url: self.request_url.clone(),
             session_headers: self.session_headers.clone(),
+            provider_session_headers: self.provider_session_headers.clone(),
             grace_period: self.grace_period,
             provider_grace_active: self.provider_grace_active,
             disable_provider_grace: self.disable_provider_grace,
@@ -112,6 +118,7 @@ impl StreamDetails {
             provider_name: None,
             request_url: None,
             session_headers: None,
+            provider_session_headers: HashMap::new(),
             grace_period: grace_period_options,
             provider_grace_active: false,
             disable_provider_grace: false,

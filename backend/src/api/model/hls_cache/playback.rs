@@ -27,6 +27,8 @@ pub struct HlsAccessContext {
     pub virtual_id: u32,
     pub lease_id: HlsAccessLeaseId,
     pub family_key: HlsPlaybackFamilyKey,
+    pub epg_reference_ts: Option<i64>,
+    pub archive_origin_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -149,5 +151,7 @@ async fn validate_hls_access_lease_admission(
         virtual_id: lease.virtual_id,
         lease_id: lease.lease_id,
         family_key: lease.family_key,
+        epg_reference_ts: lease.epg_reference_ts,
+        archive_origin_url: lease.archive_origin_url,
     })
 }

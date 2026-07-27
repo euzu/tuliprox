@@ -8,9 +8,11 @@ use super::xtream_url::{get_query_path, get_xtream_player_api_stream_url, ApiStr
 use crate::{
     api::{
         api_utils::{
-            connection_priority_for_kind, create_api_proxy_user, create_playback_session_fingerprint,
-            create_session_fingerprint, force_provider_stream_response, get_headers_from_request,
-            get_hls_session_ttl_secs, get_stream_alternative_url, is_hls_stream_share_enabled, is_seek_request,
+            connection_priority_for_kind, create_api_proxy_user, create_m3u_catchup_session_key,
+            create_playback_session_fingerprint, create_session_fingerprint, force_provider_stream_response,
+            get_headers_from_request,
+            get_hls_session_ttl_secs, get_stream_alternative_url, is_hls_stream_share_enabled,
+            is_seekable_media_request,
             local_stream_response, record_connect_failed_attempt, resolve_playback_request_admission,
             try_option_bad_request, try_unwrap_body, ConnectFailedAttempt, EvictionReentryGuard, HeaderFilter,
         },
@@ -86,8 +88,8 @@ use shared::{
         TargetType, UserConnectionPermission, XtreamCluster,
     },
     utils::{
-        generate_random_string, is_hls_url, replace_url_extension, sanitize_sensitive_info, Internable,
-        PROVIDER_SCHEME_PREFIX,
+        extract_extension_from_url, generate_random_string, is_hls_url, replace_url_extension,
+        sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX,
     },
 };
 use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
@@ -101,10 +103,28 @@ fn is_m3u_catchup_session_token(session_token: &str) -> bool {
     session_token.starts_with("m3u-catchup|") || session_token.starts_with("catchup|")
 }
 
-fn query_flag_is_archive(key: &str) -> bool { key.eq_ignore_ascii_case("utc") }
+fn legacy_hls_route_allowed_with_cache(
+    cache_enabled: bool,
+    decoded_session_token: Option<&str>,
+    existing_session_token: Option<&str>,
+) -> bool {
+    !cache_enabled
+        || decoded_session_token.is_some_and(|decoded| {
+            existing_session_token.is_some_and(|existing| {
+                decoded == existing && is_m3u_catchup_session_token(existing)
+            })
+        })
+}
+
+fn query_flag_is_archive(key: &str) -> bool {
+    key.eq_ignore_ascii_case("utc") || key.eq_ignore_ascii_case("utcstart")
+}
 
 fn query_flag_marks_start_context(key: &str) -> bool {
-    key.eq_ignore_ascii_case("end") || key.eq_ignore_ascii_case("duration") || key.eq_ignore_ascii_case("lutc")
+    key.eq_ignore_ascii_case("end")
+        || key.eq_ignore_ascii_case("duration")
+        || key.eq_ignore_ascii_case("lutc")
+        || key.eq_ignore_ascii_case("offset")
 }
 
 pub(in crate::api) fn m3u_archive_epg_reference_ts(stream_url: &str) -> Option<i64> {
@@ -129,7 +149,7 @@ pub(in crate::api) fn m3u_archive_epg_reference_ts(stream_url: &str) -> Option<i
             if let Ok(ts) = value.parse::<i64>() {
                 return Some(ts);
             }
-        } else if key.eq_ignore_ascii_case("start") {
+        } else if key.eq_ignore_ascii_case("start") || key.eq_ignore_ascii_case("timestamp") {
             start_ts = value.parse::<i64>().ok();
         } else if query_flag_marks_start_context(&key) {
             has_start_context = true;
@@ -449,8 +469,20 @@ async fn prepare_hls_resource_access(
     Ok(HlsResourceAccess { session, access_context })
 }
 
-fn create_hls_cache_user_session_token(fingerprint: &Fingerprint, username: &str, virtual_id: u32) -> String {
-    let base = create_playback_session_fingerprint(fingerprint, username, virtual_id, PlaylistItemType::LiveHls, None);
+fn create_hls_cache_user_session_token(
+    fingerprint: &Fingerprint,
+    username: &str,
+    virtual_id: u32,
+    existing_session_token: Option<&str>,
+    archive_reference: Option<i64>,
+) -> String {
+    let base = if let Some(token) = existing_session_token.filter(|token| is_m3u_catchup_session_token(token)) {
+        token.to_string()
+    } else if let Some(timestamp) = archive_reference {
+        create_m3u_catchup_session_key(fingerprint, username, virtual_id, &format!("archive|{timestamp}|0"))
+    } else {
+        create_playback_session_fingerprint(fingerprint, username, virtual_id, PlaylistItemType::LiveHls, None)
+    };
     format!("{base}|hls-cache|{}", generate_random_string(16))
 }
 
@@ -1316,17 +1348,30 @@ async fn build_hls_cache_stream_channel(
     origin_source: &HlsOriginSource,
     proxy_session_id: &ProxySessionId,
 ) -> StreamChannel {
-    if let Some((_, target)) = app_state.app_config.get_target_for_username(&access.username) {
+    let mut channel = if let Some((_, target)) = app_state.app_config.get_target_for_username(&access.username) {
         if let Some(mut channel) = get_stream_channel(app_state, &target, access.virtual_id).await {
             channel.url = Arc::from(hls_cache_stream_stats_url(proxy_session_id));
-            channel.item_type = PlaylistItemType::LiveHls;
-            channel.cluster = XtreamCluster::try_from(PlaylistItemType::LiveHls).unwrap_or(channel.cluster);
-            return channel;
+            channel
+        } else {
+            fallback_hls_cache_stream_channel(target.id, access.virtual_id, origin_source, proxy_session_id)
         }
-        return fallback_hls_cache_stream_channel(target.id, access.virtual_id, origin_source, proxy_session_id);
-    }
+    } else {
+        fallback_hls_cache_stream_channel(0, access.virtual_id, origin_source, proxy_session_id)
+    };
 
-    fallback_hls_cache_stream_channel(0, access.virtual_id, origin_source, proxy_session_id)
+    if access.epg_reference_ts.is_some()
+        || access.archive_origin_url.is_some()
+        || is_m3u_catchup_session_token(&access.user_session_token)
+    {
+        channel.item_type = PlaylistItemType::Catchup;
+        channel.cluster = XtreamCluster::Video;
+        channel.epg_reference_ts = access.epg_reference_ts;
+    } else {
+        channel.item_type = PlaylistItemType::LiveHls;
+        channel.cluster = XtreamCluster::try_from(PlaylistItemType::LiveHls).unwrap_or(channel.cluster);
+        channel.epg_reference_ts = None;
+    }
+    channel
 }
 
 fn fallback_hls_cache_stream_channel(
@@ -1352,6 +1397,7 @@ fn fallback_hls_cache_stream_channel(
         technical: None,
         epg_channel_id: None,
         epg_reference_ts: None,
+        upstream_user_agent: None,
     }
 }
 
@@ -2013,6 +2059,7 @@ fn build_hls_manifest_request_headers(
     req_headers: &HeaderMap,
     disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>,
     default_user_agent: Option<&str>,
+    upstream_user_agent: Option<&str>,
 ) -> HeaderMap {
     let input_headers = input_headers
         .iter()
@@ -2027,6 +2074,7 @@ fn build_hls_manifest_request_headers(
     let forwarded = get_headers_from_request(req_headers, &filter_header);
     let mut headers =
         request::get_request_headers(Some(&input_headers), Some(&forwarded), disabled_headers, default_user_agent);
+    request::overlay_upstream_user_agent(&mut headers, upstream_user_agent, disabled_headers);
     scrub_hls_origin_headers(&mut headers, disabled_headers);
     force_identity_without_range(&mut headers);
     headers
@@ -2145,11 +2193,26 @@ fn build_hls_origin_source(input: &ConfigInput, stream_ref: impl Into<String>) -
     HlsOriginSource::new(input.id, Arc::clone(&input.name), stream_ref, hls_origin_source_kind(input.input_type))
 }
 
+fn build_hls_origin_source_for_playback(
+    input: &ConfigInput,
+    stream_ref: impl Into<String>,
+    archive_reference: Option<i64>,
+    archive_url: Option<&str>,
+) -> HlsOriginSource {
+    let source = build_hls_origin_source(input, stream_ref);
+    match (archive_reference, archive_url) {
+        (Some(timestamp), Some(url)) => source.with_archive_request(timestamp, url),
+        (Some(timestamp), None) => source.with_archive_reference(timestamp),
+        (None, _) => source,
+    }
+}
+
 /// Keeps target routing identity separate from the immutable input content identity.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(in crate::api) struct HlsEntryStreamIdentity {
     virtual_id: u32,
     input_stream_id: Arc<str>,
+    upstream_user_agent: Option<Arc<str>>,
 }
 
 impl HlsEntryStreamIdentity {
@@ -2158,16 +2221,20 @@ impl HlsEntryStreamIdentity {
         if input_stream_id.trim().is_empty() {
             return None;
         }
-        Some(Self { virtual_id, input_stream_id })
+        Some(Self { virtual_id, input_stream_id, upstream_user_agent: None })
     }
 
     pub(in crate::api) fn from_playlist_item(item: &impl PlaylistEntry) -> Option<Self> {
-        Self::new(item.get_virtual_id(), item.get_input_stream_id()?)
+        let mut identity = Self::new(item.get_virtual_id(), item.get_input_stream_id()?)?;
+        identity.upstream_user_agent = item.get_upstream_user_agent().map(Internable::intern);
+        Some(identity)
     }
 
     pub(in crate::api) const fn virtual_id(&self) -> u32 { self.virtual_id }
 
     fn stream_ref(&self) -> &str { self.input_stream_id.as_ref() }
+
+    fn upstream_user_agent(&self) -> Option<&str> { self.upstream_user_agent.as_deref() }
 }
 
 /// Resolves the configured input together with both identities of one target entry.
@@ -3648,7 +3715,7 @@ async fn try_hls_cache_entry_redirect(
     user: &ProxyUserCredentials,
     origin_source: HlsOriginSource,
     virtual_id: u32,
-    _existing_user_session: Option<&UserSession>,
+    existing_user_session: Option<&UserSession>,
     request_url: &str,
     input: &ConfigInput,
     connection_permission: UserConnectionPermission,
@@ -3665,7 +3732,13 @@ async fn try_hls_cache_entry_redirect(
     let now_ms = current_time_millis();
     let origin_connection_kind = hls_entry_origin_connection_kind(connection_permission, connection_kind);
     let access_lease_id = new_hls_access_lease_id();
-    let session_token = create_hls_cache_user_session_token(fingerprint, &user.username, virtual_id);
+    let session_token = create_hls_cache_user_session_token(
+        fingerprint,
+        &user.username,
+        virtual_id,
+        existing_user_session.map(|session| session.token.as_str()),
+        origin_source.archive_reference,
+    );
     let session_token = prepare_hls_cache_user_session(
         app_state,
         fingerprint,
@@ -3689,6 +3762,10 @@ async fn try_hls_cache_entry_redirect(
         virtual_id,
         now_ms,
         hls_pending_bootstrap_window_ms(),
+    )
+    .with_archive_playback(
+        origin_source.archive_reference,
+        origin_source.archive_reference.map(|_| request_url.to_string()),
     );
     if let Some(connection_kind) = origin_connection_kind {
         lease = lease.with_origin_acquire_policy(connection_kind, connection_priority_for_kind(user, connection_kind));
@@ -5168,7 +5245,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     target: &ConfigTarget,
     user_session: Option<&UserSession>,
     hls_url: &str,
-    _archive_reference: Option<i64>,
+    archive_reference: Option<i64>,
     stream_identity: HlsEntryStreamIdentity,
     input: &ConfigInput,
     req_headers: &HeaderMap,
@@ -5192,7 +5269,9 @@ pub(in crate::api) async fn handle_hls_stream_request(
     }
     let url = ensure_hls_manifest_extension(&normalized_hls_url);
     let hls_cache_origin = build_hls_origin_resolution(input, &url);
-    let hls_origin_source = hls_cache_origin.as_ref().map(|_| build_hls_origin_source(input, stream_ref.clone()));
+    let hls_origin_source = hls_cache_origin
+        .as_ref()
+        .map(|_| build_hls_origin_source_for_playback(input, stream_ref.clone(), archive_reference, Some(url.as_str())));
     let server_info = app_state.app_config.get_user_server_info(user);
     let Some(server_info) = server_info else {
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -5205,6 +5284,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         req_headers,
         disabled_headers.as_ref(),
         default_user_agent.as_deref(),
+        stream_identity.upstream_user_agent(),
     );
 
     if hls_cache_enabled_for_target(app_state, target) {
@@ -5218,7 +5298,11 @@ pub(in crate::api) async fn handle_hls_stream_request(
             origin_source,
             virtual_id,
             user_session,
-            hls_cache_origin.as_ref().map_or(url.as_str(), |origin| origin.session_entry_url.as_str()),
+            if archive_reference.is_some() {
+                url.as_str()
+            } else {
+                hls_cache_origin.as_ref().map_or(url.as_str(), |origin| origin.session_entry_url.as_str())
+            },
             input,
             connection_permission,
             connection_kind,
@@ -5510,6 +5594,7 @@ async fn resolve_stream_channel(
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
+            upstream_user_agent: None,
         },
     };
 
@@ -5554,13 +5639,21 @@ async fn resolve_hls_playback_manifest_request_context(
     let Some(channel) = get_stream_channel(app_state, &target, access_context.virtual_id).await else {
         return Err(StatusCode::NOT_FOUND);
     };
-    let origin_playlist_url =
+    let origin_playlist_url = if let Some(archive_url) = access_context.archive_origin_url.as_ref() {
+        archive_url.clone()
+    } else {
         resolve_hls_origin_playlist_url(app_state, &target, &input, access_context.virtual_id, channel.url.as_ref())
-            .await?;
+            .await?
+    };
     let Some(hls_cache_origin) = build_hls_origin_resolution(&input, &origin_playlist_url) else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let origin_source = build_hls_origin_source(&input, access_context.stream_ref.clone());
+    let origin_source = build_hls_origin_source_for_playback(
+        &input,
+        access_context.stream_ref.clone(),
+        access_context.epg_reference_ts,
+        Some(&origin_playlist_url),
+    );
     let Some(server_info) = app_state.app_config.get_user_server_info(&user) else {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     };
@@ -5571,6 +5664,7 @@ async fn resolve_hls_playback_manifest_request_context(
         req_headers,
         disabled_headers.as_ref(),
         default_user_agent.as_deref(),
+        channel.upstream_user_agent.as_deref(),
     );
 
     let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, access_context.virtual_id);
@@ -5725,7 +5819,17 @@ async fn hls_api_stream_resolved(
     let Some(decoded_hls_token) = get_hls_session_token_and_url_from_token(&encrypt_secret, &token) else {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
-    if hls_cache_enabled_for_target(&app_state, &target) {
+    let lookup_session_token = decoded_hls_token
+        .0
+        .clone()
+        .unwrap_or_else(|| create_session_fingerprint(&fingerprint, &user.username, virtual_id, false));
+    let mut user_session =
+        app_state.active_users.get_and_update_user_session(&user.username, &lookup_session_token).await;
+    if !legacy_hls_route_allowed_with_cache(
+        hls_cache_enabled_for_target(&app_state, &target),
+        decoded_hls_token.0.as_deref(),
+        user_session.as_ref().map(|session| session.token.as_str()),
+    ) {
         return hls_custom_video_manifest_redirect_response_for_username(
             &app_state,
             &user.username,
@@ -5733,12 +5837,6 @@ async fn hls_api_stream_resolved(
             StatusCode::NOT_FOUND,
         );
     }
-    let lookup_session_token = decoded_hls_token
-        .0
-        .clone()
-        .unwrap_or_else(|| create_session_fingerprint(&fingerprint, &user.username, virtual_id, false));
-    let mut user_session =
-        app_state.active_users.get_and_update_user_session(&user.username, &lookup_session_token).await;
 
     if let Some(session) = &mut user_session {
         let decoded_archive_reference = m3u_archive_epg_reference_ts(&decoded_hls_token.1);
@@ -5796,7 +5894,12 @@ async fn hls_api_stream_resolved(
             app_state.connection_manager.touch_http_activity(&user.username, &session.token, &fingerprint.addr).await;
             let stream_channel =
                 resolve_stream_channel(&app_state, &target, &input, virtual_id, &hls_url, archive_reference).await;
-            if is_seek_request(stream_channel.cluster, &req_headers).await {
+            if is_seekable_media_request(
+                stream_channel.cluster,
+                &req_headers,
+                extract_extension_from_url(&hls_url),
+            )
+            {
                 // partial request means we are in reverse proxy mode, seek happened
                 return force_provider_stream_response(
                     &fingerprint,
@@ -6051,6 +6154,55 @@ mod tests {
     #[test]
     fn archive_epg_reference_rejects_plain_start_queries() {
         assert_eq!(m3u_archive_epg_reference_ts("http://provider/live/42.m3u8?start=1700000000"), None);
+    }
+
+    #[test]
+    fn archive_epg_reference_supports_contextual_start_aliases() {
+        assert_eq!(
+            m3u_archive_epg_reference_ts(
+                "http://provider/live/42.m3u8?offset=-3600&utcstart=1717200000"
+            ),
+            Some(1_717_200_000)
+        );
+        assert_eq!(
+            m3u_archive_epg_reference_ts(
+                "http://provider/live/42.m3u8?timestamp=1717200000&offset=120"
+            ),
+            Some(1_717_200_000)
+        );
+    }
+
+    #[test]
+    fn hls_cache_session_tokens_separate_live_and_archive_playback() {
+        let fingerprint = test_fingerprint();
+        let live = super::create_hls_cache_user_session_token(&fingerprint, "user", 31, None, None);
+        let archive = super::create_hls_cache_user_session_token(
+            &fingerprint,
+            "user",
+            31,
+            None,
+            Some(1_784_898_000),
+        );
+
+        assert!(!super::is_m3u_catchup_session_token(&live));
+        assert!(super::is_m3u_catchup_session_token(&archive));
+        assert_ne!(live, archive);
+    }
+
+    #[test]
+    fn hls_cache_session_token_preserves_existing_m3u_catchup_identity() {
+        let fingerprint = test_fingerprint();
+        let existing = "m3u-catchup|fp|user|31|archive|1784898000|3600";
+        let token = super::create_hls_cache_user_session_token(
+            &fingerprint,
+            "user",
+            31,
+            Some(existing),
+            Some(1_784_898_000),
+        );
+
+        assert!(token.starts_with(existing));
+        assert!(token.contains("|hls-cache|"));
     }
 
     #[test]
@@ -6422,10 +6574,15 @@ mod tests {
             cloudflare_header: true,
             custom_header: vec!["X-Origin-Secret".to_string()],
         };
-        let headers =
-            build_hls_manifest_request_headers(&input_headers, &request_headers, Some(&disabled), Some("Default-UA"));
+        let headers = build_hls_manifest_request_headers(
+            &input_headers,
+            &request_headers,
+            Some(&disabled),
+            Some("Default-UA"),
+            Some("Channel-UA"),
+        );
 
-        assert_eq!(headers.get(header::USER_AGENT).expect("user agent"), "Input-UA");
+        assert_eq!(headers.get(header::USER_AGENT).expect("user agent"), "Channel-UA");
         assert_eq!(headers.get("accept-language").expect("accept language"), "de");
         assert_eq!(headers.get(header::ACCEPT_ENCODING).expect("accept encoding"), "identity");
         assert!(!headers.contains_key(header::RANGE));
@@ -8884,7 +9041,80 @@ mod tests {
             virtual_id: 12345,
             lease_id: access_lease_id,
             family_key: HlsPlaybackFamilyKey::new("hls-user", client_fingerprint),
+            epg_reference_ts: None,
+            archive_origin_url: None,
         }
+    }
+
+    #[tokio::test]
+    async fn hls_cache_stream_channel_uses_archive_epg_context() {
+        let app_state = test_app_state();
+        let mut access = test_hls_access_context(
+            ProxySessionId("proxy-archive".to_string()),
+            HlsAccessLeaseId("lease-archive".to_string()),
+        );
+        access.epg_reference_ts = Some(1_784_898_000);
+        access.archive_origin_url = Some(
+            "http://provider/channel/timeshift_abs-1784898000.m3u8".to_string(),
+        );
+        let origin_source = HlsOriginSource::new(
+            1,
+            Arc::from("test-input"),
+            "80510",
+            HlsOriginSourceKind::M3uMediaPlaylist,
+        )
+        .with_archive_reference(1_784_898_000);
+
+        let channel = super::build_hls_cache_stream_channel(
+            &app_state,
+            &access,
+            &origin_source,
+            &ProxySessionId("proxy-archive".to_string()),
+        )
+        .await;
+
+        assert_eq!(channel.item_type, PlaylistItemType::Catchup);
+        assert_eq!(channel.cluster, XtreamCluster::Video);
+        assert_eq!(channel.epg_reference_ts, Some(1_784_898_000));
+    }
+
+    #[tokio::test]
+    async fn hls_cache_manifest_context_restores_leased_archive_origin() -> Result<(), StatusCode> {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        let input = ConfigInput {
+            id: 1,
+            name: Arc::from("test-input"),
+            input_type: InputType::M3u,
+            enabled: true,
+            ..ConfigInput::default()
+        };
+        let mut target = test_m3u_hls_share_target();
+        target.name = "default".to_string();
+        store_test_sources_with_target(&app_state, input.clone(), target.clone());
+        cache_test_m3u_hls_item(
+            &app_state,
+            &target,
+            test_m3u_hls_item(&input, 12345, "80510", "http://provider/channel/mono.m3u8"),
+        )
+        .await;
+
+        let archive_url = "http://provider/channel/timeshift_abs-1784898000.m3u8";
+        let mut access = test_hls_access_context(
+            ProxySessionId("proxy-archive".to_string()),
+            HlsAccessLeaseId("lease-archive".to_string()),
+        );
+        access.stream_ref = "80510".to_string();
+        access.epg_reference_ts = Some(1_784_898_000);
+        access.archive_origin_url = Some(archive_url.to_string());
+
+        let context =
+            super::resolve_hls_playback_manifest_request_context(&app_state, &access, &HeaderMap::new()).await?;
+
+        assert_eq!(context.hls_url, archive_url);
+        assert_eq!(context.origin_source.stream_ref, "80510");
+        assert_eq!(context.origin_source.archive_reference, Some(1_784_898_000));
+        Ok(())
     }
 
     async fn prepare_pending_test_hls_access_lease(
@@ -9458,6 +9688,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hls_cache_archive_entry_uses_distinct_identity_and_preserves_origin() -> Result<(), &'static str> {
+        let app_state = test_app_state();
+        enable_hls_cache(&app_state);
+        configure_default_test_server(&app_state);
+        let mut user = ProxyUserCredentials::default();
+        user.username = "hls-user".to_string();
+        user.password = "hls-pass".to_string();
+        let input = test_hls_input();
+        let target = test_hls_share_target(true);
+        let archive_url = "http://origin.example.com/live/user/pass/timeshift_abs-1784898000.m3u8";
+        let stream_identity = super::HlsEntryStreamIdentity::new(12345, "80510")
+            .ok_or("valid archive input stream identity")?;
+
+        let response = super::handle_hls_stream_request(
+            &test_fingerprint(),
+            &app_state,
+            &user,
+            &target,
+            None,
+            archive_url,
+            Some(1_784_898_000),
+            stream_identity,
+            &input,
+            &HeaderMap::new(),
+            UserConnectionPermission::Allowed,
+            Some(ConnectionKind::Normal),
+            &super::build_virtual_hls_entry_path(&target, &input, &user, 12345),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or("archive redirect location")?;
+        let proxy_session_id = ProxySessionId(proxy_session_id_from_redirect_location(location).to_string());
+        let live_source = super::build_hls_origin_source(&input, "80510");
+        let archive_source = super::build_hls_origin_source_for_playback(
+            &input,
+            "80510",
+            Some(1_784_898_000),
+            Some(archive_url),
+        );
+        assert_ne!(proxy_session_id, build_proxy_session_id(&live_source.session_key(), &app_state.get_encrypt_secret()));
+        assert_eq!(
+            proxy_session_id,
+            build_proxy_session_id(&archive_source.session_key(), &app_state.get_encrypt_secret())
+        );
+
+        let access_lease_id = HlsAccessLeaseId(access_lease_id_from_redirect_location(location).to_string());
+        let lease = app_state
+            .hls_proxy
+            .access_leases()
+            .write()
+            .await
+            .response_snapshot(&access_lease_id, &proxy_session_id, super::current_time_millis())
+            .ok_or("archive access lease")?;
+        assert_eq!(lease.stream_ref, "80510");
+        assert_eq!(lease.epg_reference_ts, Some(1_784_898_000));
+        assert_eq!(lease.archive_origin_url.as_deref(), Some(archive_url));
+        assert!(super::is_m3u_catchup_session_token(&lease.user_session_token));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn hls_cache_entry_denies_access_lease_when_grace_has_no_origin_slot() {
         let app_state = test_app_state();
         enable_hls_cache(&app_state);
@@ -9791,6 +10088,28 @@ mod tests {
         assert!(app_state.active_users.active_streams().await.is_empty());
     }
 
+    #[test]
+    fn cache_enabled_legacy_hls_route_only_allows_existing_m3u_catchup_session() {
+        assert!(super::legacy_hls_route_allowed_with_cache(
+            true,
+            Some("m3u-catchup|session"),
+            Some("m3u-catchup|session")
+        ));
+        assert!(super::legacy_hls_route_allowed_with_cache(
+            true,
+            Some("catchup|session"),
+            Some("catchup|session")
+        ));
+        assert!(!super::legacy_hls_route_allowed_with_cache(
+            true,
+            Some("m3u-catchup|session"),
+            Some("m3u-catchup|other")
+        ));
+        assert!(!super::legacy_hls_route_allowed_with_cache(true, Some("legacy-session"), Some("legacy-session")));
+        assert!(!super::legacy_hls_route_allowed_with_cache(true, None, None));
+        assert!(super::legacy_hls_route_allowed_with_cache(false, None, None));
+    }
+
     #[tokio::test]
     async fn hls_cache_canonical_manifest_rejects_when_target_hls_share_disabled() {
         let app_state = test_app_state();
@@ -9807,6 +10126,8 @@ mod tests {
             virtual_id: 12345,
             lease_id: HlsAccessLeaseId("access-lease".to_string()),
             family_key: HlsPlaybackFamilyKey::new("hls-user", test_fingerprint().key),
+            epg_reference_ts: None,
+            archive_origin_url: None,
         };
 
         let Err(err) =

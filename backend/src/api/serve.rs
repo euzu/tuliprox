@@ -265,6 +265,7 @@ mod tests {
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
+            upstream_user_agent: None,
         };
         let upstream = PendingDropProbeStream {
             dropped: Arc::clone(&state.upstream_dropped),

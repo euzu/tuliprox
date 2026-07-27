@@ -4,11 +4,11 @@ use serde_json::Value;
 use shared::model::stalker::{StalkerPlaybackMode, StalkerStreamKind};
 use url::Url;
 
-use crate::utils::network::stalker::client::{validate_playable_scheme, StalkerApiClient};
-use crate::utils::network::stalker::cmd_parser::scheme_is_playable;
-use crate::utils::network::stalker::error::{StalkerError, StalkerResult};
-use crate::utils::network::stalker::profile::{StalkerHandshake, StalkerResolvedStream};
-use crate::utils::network::stalker::recipes::recipe_spec_for;
+use crate::iptv::stalker::client::{validate_playable_scheme, StalkerApiClient};
+use crate::iptv::stalker::cmd_parser::scheme_is_playable;
+use crate::iptv::stalker::error::{safe_stalker_url, StalkerError, StalkerResult};
+use crate::iptv::stalker::profile::{StalkerHandshake, StalkerResolvedStream};
+use crate::iptv::stalker::recipes::recipe_spec_for;
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 struct StalkerCreateLinkResponse {
@@ -25,7 +25,7 @@ struct StalkerCreateLinkResponse {
 /// Resolve a `cmd` to a playable URL. The portal is told which kind of stream we want
 /// (`live`, `movie`, `episode` or `archive`) and the original `cmd` field. The response is
 /// expected to be a JSON object whose `js.cmd` field is a base64-encoded `ffmpeg <url>`
-/// pair, with the URL extracted by [`crate::utils::network::stalker::cmd_parser`].
+/// pair, with the URL extracted by [`crate::iptv::stalker::cmd_parser`].
 ///
 /// `requested_mode` is the playback mode the caller already decided on (from the
 /// item's temp-link capability flags). The resolved stream preserves this mode so
@@ -56,15 +56,15 @@ pub async fn create_link(
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: client.portal_url().to_string() }))
+    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_create_link_builder(
     client: &StalkerApiClient,
-    load_url: &crate::utils::network::stalker::url_factory::StalkerLoadUrl,
+    load_url: &crate::iptv::stalker::url_factory::StalkerLoadUrl,
     handshake: &StalkerHandshake,
-    spec: &crate::utils::network::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
     kind: StalkerStreamKind,
     cmd: &str,
     series_number: Option<u32>,
@@ -133,7 +133,7 @@ fn resolve_response(
             reason: "create_link response contained no cmd".to_string(),
         });
     };
-    let url = crate::utils::network::stalker::cmd_parser::extract_url_from_cmd(&raw_cmd)?;
+    let url = crate::iptv::stalker::cmd_parser::extract_url_from_cmd(&raw_cmd)?;
     let url = repair_live_stream_target(url, source_cmd, kind);
     let scheme = validate_playable_scheme(&url)?;
     if !scheme_is_playable(scheme) {
@@ -167,7 +167,7 @@ fn repair_live_stream_target(url: String, source_cmd: &str, kind: StalkerStreamK
 }
 
 fn source_live_stream_target(source_cmd: &str) -> Option<String> {
-    let source_url = crate::utils::network::stalker::cmd_parser::extract_url_from_cmd(source_cmd).ok()?;
+    let source_url = crate::iptv::stalker::cmd_parser::extract_url_from_cmd(source_cmd).ok()?;
     let parsed = Url::parse(&source_url).ok()?;
     if let Some(target) = parsed
         .query_pairs()
@@ -231,7 +231,7 @@ fn upsert_raw_query_parameter(url: &str, name: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::network::stalker::client::strip_jsonp;
+    use crate::iptv::stalker::client::strip_jsonp;
 
     #[test]
     fn resolves_create_link_response_with_js_cmd() {

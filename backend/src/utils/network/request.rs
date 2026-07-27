@@ -1819,7 +1819,9 @@ pub fn get_request_headers<S: ::std::hash::BuildHasher + Default>(
     }
 
     // 3. Finally, if no User-Agent was provided by config OR client, use the default.
-    if !has_user_agent {
+    if !has_user_agent
+        && !disabled_headers.is_some_and(|disabled| disabled.should_remove(axum::http::header::USER_AGENT.as_str()))
+    {
         let config_ua = default_user_agent
             .and_then(|ua| {
                 let trimmed = ua.trim();
@@ -1834,6 +1836,23 @@ pub fn get_request_headers<S: ::std::hash::BuildHasher + Default>(
     }
 
     headers
+}
+
+pub fn overlay_upstream_user_agent(
+    headers: &mut HeaderMap,
+    upstream_user_agent: Option<&str>,
+    disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>,
+) {
+    if disabled_headers.is_some_and(|disabled| disabled.should_remove(axum::http::header::USER_AGENT.as_str())) {
+        return;
+    }
+    if let Some(value) = upstream_user_agent
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| HeaderValue::from_str(value).ok())
+    {
+        headers.insert(axum::http::header::USER_AGENT, value);
+    }
 }
 
 // read local file content and return it as a string.
@@ -3018,7 +3037,7 @@ mod tests {
     use crate::{
         model::{
             AppConfig, Config, ConfigInput, ConfigProvider, InputSource, MediaToolCapabilities, ResourceRetryConfig,
-            ReverseProxyConfig, SourcesConfig,
+            ReverseProxyConfig, ReverseProxyDisabledHeaderConfig, SourcesConfig,
         },
         utils::{
             content_coding::{ContentCoding, ContentCodingError, ContentDecodingIoError, OutboundContentCodingPolicy},
@@ -3176,7 +3195,7 @@ mod tests {
 
     #[test]
     fn test_get_request_headers_prioritization() {
-        use super::get_request_headers;
+        use super::{get_request_headers, overlay_upstream_user_agent};
         use axum::http::header::USER_AGENT;
 
         // Case 1: No headers provided -> Default UA
@@ -3208,6 +3227,30 @@ mod tests {
         let headers =
             get_request_headers(Some(&config_headers), Some(&client_headers), None, Some("Config-Default-UA"));
         assert_eq!(headers.get("X-Test").unwrap(), "From-Config");
+
+        let mut headers = get_request_headers(
+            Some(&config_headers),
+            Some(&client_headers),
+            None,
+            Some("Config-Default-UA"),
+        );
+        overlay_upstream_user_agent(&mut headers, Some("Channel-UA"), None);
+        assert_eq!(headers.get(USER_AGENT).unwrap(), "Channel-UA");
+
+        let disabled = ReverseProxyDisabledHeaderConfig {
+            referer_header: false,
+            x_header: false,
+            cloudflare_header: false,
+            custom_header: vec!["User-Agent".to_string()],
+        };
+        let mut headers = get_request_headers(
+            Some(&config_headers),
+            Some(&client_headers),
+            Some(&disabled),
+            Some("Config-Default-UA"),
+        );
+        overlay_upstream_user_agent(&mut headers, Some("Blocked-Channel-UA"), Some(&disabled));
+        assert!(!headers.contains_key(USER_AGENT));
     }
 
     #[test]

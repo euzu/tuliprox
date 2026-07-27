@@ -647,17 +647,23 @@ impl Stream for ActiveClientStream {
                                         )
                                         .await
                                         {
-                                            Some((
-                                                _stream,
-                                                Some((_headers, _status, _response_url, Some(custom_video_type))),
-                                            )) => {
+                                            Some(response)
+                                                if matches!(
+                                                    response.info,
+                                                    Some((_, _, _, Some(_)))
+                                                ) => {
+                                                let Some((_headers, _status, _response_url, Some(custom_video_type))) =
+                                                    response.info
+                                                else {
+                                                    return DeferredProviderOpenOutcome::Failed;
+                                                };
                                                 ActiveClientStreamState::mode_for_custom_video_type(custom_video_type)
                                                     .map_or(
                                                         DeferredProviderOpenOutcome::Failed,
                                                         DeferredProviderOpenOutcome::Mode,
                                                     )
                                             }
-                                            Some((stream, _stream_info)) => DeferredProviderOpenOutcome::Stream(stream),
+                                            Some(response) => DeferredProviderOpenOutcome::Stream(response.stream),
                                             None => DeferredProviderOpenOutcome::Failed,
                                         }
                                     });
@@ -1593,6 +1599,7 @@ mod tests {
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
+            upstream_user_agent: None,
         }
     }
 
@@ -1795,6 +1802,7 @@ mod tests {
             provider_name: Some(Arc::clone(provider_name)),
             request_url: Some("http://provider-1.example/live/1".intern()),
             session_headers: None,
+            provider_session_headers: HashMap::new(),
             grace_period: GracePeriodOptions { period_millis: 100, timeout_secs: 0, hold_stream: true },
             provider_grace_active: true,
             disable_provider_grace: false,
@@ -2697,6 +2705,7 @@ mod tests {
             provider_name: Some(provider_name),
             request_url: Some("http://provider-1.example/live/2.ts".intern()),
             session_headers: None,
+            provider_session_headers: HashMap::new(),
             grace_period: GracePeriodOptions { period_millis: 100, timeout_secs: 0, hold_stream: true },
             provider_grace_active: false,
             disable_provider_grace: false,

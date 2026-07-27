@@ -270,6 +270,18 @@
   - M3U catchup metadata is now stored under live stream properties and survives playlist rewrite/output generation.
   - XMLTV `catchup-id` is now imported, merged and exported alongside programme data.
   - Reverse-proxied M3U outputs can now expose local Tuliprox catchup/archive URLs instead of leaking provider archive URLs.
+  - Catchup URL templates now resolve indexed parameters and common player query forms such as `utc` / `lutc` and
+    `utcstart` with `offset` or `duration`.
+  - Native Flussonic archive playback supports HLS (`.m3u8`) and MPEG-TS (`.ts`) paths. This includes flat archive
+    requests used by TiviMate and nested Flussonic archive paths.
+  - Live M3U entries that provide `timeshift` without a separate catchup block now use that value as Flussonic-style
+    catchup metadata instead of being rejected as non-live archive requests.
+  - Archive timestamps are retained when Tuliprox follows same-origin child HLS playlists. Segment, key and
+    initialization URLs are left unchanged apart from normal relative URL resolution.
+  - Generated M3U playlists advertise the user's Tuliprox XMLTV endpoint through both `url-tvg` and `x-tvg-url` when
+    server information is available.
+  - Per-channel `#EXTVLCOPT:http-user-agent` values are imported and used for upstream HLS and MPEG-TS requests. The
+    directive is only written to playlists that still contain direct provider URLs.
 
 - **Per-User Output Clusters**: API proxy users can now be restricted to specific clusters on their assigned target via
   `output_clusters`.
@@ -626,6 +638,9 @@
   - The rules use OR semantics: any matching CIDR or country allows the request.
 
 ## 🛠 Maintenance
+
+- Moved provider-specific M3U, Xtream and Stalker protocol code from the generic utility namespace into dedicated IPTV
+  modules.
 
 - **B+Tree v3 persistence engine**:
   - Consolidated the facade, v2 compatibility reader, v3 engine, migration, WAL, sorted index, and stress tests under

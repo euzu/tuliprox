@@ -30,6 +30,7 @@ That makes it usable both for IPTV players and for media-server-oriented workflo
 ## Runtime streaming
 
 - reverse-proxy streams instead of redirecting them
+- proxy M3U catchup and archive playback for template-based and native Flussonic HLS or MPEG-TS URLs
 - keep provider account affinity where clients need it
 - share live streams across users
 - enforce user connection limits

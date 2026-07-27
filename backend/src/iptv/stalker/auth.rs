@@ -3,15 +3,15 @@ use serde::Deserialize;
 use serde_json::Value;
 use shared::model::stalker::{StalkerAuthMode, StalkerBootstrapRecipe, StalkerPortalCapabilitiesDto};
 
-use crate::utils::network::stalker::client::StalkerApiClient;
-use crate::utils::network::stalker::error::{StalkerError, StalkerResult};
-use crate::utils::network::stalker::presets::stalker_mag_preset_spec;
-use crate::utils::network::stalker::profile::{
+use crate::iptv::stalker::client::StalkerApiClient;
+use crate::iptv::stalker::error::{safe_stalker_url, StalkerError, StalkerResult};
+use crate::iptv::stalker::presets::stalker_mag_preset_spec;
+use crate::iptv::stalker::profile::{
     StalkerHandshake, StalkerProviderProfile, StalkerRawProviderProfile,
 };
-use crate::utils::network::stalker::recipes::{detect_fingerprint, fallback_recipes_for, recipe_spec_for};
-use crate::utils::network::stalker::session::StalkerSession;
-use crate::utils::network::stalker::url_factory::StalkerLoadUrl;
+use crate::iptv::stalker::recipes::{detect_fingerprint, fallback_recipes_for, recipe_spec_for};
+use crate::iptv::stalker::session::StalkerSession;
+use crate::iptv::stalker::url_factory::StalkerLoadUrl;
 
 /// The fields we expect in a successful handshake response. The portal wraps the result
 /// in `{"js": {...}}` — we accept both wrapped and unwrapped shapes for robustness.
@@ -66,7 +66,7 @@ pub async fn handshake(client: &StalkerApiClient) -> StalkerResult<StalkerHandsh
         }
     }
     Err(last_err.unwrap_or_else(|| StalkerError::RecipesExhausted {
-        portal: client.portal_url().to_string(),
+        portal: safe_stalker_url(client.portal_url()),
     }))
 }
 
@@ -74,7 +74,7 @@ async fn attempt_recipe(client: &StalkerApiClient, recipe: StalkerBootstrapRecip
     let spec = recipe_spec_for(recipe);
     let candidates = client.load_url_candidates().to_vec();
     if candidates.is_empty() {
-        return Err(StalkerError::NoEndpoint { portal: client.portal_url().to_string() });
+        return Err(StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) });
     }
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
@@ -113,7 +113,10 @@ async fn attempt_recipe(client: &StalkerApiClient, recipe: StalkerBootstrapRecip
                 };
                 let fingerprint =
                     detect_fingerprint(handshake_status, &session.fingerprint_evidence, client.config().mag_preset);
-                debug!("Stalker portal fingerprint for {}: {fingerprint:?}", load_url.load_url);
+                debug!(
+                    "Stalker portal fingerprint for {}: {fingerprint:?}",
+                    safe_stalker_url(&load_url.load_url)
+                );
                 let capabilities = fetch_capabilities(client, &session, &load_url, &spec).await.unwrap_or_default();
                 let size_caps = client
                     .config()
@@ -145,7 +148,7 @@ async fn attempt_recipe(client: &StalkerApiClient, recipe: StalkerBootstrapRecip
 async fn perform_handshake_against(
     client: &StalkerApiClient,
     load_url: &StalkerLoadUrl,
-    spec: &crate::utils::network::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
 ) -> StalkerResult<(StalkerSession, u16)> {
     let config = client.config();
     let preset_spec = stalker_mag_preset_spec(config.mag_preset);
@@ -171,12 +174,12 @@ async fn perform_handshake_against(
         if matches!(status.as_u16(), 401 | 403 | 456) {
             return Err(StalkerError::TokenRejected {
                 status: status.as_u16(),
-                url: load_url.load_url.parse().ok(),
+                url: Some(load_url.load_url.as_str().into()),
             });
         }
         return Err(StalkerError::HandshakeFailed {
             message: format!("handshake status {}", status.as_u16()),
-            url: load_url.load_url.parse().ok(),
+            url: Some(load_url.load_url.as_str().into()),
         });
     }
     let parsed: StalkerHandshakeResponse = client.decode_body_bytes(&body, "handshake")?;
@@ -194,7 +197,7 @@ async fn perform_handshake_against(
     let Some(token) = token else {
         return Err(StalkerError::HandshakeFailed {
             message: "no token in handshake response".to_string(),
-            url: load_url.load_url.parse().ok(),
+            url: Some(load_url.load_url.as_str().into()),
         });
     };
     let evidence = parsed
@@ -240,7 +243,7 @@ async fn perform_do_auth(
     client: &StalkerApiClient,
     session: &StalkerSession,
     load_url: &StalkerLoadUrl,
-    spec: &crate::utils::network::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
     login: &str,
     password: &str,
 ) -> StalkerResult<()> {
@@ -263,7 +266,7 @@ async fn perform_do_auth(
     if matches!(value.get("js"), Some(Value::Bool(false))) {
         return Err(StalkerError::HandshakeFailed {
             message: "portal rejected do_auth credentials".to_string(),
-            url: load_url.load_url.parse().ok(),
+            url: Some(load_url.load_url.as_str().into()),
         });
     }
     Ok(())
@@ -273,7 +276,7 @@ async fn perform_handshake_extra(
     client: &StalkerApiClient,
     session: &mut StalkerSession,
     load_url: &StalkerLoadUrl,
-    spec: &crate::utils::network::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
 ) -> StalkerResult<()> {
     let mut builder = client
         .http()
@@ -300,7 +303,7 @@ async fn perform_portal_handshake(
     client: &StalkerApiClient,
     session: &StalkerSession,
     load_url: &StalkerLoadUrl,
-    spec: &crate::utils::network::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
 ) -> StalkerResult<()> {
     let target = load_url;
     let mut builder = client
@@ -328,7 +331,7 @@ async fn fetch_profile(
     client: &StalkerApiClient,
     session: &StalkerSession,
     load_url: &StalkerLoadUrl,
-    spec: &crate::utils::network::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
 ) -> StalkerResult<StalkerRawProviderProfile> {
     let mut builder = client
         .http()
@@ -364,7 +367,7 @@ async fn fetch_capabilities(
     client: &StalkerApiClient,
     session: &StalkerSession,
     load_url: &StalkerLoadUrl,
-    spec: &crate::utils::network::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
 ) -> StalkerResult<StalkerPortalCapabilitiesDto> {
     let mut builder = client
         .http()

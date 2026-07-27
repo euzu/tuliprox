@@ -8,7 +8,7 @@ use shared::model::stalker::{
 use shared::utils::deserialize_as_option_string;
 
 use crate::model::{StalkerInputConfig, StalkerSizeCaps};
-use crate::utils::network::stalker::session::StalkerSession;
+use crate::iptv::stalker::session::StalkerSession;
 
 /// Information the `get_profile` action returns about the underlying portal account. We
 /// deserialize it loosely (all fields optional) because the field set varies by portal

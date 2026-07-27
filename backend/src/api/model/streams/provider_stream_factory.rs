@@ -2,7 +2,8 @@ use crate::{
     api::{
         api_utils::{get_headers_from_request, StreamOptions},
         model::{
-            create_channel_unavailable_stream, get_header_filter_for_item_type, get_response_headers,
+            create_channel_unavailable_stream, extract_hls_provider_session_headers, get_header_filter_for_item_type,
+            get_response_headers,
             log_hls_origin_content_coding,
             model_utils::{provider_response_headers, ProviderResponseHeaderError},
             streams::{buffered_stream::BufferedStream, client_stream::ClientStream},
@@ -10,6 +11,7 @@ use crate::{
             ProviderContentRepresentationMode, ProviderStreamFactoryResponse, StreamError, STREAM_IDLE_TIMEOUT,
         },
     },
+    iptv::stalker::client::validate_public_playable_url,
     model::{AppConfig, ConfigProvider, ReverseProxyDisabledHeaderConfig},
     utils::{
         content_coding::{
@@ -17,7 +19,6 @@ use crate::{
             ContentCodingDetection, ContentCodingError, OutboundContentCodingPolicy,
         },
         debug_if_enabled,
-        network::stalker::client::validate_public_playable_url,
         request::{
             get_request_headers, is_safe_cross_origin_redirect_header, preview_request_diagnostics_for_logging,
             preview_request_target_for_logging, send_with_retry_and_provider_policy,
@@ -27,7 +28,7 @@ use crate::{
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, log_enabled, warn};
 use reqwest::{
-    header::{HeaderMap, CONTENT_RANGE, RANGE},
+    header::{HeaderMap, HeaderValue, CONTENT_RANGE, RANGE},
     StatusCode,
 };
 use shared::{
@@ -86,7 +87,7 @@ pub struct ProviderStreamFactoryOptions {
     url: Url,
     headers: HeaderMap,
     default_user_agent: Option<axum::http::header::HeaderValue>,
-    range_start_bytes: Option<usize>,
+    requested_range: Option<HeaderValue>,
     reconnect_flag: CancellationToken,
     provider: Option<Arc<ConfigProvider>>,
     username: Option<String>,
@@ -143,17 +144,22 @@ impl ProviderStreamFactoryOptions {
             .map(ToString::to_string);
         let filter_header = get_header_filter_for_item_type(*item_type);
         let mut req_headers = get_headers_from_request(req_headers, &filter_header);
-        let requested_range = get_request_range_start_bytes(&req_headers);
-        req_headers.remove("range");
+        let requested_range =
+            req_headers.remove(RANGE.as_str()).and_then(|value| HeaderValue::from_bytes(&value).ok());
 
         let merged_input_headers = merge_provider_request_headers(*input_headers, *session_headers);
 
         // We merge configured input headers with the headers from the request.
-        let headers = get_request_headers(
+        let mut headers = get_request_headers(
             merged_input_headers.as_ref(),
             Some(&req_headers),
             *disabled_headers,
             *default_user_agent,
+        );
+        crate::utils::request::overlay_upstream_user_agent(
+            &mut headers,
+            stream_channel.as_ref().and_then(|channel| channel.upstream_user_agent.as_deref()),
+            *disabled_headers,
         );
 
         let default_user_agent = default_user_agent
@@ -163,11 +169,6 @@ impl ProviderStreamFactoryOptions {
             })
             .and_then(|ua| axum::http::header::HeaderValue::from_str(ua).ok());
         let url = (*stream_url).clone();
-        let range_start_bytes = if matches!(item_type, PlaylistItemType::Live | PlaylistItemType::LiveUnknown) {
-            requested_range
-        } else {
-            Some(requested_range.unwrap_or(0))
-        };
         let mut flags = ProviderStreamFactoryFlagsSet::new();
         if stream_options.stream_retry {
             flags.set(ProviderStreamFactoryFlags::RetryEnabled);
@@ -197,7 +198,7 @@ impl ProviderStreamFactoryOptions {
             url,
             headers,
             default_user_agent,
-            range_start_bytes,
+            requested_range,
             provider: None,
             username: username.map(ToString::to_string),
             client_ip: client_ip.map(ToString::to_string),
@@ -263,7 +264,7 @@ impl ProviderStreamFactoryOptions {
     pub fn get_headers(&self) -> &HeaderMap { &self.headers }
 
     #[inline]
-    pub fn get_range_start_bytes(&self) -> Option<usize> { self.range_start_bytes }
+    pub fn get_requested_range(&self) -> Option<&HeaderValue> { self.requested_range.as_ref() }
 
     #[inline]
     pub fn should_continue(&self) -> bool { !self.reconnect_flag.is_cancelled() }
@@ -468,23 +469,6 @@ fn should_wrap_provider_stream_in_buffer(stream_options: &ProviderStreamFactoryO
         && stream_options.is_buffer_enabled()
 }
 
-fn get_request_range_start_bytes(req_headers: &HashMap<String, Vec<u8>>) -> Option<usize> {
-    // range header looks like  bytes=1234-5566/2345345 or bytes=0-
-    if let Some(req_range) = req_headers.get(axum::http::header::RANGE.as_str()) {
-        if let Some(bytes_range) = req_range.strip_prefix(b"bytes=") {
-            if let Some(index) = bytes_range.iter().position(|&x| x == b'-') {
-                let start_bytes = &bytes_range[..index];
-                if let Ok(start_str) = std::str::from_utf8(start_bytes) {
-                    if let Ok(bytes_requested) = start_str.parse::<usize>() {
-                        return Some(bytes_requested);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 // fn get_host_and_optional_port(url: &Url) -> Option<String> {
 //     let host = url.host_str()?;
 //     match url.port() {
@@ -515,7 +499,7 @@ fn prepare_client(
 ) -> (reqwest::RequestBuilder, bool) {
     let original_url = stream_options.get_url();
     let url = url_override.unwrap_or(original_url);
-    let range_start = stream_options.get_range_start_bytes();
+    let requested_range = stream_options.get_requested_range();
     let original_headers = stream_options.get_headers();
 
     if log_enabled!(log::Level::Debug) {
@@ -535,7 +519,7 @@ fn prepare_client(
         remove_sensitive_headers(&mut headers);
     }
     prepare_default_headers(&mut headers, stream_options);
-    let partial = prepare_partial_request_headers(&mut headers, stream_options, range_start);
+    let partial = prepare_partial_request_headers(&mut headers, requested_range);
     let content_coding_policy = match stream_options.content_representation() {
         ProviderContentRepresentationMode::PreserveOrigin => OutboundContentCodingPolicy::Inherit,
         ProviderContentRepresentationMode::Identity => OutboundContentCodingPolicy::Identity,
@@ -592,21 +576,10 @@ fn prepare_default_headers(headers: &mut axum::http::HeaderMap, stream_options: 
     }
 }
 
-fn prepare_partial_request_headers(
-    headers: &mut HeaderMap,
-    stream_options: &ProviderStreamFactoryOptions,
-    range_start: Option<usize>,
-) -> bool {
-    if let Some(range) = range_start {
-        if range > 0 || stream_options.was_range_requested() {
-            let range_header = format!("bytes={range}-");
-            if let Ok(header_value) = axum::http::header::HeaderValue::from_str(&range_header) {
-                headers.insert(RANGE, header_value);
-            }
-            true
-        } else {
-            false
-        }
+fn prepare_partial_request_headers(headers: &mut HeaderMap, requested_range: Option<&HeaderValue>) -> bool {
+    if let Some(range) = requested_range {
+        headers.insert(RANGE, range.clone());
+        true
     } else {
         false
     }
@@ -754,6 +727,7 @@ async fn prepare_provider_stream_response_with_context(
     context: ProviderStreamPreparationContext,
     idle_timeout: Duration,
 ) -> Result<ProviderStreamFactoryResponse, ProviderStreamPreparationError> {
+    let provider_session_headers = extract_hls_provider_session_headers(response.headers());
     match context.representation {
         ProviderContentRepresentationMode::PreserveOrigin => {
             if matches!(context.response_head_availability, ProviderResponseHeadAvailability::Unavailable) {
@@ -765,7 +739,7 @@ async fn prepare_provider_stream_response_with_context(
             let headers = provider_response_headers(response.headers(), context.representation)?;
             let response_info = Some((headers, response.status(), Some(response.url().clone()), None));
             let stream = response.bytes_stream().map_err(|error| StreamError::reqwest(&error)).boxed();
-            Ok((stream, response_info))
+            Ok(ProviderStreamFactoryResponse { stream, info: response_info, provider_session_headers })
         }
         ProviderContentRepresentationMode::Identity => {
             let origin_status = response.status();
@@ -804,7 +778,7 @@ async fn prepare_provider_stream_response_with_context(
             let headers = provider_response_headers(&decoded.headers, context.representation)?;
             let response_info = Some((headers, decoded.status, Some(decoded.final_url), None));
             let stream = ReaderStream::new(decoded.body).map_err(|error| provider_decoded_body_error(&error)).boxed();
-            Ok((stream, response_info))
+            Ok(ProviderStreamFactoryResponse { stream, info: response_info, provider_session_headers })
         }
     }
 }
@@ -899,7 +873,7 @@ async fn provider_stream_request(
                     });
                 }
                 let response = prepare_provider_stream_response_for_request(response, stream_options).await;
-                let (provider_stream, response_info) = match response {
+                let response = match response {
                     Ok(response) => response,
                     Err(error) => {
                         let provider_error_class = error.provider_error_class();
@@ -913,10 +887,10 @@ async fn provider_stream_request(
                 if log_enabled!(log::Level::Debug) {
                     // Unfortunately, the HEAD request does not work, so we need this workaround.
                     // We need some header information from the provider, we extract the necessary headers and forward them to the client
-                    let message = format!("Provider response info: {response_info:?}");
+                    let message = format!("Provider response info: {:?}", response.info);
                     debug!("{}", sanitize_sensitive_info(&message));
                 }
-                return Ok(Some((provider_stream, response_info)));
+                return Ok(Some(response));
             }
 
             if status.is_client_error() {
@@ -1067,7 +1041,7 @@ pub async fn create_provider_stream(
     stream_options: ProviderStreamFactoryOptions,
 ) -> Option<ProviderStreamFactoryResponse> {
     match get_provider_stream(app_state, client, &stream_options).await {
-        Ok(Some((init_stream, info))) => {
+        Ok(Some(ProviderStreamFactoryResponse { stream: init_stream, info, provider_session_headers })) => {
             if let Some((_headers, _status, _response_url, Some(custom_video_type))) = &info {
                 let reason = match custom_video_type {
                     CustomVideoStreamType::ChannelUnavailable => Some(ConnectFailureReason::ChannelUnavailable),
@@ -1094,10 +1068,11 @@ pub async fn create_provider_stream(
             } else {
                 stream
             };
-            Some((
-                ClientStream::new(stream, continue_signal.clone(), None, stream_options.get_url_as_str()).boxed(),
+            Some(ProviderStreamFactoryResponse {
+                stream: ClientStream::new(stream, continue_signal.clone(), None, stream_options.get_url_as_str()).boxed(),
                 info,
-            ))
+                provider_session_headers,
+            })
         }
         Ok(None) => None,
         Err(failure) => {
@@ -1115,7 +1090,11 @@ pub async fn create_provider_stream(
                 &get_response_headers(stream_options.get_headers()),
                 StatusCode::OK,
             ) {
-                return Some((boxed_provider_stream, response_info));
+                return Some(ProviderStreamFactoryResponse {
+                    stream: boxed_provider_stream,
+                    info: response_info,
+                    provider_session_headers: HashMap::new(),
+                });
             }
             None
         }
@@ -1261,7 +1240,7 @@ mod tests {
     ) {
         const IDENTITY_BODY: &[u8] = b"decoded redirect body";
 
-        let (stream, info) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::Identity,
             ProviderResponseHeadAvailability::Available,
@@ -1434,6 +1413,67 @@ mod tests {
     }
 
     #[test]
+    fn provider_requests_preserve_complete_client_range_header() {
+        let stream_url = Url::parse("http://provider.example/movie").unwrap();
+        let client = reqwest::Client::new();
+
+        for requested_range in [
+            "bytes=100-199",
+            "bytes=100-",
+            "bytes=-100",
+            "bytes=0-0",
+            "bytes=0-0,200-299",
+        ] {
+            let mut req_headers = HeaderMap::new();
+            req_headers.insert(reqwest::header::RANGE, requested_range.parse().unwrap());
+            let options = test_options(
+                ProviderContentRepresentationMode::PreserveOrigin,
+                &stream_url,
+                &req_headers,
+                None,
+                None,
+            );
+
+            let (request, partial) =
+                prepare_client(&client, &options, None, ProviderRequestCredentialState::OriginalOrigin);
+            let request = request.build().unwrap();
+
+            assert!(partial, "Range request was not recognized: {requested_range}");
+            assert_eq!(
+                request.headers().get(reqwest::header::RANGE).and_then(|value| value.to_str().ok()),
+                Some(requested_range)
+            );
+        }
+    }
+
+    #[test]
+    fn client_range_takes_precedence_over_configured_provider_range() {
+        let stream_url = Url::parse("http://provider.example/movie").unwrap();
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(reqwest::header::RANGE, "bytes=100-199".parse().unwrap());
+        let input_headers = HashMap::from([("Range".to_string(), "bytes=0-".to_string())]);
+        let options = test_options(
+            ProviderContentRepresentationMode::PreserveOrigin,
+            &stream_url,
+            &req_headers,
+            Some(&input_headers),
+            None,
+        );
+
+        let request = prepare_client(
+            &reqwest::Client::new(),
+            &options,
+            None,
+            ProviderRequestCredentialState::OriginalOrigin,
+        )
+        .0
+        .build()
+        .unwrap();
+
+        assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=100-199");
+    }
+
+    #[test]
     fn test_provider_stream_factory_options_range_logic() {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let stream_url = Url::parse("http://example.com/stream").unwrap();
@@ -1461,7 +1501,7 @@ mod tests {
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
         });
         assert!(!options.was_range_requested());
-        assert_eq!(options.get_range_start_bytes(), Some(0)); // Should track range start even if not requested
+        assert!(options.get_requested_range().is_none());
 
         // Case 2: VOD, range requested
         req_headers.insert("Range", "bytes=100-".parse().unwrap());
@@ -1483,7 +1523,7 @@ mod tests {
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
         });
         assert!(options.was_range_requested());
-        assert_eq!(options.get_range_start_bytes(), Some(100));
+        assert_eq!(options.get_requested_range().and_then(|value| value.to_str().ok()), Some("bytes=100-"));
 
         // Case 3: Live, no initial range requested
         let req_headers = HeaderMap::new();
@@ -1505,7 +1545,7 @@ mod tests {
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
         });
         assert!(!options.was_range_requested());
-        assert_eq!(options.get_range_start_bytes(), None); // Should NOT track range start
+        assert!(options.get_requested_range().is_none());
 
         // Case 4: Live, range requested (should be stripped)
         let mut req_headers = HeaderMap::new();
@@ -1528,7 +1568,7 @@ mod tests {
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
         });
         assert!(!options.was_range_requested()); // Stripped by filter
-        assert_eq!(options.get_range_start_bytes(), None);
+        assert!(options.get_requested_range().is_none());
     }
 
     #[test]
@@ -1650,6 +1690,7 @@ mod tests {
                 technical: None,
                 epg_channel_id: None,
                 epg_reference_ts: None,
+                upstream_user_agent: Some("Channel-UA".intern()),
             }),
             connect_failure_stage: Some(FailureStage::ProviderOpen),
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
@@ -1662,6 +1703,7 @@ mod tests {
         assert_eq!(info.provider.as_ref(), "provider-a");
         assert_eq!(info.channel.input_name.as_ref(), "input-a");
         assert_eq!(info.channel.virtual_id, 77);
+        assert_eq!(options.headers.get(reqwest::header::USER_AGENT).and_then(|value| value.to_str().ok()), Some("Channel-UA"));
     }
 
     #[test]
@@ -1717,12 +1759,38 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn provider_stream_factory_captures_session_cookies_separately() {
+        let (response, _) = local_response(
+            StatusCode::OK,
+            &[("content-type", "application/vnd.apple.mpegurl"), ("set-cookie", "sid=abc; Path=/")],
+            b"#EXTM3U\nsegment.ts\n".to_vec(),
+        )
+        .await;
+
+        let result = prepare_provider_stream_response(
+            response,
+            ProviderContentRepresentationMode::Identity,
+            ProviderResponseHeadAvailability::Available,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        if let Ok(response) = result {
+            assert_eq!(response.provider_session_headers.get("cookie").map(String::as_str), Some("sid=abc"));
+            assert!(response
+                .info
+                .as_ref()
+                .is_some_and(|(headers, _, _, _)| headers.iter().all(|(name, _)| !name.eq_ignore_ascii_case("set-cookie"))));
+        }
+    }
+
     #[test]
     fn cross_origin_provider_requests_keep_only_redirect_safe_headers() {
         let stream_url = Url::parse("http://provider-a.example/live/segment.ts").unwrap();
         let mut req_headers = HeaderMap::new();
         req_headers.insert(reqwest::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
-        req_headers.insert(reqwest::header::RANGE, "bytes=17-".parse().unwrap());
+        req_headers.insert(reqwest::header::RANGE, "bytes=17-31".parse().unwrap());
         req_headers.insert(reqwest::header::USER_AGENT, "test-agent".parse().unwrap());
         req_headers.insert(reqwest::header::AUTHORIZATION, "Bearer client".parse().unwrap());
         req_headers.insert(reqwest::header::COOKIE, "client=1".parse().unwrap());
@@ -1742,7 +1810,7 @@ mod tests {
 
         let mut safe_headers = HeaderMap::new();
         safe_headers.insert(reqwest::header::ACCEPT_ENCODING, "gzip".parse().unwrap());
-        safe_headers.insert(reqwest::header::RANGE, "bytes=17-".parse().unwrap());
+        safe_headers.insert(reqwest::header::RANGE, "bytes=17-31".parse().unwrap());
         let safe_options =
             test_options(ProviderContentRepresentationMode::PreserveOrigin, &stream_url, &safe_headers, None, None);
         assert!(!provider_headers_require_manual_redirects(safe_options.get_headers()));
@@ -1774,7 +1842,7 @@ mod tests {
                 assert!(!request.headers().contains_key(name), "cross-origin request retained {name}");
             }
             assert_eq!(request.headers()[reqwest::header::ACCEPT_ENCODING], "gzip");
-            assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=17-");
+            assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=17-31");
             assert_eq!(request.headers()[reqwest::header::USER_AGENT], "test-agent");
         }
     }
@@ -1811,7 +1879,7 @@ mod tests {
         let stream_url = Url::parse("http://provider-a.example/live/segment.ts").unwrap();
         let mut req_headers = HeaderMap::new();
         req_headers.insert(reqwest::header::ACCEPT_ENCODING, "br".parse().unwrap());
-        req_headers.insert(reqwest::header::RANGE, "bytes=17-".parse().unwrap());
+        req_headers.insert(reqwest::header::RANGE, "bytes=17-31".parse().unwrap());
         req_headers.insert(reqwest::header::AUTHORIZATION, "Bearer client".parse().unwrap());
         req_headers.insert(reqwest::header::COOKIE, "client=1".parse().unwrap());
         let input_headers = HashMap::from([("Accept-Encoding".to_string(), "gzip".to_string())]);
@@ -1838,7 +1906,7 @@ mod tests {
                 .build()
                 .unwrap();
             assert_eq!(request.headers()[reqwest::header::ACCEPT_ENCODING], "identity");
-            assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=17-");
+            assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=17-31");
             if target == Some(&cross_origin) {
                 assert!(!request.headers().contains_key(reqwest::header::AUTHORIZATION));
                 assert!(!request.headers().contains_key(reqwest::header::COOKIE));
@@ -1937,7 +2005,7 @@ mod tests {
 
         let encoded = encode(IDENTITY_BODY, TestEncoding::Gzip).await;
         let (response, _) = local_response(StatusCode::OK, &[("Content-Encoding", "gzip")], encoded).await;
-        let (stream, info) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::Identity,
             ProviderResponseHeadAvailability::Unavailable,
@@ -2039,7 +2107,7 @@ mod tests {
             let (response, _) =
                 local_response(StatusCode::OK, &[("Content-Encoding", content_encoding)], encoded).await;
 
-            let (stream, info) = prepare_provider_stream_response(
+            let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
                 response,
                 ProviderContentRepresentationMode::Identity,
                 ProviderResponseHeadAvailability::Available,
@@ -2060,7 +2128,7 @@ mod tests {
         let body = Bytes::from_static(b"\x1f\x8bnot-an-encoded-key");
         let (response, _) = local_response(StatusCode::OK, &[], body.to_vec()).await;
 
-        let (stream, _) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::Identity,
             ProviderResponseHeadAvailability::Available,
@@ -2078,7 +2146,7 @@ mod tests {
             local_response(StatusCode::PARTIAL_CONTENT, &[("Content-Range", "bytes 0-2/10")], PARTIAL_BODY.to_vec())
                 .await;
 
-        let (stream, info) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::Identity,
             ProviderResponseHeadAvailability::Available,
@@ -2102,7 +2170,7 @@ mod tests {
             local_response(StatusCode::OK, &[("Content-Encoding", "gzip"), ("Content-Range", "bytes 0-9/10")], encoded)
                 .await;
 
-        let (stream, info) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::Identity,
             ProviderResponseHeadAvailability::Available,
@@ -2173,7 +2241,7 @@ mod tests {
         )
         .await;
 
-        let (stream, info) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::PreserveOrigin,
             ProviderResponseHeadAvailability::Available,
@@ -2202,7 +2270,7 @@ mod tests {
         )
         .await;
 
-        let (stream, info) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, info, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::PreserveOrigin,
             ProviderResponseHeadAvailability::Available,
@@ -2223,7 +2291,7 @@ mod tests {
         let body = Bytes::from_static(b"\x1f\x8bopaque non-hls bytes");
         let (response, _) = local_response(StatusCode::OK, &[], body.to_vec()).await;
 
-        let (stream, _) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::PreserveOrigin,
             ProviderResponseHeadAvailability::Available,
@@ -2240,7 +2308,7 @@ mod tests {
         truncated.truncate(truncated.len().saturating_sub(5));
         let (response, requests) = local_response(StatusCode::OK, &[("Content-Encoding", "gzip")], truncated).await;
 
-        let (stream, _) = prepare_provider_stream_response(
+        let ProviderStreamFactoryResponse { stream, .. } = prepare_provider_stream_response(
             response,
             ProviderContentRepresentationMode::Identity,
             ProviderResponseHeadAvailability::Available,

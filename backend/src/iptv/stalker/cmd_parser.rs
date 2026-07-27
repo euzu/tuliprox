@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use url::Url;
 
-use crate::utils::network::stalker::error::{StalkerError, StalkerResult};
+use crate::iptv::stalker::error::{StalkerError, StalkerResult};
 
 /// A Stalker `cmd` field is usually a plain-text space-prefixed command + URL pair, e.g.
 /// `"ffmpeg http://portal.example/stream/123"` or a bare URL. Some portals embed a

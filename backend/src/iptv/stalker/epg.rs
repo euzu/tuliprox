@@ -9,10 +9,10 @@ use std::io::{Error as IoError, ErrorKind, Read};
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use tokio_util::io::{StreamReader, SyncIoBridge};
 
-use crate::utils::network::stalker::client::StalkerApiClient;
-use crate::utils::network::stalker::error::{StalkerError, StalkerResult};
-use crate::utils::network::stalker::profile::StalkerHandshake;
-use crate::utils::network::stalker::recipes::recipe_spec_for;
+use crate::iptv::stalker::client::StalkerApiClient;
+use crate::iptv::stalker::error::{safe_stalker_url, StalkerError, StalkerResult};
+use crate::iptv::stalker::profile::StalkerHandshake;
+use crate::iptv::stalker::recipes::recipe_spec_for;
 
 /// A single EPG programme record. The portal wraps each entry in `{ ch_id, title, start,
 /// stop, ... }`. We accept any payload shape by deserialising into a permissive value
@@ -120,7 +120,7 @@ pub async fn get_short_epg(
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: client.portal_url().to_string() }))
+    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
 /// Per-channel full EPG. The portal returns the same payload shape as the short EPG.
@@ -155,7 +155,7 @@ pub async fn get_epg(
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: client.portal_url().to_string() }))
+    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
 /// Bulk-EPG stream. The portal can return hundreds of thousands of records in a single
@@ -270,7 +270,7 @@ where
         }
         return Ok(());
     }
-    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: client.portal_url().to_string() }))
+    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
 struct CancellableReader<R> {

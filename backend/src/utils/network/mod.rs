@@ -4,10 +4,7 @@ use tokio::io::AsyncRead;
 pub(crate) mod content_coding;
 pub mod epg;
 pub mod ip_checker;
-pub mod m3u;
 pub mod request;
-pub mod stalker;
-pub mod xtream;
 
 /// Type-erased asynchronous reader used by the existing network download stack.
 pub type DynReader = Pin<Box<dyn AsyncRead + Send>>;

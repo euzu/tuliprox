@@ -1,6 +1,7 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
 use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
 use crate::library::{MediaMetadata, MetadataResolver, MetadataStorage};
+use crate::iptv::xtream;
 use crate::media_enrichment::policy::MissingFactEnrichmentPolicy;
 use crate::media_enrichment::xtream::{
     apply_fact_patch_to_video, distinct_non_empty_title_candidates, video_fact_patch_from_metadata,
@@ -22,7 +23,7 @@ use crate::repository::persist_input_vod_info;
 use crate::repository::persist_input_vod_info_batch;
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
 use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
-use crate::utils::{debug_if_enabled, trace_if_enabled, xtream};
+use crate::utils::{debug_if_enabled, trace_if_enabled};
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use parking_lot::Mutex;
 use serde_json::Value;

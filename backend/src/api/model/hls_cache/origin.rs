@@ -32,6 +32,10 @@ pub struct HlsOriginSource {
     pub input_name: Arc<str>,
     /// Exact, non-empty origin/provider stream ID captured before target mapping.
     pub stream_ref: String,
+    /// Archive start timestamp; absent for live playback.
+    pub archive_reference: Option<i64>,
+    /// Opaque identity of the complete archive request; absent for live playback.
+    pub archive_identity: Option<String>,
     pub source_kind: HlsOriginSourceKind,
 }
 
@@ -46,14 +50,49 @@ impl HlsOriginSource {
         stream_ref: impl Into<String>,
         source_kind: HlsOriginSourceKind,
     ) -> Self {
-        Self { input_id, input_name, stream_ref: stream_ref.into(), source_kind }
+        Self {
+            input_id,
+            input_name,
+            stream_ref: stream_ref.into(),
+            archive_reference: None,
+            archive_identity: None,
+            source_kind,
+        }
     }
 
     pub fn from_session_key(key: &HlsSessionKey) -> Self {
-        Self::new(key.input_id, Arc::from(""), key.stream_ref.clone(), HlsOriginSourceKind::DirectMediaPlaylist)
+        let mut source = Self::new(
+            key.input_id,
+            Arc::from(""),
+            key.stream_ref.clone(),
+            HlsOriginSourceKind::DirectMediaPlaylist,
+        );
+        source.archive_reference = key.archive_reference;
+        source.archive_identity.clone_from(&key.archive_identity);
+        source
     }
 
-    pub fn session_key(&self) -> HlsSessionKey { HlsSessionKey::new(self.input_id, self.stream_ref.clone()) }
+    pub const fn with_archive_reference(mut self, archive_reference: i64) -> Self {
+        self.archive_reference = Some(archive_reference);
+        self
+    }
+
+    pub fn with_archive_request(mut self, archive_reference: i64, archive_url: &str) -> Self {
+        self.archive_reference = Some(archive_reference);
+        self.archive_identity = Some(blake3::hash(archive_url.as_bytes()).to_hex().to_string());
+        self
+    }
+
+    pub fn session_key(&self) -> HlsSessionKey {
+        let key = HlsSessionKey::new(self.input_id, self.stream_ref.clone());
+        match self.archive_reference {
+            Some(timestamp) => match self.archive_identity.as_ref() {
+                Some(identity) => key.with_archive_reference(timestamp).with_archive_identity(identity),
+                None => key.with_archive_reference(timestamp),
+            },
+            None => key,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -965,6 +1004,28 @@ mod tests {
         let source = HlsOriginSource::from_session_key(&key);
 
         assert_eq!(source.session_key(), key);
+    }
+
+    #[test]
+    fn archive_source_keeps_origin_stream_ref_but_uses_distinct_session_key() {
+        let live = HlsOriginSource::new(7, Arc::from("input"), "80510", HlsOriginSourceKind::M3uMediaPlaylist);
+        let archive = live.clone().with_archive_reference(1_784_898_000);
+
+        assert_eq!(live.stream_ref, "80510");
+        assert_eq!(archive.stream_ref, "80510");
+        assert_ne!(live.session_key(), archive.session_key());
+        assert_eq!(archive.session_key().archive_reference, Some(1_784_898_000));
+    }
+
+    #[test]
+    fn archive_source_distinguishes_requests_with_same_start() {
+        let live = HlsOriginSource::new(7, Arc::from("input"), "80510", HlsOriginSourceKind::M3uMediaPlaylist);
+        let short = live
+            .clone()
+            .with_archive_request(1_784_898_000, "http://origin/80510-1784898000-1800.m3u8");
+        let long = live.with_archive_request(1_784_898_000, "http://origin/80510-1784898000-3600.m3u8");
+
+        assert_ne!(short.session_key(), long.session_key());
     }
 
     #[test]

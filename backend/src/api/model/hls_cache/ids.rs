@@ -15,6 +15,10 @@ pub struct HlsSessionKey {
     pub input_id: u16,
     /// Exact, non-empty origin/provider stream ID represented as a string.
     pub stream_ref: String,
+    /// Archive start timestamp; absent for live playback.
+    pub archive_reference: Option<i64>,
+    /// Opaque identity of the complete archive request; absent for live playback.
+    pub archive_identity: Option<String>,
 }
 
 impl HlsSessionKey {
@@ -23,10 +27,31 @@ impl HlsSessionKey {
     /// Callers must pass the origin/provider ID captured before target mapping, not
     /// a target-specific or virtual ID.
     pub fn new(input_id: u16, stream_ref: impl Into<String>) -> Self {
-        Self { input_id, stream_ref: stream_ref.into() }
+        Self { input_id, stream_ref: stream_ref.into(), archive_reference: None, archive_identity: None }
     }
 
-    pub fn canonical(&self) -> String { format!("input:{}|hls|{}", self.input_id, self.stream_ref) }
+    pub const fn with_archive_reference(mut self, archive_reference: i64) -> Self {
+        self.archive_reference = Some(archive_reference);
+        self
+    }
+
+    pub fn with_archive_identity(mut self, archive_identity: impl Into<String>) -> Self {
+        self.archive_identity = Some(archive_identity.into());
+        self
+    }
+
+    pub fn canonical(&self) -> String {
+        self.archive_reference.map_or_else(
+            || format!("input:{}|hls|{}", self.input_id, self.stream_ref),
+            |timestamp| {
+                let base = format!("input:{}|hls|{}|archive|{timestamp}", self.input_id, self.stream_ref);
+                match self.archive_identity.as_ref() {
+                    Some(identity) => format!("{base}|{identity}"),
+                    None => base,
+                }
+            },
+        )
+    }
 
     pub fn stable_value(&self) -> String { self.canonical() }
 }
@@ -64,6 +89,15 @@ mod tests {
 
         assert_ne!(first, different_input);
         assert_ne!(first, different_stream);
+    }
+
+    #[test]
+    fn archive_hls_session_key_changes_for_different_archive_request() {
+        let first = HlsSessionKey::new(7, "80510").with_archive_reference(1_784_898_000).with_archive_identity("first");
+        let second = HlsSessionKey::new(7, "80510").with_archive_reference(1_784_898_000).with_archive_identity("second");
+
+        assert_ne!(first, second);
+        assert_ne!(first.stable_value(), second.stable_value());
     }
 
     #[test]

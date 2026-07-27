@@ -21,7 +21,7 @@ use shared::utils::Internable;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::utils::network::stalker::catalog::{
+use crate::iptv::stalker::catalog::{
     StalkerCategory, StalkerRawItem, StalkerRawItemInfo, StalkerRawSeriesDetails, StalkerRawSeriesEpisode,
     StalkerRawSeriesItem, StalkerRawSeriesSeason,
 };
