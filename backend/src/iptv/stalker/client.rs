@@ -12,17 +12,17 @@ use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::model::{StalkerInputConfig, StalkerSizeCaps};
-use crate::utils::network::stalker::auth;
-use crate::utils::network::stalker::catalog;
-use crate::utils::network::stalker::cookie_jar::{apply_set_cookie_headers_unchecked, StalkerCookieJar};
-use crate::utils::network::stalker::epg;
-use crate::utils::network::stalker::error::{StalkerError, StalkerResult};
-use crate::utils::network::stalker::playback;
-use crate::utils::network::stalker::presets::stalker_mag_preset_spec;
-use crate::utils::network::stalker::profile::{StalkerHandshake, StalkerResolvedStream};
-use crate::utils::network::stalker::recipes::apply_endpoint_preference;
-use crate::utils::network::stalker::session::StalkerSession;
-use crate::utils::network::stalker::url_factory::{load_url_candidates, StalkerLoadUrl};
+use crate::iptv::stalker::auth;
+use crate::iptv::stalker::catalog;
+use crate::iptv::stalker::cookie_jar::{apply_set_cookie_headers_unchecked, StalkerCookieJar};
+use crate::iptv::stalker::epg;
+use crate::iptv::stalker::error::{StalkerError, StalkerResult};
+use crate::iptv::stalker::playback;
+use crate::iptv::stalker::presets::stalker_mag_preset_spec;
+use crate::iptv::stalker::profile::{StalkerHandshake, StalkerResolvedStream};
+use crate::iptv::stalker::recipes::apply_endpoint_preference;
+use crate::iptv::stalker::session::StalkerSession;
+use crate::iptv::stalker::url_factory::{load_url_candidates, StalkerLoadUrl};
 
 /// Stalker portals expect a `X-User-Agent` header on every call. The `reqwest` re-export
 /// does not ship a constant for it (the upstream convention is to use a custom name), so
@@ -135,7 +135,7 @@ impl StalkerApiClient {
             // Honour the soft TTL: a cached session older than `STALKER_SESSION_TTL`
             // is discarded and re-handshaken. The portal may invalidate tokens
             // earlier; that path is caught by the 4xx retry hook in `api_utils.rs`.
-            if !active.session.is_stale(crate::utils::network::stalker::session::STALKER_SESSION_TTL) {
+            if !active.session.is_stale(crate::iptv::stalker::session::STALKER_SESSION_TTL) {
                 return Ok(active);
             }
             // Stale: drop the cached handshake so the call below re-issues it.
@@ -332,7 +332,7 @@ impl StalkerApiClient {
             }
             Err(err) => warn!("Stalker: dropping invalid Referer header value: {err}"),
         }
-        let now = crate::utils::network::stalker::cookie_jar::now_epoch_secs();
+        let now = crate::iptv::stalker::cookie_jar::now_epoch_secs();
         let mut cookie_pairs = identity_cookie_pairs(&self.config);
         for (name, value) in self.cookies.active_cookies(now) {
             // Server-set cookies win over our synthesized identity values.

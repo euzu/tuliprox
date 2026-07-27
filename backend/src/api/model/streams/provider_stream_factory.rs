@@ -11,6 +11,7 @@ use crate::{
             ProviderContentRepresentationMode, ProviderStreamFactoryResponse, StreamError, STREAM_IDLE_TIMEOUT,
         },
     },
+    iptv::stalker::client::validate_public_playable_url,
     model::{AppConfig, ConfigProvider, ReverseProxyDisabledHeaderConfig},
     utils::{
         content_coding::{
@@ -18,7 +19,6 @@ use crate::{
             ContentCodingDetection, ContentCodingError, OutboundContentCodingPolicy,
         },
         debug_if_enabled,
-        network::stalker::client::validate_public_playable_url,
         request::{
             get_request_headers, is_safe_cross_origin_redirect_header, preview_request_diagnostics_for_logging,
             preview_request_target_for_logging, send_with_retry_and_provider_policy,
@@ -150,11 +150,16 @@ impl ProviderStreamFactoryOptions {
         let merged_input_headers = merge_provider_request_headers(*input_headers, *session_headers);
 
         // We merge configured input headers with the headers from the request.
-        let headers = get_request_headers(
+        let mut headers = get_request_headers(
             merged_input_headers.as_ref(),
             Some(&req_headers),
             *disabled_headers,
             *default_user_agent,
+        );
+        crate::utils::request::overlay_source_user_agent(
+            &mut headers,
+            stream_channel.as_ref().and_then(|channel| channel.source_user_agent.as_deref()),
+            *disabled_headers,
         );
 
         let default_user_agent = default_user_agent
@@ -1657,6 +1662,7 @@ mod tests {
                 technical: None,
                 epg_channel_id: None,
                 epg_reference_ts: None,
+                source_user_agent: Some("Channel-UA".intern()),
             }),
             connect_failure_stage: Some(FailureStage::ProviderOpen),
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,
@@ -1669,6 +1675,7 @@ mod tests {
         assert_eq!(info.provider.as_ref(), "provider-a");
         assert_eq!(info.channel.input_name.as_ref(), "input-a");
         assert_eq!(info.channel.virtual_id, 77);
+        assert_eq!(options.headers.get(reqwest::header::USER_AGENT).and_then(|value| value.to_str().ok()), Some("Channel-UA"));
     }
 
     #[test]

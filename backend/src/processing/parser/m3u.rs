@@ -462,9 +462,22 @@ fn parse_extm3u_catchup_correction(attributes: &str) -> Option<Arc<str>> {
     None
 }
 
+fn parse_extvlcopt_user_agent(line: &str) -> Option<&str> {
+    let (prefix, option) = line.trim().split_once(':')?;
+    if !prefix.eq_ignore_ascii_case("#EXTVLCOPT") {
+        return None;
+    }
+    let (name, value) = option.split_once('=')?;
+    if !name.trim().eq_ignore_ascii_case("http-user-agent") {
+        return None;
+    }
+    Some(value.trim())
+}
+
 pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInput, lines: DynReader, mut visit: F) {
     let mut header: Option<String> = None;
     let mut group: Option<Arc<str>> = None;
+    let mut source_user_agent: Option<Arc<str>> = None;
     let mut default_catchup_correction: Option<Arc<str>> = None;
     let input_name = &input.name;
 
@@ -481,6 +494,13 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
         if let Some(b'#') = bytes.first().copied() {
             if bytes.starts_with(b"#EXTINF") {
                 header = Some(line);
+                source_user_agent = None;
+                continue;
+            }
+            if let Some(value) = parse_extvlcopt_user_agent(&line) {
+                if header.is_some() {
+                    source_user_agent = (!value.is_empty()).then(|| value.intern());
+                }
                 continue;
             }
             if let Some(rest) = line.strip_prefix("#EXTM3U") {
@@ -505,6 +525,7 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
                 ),
             };
             let header = &mut item.header;
+            header.source_user_agent = source_user_agent.take();
             header.source_ordinal = ord_counter;
             ord_counter += 1;
             if header.group.is_empty() {
@@ -830,6 +851,30 @@ mod test {
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].header.group.as_ref(), "Sports");
+    }
+
+    #[tokio::test]
+    async fn consume_m3u_scopes_extvlcopt_user_agent_to_one_item() {
+        let content = concat!(
+            "#EXTM3U\n",
+            "#EXTINF:-1,Channel 1\n",
+            "#extvlcopt:HTTP-USER-AGENT=  Source UA/1.0  \n",
+            "http://provider.example/live/user/pass/1.ts\n",
+            "#EXTINF:-1,Channel 2\n",
+            "#EXTVLCOPT:http-user-agent=\n",
+            "http://provider.example/live/user/pass/2.ts\n",
+            "#EXTVLCOPT:http-user-agent=must-not-leak\n",
+            "#EXTINF:-1,Channel 3\n",
+            "http://provider.example/live/user/pass/3.ts\n",
+        );
+        let mut items = Vec::new();
+
+        super::consume_m3u(&Config::default(), &test_input(), make_reader(content), |item| items.push(item)).await;
+
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].header.source_user_agent.as_deref(), Some("Source UA/1.0"));
+        assert_eq!(items[1].header.source_user_agent, None);
+        assert_eq!(items[2].header.source_user_agent, None);
     }
 
 }

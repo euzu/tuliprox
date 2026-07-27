@@ -9,10 +9,10 @@ use std::io::{Error as IoError, ErrorKind, Read};
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use tokio_util::io::{StreamReader, SyncIoBridge};
 
-use crate::utils::network::stalker::client::StalkerApiClient;
-use crate::utils::network::stalker::error::{StalkerError, StalkerResult};
-use crate::utils::network::stalker::profile::StalkerHandshake;
-use crate::utils::network::stalker::recipes::recipe_spec_for;
+use crate::iptv::stalker::client::StalkerApiClient;
+use crate::iptv::stalker::error::{StalkerError, StalkerResult};
+use crate::iptv::stalker::profile::StalkerHandshake;
+use crate::iptv::stalker::recipes::recipe_spec_for;
 
 /// A single EPG programme record. The portal wraps each entry in `{ ch_id, title, start,
 /// stop, ... }`. We accept any payload shape by deserialising into a permissive value

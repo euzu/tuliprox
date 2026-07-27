@@ -619,6 +619,7 @@ mod tests {
             channel_no: 1,
             source_ordinal: 1,
             input_stream_id: "813563".intern(),
+            source_user_agent: None,
         }
     }
 

@@ -63,6 +63,8 @@ pub struct StreamChannel {
     pub epg_channel_id: Option<Arc<str>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epg_reference_ts: Option<i64>,
+    #[serde(skip)]
+    pub source_user_agent: Option<Arc<str>>,
 }
 
 impl StreamChannel {
@@ -107,6 +109,7 @@ impl XtreamPlaylistItem {
             technical: stream_technical_from_properties(self.additional_properties.as_ref(), self.url.as_ref()),
             epg_channel_id: self.epg_channel_id.clone(),
             epg_reference_ts: None,
+            source_user_agent: self.source_user_agent.clone(),
         }
     }
 }
@@ -130,6 +133,7 @@ impl M3uPlaylistItem {
             technical: stream_technical_from_properties(self.additional_properties.as_ref(), self.url.as_ref()),
             epg_channel_id: self.epg_channel_id.clone(),
             epg_reference_ts: None,
+            source_user_agent: self.source_user_agent.clone(),
         }
     }
 }
@@ -384,6 +388,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "1".intern(),
+            source_user_agent: None,
         };
 
         let stream_channel = create_stream_channel_with_type(1, &playlist_item, PlaylistItemType::Video);
@@ -414,11 +419,43 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "1".intern(),
+            source_user_agent: None,
         };
 
         let stream_channel = playlist_item.to_stream_channel(1);
 
         assert_eq!(stream_channel.input_name.as_ref(), "provider-input");
+    }
+
+    #[test]
+    fn stream_channel_keeps_source_user_agent_internal() {
+        let mut playlist_item = XtreamPlaylistItem {
+            virtual_id: 1,
+            provider_id: 1,
+            name: "Example".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Live".intern(),
+            title: "Example".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: "http://provider.example/live/1.ts".intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Live,
+            additional_properties: None,
+            item_type: PlaylistItemType::Live,
+            category_id: 0,
+            input_name: "provider-input".intern(),
+            channel_no: 0,
+            source_ordinal: 0,
+            input_stream_id: "1".intern(),
+            source_user_agent: Some("secret-provider-agent".intern()),
+        };
+        let stream_channel = playlist_item.to_stream_channel(1);
+        playlist_item.source_user_agent = None;
+
+        assert_eq!(stream_channel.source_user_agent.as_deref(), Some("secret-provider-agent"));
+        assert!(!serde_json::to_string(&stream_channel).is_ok_and(|json| json.contains("secret-provider-agent")));
     }
 
     #[test]
@@ -447,6 +484,7 @@ mod tests {
             source_ordinal: 0,
             additional_properties: None,
             input_stream_id: "42".intern(),
+            source_user_agent: None,
         };
 
         let channel = pli.to_stream_channel(7).with_epg_reference_ts(Some(1_700_000_000));
@@ -483,6 +521,7 @@ mod tests {
             source_ordinal: 0,
             additional_properties: None,
             input_stream_id: "42".intern(),
+            source_user_agent: None,
         };
 
         // to_stream_channel() defaults to None, and with_epg_reference_ts(None)

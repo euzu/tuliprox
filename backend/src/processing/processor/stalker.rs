@@ -6,7 +6,7 @@
 //!
 //! Reverse-proxy re-resolve (when a 4xx upstream error is observed) is implemented in the
 //! HLS/Xtream endpoints and reaches back into the API client via the helper
-//! [`crate::utils::network::stalker::client::StalkerApiClient::create_link`].
+//! [`crate::iptv::stalker::client::StalkerApiClient::create_link`].
 
 #![allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 
@@ -33,8 +33,8 @@ use crate::repository::stalker_generation_repository::{load_active_manifest, loa
 use super::stalker_refresh::{
     advance_stalker_refresh, StalkerClusterSelection, StalkerRefreshMode, StalkerRefreshOutcome,
 };
-use crate::utils::network::stalker::client::StalkerApiClient;
-use crate::utils::network::stalker::error::StalkerError;
+use crate::iptv::stalker::client::StalkerApiClient;
+use crate::iptv::stalker::error::StalkerError;
 
 
 /// Cluster selector used by the Stalker processor. Mirrors the Xtream cluster split

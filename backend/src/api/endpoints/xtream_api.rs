@@ -9,7 +9,7 @@ use crate::{
             create_m3u_catchup_session_key, create_playback_session_fingerprint, create_session_fingerprint,
             empty_json_response_as_array, empty_json_response_as_object, force_provider_stream_response,
             get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials,
-            internal_server_error, is_seek_request, is_session_based_playback, is_stream_share_enabled,
+            internal_server_error, is_seekable_media_request, is_session_based_playback, is_stream_share_enabled,
             local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder,
             should_allow_exhausted_shared_reconnect, stream_response, try_option_bad_request, try_result_bad_request,
             try_unwrap_body, RedirectParams, resolve_initial_stalker_playback_url,
@@ -27,6 +27,10 @@ use crate::{
         },
     },
     auth::{verify_access_token, Fingerprint},
+    iptv::{
+        m3u::{is_xtream_m3u_catchup_supported, resolve_xtream_m3u_catchup_url, ResolvedM3uCatchup},
+        xtream::{self, create_vod_info_from_item},
+    },
     model::{
         xtream_mapping_option_from_target_options, Config, ConfigInput, ConfigInputFlags, ConfigTarget, InputSource,
         ProxyUserCredentials,
@@ -36,9 +40,7 @@ use crate::{
         xtream_get_collection_path, xtream_get_item_for_stream_id, xtream_load_rewrite_playlist, VirtualIdRecord,
     },
     utils::{
-        apply_timeshift, debug_if_enabled, file_exists_async, is_xtream_m3u_catchup_supported, parse_timeshift,
-        request, resolve_xtream_m3u_catchup_url, trace_if_enabled, xtream, xtream::create_vod_info_from_item,
-        ResolvedM3uCatchup,
+        apply_timeshift, debug_if_enabled, file_exists_async, parse_timeshift, request, trace_if_enabled,
     },
 };
 use axum::{http::HeaderMap, response::IntoResponse};
@@ -519,7 +521,7 @@ async fn xtream_player_api_stream(
 
         let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
 
-        if session.virtual_id == virtual_id && is_seek_request(cluster, req_headers).await {
+        if session.virtual_id == virtual_id && is_seekable_media_request(cluster, req_headers, Some(playback_ext)) {
             // partial request means we are in reverse proxy mode, seek happened
             return force_provider_stream_response(
                 fingerprint,
@@ -2014,6 +2016,7 @@ mod tests {
             channel_no: 1,
             source_ordinal: 0,
             input_stream_id: "".intern(),
+            source_user_agent: None,
         }
     }
 
@@ -2157,6 +2160,7 @@ mod tests {
                 }),
                 ..shared::model::LiveStreamProperties::default()
             }))),
+            source_user_agent: None,
         }
     }
 
@@ -2369,6 +2373,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "813563".intern(),
+            source_user_agent: None,
         }
     }
 
@@ -2613,6 +2618,7 @@ mod tests {
             channel_no: 1,
             source_ordinal: 0,
             input_stream_id: "100".intern(),
+            source_user_agent: None,
         }
     }
 

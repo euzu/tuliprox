@@ -1,4 +1,4 @@
-use crate::utils::{encode_m3u_catchup_token, M3uCatchupToken};
+use super::{encode_m3u_catchup_token, M3uCatchupToken};
 use chrono::{DateTime, NaiveDateTime};
 use shared::{
     error::TuliproxError,
@@ -15,7 +15,7 @@ const M3U_APPEND_TEMPLATE: &str = "?utc={utc}&lutc={lutc}";
 const M3U_CATCHUP_PARAM_UTC: &str = "utc";
 const M3U_CATCHUP_PARAM_LUTC: &str = "lutc";
 const XC_START_TEMPLATE: &str = "{Y}-{m}-{d}:{H}-{M}-{S}";
-const FLUSSONIC_TEMPLATE: &str = "timeshift_abs-{utc}";
+const FLUSSONIC_UTC_SENTINEL: &str = "__TULIPROX_M3U_CATCHUP_UTC__";
 const XTREAM_BRIDGE_START_FORMATS: [&str; 4] = [
     "%Y-%m-%d %H:%M",
     "%Y-%m-%d:%H-%M",
@@ -50,13 +50,26 @@ fn mode_alias(mode: &str) -> &str {
         "shift"
     } else if mode.eq_ignore_ascii_case("xc") {
         "xc"
-    } else if mode.eq_ignore_ascii_case("fs") {
+    } else if ["fs", "flussonic", "flussonic-hls", "flussonic-ts"]
+        .iter()
+        .any(|alias| mode.eq_ignore_ascii_case(alias))
+    {
         "fs"
     } else if mode.eq_ignore_ascii_case("vod") {
         "vod"
     } else {
         mode
     }
+}
+
+fn effective_catchup_mode(catchup: &CatchupProperties) -> &str {
+    catchup
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+        .or_else(|| catchup.catchup_type.as_deref().map(str::trim).filter(|mode| !mode.is_empty()))
+        .unwrap_or_default()
 }
 
 fn parse_template(template: &str) -> Vec<TemplateSegment> {
@@ -185,9 +198,12 @@ fn derive_flussonic_template(source_url: &str) -> Option<String> {
         .path_segments()
         .map(|it| it.map(ToString::to_string).collect::<Vec<_>>())?;
     let file_name = segments.pop()?;
-    segments.push(format!("{FLUSSONIC_TEMPLATE}{}", extract_suffix_from_filename(&file_name)));
+    segments.push(format!(
+        "timeshift_abs-{FLUSSONIC_UTC_SENTINEL}{}",
+        extract_suffix_from_filename(&file_name)
+    ));
     parsed.set_path(&format!("/{}", segments.join("/")));
-    Some(parsed.into())
+    Some(String::from(parsed).replace(FLUSSONIC_UTC_SENTINEL, "{utc}"))
 }
 
 fn append_query_template(source_url: &str, source_template: &str) -> Option<String> {
@@ -214,7 +230,7 @@ fn is_append_like_query_source(mode: &str, source: &str) -> bool {
 }
 
 fn derived_template_for_mode<'a>(source_url: &'a str, catchup: &'a CatchupProperties) -> Option<Cow<'a, str>> {
-    let mode = catchup.mode.as_deref().unwrap_or_default();
+    let mode = effective_catchup_mode(catchup);
     if let Some(source) = catchup.source.as_deref().filter(|source| !source.is_empty()) {
         return Some(if is_append_like_query_source(mode, source) {
             append_query_template(source_url, source).map(Cow::Owned)?
@@ -247,10 +263,10 @@ fn resolve_collectors(raw_query: Option<&str>, placeholders: &[&str]) -> Vec<(us
     // Smart IPTV strips the proxy marker and indexed `v0`/`v1` keys, leaving
     // only `utc`/`lutc` in the request. Map those by placeholder name so the
     // upstream URL still gets the correct values.
-    for (idx, placeholder) in placeholders.iter().enumerate() {
+    for (collector, placeholder) in collectors.iter_mut().zip(placeholders) {
         let name = placeholder_name(placeholder);
-        if let Some((_, value)) = params.iter().find(|(key, _)| key == name) {
-            collectors[idx] = Some(value.clone());
+        if let Some((_, value)) = params.iter().find(|(key, _)| query_key_matches_placeholder(key, name)) {
+            *collector = Some(value.clone());
         }
     }
 
@@ -263,12 +279,65 @@ fn resolve_collectors(raw_query: Option<&str>, placeholders: &[&str]) -> Vec<(us
             .and_then(|suffix| suffix.parse::<usize>().ok()) else {
             continue;
         };
-        if idx < collectors.len() && collectors[idx].is_none() {
-            collectors[idx] = Some(value.clone());
+        if let Some(collector) = collectors.get_mut(idx).filter(|collector| collector.is_none()) {
+            *collector = Some(value.clone());
         }
     }
 
+    fill_collectors_from_utc_lutc(&mut collectors, placeholders, &params);
+
     into_collectors(collectors)
+}
+
+fn query_key_matches_placeholder(key: &str, placeholder: &str) -> bool {
+    if key.eq_ignore_ascii_case(placeholder) {
+        return true;
+    }
+    if ["timestamp", "utcstart", "utc"]
+        .iter()
+        .any(|name| placeholder.eq_ignore_ascii_case(name))
+    {
+        return key.eq_ignore_ascii_case("timestamp")
+            || key.eq_ignore_ascii_case("utcstart")
+            || key.eq_ignore_ascii_case(M3U_CATCHUP_PARAM_UTC);
+    }
+    false
+}
+
+fn fill_collectors_from_utc_lutc(
+    collectors: &mut [Option<String>],
+    placeholders: &[&str],
+    params: &[(String, String)],
+) {
+    let utc = params
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(M3U_CATCHUP_PARAM_UTC))
+        .map(|(_, value)| value.as_str());
+    let duration = utc
+        .and_then(|start| start.parse::<i64>().ok())
+        .zip(
+            params
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(M3U_CATCHUP_PARAM_LUTC))
+                .and_then(|(_, value)| value.parse::<i64>().ok()),
+        )
+        .and_then(|(start, end)| (end >= start).then(|| (end - start).to_string()));
+
+    for (collector, placeholder) in collectors.iter_mut().zip(placeholders) {
+        if collector.is_some() {
+            continue;
+        }
+        let name = placeholder_name(placeholder);
+        if ["timestamp", "utcstart", "utc"].iter().any(|candidate| name.eq_ignore_ascii_case(candidate)) {
+            if let Some(value) = utc {
+                *collector = Some(value.to_string());
+            }
+        } else if ["offset", "duration"].iter().any(|candidate| name.eq_ignore_ascii_case(candidate)) {
+            if let Some(value) = duration.as_ref() {
+                *collector = Some(value.clone());
+            }
+        }
+    }
 }
 
 fn into_collectors(collectors: Vec<Option<String>>) -> Vec<(usize, String)> {
@@ -299,6 +368,13 @@ fn render_template(segments: &[TemplateSegment], collectors: &[(usize, String)])
                 if *actual_idx != collector_idx {
                     return Err(TuliproxError::Crypto("Catchup collector sequence is sparse".to_string()));
                 }
+                let value = if output.ends_with('-') {
+                    value.strip_prefix('-').unwrap_or(value)
+                } else if output.ends_with('+') {
+                    value.strip_prefix('+').unwrap_or(value)
+                } else {
+                    value
+                };
                 output.push_str(value);
                 collector_idx += 1;
             }
@@ -321,6 +397,9 @@ pub fn build_m3u_catchup_rewrite(
     source_url: &str,
     catchup: &CatchupProperties,
 ) -> Result<Option<M3uCatchupRewrite>, TuliproxError> {
+    if catchup.native_flussonic_player_mode().is_some() {
+        return Ok(None);
+    }
     let Some(template) = derived_template_for_mode(source_url, catchup) else {
         return Ok(None);
     };
@@ -338,7 +417,7 @@ pub fn build_m3u_catchup_rewrite(
         .source
         .as_deref()
         .filter(|source| !source.is_empty())
-        .is_some_and(|source| is_append_like_query_source(catchup.mode.as_deref().unwrap_or_default(), source));
+        .is_some_and(|source| is_append_like_query_source(effective_catchup_mode(catchup), source));
 
     let source = build_local_source(base_url, "", &token, &placeholders, append_mode);
     let mode = if append_mode { "append" } else { "default" };
@@ -347,9 +426,17 @@ pub fn build_m3u_catchup_rewrite(
 
 pub fn has_m3u_catchup_marker(raw_query: Option<&str>) -> bool {
     raw_query.is_some_and(|query| {
-        url::form_urlencoded::parse(query.as_bytes()).any(|(key, _)| {
-            key == M3U_CATCHUP_MARKER || key == M3U_CATCHUP_PARAM_UTC || key == M3U_CATCHUP_PARAM_LUTC
-        })
+        let mut explicit = false;
+        let mut wink_start = false;
+        let mut wink_window = false;
+        for (key, _) in url::form_urlencoded::parse(query.as_bytes()) {
+            explicit |= key == M3U_CATCHUP_MARKER
+                || key == M3U_CATCHUP_PARAM_UTC
+                || key == M3U_CATCHUP_PARAM_LUTC;
+            wink_start |= key.eq_ignore_ascii_case("utcstart");
+            wink_window |= key.eq_ignore_ascii_case("offset") || key.eq_ignore_ascii_case("duration");
+        }
+        explicit || (wink_start && wink_window)
     })
 }
 
@@ -453,7 +540,8 @@ pub fn resolve_m3u_catchup_url(
 
     let url = render_template(&segments, &collectors)?;
     let mut discriminator = url::form_urlencoded::Serializer::new(String::new());
-    discriminator.append_pair("mode", catchup.mode.as_deref().unwrap_or("default"));
+    let mode = effective_catchup_mode(catchup);
+    discriminator.append_pair("mode", if mode.is_empty() { "default" } else { mode });
     for (idx, value) in collectors {
         discriminator.append_pair(&format!("{COLLECTOR_PREFIX}{idx}"), &value);
     }
@@ -662,6 +750,69 @@ mod tests {
     }
 
     #[test]
+    fn wink_catchup_detection_requires_start_and_window() {
+        assert!(has_m3u_catchup_marker(Some("utcstart=1717200000&offset=-120")));
+        assert!(has_m3u_catchup_marker(Some("duration=120&utcstart=1717200000")));
+        assert!(!has_m3u_catchup_marker(Some("utcstart=1717200000")));
+        assert!(!has_m3u_catchup_marker(Some("start=1717200000&duration=120")));
+        assert!(!has_m3u_catchup_marker(Some("timestamp=1717200000")));
+    }
+
+    #[test]
+    fn resolve_append_template_from_wink_named_collectors() -> Result<(), TuliproxError> {
+        let resolved = resolve_m3u_catchup_url(
+            "http://provider.example/hls/channel/index.m3u8?useseq=t",
+            &CatchupProperties {
+                mode: Some("append".intern()),
+                source: Some("?offset=-${offset}&utcstart=${timestamp}".intern()),
+                ..CatchupProperties::default()
+            },
+            Some("offset=-120&utcstart=1717200000"),
+        )?
+        .ok_or_else(|| TuliproxError::RepositoryM3u("Wink catch-up URL was not resolved".to_string()))?;
+
+        assert_eq!(
+            resolved.url,
+            "http://provider.example/hls/channel/index.m3u8?useseq=t&offset=-120&utcstart=1717200000"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wink_offset_sign_is_preserved_when_template_has_no_literal_minus() -> Result<(), TuliproxError> {
+        let resolved = resolve_m3u_catchup_url(
+            "http://provider.example/live/42.ts",
+            &CatchupProperties {
+                mode: Some("append".intern()),
+                source: Some("?offset=${offset}&utcstart=${timestamp}".intern()),
+                ..CatchupProperties::default()
+            },
+            Some("offset=-120&utcstart=1717200000"),
+        )?
+        .ok_or_else(|| TuliproxError::RepositoryM3u("signed Wink URL was not resolved".to_string()))?;
+
+        assert_eq!(resolved.url, "http://provider.example/live/42.ts?offset=-120&utcstart=1717200000");
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_append_template_derives_duration_from_utc_lutc() -> Result<(), TuliproxError> {
+        let resolved = resolve_m3u_catchup_url(
+            "http://provider.example/live/42.ts",
+            &CatchupProperties {
+                catchup_type: Some("append".intern()),
+                source: Some("?offset=-${offset}&utcstart=${timestamp}".intern()),
+                ..CatchupProperties::default()
+            },
+            Some("utc=1717200000&lutc=1717200120"),
+        )?
+        .ok_or_else(|| TuliproxError::RepositoryM3u("TiviMate append URL was not resolved".to_string()))?;
+
+        assert_eq!(resolved.url, "http://provider.example/live/42.ts?offset=-120&utcstart=1717200000");
+        Ok(())
+    }
+
+    #[test]
     fn resolve_shift_template_from_siptv_native_collectors() {
         // Smart IPTV strips `tuliprox-catchup`/`v0`/`v1` and forwards only
         // `utc`/`lutc`. The server must still resolve the upstream URL.
@@ -680,6 +831,106 @@ mod tests {
             resolved.url,
             "http://provider.example/live/42.ts?utc=20240101120000&lutc=20240101130000"
         );
+    }
+
+    #[test]
+    fn resolve_flussonic_hls_template_replaces_utc() -> Result<(), TuliproxError> {
+        let resolved = resolve_m3u_catchup_url(
+            "http://provider.example/channel/mono.m3u8?token=abc",
+            &CatchupProperties {
+                mode: Some("fs".intern()),
+                ..CatchupProperties::default()
+            },
+            Some("utc=1784885700&lutc=1784899708"),
+        )?
+        .ok_or_else(|| TuliproxError::RepositoryM3u("HLS Flussonic URL was not resolved".to_string()))?;
+
+        assert_eq!(
+            resolved.url,
+            "http://provider.example/channel/timeshift_abs-1784885700.m3u8?token=abc"
+        );
+        assert!(!resolved.url.contains("%7B"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_flussonic_ts_template_replaces_utc() -> Result<(), TuliproxError> {
+        let resolved = resolve_m3u_catchup_url(
+            "http://provider.example/channel/channel.ts?token=abc",
+            &CatchupProperties {
+                mode: Some("fs".intern()),
+                ..CatchupProperties::default()
+            },
+            Some("utc=1784885700&lutc=1784899708"),
+        )?
+        .ok_or_else(|| TuliproxError::RepositoryM3u("TS Flussonic URL was not resolved".to_string()))?;
+
+        assert_eq!(
+            resolved.url,
+            "http://provider.example/channel/timeshift_abs-1784885700.ts?token=abc"
+        );
+        assert!(!resolved.url.contains("%7B"));
+        Ok(())
+    }
+
+    #[test]
+    fn flussonic_aliases_are_case_insensitive() -> Result<(), TuliproxError> {
+        for mode in ["fs", "FLUSSONIC", "Flussonic-Hls", "flussonic-TS"] {
+            let resolved = resolve_m3u_catchup_url(
+                "http://provider.example/channel/mono.m3u8",
+                &CatchupProperties {
+                    mode: Some(mode.intern()),
+                    ..CatchupProperties::default()
+                },
+                Some("utc=1784885700"),
+            )?
+            .ok_or_else(|| TuliproxError::RepositoryM3u(format!("mode {mode} was not resolved")))?;
+
+            assert_eq!(
+                resolved.url,
+                "http://provider.example/channel/timeshift_abs-1784885700.m3u8"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn catchup_type_flussonic_is_used_when_mode_is_missing() -> Result<(), TuliproxError> {
+        let resolved = resolve_m3u_catchup_url(
+            "http://provider.example/channel/channel.ts",
+            &CatchupProperties {
+                catchup_type: Some("flussonic".intern()),
+                ..CatchupProperties::default()
+            },
+            Some("utc=1784885700"),
+        )?
+        .ok_or_else(|| TuliproxError::RepositoryM3u("catchup-type was not resolved".to_string()))?;
+
+        assert_eq!(
+            resolved.url,
+            "http://provider.example/channel/timeshift_abs-1784885700.ts"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_flussonic_rewrite_uses_player_path_instead_of_token_source() -> Result<(), TuliproxError> {
+        let rewrite = build_m3u_catchup_rewrite(
+            &[7u8; 16],
+            "http://proxy.example",
+            "alice",
+            7,
+            42,
+            "http://provider.example/ch/index.m3u8",
+            &CatchupProperties {
+                catchup_type: Some("flussonic".intern()),
+                days: Some("3".intern()),
+                ..CatchupProperties::default()
+            },
+        )?;
+
+        assert!(rewrite.is_none());
+        Ok(())
     }
 
     #[test]

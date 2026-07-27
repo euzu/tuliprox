@@ -2,7 +2,7 @@ use crate::model::ProxyUserCredentials;
 use shared::concat_string;
 use shared::{
     utils::{deobfuscate_text, extract_extension_from_url, obfuscate_text, CONSTANTS},
-    defaults::{HLS_PREFIX}
+    defaults::{HLS_EXT, HLS_PREFIX}
 };
 use std::borrow::Cow;
 use std::str;
@@ -63,10 +63,48 @@ pub struct RewriteHlsProps<'a> {
     pub user_token: Option<&'a str>,
 }
 
+fn is_direct_archive_start_query_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("utc") || key.eq_ignore_ascii_case("utcstart")
+}
+
+fn is_contextual_archive_start_query_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("start") || key.eq_ignore_ascii_case("timestamp")
+}
+
+fn is_archive_start_context_query_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("end")
+        || key.eq_ignore_ascii_case("duration")
+        || key.eq_ignore_ascii_case("lutc")
+        || key.eq_ignore_ascii_case("offset")
+}
+
+fn archive_start_query(url: &Url) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
+    let has_context = url.query_pairs().any(|(key, _)| is_archive_start_context_query_key(&key));
+    url.query_pairs().find(|(key, _)| {
+        is_direct_archive_start_query_key(key) || (has_context && is_contextual_archive_start_query_key(key))
+    })
+}
+
+fn preserve_archive_start_query(base: &Url, mut target: Url) -> Url {
+    if archive_start_query(&target).is_some() {
+        return target;
+    }
+    if let Some((key, value)) = archive_start_query(base) {
+        target.query_pairs_mut().append_pair(&key, &value);
+    }
+    target
+}
+
+fn has_same_origin(left: &Url, right: &Url) -> bool {
+    matches!(left.scheme(), "ftp" | "http" | "https" | "ws" | "wss")
+        && left.scheme() == right.scheme()
+        && left.host() == right.host()
+        && left.port_or_known_default() == right.port_or_known_default()
+}
+
 /// Rewrites an HLS URI relative to a base playlist URL.
 /// Absolute URIs are returned unchanged.
 pub fn rewrite_hls_url<'a>(base: &'a str, reference: &'a str) -> Cow<'a, str> {
-    // absolute URI -> passthrough
     if Url::parse(reference).is_ok() {
         return Cow::Borrowed(reference);
     }
@@ -75,7 +113,19 @@ pub fn rewrite_hls_url<'a>(base: &'a str, reference: &'a str) -> Cow<'a, str> {
         return Cow::Borrowed(reference);
     };
 
-    base_url.join(reference).map_or_else(|_| Cow::Borrowed(reference), |u| Cow::Owned(u.to_string()))
+    base_url.join(reference).map_or_else(
+        |_| Cow::Borrowed(reference),
+        |target| {
+            let is_same_origin_child_playlist = has_same_origin(&target, &base_url)
+                && extract_extension_from_url(target.as_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case(HLS_EXT));
+            Cow::Owned(if is_same_origin_child_playlist {
+                preserve_archive_start_query(&base_url, target).into()
+            } else {
+                target.into()
+            })
+        },
+    )
 }
 
 fn rewrite_uri_attrib<'a>(line: &'a str, props: &RewriteHlsProps, user: &ProxyUserCredentials) -> Cow<'a, str> {
@@ -194,6 +244,63 @@ mod test {
     }
 
     #[test]
+    fn rewrite_relative_variant_preserves_archive_start_query() {
+        let base = "https://cdn.example/hls/channel/index.m3u8?offset=-10752&utcstart=1785072000&useseq=t";
+        let uri = "variant/playlist.m3u8?offset=-10752&useseq=t";
+
+        let out = rewrite_hls_url(base, uri);
+        assert_eq!(
+            out,
+            "https://cdn.example/hls/channel/variant/playlist.m3u8?offset=-10752&useseq=t&utcstart=1785072000"
+        );
+    }
+
+    #[test]
+    fn rewrite_keeps_child_archive_start_query() {
+        let base = "https://cdn.example/hls/channel/index.m3u8?utcstart=1785072000";
+        let uri = "variant/playlist.m3u8?utc=1785071000";
+
+        let out = rewrite_hls_url(base, uri);
+        assert_eq!(out, "https://cdn.example/hls/channel/variant/playlist.m3u8?utc=1785071000");
+    }
+
+    #[test]
+    fn rewrite_does_not_propagate_plain_start_query() {
+        let base = "https://cdn.example/hls/channel/index.m3u8?start=1785072000";
+        let uri = "variant/playlist.m3u8";
+
+        let out = rewrite_hls_url(base, uri);
+        assert_eq!(out, "https://cdn.example/hls/channel/variant/playlist.m3u8");
+    }
+
+    #[test]
+    fn rewrite_archive_playlist_does_not_modify_signed_media_urls() {
+        let base = "https://cdn.example/hls/channel/index.m3u8?utcstart=1785072000&offset=-3600";
+
+        assert_eq!(
+            rewrite_hls_url(base, "segment.ts?sig=abc"),
+            "https://cdn.example/hls/channel/segment.ts?sig=abc"
+        );
+        assert_eq!(
+            rewrite_hls_url(base, "key.bin?sig=def"),
+            "https://cdn.example/hls/channel/key.bin?sig=def"
+        );
+        assert_eq!(
+            rewrite_hls_url(base, "init.mp4?sig=ghi"),
+            "https://cdn.example/hls/channel/init.mp4?sig=ghi"
+        );
+    }
+
+    #[test]
+    fn rewrite_absolute_same_origin_url_remains_exact_passthrough() {
+        let base = "https://cdn.example/hls/channel/index.m3u8?utcstart=1785072000&offset=-3600";
+        let reference = "https://cdn.example/hls/channel/segment.ts?sig=a%2Fb&token=x+y";
+
+        assert!(matches!(rewrite_hls_url(base, reference), std::borrow::Cow::Borrowed(_)));
+        assert_eq!(rewrite_hls_url(base, reference), reference);
+    }
+
+    #[test]
     fn rewrite_https_absolute_passthrough() {
         let base = "http://example.com/hls/playlist.m3u8";
         let uri = "https://cdn.example.org/video/seg.ts";
@@ -218,6 +325,13 @@ mod test {
 
         let out = rewrite_hls_url(base, uri);
         assert_eq!(out, "file:///mnt/media/hls/seg001.ts");
+    }
+
+    #[test]
+    fn rewrite_file_child_playlist_does_not_inherit_archive_query() {
+        let base = "file:///mnt/media/hls/playlist.m3u8?utc=1785072000";
+
+        assert_eq!(rewrite_hls_url(base, "child.m3u8"), "file:///mnt/media/hls/child.m3u8");
     }
 
     #[test]

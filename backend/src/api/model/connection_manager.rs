@@ -1264,6 +1264,7 @@ mod tests {
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
+            source_user_agent: None,
         };
         StreamInfo::new(shared::model::StreamInfoParams {
             uid: 0,

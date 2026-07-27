@@ -126,6 +126,8 @@ pub struct HlsAccessLease {
     pub pending_deadline: Option<HlsAccessLeasePendingDeadline>,
     pub valid_until_ms: u64,
     pub response_flag: Option<HlsAccessLeaseResponseFlag>,
+    pub epg_reference_ts: Option<i64>,
+    pub archive_origin_url: Option<String>,
 }
 
 impl HlsAccessLease {
@@ -162,7 +164,15 @@ impl HlsAccessLease {
             }),
             valid_until_ms: now_ms.saturating_add(valid_window_ms),
             response_flag: None,
+            epg_reference_ts: None,
+            archive_origin_url: None,
         }
+    }
+
+    pub fn with_archive_playback(mut self, epg_reference_ts: Option<i64>, archive_origin_url: Option<String>) -> Self {
+        self.epg_reference_ts = epg_reference_ts;
+        self.archive_origin_url = archive_origin_url;
+        self
     }
 
     pub const fn with_origin_acquire_policy(mut self, connection_kind: ConnectionKind, priority: i8) -> Self {
@@ -737,6 +747,24 @@ mod tests {
         assert_eq!(lease_id.0.len(), 22);
         assert!(!lease_id.0.contains("alice"));
         assert!(!lease_id.0.contains("session"));
+    }
+
+    #[test]
+    fn archive_playback_context_is_opt_in() {
+        let live = lease(HlsAccessLeaseId("live".to_string()), "proxy-live", 1_000);
+        assert_eq!(live.epg_reference_ts, None);
+        assert_eq!(live.archive_origin_url, None);
+
+        let archive = lease(HlsAccessLeaseId("archive".to_string()), "proxy-archive", 1_000)
+            .with_archive_playback(
+                Some(1_784_898_000),
+                Some("http://provider/channel/timeshift_abs-1784898000.m3u8".to_string()),
+            );
+        assert_eq!(archive.epg_reference_ts, Some(1_784_898_000));
+        assert_eq!(
+            archive.archive_origin_url.as_deref(),
+            Some("http://provider/channel/timeshift_abs-1784898000.m3u8")
+        );
     }
 
     #[test]

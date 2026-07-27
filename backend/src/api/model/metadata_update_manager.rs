@@ -4252,6 +4252,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: Arc::from("42"),
+            source_user_agent: None,
         };
 
         InputWorker::apply_pending_generic_probe_base(&batch, XtreamCluster::Video, 42, &mut item);

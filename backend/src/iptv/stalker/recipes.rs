@@ -2,7 +2,7 @@ use shared::model::stalker::{
     StalkerAuthMode, StalkerBootstrapRecipe, StalkerEndpointPreference, StalkerMagPreset, StalkerPortalFingerprint,
 };
 
-use crate::utils::network::stalker::presets::stalker_mag_preset_spec;
+use crate::iptv::stalker::presets::stalker_mag_preset_spec;
 
 /// A recipe captures "how to perform the handshake against a portal of flavour X using
 /// auth mode Y and MAG preset Z". The handshake is a sequence of HTTP calls (`handshake`,
@@ -153,8 +153,8 @@ pub fn detect_fingerprint(
 /// The relative order of other candidates is preserved.
 pub fn apply_endpoint_preference(
     pref: StalkerEndpointPreference,
-    mut candidates: Vec<crate::utils::network::stalker::url_factory::StalkerLoadUrl>,
-) -> Vec<crate::utils::network::stalker::url_factory::StalkerLoadUrl> {
+    mut candidates: Vec<crate::iptv::stalker::url_factory::StalkerLoadUrl>,
+) -> Vec<crate::iptv::stalker::url_factory::StalkerLoadUrl> {
     match pref {
         StalkerEndpointPreference::Auto => candidates,
         StalkerEndpointPreference::ServerLoad => {
@@ -168,7 +168,7 @@ pub fn apply_endpoint_preference(
     }
 }
 
-fn rotate_to_front(candidates: &mut Vec<crate::utils::network::stalker::url_factory::StalkerLoadUrl>, path: &str) {
+fn rotate_to_front(candidates: &mut Vec<crate::iptv::stalker::url_factory::StalkerLoadUrl>, path: &str) {
     if let Some(pos) = candidates.iter().position(|c| c.load_url.ends_with(path)) {
         if pos == 0 {
             return;
@@ -233,17 +233,17 @@ mod tests {
         assert!(spec.token_in_query);
     }
 
-    fn make_candidates() -> Vec<crate::utils::network::stalker::url_factory::StalkerLoadUrl> {
+    fn make_candidates() -> Vec<crate::iptv::stalker::url_factory::StalkerLoadUrl> {
         vec![
-            crate::utils::network::stalker::url_factory::StalkerLoadUrl {
+            crate::iptv::stalker::url_factory::StalkerLoadUrl {
                 load_url: "http://portal.example/server/load.php".to_string(),
                 referer: "http://portal.example/c/".to_string(),
             },
-            crate::utils::network::stalker::url_factory::StalkerLoadUrl {
+            crate::iptv::stalker::url_factory::StalkerLoadUrl {
                 load_url: "http://portal.example/portal.php".to_string(),
                 referer: "http://portal.example/c/".to_string(),
             },
-            crate::utils::network::stalker::url_factory::StalkerLoadUrl {
+            crate::iptv::stalker::url_factory::StalkerLoadUrl {
                 load_url: "http://portal.example/c/".to_string(),
                 referer: "http://portal.example/c/".to_string(),
             },
@@ -280,7 +280,7 @@ mod tests {
     fn endpoint_preference_missing_path_is_noop() {
         // No `server/load.php` in the list — rotation must not panic and must keep
         // the original order.
-        let cands = vec![crate::utils::network::stalker::url_factory::StalkerLoadUrl {
+        let cands = vec![crate::iptv::stalker::url_factory::StalkerLoadUrl {
             load_url: "http://portal.example/portal.php".to_string(),
             referer: "http://portal.example/c/".to_string(),
         }];

@@ -344,6 +344,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "52568".intern(),
+            source_user_agent: None,
         };
 
         let value = to_human_readable_json_value(&item).expect("dump value should serialize");

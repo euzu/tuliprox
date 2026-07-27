@@ -3504,6 +3504,7 @@ mod tests {
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
+            source_user_agent: None,
         }
     }
 
@@ -3524,6 +3525,7 @@ mod tests {
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
+            source_user_agent: None,
         }
     }
 
@@ -8701,6 +8703,7 @@ mod tests {
                     shared: false, shared_joined_existing: None, shared_stream_id: None, technical: None,
                     epg_channel_id: None,
                     epg_reference_ts: None,
+                    source_user_agent: None,
                 },
                 user_agent: "ua".to_string(),
                 country_code: None,

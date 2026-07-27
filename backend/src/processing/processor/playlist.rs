@@ -6,6 +6,7 @@ use crate::{
         },
         sync_panel_api_exp_dates,
     },
+    iptv::{m3u, xtream},
     messaging::send_message,
     media_server::{
         media_server_catalog_snapshot_to_playlist, refresh_media_server_catalog_complete_before_publish,
@@ -32,7 +33,7 @@ use crate::{
         PlaylistSource,
     },
     utils::{
-        debug_if_enabled, epg, log_memory_snapshot, m3u, trace_if_enabled, xtream,
+        debug_if_enabled, epg, log_memory_snapshot, trace_if_enabled,
         StepMeasure, StepMeasureCallback,
     },
 };
@@ -2077,18 +2078,21 @@ mod tests {
     use shared::utils::Internable;
     use crate::model::Config;
 
-    fn serialize_without_trailing_input_stream_id<T: serde::Serialize>(value: &T) -> Vec<u8> {
+    fn serialize_without_trailing_fields<T: serde::Serialize>(value: &T, trailing_fields: &[u8]) -> Vec<u8> {
         let mut encoded = rmp_serde::to_vec(value).expect("playlist item should serialize");
-        assert_eq!(encoded.pop(), Some(0xa0), "input_stream_id should be the trailing empty string");
+        for expected in trailing_fields {
+            assert_eq!(encoded.pop(), Some(*expected), "unexpected trailing MessagePack field");
+        }
+        let removed = if trailing_fields.len() == 1 { 1_u8 } else { 2_u8 };
         match encoded[0] {
-            marker @ 0x91..=0x9f => encoded[0] = marker - 1,
+            marker @ 0x92..=0x9f => encoded[0] = marker - removed,
             0xdc => {
                 let len = u16::from_be_bytes([encoded[1], encoded[2]]);
-                encoded[1..3].copy_from_slice(&(len - 1).to_be_bytes());
+                encoded[1..3].copy_from_slice(&(len - u16::from(removed)).to_be_bytes());
             }
             0xdd => {
                 let len = u32::from_be_bytes([encoded[1], encoded[2], encoded[3], encoded[4]]);
-                encoded[1..5].copy_from_slice(&(len - 1).to_be_bytes());
+                encoded[1..5].copy_from_slice(&(len - u32::from(removed)).to_be_bytes());
             }
             marker => panic!("unexpected MessagePack sequence marker {marker:#x}"),
         }
@@ -2231,11 +2235,12 @@ mod tests {
             },
         };
 
-        let header_bytes = serialize_without_trailing_input_stream_id(&source.header);
+        let header_bytes = serialize_without_trailing_fields(&source.header, &[0xc0, 0xa0]);
         let decoded_header: PlaylistItemHeader =
             rmp_serde::from_slice(&header_bytes).expect("legacy header should deserialize");
         assert!(decoded_header.input_stream_id.is_empty());
         assert_eq!(decoded_header.get_input_stream_id(), None);
+        assert_eq!(decoded_header.source_user_agent, None);
         let mut decoded_header = decoded_header;
         decoded_header.freeze_input_stream_id();
         assert_eq!(decoded_header.get_input_stream_id().as_deref(), Some("origin-alpha"));
@@ -2243,19 +2248,52 @@ mod tests {
         source.header.freeze_input_stream_id();
         let mut m3u_item = M3uPlaylistItem::from(&source);
         m3u_item.input_stream_id = "".intern();
-        let m3u_bytes = serialize_without_trailing_input_stream_id(&m3u_item);
+        let m3u_bytes = serialize_without_trailing_fields(&m3u_item, &[0xc0, 0xa0]);
         let decoded_m3u: M3uPlaylistItem =
             rmp_serde::from_slice(&m3u_bytes).expect("legacy M3U item should deserialize");
         assert!(decoded_m3u.input_stream_id.is_empty());
         assert_eq!(decoded_m3u.get_input_stream_id().as_deref(), Some("origin-alpha"));
+        assert_eq!(decoded_m3u.source_user_agent, None);
 
         let mut xtream_item = XtreamPlaylistItem::from(&source);
         xtream_item.input_stream_id = "".intern();
-        let xtream_bytes = serialize_without_trailing_input_stream_id(&xtream_item);
+        let xtream_bytes = serialize_without_trailing_fields(&xtream_item, &[0xc0, 0xa0]);
         let decoded_xtream: XtreamPlaylistItem =
             rmp_serde::from_slice(&xtream_bytes).expect("legacy Xtream item should deserialize");
         assert!(decoded_xtream.input_stream_id.is_empty());
         assert_eq!(decoded_xtream.get_input_stream_id().as_deref(), Some("80510"));
+        assert_eq!(decoded_xtream.source_user_agent, None);
+    }
+
+    #[test]
+    fn previous_messagepack_playlist_items_default_missing_source_user_agent() {
+        let source = PlaylistItem {
+            header: PlaylistItemHeader {
+                id: "80510".intern(),
+                input_stream_id: "origin-alpha".intern(),
+                ..Default::default()
+            },
+        };
+
+        let header: PlaylistItemHeader = rmp_serde::from_slice(&serialize_without_trailing_fields(&source.header, &[0xc0]))
+            .expect("previous header should deserialize");
+        let m3u: M3uPlaylistItem = rmp_serde::from_slice(&serialize_without_trailing_fields(
+            &M3uPlaylistItem::from(&source),
+            &[0xc0],
+        ))
+        .expect("previous M3U item should deserialize");
+        let xtream: XtreamPlaylistItem = rmp_serde::from_slice(&serialize_without_trailing_fields(
+            &XtreamPlaylistItem::from(&source),
+            &[0xc0],
+        ))
+        .expect("previous Xtream item should deserialize");
+
+        assert_eq!(header.input_stream_id.as_ref(), "origin-alpha");
+        assert_eq!(m3u.input_stream_id.as_ref(), "origin-alpha");
+        assert_eq!(xtream.input_stream_id.as_ref(), "origin-alpha");
+        assert_eq!(header.source_user_agent, None);
+        assert_eq!(m3u.source_user_agent, None);
+        assert_eq!(xtream.source_user_agent, None);
     }
 
     #[test]

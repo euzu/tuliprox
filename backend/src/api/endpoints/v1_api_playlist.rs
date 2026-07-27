@@ -20,6 +20,7 @@ use crate::{
         model::AppState,
     },
     auth::{create_access_token, permission_layer, verify_access_token},
+    iptv::{stalker::client::validate_public_playable_url, xtream},
     model::{
         parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags,
         ConfigInputOptions, EpgSource, EpgSourceType, IcsDummyPolicy, InputSource,
@@ -35,8 +36,7 @@ use crate::{
     utils::{
         epg::get_input_raw_epg_file_path,
         file_exists_async,
-        network::stalker::client::validate_public_playable_url,
-        request, xtream,
+        request,
     },
 };
 use axum::{response::IntoResponse, Router};

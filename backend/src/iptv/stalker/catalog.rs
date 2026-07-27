@@ -4,11 +4,11 @@ use serde_json::Value;
 use shared::model::stalker::StalkerStreamKind;
 use shared::utils::{deserialize_as_option_string, deserialize_number_from_string};
 
-use crate::utils::network::stalker::client::StalkerApiClient;
-use crate::utils::network::stalker::error::{StalkerError, StalkerResult};
-use crate::utils::network::stalker::profile::StalkerHandshake;
-use crate::utils::network::stalker::recipes::recipe_spec_for;
-use crate::utils::network::stalker::url_factory::StalkerLoadUrl;
+use crate::iptv::stalker::client::StalkerApiClient;
+use crate::iptv::stalker::error::{StalkerError, StalkerResult};
+use crate::iptv::stalker::profile::StalkerHandshake;
+use crate::iptv::stalker::recipes::recipe_spec_for;
+use crate::iptv::stalker::url_factory::StalkerLoadUrl;
 
 /// A category returned by `get_*_categories`. Stalker portals wrap the list in `{"js": [...]}`.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

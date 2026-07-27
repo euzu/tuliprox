@@ -1,6 +1,7 @@
 use crate::api::model::UpdateTask;
 use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType, ResolveReason, ResolveReasonSet};
 use crate::library::{MetadataResolver, MetadataStorage};
+use crate::iptv::xtream;
 use crate::media_enrichment::policy::MissingFactEnrichmentPolicy;
 use crate::media_enrichment::xtream::{
     apply_fact_patch_to_series, series_fact_patch_from_metadata, series_fact_patch_from_title_candidates,
@@ -21,7 +22,7 @@ use crate::repository::persists_input_series_info;
 use crate::repository::{get_input_storage_path, persist_input_series_info_batch, MemoryPlaylistSource};
 use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
 use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
-use crate::utils::{debug_if_enabled, xtream};
+use crate::utils::debug_if_enabled;
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use parking_lot::Mutex;
 use serde_json::Value;

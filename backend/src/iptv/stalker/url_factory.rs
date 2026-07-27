@@ -1,6 +1,6 @@
 use url::Url;
 
-use crate::utils::network::stalker::error::{StalkerError, StalkerResult};
+use crate::iptv::stalker::error::{StalkerError, StalkerResult};
 
 /// The candidate endpoints a Stalker portal might respond on, in priority order. The portal
 /// will answer on any of these depending on the firmware flavour (legacy MAG250, Ministra,

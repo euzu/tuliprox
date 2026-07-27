@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 
-use crate::utils::network::stalker::error::StalkerResult;
+use crate::iptv::stalker::error::StalkerResult;
 
 /// The cookie jar is intentionally cheaply cloneable (the inner map is wrapped in a
 /// `parking_lot::RwLock` so cloning a jar shares the storage; this is safe because all

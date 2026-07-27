@@ -205,6 +205,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "1".intern(),
+            source_user_agent: None,
         }
     }
 
@@ -247,6 +248,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "2".intern(),
+            source_user_agent: None,
         }
     }
 

@@ -1,7 +1,7 @@
 use crate::model::{ConfigInput, ConfigInputFlags};
 use crate::model::XtreamCategory;
 use crate::utils::request::DynReader;
-use crate::utils::xtream::get_xtream_stream_url_base;
+use crate::iptv::xtream::get_xtream_stream_url_base;
 use indexmap::IndexMap;
 use serde::Deserializer;
 use shared::error::TuliproxError;

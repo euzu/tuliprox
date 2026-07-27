@@ -4135,7 +4135,7 @@ pub fn redirect(url: &str) -> impl IntoResponse {
         .body(Body::empty()))
 }
 
-pub async fn is_seek_request(cluster: XtreamCluster, req_headers: &HeaderMap) -> bool {
+pub fn is_seek_request(cluster: XtreamCluster, req_headers: &HeaderMap) -> bool {
     // seek only for non-live streams
     if cluster == XtreamCluster::Live {
         return false;
@@ -4150,6 +4150,14 @@ pub async fn is_seek_request(cluster: XtreamCluster, req_headers: &HeaderMap) ->
         }
     }
     false
+}
+
+pub fn is_seekable_media_request(
+    cluster: XtreamCluster,
+    req_headers: &HeaderMap,
+    extension: Option<&str>,
+) -> bool {
+    !extension.is_some_and(|ext| ext.eq_ignore_ascii_case(HLS_EXT)) && is_seek_request(cluster, req_headers)
 }
 
 pub fn bin_response<T: Serialize>(data: &T) -> impl IntoResponse + Send {
@@ -4762,28 +4770,45 @@ mod tests {
         ))
     }
 
-    #[tokio::test]
-    async fn test_is_seek_request() {
+    #[test]
+    fn test_is_seek_request() {
         let mut headers = HeaderMap::new();
 
         // No range header
-        assert!(!is_seek_request(XtreamCluster::Video, &headers).await);
+        assert!(!is_seek_request(XtreamCluster::Video, &headers));
 
         // Range: bytes=0- (Should be true now to allow session takeover on restart)
         headers.insert("range", "bytes=0-".parse().unwrap());
-        assert!(is_seek_request(XtreamCluster::Video, &headers).await);
+        assert!(is_seek_request(XtreamCluster::Video, &headers));
 
         // Range: bytes=100- (Should be true)
         headers.insert("range", "bytes=100-".parse().unwrap());
-        assert!(is_seek_request(XtreamCluster::Video, &headers).await);
+        assert!(is_seek_request(XtreamCluster::Video, &headers));
 
         // Range: bytes=100-200 (Should be true)
         headers.insert("range", "bytes=100-200".parse().unwrap());
-        assert!(is_seek_request(XtreamCluster::Video, &headers).await);
+        assert!(is_seek_request(XtreamCluster::Video, &headers));
 
         // Live cluster should always return false
         headers.insert("range", "bytes=100-".parse().unwrap());
-        assert!(!is_seek_request(XtreamCluster::Live, &headers).await);
+        assert!(!is_seek_request(XtreamCluster::Live, &headers));
+    }
+
+    #[test]
+    fn hls_manifests_are_not_forced_as_seek_responses() {
+        let mut headers = HeaderMap::new();
+        headers.insert("range", HeaderValue::from_static("bytes=0-"));
+
+        assert!(!is_seekable_media_request(
+            XtreamCluster::Video,
+            &headers,
+            Some(HLS_EXT)
+        ));
+        assert!(is_seekable_media_request(
+            XtreamCluster::Video,
+            &headers,
+            Some(".ts")
+        ));
     }
 
     #[test]
@@ -5966,6 +5991,7 @@ mod tests {
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
+            source_user_agent: None,
         }
     }
 
@@ -5986,6 +6012,7 @@ mod tests {
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
+            source_user_agent: None,
         }
     }
 
@@ -9655,6 +9682,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "1".intern(),
+            source_user_agent: None,
         };
 
         let hls_ext = shared::defaults::HLS_EXT.to_string();

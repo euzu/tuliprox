@@ -139,6 +139,7 @@ pub(crate) mod tests {
                 }),
                 epg_channel_id: None,
                 epg_reference_ts: None,
+                source_user_agent: None,
             },
             user_agent: String::from("VLC/3.0"),
             country_code: Some(String::from("DE")),

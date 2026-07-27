@@ -1,11 +1,11 @@
 use crate::model::ConfigTarget;
 use crate::model::{AppConfig, ProxyUserCredentials};
+use crate::iptv::m3u::{build_m3u_catchup_rewrite, flussonic_proxy_live_file};
 use crate::repository::m3u_get_file_path_for_db;
 use crate::repository::storage_const;
 use crate::repository::user_get_bouquet_filter;
 use crate::repository::{ensure_target_storage_path, get_file_path_for_db_index};
 use crate::repository::{open_playlist_reader, LockedReceiverStream};
-use crate::utils::build_m3u_catchup_rewrite;
 use futures::Stream;
 use log::error;
 use shared::create_bitset;
@@ -163,13 +163,36 @@ fn apply_rewrite(
     };
 
     if should_rewrite_urls {
-        let stream_url = build_rewritten_url(
-            ctx,
-            effective_source_url.as_ref(),
-            &m3u_pli,
-            flags.contains(M3uPlaylistIteratorFlags::IncludeTypeInUrl),
-            storage_const::M3U_STREAM_PATH,
-            true,
+        let flussonic_live_file = m3u_pli.additional_properties.as_ref().and_then(|properties| match properties {
+            StreamProperties::Live(live) => live
+                .catchup
+                .as_ref()
+                .and_then(shared::model::CatchupProperties::native_flussonic_player_mode)
+                .map(flussonic_proxy_live_file),
+            _ => None,
+        });
+        let stream_url = flussonic_live_file.map_or_else(
+            || {
+                build_rewritten_url(
+                    ctx,
+                    effective_source_url.as_ref(),
+                    &m3u_pli,
+                    flags.contains(M3uPlaylistIteratorFlags::IncludeTypeInUrl),
+                    storage_const::M3U_STREAM_PATH,
+                    true,
+                )
+            },
+            |live_file| {
+                let base = build_rewritten_url(
+                    ctx,
+                    effective_source_url.as_ref(),
+                    &m3u_pli,
+                    flags.contains(M3uPlaylistIteratorFlags::IncludeTypeInUrl),
+                    storage_const::M3U_STREAM_PATH,
+                    false,
+                );
+                shared::concat_string!(&base, "/", live_file)
+            },
         );
         let resource_url = if flags.contains(M3uPlaylistIteratorFlags::RewriteResource) {
             let source_url = if m3u_pli.logo.is_empty() { m3u_pli.logo_small.as_ref() } else { m3u_pli.logo.as_ref() };
@@ -197,6 +220,9 @@ fn apply_rewrite(
     if let Some(rewrite) = catchup_rewrite {
         m3u_pli.t_catchup_mode = Some(rewrite.mode);
         m3u_pli.t_catchup_source = Some(rewrite.source);
+    }
+    if should_rewrite_urls {
+        m3u_pli.source_user_agent = None;
     }
 
     m3u_pli
@@ -350,10 +376,23 @@ impl Stream for M3uPlaylistIterator {
     }
 }
 
+fn build_proxy_xmltv_url_tvg(base_url: &str, username: &str, password: &str) -> Option<String> {
+    let base = base_url.trim_end_matches('/');
+    if base.is_empty() || username.is_empty() || password.is_empty() {
+        return None;
+    }
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("username", username)
+        .append_pair("password", password)
+        .finish();
+    Some(format!("{base}/xmltv.php?{query}"))
+}
+
 pub struct M3uPlaylistM3uTextIterator {
     inner: M3uPlaylistIterator,
     started: bool,
     target_options: Option<ConfigTargetOptions>,
+    url_tvg: Option<String>,
 }
 
 impl M3uPlaylistM3uTextIterator {
@@ -362,10 +401,12 @@ impl M3uPlaylistM3uTextIterator {
         target: &ConfigTarget,
         user: &ProxyUserCredentials,
     ) -> Result<Self, TuliproxError> {
+        let base_url = cfg.get_user_server_info(user).map(|server| server.get_base_url()).unwrap_or_default();
         Ok(Self {
             inner: M3uPlaylistIterator::new(cfg, target, user).await?,
             started: false,
             target_options: target.options.clone(),
+            url_tvg: build_proxy_xmltv_url_tvg(&base_url, &user.username, &user.password),
         })
     }
 }
@@ -376,7 +417,11 @@ impl Stream for M3uPlaylistM3uTextIterator {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if !self.started {
             self.started = true;
-            return Poll::Ready(Some(Ok("#EXTM3U".to_string())));
+            let header = self.url_tvg.as_ref().map_or_else(
+                || "#EXTM3U".to_string(),
+                |url| format!("#EXTM3U url-tvg=\"{url}\" x-tvg-url=\"{url}\""),
+            );
+            return Poll::Ready(Some(Ok(header)));
         }
 
         match Pin::new(&mut self.inner).poll_next(cx) {
@@ -394,14 +439,17 @@ impl Stream for M3uPlaylistM3uTextIterator {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_rewrite, M3uPlaylistIterator, M3uPlaylistIteratorFlags, M3uPlaylistIteratorFlagsSet,
-        M3uPlaylistM3uTextIterator, UrlRewriteContext,
+        apply_rewrite, build_proxy_xmltv_url_tvg, M3uPlaylistIterator, M3uPlaylistIteratorFlags,
+        M3uPlaylistIteratorFlagsSet, M3uPlaylistM3uTextIterator, UrlRewriteContext,
     };
     use crate::model::{ConfigInput, ConfigProvider, ProviderDnsCache};
     use crate::repository::LockedReceiverStream;
     use futures::StreamExt;
     use shared::{
-        model::{M3uPlaylistItem, PlaylistItemType, ProviderUrlSelectionPolicy, ProxyType},
+        model::{
+            CatchupProperties, LiveStreamProperties, M3uPlaylistItem, PlaylistItemType, ProviderUrlSelectionPolicy,
+            ProxyType, StreamProperties,
+        },
         utils::Internable,
     };
     use std::{
@@ -450,6 +498,7 @@ mod tests {
             source_ordinal: 0,
             additional_properties: None,
             input_stream_id: "813294".intern(),
+            source_user_agent: None,
         }
     }
 
@@ -499,6 +548,55 @@ mod tests {
     }
 
     #[test]
+    fn source_user_agent_is_only_exposed_for_direct_provider_urls() {
+        let input_by_name = HashMap::new();
+        let ctx = UrlRewriteContext {
+            base_url: "https://example.com",
+            username: "user",
+            password: "pass",
+        };
+        let mut direct_item = m3u_item("http://example.com/live/user/pass/813294.ts");
+        direct_item.source_user_agent = Some("Provider-UA".intern());
+
+        let direct = apply_rewrite(
+            direct_item.clone(),
+            &ctx,
+            1,
+            &[7u8; 16],
+            &input_by_name,
+            None,
+            M3uPlaylistIteratorFlagsSet::new(),
+            ProxyType::Redirect,
+        );
+        let reverse = apply_rewrite(
+            direct_item,
+            &ctx,
+            1,
+            &[7u8; 16],
+            &input_by_name,
+            None,
+            M3uPlaylistIteratorFlagsSet::new(),
+            ProxyType::Reverse(None),
+        );
+        let mut masked_flags = M3uPlaylistIteratorFlagsSet::new();
+        masked_flags.set(M3uPlaylistIteratorFlags::MaskRedirectUrl);
+        let masked_redirect = apply_rewrite(
+            direct.clone(),
+            &ctx,
+            1,
+            &[7u8; 16],
+            &input_by_name,
+            None,
+            masked_flags,
+            ProxyType::Redirect,
+        );
+
+        assert!(direct.to_m3u(None, false).contains("#EXTVLCOPT:http-user-agent=Provider-UA"));
+        assert!(!reverse.to_m3u(None, true).contains("#EXTVLCOPT:http-user-agent"));
+        assert!(!masked_redirect.to_m3u(None, true).contains("#EXTVLCOPT:http-user-agent"));
+    }
+
+    #[test]
     fn redirect_without_mask_preserves_provider_scheme_url_when_input_is_missing() {
         let input_by_name = HashMap::new();
         let ctx = UrlRewriteContext {
@@ -545,25 +643,119 @@ mod tests {
         assert_eq!(rewritten.t_stream_url.as_ref(), "https://example.com/m3u-stream/user/pass/813294.ts");
     }
 
-    // Regression lock: the streaming M3U response used by `m3u_api` must emit a
-    // bare `#EXTM3U` header line, never a proxy-rewritten `url-tvg` from the
-    // source playlist. The parser does not capture the source's `url-tvg`
-    // attribute (`M3uPlaylistItem` has no field for it), and the writer must
-    // therefore emit the bare marker regardless of what the upstream feed
-    // declared. The inner channel is closed immediately so the iterator yields
-    // no item lines, which lets the assertion focus on the header line only.
+    #[test]
+    fn explicit_flussonic_modes_use_native_hls_and_ts_live_paths() {
+        let ctx = UrlRewriteContext {
+            base_url: "https://example.com",
+            username: "user",
+            password: "pass",
+        };
+        for (mode, source_url, expected_suffix) in [
+            ("flussonic", "http://provider/ch/index.m3u8", "/813294/index.m3u8"),
+            ("flussonic-ts", "http://provider/ch/channel.ts", "/813294/mpegts"),
+        ] {
+            let mut item = m3u_item(source_url);
+            item.additional_properties = Some(StreamProperties::Live(Box::new(LiveStreamProperties {
+                catchup: Some(CatchupProperties {
+                    catchup_type: Some(mode.intern()),
+                    ..CatchupProperties::default()
+                }),
+                ..LiveStreamProperties::default()
+            })));
+            let rewritten = apply_rewrite(
+                item,
+                &ctx,
+                1,
+                &[7u8; 16],
+                &HashMap::new(),
+                None,
+                M3uPlaylistIteratorFlagsSet::new(),
+                ProxyType::Reverse(None),
+            );
+            assert!(rewritten.t_stream_url.ends_with(expected_suffix));
+            assert!(rewritten.t_catchup_source.is_none());
+        }
+    }
+
+    #[test]
+    fn append_mode_keeps_existing_flat_live_path() {
+        let mut item = m3u_item("http://provider/ch/index.m3u8");
+        item.additional_properties = Some(StreamProperties::Live(Box::new(LiveStreamProperties {
+            catchup: Some(CatchupProperties {
+                mode: Some("append".intern()),
+                source: Some("?utcstart=${timestamp}&offset=-${offset}".intern()),
+                ..CatchupProperties::default()
+            }),
+            ..LiveStreamProperties::default()
+        })));
+        let rewritten = apply_rewrite(
+            item,
+            &UrlRewriteContext {
+                base_url: "https://example.com",
+                username: "user",
+                password: "pass",
+            },
+            1,
+            &[7u8; 16],
+            &HashMap::new(),
+            None,
+            M3uPlaylistIteratorFlagsSet::new(),
+            ProxyType::Reverse(None),
+        );
+
+        assert_eq!(rewritten.t_stream_url.as_ref(), "https://example.com/m3u-stream/user/pass/813294.m3u8");
+        assert!(rewritten.t_catchup_source.is_some());
+    }
+
+    #[test]
+    fn proxy_xmltv_url_uses_user_server_path_and_encoded_credentials() {
+        assert_eq!(
+            build_proxy_xmltv_url_tvg("https://proxy.example/iptv/", "u ser", "p&ss").as_deref(),
+            Some("https://proxy.example/iptv/xmltv.php?username=u+ser&password=p%26ss")
+        );
+        assert_eq!(build_proxy_xmltv_url_tvg("", "user", "pass"), None);
+    }
+
+    // Regression lock: never forward the provider's source `url-tvg`. Without
+    // configured Tuliprox server information, the header stays bare.
     #[tokio::test]
     async fn m3u_text_iterator_emits_bare_extm3u_header_without_proxying_source_url_tvg() {
         let (tx, rx) = mpsc::channel::<Result<(M3uPlaylistItem, bool), shared::error::TuliproxError>>(1);
         drop(tx);
         let inner_iter = M3uPlaylistIterator { inner: LockedReceiverStream::new_empty(rx) };
-        let mut text_iter = M3uPlaylistM3uTextIterator { inner: inner_iter, started: false, target_options: None };
+        let mut text_iter = M3uPlaylistM3uTextIterator {
+            inner: inner_iter,
+            started: false,
+            target_options: None,
+            url_tvg: None,
+        };
 
         let first = text_iter.next().await;
         assert_eq!(first.as_ref().and_then(|line| line.as_deref().ok()), Some("#EXTM3U"), "EXTM3U header must be bare, never contain url-tvg");
 
         let second = text_iter.next().await;
         assert_eq!(second, None, "inner channel is closed, so no item lines should follow");
+    }
+
+    #[tokio::test]
+    async fn m3u_text_iterator_emits_proxy_xmltv_header_when_configured() {
+        let (tx, rx) = mpsc::channel::<Result<(M3uPlaylistItem, bool), shared::error::TuliproxError>>(1);
+        drop(tx);
+        let inner_iter = M3uPlaylistIterator { inner: LockedReceiverStream::new_empty(rx) };
+        let mut text_iter = M3uPlaylistM3uTextIterator {
+            inner: inner_iter,
+            started: false,
+            target_options: None,
+            url_tvg: Some("https://proxy.example/xmltv.php?username=user&password=pass".to_string()),
+        };
+
+        let first = text_iter.next().await;
+        assert_eq!(
+            first.as_ref().and_then(|line| line.as_deref().ok()),
+            Some(
+                "#EXTM3U url-tvg=\"https://proxy.example/xmltv.php?username=user&password=pass\" x-tvg-url=\"https://proxy.example/xmltv.php?username=user&password=pass\""
+            )
+        );
     }
 
     #[tokio::test]

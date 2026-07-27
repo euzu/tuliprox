@@ -47,6 +47,22 @@ impl CatchupProperties {
             && self.catchup_type.is_none()
             && self.extra_attributes.is_empty()
     }
+
+    pub fn native_flussonic_player_mode(&self) -> Option<&'static str> {
+        let mode = self
+            .mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.catchup_type.as_deref().map(str::trim).filter(|value| !value.is_empty()))?;
+        if mode.eq_ignore_ascii_case("flussonic-ts") {
+            Some("flussonic-ts")
+        } else if ["fs", "flussonic", "flussonic-hls"].iter().any(|alias| mode.eq_ignore_ascii_case(alias)) {
+            Some("flussonic")
+        } else {
+            None
+        }
+    }
 }
 
 fn format_episode_code(season: u32, episode: u32) -> Option<String> {
@@ -1052,6 +1068,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "1001".into(),
+            source_user_agent: None,
         }
     }
 
@@ -1144,5 +1161,26 @@ mod tests {
         }));
 
         assert!(props.has_details());
+    }
+
+    #[test]
+    fn native_flussonic_mode_is_canonical_and_respects_mode_precedence() {
+        for (value, expected) in [
+            ("fs", Some("flussonic")),
+            ("FLUSSONIC", Some("flussonic")),
+            ("flussonic-hls", Some("flussonic")),
+            ("Flussonic-TS", Some("flussonic-ts")),
+            ("append", None),
+        ] {
+            let catchup = CatchupProperties { mode: Some(value.into()), ..CatchupProperties::default() };
+            assert_eq!(catchup.native_flussonic_player_mode(), expected);
+        }
+
+        let conflicting = CatchupProperties {
+            mode: Some("append".into()),
+            catchup_type: Some("flussonic".into()),
+            ..CatchupProperties::default()
+        };
+        assert_eq!(conflicting.native_flussonic_player_mode(), None);
     }
 }
