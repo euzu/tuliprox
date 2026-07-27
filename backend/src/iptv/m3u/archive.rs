@@ -13,9 +13,11 @@ pub enum FlussonicArchiveKind {
 impl FlussonicArchiveKind {
     pub fn discriminator(&self) -> String {
         match self {
-            Self::Archive { start, duration, .. } => format!("archive|{start}|{duration}"),
-            Self::TimeshiftAbs { start, .. } => format!("timeshift_abs|{start}"),
-            Self::TimeshiftRel { ago, .. } => format!("timeshift_rel|{ago}"),
+            Self::Archive { start, duration, extension } => {
+                format!("archive|{start}|{duration}|{extension}")
+            }
+            Self::TimeshiftAbs { start, extension } => format!("timeshift_abs|{start}|{extension}"),
+            Self::TimeshiftRel { ago, extension } => format!("timeshift_rel|{ago}|{extension}"),
         }
     }
 
@@ -186,7 +188,27 @@ mod tests {
         );
         assert!(parse_flat_flussonic_archive("59.m3u8").is_none());
         assert!(parse_flat_flussonic_archive("59-1784898000-3600.ts").is_none());
+
+        let uppercase = parse_flat_flussonic_archive("59-1784898000-3600.M3U8")
+            .ok_or("uppercase flat archive path was not parsed")?;
+        assert_eq!(uppercase, (virtual_id, archive));
         Ok(())
+    }
+
+    #[test]
+    fn archive_discriminator_includes_transport() {
+        let hls = FlussonicArchiveKind::Archive {
+            start: "1784898000".to_string(),
+            duration: "3600".to_string(),
+            extension: ".m3u8",
+        };
+        let ts = FlussonicArchiveKind::Archive {
+            start: "1784898000".to_string(),
+            duration: "3600".to_string(),
+            extension: ".ts",
+        };
+
+        assert_ne!(hls.discriminator(), ts.discriminator());
     }
 
     #[test]

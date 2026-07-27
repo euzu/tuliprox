@@ -1213,7 +1213,7 @@ mod tests {
         )?;
         assert_eq!(hls_archive.item_type, PlaylistItemType::Catchup);
         assert_eq!(hls_archive.url.as_ref(), "http://provider/ch/index-1784898000-3600.m3u8?token=abc");
-        assert_eq!(discriminator, "archive|1784898000|3600");
+        assert_eq!(discriminator, "archive|1784898000|3600|.m3u8");
 
         let ts_item = native_flussonic_item("flussonic-ts", "http://provider/ch/channel.ts?token=abc");
         let (ts_archive, _) = apply_native_flussonic_archive(
