@@ -106,6 +106,18 @@ fn preserve_archive_start_query(base: &Url, mut target: Url) -> Url {
     target
 }
 
+fn preserve_token_query(base: &Url, mut target: Url) -> Url {
+    let target_has_token = target.query_pairs().any(|(key, _)| key.eq_ignore_ascii_case("token"));
+    if target_has_token {
+        return target;
+    }
+
+    if let Some((key, value)) = base.query_pairs().find(|(key, _)| key.eq_ignore_ascii_case("token")) {
+        target.query_pairs_mut().append_pair(&key, &value);
+    }
+    target
+}
+
 fn has_same_origin(left: &Url, right: &Url) -> bool {
     matches!(left.scheme(), "ftp" | "http" | "https" | "ws" | "wss")
         && left.scheme() == right.scheme()
@@ -126,8 +138,12 @@ pub fn rewrite_hls_url<'a>(base: &'a str, reference: &'a str) -> Cow<'a, str> {
 
     base_url.join(reference).map_or_else(
         |_| Cow::Borrowed(reference),
-        |target| {
-            let is_same_origin_child_playlist = has_same_origin(&target, &base_url)
+        |mut target| {
+            let is_same_origin = has_same_origin(&target, &base_url);
+            if is_same_origin {
+                target = preserve_token_query(&base_url, target);
+            }
+            let is_same_origin_child_playlist = is_same_origin
                 && extract_extension_from_url(target.as_str())
                     .is_some_and(|extension| extension.eq_ignore_ascii_case(HLS_EXT));
             Cow::Owned(if is_same_origin_child_playlist {
@@ -252,6 +268,44 @@ mod test {
 
         let out = rewrite_hls_url(base, uri);
         assert_eq!(out, "http://example.com/hls/seg001.ts");
+    }
+
+    #[test]
+    fn rewrite_relative_hls_resources_inherit_token() {
+        let base = "https://cdn.example/hls/channel/timeshift_abs-1785136500.m3u8?token=secret";
+
+        for (reference, expected) in [
+            (
+                "tracks-v1a1/timeshift_abs-1785136500.m3u8",
+                "https://cdn.example/hls/channel/tracks-v1a1/timeshift_abs-1785136500.m3u8?token=secret",
+            ),
+            (
+                "tracks-v1a1/dvr-2026/07/27/12/00/00-06000.ts",
+                "https://cdn.example/hls/channel/tracks-v1a1/dvr-2026/07/27/12/00/00-06000.ts?token=secret",
+            ),
+            ("key.bin?version=2", "https://cdn.example/hls/channel/key.bin?version=2&token=secret"),
+            ("init.mp4", "https://cdn.example/hls/channel/init.mp4?token=secret"),
+        ] {
+            assert_eq!(rewrite_hls_url(base, reference), expected);
+        }
+    }
+
+    #[test]
+    fn rewrite_relative_hls_resource_keeps_its_own_token() {
+        let base = "https://cdn.example/hls/channel/index.m3u8?TOKEN=base";
+
+        assert_eq!(
+            rewrite_hls_url(base, "child.m3u8?token=child"),
+            "https://cdn.example/hls/channel/child.m3u8?token=child"
+        );
+    }
+
+    #[test]
+    fn rewrite_does_not_leak_token_to_cross_origin_resource() {
+        let base = "https://cdn.example/hls/channel/index.m3u8?token=secret";
+
+        assert_eq!(rewrite_hls_url(base, "https://media.example/child.m3u8"), "https://media.example/child.m3u8");
+        assert_eq!(rewrite_hls_url(base, "//media.example/child.m3u8"), "https://media.example/child.m3u8");
     }
 
     #[test]
