@@ -5,17 +5,25 @@ pub const FLUSSONIC_TS_LIVE_FILE: &str = "mpegts";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlussonicArchiveKind {
-    Archive { start: String, duration: String },
+    Archive { start: String, duration: String, extension: &'static str },
     TimeshiftAbs { start: String, extension: &'static str },
-    TimeshiftRel { ago: String },
+    TimeshiftRel { ago: String, extension: &'static str },
 }
 
 impl FlussonicArchiveKind {
     pub fn discriminator(&self) -> String {
         match self {
-            Self::Archive { start, duration } => format!("archive|{start}|{duration}"),
+            Self::Archive { start, duration, .. } => format!("archive|{start}|{duration}"),
             Self::TimeshiftAbs { start, .. } => format!("timeshift_abs|{start}"),
-            Self::TimeshiftRel { ago } => format!("timeshift_rel|{ago}"),
+            Self::TimeshiftRel { ago, .. } => format!("timeshift_rel|{ago}"),
+        }
+    }
+
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Self::Archive { extension, .. }
+            | Self::TimeshiftAbs { extension, .. }
+            | Self::TimeshiftRel { extension, .. } => extension,
         }
     }
 }
@@ -27,6 +35,16 @@ fn strip_media_suffix(value: &str) -> &str {
         .or_else(|| value.strip_suffix(".ts"))
         .or_else(|| value.strip_suffix(".TS"))
         .unwrap_or(value)
+}
+
+fn split_media_suffix(value: &str) -> (&str, &'static str) {
+    if let Some(stem) = value.strip_suffix(".m3u8") {
+        (stem, ".m3u8")
+    } else if let Some(stem) = value.strip_suffix(".ts") {
+        (stem, ".ts")
+    } else {
+        (value, ".m3u8")
+    }
 }
 
 fn is_valid_start_duration(start: &str, duration: &str) -> bool {
@@ -61,6 +79,7 @@ pub fn parse_flat_flussonic_archive(file: &str) -> Option<(u32, FlussonicArchive
         FlussonicArchiveKind::Archive {
             start: start.to_string(),
             duration: duration.to_string(),
+            extension: ".m3u8",
         },
     ))
 }
@@ -73,10 +92,12 @@ pub fn parse_flussonic_archive_file(file: &str) -> Option<FlussonicArchiveKind> 
     let lower = file.to_ascii_lowercase();
     for prefix in ["archive-", "index-", "video-", "mono-"] {
         if let Some(value) = lower.strip_prefix(prefix) {
-            let (start, duration) = split_start_duration(strip_media_suffix(value))?;
+            let (value, extension) = split_media_suffix(value);
+            let (start, duration) = split_start_duration(value)?;
             return Some(FlussonicArchiveKind::Archive {
                 start: start.to_string(),
                 duration: duration.to_string(),
+                extension,
             });
         }
     }
@@ -90,9 +111,9 @@ pub fn parse_flussonic_archive_file(file: &str) -> Option<FlussonicArchiveKind> 
         return Some(FlussonicArchiveKind::TimeshiftAbs { start: start.to_string(), extension });
     }
     if let Some(value) = lower.strip_prefix("timeshift_rel-") {
-        let ago = strip_media_suffix(value);
+        let (ago, extension) = split_media_suffix(value);
         ago.parse::<u64>().ok()?;
-        return Some(FlussonicArchiveKind::TimeshiftRel { ago: ago.to_string() });
+        return Some(FlussonicArchiveKind::TimeshiftRel { ago: ago.to_string(), extension });
     }
     None
 }
@@ -122,13 +143,13 @@ pub fn build_provider_flussonic_archive_url(
     archive: &FlussonicArchiveKind,
 ) -> Option<String> {
     let new_file = match archive {
-        FlussonicArchiveKind::Archive { start, duration } => {
-            format!("{}-{start}-{duration}.m3u8", provider_playlist_stem(provider_url).unwrap_or("archive"))
+        FlussonicArchiveKind::Archive { start, duration, extension } => {
+            format!("{}-{start}-{duration}{extension}", provider_playlist_stem(provider_url).unwrap_or("archive"))
         }
         FlussonicArchiveKind::TimeshiftAbs { start, extension } => {
             format!("timeshift_abs-{start}{extension}")
         }
-        FlussonicArchiveKind::TimeshiftRel { ago } => format!("timeshift_rel-{ago}.m3u8"),
+        FlussonicArchiveKind::TimeshiftRel { ago, extension } => format!("timeshift_rel-{ago}{extension}"),
     };
     let mut parsed = Url::parse(provider_url).ok()?;
     parsed.path_segments_mut().ok()?.pop().push(&new_file);
@@ -160,6 +181,7 @@ mod tests {
             FlussonicArchiveKind::Archive {
                 start: "1784898000".to_string(),
                 duration: "3600".to_string(),
+                extension: ".m3u8",
             }
         );
         assert!(parse_flat_flussonic_archive("59.m3u8").is_none());
@@ -187,6 +209,15 @@ mod tests {
                 extension: ".ts",
             })
         );
+
+        for file in ["archive-1784898000-3600.ts", "timeshift_rel-120.ts"] {
+            let archive = parse_flussonic_archive_file(file).expect("TS archive path should parse");
+            let url = build_provider_flussonic_archive_url("http://cdn.example/ch/index.ts", &archive)
+                .expect("TS provider archive URL should build");
+            assert!(std::path::Path::new(&url)
+                 .extension()
+                 .is_some_and(|ext| ext.eq_ignore_ascii_case("ts")), "requested TS extension was not preserved: {url}");
+        }
     }
 
     #[test]
@@ -220,6 +251,7 @@ mod tests {
             &FlussonicArchiveKind::Archive {
                 start: "1784898000".to_string(),
                 duration: "3600".to_string(),
+                extension: ".m3u8",
             },
         )
         .ok_or("HLS provider archive URL was not built")?;

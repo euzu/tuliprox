@@ -1734,7 +1734,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: provider_id.to_string().intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
         }
     }
 

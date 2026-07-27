@@ -2083,16 +2083,24 @@ mod tests {
         for expected in trailing_fields {
             assert_eq!(encoded.pop(), Some(*expected), "unexpected trailing MessagePack field");
         }
-        let removed = if trailing_fields.len() == 1 { 1_u8 } else { 2_u8 };
+        let removed = trailing_fields.len();
         match encoded[0] {
-            marker @ 0x92..=0x9f => encoded[0] = marker - removed,
+            marker @ 0x92..=0x9f => {
+                let len = usize::from(marker - 0x90);
+                assert!(len >= removed, "trailing field count exceeds MessagePack sequence length");
+                encoded[0] = 0x90 + u8::try_from(len - removed).unwrap_or_default();
+            }
             0xdc => {
                 let len = u16::from_be_bytes([encoded[1], encoded[2]]);
-                encoded[1..3].copy_from_slice(&(len - u16::from(removed)).to_be_bytes());
+                let removed = u16::try_from(removed).unwrap_or(u16::MAX);
+                assert!(len >= removed, "trailing field count exceeds MessagePack sequence length");
+                encoded[1..3].copy_from_slice(&(len - removed).to_be_bytes());
             }
             0xdd => {
                 let len = u32::from_be_bytes([encoded[1], encoded[2], encoded[3], encoded[4]]);
-                encoded[1..5].copy_from_slice(&(len - u32::from(removed)).to_be_bytes());
+                let removed = u32::try_from(removed).unwrap_or(u32::MAX);
+                assert!(len >= removed, "trailing field count exceeds MessagePack sequence length");
+                encoded[1..5].copy_from_slice(&(len - removed).to_be_bytes());
             }
             marker => panic!("unexpected MessagePack sequence marker {marker:#x}"),
         }
@@ -2240,7 +2248,7 @@ mod tests {
             rmp_serde::from_slice(&header_bytes).expect("legacy header should deserialize");
         assert!(decoded_header.input_stream_id.is_empty());
         assert_eq!(decoded_header.get_input_stream_id(), None);
-        assert_eq!(decoded_header.source_user_agent, None);
+        assert_eq!(decoded_header.upstream_user_agent, None);
         let mut decoded_header = decoded_header;
         decoded_header.freeze_input_stream_id();
         assert_eq!(decoded_header.get_input_stream_id().as_deref(), Some("origin-alpha"));
@@ -2253,7 +2261,7 @@ mod tests {
             rmp_serde::from_slice(&m3u_bytes).expect("legacy M3U item should deserialize");
         assert!(decoded_m3u.input_stream_id.is_empty());
         assert_eq!(decoded_m3u.get_input_stream_id().as_deref(), Some("origin-alpha"));
-        assert_eq!(decoded_m3u.source_user_agent, None);
+        assert_eq!(decoded_m3u.upstream_user_agent, None);
 
         let mut xtream_item = XtreamPlaylistItem::from(&source);
         xtream_item.input_stream_id = "".intern();
@@ -2262,11 +2270,11 @@ mod tests {
             rmp_serde::from_slice(&xtream_bytes).expect("legacy Xtream item should deserialize");
         assert!(decoded_xtream.input_stream_id.is_empty());
         assert_eq!(decoded_xtream.get_input_stream_id().as_deref(), Some("80510"));
-        assert_eq!(decoded_xtream.source_user_agent, None);
+        assert_eq!(decoded_xtream.upstream_user_agent, None);
     }
 
     #[test]
-    fn previous_messagepack_playlist_items_default_missing_source_user_agent() {
+    fn previous_messagepack_playlist_items_default_missing_upstream_user_agent() {
         let source = PlaylistItem {
             header: PlaylistItemHeader {
                 id: "80510".intern(),
@@ -2291,9 +2299,30 @@ mod tests {
         assert_eq!(header.input_stream_id.as_ref(), "origin-alpha");
         assert_eq!(m3u.input_stream_id.as_ref(), "origin-alpha");
         assert_eq!(xtream.input_stream_id.as_ref(), "origin-alpha");
-        assert_eq!(header.source_user_agent, None);
-        assert_eq!(m3u.source_user_agent, None);
-        assert_eq!(xtream.source_user_agent, None);
+        assert_eq!(header.upstream_user_agent, None);
+        assert_eq!(m3u.upstream_user_agent, None);
+        assert_eq!(xtream.upstream_user_agent, None);
+    }
+
+    #[test]
+    fn messagepack_playlist_items_preserve_upstream_user_agent() -> Result<(), Box<dyn std::error::Error>> {
+        let source = PlaylistItem {
+            header: PlaylistItemHeader {
+                upstream_user_agent: Some("Provider-UA".intern()),
+                ..Default::default()
+            },
+        };
+
+        let header: PlaylistItemHeader = rmp_serde::from_slice(&rmp_serde::to_vec(&source.header)?)?;
+        let m3u: M3uPlaylistItem =
+            rmp_serde::from_slice(&rmp_serde::to_vec(&M3uPlaylistItem::from(&source))?)?;
+        let xtream: XtreamPlaylistItem =
+            rmp_serde::from_slice(&rmp_serde::to_vec(&XtreamPlaylistItem::from(&source))?)?;
+
+        assert_eq!(header.upstream_user_agent.as_deref(), Some("Provider-UA"));
+        assert_eq!(m3u.upstream_user_agent.as_deref(), Some("Provider-UA"));
+        assert_eq!(xtream.upstream_user_agent.as_deref(), Some("Provider-UA"));
+        Ok(())
     }
 
     #[test]

@@ -2016,7 +2016,7 @@ mod tests {
             channel_no: 1,
             source_ordinal: 0,
             input_stream_id: "".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
         }
     }
 
@@ -2160,7 +2160,7 @@ mod tests {
                 }),
                 ..shared::model::LiveStreamProperties::default()
             }))),
-            source_user_agent: None,
+            upstream_user_agent: None,
         }
     }
 
@@ -2373,7 +2373,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "813563".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
         }
     }
 
@@ -2618,7 +2618,7 @@ mod tests {
             channel_no: 1,
             source_ordinal: 0,
             input_stream_id: "100".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
         }
     }
 

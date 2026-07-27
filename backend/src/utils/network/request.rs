@@ -1838,15 +1838,15 @@ pub fn get_request_headers<S: ::std::hash::BuildHasher + Default>(
     headers
 }
 
-pub fn overlay_source_user_agent(
+pub fn overlay_upstream_user_agent(
     headers: &mut HeaderMap,
-    source_user_agent: Option<&str>,
+    upstream_user_agent: Option<&str>,
     disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>,
 ) {
     if disabled_headers.is_some_and(|disabled| disabled.should_remove(axum::http::header::USER_AGENT.as_str())) {
         return;
     }
-    if let Some(value) = source_user_agent
+    if let Some(value) = upstream_user_agent
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .and_then(|value| HeaderValue::from_str(value).ok())
@@ -3195,7 +3195,7 @@ mod tests {
 
     #[test]
     fn test_get_request_headers_prioritization() {
-        use super::{get_request_headers, overlay_source_user_agent};
+        use super::{get_request_headers, overlay_upstream_user_agent};
         use axum::http::header::USER_AGENT;
 
         // Case 1: No headers provided -> Default UA
@@ -3234,7 +3234,7 @@ mod tests {
             None,
             Some("Config-Default-UA"),
         );
-        overlay_source_user_agent(&mut headers, Some("Channel-UA"), None);
+        overlay_upstream_user_agent(&mut headers, Some("Channel-UA"), None);
         assert_eq!(headers.get(USER_AGENT).unwrap(), "Channel-UA");
 
         let disabled = ReverseProxyDisabledHeaderConfig {
@@ -3249,7 +3249,7 @@ mod tests {
             Some(&disabled),
             Some("Config-Default-UA"),
         );
-        overlay_source_user_agent(&mut headers, Some("Blocked-Channel-UA"), Some(&disabled));
+        overlay_upstream_user_agent(&mut headers, Some("Blocked-Channel-UA"), Some(&disabled));
         assert!(!headers.contains_key(USER_AGENT));
     }
 

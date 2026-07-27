@@ -5,7 +5,7 @@ use shared::model::stalker::StalkerStreamKind;
 use shared::utils::{deserialize_as_option_string, deserialize_number_from_string};
 
 use crate::iptv::stalker::client::StalkerApiClient;
-use crate::iptv::stalker::error::{StalkerError, StalkerResult};
+use crate::iptv::stalker::error::{safe_stalker_url, StalkerError, StalkerResult};
 use crate::iptv::stalker::profile::StalkerHandshake;
 use crate::iptv::stalker::recipes::recipe_spec_for;
 use crate::iptv::stalker::url_factory::StalkerLoadUrl;
@@ -316,7 +316,7 @@ async fn get_categories(
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: client.portal_url().to_string() }))
+    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
 fn parse_categories(value: &Value) -> Vec<StalkerCategory> {
@@ -571,7 +571,7 @@ async fn get_catalog_value(
             Err(err) => last_err = Some(err),
         }
     }
-    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: client.portal_url().to_string() }))
+    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
 pub async fn get_all_channels(
@@ -674,7 +674,7 @@ pub async fn get_series_details(
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: client.portal_url().to_string() }))
+    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
 async fn fetch_series_page(

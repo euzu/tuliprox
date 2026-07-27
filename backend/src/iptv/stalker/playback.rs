@@ -6,7 +6,7 @@ use url::Url;
 
 use crate::iptv::stalker::client::{validate_playable_scheme, StalkerApiClient};
 use crate::iptv::stalker::cmd_parser::scheme_is_playable;
-use crate::iptv::stalker::error::{StalkerError, StalkerResult};
+use crate::iptv::stalker::error::{safe_stalker_url, StalkerError, StalkerResult};
 use crate::iptv::stalker::profile::{StalkerHandshake, StalkerResolvedStream};
 use crate::iptv::stalker::recipes::recipe_spec_for;
 
@@ -56,7 +56,7 @@ pub async fn create_link(
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: client.portal_url().to_string() }))
+    Err(last_err.unwrap_or_else(|| StalkerError::NoEndpoint { portal: safe_stalker_url(client.portal_url()) }))
 }
 
 #[allow(clippy::too_many_arguments)]

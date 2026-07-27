@@ -290,7 +290,7 @@ pub trait PlaylistEntry: Send + Sync {
     fn get_resolved_info_document(&self, options: &XtreamMappingOptions) -> Option<XtreamInfoDocument>;
     fn get_additional_properties(&self) -> Option<&StreamProperties>;
     fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties>;
-    fn get_source_user_agent(&self) -> Option<&str>;
+    fn get_upstream_user_agent(&self) -> Option<&str>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,8 +341,8 @@ pub struct PlaylistItemHeader {
     /// Stable provider/origin ID captured before any target transformation.
     #[serde(default, with = "arc_str_serde")]
     pub input_stream_id: Arc<str>,
-    #[serde(default, with = "arc_str_option_serde")]
-    pub source_user_agent: Option<Arc<str>>,
+    #[serde(default, rename = "source_user_agent", alias = "upstream_user_agent", with = "arc_str_option_serde")]
+    pub upstream_user_agent: Option<Arc<str>>,
 }
 
 impl Default for PlaylistItemHeader {
@@ -370,7 +370,7 @@ impl Default for PlaylistItemHeader {
             input_name: "".intern(),
             source_ordinal: 0,
             input_stream_id: "".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
         }
     }
 }
@@ -575,8 +575,8 @@ pub struct M3uPlaylistItem {
     /// Stable provider/origin ID captured before any target transformation.
     #[serde(default, with = "arc_str_serde")]
     pub input_stream_id: Arc<str>,
-    #[serde(default, with = "arc_str_option_serde")]
-    pub source_user_agent: Option<Arc<str>>,
+    #[serde(default, rename = "source_user_agent", alias = "upstream_user_agent", with = "arc_str_option_serde")]
+    pub upstream_user_agent: Option<Arc<str>>,
 }
 
 fn write_m3u_attr(line: &mut String, name: &str, value: &str) { let _ = write!(line, " {name}=\"{value}\""); }
@@ -661,7 +661,7 @@ impl M3uPlaylistItem {
 
         let _ = writeln!(&mut line, ",{}", self.title);
         if let Some(user_agent) =
-            self.source_user_agent.as_deref().filter(|value| !value.is_empty() && !value.contains(['\r', '\n']))
+            self.upstream_user_agent.as_deref().filter(|value| !value.is_empty() && !value.contains(['\r', '\n']))
         {
             let _ = writeln!(&mut line, "#EXTVLCOPT:http-user-agent={user_agent}");
         }
@@ -704,7 +704,7 @@ impl PlaylistEntry for M3uPlaylistItem {
         (!input_stream_id.is_empty()).then(|| Arc::clone(input_stream_id))
     }
 
-    fn get_source_user_agent(&self) -> Option<&str> { self.source_user_agent.as_deref() }
+    fn get_upstream_user_agent(&self) -> Option<&str> { self.upstream_user_agent.as_deref() }
 
     fn get_provider_id(&self) -> Option<u32> { get_provider_id(&self.provider_id, &self.url) }
     #[inline]
@@ -933,8 +933,8 @@ pub struct XtreamPlaylistItem {
     /// Stable provider/origin ID captured before any target transformation.
     #[serde(default, with = "arc_str_serde")]
     pub input_stream_id: Arc<str>,
-    #[serde(default, with = "arc_str_option_serde")]
-    pub source_user_agent: Option<Arc<str>>,
+    #[serde(default, rename = "source_user_agent", alias = "upstream_user_agent", with = "arc_str_option_serde")]
+    pub upstream_user_agent: Option<Arc<str>>,
 }
 
 impl XtreamPlaylistItem {
@@ -999,7 +999,7 @@ impl PlaylistEntry for XtreamPlaylistItem {
         }
     }
 
-    fn get_source_user_agent(&self) -> Option<&str> { self.source_user_agent.as_deref() }
+    fn get_upstream_user_agent(&self) -> Option<&str> { self.upstream_user_agent.as_deref() }
     #[inline]
     fn get_provider_id(&self) -> Option<u32> { Some(self.provider_id) }
     #[inline]
@@ -1257,7 +1257,7 @@ impl From<&PlaylistItem> for XtreamPlaylistItem {
             channel_no: header.chno,
             source_ordinal: header.source_ordinal,
             input_stream_id,
-            source_user_agent: header.source_user_agent.clone(),
+            upstream_user_agent: header.upstream_user_agent.clone(),
         }
     }
 }
@@ -1296,7 +1296,7 @@ impl From<&PlaylistItem> for M3uPlaylistItem {
             source_ordinal: header.source_ordinal,
             additional_properties: header.additional_properties.clone(),
             input_stream_id,
-            source_user_agent: header.source_user_agent.clone(),
+            upstream_user_agent: header.upstream_user_agent.clone(),
         }
     }
 }
@@ -1365,7 +1365,7 @@ impl From<&XtreamPlaylistItem> for PlaylistItem {
             additional_properties: item.additional_properties.clone(),
             source_ordinal: item.source_ordinal,
             input_stream_id: input_stream_id.unwrap_or_else(|| "".intern()),
-            source_user_agent: item.source_user_agent.clone(),
+            upstream_user_agent: item.upstream_user_agent.clone(),
         };
 
         PlaylistItem { header }
@@ -1397,7 +1397,7 @@ impl From<&M3uPlaylistItem> for PlaylistItem {
             additional_properties: item.additional_properties.clone(),
             source_ordinal: item.source_ordinal,
             input_stream_id: item.get_input_stream_id().unwrap_or_else(|| "".intern()),
-            source_user_agent: item.source_user_agent.clone(),
+            upstream_user_agent: item.upstream_user_agent.clone(),
         };
 
         PlaylistItem { header }
@@ -1467,7 +1467,7 @@ impl PlaylistItem {
             category_id: item.category_id,
             source_ordinal: 0,
             input_stream_id: stream_id_str,
-            source_user_agent: None,
+            upstream_user_agent: None,
         };
 
         PlaylistItem { header }
@@ -1481,7 +1481,7 @@ impl PlaylistEntry for PlaylistItem {
     #[inline]
     fn get_input_stream_id(&self) -> Option<Arc<str>> { self.header.get_input_stream_id() }
 
-    fn get_source_user_agent(&self) -> Option<&str> { self.header.source_user_agent.as_deref() }
+    fn get_upstream_user_agent(&self) -> Option<&str> { self.header.upstream_user_agent.as_deref() }
 
     fn get_provider_id(&self) -> Option<u32> {
         let header = &self.header;
@@ -1901,7 +1901,7 @@ mod tests {
             virtual_id: 0,
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
             name: "Test Channel".intern(),
             chno: 0,
             logo: "".intern(),
@@ -1936,7 +1936,7 @@ mod tests {
             virtual_id: 0,
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
             name: "Test Channel".intern(),
             chno: 0,
             logo: "".intern(),
@@ -1969,7 +1969,7 @@ mod tests {
             virtual_id: 0,
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
             name: "Test Channel".intern(),
             chno: 42,
             logo: "".intern(),
@@ -2002,7 +2002,7 @@ mod tests {
             virtual_id: 0,
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
             name: "Test Channel".intern(),
             chno: 0,
             logo: "".intern(),
@@ -2035,7 +2035,7 @@ mod tests {
             virtual_id: 0,
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
             name: "Test Channel".intern(),
             chno: 0,
             logo: "".intern(),
@@ -2084,7 +2084,7 @@ mod tests {
             virtual_id: 0,
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
             name: "Test Channel".intern(),
             chno: 0,
             logo: "".intern(),
@@ -2118,5 +2118,15 @@ mod tests {
         assert!(output.contains(r#"catchup="default""#));
         assert!(output.contains(r#"catchup-source="http://proxy.example/m3u-catchup/token?v0={utc}""#));
         assert!(!output.contains(r#"catchup-source="?offset=-${offset}""#));
+    }
+
+    #[test]
+    fn m3u_to_m3u_emits_only_configured_upstream_user_agent() {
+        let mut item = M3uPlaylistItem::from(&PlaylistItem { header: PlaylistItemHeader::default() });
+        item.upstream_user_agent = Some("Provider-UA".intern());
+
+        assert!(item.to_m3u(None, false).contains("#EXTVLCOPT:http-user-agent=Provider-UA\n"));
+        item.upstream_user_agent = None;
+        assert!(!item.to_m3u(None, false).contains("#EXTVLCOPT:http-user-agent="));
     }
 }

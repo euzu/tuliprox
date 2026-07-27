@@ -156,9 +156,9 @@ impl ProviderStreamFactoryOptions {
             *disabled_headers,
             *default_user_agent,
         );
-        crate::utils::request::overlay_source_user_agent(
+        crate::utils::request::overlay_upstream_user_agent(
             &mut headers,
-            stream_channel.as_ref().and_then(|channel| channel.source_user_agent.as_deref()),
+            stream_channel.as_ref().and_then(|channel| channel.upstream_user_agent.as_deref()),
             *disabled_headers,
         );
 
@@ -1662,7 +1662,7 @@ mod tests {
                 technical: None,
                 epg_channel_id: None,
                 epg_reference_ts: None,
-                source_user_agent: Some("Channel-UA".intern()),
+                upstream_user_agent: Some("Channel-UA".intern()),
             }),
             connect_failure_stage: Some(FailureStage::ProviderOpen),
             content_representation: ProviderContentRepresentationMode::PreserveOrigin,

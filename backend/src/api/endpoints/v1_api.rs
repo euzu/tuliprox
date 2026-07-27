@@ -222,7 +222,7 @@ mod tests {
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
-            source_user_agent: None,
+            upstream_user_agent: None,
         };
         app_state.connection_manager.add_connection(&addr).await;
         let registered = app_state

@@ -2,6 +2,21 @@ use std::io;
 use thiserror::Error;
 use url::Url;
 
+pub(crate) fn safe_stalker_url(value: &str) -> String {
+    let Ok(mut url) = Url::parse(value) else {
+        return "[redacted invalid URL]".to_string();
+    };
+    if !matches!(url.scheme(), "http" | "https")
+        || url.set_username("").is_err()
+        || url.set_password(None).is_err()
+    {
+        return "[redacted invalid URL]".to_string();
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    url.into()
+}
+
 /// Failure modes surfaced by the Stalker portal client. The variants cover both transport
 /// errors (network, body caps, JSONP decoding) and protocol-level errors (token rejection,
 /// portal refusal, missing playable URL). `Status`-flavored variants carry the upstream
@@ -9,10 +24,10 @@ use url::Url;
 #[derive(Debug, Error)]
 pub enum StalkerError {
     #[error("stalker portal handshake failed: {message}")]
-    HandshakeFailed { message: String, url: Option<Url> },
+    HandshakeFailed { message: String, url: Option<String> },
 
     #[error("stalker portal rejected the token (status {status})")]
-    TokenRejected { status: u16, url: Option<Url> },
+    TokenRejected { status: u16, url: Option<String> },
 
     #[error("stalker portal body reported code {code} for {action}: {body_snippet}")]
     PortalBodyError { code: u16, action: String, body_snippet: String },
@@ -110,5 +125,19 @@ mod tests {
             url: None,
         }
         .is_token_rejected());
+    }
+
+    #[test]
+    fn stalker_error_urls_drop_userinfo_query_and_fragment() {
+        let safe = safe_stalker_url(
+            "https://user:pass@portal.example/server/load.php?token=secret&mac=00:11:22:33:44:55#fragment",
+        );
+        assert_eq!(safe, "https://portal.example/server/load.php");
+
+        let error = StalkerError::HandshakeFailed { message: "failed".to_string(), url: Some(safe) };
+        let debug = format!("{error:?}");
+        for secret in ["user", "pass", "secret", "00:11:22:33:44:55", "fragment"] {
+            assert!(!debug.contains(secret), "error debug output leaked {secret}");
+        }
     }
 }

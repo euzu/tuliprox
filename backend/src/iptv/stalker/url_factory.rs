@@ -1,6 +1,6 @@
 use url::Url;
 
-use crate::iptv::stalker::error::{StalkerError, StalkerResult};
+use crate::iptv::stalker::error::{safe_stalker_url, StalkerError, StalkerResult};
 
 /// The candidate endpoints a Stalker portal might respond on, in priority order. The portal
 /// will answer on any of these depending on the firmware flavour (legacy MAG250, Ministra,
@@ -36,7 +36,7 @@ pub fn load_url_candidates(portal_url: &str) -> StalkerResult<Vec<StalkerLoadUrl
         trimmed.to_string().trim_end_matches('/').to_string()
     };
     if origin.is_empty() {
-        return Err(StalkerError::NoEndpoint { portal: portal_url.to_string() });
+        return Err(StalkerError::NoEndpoint { portal: safe_stalker_url(portal_url) });
     }
     let supplied_path = parsed.path().trim_matches('/').to_string();
 

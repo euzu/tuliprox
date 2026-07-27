@@ -222,7 +222,7 @@ fn apply_rewrite(
         m3u_pli.t_catchup_source = Some(rewrite.source);
     }
     if should_rewrite_urls {
-        m3u_pli.source_user_agent = None;
+        m3u_pli.upstream_user_agent = None;
     }
 
     m3u_pli
@@ -498,7 +498,7 @@ mod tests {
             source_ordinal: 0,
             additional_properties: None,
             input_stream_id: "813294".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
         }
     }
 
@@ -548,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn source_user_agent_is_only_exposed_for_direct_provider_urls() {
+    fn upstream_user_agent_is_only_exposed_for_direct_provider_urls() {
         let input_by_name = HashMap::new();
         let ctx = UrlRewriteContext {
             base_url: "https://example.com",
@@ -556,7 +556,7 @@ mod tests {
             password: "pass",
         };
         let mut direct_item = m3u_item("http://example.com/live/user/pass/813294.ts");
-        direct_item.source_user_agent = Some("Provider-UA".intern());
+        direct_item.upstream_user_agent = Some("Provider-UA".intern());
 
         let direct = apply_rewrite(
             direct_item.clone(),

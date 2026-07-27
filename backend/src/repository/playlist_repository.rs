@@ -1269,7 +1269,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "9001".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
         };
         let provider_parent_code = xtream_series_info.get_uuid().intern();
         let xtream_provider_episode = XtreamPlaylistItem {
@@ -1292,7 +1292,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "201".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
         };
         let provider_episode = PlaylistItem::from(&xtream_provider_episode);
         let mut series_info = PlaylistItem::from(&xtream_series_info);

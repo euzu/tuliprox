@@ -5991,7 +5991,7 @@ mod tests {
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
-            source_user_agent: None,
+            upstream_user_agent: None,
         }
     }
 
@@ -6012,7 +6012,7 @@ mod tests {
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
-            source_user_agent: None,
+            upstream_user_agent: None,
         }
     }
 
@@ -9682,7 +9682,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "1".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
         };
 
         let hls_ext = shared::defaults::HLS_EXT.to_string();

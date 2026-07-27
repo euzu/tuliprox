@@ -1,5 +1,7 @@
 use std::{fmt, time::{Duration, SystemTime, UNIX_EPOCH}};
 
+use super::error::safe_stalker_url;
+
 /// A successful Stalker handshake. The token is sent as `Authorization: Bearer <token>` on
 /// every subsequent API call; portal cookies live in the client's shared cookie jar; the
 /// referer is the `Referer` header the portal expects; the `fingerprint_evidence` is a
@@ -18,10 +20,12 @@ pub struct StalkerSession {
 
 impl fmt::Debug for StalkerSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let referer = safe_stalker_url(&self.referer);
+        let load_url = safe_stalker_url(&self.load_url);
         f.debug_struct("StalkerSession")
             .field("token", &"[redacted]")
-            .field("referer", &self.referer)
-            .field("load_url", &self.load_url)
+            .field("referer", &referer)
+            .field("load_url", &load_url)
             .field("fingerprint_evidence", &self.fingerprint_evidence)
             .field("created_at_epoch_secs", &self.created_at_epoch_secs)
             .finish()
@@ -80,6 +84,22 @@ mod tests {
         let session = StalkerSession::new("abc".to_string(), "http://portal/c/".to_string(), "http://portal/server/load.php".to_string())
             .with_evidence(vec!["js.keyA".to_string(), "js.keyB".to_string()]);
         assert_eq!(session.fingerprint_evidence.len(), 2);
+    }
+
+    #[test]
+    fn debug_redacts_url_credentials_and_query_secrets() {
+        let session = StalkerSession::new(
+            "token-secret".to_string(),
+            "https://user:pass@portal.example/c/?mac=00:11:22:33:44:55".to_string(),
+            "https://user:pass@portal.example/server/load.php?token=query-secret".to_string(),
+        );
+
+        let debug = format!("{session:?}");
+        for secret in ["token-secret", "user", "pass", "00:11:22:33:44:55", "query-secret"] {
+            assert!(!debug.contains(secret), "debug output leaked {secret}");
+        }
+        assert!(debug.contains("https://portal.example/c/"));
+        assert!(debug.contains("https://portal.example/server/load.php"));
     }
 
     #[test]

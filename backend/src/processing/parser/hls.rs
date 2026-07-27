@@ -78,19 +78,30 @@ fn is_archive_start_context_query_key(key: &str) -> bool {
         || key.eq_ignore_ascii_case("offset")
 }
 
-fn archive_start_query(url: &Url) -> Option<(Cow<'_, str>, Cow<'_, str>)> {
+fn has_archive_start_query(url: &Url) -> bool {
     let has_context = url.query_pairs().any(|(key, _)| is_archive_start_context_query_key(&key));
-    url.query_pairs().find(|(key, _)| {
-        is_direct_archive_start_query_key(key) || (has_context && is_contextual_archive_start_query_key(key))
+    url.query_pairs().any(|(key, _)| {
+        is_direct_archive_start_query_key(&key) || (has_context && is_contextual_archive_start_query_key(&key))
     })
 }
 
 fn preserve_archive_start_query(base: &Url, mut target: Url) -> Url {
-    if archive_start_query(&target).is_some() {
+    let has_context = base.query_pairs().any(|(key, _)| is_archive_start_context_query_key(&key));
+    if !has_archive_start_query(base) {
         return target;
     }
-    if let Some((key, value)) = archive_start_query(base) {
-        target.query_pairs_mut().append_pair(&key, &value);
+
+    for (key, value) in base.query_pairs() {
+        let is_start = is_direct_archive_start_query_key(&key)
+            || (has_context && is_contextual_archive_start_query_key(&key));
+        let already_present = if is_start {
+            has_archive_start_query(&target)
+        } else {
+            target.query_pairs().any(|(target_key, _)| target_key.eq_ignore_ascii_case(&key))
+        };
+        if (is_start || is_archive_start_context_query_key(&key)) && !already_present {
+            target.query_pairs_mut().append_pair(&key, &value);
+        }
     }
     target
 }
@@ -252,6 +263,18 @@ mod test {
         assert_eq!(
             out,
             "https://cdn.example/hls/channel/variant/playlist.m3u8?offset=-10752&useseq=t&utcstart=1785072000"
+        );
+    }
+
+    #[test]
+    fn rewrite_relative_variant_preserves_all_archive_context_queries() {
+        let base = "https://cdn.example/hls/channel/index.m3u8?utcstart=1785072000&offset=-3600&end=1785075600&duration=3600";
+        let uri = "variant/playlist.m3u8?offset=-1800";
+
+        let out = rewrite_hls_url(base, uri);
+        assert_eq!(
+            out,
+            "https://cdn.example/hls/channel/variant/playlist.m3u8?offset=-1800&utcstart=1785072000&end=1785075600&duration=3600"
         );
     }
 

@@ -276,7 +276,7 @@ mod tests {
             channel_no: 0,
             source_ordinal: 0,
             input_stream_id: "1".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
         };
         assert!(tx.send(Ok((item, true))).await.is_ok());
         assert!(tx.send(Err(shared::error::TuliproxError::RepositoryXtream("corrupt page".into()))).await.is_ok());

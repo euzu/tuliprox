@@ -130,6 +130,19 @@ async fn m3u_api_post(
     m3u_api(user, target, &app_state, &api_req.content_type).await.into_response()
 }
 
+fn effective_playback_extension<'a>(
+    item_type: PlaylistItemType,
+    stream_url: &'a str,
+    requested_extension: Option<&'a str>,
+) -> Option<&'a str> {
+    let upstream_extension = extract_extension_from_url(stream_url);
+    if item_type == PlaylistItemType::Catchup {
+        upstream_extension.or(requested_extension)
+    } else {
+        requested_extension.or(upstream_extension)
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(in crate::api) async fn m3u_api_stream_loaded(
     user: Arc<ProxyUserCredentials>,
@@ -149,7 +162,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     }
 
     let is_hls_manifest_request =
-        stream_ext == Some(HLS_EXT) || (stream_ext.is_none() && extract_extension_from_url(&pli.url) == Some(HLS_EXT));
+        effective_playback_extension(pli.item_type, &pli.url, stream_ext) == Some(HLS_EXT);
 
     if !user.allows_item_type(pli.item_type) {
         if is_hls_manifest_request {
@@ -253,8 +266,8 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         "M3U playback for virtual_id={virtual_id}, item_type={}",
         pli.item_type
     );
-    let extracted_ext = extract_extension_from_url(&pli.url).unwrap_or_default();
-    let extension = stream_ext.unwrap_or(extracted_ext);
+    let effective_stream_ext = effective_playback_extension(pli.item_type, &pli.url, stream_ext);
+    let extension = effective_stream_ext.unwrap_or_default();
     let session_key = if pli.item_type == PlaylistItemType::Catchup {
         create_m3u_catchup_session_key(
             fingerprint,
@@ -406,7 +419,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         target: &target,
         input: &input,
         user: &user,
-        stream_ext,
+        stream_ext: effective_stream_ext,
         req_context: context,
         action_path: "", // TODO is there timeshift or something like that ?
     };
@@ -523,16 +536,8 @@ fn native_live_file_matches_mode(mode: &str, file: &str) -> bool {
 }
 
 fn native_archive_matches_mode(mode: &str, archive: &FlussonicArchiveKind) -> bool {
-    matches!(
-        (mode, archive),
-        ("flussonic-ts", FlussonicArchiveKind::TimeshiftAbs { extension: ".ts", .. })
-            | (
-                "flussonic",
-                FlussonicArchiveKind::Archive { .. }
-                    | FlussonicArchiveKind::TimeshiftRel { .. }
-                    | FlussonicArchiveKind::TimeshiftAbs { extension: ".m3u8", .. },
-            )
-    )
+    let expected_extension = if mode == "flussonic-ts" { ".ts" } else { HLS_EXT };
+    matches!(mode, "flussonic" | "flussonic-ts") && archive.extension() == expected_extension
 }
 
 fn apply_native_flussonic_archive(
@@ -629,7 +634,7 @@ async fn m3u_api_stream(
             app_state,
             resolved_pli,
             input,
-            Some(HLS_EXT),
+            Some(archive.extension()),
             Some(&discriminator),
         )
         .await
@@ -1041,7 +1046,8 @@ pub fn m3u_api_register() -> axum::Router<Arc<AppState>> {
 mod tests {
     use super::{
         apply_native_flussonic_archive, native_archive_matches_mode, native_live_file_matches_mode,
-        playlist_item_native_flussonic_mode, resolve_m3u_catchup_properties, resolved_m3u_item_is_allowed,
+        effective_playback_extension, playlist_item_native_flussonic_mode, resolve_m3u_catchup_properties,
+        resolved_m3u_item_is_allowed,
     };
     use crate::api::model::UserApiRequest;
     use crate::model::{ConfigInput, ProxyUserCredentials};
@@ -1093,6 +1099,30 @@ mod tests {
         user.output_clusters = ClusterFlags::Live;
 
         assert!(!resolved_m3u_item_is_allowed(&user, PlaylistItemType::Catchup));
+    }
+
+    #[test]
+    fn catchup_uses_resolved_upstream_transport() {
+        assert_eq!(
+            effective_playback_extension(
+                PlaylistItemType::Catchup,
+                "http://provider/ch/timeshift_abs-1.ts",
+                Some(".m3u8")
+            ),
+            Some(".ts")
+        );
+        assert_eq!(
+            effective_playback_extension(
+                PlaylistItemType::Catchup,
+                "http://provider/ch/timeshift_abs-1.m3u8",
+                Some(".ts")
+            ),
+            Some(".m3u8")
+        );
+        assert_eq!(
+            effective_playback_extension(PlaylistItemType::Live, "http://provider/ch/index.m3u8", Some(".ts")),
+            Some(".ts")
+        );
     }
 
     #[test]
@@ -1164,7 +1194,7 @@ mod tests {
                 ..LiveStreamProperties::default()
             }))),
             input_stream_id: "59".intern(),
-            source_user_agent: None,
+            upstream_user_agent: None,
         }
     }
 
@@ -1178,6 +1208,7 @@ mod tests {
             &FlussonicArchiveKind::Archive {
                 start: "1784898000".to_string(),
                 duration: "3600".to_string(),
+                extension: ".m3u8",
             },
         )?;
         assert_eq!(hls_archive.item_type, PlaylistItemType::Catchup);
@@ -1216,6 +1247,7 @@ mod tests {
             &FlussonicArchiveKind::Archive {
                 start: "1784898000".to_string(),
                 duration: "3600".to_string(),
+                extension: ".m3u8",
             }
         ));
         assert!(!native_archive_matches_mode(
@@ -1223,6 +1255,7 @@ mod tests {
             &FlussonicArchiveKind::Archive {
                 start: "1784898000".to_string(),
                 duration: "3600".to_string(),
+                extension: ".m3u8",
             }
         ));
         assert!(native_archive_matches_mode(
@@ -1239,5 +1272,11 @@ mod tests {
         let archive = parse_flussonic_archive_file("timeshift_abs-1784898000.ts");
         assert!(archive.as_ref().is_some_and(|value| native_archive_matches_mode("flussonic-ts", value)));
         assert!(!archive.as_ref().is_some_and(|value| native_archive_matches_mode("flussonic", value)));
+
+        for file in ["archive-1784898000-3600.ts", "timeshift_rel-120.ts"] {
+            let archive = parse_flussonic_archive_file(file);
+            assert!(archive.as_ref().is_some_and(|value| native_archive_matches_mode("flussonic-ts", value)));
+            assert!(!archive.as_ref().is_some_and(|value| native_archive_matches_mode("flussonic", value)));
+        }
     }
 }

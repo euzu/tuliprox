@@ -477,7 +477,7 @@ fn parse_extvlcopt_user_agent(line: &str) -> Option<&str> {
 pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInput, lines: DynReader, mut visit: F) {
     let mut header: Option<String> = None;
     let mut group: Option<Arc<str>> = None;
-    let mut source_user_agent: Option<Arc<str>> = None;
+    let mut upstream_user_agent: Option<Arc<str>> = None;
     let mut default_catchup_correction: Option<Arc<str>> = None;
     let input_name = &input.name;
 
@@ -494,12 +494,12 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
         if let Some(b'#') = bytes.first().copied() {
             if bytes.starts_with(b"#EXTINF") {
                 header = Some(line);
-                source_user_agent = None;
+                upstream_user_agent = None;
                 continue;
             }
             if let Some(value) = parse_extvlcopt_user_agent(&line) {
                 if header.is_some() {
-                    source_user_agent = (!value.is_empty()).then(|| value.intern());
+                    upstream_user_agent = (!value.is_empty()).then(|| value.intern());
                 }
                 continue;
             }
@@ -525,7 +525,7 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
                 ),
             };
             let header = &mut item.header;
-            header.source_user_agent = source_user_agent.take();
+            header.upstream_user_agent = upstream_user_agent.take();
             header.source_ordinal = ord_counter;
             ord_counter += 1;
             if header.group.is_empty() {
@@ -872,9 +872,9 @@ mod test {
         super::consume_m3u(&Config::default(), &test_input(), make_reader(content), |item| items.push(item)).await;
 
         assert_eq!(items.len(), 3);
-        assert_eq!(items[0].header.source_user_agent.as_deref(), Some("Source UA/1.0"));
-        assert_eq!(items[1].header.source_user_agent, None);
-        assert_eq!(items[2].header.source_user_agent, None);
+        assert_eq!(items[0].header.upstream_user_agent.as_deref(), Some("Source UA/1.0"));
+        assert_eq!(items[1].header.upstream_user_agent, None);
+        assert_eq!(items[2].header.upstream_user_agent, None);
     }
 
 }

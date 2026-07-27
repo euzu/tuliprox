@@ -255,7 +255,7 @@ fn resolve_collectors(raw_query: Option<&str>, placeholders: &[&str]) -> Vec<(us
     };
 
     let params: Vec<(String, String)> = url::form_urlencoded::parse(raw_query.as_bytes())
-        .filter(|(key, _)| key != M3U_CATCHUP_MARKER)
+        .filter(|(key, _)| !key.eq_ignore_ascii_case(M3U_CATCHUP_MARKER))
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
 
@@ -361,16 +361,19 @@ fn render_template(segments: &[TemplateSegment], collectors: &[(usize, String)])
     for segment in segments {
         match segment {
             TemplateSegment::Literal(literal) => output.push_str(literal),
-            TemplateSegment::Placeholder(_) => {
+            TemplateSegment::Placeholder(placeholder) => {
                 let Some((actual_idx, value)) = collectors.get(collector_idx) else {
                     return Err(TuliproxError::Crypto("Missing catchup collector value".to_string()));
                 };
                 if *actual_idx != collector_idx {
                     return Err(TuliproxError::Crypto("Catchup collector sequence is sparse".to_string()));
                 }
-                let value = if output.ends_with('-') {
+                let strips_sign = ["offset", "duration"]
+                    .iter()
+                    .any(|name| placeholder_name(placeholder).eq_ignore_ascii_case(name));
+                let value = if strips_sign && output.ends_with('-') {
                     value.strip_prefix('-').unwrap_or(value)
-                } else if output.ends_with('+') {
+                } else if strips_sign && output.ends_with('+') {
                     value.strip_prefix('+').unwrap_or(value)
                 } else {
                     value
@@ -430,9 +433,9 @@ pub fn has_m3u_catchup_marker(raw_query: Option<&str>) -> bool {
         let mut wink_start = false;
         let mut wink_window = false;
         for (key, _) in url::form_urlencoded::parse(query.as_bytes()) {
-            explicit |= key == M3U_CATCHUP_MARKER
-                || key == M3U_CATCHUP_PARAM_UTC
-                || key == M3U_CATCHUP_PARAM_LUTC;
+            explicit |= key.eq_ignore_ascii_case(M3U_CATCHUP_MARKER)
+                || key.eq_ignore_ascii_case(M3U_CATCHUP_PARAM_UTC)
+                || key.eq_ignore_ascii_case(M3U_CATCHUP_PARAM_LUTC);
             wink_start |= key.eq_ignore_ascii_case("utcstart");
             wink_window |= key.eq_ignore_ascii_case("offset") || key.eq_ignore_ascii_case("duration");
         }
@@ -553,7 +556,8 @@ pub fn resolve_m3u_catchup_url(
 mod tests {
     use super::{
         build_m3u_catchup_rewrite, has_m3u_catchup_marker, is_xtream_m3u_catchup_supported,
-        resolve_m3u_catchup_url, resolve_xtream_m3u_catchup_url, M3U_CATCHUP_MARKER,
+        parse_template, render_template, resolve_m3u_catchup_url, resolve_xtream_m3u_catchup_url,
+        M3U_CATCHUP_MARKER,
     };
     use shared::{error::TuliproxError, model::CatchupProperties, utils::Internable};
 
@@ -737,8 +741,20 @@ mod tests {
     #[test]
     fn catchup_marker_detection_is_explicit() {
         assert!(has_m3u_catchup_marker(Some(&format!("{M3U_CATCHUP_MARKER}=abc&v0=1"))));
+        assert!(has_m3u_catchup_marker(Some("TULIPROX-CATCHUP=abc")));
+        assert!(has_m3u_catchup_marker(Some("UTC=1784869500")));
+        assert!(has_m3u_catchup_marker(Some("LUTC=1784877418")));
         assert!(!has_m3u_catchup_marker(Some("v0=1")));
         assert!(!has_m3u_catchup_marker(None));
+    }
+
+    #[test]
+    fn render_template_only_strips_signs_from_offset_and_duration() -> Result<(), TuliproxError> {
+        let segments = parse_template("timeshift_abs-{utc}-{duration}");
+        let collectors = vec![(0, "-1784885700".to_string()), (1, "-120".to_string())];
+
+        assert_eq!(render_template(&segments, &collectors)?, "timeshift_abs--1784885700-120");
+        Ok(())
     }
 
     #[test]

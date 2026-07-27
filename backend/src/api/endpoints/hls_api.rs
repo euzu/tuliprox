@@ -1397,7 +1397,7 @@ fn fallback_hls_cache_stream_channel(
         technical: None,
         epg_channel_id: None,
         epg_reference_ts: None,
-        source_user_agent: None,
+        upstream_user_agent: None,
     }
 }
 
@@ -2059,7 +2059,7 @@ fn build_hls_manifest_request_headers(
     req_headers: &HeaderMap,
     disabled_headers: Option<&ReverseProxyDisabledHeaderConfig>,
     default_user_agent: Option<&str>,
-    source_user_agent: Option<&str>,
+    upstream_user_agent: Option<&str>,
 ) -> HeaderMap {
     let input_headers = input_headers
         .iter()
@@ -2074,7 +2074,7 @@ fn build_hls_manifest_request_headers(
     let forwarded = get_headers_from_request(req_headers, &filter_header);
     let mut headers =
         request::get_request_headers(Some(&input_headers), Some(&forwarded), disabled_headers, default_user_agent);
-    request::overlay_source_user_agent(&mut headers, source_user_agent, disabled_headers);
+    request::overlay_upstream_user_agent(&mut headers, upstream_user_agent, disabled_headers);
     scrub_hls_origin_headers(&mut headers, disabled_headers);
     force_identity_without_range(&mut headers);
     headers
@@ -2212,7 +2212,7 @@ fn build_hls_origin_source_for_playback(
 pub(in crate::api) struct HlsEntryStreamIdentity {
     virtual_id: u32,
     input_stream_id: Arc<str>,
-    source_user_agent: Option<Arc<str>>,
+    upstream_user_agent: Option<Arc<str>>,
 }
 
 impl HlsEntryStreamIdentity {
@@ -2221,12 +2221,12 @@ impl HlsEntryStreamIdentity {
         if input_stream_id.trim().is_empty() {
             return None;
         }
-        Some(Self { virtual_id, input_stream_id, source_user_agent: None })
+        Some(Self { virtual_id, input_stream_id, upstream_user_agent: None })
     }
 
     pub(in crate::api) fn from_playlist_item(item: &impl PlaylistEntry) -> Option<Self> {
         let mut identity = Self::new(item.get_virtual_id(), item.get_input_stream_id()?)?;
-        identity.source_user_agent = item.get_source_user_agent().map(Internable::intern);
+        identity.upstream_user_agent = item.get_upstream_user_agent().map(Internable::intern);
         Some(identity)
     }
 
@@ -2234,7 +2234,7 @@ impl HlsEntryStreamIdentity {
 
     fn stream_ref(&self) -> &str { self.input_stream_id.as_ref() }
 
-    fn source_user_agent(&self) -> Option<&str> { self.source_user_agent.as_deref() }
+    fn upstream_user_agent(&self) -> Option<&str> { self.upstream_user_agent.as_deref() }
 }
 
 /// Resolves the configured input together with both identities of one target entry.
@@ -5284,7 +5284,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
         req_headers,
         disabled_headers.as_ref(),
         default_user_agent.as_deref(),
-        stream_identity.source_user_agent(),
+        stream_identity.upstream_user_agent(),
     );
 
     if hls_cache_enabled_for_target(app_state, target) {
@@ -5594,7 +5594,7 @@ async fn resolve_stream_channel(
             technical: None,
             epg_channel_id: None,
             epg_reference_ts: None,
-            source_user_agent: None,
+            upstream_user_agent: None,
         },
     };
 
@@ -5664,7 +5664,7 @@ async fn resolve_hls_playback_manifest_request_context(
         req_headers,
         disabled_headers.as_ref(),
         default_user_agent.as_deref(),
-        channel.source_user_agent.as_deref(),
+        channel.upstream_user_agent.as_deref(),
     );
 
     let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, access_context.virtual_id);
