@@ -17,6 +17,17 @@ pub(crate) fn safe_stalker_url(value: &str) -> String {
     url.into()
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StalkerErrorUrl(String);
+
+impl From<&str> for StalkerErrorUrl {
+    fn from(value: &str) -> Self { Self(safe_stalker_url(value)) }
+}
+
+impl From<String> for StalkerErrorUrl {
+    fn from(value: String) -> Self { Self::from(value.as_str()) }
+}
+
 /// Failure modes surfaced by the Stalker portal client. The variants cover both transport
 /// errors (network, body caps, JSONP decoding) and protocol-level errors (token rejection,
 /// portal refusal, missing playable URL). `Status`-flavored variants carry the upstream
@@ -24,10 +35,10 @@ pub(crate) fn safe_stalker_url(value: &str) -> String {
 #[derive(Debug, Error)]
 pub enum StalkerError {
     #[error("stalker portal handshake failed: {message}")]
-    HandshakeFailed { message: String, url: Option<String> },
+    HandshakeFailed { message: String, url: Option<StalkerErrorUrl> },
 
     #[error("stalker portal rejected the token (status {status})")]
-    TokenRejected { status: u16, url: Option<String> },
+    TokenRejected { status: u16, url: Option<StalkerErrorUrl> },
 
     #[error("stalker portal body reported code {code} for {action}: {body_snippet}")]
     PortalBodyError { code: u16, action: String, body_snippet: String },
@@ -129,15 +140,18 @@ mod tests {
 
     #[test]
     fn stalker_error_urls_drop_userinfo_query_and_fragment() {
-        let safe = safe_stalker_url(
-            "https://user:pass@portal.example/server/load.php?token=secret&mac=00:11:22:33:44:55#fragment",
-        );
-        assert_eq!(safe, "https://portal.example/server/load.php");
+        let raw = "https://user:pass@portal.example/server/load.php?token=secret&mac=00:11:22:33:44:55#fragment";
+        let errors = [
+            StalkerError::HandshakeFailed { message: "failed".to_string(), url: Some(raw.into()) },
+            StalkerError::TokenRejected { status: 401, url: Some(raw.into()) },
+        ];
 
-        let error = StalkerError::HandshakeFailed { message: "failed".to_string(), url: Some(safe) };
-        let debug = format!("{error:?}");
-        for secret in ["user", "pass", "secret", "00:11:22:33:44:55", "fragment"] {
-            assert!(!debug.contains(secret), "error debug output leaked {secret}");
+        for error in errors {
+            let debug = format!("{error:?}");
+            assert!(debug.contains("https://portal.example/server/load.php"));
+            for secret in ["user", "pass", "secret", "00:11:22:33:44:55", "fragment"] {
+                assert!(!debug.contains(secret), "error debug output leaked {secret}");
+            }
         }
     }
 }

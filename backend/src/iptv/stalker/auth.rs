@@ -174,12 +174,12 @@ async fn perform_handshake_against(
         if matches!(status.as_u16(), 401 | 403 | 456) {
             return Err(StalkerError::TokenRejected {
                 status: status.as_u16(),
-                url: Some(safe_stalker_url(&load_url.load_url)),
+                url: Some(load_url.load_url.as_str().into()),
             });
         }
         return Err(StalkerError::HandshakeFailed {
             message: format!("handshake status {}", status.as_u16()),
-            url: Some(safe_stalker_url(&load_url.load_url)),
+            url: Some(load_url.load_url.as_str().into()),
         });
     }
     let parsed: StalkerHandshakeResponse = client.decode_body_bytes(&body, "handshake")?;
@@ -197,7 +197,7 @@ async fn perform_handshake_against(
     let Some(token) = token else {
         return Err(StalkerError::HandshakeFailed {
             message: "no token in handshake response".to_string(),
-            url: Some(safe_stalker_url(&load_url.load_url)),
+            url: Some(load_url.load_url.as_str().into()),
         });
     };
     let evidence = parsed
@@ -266,7 +266,7 @@ async fn perform_do_auth(
     if matches!(value.get("js"), Some(Value::Bool(false))) {
         return Err(StalkerError::HandshakeFailed {
             message: "portal rejected do_auth credentials".to_string(),
-            url: Some(safe_stalker_url(&load_url.load_url)),
+            url: Some(load_url.load_url.as_str().into()),
         });
     }
     Ok(())
