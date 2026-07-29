@@ -315,7 +315,7 @@ qos_aggregation:
     fn prepare_disables_qos_aggregation_when_stream_history_is_disabled() {
         let mut cfg = ReverseProxyConfigDto {
             rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
-            qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 300 }),
+            qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 300, ..Default::default() }),
             ..Default::default()
         };
 
@@ -329,7 +329,7 @@ qos_aggregation:
         let mut cfg = ReverseProxyConfigDto {
             rewrite_secret: "00112233445566778899aabbccddeeff".to_string(),
             stream_history: Some(StreamHistoryConfigDto { stream_history_enabled: true, ..Default::default() }),
-            qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 0 }),
+            qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 0, ..Default::default() }),
             ..Default::default()
         };
 

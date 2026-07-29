@@ -510,6 +510,7 @@ reverse_proxy:
   qos_aggregation:
     enabled: true
     interval_secs: 300
+    compaction_interval_secs: 86400
 ```
 
 ### QoS Aggregation Parameters
@@ -518,6 +519,7 @@ reverse_proxy:
 | :--- | :--- | :--- | :--- |
 | `enabled` | Bool | `false` | Enables the background QoS worker. Only effective if `stream_history.stream_history_enabled` is also `true`. |
 | `interval_secs` | Int | `300` | Polling interval for the aggregation loop. Lower values update snapshots faster but increase background disk and CPU work. |
+| `compaction_interval_secs` | Int | `86400` | Rebuilds `qos_snapshot.db` at this interval to reclaim B+Tree storage from expired snapshots. Set to `0` to disable automatic compaction; this does not change the rolling 30-day QoS summaries. |
 
 ### Technical Background
 

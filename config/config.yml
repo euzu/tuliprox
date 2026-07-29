@@ -102,6 +102,7 @@ reverse_proxy:
   # qos_aggregation:
   #   enabled: true
   #   interval_secs: 300
+  #   compaction_interval_secs: 86400
   rewrite_secret: ${env:TULIPROX_PROXY_REWRITE_SECRET} # use openssl rand -hex 16
 
 library:
