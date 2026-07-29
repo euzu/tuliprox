@@ -1680,6 +1680,7 @@ output:
     cleanup: false
     underscore_whitespace: false
     add_quality_to_filename: true
+    use_metadata: false
     strm_props:
       - "#KODIPROP:seekable=true"
       - "#KODIPROP:inputstream=inputstream.ffmpeg"
@@ -1694,18 +1695,19 @@ Generates local `.strm` files for Emby, Jellyfin, or Kodi-based library ingestio
 
 #### `strm` Parameters
 
-| Parameter                 | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                       |
-|:--------------------------|:-------|:--------:|:--------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `type`                    | Enum   |   Yes    |         | Must be `strm`. Generates filesystem-based `.strm` references instead of a network playlist format.                                                                                                                 |
-| `directory`               | String |   Yes    |         | Target directory where `.strm` files are written. This is the root Tuliprox manages for exported media stubs and must be chosen carefully to avoid overlap with real media directories.                             |
-| `username`                | String |    No    |         | Optional username context used when generating stream references. This affects which user-specific URL or access context Tuliprox embeds into the exported `.strm` files.                                           |
-| `underscore_whitespace`   | Bool   |    No    | `false` | Replaces whitespace with `_` in paths and filenames. This improves compatibility with environments or scrapers that prefer filesystem-safe, normalized naming.                                                      |
-| `cleanup`                 | Bool   |    No    | `false` | If enabled, Tuliprox removes orphaned output files from the STRM directory. This keeps the export directory synchronized with the target, but can delete files if the directory points to an existing media folder. |
-| `style`                   | Enum   |   Yes    |         | Naming convention for the output structure. Supported values: `kodi`, `emby`, `jellyfin`. This affects scraper compatibility and how downstream media servers identify titles.                                      |
-| `flat`                    | Bool   |    No    | `false` | If enabled, Tuliprox creates a flatter directory structure. This changes how categories and group information are represented on disk and can simplify some media-server imports.                                   |
-| `strm_props`              | List   |    No    |         | Stream property lines inserted into `.strm` files, mainly for Kodi player behavior. This allows low-level playback hints to be embedded directly into generated files.                                              |
-| `add_quality_to_filename` | Bool   |    No    | `false` | Appends detected media quality tags such as `[1080p 4K HEVC HDR]` to the filename. This improves visibility in library UIs but depends on prior probing/enrichment data being available.                            |
-| `filter`                  | String |    No    |         | Optional STRM-only output filter. Useful when only a subset of the target should be materialized as filesystem entries.                                                                                             |
+| Parameter                 | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                                             |
+|:--------------------------|:-------|:--------:|:--------|:------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `type`                    | Enum   |   Yes    |         | Must be `strm`. Generates filesystem-based `.strm` references instead of a network playlist format.                                                                                                                                       |
+| `directory`               | String |   Yes    |         | Target directory where `.strm` files are written. This is the root Tuliprox manages for exported media stubs and must be chosen carefully to avoid overlap with real media directories.                                                   |
+| `username`                | String |    No    |         | Optional username context used when generating stream references. This affects which user-specific URL or access context Tuliprox embeds into the exported `.strm` files.                                                                 |
+| `underscore_whitespace`   | Bool   |    No    | `false` | Replaces whitespace with `_` in paths and filenames. This improves compatibility with environments or scrapers that prefer filesystem-safe, normalized naming.                                                                            |
+| `cleanup`                 | Bool   |    No    | `false` | If enabled, Tuliprox removes orphaned output files from the STRM directory. This keeps the export directory synchronized with the target, but can delete files if the directory points to an existing media folder.                       |
+| `style`                   | Enum   |   Yes    |         | Naming convention for the output structure. Supported values: `kodi`, `emby`, `jellyfin`. This affects scraper compatibility and how downstream media servers identify titles.                                                            |
+| `flat`                    | Bool   |    No    | `false` | If enabled, Tuliprox creates a flatter directory structure. This changes how categories and group information are represented on disk and can simplify some media-server imports.                                                         |
+| `strm_props`              | List   |    No    |         | Stream property lines inserted into `.strm` files, mainly for Kodi player behavior. This allows low-level playback hints to be embedded directly into generated files.                                                                    |
+| `add_quality_to_filename` | Bool   |    No    | `false` | Appends detected media quality tags such as `[1080p 4K HEVC HDR]` to the filename. This improves visibility in library UIs but depends on prior probing/enrichment data being available.                                                  |
+| `use_metadata`            | Bool   |    No    | `false` | Uses the media metadata name for STRM filenames and folders. By default, the target's processed title is used, so rename and mapping rules affect the generated paths. If metadata has no name, the processed title remains the fallback. |
+| `filter`                  | String |    No    |         | Optional STRM-only output filter. Useful when only a subset of the target should be materialized as filesystem entries.                                                                                                                   |
 
 #### Supported `style` Conventions
 

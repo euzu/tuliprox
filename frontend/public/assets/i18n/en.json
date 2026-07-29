@@ -757,6 +757,7 @@
       "DIRECTORY": "The filesystem path where .strm files and folder structures are created.",
       "STRM_PROPS": "List of Kodi stream properties (e.g. inputstream=...) to include in .strm files.",
       "UNDERSCORE_WHITESPACE": "If enabled, replaces all spaces with underscores in filenames and paths.",
+      "USE_METADATA": "If enabled, STRM filenames prefer the media metadata name. Otherwise, the target's processed title is used; it remains the fallback when metadata has no name.",
       "USERNAME": "The user whose credentials will be embedded in the .strm URLs."
     },
     "TARGET_FORM": {
@@ -905,6 +906,7 @@
     "ADD_PROPERTY": "Add Property",
     "ADD_PROVIDER": "Add Provider",
     "ADD_QUALITY_TO_FILENAME": "Quality",
+    "USE_METADATA": "Use metadata",
     "ADD_SERVER": "Add Server",
     "ADD_STRIP_ENTRY": "Add Strip Entry",
     "ADD_TRAKT_CHART": "Add a Trakt chart",

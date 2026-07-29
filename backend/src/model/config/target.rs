@@ -14,7 +14,7 @@ use shared::{apply_flags, create_bitset};
 use std::sync::Arc;
 
 create_bitset!(u8, XtreamTargetFlags, SkipLiveDirectSource, SkipVideoDirectSource, SkipSeriesDirectSource);
-create_bitset!(u8, StrmTargetFlags, Flat, UnderscoreWhitespace, Cleanup, AddQualityToFilename);
+create_bitset!(u8, StrmTargetFlags, Flat, UnderscoreWhitespace, Cleanup, AddQualityToFilename, UseMetadata);
 
 #[derive(Clone, Debug)]
 pub struct ProcessTargets {
@@ -121,7 +121,8 @@ impl From<&StrmTargetOutputDto> for StrmTargetOutput {
             (flat, Flat),
             (underscore_whitespace, UnderscoreWhitespace),
             (cleanup, Cleanup),
-            (add_quality_to_filename, AddQualityToFilename)
+            (add_quality_to_filename, AddQualityToFilename),
+            (use_metadata, UseMetadata)
         );
         Self {
             directory: dto.directory.clone(),
@@ -148,6 +149,7 @@ impl From<&StrmTargetOutput> for StrmTargetOutputDto {
             filter: instance.filter.as_ref().map(ToString::to_string),
             t_filter: instance.filter.clone(),
             add_quality_to_filename: instance.flags.contains(StrmTargetFlags::AddQualityToFilename),
+            use_metadata: instance.flags.contains(StrmTargetFlags::UseMetadata),
             probe_probe_size_bytes: instance.probe_probe_size_bytes,
             probe_analyze_duration: instance.probe_analyze_duration,
         }
