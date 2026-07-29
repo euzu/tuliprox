@@ -910,7 +910,7 @@ fn qos_aggregation_changed(old_config: &Config, new_config: &Config) -> bool {
         })
     };
     let qos_tuple = |cfg: Option<&crate::model::QosAggregationConfig>| {
-        cfg.map(|qos| (qos.enabled, qos.interval_secs))
+        cfg.map(|qos| (qos.enabled, qos.interval_secs, qos.compaction_interval_secs))
     };
 
     stream_history_tuple(old_stream_history) != stream_history_tuple(new_stream_history)
@@ -1070,7 +1070,7 @@ mod tests {
                     stream_history_retention_days: 7,
                     stream_history_directory: "/tmp/history".to_string(),
                 }),
-                qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 60 }),
+                qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 60, ..Default::default() }),
                 ..Default::default()
             })),
             ..Config::default()
@@ -1081,6 +1081,27 @@ mod tests {
             if let Some(history) = reverse_proxy.stream_history.as_mut() {
                 history.stream_history_batch_size = 128;
             }
+        }
+
+        assert!(qos_aggregation_changed(&old_config, &new_config));
+    }
+
+    #[test]
+    fn qos_aggregation_changed_detects_compaction_interval_changes() {
+        let old_config = Config {
+            reverse_proxy: Some(crate::model::ReverseProxyConfig::from(&ReverseProxyConfigDto {
+                qos_aggregation: Some(QosAggregationConfigDto {
+                    enabled: true,
+                    interval_secs: 60,
+                    compaction_interval_secs: 86_400,
+                }),
+                ..Default::default()
+            })),
+            ..Config::default()
+        };
+        let mut new_config = old_config.clone();
+        if let Some(qos) = new_config.reverse_proxy.as_mut().and_then(|proxy| proxy.qos_aggregation.as_mut()) {
+            qos.compaction_interval_secs = 3_600;
         }
 
         assert!(qos_aggregation_changed(&old_config, &new_config));
