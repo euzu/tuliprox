@@ -214,12 +214,11 @@ fn extract_item_info(pli: &mut PlaylistItem, use_metadata: bool) -> StrmItemInfo
                 match header.additional_properties.as_ref() {
                     None => (None, None, None, None, None, None, None),
                     Some(props) => (
-                        // If series props are available, check if we have a valid name there
-                        if let StreamProperties::Series(s) = props {
-                            if s.name.is_empty() {
-                                None
+                        if use_metadata {
+                            if let StreamProperties::Series(series) = props {
+                                (!series.name.is_empty()).then(|| series.name.clone())
                             } else {
-                                Some(s.name.clone())
+                                None
                             }
                         } else {
                             None
@@ -1289,8 +1288,8 @@ mod tests {
     use shared::model::ConfigPaths;
     use shared::model::{
         ConfigProviderDto, InputType, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
-        ProviderUrlSelectionPolicy, ProxyType, StreamProperties, StrmExportStyle, VideoStreamDetailProperties,
-        VideoStreamProperties, XtreamCluster,
+        ProviderUrlSelectionPolicy, ProxyType, SeriesStreamProperties, StreamProperties, StrmExportStyle,
+        VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster,
     };
     use std::{collections::HashMap, sync::Arc};
 
@@ -1530,6 +1529,22 @@ mod tests {
         }
     }
 
+    fn make_series_pli(series_name: &str, group: &str) -> PlaylistItem {
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                title: Arc::from("Episode Title"),
+                name: Arc::from(series_name),
+                group: Arc::from(group),
+                item_type: PlaylistItemType::Series,
+                additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+                    name: Arc::from("Metadata Series"),
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            },
+        }
+    }
+
     fn strm_output(style: StrmExportStyle, flags: &[StrmTargetFlags]) -> StrmTargetOutput {
         let mut flag_set = StrmTargetFlagsSet::new();
         for flag in flags {
@@ -1582,6 +1597,21 @@ mod tests {
 
         assert!(files[0].file_name.contains("Metadata Movie"));
         assert!(!files[0].file_name.contains("Mapped Movie"));
+    }
+
+    #[test]
+    fn strm_series_filename_uses_processed_name_without_metadata_flag() {
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: Arc::from("Series"),
+            channels: vec![make_series_pli("Mapped Series", "Series")],
+            xtream_cluster: XtreamCluster::Series,
+        }];
+
+        let files = prepare_strm_files(&mut playlist, &strm_output(StrmExportStyle::Jellyfin, &[]));
+
+        assert!(files[0].file_name.contains("Mapped Series"));
+        assert!(!files[0].file_name.contains("Metadata Series"));
     }
 
     /// The two ways one provider spells the same film in the same category: same tmdb id,
