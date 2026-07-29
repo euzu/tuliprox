@@ -31,6 +31,10 @@ pub fn StrmOutput(props: &StrmOutputProps) -> Html {
                     class: convert_bool_to_chip_style(output.add_quality_to_filename),
                     label: translate.t("LABEL.ADD_QUALITY_TO_FILENAME"),
                 }),
+                Rc::new(Tag {
+                    class: convert_bool_to_chip_style(output.use_metadata),
+                    label: translate.t("LABEL.USE_METADATA"),
+                }),
             ]
         })
     };

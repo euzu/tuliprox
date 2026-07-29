@@ -4,6 +4,10 @@
 
 ## ⚠️ Breaking Changes
 
+- **STRM names now use the processed target title by default**: Previously, STRM folders and filenames preferred the
+  media metadata name. Existing STRM targets that must retain that behavior need `use_metadata: true`; otherwise the
+  next export can generate different paths, and `cleanup: true` can remove the old files.
+
 - **Shared Input Skip Option Names**:
   - Input options now serialize as `skip_live`, `skip_vod`, and `skip_series` instead of the old
     type-prefixed `xtream_skip_*` / `stalker_skip_*` names.
@@ -65,6 +69,10 @@
   paths remain read-compatible, but `style: plex` is no longer accepted in configuration.
 
 ## 🌟 New Features
+
+- **STRM metadata naming option**: STRM outputs now accept `use_metadata: true` to prefer media metadata names for
+  generated folders and filenames. The default remains the target's processed title, so title rename and mapping rules
+  apply to STRM paths without additional configuration.
 
 - **Mapping block `stage` (`processing` / `after_epg`)**:
   - Each `mapping.yml` block now accepts an optional `stage`. The default `processing` keeps the block at the

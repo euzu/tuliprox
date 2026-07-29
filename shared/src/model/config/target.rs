@@ -198,6 +198,8 @@ pub struct StrmTargetOutputDto {
     pub filter: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub add_quality_to_filename: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub use_metadata: bool,
 
     // New Fields for Metadata and Probe
     #[serde(default, skip_serializing_if = "Option::is_none")]

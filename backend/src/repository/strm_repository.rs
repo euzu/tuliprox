@@ -194,7 +194,7 @@ impl StrmItemInfo {
     pub(crate) fn get_file_ts(&self) -> Option<u64> { self.added }
 }
 
-fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
+fn extract_item_info(pli: &mut PlaylistItem, use_metadata: bool) -> StrmItemInfo {
     let header = &mut pli.header;
     // Clone necessary fields cheaply (Arc)
     let group = header.group.clone();
@@ -214,12 +214,11 @@ fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
                 match header.additional_properties.as_ref() {
                     None => (None, None, None, None, None, None, None),
                     Some(props) => (
-                        // If series props are available, check if we have a valid name there
-                        if let StreamProperties::Series(s) = props {
-                            if s.name.is_empty() {
-                                None
+                        if use_metadata {
+                            if let StreamProperties::Series(series) = props {
+                                (!series.name.is_empty()).then(|| series.name.clone())
                             } else {
-                                Some(s.name.clone())
+                                None
                             }
                         } else {
                             None
@@ -249,14 +248,14 @@ fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
             (ep_title, Some(final_series_name), release_date, series_release_date, added, tmdb_id, season, episode)
         }
         PlaylistItemType::Video | PlaylistItemType::LocalVideo => {
-            let (prop_name, release_date, added, tmdb_id) = match header.additional_properties.as_ref() {
+            let (metadata_title, release_date, added, tmdb_id) = match header.additional_properties.as_ref() {
                 None => (None, None, None, None),
                 Some(props) => (
-                    if let StreamProperties::Video(v) = props {
-                        if v.name.is_empty() {
-                            None
+                    if use_metadata {
+                        if let StreamProperties::Video(video) = props {
+                            (!video.name.is_empty()).then(|| video.name.clone())
                         } else {
-                            Some(v.name.clone())
+                            None
                         }
                     } else {
                         None
@@ -267,7 +266,7 @@ fn extract_item_info(pli: &mut PlaylistItem) -> StrmItemInfo {
                 ),
             };
 
-            let final_title = prop_name.unwrap_or_else(|| header.title.clone());
+            let final_title = metadata_title.unwrap_or_else(|| header.title.clone());
 
             (final_title, None, release_date, None, added, tmdb_id, None, None)
         }
@@ -692,7 +691,7 @@ fn prepare_strm_files(new_playlist: &mut [PlaylistGroup], strm_target_output: &S
     // first we create the names to identify name collisions
     for pg in new_playlist.iter_mut() {
         for pli in pg.channels.iter_mut().filter(|c| filter_strm_item(c)) {
-            let strm_item_info = extract_item_info(pli);
+            let strm_item_info = extract_item_info(pli, strm_target_output.flags.contains(StrmTargetFlags::UseMetadata));
 
             let (dir_path, strm_file_name) = style_based_rename(
                 &strm_item_info,
@@ -1289,8 +1288,8 @@ mod tests {
     use shared::model::ConfigPaths;
     use shared::model::{
         ConfigProviderDto, InputType, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
-        ProviderUrlSelectionPolicy, ProxyType, StreamProperties, StrmExportStyle, VideoStreamDetailProperties,
-        VideoStreamProperties, XtreamCluster,
+        ProviderUrlSelectionPolicy, ProxyType, SeriesStreamProperties, StreamProperties, StrmExportStyle,
+        VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster,
     };
     use std::{collections::HashMap, sync::Arc};
 
@@ -1530,6 +1529,22 @@ mod tests {
         }
     }
 
+    fn make_series_pli(series_name: &str, group: &str) -> PlaylistItem {
+        PlaylistItem {
+            header: PlaylistItemHeader {
+                title: Arc::from("Episode Title"),
+                name: Arc::from(series_name),
+                group: Arc::from(group),
+                item_type: PlaylistItemType::Series,
+                additional_properties: Some(StreamProperties::Series(Box::new(SeriesStreamProperties {
+                    name: Arc::from("Metadata Series"),
+                    ..Default::default()
+                }))),
+                ..Default::default()
+            },
+        }
+    }
+
     fn strm_output(style: StrmExportStyle, flags: &[StrmTargetFlags]) -> StrmTargetOutput {
         let mut flag_set = StrmTargetFlagsSet::new();
         for flag in flags {
@@ -1545,6 +1560,58 @@ mod tests {
             probe_probe_size_bytes: None,
             probe_analyze_duration: None,
         }
+    }
+
+    #[test]
+    fn strm_filename_uses_mapped_video_title_over_metadata_title() {
+        let mut item = make_video_pli("Metadata Movie", "Movies", 1, 1, None, None);
+        item.header.title = Arc::from("Mapped Movie");
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: Arc::from("Movies"),
+            channels: vec![item],
+            xtream_cluster: XtreamCluster::Video,
+        }];
+
+        let files = prepare_strm_files(&mut playlist, &strm_output(StrmExportStyle::Jellyfin, &[]));
+
+        assert!(files[0].file_name.contains("Mapped Movie"));
+        assert!(!files[0].file_name.contains("Metadata Movie"));
+    }
+
+    #[test]
+    fn strm_filename_uses_metadata_title_when_configured() {
+        let mut item = make_video_pli("Metadata Movie", "Movies", 1, 1, None, None);
+        item.header.title = Arc::from("Mapped Movie");
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: Arc::from("Movies"),
+            channels: vec![item],
+            xtream_cluster: XtreamCluster::Video,
+        }];
+
+        let files = prepare_strm_files(
+            &mut playlist,
+            &strm_output(StrmExportStyle::Jellyfin, &[StrmTargetFlags::UseMetadata]),
+        );
+
+        assert!(files[0].file_name.contains("Metadata Movie"));
+        assert!(!files[0].file_name.contains("Mapped Movie"));
+    }
+
+    #[test]
+    fn strm_series_filename_uses_processed_name_without_metadata_flag() {
+        let mut playlist = vec![PlaylistGroup {
+            id: 1,
+            title: Arc::from("Series"),
+            channels: vec![make_series_pli("Mapped Series", "Series")],
+            xtream_cluster: XtreamCluster::Series,
+        }];
+
+        let files = prepare_strm_files(&mut playlist, &strm_output(StrmExportStyle::Jellyfin, &[]));
+
+        assert!(files[0].file_name.contains("Mapped Series"));
+        assert!(!files[0].file_name.contains("Metadata Series"));
     }
 
     /// The two ways one provider spells the same film in the same category: same tmdb id,

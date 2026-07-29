@@ -27,6 +27,7 @@ const LABEL_CLEANUP: &str = "LABEL.CLEANUP";
 const LABEL_STRM_PROPS: &str = "LABEL.STRM_PROPS";
 const LABEL_FILTER: &str = "LABEL.FILTER";
 const LABEL_ADD_QUALITY_TO_FILENAME: &str = "LABEL.ADD_QUALITY_TO_FILENAME";
+const LABEL_USE_METADATA: &str = "LABEL.USE_METADATA";
 const LABEL_ADD_PROPERTY: &str = "LABEL.ADD_PROPERTY";
 const LABEL_MAIN: &str = "LABEL.MAIN_CONFIG";
 const LABEL_OPTIONS: &str = "LABEL.OPTIONS";
@@ -90,6 +91,7 @@ generate_form_reducer!(
         StrmProps => strm_props: Option<Vec<String>>,
         Filter => filter: Option<String>,
         AddQualityToFilename => add_quality_to_filename: bool,
+        UseMetadata => use_metadata: bool,
     }
 );
 
@@ -197,6 +199,7 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
                     { config_field_bool!(output_form_state.form, translate.t(LABEL_UNDERSCORE_WHITESPACE), underscore_whitespace) }
                     { config_field_bool!(output_form_state.form, translate.t(LABEL_CLEANUP), cleanup) }
                     { config_field_bool!(output_form_state.form, translate.t(LABEL_ADD_QUALITY_TO_FILENAME), add_quality_to_filename) }
+                    { config_field_bool!(output_form_state.form, translate.t(LABEL_USE_METADATA), use_metadata) }
                     { config_field_custom!(
                         translate.t(LABEL_STRM_PROPS),
                         output_form_state.form.strm_props.as_ref().map_or_else(String::new, |props| props.join(", "))
@@ -210,6 +213,7 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
                     { edit_field_bool!(output_form_state, translate.t(LABEL_UNDERSCORE_WHITESPACE), underscore_whitespace, StrmTargetOutputFormAction::UnderscoreWhitespace) }
                     { edit_field_bool!(output_form_state, translate.t(LABEL_CLEANUP), cleanup, StrmTargetOutputFormAction::Cleanup) }
                     { edit_field_bool!(output_form_state, translate.t(LABEL_ADD_QUALITY_TO_FILENAME), add_quality_to_filename, StrmTargetOutputFormAction::AddQualityToFilename) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_USE_METADATA), use_metadata, StrmTargetOutputFormAction::UseMetadata) }
                     { edit_field_list_option!(output_form_state, translate.t(LABEL_STRM_PROPS), strm_props, StrmTargetOutputFormAction::StrmProps, translate.t(LABEL_ADD_PROPERTY)) }
                 </Card>
             }
