@@ -4,6 +4,7 @@ use shared::model::QosAggregationConfigDto;
 pub struct QosAggregationConfig {
     pub enabled: bool,
     pub interval_secs: u64,
+    pub compaction_interval_secs: u64,
 }
 
 impl From<&QosAggregationConfigDto> for QosAggregationConfig {
@@ -11,6 +12,7 @@ impl From<&QosAggregationConfigDto> for QosAggregationConfig {
         Self {
             enabled: dto.enabled,
             interval_secs: dto.interval_secs,
+            compaction_interval_secs: dto.compaction_interval_secs,
         }
     }
 }
@@ -20,6 +22,7 @@ impl From<&QosAggregationConfig> for QosAggregationConfigDto {
         Self {
             enabled: config.enabled,
             interval_secs: config.interval_secs,
+            compaction_interval_secs: config.compaction_interval_secs,
         }
     }
 }

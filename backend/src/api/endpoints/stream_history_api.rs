@@ -1188,6 +1188,7 @@ mod tests {
                 qos_aggregation: Some(QosAggregationConfig {
                     enabled: false,
                     interval_secs: 300,
+                    compaction_interval_secs: 86_400,
                 }),
                 hls_cache: None,
             }),
@@ -1200,6 +1201,7 @@ mod tests {
             reverse_proxy.qos_aggregation = Some(QosAggregationConfig {
                 enabled: true,
                 interval_secs: 300,
+                compaction_interval_secs: 86_400,
             });
         }
 

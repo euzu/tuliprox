@@ -13,7 +13,7 @@ use crate::api::model::AppState;
 use crate::model::{Config, StreamHistoryRecord};
 use crate::repository::{
     extract_day_from_filename,
-    QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow,
+    QosAggregationCheckpoint, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow,
     StreamHistoryFileReader,
 };
 use crate::utils::{current_utc_day, now_utc_secs};
@@ -66,6 +66,7 @@ pub(in crate::api) fn exec_qos_aggregation(app_state: &Arc<AppState>, cancel_tok
     let history_dir = PathBuf::from(history.stream_history_directory.clone());
     let storage_dir = PathBuf::from(config.storage_dir.clone());
     let interval = Duration::from_secs(qos.interval_secs.max(1));
+    let compaction_interval_secs = qos.compaction_interval_secs;
     let cancel = cancel_token.clone();
 
     tokio::spawn(async move {
@@ -82,7 +83,7 @@ pub(in crate::api) fn exec_qos_aggregation(app_state: &Arc<AppState>, cancel_tok
             let repo_clone = repo.clone();
             let history_dir_clone = history_dir.clone();
             if let Err(err) = tokio::task::spawn_blocking(move || {
-                run_aggregation_once(&repo_clone, &history_dir_clone, &today)
+                run_aggregation_once(&repo_clone, &history_dir_clone, &today, compaction_interval_secs)
             }).await.unwrap_or_else(|e| Err(std::io::Error::other(e.to_string()))) {
                 warn!("QoS aggregation run failed: {err}");
             }
@@ -102,6 +103,17 @@ pub(crate) fn run_aggregation_once(
     repo: &QosSnapshotRepository,
     history_dir: &Path,
     today_utc: &str,
+    compaction_interval_secs: u64,
+) -> io::Result<()> {
+    run_aggregation_once_at(repo, history_dir, today_utc, compaction_interval_secs, now_utc_secs())
+}
+
+fn run_aggregation_once_at(
+    repo: &QosSnapshotRepository,
+    history_dir: &Path,
+    today_utc: &str,
+    compaction_interval_secs: u64,
+    now_utc_secs: u64,
 ) -> io::Result<()> {
     let mut checkpoint = repo.load_checkpoint()?;
     let days = discover_history_days(history_dir)?;
@@ -128,13 +140,38 @@ pub(crate) fn run_aggregation_once(
     {
         checkpoint.last_completed_day_utc = Some(last_completed_day_utc);
     }
-    checkpoint.last_successful_run_ts_utc = now_utc_secs();
+    checkpoint.last_successful_run_ts_utc = now_utc_secs;
     checkpoint.current_day_utc = Some(today_utc.to_string());
     checkpoint.current_day_revision_secs = current_day_revision.map(|revision| revision.0);
     checkpoint.current_day_revision_len = current_day_revision.map(|revision| revision.1);
     repo.store_checkpoint(&checkpoint)?;
+    if compact_if_due(&mut checkpoint, compaction_interval_secs, now_utc_secs, || repo.compact_snapshots())? {
+        repo.store_checkpoint(&checkpoint)?;
+    }
 
     Ok(())
+}
+
+fn compaction_is_due(last_compaction_at_utc: u64, interval_secs: u64, now_utc_secs: u64) -> bool {
+    interval_secs != 0
+        && (last_compaction_at_utc == 0 || now_utc_secs.saturating_sub(last_compaction_at_utc) >= interval_secs)
+}
+
+fn compact_if_due<F>(
+    checkpoint: &mut QosAggregationCheckpoint,
+    compaction_interval_secs: u64,
+    now_utc_secs: u64,
+    compact: F,
+) -> io::Result<bool>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    if !compaction_is_due(checkpoint.last_compaction_at_utc, compaction_interval_secs, now_utc_secs) {
+        return Ok(false);
+    }
+    compact()?;
+    checkpoint.last_compaction_at_utc = now_utc_secs;
+    Ok(true)
 }
 
 pub(crate) fn fold_record_into_bucket(bucket: &mut QosSnapshotDailyBucket, record: &StreamHistoryRecord) {
@@ -544,12 +581,13 @@ struct HistoryDayFile {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{fold_record_into_bucket, history_day_revision, qos_aggregation_is_enabled, rebuild_windows, run_aggregation_once};
+    use super::{compact_if_due, compaction_is_due, fold_record_into_bucket, history_day_revision, qos_aggregation_is_enabled, rebuild_windows, run_aggregation_once};
     use crate::model::{Config, QosAggregationConfig, ResourceRetryConfig, ReverseProxyConfig, StreamHistoryConfig, StreamHistoryRecord, RECORD_SCHEMA_VERSION};
     use crate::repository::{
         serialize_named, write_block_magic, write_file_magic, write_framed, BlockHeaderBody,
         CompressionKind, FileHeaderBody,
-        QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow, RecordEncodingKind,
+        QosAggregationCheckpoint, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow,
+        RecordEncodingKind,
         CONTAINER_FORMAT_VERSION, SOURCE_KIND_STREAM_HISTORY,
     };
     use crate::utils::current_utc_day;
@@ -810,6 +848,7 @@ mod tests {
                 qos_aggregation: Some(QosAggregationConfig {
                     enabled: true,
                     interval_secs: 300,
+                    compaction_interval_secs: 86_400,
                 }),
             }),
             ..Config::default()
@@ -823,6 +862,25 @@ mod tests {
             }
         }
         assert!(qos_aggregation_is_enabled(&config));
+    }
+
+    #[test]
+    fn compaction_due_respects_the_configured_interval() {
+        assert!(!compaction_is_due(0, 0, 100));
+        assert!(compaction_is_due(0, 60, 100));
+        assert!(!compaction_is_due(41, 60, 100));
+        assert!(compaction_is_due(40, 60, 100));
+        assert!(!compaction_is_due(101, 60, 100));
+    }
+
+    #[test]
+    fn failed_compaction_keeps_the_timestamp_due_for_retry() {
+        let mut checkpoint = QosAggregationCheckpoint::default();
+        assert!(compact_if_due(&mut checkpoint, 60, 100, || Err(std::io::Error::other("test failure"))).is_err());
+        assert_eq!(checkpoint.last_compaction_at_utc, 0);
+
+        assert!(compact_if_due(&mut checkpoint, 60, 100, || Ok(())).expect("retry should succeed"));
+        assert_eq!(checkpoint.last_compaction_at_utc, 100);
     }
 
     #[tokio::test]
@@ -847,7 +905,7 @@ mod tests {
         let repo_c = repo.clone();
         let h_dir = history_dir.clone();
         let now = today.clone();
-        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c, &h_dir, &now))
+        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c, &h_dir, &now, 0))
             .await.unwrap().expect("aggregation should succeed");
 
         let snapshot = repo
@@ -881,13 +939,13 @@ mod tests {
         let repo_c1 = repo.clone();
         let h_dir1 = history_dir.clone();
         let t_day1 = today.clone();
-        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c1, &h_dir1, &t_day1))
+        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c1, &h_dir1, &t_day1, 0))
             .await.unwrap().expect("first aggregation should succeed");
 
         let repo_c2 = repo.clone();
         let h_dir2 = history_dir.clone();
         let t_day2 = today.clone();
-        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c2, &h_dir2, &t_day2))
+        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c2, &h_dir2, &t_day2, 0))
             .await.unwrap().expect("second aggregation should succeed");
 
         let snapshot = repo
@@ -928,7 +986,7 @@ mod tests {
 
         let repo_c1 = repo.clone();
         let h_dir1 = history_dir.clone();
-        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c1, &h_dir1, "2036-04-05"))
+        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c1, &h_dir1, "2036-04-05", 0))
             .await.unwrap().expect("first aggregation should succeed");
 
         let checkpoint = repo.load_checkpoint().expect("checkpoint should load");
@@ -943,7 +1001,7 @@ mod tests {
 
         let repo_c2 = repo.clone();
         let h_dir2 = history_dir.clone();
-        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c2, &h_dir2, "2036-04-05"))
+        tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c2, &h_dir2, "2036-04-05", 0))
             .await.unwrap().expect("second aggregation should succeed");
 
         let checkpoint = repo.load_checkpoint().expect("checkpoint should load");

@@ -236,6 +236,8 @@ pub struct QosAggregationCheckpoint {
     pub current_day_utc: Option<String>,
     pub current_day_revision_secs: Option<u64>,
     pub current_day_revision_len: Option<u64>,
+    #[serde(default)]
+    pub last_compaction_at_utc: u64,
 }
 
 pub struct QosSnapshotRepository {
@@ -294,6 +296,8 @@ impl QosSnapshotRepository {
         tree.commit()?;
         Ok(deleted)
     }
+
+    pub fn compact_snapshots(&self) -> io::Result<()> { self.snapshot_tree.lock().compact() }
 
     pub fn for_each_snapshot<F>(&self, mut visit: F) -> io::Result<()>
     where
@@ -360,6 +364,7 @@ fn load_snapshot_tree(path: &Path) -> io::Result<BPlusTree<String, QosSnapshotRe
 
 #[cfg(test)]
 mod tests {
+    use serde::{Deserialize, Serialize};
     use std::collections::BTreeMap;
     use std::path::Path;
 
@@ -415,10 +420,58 @@ mod tests {
             current_day_utc: Some("2026-04-02".to_string()),
             current_day_revision_secs: Some(1_700_001_000),
             current_day_revision_len: Some(4_096),
+            last_compaction_at_utc: 1_700_001_001,
         };
         repo.store_checkpoint(&checkpoint).expect("store checkpoint should succeed");
         let loaded_checkpoint = repo.load_checkpoint().expect("load checkpoint should succeed");
         assert_eq!(loaded_checkpoint, checkpoint);
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct LegacyQosAggregationCheckpoint {
+        last_completed_day_utc: Option<String>,
+        last_successful_run_ts_utc: u64,
+        current_day_utc: Option<String>,
+        current_day_revision_secs: Option<u64>,
+        current_day_revision_len: Option<u64>,
+    }
+
+    #[test]
+    fn qos_aggregation_checkpoint_defaults_missing_compaction_timestamp() {
+        let legacy = LegacyQosAggregationCheckpoint {
+            last_completed_day_utc: Some("2026-04-01".to_string()),
+            last_successful_run_ts_utc: 1_700_000_999,
+            current_day_utc: Some("2026-04-02".to_string()),
+            current_day_revision_secs: Some(1_700_001_000),
+            current_day_revision_len: Some(4_096),
+        };
+        let bytes = crate::repository::serialize_named(&legacy).expect("legacy checkpoint should serialize");
+        let checkpoint: QosAggregationCheckpoint =
+            crate::repository::deserialize_named(&bytes).expect("legacy checkpoint should deserialize");
+
+        assert_eq!(checkpoint.last_completed_day_utc, legacy.last_completed_day_utc);
+        assert_eq!(checkpoint.last_successful_run_ts_utc, legacy.last_successful_run_ts_utc);
+        assert_eq!(checkpoint.last_compaction_at_utc, 0);
+    }
+
+    #[test]
+    fn qos_snapshot_repository_compaction_reclaims_deleted_snapshot_storage() {
+        let temp = tempdir().expect("tempdir should succeed");
+        let repo = QosSnapshotRepository::open(temp.path()).expect("repo should open");
+        for index in 0..128 {
+            let snapshot = make_test_snapshot(&format!("stream-{index:03}"), 81);
+            repo.put_snapshot(&snapshot).expect("put snapshot should succeed");
+        }
+        for index in 0..127 {
+            assert!(repo.delete_snapshot(&format!("stream-{index:03}")).expect("delete should succeed"));
+        }
+        let size_before = std::fs::metadata(repo.snapshot_path()).expect("snapshot metadata should load").len();
+
+        repo.compact_snapshots().expect("compaction should succeed");
+
+        assert!(repo.get_snapshot("stream-127").expect("get should succeed").is_some());
+        let size_after = std::fs::metadata(repo.snapshot_path()).expect("snapshot metadata should load").len();
+        assert!(size_after < size_before, "compaction must reclaim snapshot storage");
     }
 
     #[test]

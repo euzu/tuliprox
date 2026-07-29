@@ -457,6 +457,7 @@ mod tests {
             qos_aggregation: Some(QosAggregationConfigDto {
                 enabled: true,
                 interval_secs: 300,
+                ..Default::default()
             }),
             ..Default::default()
         };

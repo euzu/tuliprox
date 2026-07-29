@@ -70,6 +70,10 @@
 
 ## 🌟 New Features
 
+- **QoS snapshot compaction**: `qos_aggregation.compaction_interval_secs` now periodically rebuilds
+  `qos_snapshot.db` to reclaim storage from expired snapshots. It defaults to daily; set it to `0` to disable
+  automatic compaction without changing QoS summary windows.
+
 - **STRM metadata naming option**: STRM outputs now accept `use_metadata: true` to prefer media metadata names for
   generated folders and filenames. The default remains the target's processed title, so title rename and mapping rules
   apply to STRM paths without additional configuration.
