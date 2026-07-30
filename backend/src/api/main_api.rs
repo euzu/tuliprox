@@ -1,7 +1,7 @@
 use crate::{
     api::{
         api_utils::{get_build_time, get_server_time},
-        config_watch::exec_config_watch,
+        tasks::exec_config_watch,
         endpoints::{
             custom_video_stream_api::cvs_api_register,
             download_api::{resume_download_worker_if_needed, spawn_download_services},
@@ -16,7 +16,7 @@ use crate::{
             xtream_api::xtream_api_register,
         },
         hdhomerun_proprietary::spawn_proprietary_tasks,
-        hdhomerun_ssdp::spawn_ssdp_discover_task,
+        tasks::spawn_ssdp_discover_task,
         http_layers::create_cors_layer,
         model::{
             create_cache, create_http_client, create_http_client_no_redirect, create_public_http_client_no_redirect,
@@ -27,7 +27,7 @@ use crate::{
             UpdateGuard, exec_qos_aggregation,
         },
         panel_api::sync_panel_api_exp_dates_on_boot,
-        scheduler::{exec_interner_prune, exec_scheduler},
+        tasks::{exec_interner_prune, exec_scheduler, exec_xtream_expiry_sync},
         serve::serve,
         sys_usage::exec_system_usage,
     },
@@ -693,6 +693,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     }
 
     let server_cancel_token = CancellationToken::new();
+    exec_xtream_expiry_sync(&app_state, &server_cancel_token);
     let server_cancel_token_signal = server_cancel_token.clone();
     let app_state_signal = Arc::clone(&app_state);
     tokio::spawn(async move {

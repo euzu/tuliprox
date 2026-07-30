@@ -1111,29 +1111,27 @@ impl ConfigInputDto {
 
     pub fn update_account_expiration_date(
         &mut self,
-        input_name: &Arc<str>,
-        username: &str,
+        account_name: &str,
         exp_date: i64,
-    ) -> Result<(), TuliproxError> {
-        if &self.name == input_name {
-            if let Some(input_username) = &self.username {
-                if input_username == username {
-                    self.exp_date = Some(exp_date);
-                    return Ok(());
-                }
-            }
+        disable: bool,
+    ) -> Result<bool, TuliproxError> {
+        let (expiration, enabled) = if self.name.as_ref() == account_name {
+            (&mut self.exp_date, &mut self.enabled)
+        } else if let Some(alias) = self
+            .aliases
+            .as_mut()
+            .and_then(|aliases| aliases.iter_mut().find(|alias| alias.name.as_ref() == account_name))
+        {
+            (&mut alias.exp_date, &mut alias.enabled)
+        } else {
+            return Err(TuliproxError::ConfigInput(format!("No input or alias found for account '{account_name}'")));
+        };
+        let changed = *expiration != Some(exp_date) || disable && *enabled;
+        *expiration = Some(exp_date);
+        if disable {
+            *enabled = false;
         }
-
-        if let Some(aliases) = &mut self.aliases {
-            if let Some(alias) = aliases.iter_mut().find(|a| a.username.as_deref() == Some(username)) {
-                alias.exp_date = Some(exp_date);
-                return Ok(());
-            }
-        }
-
-        Err(TuliproxError::ConfigInput(format!(
-            "No matching input or alias found for input '{input_name}' with username '{username}'"
-        )))
+        Ok(changed)
     }
 }
 
