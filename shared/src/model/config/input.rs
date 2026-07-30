@@ -1127,9 +1127,7 @@ impl ConfigInputDto {
             return Err(TuliproxError::ConfigInput(format!("No input or alias found for account '{account_name}'")));
         };
         let changed = *expiration != Some(exp_date) || disable && *enabled;
-        if *expiration != Some(exp_date) {
-            *expiration = Some(exp_date);
-        }
+        *expiration = Some(exp_date);
         if disable {
             *enabled = false;
         }

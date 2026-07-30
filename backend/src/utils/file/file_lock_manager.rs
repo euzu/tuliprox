@@ -44,7 +44,29 @@ impl FileLockManager {
         if removed > 0 {
             log::debug!("Pruned {removed} unused file locks ({} remaining)", locks.len());
         }
-        self.internal_write_revisions.lock().await.retain(|path, _| path.exists());
+        drop(locks);
+
+        let tracked_revisions = self
+            .internal_write_revisions
+            .lock()
+            .await
+            .iter()
+            .map(|(path, revision)| (path.clone(), *revision))
+            .collect::<Vec<_>>();
+        let mut missing_revisions = Vec::new();
+        for (path, revision) in tracked_revisions {
+            if !matches!(tokio::fs::try_exists(&path).await, Ok(true)) {
+                missing_revisions.push((path, revision));
+            }
+        }
+        if !missing_revisions.is_empty() {
+            let mut revisions = self.internal_write_revisions.lock().await;
+            for (path, revision) in missing_revisions {
+                if revisions.get(&path) == Some(&revision) {
+                    revisions.remove(&path);
+                }
+            }
+        }
     }
 
     pub async fn mark_internal_write_revision(&self, path: &Path) -> io::Result<()> {

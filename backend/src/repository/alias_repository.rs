@@ -574,7 +574,7 @@ pub async fn csv_patch_batch_update_exp_dates(
             }
             if is_header && header_extended {
                 patched.push(HEADER_PREFIX);
-                patched.push_str(&columns.join(";"));
+                push_csv_row(&mut patched, &columns);
                 push_line_ending(&mut patched, has_newline, has_carriage_return);
             } else {
                 patched.push_str(raw_line);
@@ -590,7 +590,7 @@ pub async fn csv_patch_batch_update_exp_dates(
         let exp_index = columns.iter().position(|column| column == FIELD_EXP_DATE);
         let enabled_index = columns.iter().position(|column| column == FIELD_ENABLED);
         let mut values = line.split(CSV_SEPARATOR).map(ToString::to_string).collect::<Vec<_>>();
-        if header_extended {
+        if header_extended && values.len() < columns.len() {
             values.resize(columns.len(), String::new());
         }
         let update = name_index
@@ -598,7 +598,9 @@ pub async fn csv_patch_batch_update_exp_dates(
             .and_then(|name| updates_by_name.get(name.as_str()))
             .copied();
         if let Some(update) = update {
-            values.resize(columns.len(), String::new());
+            if values.len() < columns.len() {
+                values.resize(columns.len(), String::new());
+            }
             matched_account_keys.push(update.account_key.clone());
             if let Some(index) = exp_index {
                 let expiration = shared::utils::unix_ts_to_str_with_format(update.exp_date, "%Y-%m-%d %H:%M:%S")
@@ -616,7 +618,7 @@ pub async fn csv_patch_batch_update_exp_dates(
             }
         }
         if update.is_some() || header_extended {
-            patched.push_str(&values.join(";"));
+            push_csv_row(&mut patched, &values);
             push_line_ending(&mut patched, has_newline, has_carriage_return);
         } else {
             patched.push_str(raw_line);
@@ -629,6 +631,16 @@ pub async fn csv_patch_batch_update_exp_dates(
             .await?;
     }
     Ok((changed, matched_account_keys))
+}
+
+fn push_csv_row(content: &mut String, values: &[String]) {
+    if let Some((first, remaining)) = values.split_first() {
+        content.push_str(first);
+        for value in remaining {
+            content.push(CSV_SEPARATOR);
+            content.push_str(value);
+        }
+    }
 }
 
 fn push_line_ending(content: &mut String, has_newline: bool, has_carriage_return: bool) {
@@ -982,7 +994,7 @@ missing;missing-user;missing-pass;http://missing.example;1;\n",
         let backup_dir = dir.path().join("backups");
         let raw = "# retained comment\n\
 #name;username;password;url;enabled;max_connections;priority;exp_date;custom\n\
-input_1;${env:PATH};${env:XTREAM_PASSWORD};http://provider.tv;1;1;0;2028-11-23 13:12:34;keep-me\n";
+input_1;${env:PATH};${env:XTREAM_PASSWORD};http://provider.tv;1;1;0;2028-11-23 13:12:34;keep-me;trailing-a;trailing-b\n";
         tokio::fs::write(&csv_path, raw).await?;
         let update = BatchExpDateUpdate {
             account_key: "provider/input_1".to_string(),
@@ -1002,7 +1014,35 @@ input_1;${env:PATH};${env:XTREAM_PASSWORD};http://provider.tv;1;1;0;2028-11-23 1
         let written = tokio::fs::read_to_string(csv_path).await?;
         assert!(written.contains("# retained comment"));
         assert!(written.contains("${env:PATH};${env:XTREAM_PASSWORD}"));
-        assert!(written.contains(";keep-me"));
+        assert!(written.contains(";keep-me;trailing-a;trailing-b"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batch_expiry_header_extension_preserves_trailing_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let csv_path = dir.path().join("aliases.csv");
+        let backup_dir = dir.path().join("backups");
+        let raw = "#name;username;password;url;max_connections;priority;custom\n\
+input_1;user;password;http://provider.tv;1;0;keep-me;old-enabled;old-expiry;trailing\n";
+        tokio::fs::write(&csv_path, raw).await?;
+        let update = BatchExpDateUpdate {
+            account_key: "provider/input_1".to_string(),
+            account_name: "input_1".into(),
+            exp_date: 2_000_000_000,
+            disable: true,
+        };
+
+        csv_patch_batch_update_exp_dates(
+            InputType::XtreamBatch,
+            &csv_path,
+            &[update],
+            backup_dir.to_string_lossy().as_ref(),
+        )
+        .await?;
+
+        let written = tokio::fs::read_to_string(csv_path).await?;
+        assert!(written.contains(";trailing"));
         Ok(())
     }
 

@@ -68,8 +68,8 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
     let cancel = cancel_token.clone();
     let watcher_app_state = Arc::clone(app_state);
 
-    let handle_error = move |err: TuliproxError, path: &Path| {
-        let msg = format!("Failed to reload config file {}: {err}", path.display());
+    let handle_error = move |err: TuliproxError, paths: &HashSet<PathBuf>| {
+        let msg = format!("Failed to reload config files [{}]: {err}", format_paths(paths));
         error!("{msg}");
         event_manager.send_event(EventMessage::ServerError(msg));
     };
@@ -147,9 +147,9 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
                         {
                             continue;
                         }
-                        let Some(path) = paths.iter().next() else { continue };
+                        let Some(path) = paths.iter().min() else { continue };
                         if let Err(err) = Box::pin(config_file.reload(path, &watcher_app_state)).await {
-                           handle_error(err, path);
+                           handle_error(err, &paths);
                         }
                     }
                 }
@@ -174,6 +174,12 @@ async fn has_external_source_write(
         }
     }
     false
+}
+
+fn format_paths(paths: &HashSet<PathBuf>) -> String {
+    let mut paths = paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>();
+    paths.sort_unstable();
+    paths.join(", ")
 }
 
 fn get_watch_files(
@@ -218,9 +224,16 @@ pub fn exec_config_watch(app_state: &Arc<AppState>, cancel: &CancellationToken) 
 
 #[cfg(test)]
 mod tests {
-    use super::has_external_source_write;
+    use super::{format_paths, has_external_source_write};
     use crate::utils::FileLockManager;
-    use std::collections::HashSet;
+    use std::{collections::HashSet, path::PathBuf};
+
+    #[test]
+    fn pending_paths_are_formatted_completely_and_deterministically() {
+        let paths = HashSet::from([PathBuf::from("z.yml"), PathBuf::from("a.yml")]);
+
+        assert_eq!(format_paths(&paths), "a.yml, z.yml");
+    }
 
     #[tokio::test]
     async fn external_source_event_is_not_hidden_by_internal_event() -> Result<(), Box<dyn std::error::Error>> {
