@@ -1,9 +1,13 @@
 use crate::{
     api::{
-        model::{is_custom_video_stream_enabled, AppState, CustomVideoStreamType, HlsAccessLeaseId, ProxySessionId},
+        model::{
+            build_hls_standalone_custom_plan, is_custom_video_stream_enabled, AppState, CustomVideoStreamType,
+            HlsAccessLease, HlsAccessLeaseId, HlsRuntimeCustomTailReason, HlsStandaloneCustomAccess,
+            ProxySessionId, TransportStreamBuffer,
+        },
         panel_api::{can_provision_on_exhausted, try_provision_account_on_exhausted},
     },
-    model::{ConfigInput, ProxyUserCredentials},
+    model::{ConfigInput, CustomStreamResponse, ProxyUserCredentials},
 };
 use axum::{
     body::Body,
@@ -16,14 +20,8 @@ use shared::{
     utils::{sanitize_sensitive_info},
     defaults::{CUSTOM_VIDEO_PREFIX}
 };
-use std::{
-    fmt::Write as _,
-    sync::Arc,
-};
+use std::sync::Arc;
 
-const HLS_STATIC_CUSTOM_VIDEO_TARGET_DURATION_SECS: u64 = 10;
-const HLS_STATIC_CUSTOM_VIDEO_EXTINF: &str = "10.0";
-const HLS_STATIC_CUSTOM_VIDEO_SEGMENT_COUNT: usize = 12;
 const PROVISIONING_HLS_TARGET_DURATION_SECS: u64 = 2;
 const PROVISIONING_HLS_EXTINF: &str = "2.000000";
 pub(crate) const CUSTOM_VIDEO_HLS_PROVISIONING_SEGMENT_COUNT: usize =
@@ -341,51 +339,25 @@ pub(crate) fn hls_custom_video_type_configured(app_state: &Arc<AppState>, video_
         return false;
     }
     let custom_stream_response = app_state.app_config.custom_stream_response.load();
-    match video_type {
-        CustomVideoStreamType::ChannelUnavailable => {
-            custom_stream_response.as_ref().and_then(|response| response.channel_unavailable.as_ref()).is_some()
-        }
-        CustomVideoStreamType::UserConnectionsExhausted => {
-            custom_stream_response.as_ref().and_then(|response| response.user_connections_exhausted.as_ref()).is_some()
-        }
-        CustomVideoStreamType::ProviderConnectionsExhausted => custom_stream_response
-            .as_ref()
-            .and_then(|response| response.provider_connections_exhausted.as_ref())
-            .is_some(),
-        CustomVideoStreamType::LowPriorityPreempted => {
-            custom_stream_response.as_ref().and_then(|response| response.low_priority_preempted.as_ref()).is_some()
-        }
-        CustomVideoStreamType::UserAccountExpired => {
-            custom_stream_response.as_ref().and_then(|response| response.user_account_expired.as_ref()).is_some()
-        }
-        CustomVideoStreamType::Provisioning => {
-            custom_stream_response.as_ref().and_then(|response| response.panel_api_provisioning.as_ref()).is_some()
-        }
-        CustomVideoStreamType::HlsSessionOrLeaseExpired => custom_stream_response
-            .as_ref()
-            .and_then(|response| response.hls_session_or_lease_expired.as_ref())
-            .is_some(),
-    }
+    custom_stream_response
+        .as_ref()
+        .and_then(|response| custom_video_asset(response, video_type))
+        .is_some()
 }
 
-fn hls_custom_video_url(base_url: &str, user: &ProxyUserCredentials, video_type: CustomVideoStreamType) -> String {
-    format!(
-        "{}/{CUSTOM_VIDEO_PREFIX}/{HLS_CUSTOM_VIDEO_ROUTE_KIND}/{}/{}/{}.ts",
-        base_url.trim_end_matches('/'),
-        user.username,
-        user.password,
-        video_type
-    )
-}
-
-pub(crate) fn hls_custom_video_manifest_path(
-    user: &ProxyUserCredentials,
+fn custom_video_asset(
+    response: &CustomStreamResponse,
     video_type: CustomVideoStreamType,
-) -> String {
-    format!(
-        "/{CUSTOM_VIDEO_PREFIX}/{HLS_CUSTOM_VIDEO_ROUTE_KIND}/{}/{}/{}.m3u8",
-        user.username, user.password, video_type
-    )
+) -> Option<&TransportStreamBuffer> {
+    match video_type {
+        CustomVideoStreamType::ChannelUnavailable => response.channel_unavailable.as_ref(),
+        CustomVideoStreamType::UserConnectionsExhausted => response.user_connections_exhausted.as_ref(),
+        CustomVideoStreamType::ProviderConnectionsExhausted => response.provider_connections_exhausted.as_ref(),
+        CustomVideoStreamType::LowPriorityPreempted => response.low_priority_preempted.as_ref(),
+        CustomVideoStreamType::UserAccountExpired => response.user_account_expired.as_ref(),
+        CustomVideoStreamType::Provisioning => response.panel_api_provisioning.as_ref(),
+        CustomVideoStreamType::HlsSessionOrLeaseExpired => response.hls_session_or_lease_expired.as_ref(),
+    }
 }
 
 pub(crate) fn hls_panel_provisioning_segment_route_name(index: usize) -> String {
@@ -430,46 +402,77 @@ fn build_hls_panel_provisioning_manifest_body(mut segment_url: impl FnMut(usize)
     );
     for index in 0..CUSTOM_VIDEO_HLS_PROVISIONING_SEGMENT_COUNT {
         let video_url = segment_url(index);
-        let _ = write!(playlist, "#EXTINF:{PROVISIONING_HLS_EXTINF},\n{video_url}\n");
+        playlist.push_str("#EXTINF:");
+        playlist.push_str(PROVISIONING_HLS_EXTINF);
+        playlist.push_str(",\n");
+        playlist.push_str(&video_url);
+        playlist.push('\n');
     }
     playlist
 }
 
-fn build_hls_static_custom_video_manifest_body(video_url: &str) -> String {
-    let mut playlist = format!(
-        "#EXTM3U\n\
-         #EXT-X-VERSION:3\n\
-         #EXT-X-TARGETDURATION:{HLS_STATIC_CUSTOM_VIDEO_TARGET_DURATION_SECS}\n\
-         #EXT-X-MEDIA-SEQUENCE:0\n"
-    );
-    for _ in 0..HLS_STATIC_CUSTOM_VIDEO_SEGMENT_COUNT {
-        let _ = write!(playlist, "#EXTINF:{HLS_STATIC_CUSTOM_VIDEO_EXTINF},\n{video_url}\n");
-    }
-    playlist.push_str("#EXT-X-ENDLIST\n");
-    playlist
-}
-
+#[cfg(test)]
 pub(crate) fn build_hls_custom_video_manifest_body(
     base_url: &str,
     user: &ProxyUserCredentials,
     video_type: CustomVideoStreamType,
-    _now_ms: u64,
-    _virtual_id: Option<u32>,
-) -> String {
+) -> Option<String> {
     if video_type != CustomVideoStreamType::Provisioning {
-        let video_url = hls_custom_video_url(base_url, user, video_type);
-        return build_hls_static_custom_video_manifest_body(&video_url);
+        return None;
     }
 
-    build_hls_panel_provisioning_manifest_body(|index| hls_panel_provisioning_segment_url(base_url, user, index))
+    Some(build_hls_panel_provisioning_manifest_body(|index| {
+        hls_panel_provisioning_segment_url(base_url, user, index)
+    }))
 }
 
-pub(crate) fn hls_custom_video_manifest_response_with_virtual_id(
+pub(crate) async fn hls_custom_video_manifest_response_with_virtual_id(
     app_state: &Arc<AppState>,
     user: &ProxyUserCredentials,
     video_type: CustomVideoStreamType,
     fallback_status: StatusCode,
-    virtual_id: Option<u32>,
+    _virtual_id: Option<u32>,
+) -> axum::response::Response {
+    hls_custom_video_manifest_response_with_access(
+        app_state,
+        user,
+        video_type,
+        fallback_status,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn hls_custom_video_manifest_response_for_access_lease(
+    app_state: &Arc<AppState>,
+    user: &ProxyUserCredentials,
+    video_type: CustomVideoStreamType,
+    fallback_status: StatusCode,
+    lease: &HlsAccessLease,
+) -> axum::response::Response {
+    let access = HlsStandaloneCustomAccess::for_shared_lease(
+        lease.lease_id.clone(),
+        lease.proxy_session_id.clone(),
+        lease.username.clone(),
+        lease.issued_at_ms,
+        lease.valid_until_ms,
+    );
+    hls_custom_video_manifest_response_with_access(
+        app_state,
+        user,
+        video_type,
+        fallback_status,
+        Some(access),
+    )
+    .await
+}
+
+async fn hls_custom_video_manifest_response_with_access(
+    app_state: &Arc<AppState>,
+    user: &ProxyUserCredentials,
+    video_type: CustomVideoStreamType,
+    fallback_status: StatusCode,
+    access: Option<HlsStandaloneCustomAccess>,
 ) -> axum::response::Response {
     if !hls_custom_video_type_configured(app_state, video_type) {
         return fallback_status.into_response();
@@ -478,13 +481,24 @@ pub(crate) fn hls_custom_video_manifest_response_with_virtual_id(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
 
-    hls_response(build_hls_custom_video_manifest_body(
-        &server_info.get_base_url(),
-        user,
-        video_type,
-        current_time_millis(),
-        virtual_id,
-    ))
+    let base_url = server_info.get_base_url();
+    let manifest = if video_type == CustomVideoStreamType::Provisioning {
+        build_hls_panel_provisioning_manifest_body(|index| {
+            hls_panel_provisioning_segment_url(&base_url, user, index)
+        })
+    } else {
+        let Some(reason) = HlsRuntimeCustomTailReason::from_video_type(video_type) else {
+            return fallback_status.into_response();
+        };
+        let access = access.unwrap_or_else(|| HlsStandaloneCustomAccess::for_user(user.username.clone()));
+        let Ok(plan) =
+            build_hls_standalone_custom_plan(app_state, &base_url, access, reason, current_time_millis()).await
+        else {
+            return fallback_status.into_response();
+        };
+        plan.manifest_body.to_string()
+    };
+    hls_response(manifest)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -536,13 +550,18 @@ pub(crate) async fn try_hls_panel_provisioning_manifest_response(
                 server_path.as_deref(),
             ))
         }
-        HlsProvisioningStatus::ProviderExhausted => Some(hls_custom_video_manifest_response_with_virtual_id(
-            app_state,
-            user,
-            CustomVideoStreamType::ProviderConnectionsExhausted,
-            fallback_status,
-            Some(virtual_id),
-        )),
+        HlsProvisioningStatus::ProviderExhausted => {
+            Some(
+                hls_custom_video_manifest_response_with_virtual_id(
+                    app_state,
+                    user,
+                    CustomVideoStreamType::ProviderConnectionsExhausted,
+                    fallback_status,
+                    Some(virtual_id),
+                )
+                .await,
+            )
+        }
     }
 }
 

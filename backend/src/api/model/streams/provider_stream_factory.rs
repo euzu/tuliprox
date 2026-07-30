@@ -1117,12 +1117,9 @@ mod tests {
         model::{ConfigPaths, PlaylistItemType, StreamChannel, XtreamCluster},
         utils::Internable,
     };
-    use std::{
-        fmt::Write as _,
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
     };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -1299,6 +1296,8 @@ mod tests {
         headers: &[(&str, &str)],
         body: Vec<u8>,
     ) -> (reqwest::Response, Arc<AtomicUsize>) {
+        use std::fmt::Write as _;
+
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let requests = Arc::new(AtomicUsize::new(0));

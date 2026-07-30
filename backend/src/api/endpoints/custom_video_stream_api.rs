@@ -1,24 +1,25 @@
 use crate::{
     api::{
-        api_utils::{create_api_proxy_user, mark_response_as_uncompressed},
+        api_utils::create_api_proxy_user,
         endpoints::hls_api::{
             build_virtual_hls_entry_path, hls_panel_provisioning_poll_manifest_response,
             resolve_hls_virtual_source_for_target,
         },
         model::{
             create_custom_video_stream_response, hls_custom_video_manifest_response_with_virtual_id,
-            parse_hls_panel_provisioning_segment_route_name, AppState, CustomVideoStreamType,
-            TransportStreamBuffer,
+            finite_hls_immutable_media_response,
+            parse_hls_panel_provisioning_segment_route_name, resolve_hls_standalone_custom_segment,
+            AppState, CustomVideoStreamType, HlsAccessLeaseId, HlsStandaloneCustomSegmentAccess,
+            HlsStandaloneCustomSegmentError, TransportStreamBuffer,
         },
     },
     auth::{check_network_access_only, resolve_api_user_context, verify_access_token, Fingerprint},
     model::{ConfigTarget, ProxyUserCredentials},
 };
 use axum::{
-    body::Body,
     http::{
-        header::{self, HeaderName},
-        HeaderMap, HeaderValue, StatusCode,
+        header,
+        HeaderMap, HeaderValue, Method, StatusCode,
     },
     response::{IntoResponse, Response},
 };
@@ -28,8 +29,8 @@ use url::form_urlencoded;
 
 const HLS_CVS_CONTENT_TYPE: &str = "video/mp2t";
 const HLS_CVS_MEDIA_EXTENSIONS: &[&str] = &["ts", "mp4", "m4s", "m4v"];
-const ACCEPT_RANGES_VALUE: &str = "bytes";
-const HLS_CVS_CACHE_CONTROL: &str = "no-store";
+const HLS_CVS_PROVISIONING_CACHE_CONTROL: &str = "no-store";
+const HLS_CVS_IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 
 #[derive(Debug, Deserialize)]
 struct ProvisioningManifestQuery {
@@ -90,6 +91,22 @@ fn resolve_hls_cvs_user_context(
     Ok((user, target))
 }
 
+fn resolve_hls_cvs_access_user(
+    app_state: &Arc<AppState>,
+    fingerprint: &Fingerprint,
+    username: &str,
+) -> Result<CvsUserContext, Box<Response>> {
+    let Some((user, target)) = app_state.app_config.get_target_for_username(username) else {
+        return Err(Box::new(app_state.app_config.get_auth_error_status().into_response()));
+    };
+
+    if let Err(e) = check_network_access_only(&user, fingerprint, app_state) {
+        return Err(Box::new(e.into_player_response(app_state.app_config.get_auth_error_status())));
+    }
+
+    Ok((user, target))
+}
+
 async fn cvs_typed_api(
     fingerprint: Fingerprint,
     axum::extract::Path((route_kind, username, password, stream_type)): axum::extract::Path<(
@@ -99,9 +116,22 @@ async fn cvs_typed_api(
         String,
     )>,
     axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
+    method: Method,
     headers: HeaderMap,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
+    if route_kind == "hls" && parse_cvs_standalone_hls_segment_file(&stream_type).is_some() {
+        return cvs_standalone_hls_segment_response(
+            &fingerprint,
+            &username,
+            &password,
+            &stream_type,
+            method,
+            &headers,
+            &app_state,
+        )
+        .await;
+    }
     let route_kind = match route_kind.as_str() {
         "hls" => CvsRouteKind::Hls,
         "ts" => CvsRouteKind::Ts,
@@ -117,6 +147,7 @@ async fn cvs_typed_api(
         raw_query: raw_query.as_deref(),
         app_state: &app_state,
     })
+    .await
 }
 
 async fn cvs_api(
@@ -136,9 +167,10 @@ async fn cvs_api(
         raw_query: raw_query.as_deref(),
         app_state: &app_state,
     })
+    .await
 }
 
-fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
+async fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
     let CvsApiResponseContext {
         fingerprint,
         username,
@@ -174,7 +206,8 @@ fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
                 custom_video_type,
                 StatusCode::NOT_FOUND,
                 None,
-            );
+            )
+            .await;
         }
     }
 
@@ -210,10 +243,79 @@ fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
     }
 
     match route_kind {
-        CvsRouteKind::Hls => create_hls_custom_video_segment_response(app_state, request_headers, custom_video_type),
+        CvsRouteKind::Hls => StatusCode::NOT_FOUND.into_response(),
         CvsRouteKind::Ts => create_custom_video_stream_response(app_state, &fingerprint.addr, custom_video_type)
             .into_response(),
     }
+}
+
+async fn cvs_standalone_hls_segment_response(
+    fingerprint: &Fingerprint,
+    access_lease: &str,
+    asset_fingerprint: &str,
+    segment_file: &str,
+    method: Method,
+    headers: &HeaderMap,
+    app_state: &Arc<AppState>,
+) -> Response {
+    let Some(index) = parse_cvs_standalone_hls_segment_file(segment_file) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let access_lease = HlsAccessLeaseId(access_lease.to_string());
+    let now_ms = current_time_millis();
+    let access =
+        match resolve_hls_standalone_custom_segment(app_state, &access_lease, asset_fingerprint, index, now_ms) {
+            Ok(access) => access,
+            Err(
+                HlsStandaloneCustomSegmentError::InvalidIndex
+                | HlsStandaloneCustomSegmentError::UnknownAccessLease
+                | HlsStandaloneCustomSegmentError::StaleAssetFingerprint,
+            ) => return StatusCode::NOT_FOUND.into_response(),
+        };
+    if let Err(response) =
+        validate_hls_standalone_custom_access(app_state, fingerprint, &access_lease, &access, now_ms).await
+    {
+        return *response;
+    }
+    finite_hls_immutable_media_response(
+        access.bytes,
+        headers.get(header::RANGE),
+        HLS_CVS_CONTENT_TYPE,
+        HLS_CVS_IMMUTABLE_CACHE_CONTROL,
+        method == Method::HEAD,
+    )
+}
+
+async fn validate_hls_standalone_custom_access(
+    app_state: &Arc<AppState>,
+    fingerprint: &Fingerprint,
+    access_lease_id: &HlsAccessLeaseId,
+    access: &HlsStandaloneCustomSegmentAccess,
+    now_ms: u64,
+) -> Result<(), Box<Response>> {
+    if let Some(shared_lease) = access.shared_lease.as_ref() {
+        let lease = app_state
+            .hls_proxy
+            .access_lease_response_snapshot(access_lease_id, &shared_lease.proxy_session_id, now_ms)
+            .await;
+        if !lease.is_some_and(|lease| {
+            lease.issued_at_ms == shared_lease.lease_issued_at_ms
+                && lease.username == access.username.as_ref()
+        }) {
+            return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
+        }
+    }
+    resolve_hls_cvs_access_user(app_state, fingerprint, access.username.as_ref()).map(|_| ())
+}
+
+fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+
+fn parse_cvs_standalone_hls_segment_file(segment_file: &str) -> Option<u16> {
+    let index = segment_file.strip_suffix(".ts")?;
+    if index.is_empty() || !index.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    index.parse().ok()
 }
 
 fn strip_hls_custom_video_media_extension(stream_type: &str) -> &str {
@@ -241,162 +343,24 @@ fn create_hls_provisioning_segment_response(
     build_hls_cvs_response_from_buffer(&video, request_headers.get(header::RANGE))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HlsCvsRange {
-    Full,
-    Partial { start: usize, end: usize },
-    Unsatisfiable,
-}
-
-fn insert_static_header(headers: &mut HeaderMap, name: HeaderName, value: &'static str) {
-    headers.insert(name, HeaderValue::from_static(value));
-}
-
-fn insert_usize_header(headers: &mut HeaderMap, name: HeaderName, value: usize) -> bool {
-    match HeaderValue::from_str(&value.to_string()) {
-        Ok(header_value) => {
-            headers.insert(name, header_value);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-fn insert_string_header(headers: &mut HeaderMap, name: HeaderName, value: &str) -> bool {
-    match HeaderValue::from_str(value) {
-        Ok(header_value) => {
-            headers.insert(name, header_value);
-            true
-        }
-        Err(_) => false,
-    }
-}
-
-fn resolve_hls_cvs_range(range_header: Option<&HeaderValue>, full_size: usize) -> HlsCvsRange {
-    let Some(range_header) = range_header.and_then(|value| value.to_str().ok()) else {
-        return HlsCvsRange::Full;
-    };
-    let Some(range) = range_header.strip_prefix("bytes=") else {
-        return HlsCvsRange::Unsatisfiable;
-    };
-    if full_size == 0 || range.contains(',') {
-        return HlsCvsRange::Unsatisfiable;
-    }
-    let Some((start_raw, end_raw)) = range.split_once('-') else {
-        return HlsCvsRange::Unsatisfiable;
-    };
-    if start_raw.is_empty() {
-        let Ok(suffix_len) = end_raw.parse::<usize>() else {
-            return HlsCvsRange::Unsatisfiable;
-        };
-        if suffix_len == 0 {
-            return HlsCvsRange::Unsatisfiable;
-        }
-        let start = full_size.saturating_sub(suffix_len);
-        return HlsCvsRange::Partial { start, end: full_size - 1 };
-    }
-    let Ok(start) = start_raw.parse::<usize>() else {
-        return HlsCvsRange::Unsatisfiable;
-    };
-    if start >= full_size {
-        return HlsCvsRange::Unsatisfiable;
-    }
-    let end = if end_raw.is_empty() {
-        full_size - 1
-    } else {
-        let Ok(end) = end_raw.parse::<usize>() else {
-            return HlsCvsRange::Unsatisfiable;
-        };
-        if end < start {
-            return HlsCvsRange::Unsatisfiable;
-        }
-        end.min(full_size - 1)
-    };
-    HlsCvsRange::Partial { start, end }
-}
-
 fn build_hls_cvs_response_from_buffer(video: &TransportStreamBuffer, range_header: Option<&HeaderValue>) -> Response {
     // `clone_bytes` returns a `Bytes` (refcount bump) instead of forcing
     // `Bytes::copy_from_slice` to memcpy the entire TS payload each response.
-    let bytes_owned = video.clone_bytes();
-    let full_size = bytes_owned.len();
-    let range = resolve_hls_cvs_range(range_header, full_size);
-    let mut response = match range {
-        HlsCvsRange::Full => {
-            let mut builder = Response::builder().status(StatusCode::OK);
-            let headers = builder.headers_mut().expect("response builder headers should be available");
-            insert_static_header(headers, header::CONTENT_TYPE, HLS_CVS_CONTENT_TYPE);
-            insert_static_header(headers, header::ACCEPT_RANGES, ACCEPT_RANGES_VALUE);
-            insert_static_header(headers, header::CACHE_CONTROL, HLS_CVS_CACHE_CONTROL);
-            if !insert_usize_header(headers, header::CONTENT_LENGTH, full_size) {
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-            builder
-                .body(Body::from(bytes_owned))
-                .map_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response(), IntoResponse::into_response)
-        }
-        HlsCvsRange::Partial { start, end } => {
-            let mut builder = Response::builder().status(StatusCode::PARTIAL_CONTENT);
-            let headers = builder.headers_mut().expect("response builder headers should be available");
-            insert_static_header(headers, header::CONTENT_TYPE, HLS_CVS_CONTENT_TYPE);
-            insert_static_header(headers, header::ACCEPT_RANGES, ACCEPT_RANGES_VALUE);
-            insert_static_header(headers, header::CACHE_CONTROL, HLS_CVS_CACHE_CONTROL);
-            if !insert_usize_header(headers, header::CONTENT_LENGTH, end - start + 1)
-                || !insert_string_header(headers, header::CONTENT_RANGE, &format!("bytes {start}-{end}/{full_size}"))
-            {
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-            // `Bytes::slice` shares the underlying allocation (no copy).
-            builder
-                .body(Body::from(bytes_owned.slice(start..=end)))
-                .map_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response(), IntoResponse::into_response)
-        }
-        HlsCvsRange::Unsatisfiable => {
-            let mut builder = Response::builder().status(StatusCode::RANGE_NOT_SATISFIABLE);
-            let headers = builder.headers_mut().expect("response builder headers should be available");
-            insert_static_header(headers, header::ACCEPT_RANGES, ACCEPT_RANGES_VALUE);
-            insert_static_header(headers, header::CACHE_CONTROL, HLS_CVS_CACHE_CONTROL);
-            insert_static_header(headers, header::CONTENT_LENGTH, "0");
-            if !insert_string_header(headers, header::CONTENT_RANGE, &format!("bytes */{full_size}")) {
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-            builder
-                .body(Body::empty())
-                .map_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response(), IntoResponse::into_response)
-        }
-    };
-    mark_response_as_uncompressed(&mut response);
-    response
+    build_hls_cvs_response_from_bytes(video.clone_bytes(), range_header, false)
 }
 
-fn hls_custom_video_buffer(
-    app_state: &Arc<AppState>,
-    custom_video_type: CustomVideoStreamType,
-) -> Option<TransportStreamBuffer> {
-    let custom_stream_response = app_state.app_config.custom_stream_response.load();
-    let custom_stream_response = custom_stream_response.as_ref()?;
-    match custom_video_type {
-        CustomVideoStreamType::ChannelUnavailable => custom_stream_response.channel_unavailable.clone(),
-        CustomVideoStreamType::UserConnectionsExhausted => custom_stream_response.user_connections_exhausted.clone(),
-        CustomVideoStreamType::ProviderConnectionsExhausted => custom_stream_response.provider_connections_exhausted.clone(),
-        CustomVideoStreamType::LowPriorityPreempted => custom_stream_response.low_priority_preempted.clone(),
-        CustomVideoStreamType::UserAccountExpired => custom_stream_response.user_account_expired.clone(),
-        CustomVideoStreamType::Provisioning => custom_stream_response.panel_api_provisioning.clone(),
-        CustomVideoStreamType::HlsSessionOrLeaseExpired => {
-            custom_stream_response.hls_session_or_lease_expired.clone()
-        }
-    }
-}
-
-fn create_hls_custom_video_segment_response(
-    app_state: &Arc<AppState>,
-    request_headers: &HeaderMap,
-    custom_video_type: CustomVideoStreamType,
+fn build_hls_cvs_response_from_bytes(
+    bytes_owned: bytes::Bytes,
+    range_header: Option<&HeaderValue>,
+    head_only: bool,
 ) -> Response {
-    let Some(video) = hls_custom_video_buffer(app_state, custom_video_type) else {
-        return StatusCode::FORBIDDEN.into_response();
-    };
-    build_hls_cvs_response_from_buffer(&video, request_headers.get(header::RANGE))
+    finite_hls_immutable_media_response(
+        bytes_owned,
+        range_header,
+        HLS_CVS_CONTENT_TYPE,
+        HLS_CVS_PROVISIONING_CACHE_CONTROL,
+        head_only,
+    )
 }
 
 async fn cvs_provisioning_manifest_api(
@@ -423,7 +387,7 @@ async fn cvs_provisioning_manifest_api(
         &user,
         &target,
         &source.input,
-        &source.stream_identity,
+        source.stream_context.identity(),
         &original_hls_entry_path,
         server_path.as_deref(),
     )
@@ -442,10 +406,7 @@ pub fn cvs_api_register() -> axum::Router<Arc<AppState>> {
 
 #[cfg(test)]
 mod hls_cvs_tests {
-    use super::{
-        build_hls_cvs_response_from_buffer, resolve_hls_cvs_range, strip_hls_custom_video_media_extension,
-        HlsCvsRange,
-    };
+    use super::{build_hls_cvs_response_from_buffer, strip_hls_custom_video_media_extension};
     use crate::api::model::TransportStreamBuffer;
     use axum::{
         body::to_bytes,
@@ -468,33 +429,6 @@ mod hls_cvs_tests {
 
     async fn response_body(response: axum::response::Response) -> bytes::Bytes {
         to_bytes(response.into_body(), usize::MAX).await.expect("body should collect")
-    }
-
-    #[test]
-    fn hls_cvs_range_zero_open_resolves_to_full_partial_range() {
-        let range = HeaderValue::from_static("bytes=0-");
-
-        assert_eq!(
-            resolve_hls_cvs_range(Some(&range), 376),
-            HlsCvsRange::Partial { start: 0, end: 375 }
-        );
-    }
-
-    #[test]
-    fn hls_cvs_suffix_range_resolves_from_tail() {
-        let range = HeaderValue::from_static("bytes=-10");
-
-        assert_eq!(
-            resolve_hls_cvs_range(Some(&range), 376),
-            HlsCvsRange::Partial { start: 366, end: 375 }
-        );
-    }
-
-    #[test]
-    fn hls_cvs_multi_range_is_unsatisfiable() {
-        let range = HeaderValue::from_static("bytes=0-1,4-5");
-
-        assert_eq!(resolve_hls_cvs_range(Some(&range), 376), HlsCvsRange::Unsatisfiable);
     }
 
     #[test]
@@ -552,11 +486,14 @@ mod hls_cvs_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::cvs_api_register;
+    use super::{cvs_api_register, parse_cvs_standalone_hls_segment_file};
     use crate::{
         api::model::{
-            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadQueue,
-            EventManager, HlsProvisioningState, HlsProxyManager, MetadataUpdateManager, PlaylistStorageState,
+            build_hls_standalone_custom_plan, hls_custom_video_manifest_response_for_access_lease,
+            ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager,
+            CustomVideoStreamType, DownloadQueue, EventManager, HlsAccessLease, HlsAccessLeaseId,
+            HlsPlaybackFamilyKey, HlsProvisioningState, HlsProxyManager, HlsRuntimeCustomTailReason,
+            HlsStandaloneCustomAccess, MetadataUpdateManager, PlaylistStorageState, ProxySessionId,
             SharedStreamManager, TransportStreamBuffer, UpdateGuard,
         },
         model::{
@@ -568,7 +505,7 @@ mod tests {
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::{
         body::Body,
-        http::{header, Request, StatusCode},
+        http::{header, Method, Request, StatusCode},
         response::IntoResponse,
         Router,
     };
@@ -585,6 +522,31 @@ mod tests {
             "127.0.0.1".to_string(),
             "127.0.0.1:12345".parse().expect("socket addr"),
         )
+    }
+
+    fn test_custom_stream_response() -> CustomStreamResponse {
+        CustomStreamResponse {
+            channel_unavailable: Some(TransportStreamBuffer::new(
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts")).to_vec(),
+            )),
+            user_connections_exhausted: Some(TransportStreamBuffer::new(
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/user_connections_exhausted.ts")).to_vec(),
+            )),
+            provider_connections_exhausted: Some(TransportStreamBuffer::new(
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/provider_connections_exhausted.ts")).to_vec(),
+            )),
+            low_priority_preempted: Some(TransportStreamBuffer::new(
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/low_priority_preempted.ts")).to_vec(),
+            )),
+            user_account_expired: Some(TransportStreamBuffer::new(
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/user_account_expired.ts")).to_vec(),
+            )),
+            panel_api_provisioning: None,
+            hls_session_or_lease_expired: Some(TransportStreamBuffer::new(
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/hls_session_or_lease_expired.ts")).to_vec(),
+            )),
+            panel_api_provisioning_hls_segments: Vec::new(),
+        }
     }
 
     fn create_test_app_config_with_channel_unavailable() -> AppConfig {
@@ -676,18 +638,9 @@ mod tests {
             media_tools: Arc::new(MediaToolCapabilities::new()),
         };
 
-        let mut ts_packet = vec![0_u8; 188];
-        ts_packet[0] = 0x47;
-        app_cfg.custom_stream_response.store(Some(Arc::new(CustomStreamResponse {
-            channel_unavailable: Some(TransportStreamBuffer::new(ts_packet)),
-            user_connections_exhausted: None,
-            provider_connections_exhausted: None,
-            low_priority_preempted: None,
-            user_account_expired: None,
-            panel_api_provisioning: None,
-            hls_session_or_lease_expired: None,
-            panel_api_provisioning_hls_segments: Vec::new(),
-        })));
+        app_cfg
+            .custom_stream_response
+            .store(Some(Arc::new(test_custom_stream_response())));
         app_cfg
     }
 
@@ -781,7 +734,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hls_cvs_segment_allows_expired_user_custom_response() {
+    async fn hls_cvs_legacy_raw_segment_route_is_not_used_by_finite_manifests() {
         let app_state = create_test_app_state();
         let headers = axum::http::HeaderMap::new();
         let fingerprint = test_fingerprint();
@@ -796,10 +749,10 @@ mod tests {
                 request_headers: &headers,
                 raw_query: None,
                 app_state: &app_state,
-            });
+            })
+            .await;
 
-            assert_eq!(response.status(), StatusCode::OK, "{extension} custom response should be served");
-            assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp2t");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{extension} raw route must stay unavailable");
         }
     }
 
@@ -818,13 +771,420 @@ mod tests {
             request_headers: &headers,
             raw_query: None,
             app_state: &app_state,
-        });
+        })
+        .await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("body should collect");
         let body = String::from_utf8(body.to_vec()).expect("manifest is utf-8");
         assert!(body.contains("#EXTM3U"));
-        assert!(body.contains("/cvs/hls/viewer/secret/channel_unavailable.ts"));
+        let urls = custom_segment_urls(&body);
+        assert_eq!(urls.len(), 12);
+        let (access_lease, asset_fingerprint, index) = standalone_route_parts(urls[0]);
+        assert_eq!(access_lease.len(), 22);
+        assert_eq!(asset_fingerprint.len(), 16);
+        assert_eq!(index, 0);
+        assert!(!body.contains("/viewer/"));
+        assert!(!body.contains("/secret/"));
+        assert!(!body.contains("/channel_unavailable/"));
+    }
+
+    async fn custom_manifest_body(
+        app_state: &Arc<AppState>,
+        video_type: CustomVideoStreamType,
+    ) -> String {
+        let user = app_state.app_config.get_user_credentials("viewer").expect("test user");
+        let response = crate::api::model::hls_custom_video_manifest_response_with_virtual_id(
+            app_state,
+            &user,
+            video_type,
+            StatusCode::NOT_FOUND,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        String::from_utf8(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("custom manifest body")
+                .to_vec(),
+        )
+        .expect("custom manifest utf8")
+    }
+
+    fn custom_segment_urls(manifest: &str) -> Vec<&str> {
+        manifest.lines().filter(|line| !line.is_empty() && !line.starts_with('#')).collect()
+    }
+
+    fn standalone_route_parts(url: &str) -> (String, String, u16) {
+        let parsed = url::Url::parse(url).expect("absolute custom segment URL");
+        let components = parsed.path_segments().expect("custom path components").collect::<Vec<_>>();
+        let count = components.len();
+        let access_lease = components.get(count.saturating_sub(3)).expect("access lease").to_string();
+        let asset_fingerprint = components.get(count.saturating_sub(2)).expect("asset fingerprint").to_string();
+        let index = components
+            .get(count.saturating_sub(1))
+            .and_then(|file| file.strip_suffix(".ts"))
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("custom segment index");
+        (access_lease, asset_fingerprint, index)
+    }
+
+    async fn standalone_segment_response(
+        app_state: Arc<AppState>,
+        url: &str,
+        method: Method,
+        range: Option<&'static str>,
+    ) -> axum::response::Response {
+        let parsed = url::Url::parse(url).expect("absolute custom segment URL");
+        let route_start = parsed.path().rfind("/cvs/").expect("custom segment route");
+        let route_path = &parsed.path()[route_start..];
+        let request_uri = parsed.query().map_or_else(
+            || route_path.to_string(),
+            |query| format!("{route_path}?{query}"),
+        );
+        let mut request = Request::builder().method(method).uri(request_uri);
+        if let Some(range) = range {
+            request = request.header(header::RANGE, range);
+        }
+        let mut request = request.body(Body::empty()).expect("standalone custom segment request");
+        request.extensions_mut().insert(axum::extract::ConnectInfo(test_fingerprint().addr));
+        let router = cvs_api_register().with_state(app_state);
+        Router::into_service(router).oneshot(request).await.expect("standalone custom segment response")
+    }
+
+    fn configured_low_priority_buffer(app_state: &Arc<AppState>) -> TransportStreamBuffer {
+        app_state
+            .app_config
+            .custom_stream_response
+            .load_full()
+            .and_then(|responses| responses.low_priority_preempted.clone())
+            .expect("low-priority test buffer")
+    }
+
+    fn replace_low_priority_asset(app_state: &Arc<AppState>, bytes: Vec<u8>) {
+        let responses = app_state
+            .app_config
+            .custom_stream_response
+            .load_full()
+            .expect("custom responses before reload");
+        let mut revised = responses.as_ref().clone();
+        revised.low_priority_preempted = Some(TransportStreamBuffer::new(bytes));
+        app_state.app_config.custom_stream_response.store(Some(Arc::new(revised)));
+    }
+
+    async fn assert_initial_policy_uses_standalone_finite_response(
+        video_type: CustomVideoStreamType,
+        reason: HlsRuntimeCustomTailReason,
+    ) {
+        let app_state = create_test_app_state();
+        let body = custom_manifest_body(&app_state, video_type).await;
+        let urls = custom_segment_urls(&body);
+        assert_eq!(urls.len(), 12);
+        assert!(body.ends_with("#EXT-X-ENDLIST\n"));
+        assert!(urls.iter().all(|url| !url.contains(&format!("/{}/", reason.as_label()))));
+        let (access_lease, asset_fingerprint, _) = standalone_route_parts(urls[0]);
+        assert!(urls.iter().all(|url| {
+            let (candidate_lease, candidate_fingerprint, _) = standalone_route_parts(url);
+            candidate_lease == access_lease && candidate_fingerprint == asset_fingerprint
+        }));
+        assert_eq!(asset_fingerprint.len(), 16);
+        assert_eq!(urls.iter().copied().collect::<std::collections::HashSet<_>>().len(), 12);
+    }
+
+    #[tokio::test]
+    async fn cold_provider_exhaustion_uses_standalone_finite_response() {
+        assert_initial_policy_uses_standalone_finite_response(
+            CustomVideoStreamType::ProviderConnectionsExhausted,
+            HlsRuntimeCustomTailReason::ProviderConnectionsExhausted,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn initial_user_exhaustion_uses_standalone_finite_response() {
+        assert_initial_policy_uses_standalone_finite_response(
+            CustomVideoStreamType::UserConnectionsExhausted,
+            HlsRuntimeCustomTailReason::UserConnectionsExhausted,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn initial_user_account_expiry_uses_standalone_finite_response() {
+        assert_initial_policy_uses_standalone_finite_response(
+            CustomVideoStreamType::UserAccountExpired,
+            HlsRuntimeCustomTailReason::UserAccountExpired,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn standalone_custom_manifest_uses_unique_segment_urls() {
+        let app_state = create_test_app_state();
+        let body = custom_manifest_body(&app_state, CustomVideoStreamType::LowPriorityPreempted).await;
+        let urls = custom_segment_urls(&body);
+
+        assert_eq!(urls.len(), 12);
+        assert_eq!(urls.iter().copied().collect::<std::collections::HashSet<_>>().len(), urls.len());
+        for (index, url) in urls.iter().enumerate() {
+            assert!(url.ends_with(&format!("/{index}.ts")));
+        }
+    }
+
+    #[test]
+    fn standalone_custom_segment_file_requires_numeric_ts_name() {
+        assert_eq!(parse_cvs_standalone_hls_segment_file("0.ts"), Some(0));
+        assert_eq!(parse_cvs_standalone_hls_segment_file("65535.ts"), Some(u16::MAX));
+        for invalid in ["", ".ts", "index.ts", "+1.ts", "65536.ts", "0.m4s", "0.ts.extra"] {
+            assert_eq!(parse_cvs_standalone_hls_segment_file(invalid), None, "{invalid}");
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_custom_segment_route_serves_generated_ts_uri() {
+        let app_state = create_test_app_state();
+        let body = custom_manifest_body(&app_state, CustomVideoStreamType::LowPriorityPreempted).await;
+        let url = custom_segment_urls(&body)[0];
+
+        let response = standalone_segment_response(app_state, url, Method::GET, None).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mp2t");
+    }
+
+    #[tokio::test]
+    async fn shared_standalone_custom_segment_requires_same_access_lease_incarnation() {
+        let app_state = create_test_app_state();
+        let now_ms = super::current_time_millis();
+        let lease_id = HlsAccessLeaseId("shared-access-lease".to_string());
+        let proxy_session_id = ProxySessionId("shared-proxy-session".to_string());
+        let lease = HlsAccessLease::pending(
+            lease_id.clone(),
+            HlsPlaybackFamilyKey::new("viewer", "client"),
+            proxy_session_id.clone(),
+            "viewer".to_string(),
+            "user-session".to_string(),
+            1,
+            "stream".to_string(),
+            7,
+            now_ms,
+            60_000,
+        );
+        app_state.hls_proxy.prepare_access_lease(lease.clone()).await;
+        let user = app_state.app_config.get_user_credentials("viewer").expect("test user");
+        let response = hls_custom_video_manifest_response_for_access_lease(
+            &app_state,
+            &user,
+            CustomVideoStreamType::ChannelUnavailable,
+            StatusCode::NOT_FOUND,
+            &lease,
+        )
+        .await;
+        let body = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("shared custom manifest")
+                .to_vec(),
+        )
+        .expect("shared custom manifest utf8");
+        let url = custom_segment_urls(&body)[0];
+        assert_eq!(standalone_route_parts(url).0, lease_id.0);
+        assert_eq!(
+            standalone_segment_response(Arc::clone(&app_state), url, Method::GET, None)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+
+        app_state.hls_proxy.access_leases().write().await.remove_access_lease(&lease_id);
+        let replacement = HlsAccessLease::pending(
+            lease_id.clone(),
+            HlsPlaybackFamilyKey::new("viewer", "client"),
+            proxy_session_id,
+            "viewer".to_string(),
+            "replacement-session".to_string(),
+            1,
+            "stream".to_string(),
+            7,
+            now_ms.saturating_add(1),
+            60_000,
+        );
+        app_state.hls_proxy.prepare_access_lease(replacement).await;
+
+        assert_eq!(
+            standalone_segment_response(app_state, url, Method::GET, None).await.status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_custom_segment_route_rejects_non_ts_filename() {
+        let app_state = create_test_app_state();
+        let body = custom_manifest_body(&app_state, CustomVideoStreamType::LowPriorityPreempted).await;
+        let url = custom_segment_urls(&body)[0];
+        let invalid_url = format!("{}.m4s", url.strip_suffix(".ts").expect("generated TS segment URL"));
+
+        let response = standalone_segment_response(app_state, &invalid_url, Method::GET, None).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn standalone_custom_segments_advance_by_exact_asset_duration() {
+        let app_state = create_test_app_state();
+        for reason in [
+            HlsRuntimeCustomTailReason::ChannelUnavailable,
+            HlsRuntimeCustomTailReason::LowPriorityPreempted,
+            HlsRuntimeCustomTailReason::ProviderConnectionsExhausted,
+            HlsRuntimeCustomTailReason::UserConnectionsExhausted,
+            HlsRuntimeCustomTailReason::UserAccountExpired,
+            HlsRuntimeCustomTailReason::SessionOrLeaseExpired,
+        ] {
+            let plan = build_hls_standalone_custom_plan(
+                &app_state,
+                "https://example.test/iptv",
+                HlsStandaloneCustomAccess::for_user("viewer"),
+                reason,
+                super::current_time_millis(),
+            )
+            .await
+            .expect("standalone custom plan");
+
+            assert_eq!(
+                plan.prepared_bundle.source_asset_duration_ticks_90khz,
+                902_400,
+                "{reason:?}"
+            );
+            assert_eq!(plan.prepared_bundle.source_asset_duration_ms, 10_027, "{reason:?}");
+            assert!(plan.manifest_body.contains("#EXTINF:10.027,\n"), "{reason:?}");
+            assert_eq!(plan.prepared_bundle.segments[0].timestamp_offset_ticks_90khz, 0);
+            for pair in plan.prepared_bundle.segments.windows(2) {
+                assert_eq!(
+                    pair[1]
+                        .timestamp_offset_ticks_90khz
+                        .saturating_sub(pair[0].timestamp_offset_ticks_90khz),
+                    902_400,
+                    "{reason:?}"
+                );
+                assert_ne!(pair[0].bytes, pair[1].bytes, "{reason:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_custom_segment_route_keeps_immutable_plan_after_asset_reload() {
+        let app_state = create_test_app_state();
+        let body = custom_manifest_body(&app_state, CustomVideoStreamType::LowPriorityPreempted).await;
+        let url = custom_segment_urls(&body)[0];
+        let before = standalone_segment_response(Arc::clone(&app_state), url, Method::GET, None).await;
+        assert_eq!(before.status(), StatusCode::OK);
+        let before =
+            axum::body::to_bytes(before.into_body(), usize::MAX).await.expect("original immutable body");
+        let mut revised = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/low_priority_preempted.ts")).to_vec();
+        *revised.last_mut().expect("non-empty low-priority asset") ^= 1;
+        replace_low_priority_asset(&app_state, revised);
+
+        let response = standalone_segment_response(app_state, url, Method::GET, None).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("replayed immutable body"),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_custom_segment_route_rejects_wrong_asset_fingerprint() {
+        let app_state = create_test_app_state();
+        let body = custom_manifest_body(&app_state, CustomVideoStreamType::LowPriorityPreempted).await;
+        let url = custom_segment_urls(&body)[0];
+        let (_, asset_fingerprint, _) = standalone_route_parts(url);
+        let wrong_fingerprint = if asset_fingerprint == "0000000000000000" {
+            "1111111111111111"
+        } else {
+            "0000000000000000"
+        };
+        let invalid_url = url.replacen(&asset_fingerprint, wrong_fingerprint, 1);
+
+        let response = standalone_segment_response(app_state, &invalid_url, Method::GET, None).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn standalone_custom_range_requests_slice_prepared_immutable_bytes() {
+        let app_state = create_test_app_state();
+        let plan = build_hls_standalone_custom_plan(
+            &app_state,
+            "https://example.test/iptv",
+            HlsStandaloneCustomAccess::for_user("viewer"),
+            HlsRuntimeCustomTailReason::LowPriorityPreempted,
+            super::current_time_millis(),
+        )
+        .await
+        .expect("standalone custom plan");
+        let url = custom_segment_urls(&plan.manifest_body)[0];
+        let expected = plan.segment_bytes(0).expect("prepared segment zero");
+
+        let response =
+            standalone_segment_response(Arc::clone(&app_state), url, Method::GET, Some("bytes=0-187")).await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "188");
+        assert!(response.headers()[header::CACHE_CONTROL]
+            .to_str()
+            .is_ok_and(|value| value.contains("immutable")));
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("range body"),
+            expected.slice(..188)
+        );
+        let head = standalone_segment_response(app_state, url, Method::HEAD, None).await;
+        assert_eq!(head.status(), StatusCode::OK);
+        assert_eq!(head.headers()[header::CONTENT_LENGTH], expected.len().to_string());
+        assert!(axum::body::to_bytes(head.into_body(), usize::MAX)
+            .await
+            .expect("HEAD body")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn standalone_custom_endpoint_performs_no_request_time_timestamp_rewrite() {
+        let app_state = create_test_app_state();
+        let buffer = configured_low_priority_buffer(&app_state);
+        let body = custom_manifest_body(&app_state, CustomVideoStreamType::LowPriorityPreempted).await;
+        let urls = custom_segment_urls(&body);
+        let render_count = buffer.finite_hls_render_count();
+        let finalize_count = buffer.finite_hls_finalize_count();
+        assert_eq!(render_count, urls.len());
+        assert_eq!(finalize_count, 0);
+
+        for url in urls.iter().take(2) {
+            let response =
+                standalone_segment_response(Arc::clone(&app_state), url, Method::GET, None).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("immutable segment body")
+                .is_empty());
+        }
+
+        assert_eq!(buffer.finite_hls_render_count(), render_count);
+        assert_eq!(buffer.finite_hls_finalize_count(), finalize_count);
+    }
+
+    #[tokio::test]
+    async fn standalone_low_priority_preempted_manifest_has_no_repeated_raw_segment_uri() {
+        let app_state = create_test_app_state();
+        let body = custom_manifest_body(&app_state, CustomVideoStreamType::LowPriorityPreempted).await;
+        let urls = custom_segment_urls(&body);
+
+        assert!(!body.contains("/low_priority_preempted.ts\n"));
+        assert_eq!(urls.iter().copied().collect::<std::collections::HashSet<_>>().len(), 12);
+        assert!(urls.iter().all(|url| !url.contains("/low_priority_preempted/")));
     }
 
     #[tokio::test]
@@ -842,7 +1202,8 @@ mod tests {
             request_headers: &headers,
             raw_query: None,
             app_state: &app_state,
-        });
+        })
+        .await;
 
         assert!(response.status().is_client_error());
     }

@@ -4,6 +4,7 @@ pub(in crate::api) mod download_api;
 mod extract_accept_header;
 pub(in crate::api) mod hdhomerun_api;
 pub(in crate::api) mod hls_api;
+mod hls_terminal_response;
 mod library_api;
 pub(in crate::api) mod m3u_api;
 pub(in crate::api) mod provider_resolve_api;

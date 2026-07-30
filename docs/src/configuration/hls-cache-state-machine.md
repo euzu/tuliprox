@@ -49,9 +49,9 @@ The public canonical paths are:
 
 ## High-level flow
 
-The entry request creates a new playback-specific access lease and redirects the player to the canonical Shared HLS
-manifest. The shared content session is created or reused by the canonical manifest request after access-lease validation
-and admission checks have passed.
+The entry request creates a new playback-specific access lease and returns a single-variant master playlist. Its variant
+points to the canonical Shared HLS media playlist. The shared content session is created or reused by that media-playlist
+request after access-lease validation and admission checks have passed.
 
 ```mermaid
 flowchart TD
@@ -59,18 +59,19 @@ flowchart TD
     B --> C{"Global hls_cache and target share_live_streams.hls?"}
     C -->|no| D["Legacy HLS reverse proxy path"]
     C -->|yes| E["Create new Pending HlsAccessLease"]
-    E --> F["307 redirect to canonical manifest"]
-    F --> G["Validate access lease and restore context"]
-    G --> H["Create or reuse shared HlsSession"]
-    H --> I["Fetch, accept, commit, and render manifest"]
-    I --> J["Segment, MAP, or transient resource request"]
-    J --> K["Activate or refresh access lease"]
-    K --> L["Serve cache hit, demand fetch, prefetch, or transient response"]
+    E --> F["200 single-variant master playlist"]
+    F --> G["GET canonical media-playlist variant"]
+    G --> H["Validate access lease and restore context"]
+    H --> I["Create or reuse shared HlsSession"]
+    I --> J["Fetch, accept, commit, and render media playlist"]
+    J --> K["Segment, MAP, or transient resource request"]
+    K --> L["Activate or refresh access lease"]
+    L --> M["Serve cache hit, demand fetch, prefetch, or transient response"]
 ```
 
-Entry redirects intentionally create distinct access leases for distinct playback starts. A later entry request for the
-same user, fingerprint, and channel does not reuse an already activated lease, and existing pending leases are not used as
-the identity for a new playback.
+Entry master playlists intentionally contain distinct access-lease variants for distinct playback starts. A later entry
+request for the same user, fingerprint, and channel does not reuse an already activated lease, and existing pending leases
+are not used as the identity for a new playback.
 
 ## HlsAccessLease state machine
 
@@ -78,7 +79,7 @@ the identity for a new playback.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending: Entry redirect creates lease
+    [*] --> Pending: Entry master playlist creates lease
 
     Pending --> Pending: Manifest touch
     Pending --> Activated: Segment, MAP, or /r resource request
@@ -104,7 +105,7 @@ stateDiagram-v2
 
 | From | To | Condition |
 | :--- | :--- | :--- |
-| none | `Pending` | Entry request prepares a new access lease and redirects to the canonical manifest. |
+| none | `Pending` | Entry request prepares a new access lease and returns its canonical media-playlist variant in a master playlist. |
 | `Pending` | `Pending` | Canonical manifest validation succeeds. Manifest access alone does not activate the lease. |
 | `Pending` | `Activated` | Segment, MAP, or transient `/r` resource request validates with resource access. |
 | `Pending` | `Expired` | The pending deadline or validity boundary is reached. The boundary is inclusive. |
@@ -206,11 +207,30 @@ The manifest commit policy tracks multiple signals:
 
 | Signal | Purpose |
 | :--- | :--- |
-| Media sequence and visible segment range | Avoids regressive manifests and invalid jumps. |
-| Effective origin host | Avoids unsafe host switches while allowing controlled redirect host pinning. |
+| Media sequence and visible segment range | Host- and origin-epoch-local progress evidence; equal sequence numbers on different effective hosts do not prove continuity or content identity. |
+| Effective origin host and origin epoch | Requires explicit cross-host acceptance and starts a new origin epoch with a discontinuity when the handoff cannot preserve continuity. |
 | Target duration and segment durations | Drives refresh timing, lease active windows, and startup behavior. |
-| Failure counters | Separates temporary origin failures from hard failures that require a fresh commit. |
-| Recovery requirements | Forces fresh manifest decisions during cold start, expired revalidation, hard failures, and provisioning handoff. |
+| Lease-specific READY reserve and playback cursor | Determines when recovery pressure exists, whether startup admission remains safe, and when one lease reaches terminal cutover. |
+| Recovery ETA and transition margin | Starts recovery early enough to execute the configured acceptance plan and prevents waiting beyond usable media reserve. |
+| Failure counters | Drive bounded retry/backoff, circuit-breaking, diagnostics, and explicitly bounded acceptance evidence only. A counter never terminalizes a lease. |
+
+### Origin progress and availability phases
+
+| Phase | Meaning | Availability effect |
+| :--- | :--- | :--- |
+| `PublicationLate` | No publication progress has been observed for `1.5 * TARGETDURATION`. | Lateness evidence only. By itself it neither switches host nor closes admission nor cuts over a lease. |
+| `RecoveryRequired` | Degraded origin evidence and lease reserve/ETA show that recovery work must start. | Opens one generation-bound acceptance episode and temporarily closes new admission while existing leases use their remaining READY reserve. |
+| `Critical` | At least one live lease has reached its reserve/transition boundary without committed recovery. | Evaluates that lease's safe cross-host handoff or prepared terminal decision before its media exhaustion deadline. |
+| `NoAdmission` | Operator shorthand for the closed startup-admission gate; it is not a separate stored origin enum. | New leases are not admitted from insufficient READY startup media. Existing leases are evaluated independently and are not terminalized as a group. |
+
+An acceptance episode owns an immutable candidate plan, timing budget, workload binding, generation, and deadline. The
+first attempt executes the complete configured burst. For the current `beast` profile that means six slots with two
+lanes, or twelve derived candidates; the implementation derives the count from the configured plan. Pinned-host
+candidates retain acceptance priority, while every cross-host winner still requires staged media evidence and a
+generation-safe timeline commit.
+
+Initial strip affects only the READY media actually withheld from the first lease view and the lease's measured start
+distance. It is not a failure, host-switch, or terminal threshold.
 
 A successful commit renders a visible manifest window and queues prefetch work up to `max_segments_prefetch`, subject to
 per-session and global fetch limits.
@@ -229,9 +249,13 @@ A segment request validates the access lease and then looks up the segment objec
 | Ready | Serve from cache, including supported range responses. |
 | Known but not ready | Wait briefly or return `503` with `Retry-After`. |
 | Missing from session timeline | Return an unavailable/expired response depending on context. |
-| Temporary failures below threshold | Keep retrying according to internal retry behavior. |
-| Temporary failure threshold reached | Mark usable access leases channel-unavailable. |
-| Permanent failure | Mark affected leases channel-unavailable. |
+| Retryable or hard origin failure | Update origin-path evidence and bounded retry state; keep serving lease-specific READY reserve when safe. |
+| Lease reserve reaches the transition boundary | Commit a generation-bound prepared terminal decision only after the complete acceptance budget can no longer recover before the safe deadline. |
+
+For a warm canonical manifest request, terminal `channel_unavailable` is not a redirect. The same manifest URL returns an
+immutable HTTP `200` media playlist containing a safe live suffix, a discontinuity, finite lease/generation-bound
+terminal segments, and `#EXT-X-ENDLIST`. The lease remains terminal even if the shared session later recovers for other
+leases. Normal segment, MAP, and `/r` routes never return terminal bytes.
 
 ### MAP objects
 
@@ -278,6 +302,9 @@ the old location.
 | Access lease active window | `2 * target_duration` | Keeps a media-active lease active after resource access. |
 | Access lease valid window | `hls_cache.session_idle_timeout` | Keeps the lease valid before expiry. Default: 300 seconds. |
 | Target duration fallback | 15 seconds | Used before an origin target duration is known. |
+| Publication lateness | `1.5 * target_duration` | Observation signal only; never a cutover or terminal deadline. |
+| Recovery trigger | Lease READY reserve minus full acceptance ETA and transition margin | Starts recovery while the configured burst can still complete. |
+| Terminal cutover | Lease-specific safe commit deadline | Prevents terminal publication after the lease's usable reserve is exhausted. |
 | HLS cache GC interval | 30 seconds | Periodic cleanup cadence for cache objects and stale runtime state. |
 | Temporary file retention | 30 seconds | Retention window for temporary HLS cache files. |
 | Failed segment retention | 10 seconds | Short retention for failed segment state. |
@@ -288,13 +315,17 @@ the old location.
 
 | Area | Main implementation files |
 | :--- | :--- |
-| Public routes and request handling | `backend/src/api/endpoints/hls_api.rs` |
+| Public routes, access checks, and request orchestration | `backend/src/api/endpoints/hls_api.rs` |
+| Immutable terminal manifest/segment responses | `backend/src/api/endpoints/hls_terminal_response.rs` |
 | Access lease model and store | `backend/src/api/model/hls_cache/lease.rs` |
 | Shared session model | `backend/src/api/model/hls_cache/session.rs` |
 | Session manager, lifecycle, runtime config | `backend/src/api/model/hls_cache/manager.rs` |
 | Session identity | `backend/src/api/model/hls_cache/ids.rs` |
 | Origin account binding/protection | `backend/src/api/model/hls_cache/origin.rs` |
 | Manifest refresh and render | `backend/src/api/model/hls_cache/refresh.rs`, `renderer.rs`, `timeline.rs` |
+| Critical lease selection and handoff evidence policy | `backend/src/api/model/hls_cache/critical_handoff.rs` |
+| Prepared terminal bundles and terminal CAS/retry | `prepared_terminal_bundle.rs`, `terminal_commit.rs` |
+| Read-only MPEG-TS compatibility inspection | `ts_inspector.rs` |
 | Segment and MAP fetching | `segment_fetcher.rs`, `map_fetcher.rs` |
 | Transient resource handling | `transient.rs` |
 | Cache and cleanup | `cache.rs`, `gc.rs` |

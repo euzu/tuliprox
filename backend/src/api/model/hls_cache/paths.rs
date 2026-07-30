@@ -3,7 +3,7 @@ use super::TransientResourceId;
 const MIN_PROXY_ID_DIGITS: usize = 6;
 const SEGMENT_EXTENSIONS: &[&str] = &["ts", "mp4", "m4s", "m4v"];
 const MAP_EXTENSIONS: &[&str] = &["mp4", "m4s", "m4v"];
-const TRANSIENT_RESOURCE_EXTENSIONS: &[&str] = &["ts", "mpegts", "mp4", "m4s", "m4v", "key"];
+const TRANSIENT_RESOURCE_EXTENSIONS: &[&str] = &["ts", "mpegts", "mp4", "m4s", "m4v", "key", "bin"];
 
 /// Parsed normal timeline segment file from `/hls/shared/live/{id}/{segment_file}`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +119,7 @@ mod tests {
         );
         assert_eq!(TransientResourceFile::parse("resource_1.m4s").expect("valid transient resource").extension, "m4s");
         assert_eq!(TransientResourceFile::parse("abc-123.key").expect("valid transient resource").extension, "key");
+        assert_eq!(TransientResourceFile::parse("abc-123.bin").expect("valid fallback resource").extension, "bin");
     }
 
     #[test]

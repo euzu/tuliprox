@@ -15,12 +15,15 @@ use crate::{
     utils::{async_file_writer, file_exists_async},
 };
 use indexmap::IndexMap;
-use log::error;
+use log::{error, warn};
 use serde::{Deserialize, Serialize};
 use shared::{
     concat_string,
     error::{str_to_io_error, string_to_io_error, TuliproxError},
-    model::{M3uPlaylistItem, PlaylistGroup, PlaylistItem, PlaylistItemType, XtreamCluster},
+    model::{
+        LiveStreamProperties, M3uPlaylistItem, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties,
+        XtreamCluster,
+    },
     utils::PROVIDER_SCHEME_PREFIX,
 };
 use std::{
@@ -454,11 +457,17 @@ pub async fn persist_input_m3u_playlist(
     let file_lock = app_config.file_locks.write_lock(m3u_path).await;
     let m3u_path_clone = m3u_path.to_path_buf();
 
-    let playlist_items: Vec<M3uPlaylistItem> =
+    let mut playlist_items: Vec<M3uPlaylistItem> =
         playlist.iter().flat_map(|pg| &pg.channels).map(M3uPlaylistItem::from).collect();
 
     task::spawn_blocking(move || -> Result<(), TuliproxError> {
         let _guard = file_lock;
+        if let Err(err) = merge_preserved_m3u_live_metadata(&m3u_path_clone, &mut playlist_items) {
+            warn!(
+                "Failed to preserve learned Live metadata during M3U playlist rewrite for {}: {err}",
+                m3u_path_clone.display()
+            );
+        }
         let mut tree = BPlusTree::new();
         for m3u in &playlist_items {
             tree.insert(m3u.provider_id.clone(), m3u.clone());
@@ -468,6 +477,48 @@ pub async fn persist_input_m3u_playlist(
     })
         .await
         .map_err(|err| TuliproxError::RepositoryM3u(format!("failed to write m3u playlist: {} - {err}", m3u_path.display())))??;
+
+    Ok(())
+}
+
+fn merge_preserved_m3u_live_metadata(
+    m3u_path: &Path,
+    playlist_items: &mut [M3uPlaylistItem],
+) -> Result<(), String> {
+    if !m3u_path.exists() {
+        return Ok(());
+    }
+
+    let mut stored = BPlusTreeQuery::<Arc<str>, M3uPlaylistItem>::try_new(m3u_path)
+        .map_err(|err| format!("failed to open existing input playlist: {err}"))?;
+
+    for item in playlist_items {
+        if item.provider_id.is_empty() {
+            continue;
+        }
+        let previous = stored
+            .query(&item.provider_id)
+            .map_err(|err| format!("failed to read existing input playlist item: {err}"))?;
+        let Some(StreamProperties::Live(previous)) = previous.and_then(|item| item.additional_properties) else {
+            continue;
+        };
+
+        match item.additional_properties.as_mut() {
+            Some(StreamProperties::Live(current)) => {
+                current.merge_learned_metadata_from(&previous);
+            }
+            None if item.item_type.is_live() => {
+                let mut current = LiveStreamProperties::default();
+                if current.merge_learned_metadata_from(&previous) {
+                    item.additional_properties = Some(StreamProperties::Live(Box::new(current)));
+                }
+            }
+            Some(
+                StreamProperties::Video(_) | StreamProperties::Series(_) | StreamProperties::Episode(_),
+            )
+            | None => {}
+        }
+    }
 
     Ok(())
 }
@@ -518,7 +569,68 @@ pub async fn load_input_m3u_playlist(
 
 #[cfg(test)]
 mod tests {
-    use super::replace_m3u_url_line;
+    use super::{persist_input_m3u_playlist, replace_m3u_url_line};
+    use crate::{
+        model::{AppConfig, Config, MediaToolCapabilities, SourcesConfig},
+        repository::BPlusTreeQuery,
+        utils::FileLockManager,
+    };
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::{
+        model::{
+            ConfigPaths, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader,
+            PlaylistItemType, StreamProperties, XtreamCluster,
+        },
+        utils::Internable,
+    };
+    use std::sync::Arc;
+
+    fn test_app_config() -> Arc<AppConfig> {
+        Arc::new(AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        })
+    }
+
+    fn live_playlist(properties: Option<LiveStreamProperties>) -> Vec<PlaylistGroup> {
+        vec![PlaylistGroup {
+            id: 1,
+            title: "Live".intern(),
+            channels: vec![PlaylistItem {
+                header: PlaylistItemHeader {
+                    id: "provider-1".intern(),
+                    input_stream_id: "provider-1".intern(),
+                    name: "Channel".intern(),
+                    group: "Live".intern(),
+                    item_type: PlaylistItemType::Live,
+                    xtream_cluster: XtreamCluster::Live,
+                    additional_properties: properties.map(|properties| StreamProperties::Live(Box::new(properties))),
+                    ..PlaylistItemHeader::default()
+                },
+            }],
+            xtream_cluster: XtreamCluster::Live,
+        }]
+    }
 
     #[test]
     fn replace_m3u_url_line_trims_trailing_whitespace() {
@@ -542,5 +654,47 @@ mod tests {
         let mut line = "http://old".to_string();
         replace_m3u_url_line(&mut line, "http://new");
         assert_eq!(line, "http://old\nhttp://new");
+    }
+
+    #[tokio::test]
+    async fn persist_input_m3u_playlist_preserves_learned_live_metadata_across_full_rewrite() {
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let path = temp.path().join("input.db");
+        let app_config = test_app_config();
+        let learned = LiveStreamProperties {
+            video: Some("learned-video".intern()),
+            audio: Some("learned-audio".intern()),
+            last_probed_timestamp: Some(100),
+            last_success_timestamp: Some(90),
+            bitrate: 2_500_000,
+            ..LiveStreamProperties::default()
+        };
+
+        persist_input_m3u_playlist(&app_config, &path, &live_playlist(Some(learned)))
+            .await
+            .expect("initial playlist should persist");
+        persist_input_m3u_playlist(
+            &app_config,
+            &path,
+            &live_playlist(None),
+        )
+        .await
+        .expect("rewritten playlist should persist");
+
+        let mut query = BPlusTreeQuery::<Arc<str>, shared::model::M3uPlaylistItem>::try_new(&path)
+            .expect("rewritten playlist should open");
+        let item = query
+            .query(&"provider-1".intern())
+            .expect("rewritten playlist should be readable")
+            .expect("live item should remain present");
+        let Some(StreamProperties::Live(properties)) = item.additional_properties else {
+            panic!("expected live properties");
+        };
+
+        assert_eq!(properties.video.as_deref(), Some("learned-video"));
+        assert_eq!(properties.audio.as_deref(), Some("learned-audio"));
+        assert_eq!(properties.last_probed_timestamp, Some(100));
+        assert_eq!(properties.last_success_timestamp, Some(90));
+        assert_eq!(properties.bitrate, 2_500_000);
     }
 }

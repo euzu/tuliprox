@@ -33,7 +33,7 @@ Enable Shared HLS Sessions when these statements are true:
 - the stream type is live HLS;
 - multiple users may watch the same channel at the same time;
 - the provider limits simultaneous connections or penalizes frequent account switching;
-- clients can follow HTTP redirects and play normal HLS playlists;
+- clients can load a single-variant HLS master playlist and its media-playlist variant;
 - Tuliprox reverse proxy mode is used instead of direct provider URLs.
 
 Do not expect this feature to share VOD, series, catchup, or MPEG-TS streams. MPEG-TS stream sharing is controlled by the
@@ -121,8 +121,9 @@ targets:
 2. Tuliprox authenticates the user, resolves the unchanged input stream ID, and checks whether this target allows Shared
    HLS.
 3. Tuliprox creates a new access lease for that playback.
-4. Tuliprox returns an HTTP `307 Temporary Redirect` to the canonical shared HLS manifest URL.
-5. The player follows the redirect and requests `/hls/shared/live/.../manifest.m3u8`.
+4. Tuliprox returns an HTTP `200 OK` single-variant master playlist whose variant is the canonical shared HLS media
+   playlist.
+5. The player loads that variant from `/hls/shared/live/.../manifest.m3u8`.
 6. Tuliprox creates or reuses the shared `HlsSession` for the live channel.
 7. The player requests segments, MAP files, or transient resources through the same access lease.
 8. Segment and MAP requests activate or refresh the lease. When the player stops, the lease idles and is later removed.
@@ -134,11 +135,16 @@ flowchart TD
     B --> C{"Shared HLS enabled?"}
     C -->|no| D["Legacy HLS reverse proxy path"]
     C -->|yes| E["Create per-playback HLS access lease"]
-    E --> F["307 redirect to canonical shared manifest"]
-    F --> G["Create or reuse shared HLS session"]
-    G --> H["Render manifest with this user's access lease"]
-    H --> I["Serve segments, MAPs, or resources from cache or origin"]
+    E --> F["200 single-variant master playlist"]
+    F --> G["Load canonical media-playlist variant"]
+    G --> H["Create or reuse shared HLS session"]
+    H --> I["Render media playlist with this user's access lease"]
+    I --> J["Serve segments, MAPs, or resources from cache or origin"]
 ```
+
+The master playlist advertises one `BANDWIDTH`. Tuliprox prefers a known positive live bitrate, including a value learned
+and persisted by an earlier Shared HLS playback, and adds safety headroom. Until such a value exists, it advertises
+exactly 1 Mbit/s. This metadata does not change the shared session identity.
 
 Canonical Shared HLS URLs look like this:
 

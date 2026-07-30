@@ -628,7 +628,7 @@ mod tests {
 
         storage.store_thumbnail("stale-orphan", b"jpeg").await.unwrap();
         let thumbnail_path = storage.get_thumbnail_path("stale-orphan");
-        let stale_time = FileTime::from_system_time(SystemTime::now() - Duration::from_secs(60));
+        let stale_time = FileTime::from_system_time(SystemTime::now() - Duration::from_mins(1));
         set_file_mtime(&thumbnail_path, stale_time).unwrap();
 
         storage.cleanup_orphaned_thumbnails().await;

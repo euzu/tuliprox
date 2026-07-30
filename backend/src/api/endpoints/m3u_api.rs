@@ -13,7 +13,7 @@ use crate::{
         endpoints::{
             hls_api::{
                 build_virtual_hls_entry_path, handle_hls_stream_request, hls_admission_failure_manifest_response,
-                hls_custom_video_manifest_response, m3u_archive_epg_reference_ts, HlsEntryStreamIdentity,
+                hls_custom_video_manifest_response, m3u_archive_epg_reference_ts, HlsEntryStreamContext,
             },
             xtream_api::{ApiStreamContext, ApiStreamRequest},
         },
@@ -171,7 +171,8 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                 &user,
                 crate::api::model::CustomVideoStreamType::ChannelUnavailable,
                 axum::http::StatusCode::FORBIDDEN,
-            );
+            )
+            .await;
         }
         return crate::api::model::create_custom_video_stream_response(
             app_state,
@@ -196,7 +197,8 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                 pli.input_name.clone(),
                 req_headers,
                 ConnectFailureReason::UserAccountExpired,
-            );
+            )
+            .await;
         }
         return admission_failure_response(
             app_state,
@@ -298,7 +300,8 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                     session.provider.clone(),
                     req_headers,
                     ConnectFailureReason::UserConnectionsExhausted,
-                );
+                )
+                .await;
             }
             return admission_failure_response(
                 app_state,
@@ -321,7 +324,8 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                     session.provider.clone(),
                     req_headers,
                     ConnectFailureReason::ProviderConnectionsExhausted,
-                );
+                )
+                .await;
             }
             return admission_failure_response(
                 app_state,
@@ -396,7 +400,8 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
                 input.name.clone(),
                 req_headers,
                 ConnectFailureReason::UserConnectionsExhausted,
-            );
+            )
+            .await;
         }
         return admission_failure_response(
             app_state,
@@ -438,7 +443,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     let archive_reference = m3u_archive_epg_reference_ts(&pli.url);
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
     if is_session_request && extension == shared::defaults::HLS_EXT {
-        let Some(stream_identity) = HlsEntryStreamIdentity::from_playlist_item(&pli) else {
+        let Some(stream_context) = HlsEntryStreamContext::from_playlist_item(&pli) else {
             error!(
                 "HLS input stream identity missing for virtual_id={}; refresh target playlist",
                 pli.virtual_id
@@ -454,7 +459,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             user_session.as_ref(),
             &pli.url,
             archive_reference,
-            stream_identity,
+            stream_context,
             &input,
             req_headers,
             connection_permission,

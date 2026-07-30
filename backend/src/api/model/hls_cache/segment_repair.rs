@@ -1,8 +1,10 @@
 #![allow(clippy::large_futures)]
 
 use super::{
-    safe_hls_access_lease_id, safe_proxy_session_id, segment_watchdog::HlsCorruptSegmentWatchdogManager,
-    CachedSegmentMetadata, HlsAccessLeaseId, HlsCacheObjectKey, HlsSegmentCache, ProxySessionId, StagedCacheObject,
+    is_hls_provisioning_segment, safe_hls_access_lease_id, safe_proxy_session_id,
+    media_reserve::HlsLeaseManifestSnapshot, segment_watchdog::HlsCorruptSegmentWatchdogManager,
+    CachedSegmentMetadata, HlsAccessLeaseId, HlsAccessLeaseStore, HlsCacheObjectKey, HlsLogIdentity, HlsSegmentCache,
+    HlsSession, ProxySessionId, SegmentCacheKey, SegmentCacheStatus, StagedCacheObject,
 };
 use crate::model::{HlsCorruptSegmentWatchdogConfig, HlsSegmentRepairConfig};
 use arc_swap::ArcSwap;
@@ -54,6 +56,7 @@ pub enum HlsRepairRenderedObjectId {
 #[derive(Debug, Clone)]
 pub struct HlsSegmentRepairObjectContext {
     pub source: HlsSegmentRepairSource,
+    pub log_identity: HlsLogIdentity,
     pub proxy_session_id: ProxySessionId,
     pub hls_access_lease_id: Option<HlsAccessLeaseId>,
     pub rendered_object_id: HlsRepairRenderedObjectId,
@@ -69,6 +72,91 @@ pub struct HlsSegmentRepairObjectContext {
     pub complete_object: bool,
     pub encrypted: bool,
     pub custom_response: bool,
+}
+
+pub(crate) fn ready_segment_repair_prewarm_candidates(
+    session: &HlsSession,
+    lease_id: &HlsAccessLeaseId,
+    snapshot: &HlsLeaseManifestSnapshot,
+    candidate_limit: usize,
+) -> Vec<(SegmentCacheKey, HlsSegmentRepairObjectContext)> {
+    let identity = HlsLogIdentity::from_session(session);
+    snapshot
+        .visible_segments
+        .iter()
+        .take(candidate_limit)
+        .filter_map(|visible| {
+            let entry = session.segments.get(&visible.proxy_seq)?;
+            if entry.proxy_seq != visible.proxy_seq
+                || is_hls_provisioning_segment(entry)
+                || entry.proxy_file_ext != "ts"
+                || entry.origin_byte_range.is_some()
+                || entry.encryption.is_some()
+                || !matches!(entry.status, SegmentCacheStatus::Ready { .. })
+            {
+                return None;
+            }
+            Some((
+                entry.cache_key.clone(),
+                HlsSegmentRepairObjectContext {
+                    source: HlsSegmentRepairSource::Normal,
+                    log_identity: identity.clone(),
+                    proxy_session_id: session.proxy_session_id.clone(),
+                    hls_access_lease_id: Some(lease_id.clone()),
+                    rendered_object_id: HlsRepairRenderedObjectId::Normal { proxy_seq: visible.proxy_seq },
+                    resource_id: format!("{:06}", visible.proxy_seq),
+                    file_ext: entry.proxy_file_ext.clone(),
+                    origin_fetch_uri_for_diagnostics: entry
+                        .origin_fetch_ref
+                        .as_ref()
+                        .map(|fetch_ref| fetch_ref.resolved_origin_url.clone())
+                        .unwrap_or_default(),
+                    media_sequence: Some(entry.origin_key.host_local_sequence),
+                    discontinuity_sequence: Some(session.discontinuity_sequence),
+                    complete_object: true,
+                    encrypted: false,
+                    custom_response: false,
+                },
+            ))
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+pub(crate) struct HlsRepairPrewarmGuard {
+    access_leases: Arc<RwLock<HlsAccessLeaseStore>>,
+    lease_id: HlsAccessLeaseId,
+    proxy_session_id: ProxySessionId,
+    issued_at_ms: u64,
+    snapshot_generation: u64,
+}
+
+struct HlsSelectedRepairCandidate<'a> {
+    mode: HlsSegmentRepairMode,
+    runtime: Arc<HlsSegmentRepairRuntime>,
+    candidate: HlsRepairWindowCandidateKey,
+    prewarm_guard: Option<&'a HlsRepairPrewarmGuard>,
+}
+
+impl HlsRepairPrewarmGuard {
+    pub(crate) fn new(
+        access_leases: Arc<RwLock<HlsAccessLeaseStore>>,
+        lease_id: HlsAccessLeaseId,
+        proxy_session_id: ProxySessionId,
+        issued_at_ms: u64,
+        snapshot_generation: u64,
+    ) -> Self {
+        Self { access_leases, lease_id, proxy_session_id, issued_at_ms, snapshot_generation }
+    }
+
+    async fn is_current(&self) -> bool {
+        self.access_leases.read().await.repair_prewarm_is_current(
+            &self.lease_id,
+            &self.proxy_session_id,
+            self.issued_at_ms,
+            self.snapshot_generation,
+        )
+    }
 }
 
 impl HlsSegmentRepairObjectContext {
@@ -93,6 +181,17 @@ impl HlsSegmentRepairObjectContext {
             return Some("custom-response");
         }
         None
+    }
+
+    fn log_identity_fields(&self) -> String {
+        format!(
+            "session={} proxy_session={} lease={}",
+            self.log_identity.session(),
+            self.log_identity.proxy_session(),
+            self.hls_access_lease_id
+                .as_ref()
+                .map_or_else(|| "<none>".to_string(), safe_hls_access_lease_id)
+        )
     }
 }
 
@@ -133,11 +232,11 @@ struct HlsRepairObjectMetadataKey {
     ffmpeg_version: String,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum RepairCandidateSelection {
-    Selected(HlsSegmentRepairMode),
+    Selected(HlsSegmentRepairMode, HlsRepairWindowCandidateKey),
     Skipped(&'static str),
-    AlreadyChecked,
+    AlreadyChecked(HlsSegmentRepairMode, HlsRepairWindowCandidateKey),
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -302,6 +401,14 @@ impl HlsRepairWindowRegistry {
         );
     }
 
+    fn ensure_window(&mut self, lease_id: HlsAccessLeaseId, config: &HlsSegmentRepairConfig) -> bool {
+        if self.windows.contains_key(&lease_id) {
+            return false;
+        }
+        self.start_window(lease_id, config);
+        true
+    }
+
     fn try_select_candidate(&mut self, context: &HlsSegmentRepairObjectContext) -> RepairCandidateSelection {
         if let Some(reason) = context.repair_skip_reason() {
             return RepairCandidateSelection::Skipped(reason);
@@ -309,11 +416,10 @@ impl HlsRepairWindowRegistry {
         let Some(lease_id) = context.hls_access_lease_id.as_ref() else {
             return RepairCandidateSelection::Skipped("missing-lease");
         };
-        let Some(activation_generation) = self
+        let Some((activation_generation, mode)) = self
             .windows
             .get(lease_id)
-            .map(|window| window.activation_generation)
-            .or_else(|| self.generations.get(lease_id).copied())
+            .map(|window| (window.activation_generation, window.mode))
         else {
             return RepairCandidateSelection::Skipped("no-window");
         };
@@ -324,21 +430,31 @@ impl HlsRepairWindowRegistry {
             object_id: context.rendered_object_id.clone(),
             file_ext: context.file_ext.clone(),
         };
-        if !self.remember_candidate(candidate_key.clone()) {
-            return RepairCandidateSelection::AlreadyChecked;
-        }
-        let Some(window) = self.windows.get_mut(lease_id) else {
+        let Some(window) = self.windows.get(lease_id) else {
             return RepairCandidateSelection::Skipped("no-window");
         };
         if window.seen_candidates.contains(&candidate_key) {
-            return RepairCandidateSelection::Skipped("duplicate-identity");
+            return RepairCandidateSelection::AlreadyChecked(mode, candidate_key);
         }
         if window.remaining_segments == 0 {
             return RepairCandidateSelection::Skipped("window-exhausted");
         }
-        window.seen_candidates.insert(candidate_key);
+        if !self.remember_candidate(candidate_key.clone()) {
+            return RepairCandidateSelection::Skipped("candidate-not-admitted");
+        }
+        let Some(window) = self.windows.get_mut(lease_id) else {
+            return RepairCandidateSelection::Skipped("no-window");
+        };
+        window.seen_candidates.insert(candidate_key.clone());
         window.remaining_segments = window.remaining_segments.saturating_sub(1);
-        RepairCandidateSelection::Selected(window.mode)
+        RepairCandidateSelection::Selected(window.mode, candidate_key)
+    }
+
+    fn candidate_is_current(&self, candidate: &HlsRepairWindowCandidateKey) -> bool {
+        self.windows.get(&candidate.hls_access_lease_id).is_some_and(|window| {
+            window.activation_generation == candidate.activation_generation
+                && window.seen_candidates.contains(candidate)
+        })
     }
 
     fn remove_access_lease(&mut self, lease_id: &HlsAccessLeaseId) {
@@ -506,6 +622,70 @@ impl HlsSegmentRepairManager {
         );
     }
 
+    pub(crate) async fn ensure_access_lease_window(&self, lease_id: HlsAccessLeaseId) {
+        let runtime = self.runtime.load_full();
+        if !runtime.repair_enabled() {
+            return;
+        }
+        let started = self.windows.write().await.ensure_window(lease_id.clone(), &runtime.config);
+        if started {
+            debug!(
+                "HLS segment repair window started: lease={} max_level={} segments={}",
+                safe_hls_access_lease_id(&lease_id),
+                runtime.config.max_level.as_log_value(),
+                runtime.config.apply_to_first_segments
+            );
+        }
+    }
+
+    pub(crate) fn prewarm_candidate_limit(&self) -> usize {
+        let runtime = self.runtime.load();
+        if runtime.repair_enabled() { usize::from(runtime.config.apply_to_first_segments) } else { 0 }
+    }
+
+    pub(crate) async fn spawn_ready_cache_prewarm<K>(
+        self: &Arc<Self>,
+        segment_cache: Arc<HlsSegmentCache>,
+        candidates: Vec<(K, HlsSegmentRepairObjectContext)>,
+        guard: HlsRepairPrewarmGuard,
+    ) where
+        K: HlsCacheObjectKey + Send + Sync + 'static,
+    {
+        self.spawn_ready_cache_prewarm_inner(segment_cache, candidates, Some(guard)).await;
+    }
+
+    async fn spawn_ready_cache_prewarm_inner<K>(
+        self: &Arc<Self>,
+        segment_cache: Arc<HlsSegmentCache>,
+        candidates: Vec<(K, HlsSegmentRepairObjectContext)>,
+        guard: Option<HlsRepairPrewarmGuard>,
+    ) where
+        K: HlsCacheObjectKey + Send + Sync + 'static,
+    {
+        for (key, context) in candidates {
+            let Some((mode, runtime, candidate)) = self.try_select_candidate(&context).await else {
+                continue;
+            };
+            let manager = Arc::clone(self);
+            let segment_cache = Arc::clone(&segment_cache);
+            let guard = guard.clone();
+            tokio::spawn(async move {
+                let selection = HlsSelectedRepairCandidate {
+                    mode,
+                    runtime,
+                    candidate,
+                    prewarm_guard: guard.as_ref(),
+                };
+                if let Err(err) = manager
+                    .repair_ready_cache_hit_with_candidate(&segment_cache, &key, context, selection)
+                    .await
+                {
+                    debug!("HLS segment repair prewarm ended without a reusable decision: error_kind={:?}", err.kind());
+                }
+            });
+        }
+    }
+
     pub async fn remove_access_lease_window(&self, lease_id: &HlsAccessLeaseId) {
         self.windows.write().await.remove_access_lease(lease_id);
     }
@@ -568,12 +748,30 @@ impl HlsSegmentRepairManager {
     where
         K: HlsCacheObjectKey,
     {
-        if !self.runtime.load().repair_enabled() {
-            return Ok(None);
-        }
-        let Some((mode, runtime)) = self.try_select_candidate(&context).await else {
+        let Some((mode, runtime, candidate)) = self.try_select_or_join_candidate(&context).await else {
             return Ok(None);
         };
+        self.repair_ready_cache_hit_with_candidate(
+            segment_cache,
+            key,
+            context,
+            HlsSelectedRepairCandidate { mode, runtime, candidate, prewarm_guard: None },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn repair_ready_cache_hit_with_candidate<K>(
+        &self,
+        segment_cache: &HlsSegmentCache,
+        key: &K,
+        context: HlsSegmentRepairObjectContext,
+        selection: HlsSelectedRepairCandidate<'_>,
+    ) -> io::Result<Option<CachedSegmentMetadata>>
+    where
+        K: HlsCacheObjectKey,
+    {
+        let HlsSelectedRepairCandidate { mode, runtime, candidate, prewarm_guard } = selection;
         let Some(metadata) = segment_cache.metadata(key).await? else {
             return Ok(None);
         };
@@ -596,7 +794,13 @@ impl HlsSegmentRepairManager {
         let lock = self.lock_for_identity(identity.clone()).await;
         let result = {
             let _guard = lock.lock().await;
-            if let Some(current_metadata) = segment_cache.metadata(key).await? {
+            let prewarm_is_current = match prewarm_guard {
+                Some(prewarm_guard) => prewarm_guard.is_current().await,
+                None => true,
+            };
+            if !prewarm_is_current {
+                Ok(None)
+            } else if let Some(current_metadata) = segment_cache.metadata(key).await? {
                 let current_hash = sha256_file(&current_metadata.path).await?;
                 if current_hash != raw_hash {
                     Ok(None)
@@ -622,31 +826,45 @@ impl HlsSegmentRepairManager {
                         )
                         .await?
                     {
-                        let fixed_size = fs::metadata(&fixed_path).await?.len();
-                        let staged = StagedCacheObject { path: fixed_path, size: fixed_size };
-                        let committed = segment_cache.commit_staged(key, staged).await?;
-                        self.record_metadata(
-                            identity.clone(),
-                            RepairStatus::Fixed,
-                            current_metadata.size,
-                            committed.size,
-                            None,
-                        )
-                        .await;
-                        let committed_hash = sha256_file(&committed.path).await?;
-                        self.record_object_metadata(
-                            object_key.clone(),
-                            HlsRepairObjectMetadata {
-                                committed_sha256: committed_hash,
-                                raw_sha256: Some(current_hash),
-                                status: RepairStatus::Fixed,
-                                raw_size: current_metadata.size,
-                                final_size: committed.size,
-                                validation_reason: None,
-                            },
-                        )
-                        .await;
-                        Ok(Some(committed))
+                        let candidate_current = self.windows.read().await.candidate_is_current(&candidate)
+                            && match prewarm_guard {
+                                Some(prewarm_guard) => prewarm_guard.is_current().await,
+                                None => true,
+                            };
+                        let latest_hash = match segment_cache.metadata(key).await? {
+                            Some(latest_metadata) => Some(sha256_file(&latest_metadata.path).await?),
+                            None => None,
+                        };
+                        if !candidate_current || latest_hash.as_deref() != Some(current_hash.as_str()) {
+                            let _ = fs::remove_file(&fixed_path).await;
+                            Ok(None)
+                        } else {
+                            let fixed_size = fs::metadata(&fixed_path).await?.len();
+                            let staged = adopt_repair_output(segment_cache, fixed_path, fixed_size).await?;
+                            let committed = segment_cache.commit_staged(key, staged).await?;
+                            self.record_metadata(
+                                identity.clone(),
+                                RepairStatus::Fixed,
+                                current_metadata.size,
+                                committed.size,
+                                None,
+                            )
+                            .await;
+                            let committed_hash = sha256_file(&committed.path).await?;
+                            self.record_object_metadata(
+                                object_key.clone(),
+                                HlsRepairObjectMetadata {
+                                    committed_sha256: committed_hash,
+                                    raw_sha256: Some(current_hash),
+                                    status: RepairStatus::Fixed,
+                                    raw_size: current_metadata.size,
+                                    final_size: committed.size,
+                                    validation_reason: None,
+                                },
+                            )
+                            .await;
+                            Ok(Some(committed))
+                        }
                     } else {
                         self.record_object_metadata_from_repair_identity(
                             object_key.clone(),
@@ -737,10 +955,11 @@ impl HlsSegmentRepairManager {
                     self.repair_file(&raw.path, raw.size, &identity, &context, runtime.clone(), &deadline).await?
                 {
                     let fixed_size = fs::metadata(&fixed_path).await?.len();
-                    let _ = segment_cache.remove_staged(raw.clone()).await;
-                    let committed = segment_cache
-                        .commit_staged(key, StagedCacheObject { path: fixed_path, size: fixed_size })
-                        .await?;
+                    if let Err(error) = segment_cache.remove_staged(raw.clone()).await {
+                        warn!("HLS repair raw staging cleanup deferred: error_kind={:?}", error.kind());
+                    }
+                    let fixed = adopt_repair_output(segment_cache, fixed_path, fixed_size).await?;
+                    let committed = segment_cache.commit_staged(key, fixed).await?;
                     self.record_metadata(identity.clone(), RepairStatus::Fixed, raw.size, committed.size, None).await;
                     let committed_hash = sha256_file(&committed.path).await?;
                     self.record_object_metadata(
@@ -776,9 +995,24 @@ impl HlsSegmentRepairManager {
     async fn try_select_candidate(
         &self,
         context: &HlsSegmentRepairObjectContext,
-    ) -> Option<(HlsSegmentRepairMode, Arc<HlsSegmentRepairRuntime>)> {
+    ) -> Option<(HlsSegmentRepairMode, Arc<HlsSegmentRepairRuntime>, HlsRepairWindowCandidateKey)> {
         let runtime = self.runtime.load_full();
-        self.try_select_candidate_with_runtime(context, &runtime).await.map(|mode| (mode, runtime))
+        match self.select_candidate(context, &runtime).await {
+            RepairCandidateSelection::Selected(mode, candidate) => Some((mode, runtime, candidate)),
+            RepairCandidateSelection::Skipped(_) | RepairCandidateSelection::AlreadyChecked(_, _) => None,
+        }
+    }
+
+    async fn try_select_or_join_candidate(
+        &self,
+        context: &HlsSegmentRepairObjectContext,
+    ) -> Option<(HlsSegmentRepairMode, Arc<HlsSegmentRepairRuntime>, HlsRepairWindowCandidateKey)> {
+        let runtime = self.runtime.load_full();
+        match self.select_candidate(context, &runtime).await {
+            RepairCandidateSelection::Selected(mode, candidate)
+            | RepairCandidateSelection::AlreadyChecked(mode, candidate) => Some((mode, runtime, candidate)),
+            RepairCandidateSelection::Skipped(_) => None,
+        }
     }
 
     async fn try_select_candidate_with_runtime(
@@ -786,35 +1020,42 @@ impl HlsSegmentRepairManager {
         context: &HlsSegmentRepairObjectContext,
         runtime: &Arc<HlsSegmentRepairRuntime>,
     ) -> Option<HlsSegmentRepairMode> {
+        match self.select_candidate(context, runtime).await {
+            RepairCandidateSelection::Selected(mode, _) => Some(mode),
+            RepairCandidateSelection::Skipped(_) | RepairCandidateSelection::AlreadyChecked(_, _) => None,
+        }
+    }
+
+    async fn select_candidate(
+        &self,
+        context: &HlsSegmentRepairObjectContext,
+        runtime: &Arc<HlsSegmentRepairRuntime>,
+    ) -> RepairCandidateSelection {
         if !runtime.repair_enabled() {
-            return None;
+            return RepairCandidateSelection::Skipped("disabled");
         }
-        context.hls_access_lease_id.as_ref()?;
-        match self.windows.write().await.try_select_candidate(context) {
-            RepairCandidateSelection::Selected(mode) => {
-                debug!(
-                    "HLS segment repair candidate selected: session={} lease={} source={} resource={} mode={}",
-                    safe_proxy_session_id(&context.proxy_session_id),
-                    context.hls_access_lease_id.as_ref().map_or_else(|| "<none>".to_string(), safe_hls_access_lease_id),
-                    context.source.as_log_value(),
-                    context.resource_id,
-                    mode.as_log_value()
-                );
-                Some(mode)
-            }
-            RepairCandidateSelection::Skipped(reason) => {
-                debug!(
-                    "HLS segment repair candidate skipped: session={} lease={} source={} resource={} reason={}",
-                    safe_proxy_session_id(&context.proxy_session_id),
-                    context.hls_access_lease_id.as_ref().map_or_else(|| "<none>".to_string(), safe_hls_access_lease_id),
-                    context.source.as_log_value(),
-                    context.resource_id,
-                    reason
-                );
-                None
-            }
-            RepairCandidateSelection::AlreadyChecked => None,
+        if context.hls_access_lease_id.is_none() {
+            return RepairCandidateSelection::Skipped("missing-lease");
         }
+        let selection = self.windows.write().await.try_select_candidate(context);
+        match &selection {
+            RepairCandidateSelection::Selected(mode, _) => debug!(
+                "HLS segment repair candidate selected: {} source={} resource={} mode={}",
+                context.log_identity_fields(),
+                context.source.as_log_value(),
+                context.resource_id,
+                mode.as_log_value()
+            ),
+            RepairCandidateSelection::Skipped(reason) => debug!(
+                "HLS segment repair candidate skipped: {} source={} resource={} reason={}",
+                context.log_identity_fields(),
+                context.source.as_log_value(),
+                context.resource_id,
+                reason
+            ),
+            RepairCandidateSelection::AlreadyChecked(_, _) => {}
+        }
+        selection
     }
 
     #[allow(clippy::too_many_lines)]
@@ -876,8 +1117,8 @@ impl HlsSegmentRepairManager {
             }
             HlsSegmentRepairExecutionPlan::SkipConfiguredMaxBelowRequired => {
                 warn!(
-                    "HLS segment repair required level exceeds configured max: session={} source={} resource={} configured_max_level={} required_level={} trigger={} action=raw_commit",
-                    safe_proxy_session_id(&context.proxy_session_id),
+                    "HLS segment repair required level exceeds configured max: {} source={} resource={} configured_max_level={} required_level={} trigger={} action=raw_commit",
+                    context.log_identity_fields(),
                     context.source.as_log_value(),
                     context.resource_id,
                     identity.repair_mode.as_log_value(),
@@ -909,8 +1150,8 @@ impl HlsSegmentRepairManager {
         }
         let fixed_path = repair_output_path(raw_path);
         debug!(
-            "HLS segment repair remux started: session={} source={} resource={} configured_max_level={} executed_level={}",
-            safe_proxy_session_id(&context.proxy_session_id),
+            "HLS segment repair remux started: {} source={} resource={} configured_max_level={} executed_level={}",
+            context.log_identity_fields(),
             context.source.as_log_value(),
             context.resource_id,
             identity.repair_mode.as_log_value(),
@@ -920,7 +1161,7 @@ impl HlsSegmentRepairManager {
         if let Err(reason) = remux {
             debug_repair_event(context, executed_level, "remux failed", Some(&reason));
             let status = if reason == "timeout" { RepairStatus::Timeout } else { RepairStatus::RemuxFailed };
-            let _ = fs::remove_file(&fixed_path).await;
+            cleanup_repair_output(&fixed_path).await;
             self.record_metadata(identity.clone(), status, raw_size, raw_size, Some(reason)).await;
             return Ok(None);
         }
@@ -928,7 +1169,7 @@ impl HlsSegmentRepairManager {
             Ok(scan) => scan,
             Err(reason) => {
                 debug_repair_event(context, executed_level, "validation probe failed", Some(&reason));
-                let _ = fs::remove_file(&fixed_path).await;
+                cleanup_repair_output(&fixed_path).await;
                 self.record_metadata(
                     identity.clone(),
                     RepairStatus::ValidationFailed,
@@ -944,14 +1185,14 @@ impl HlsSegmentRepairManager {
             validate_repair(&runtime.config, codec, &raw_scan, &fixed_scan, executed_level, &stream_selection);
         if let Err(reason) = validation {
             debug_repair_event(context, executed_level, "validation failed", Some(&reason));
-            let _ = fs::remove_file(&fixed_path).await;
+            cleanup_repair_output(&fixed_path).await;
             self.record_metadata(identity.clone(), RepairStatus::ValidationFailed, raw_size, raw_size, Some(reason))
                 .await;
             return Ok(None);
         }
         debug!(
-            "HLS segment repair remux completed: session={} source={} resource={} configured_max_level={} executed_level={} duration_ms={}",
-            safe_proxy_session_id(&context.proxy_session_id),
+            "HLS segment repair remux completed: {} source={} resource={} configured_max_level={} executed_level={} duration_ms={}",
+            context.log_identity_fields(),
             context.source.as_log_value(),
             context.resource_id,
             identity.repair_mode.as_log_value(),
@@ -999,7 +1240,7 @@ impl HlsSegmentRepairManager {
                 HlsRepairRenderedObjectId::Transient { resource_id } => ("transient", resource_id.clone()),
             };
             debug!(
-                "HLS segment repair object metadata hit: session={} source={} resource={} mode={}",
+                "HLS segment repair object metadata hit: proxy_session={} source={} resource={} mode={}",
                 safe_proxy_session_id(&key.proxy_session_id),
                 source,
                 resource,
@@ -1541,8 +1782,8 @@ fn debug_repair_analysis(
     let executed_level = executed_level.map_or("off", HlsSegmentRepairMode::as_log_value);
     match decision.codec {
         RepairVideoCodec::H264 => debug!(
-            "HLS segment repair analysis completed: session={} source={} resource={} configured_max_level={} required_level={} executed_level={} codec={} trigger={} common_low={} codec_medium={} missing_sps={} missing_pps={} sps_out_of_range={} pps_out_of_range={} no_frame={} decode_slice_header_error={} missing_picture={} invalid_nal={} no_start_code={} nal_split_error={} packet_corrupt={} continuity_check_failed={} codec_parameters_missing={}",
-            safe_proxy_session_id(&context.proxy_session_id),
+            "HLS segment repair analysis completed: {} source={} resource={} configured_max_level={} required_level={} executed_level={} codec={} trigger={} common_low={} codec_medium={} missing_sps={} missing_pps={} sps_out_of_range={} pps_out_of_range={} no_frame={} decode_slice_header_error={} missing_picture={} invalid_nal={} no_start_code={} nal_split_error={} packet_corrupt={} continuity_check_failed={} codec_parameters_missing={}",
+            context.log_identity_fields(),
             context.source.as_log_value(),
             context.resource_id,
             configured_max_level.as_log_value(),
@@ -1567,8 +1808,8 @@ fn debug_repair_analysis(
             warnings.codec_parameters_missing
         ),
         RepairVideoCodec::Hevc => debug!(
-            "HLS segment repair analysis completed: session={} source={} resource={} configured_max_level={} required_level={} executed_level={} codec={} trigger={} common_low={} codec_medium={} missing_vps={} missing_sps={} missing_pps={} vps_out_of_range={} sps_out_of_range={} pps_out_of_range={} pps_id_out_of_range={} invalid_vcl_nalu={} nal_parse_error={} invalid_nal={} no_start_code={} nal_split_error={} packet_corrupt={} continuity_check_failed={} codec_parameters_missing={}",
-            safe_proxy_session_id(&context.proxy_session_id),
+            "HLS segment repair analysis completed: {} source={} resource={} configured_max_level={} required_level={} executed_level={} codec={} trigger={} common_low={} codec_medium={} missing_vps={} missing_sps={} missing_pps={} vps_out_of_range={} sps_out_of_range={} pps_out_of_range={} pps_id_out_of_range={} invalid_vcl_nalu={} nal_parse_error={} invalid_nal={} no_start_code={} nal_split_error={} packet_corrupt={} continuity_check_failed={} codec_parameters_missing={}",
+            context.log_identity_fields(),
             context.source.as_log_value(),
             context.resource_id,
             configured_max_level.as_log_value(),
@@ -1595,8 +1836,8 @@ fn debug_repair_analysis(
             warnings.codec_parameters_missing
         ),
         RepairVideoCodec::Unsupported => debug!(
-            "HLS segment repair analysis completed: session={} source={} resource={} configured_max_level={} required_level={} executed_level={} codec={} trigger={}",
-            safe_proxy_session_id(&context.proxy_session_id),
+            "HLS segment repair analysis completed: {} source={} resource={} configured_max_level={} required_level={} executed_level={} codec={} trigger={}",
+            context.log_identity_fields(),
             context.source.as_log_value(),
             context.resource_id,
             configured_max_level.as_log_value(),
@@ -1616,8 +1857,8 @@ fn debug_repair_event(
 ) {
     if let Some(reason) = reason {
         debug!(
-            "HLS segment repair {event}: session={} source={} resource={} mode={} reason={}",
-            safe_proxy_session_id(&context.proxy_session_id),
+            "HLS segment repair {event}: {} source={} resource={} mode={} reason={}",
+            context.log_identity_fields(),
             context.source.as_log_value(),
             context.resource_id,
             mode.as_log_value(),
@@ -1625,8 +1866,8 @@ fn debug_repair_event(
         );
     } else {
         debug!(
-            "HLS segment repair {event}: session={} source={} resource={} mode={}",
-            safe_proxy_session_id(&context.proxy_session_id),
+            "HLS segment repair {event}: {} source={} resource={} mode={}",
+            context.log_identity_fields(),
             context.source.as_log_value(),
             context.resource_id,
             mode.as_log_value()
@@ -1636,8 +1877,8 @@ fn debug_repair_event(
 
 fn debug_repair_stream_dropped(context: &HlsSegmentRepairObjectContext, dropped: &RepairRemuxDroppedStream) {
     debug!(
-        "HLS segment repair stream dropped: session={} source={} resource={} stream={} reason={}",
-        safe_proxy_session_id(&context.proxy_session_id),
+        "HLS segment repair stream dropped: {} source={} resource={} stream={} reason={}",
+        context.log_identity_fields(),
         context.source.as_log_value(),
         context.resource_id,
         dropped.index,
@@ -1974,6 +2215,28 @@ fn repair_output_path(raw_path: &Path) -> PathBuf {
     raw_path.with_file_name(format!("{file_name}.repair.tmp.{suffix:016x}"))
 }
 
+async fn cleanup_repair_output(path: &Path) {
+    match fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => warn!("HLS repair fixed staging cleanup deferred: error_kind={:?}", error.kind()),
+    }
+}
+
+async fn adopt_repair_output(
+    segment_cache: &HlsSegmentCache,
+    path: PathBuf,
+    size: u64,
+) -> io::Result<StagedCacheObject> {
+    match segment_cache.adopt_staged_file(path.clone(), size) {
+        Ok(staged) => Ok(staged),
+        Err(error) => {
+            cleanup_repair_output(&path).await;
+            Err(error)
+        }
+    }
+}
+
 impl fmt::Display for RepairStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1991,20 +2254,29 @@ impl fmt::Display for RepairStatus {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_video_codec, parse_ffmpeg_warnings, parse_probe, repair_object_metadata_key,
-        select_repair_remux_streams, sha256_file, validate_repair, HlsRepairObjectMetadata, HlsRepairRenderedObjectId,
-        HlsSegmentRepairManager, HlsSegmentRepairObjectContext, HlsSegmentRepairSource, RepairIdentity,
-        RepairRemuxStreamSelection, RepairStatus, RepairVideoCodec, WarningCounters, REPAIR_METADATA_MAX_ENTRIES,
+        adopt_repair_output, detect_video_codec, parse_ffmpeg_warnings, parse_probe, repair_object_metadata_key,
+        ready_segment_repair_prewarm_candidates, select_repair_remux_streams, sha256_file, validate_repair,
+        HlsRepairObjectMetadata, HlsRepairRenderedObjectId, HlsSegmentRepairManager, HlsSegmentRepairObjectContext,
+        HlsSegmentRepairSource, RepairIdentity, RepairRemuxStreamSelection, RepairStatus, RepairVideoCodec,
+        WarningCounters, REPAIR_METADATA_MAX_ENTRIES,
     };
     use crate::{
         api::model::{
-            HlsAccessLeaseId, HlsSegmentCache, ProxySessionId, SegmentCacheKey, TransientObjectCacheKey,
-            TransientResourceId,
+            CacheAccessState, HlsAccessLeaseId, HlsSegmentCache, HlsSegmentEncryption, HlsSession, HlsSessionKey,
+            OriginSegmentKey, ProxySessionId, SegmentCacheKey, SegmentCacheStatus, SegmentEntry,
+            TransientObjectCacheKey, TransientResourceId, HLS_PROVISIONING_ORIGIN_EPOCH,
         },
         model::HlsSegmentRepairConfig,
     };
+    use super::super::{
+        media_reserve::{
+            HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestDeliveryMode,
+            HlsManifestSourceRenderMarker,
+        },
+        terminal_tail::HlsMediaContainer,
+    };
     use shared::model::HlsSegmentRepairMode;
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
 
     fn repair_config(mode: HlsSegmentRepairMode, apply_to_first_segments: u8) -> HlsSegmentRepairConfig {
         HlsSegmentRepairConfig {
@@ -2022,6 +2294,7 @@ mod tests {
     fn repair_context(lease_id: &str, resource_id: &str) -> HlsSegmentRepairObjectContext {
         HlsSegmentRepairObjectContext {
             source: HlsSegmentRepairSource::Normal,
+            log_identity: super::HlsLogIdentity::for_test("input:1|hls|stream-a", "proxy-session"),
             proxy_session_id: ProxySessionId("proxy-session".to_string()),
             hls_access_lease_id: Some(HlsAccessLeaseId(lease_id.to_string())),
             rendered_object_id: HlsRepairRenderedObjectId::Normal { proxy_seq: resource_id.parse().unwrap_or(1) },
@@ -2036,11 +2309,122 @@ mod tests {
         }
     }
 
+    #[test]
+    fn repair_log_identity_fields_separate_content_proxy_and_lease_identities() {
+        let context = repair_context("lease-a", "000001");
+        let fields = context.log_identity_fields();
+
+        assert_eq!(
+            fields,
+            format!(
+                "session={} proxy_session={} lease={}",
+                context.log_identity.session(),
+                context.log_identity.proxy_session(),
+                super::safe_hls_access_lease_id(context.hls_access_lease_id.as_ref().expect("test lease"))
+            )
+        );
+        assert_ne!(context.log_identity.session(), context.log_identity.proxy_session());
+    }
+
+    #[tokio::test]
+    async fn failed_repair_output_adoption_removes_the_unowned_file() {
+        let cache_root = tempfile::tempdir().expect("cache root");
+        let outside = tempfile::tempdir().expect("outside root");
+        let output = outside.path().join("fixed.ts");
+        tokio::fs::write(&output, b"fixed").await.expect("write output");
+        let cache = HlsSegmentCache::with_cache_path(cache_root.path());
+
+        assert!(adopt_repair_output(&cache, output.clone(), 5).await.is_err());
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn repair_prewarm_candidates_include_only_ready_clear_origin_ts_media() {
+        let lease_id = HlsAccessLeaseId("lease-a".to_string());
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "prewarm-candidates"), b"secret", 0);
+        let proxy_seq = 10;
+        let cache_key = SegmentCacheKey::new(session.proxy_session_id.clone(), proxy_seq, "ts");
+        session.segments.insert(
+            proxy_seq,
+            SegmentEntry {
+                origin_key: OriginSegmentKey {
+                    origin_epoch: 1,
+                    effective_host_id: 1,
+                    host_local_sequence: 100,
+                    host_local_index: 0,
+                },
+                proxy_seq,
+                duration_ms: 6_000,
+                proxy_file_ext: "ts".to_string(),
+                content_type: "video/mp2t".to_string(),
+                cache_key,
+                discontinuity_before: false,
+                program_date_time: None,
+                daterange_tags_before: Vec::new(),
+                origin_byte_range: None,
+                map_ref: None,
+                encryption: None,
+                origin_fetch_ref: None,
+                status: SegmentCacheStatus::Ready { content_length: 1_024, ready_at_ms: 1 },
+                last_rendered_at_ms: Some(1),
+                access: Arc::new(CacheAccessState::new()),
+            },
+        );
+        let snapshot = HlsLeaseManifestSnapshot {
+            delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
+            source_render_marker: HlsManifestSourceRenderMarker::new(1),
+            snapshot_generation: 1,
+            delivered_at_ms: 1,
+            first_proxy_seq: proxy_seq,
+            last_proxy_seq: proxy_seq,
+            visible_segments: Arc::from([HlsLeaseManifestSegment {
+                proxy_seq,
+                duration_ms: 6_000,
+                uri: "/live/10.ts".to_string(),
+                discontinuity_before: false,
+                map_ref_ready: true,
+                encryption: None,
+            }]),
+            discontinuity_sequence: 0,
+            target_duration_ms: 6_000,
+            playlist_duration_ms: 6_000,
+            last_visible_media_end_ms: 6_000,
+            active_map: None,
+            active_encryption: None,
+            container: HlsMediaContainer::MpegTs,
+        };
+
+        assert_eq!(ready_segment_repair_prewarm_candidates(&session, &lease_id, &snapshot, 1).len(), 1);
+        assert!(ready_segment_repair_prewarm_candidates(&session, &lease_id, &snapshot, 0).is_empty());
+
+        let entry = session.segments.get_mut(&proxy_seq).expect("candidate segment");
+        entry.proxy_file_ext = "m4s".to_string();
+        assert!(ready_segment_repair_prewarm_candidates(&session, &lease_id, &snapshot, 1).is_empty());
+        let entry = session.segments.get_mut(&proxy_seq).expect("candidate segment");
+        entry.proxy_file_ext = "ts".to_string();
+        entry.encryption = Some(HlsSegmentEncryption {
+            resource_id: TransientResourceId("key-a".to_string()),
+            resource_extension: "key".to_string(),
+            iv: None,
+            key_format: None,
+            key_format_versions: None,
+        });
+        assert!(ready_segment_repair_prewarm_candidates(&session, &lease_id, &snapshot, 1).is_empty());
+        let entry = session.segments.get_mut(&proxy_seq).expect("candidate segment");
+        entry.encryption = None;
+        entry.status = SegmentCacheStatus::Discovered;
+        assert!(ready_segment_repair_prewarm_candidates(&session, &lease_id, &snapshot, 1).is_empty());
+        let entry = session.segments.get_mut(&proxy_seq).expect("candidate segment");
+        entry.status = SegmentCacheStatus::Ready { content_length: 1_024, ready_at_ms: 1 };
+        entry.origin_key.origin_epoch = HLS_PROVISIONING_ORIGIN_EPOCH;
+        assert!(ready_segment_repair_prewarm_candidates(&session, &lease_id, &snapshot, 1).is_empty());
+    }
+
     async fn selected_repair_mode(
         manager: &HlsSegmentRepairManager,
         context: &HlsSegmentRepairObjectContext,
     ) -> Option<HlsSegmentRepairMode> {
-        manager.try_select_candidate(context).await.map(|(mode, _)| mode)
+        manager.try_select_candidate(context).await.map(|(mode, _, _)| mode)
     }
 
     #[tokio::test]
@@ -2623,6 +3007,90 @@ mod tests {
 
         assert_eq!(selected_repair_mode(&manager, &context).await, Some(HlsSegmentRepairMode::Low));
         assert_eq!(manager.windows.read().await.checked_candidates.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn ensuring_pending_repair_window_does_not_reset_consumed_candidate_budget() {
+        let manager = HlsSegmentRepairManager::new(repair_config(HlsSegmentRepairMode::Low, 1));
+        let lease_id = HlsAccessLeaseId("lease-a".to_string());
+        manager.ensure_access_lease_window(lease_id.clone()).await;
+
+        assert_eq!(
+            selected_repair_mode(&manager, &repair_context("lease-a", "1")).await,
+            Some(HlsSegmentRepairMode::Low)
+        );
+        manager.ensure_access_lease_window(lease_id).await;
+
+        assert_eq!(selected_repair_mode(&manager, &repair_context("lease-a", "2")).await, None);
+        assert_eq!(manager.stats().await.generations, 1);
+    }
+
+    #[tokio::test]
+    async fn on_demand_selection_joins_the_prewarm_candidate_identity() {
+        let manager = HlsSegmentRepairManager::new(repair_config(HlsSegmentRepairMode::Low, 1));
+        manager.ensure_access_lease_window(HlsAccessLeaseId("lease-a".to_string())).await;
+        let context = repair_context("lease-a", "1");
+
+        let (prewarm_mode, _, prewarm_candidate) =
+            manager.try_select_candidate(&context).await.expect("prewarm candidate");
+        let (demand_mode, _, demand_candidate) =
+            manager.try_select_or_join_candidate(&context).await.expect("demand joins prewarm");
+
+        assert_eq!(demand_mode, prewarm_mode);
+        assert_eq!(demand_candidate, prewarm_candidate);
+        assert_eq!(manager.windows.read().await.windows[&HlsAccessLeaseId("lease-a".to_string())].remaining_segments, 0);
+    }
+
+    #[tokio::test]
+    async fn exhausted_window_candidate_is_never_remembered_as_joinable() {
+        let manager = HlsSegmentRepairManager::new(repair_config(HlsSegmentRepairMode::Low, 1));
+        manager.ensure_access_lease_window(HlsAccessLeaseId("lease-a".to_string())).await;
+        assert!(manager.try_select_candidate(&repair_context("lease-a", "1")).await.is_some());
+        let skipped = repair_context("lease-a", "2");
+
+        assert!(manager.try_select_or_join_candidate(&skipped).await.is_none());
+        assert!(manager.try_select_or_join_candidate(&skipped).await.is_none());
+        assert_eq!(manager.stats().await.checked_candidates, 1);
+    }
+
+    #[tokio::test]
+    async fn prewarmed_ready_object_reuses_metadata_on_later_demand() {
+        const CLEAN_TS: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let cache = Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path()));
+        let manager = Arc::new(HlsSegmentRepairManager::new(repair_config(HlsSegmentRepairMode::Low, 1)));
+        let lease_id = HlsAccessLeaseId("lease-a".to_string());
+        let cache_key = SegmentCacheKey::new(ProxySessionId("proxy-session".to_string()), 1, "ts");
+        cache.write_bytes_and_commit(&cache_key, CLEAN_TS).await.expect("cache fixture");
+        manager.ensure_access_lease_window(lease_id).await;
+        let context = repair_context("lease-a", "1");
+
+        manager
+                .spawn_ready_cache_prewarm_inner(
+                    Arc::clone(&cache),
+                    vec![(cache_key.clone(), context.clone())],
+                    None,
+            )
+            .await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if manager.stats().await.object_metadata == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("prewarm completes");
+        let after_prewarm = manager.stats().await;
+        assert_eq!(after_prewarm.object_metadata, 1);
+
+        assert!(manager
+            .repair_ready_cache_hit(&cache, &cache_key, context)
+            .await
+            .expect("demand reuses prewarm")
+            .is_none());
+        assert_eq!(manager.stats().await, after_prewarm);
     }
 
     #[tokio::test]

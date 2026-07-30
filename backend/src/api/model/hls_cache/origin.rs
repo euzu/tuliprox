@@ -653,7 +653,11 @@ async fn reserve_hls_origin_account_io_slot(
 ) -> Result<HlsOriginAccountIoSlot, HlsBoundAccountAcquireErrorKind> {
     let wait_deadline = acquire_timeout.map(|duration| Instant::now() + duration);
     loop {
-        match try_reserve_hls_origin_account_io_slot(&mut *session.write().await, binding) {
+        let outcome = {
+            let mut session = session.write().await;
+            try_reserve_hls_origin_account_io_slot(&mut session, binding)
+        };
+        match outcome {
             HlsOriginAccountIoReserveOutcome::Joined => {
                 return Ok(HlsOriginAccountIoSlot::Joined);
             }
@@ -874,10 +878,49 @@ mod tests {
     use super::{
         build_hls_origin_session_owner, classify_account_binding_protection, HlsAccountBindingProtection,
         HlsAccountOverlapTiming, HlsBoundAccountAcquireErrorKind, HlsOriginAccountBinding, HlsOriginAccountBindingMode,
-        HlsOriginAccountRebindState, HlsOriginSource, HlsOriginSourceKind,
+        HlsOriginAccountIoLease, HlsOriginAccountIoSlot, HlsOriginAccountRebindState, HlsOriginSource,
+        HlsOriginSourceKind, reserve_hls_origin_account_io_slot,
     };
-    use crate::api::model::{build_proxy_session_id, HlsSessionKey, ProxySessionId};
+    use crate::api::model::{build_proxy_session_id, HlsSession, HlsSessionKey, ProxySessionId};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn account_io_wait_releases_the_session_write_lock_before_awaiting_notification() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "lock-release"), b"secret", 1_000);
+        let binding = HlsOriginAccountBinding::new(
+            Arc::from("input"),
+            Arc::from("account"),
+            &session.proxy_session_id,
+            1_000,
+        );
+        session.origin_account_io_lease = Some(HlsOriginAccountIoLease::acquiring(&binding));
+        let session = Arc::new(tokio::sync::RwLock::new(session));
+        let waiting_session = Arc::clone(&session);
+        let waiting_binding = binding.clone();
+        let waiter = tokio::spawn(async move {
+            reserve_hls_origin_account_io_slot(&waiting_session, &waiting_binding, None).await
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "the acquiring lease must make the second caller wait");
+
+        let completing_session = Arc::clone(&session);
+        let completion = tokio::spawn(async move {
+            let notify = {
+                let mut session = completing_session.write().await;
+                session.origin_account_io_lease.take().map(|lease| lease.notify)
+            };
+            if let Some(notify) = notify {
+                notify.notify_waiters();
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(completion.is_finished(), "the waiter must not retain the session lock");
+        completion.await.expect("controlled completion task");
+        assert!(matches!(
+            waiter.await.expect("controlled waiter task"),
+            Ok(HlsOriginAccountIoSlot::Acquire)
+        ));
+    }
 
     #[test]
     fn hls_origin_session_owner_contains_no_reservation_family_separator() {

@@ -35,38 +35,127 @@
 //! put this?" map. New files should land in the natural group, not the flat
 //! layout.
 
+mod availability;
+mod availability_reevaluation;
 mod backpressure;
 mod cache;
+mod critical_handoff;
+mod cutover;
 mod deadline;
+mod deterministic_conflict;
 mod gc;
 mod headers;
 mod ids;
 mod lease;
 mod lifecycle;
 mod manager;
+mod manifest_acceptance;
 mod manifest_commit;
 mod manifest_fetch;
+mod manifest_origin_binding;
+mod manifest_snapshot;
+mod master_playlist;
 mod map;
 mod map_fetcher;
+mod media_reserve;
 mod observability;
 mod origin;
+mod origin_progress;
 mod paths;
 mod playback;
+mod post_refresh_availability;
 mod prefetch;
+mod prepared_terminal_bundle;
 mod qos;
+mod recovery_timing;
 mod refresh;
 mod renderer;
 mod resource_fetch;
 mod response;
+mod resource_identity;
+mod runtime_custom_tail;
 mod segment_fetcher;
 mod segment_repair;
 mod segment_watchdog;
 mod session;
 mod session_store;
+mod startup_observability;
+mod terminal_commit;
+mod terminal_pending;
+mod terminal_tail;
 mod timeline;
 mod transient;
 mod transient_fetcher;
+mod ts_inspector;
 
+#[cfg(test)]
+pub(crate) use self::recovery_timing::{
+    HlsAcceptanceEpisodeTiming, HlsAcceptanceEpisodeTimingInput, HlsObservedRecoveryLatency, HlsOperationTimeoutMs,
+    HlsRecoveryEtaMs, HlsRecoveryTimingPolicy, HlsRecoveryWorkload, HlsTerminalMediaPreparationState,
+    HlsTransitionMarginMs,
+};
+#[cfg(test)]
+pub(crate) use self::terminal_tail::HlsTerminalTailGeneration;
+#[cfg(test)]
+pub(crate) use self::lease::HlsAccessLeaseDenialMode;
+#[cfg(test)]
+pub(crate) use self::availability_reevaluation::{
+    HlsAvailabilityReevaluationFinishReason, HlsAvailabilityReevaluationMode,
+};
+pub(crate) use self::{
+    availability::{
+        commit_terminal_tail_if_lease_reserve_requires_cutover, hls_manifest_acceptance_directive_for_session,
+        hls_recovery_timing_policy, hls_startup_admission_allows_snapshot,
+        register_hls_availability_reevaluation, HlsManifestAcceptanceDirective,
+        HlsManifestAcceptanceEvaluationOutcome, HlsTerminalFailedClosedReason, HlsTerminalResolution,
+        HLS_PLAYBACK_RATE_GUARD_MILLI,
+    },
+    availability_reevaluation::{
+        HlsAvailabilityReevaluationObservation, HlsAvailabilityReevaluationRegistration,
+    },
+    lease::{HlsLeaseStartupAdmissionState, HlsMediaLeaseIdentity},
+    manager::{HlsCriticalHandoffStateAccess, HlsMediaActivityCommitOutcome},
+    manifest_fetch::MAX_HLS_MANIFEST_BYTES,
+    manifest_snapshot::{derive_hls_lease_manifest_snapshot, HlsLeaseManifestSnapshotInput},
+    master_playlist::{
+        HlsBandwidthPersistenceOutcome, HlsMasterBandwidth, HlsMasterBandwidthSelection,
+        HlsSingleVariantMasterPlaylist,
+    },
+    media_reserve::{
+        evaluate_lease_reserve, HlsLeaseReserveInput, HlsPlaybackCompletionOutcome, HlsPlaybackRequestToken,
+    },
+    observability::{
+        hls_manifest_recovery_log_fields, log_hls_origin_content_coding, HlsLogIdentity,
+        HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource, HlsRecoveryTriggerDiagnostic,
+        HlsRecoveryTriggerSource,
+    },
+    origin_progress::publication_late_after_ms,
+    response::{
+        finite_hls_immutable_media_response, finite_hls_media_head_response, finite_hls_media_response,
+        finite_hls_terminal_key_response,
+    },
+    startup_observability::{HlsStartupBodyObservation, HlsStartupObservability},
+    playback::{validate_hls_access_lease, HlsAccessLeaseValidationError},
+    refresh::{maybe_trigger_origin_refresh_with_outcome, HlsOriginRefreshTriggerOutcome, HlsPostRefreshRuntime},
+    runtime_custom_tail::{
+        build_hls_standalone_custom_plan, commit_hls_runtime_custom_tail,
+        resolve_hls_standalone_custom_segment, HlsRuntimeCustomTailOutcome,
+        HlsRuntimeCustomTailReason, HlsRuntimeCustomTailRequest, HlsStandaloneCustomAccess,
+        HlsStandaloneCustomSegmentAccess, HlsStandaloneCustomSegmentError,
+    },
+    session::{HlsTerminalTailProtection, HlsTerminalTailProtectionInstall, HlsTerminalTailProtectionRemoval},
+    terminal_tail::{
+        terminal_tail_manifest_body, HlsLeasePlaybackMode, HlsTerminalSegmentPath, HlsTerminalTailPlan,
+    },
+    timeline::TimelineMapError,
+    ts_inspector::{
+        evaluate_mpeg_ts_splice_boundary, hls_aes128_cbc_iv, inspect_mpeg_ts, inspect_mpeg_ts_async,
+        inspect_mpeg_ts_media_evidence_async, HlsTrackEvidenceResolution, HlsTsMediaEvidence,
+        HlsTsProbeBudget, HlsTsProbeOutcome, HlsTsProbeProtection, HlsTsProtectionReason,
+        HlsTsSpliceBoundaryIncompatibility, HlsTsSpliceEvidence, HlsTsSpliceIncompatibility,
+        HlsTsTrackSignature,
+    },
+};
 pub use self::{
     backpressure::{classify_hls_backpressure, HlsBackpressureState},
     cache::{
@@ -86,10 +175,10 @@ pub use self::{
     },
     ids::{build_proxy_session_id, HlsSessionKey, ProxySessionId},
     lease::{
-        new_hls_access_lease_id, HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseChannelUnavailableReason,
-        HlsAccessLeaseId, HlsAccessLeaseIdleRelease, HlsAccessLeaseLifecycleSnapshot, HlsAccessLeasePendingDeadline,
-        HlsAccessLeaseResponseFlag, HlsAccessLeaseSessionSnapshot, HlsAccessLeaseState, HlsAccessLeaseStore,
-        HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsFreshManifestRequiredReason, HlsPlaybackFamilyKey,
+        new_hls_access_lease_id, HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseId, HlsAccessLeaseIdleRelease,
+        HlsAccessLeaseLifecycleSnapshot, HlsAccessLeasePendingDeadline, HlsAccessLeaseSessionSnapshot,
+        HlsAccessLeaseState, HlsAccessLeaseStore, HlsAccessLeaseTiming, HlsAccessLeaseTouch,
+        HlsFreshManifestRequiredReason, HlsPlaybackFamilyKey,
     },
     lifecycle::{HlsLifecycleEvent, HlsLifecycleEventKey, HlsLifecycleManager},
     manager::{exec_hls_lifecycle, HlsProxyManager},
@@ -102,7 +191,7 @@ pub use self::{
     map::{MapCacheStatus, MapEntry, OriginMapFetchRef, OriginMapKey, ProxyMapId},
     map_fetcher::{HlsMapWorkerPool, MapFetchContext},
     observability::{
-        safe_hls_access_lease_id, safe_origin_log_value, safe_proxy_session_id, safe_session_key,
+        hls_origin_log_value, safe_hls_access_lease_id, safe_proxy_session_id, safe_session_key,
         safe_user_session_token, HlsCacheMetrics, HlsCacheMetricsSnapshot,
     },
     origin::{
@@ -116,10 +205,7 @@ pub use self::{
         HlsOriginSource, HlsOriginSourceKind, HlsOriginWorkClass,
     },
     paths::{HlsMapFile, HlsSegmentFile, TransientResourceFile},
-    playback::{
-        validate_hls_access_lease, HlsAccessAdmissionMode, HlsAccessContext, HlsAccessLeaseValidationError,
-        HLS_ACCESS_LEASE_ID_PLACEHOLDER,
-    },
+    playback::{HlsAccessAdmissionMode, HlsAccessContext, HLS_ACCESS_LEASE_ID_PLACEHOLDER},
     prefetch::{ManifestFetchQueueReport, SegmentFetchPriority, SegmentPrefetchQueue},
     qos::{HlsQosMeterInit, HlsQosRegistration, HlsQosRegistry, HlsQosRuntimeConfig},
     refresh::{
@@ -138,8 +224,7 @@ pub use self::{
         HlsResourceFetchSource,
     },
     response::{
-        serve_hls_map_cache_outcome, serve_hls_map_cache_response, serve_hls_segment_cache_outcome,
-        serve_hls_segment_cache_response, serve_hls_transient_object_cache_outcome,
+        serve_hls_map_cache_outcome, serve_hls_segment_cache_outcome, serve_hls_transient_object_cache_outcome,
         serve_hls_transient_object_cache_response, HlsCacheResponseContext, HlsMediaActivityMarker,
         HlsResourceServeFailure, HlsResourceServeOutcome,
     },
@@ -149,25 +234,23 @@ pub use self::{
         HlsSegmentRepairSource, WarningCounters,
     },
     session::{
-        HlsManifestAcceptanceState, HlsManifestHostSwitchCandidate, HlsManifestTemporaryFailureKind,
-        HlsManifestTemporaryFailureTracker, HlsManifestTemporaryFailureTransition, HlsSegmentFailureObject,
-        HlsSegmentFailureTracker, HlsSegmentFailureTransition, HlsSession, HlsSessionActivity, HlsSessionMode,
-        TransientPassthroughReason,
+        HlsSegmentFailureObject, HlsSegmentFailureTracker, HlsSegmentFailureTransition, HlsSession, HlsSessionActivity,
+        HlsSessionMode, TransientPassthroughReason,
     },
     session_store::{
         HlsExpiredSessionMarker, HlsExpiredSessionReason, HlsSessionHandle, HlsSessionStore, HlsSessionStoreOutcome,
     },
     timeline::{
         default_content_type_for_segment_ext, is_hls_provisioning_gap_segment, is_hls_provisioning_segment,
-        CacheAccessState, OriginSegmentFetchRef, OriginSegmentKey, SegmentCacheStatus, SegmentEntry, TimelineMapError,
-        HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH, HLS_PROVISIONING_SEGMENT_DURATION_MS,
-        HLS_PROVISIONING_TARGET_DURATION_SECS,
+        CacheAccessState, HlsSegmentEncryption, OriginSegmentFetchRef, OriginSegmentKey, SegmentCacheStatus,
+        SegmentEntry, HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH,
+        HLS_PROVISIONING_SEGMENT_DURATION_MS, HLS_PROVISIONING_TARGET_DURATION_SECS,
     },
     transient::{
         build_transient_resource_id, TransientObjectCacheEntry, TransientObjectCacheStatus,
-        TransientObjectFetchDecision, TransientObjectRemoval, TransientObjectUnavailableState,
-        TransientPassthroughState, TransientResourceId, TransientResourceKind, TransientResourceRef,
-        TransientResourceStore,
+        TransientObjectFetchDecision, TransientObjectFetchToken, TransientObjectRemoval,
+        TransientObjectUnavailableState, TransientPassthroughState, TransientResourceId, TransientResourceKind,
+        TransientResourceRef, TransientResourceStore,
     },
     transient_fetcher::{
         fetch_and_commit_hls_transient_origin_response_with_attempt_prepare,
@@ -181,7 +264,26 @@ pub use self::{
         HlsTransientOriginIoGuard,
     },
 };
+
+pub(crate) use self::cache::{
+    HlsCacheCapacityReclaimOutcome, HlsCacheCapacityReclaimRequest, HlsCacheCapacityReclaimer,
+    HlsCacheCapacityRevision,
+};
+#[cfg(test)]
 pub(crate) use self::{
-    manifest_fetch::MAX_HLS_MANIFEST_BYTES,
-    observability::{log_hls_origin_content_coding, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource},
+    manifest_acceptance::{HlsManifestAcceptanceExhaustionReason, HlsManifestAcceptanceTrigger},
+    master_playlist::HlsBandwidthPersistenceState,
+    media_reserve::{
+        HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsLeaseReserveAvailabilityBasis, HlsLeaseReserveSnapshot,
+        HlsManifestDeliveryMode, HlsManifestSourceRenderMarker,
+    },
+    origin_progress::HlsOriginPathCondition,
+    prepared_terminal_bundle::{prepared_terminal_bundle_key, HlsPreparedTerminalBundleState},
+    runtime_custom_tail::HlsRuntimeCustomTailAssetIdentity,
+    terminal_tail::{
+        build_terminal_tail_plan, prepare_terminal_base_evidence, snapshot_terminal_media_asset, HlsMapSignature,
+        HlsMediaContainer, HlsTerminalAssetIdentity, HlsTerminalBaseMediaState, HlsTerminalBaseProtection,
+        HlsTerminalBaseSegmentAvailability, HlsTerminalMediaAsset, HlsTerminalTailBuildInput,
+        HlsTerminalTailCompatibility, HLS_TERMINAL_TAIL_SEGMENT_COUNT,
+    },
 };

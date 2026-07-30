@@ -13,6 +13,7 @@ pub mod storage_const;
 mod playlist_scratch;
 mod playlist_source;
 mod library_repository;
+mod live_stream_metadata_repository;
 mod alias_repository;
 mod playlist_stream;
 mod provider_dns_repository;
@@ -36,6 +37,9 @@ pub use storage_const::*;
 pub use alias_repository::*;
 pub use playlist_source::*;
 pub use library_repository::*;
+pub(crate) use live_stream_metadata_repository::{
+    load_input_live_bitrate_bps, persist_input_live_bitrate_bps, LiveBitratePersistenceOutcome,
+};
 pub use playlist_stream::*;
 pub use provider_dns_repository::*;
 pub use stream_history::*;

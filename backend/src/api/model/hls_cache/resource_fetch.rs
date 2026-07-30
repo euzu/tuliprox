@@ -1,8 +1,9 @@
 use super::{
-    append_hls_provider_session_headers, cache::hls_cache_object_limit_from_io, force_identity_without_range,
-    hls_object_body_deadline, log_hls_origin_content_coding, safe_origin_log_value, safe_proxy_session_id,
-    scrub_hls_origin_headers, HlsBoundAccountAcquireErrorKind, HlsOriginContentCodingObjectKind,
-    HlsOriginContentCodingSource, ProxySessionId, SegmentFetchPolicy,
+    append_hls_provider_session_headers,
+    cache::{hls_cache_capacity_from_io, hls_cache_object_limit_from_io},
+    force_identity_without_range, hls_object_body_deadline, hls_origin_log_value, log_hls_origin_content_coding,
+    scrub_hls_origin_headers, HlsBoundAccountAcquireErrorKind, HlsLogIdentity, HlsOriginContentCodingObjectKind,
+    HlsOriginContentCodingSource, SegmentFetchPolicy,
 };
 use crate::{
     processing::parser::hls::origin_manifest::ParsedByteRange,
@@ -151,12 +152,19 @@ pub enum HlsOriginResourceFetchError {
     Transport(String),
     Redirect,
     Timeout,
+    Superseded,
     InvalidOriginUrl,
     InvalidByteRange,
     UnexpectedByteRangeStatus,
     ContentCoding(HlsContentCodingFailure),
     ContentDecoding(HlsContentDecodingFailure),
     CacheObjectLimit { limit: u64 },
+    LocalCacheCapacity {
+        required_session_bytes: u64,
+        required_global_bytes: u64,
+        projected_write_bytes: u64,
+        revision: super::HlsCacheCapacityRevision,
+    },
     CacheCommit(HlsCacheCommitFailure),
     ProviderUnavailable(HlsBoundAccountAcquireErrorKind),
 }
@@ -224,7 +232,17 @@ impl HlsCacheCommitFailure {
 }
 
 impl HlsOriginResourceFetchError {
-    pub fn cache_commit(err: &io::Error) -> Self { Self::CacheCommit(HlsCacheCommitFailure::from_io_error(err)) }
+    pub fn cache_commit(err: &io::Error) -> Self {
+        if let Some(capacity) = hls_cache_capacity_from_io(err) {
+            return Self::LocalCacheCapacity {
+                required_session_bytes: capacity.required_session_bytes(),
+                required_global_bytes: capacity.required_global_bytes(),
+                projected_write_bytes: capacity.staged_bytes(),
+                revision: capacity.revision().clone(),
+            };
+        }
+        Self::CacheCommit(HlsCacheCommitFailure::from_io_error(err))
+    }
 
     /// Classifies an error produced while consuming a decoded body into the HLS retry contract.
     pub fn cache_body(err: &io::Error) -> Self {
@@ -267,7 +285,12 @@ impl HlsOriginResourceFetchError {
     pub fn retryable_failure(&self) -> bool {
         matches!(
             self,
-            Self::RetryableStatus(_) | Self::Transport(_) | Self::Redirect | Self::Timeout | Self::ContentDecoding(_)
+            Self::RetryableStatus(_)
+                | Self::Transport(_)
+                | Self::Redirect
+                | Self::Timeout
+                | Self::ContentDecoding(_)
+                | Self::LocalCacheCapacity { .. }
         ) || matches!(self, Self::CacheCommit(failure) if !failure.storage_full())
             || matches!(self, Self::ProviderUnavailable(kind) if kind.is_retryable_resource_failure())
     }
@@ -275,6 +298,22 @@ impl HlsOriginResourceFetchError {
     pub fn permanent_status(&self) -> Option<StatusCode> {
         match self {
             Self::PermanentStatus(status) | Self::NonRetryableStatus(status) => Some(*status),
+            _ => None,
+        }
+    }
+
+    pub fn is_local_cache_capacity(&self) -> bool { matches!(self, Self::LocalCacheCapacity { .. }) }
+
+    pub(crate) fn capacity_revision(&self) -> Option<&super::HlsCacheCapacityRevision> {
+        match self {
+            Self::LocalCacheCapacity { revision, .. } => Some(revision),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn projected_write_bytes(&self) -> Option<u64> {
+        match self {
+            Self::LocalCacheCapacity { projected_write_bytes, .. } => Some(*projected_write_bytes),
             _ => None,
         }
     }
@@ -302,9 +341,16 @@ impl HlsOriginResourceFetchError {
             }
             Self::Redirect => HlsResourceFetchLogStatus::RedirectError,
             Self::Timeout => HlsResourceFetchLogStatus::Timeout,
+            Self::Superseded => HlsResourceFetchLogStatus::Superseded,
             Self::ContentCoding(failure) => HlsResourceFetchLogStatus::ContentCodingError(failure.clone()),
             Self::ContentDecoding(failure) => HlsResourceFetchLogStatus::ContentDecodingError(failure.clone()),
             Self::CacheObjectLimit { limit } => HlsResourceFetchLogStatus::CacheObjectLimit { limit: *limit },
+            Self::LocalCacheCapacity { required_session_bytes, required_global_bytes, .. } => {
+                HlsResourceFetchLogStatus::LocalCacheCapacity {
+                    required_session_bytes: *required_session_bytes,
+                    required_global_bytes: *required_global_bytes,
+                }
+            }
             Self::CacheCommit(failure) => HlsResourceFetchLogStatus::CacheCommitError(failure.clone()),
             Self::ProviderUnavailable(kind) => HlsResourceFetchLogStatus::ProviderUnavailable(*kind),
         }
@@ -318,7 +364,9 @@ impl HlsOriginResourceFetchError {
             | Self::InvalidByteRange
             | Self::UnexpectedByteRangeStatus
             | Self::ContentCoding(_)
-            | Self::CacheObjectLimit { .. } => true,
+            | Self::CacheObjectLimit { .. }
+            | Self::LocalCacheCapacity { .. }
+            | Self::Superseded => true,
             Self::ProviderUnavailable(kind) => !kind.is_retryable_resource_failure(),
             Self::CacheCommit(failure) => failure.storage_full(),
             Self::RetryableStatus(_)
@@ -336,7 +384,7 @@ struct HlsOriginResourceRetryRun<'a> {
     target: HlsOriginResourceFetchTarget,
     clients: HlsOriginResourceClients,
     policy: &'a SegmentFetchPolicy,
-    session_log_id: &'a str,
+    identity: &'a HlsLogIdentity,
 }
 
 /// Absolute per-attempt deadline shared by decoder preparation and decoded cache-body consumption.
@@ -370,7 +418,7 @@ pub async fn run_hls_origin_resource_retry_loop_with_attempt_prepare<T, G, P, C,
     target: HlsOriginResourceFetchTarget,
     clients: HlsOriginResourceClients,
     policy: &SegmentFetchPolicy,
-    session_log_id: &str,
+    identity: &HlsLogIdentity,
     prepare_attempt: P,
     cleanup_attempt: C,
     commit: F,
@@ -396,7 +444,7 @@ where
     };
     let range_requested = target.headers.contains_key(header::RANGE);
     run_hls_origin_resource_raw_retry_core(
-        HlsOriginResourceRetryRun { target, clients, policy, session_log_id },
+        HlsOriginResourceRetryRun { target, clients, policy, identity },
         prepare_attempt,
         cleanup_attempt,
         |response, deadline| {
@@ -455,7 +503,7 @@ where
         G,
     ) -> BoxFuture<'static, Result<T, HlsOriginResourceFetchError>>,
 {
-    let HlsOriginResourceRetryRun { target, clients, policy, session_log_id } = run;
+    let HlsOriginResourceRetryRun { target, clients, policy, identity } = run;
     let attempts = policy.retry_delays_ms.len();
     for attempt_index in 0..attempts {
         let attempt = HlsResourceFetchAttempt { attempt_index, attempts };
@@ -464,7 +512,7 @@ where
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
 
-        log_hls_resource_attempt_started(session_log_id, target.log_context(), attempt);
+        log_hls_resource_attempt_started(identity, target.log_context(), attempt);
         let attempt_started_at = Instant::now();
         let result = match prepare_attempt(attempt).await {
             Ok(guard) => match fetch_hls_origin_resource_response(&target, &clients).await {
@@ -489,32 +537,32 @@ where
 
         match result {
             Ok(output) => {
-                log_hls_resource_attempt_succeeded(session_log_id, target.log_context(), attempt_started_at.elapsed());
+                log_hls_resource_attempt_succeeded(identity, target.log_context(), attempt_started_at.elapsed());
                 return Ok(output);
             }
             Err(err) if err.aborts_without_retry() || attempt_index + 1 == attempts => {
                 if matches!(err, HlsOriginResourceFetchError::Timeout) {
                     log_hls_resource_timeout(
-                        session_log_id,
+                        identity,
                         target.log_context(),
                         attempt,
                         hls_object_body_deadline(policy.origin_segment_timeout_ms).as_millis(),
                     );
                 }
-                log_hls_resource_fetch_failed(session_log_id, target.log_context(), attempt, err.log_status());
+                log_hls_resource_fetch_failed(identity, target.log_context(), attempt, err.log_status());
                 return Err(err);
             }
             Err(err) => {
                 if matches!(err, HlsOriginResourceFetchError::Timeout) {
                     log_hls_resource_timeout(
-                        session_log_id,
+                        identity,
                         target.log_context(),
                         attempt,
                         hls_object_body_deadline(policy.origin_segment_timeout_ms).as_millis(),
                     );
                 }
                 log_hls_resource_retry_scheduled(
-                    session_log_id,
+                    identity,
                     target.log_context(),
                     attempt,
                     err.log_status(),
@@ -692,11 +740,13 @@ pub(super) struct HlsResourceFetchLogContext<'a> {
 enum HlsResourceFetchLogStatus {
     Http(StatusCode),
     Timeout,
+    Superseded,
     TransportError,
     RedirectError,
     ContentCodingError(HlsContentCodingFailure),
     ContentDecodingError(HlsContentDecodingFailure),
     CacheObjectLimit { limit: u64 },
+    LocalCacheCapacity { required_session_bytes: u64, required_global_bytes: u64 },
     CacheCommitError(HlsCacheCommitFailure),
     ProviderUnavailable(HlsBoundAccountAcquireErrorKind),
 }
@@ -709,11 +759,15 @@ impl HlsResourceFetchLogStatus {
                 format!("{} {reason}", status.as_u16())
             }
             Self::Timeout => "Timeout".to_string(),
+            Self::Superseded => "Superseded".to_string(),
             Self::TransportError => "TransportError".to_string(),
             Self::RedirectError => "RedirectError".to_string(),
             Self::ContentCodingError(failure) => failure.label(),
             Self::ContentDecodingError(failure) => failure.label(),
             Self::CacheObjectLimit { limit } => format!("CacheObjectLimit(limit={limit})"),
+            Self::LocalCacheCapacity { required_session_bytes, required_global_bytes } => format!(
+                "LocalCacheCapacity(required_session_bytes={required_session_bytes} required_global_bytes={required_global_bytes})"
+            ),
             Self::CacheCommitError(failure) => failure.label(),
             Self::ProviderUnavailable(kind) => format!("ProviderUnavailable({})", kind.as_log_label()),
         }
@@ -743,45 +797,48 @@ pub(super) fn take_body_failure_log_attempts() -> Vec<(usize, usize)> {
     BODY_FAILURE_LOG_ATTEMPTS.with(|attempts| std::mem::take(&mut *attempts.borrow_mut()))
 }
 
-fn safe_resource_fetch_session_id(session: &str) -> String {
-    safe_proxy_session_id(&ProxySessionId(session.to_string()))
-}
-
 fn log_hls_resource_attempt_started(
-    session: &str,
+    identity: &HlsLogIdentity,
     context: HlsResourceFetchLogContext<'_>,
     attempt: HlsResourceFetchAttempt,
 ) {
     if let Some(origin_url) = context.origin_url {
         debug!(
-            "{} '{}' attempting URL attempt {} of {}: session={} source={} {}",
+            "{} '{}' attempting URL attempt {} of {}: session={} proxy_session={} source={} resource_url={}",
             context.kind.label(),
             context.object_id,
             attempt.display_number(),
             attempt.attempts,
-            safe_resource_fetch_session_id(session),
+            identity.session(),
+            identity.proxy_session(),
             context.source.as_log_value(),
-            safe_origin_log_value(origin_url)
+            hls_origin_log_value(origin_url)
         );
     } else {
         debug!(
-            "{} '{}' attempting URL attempt {} of {}: session={} source={}",
+            "{} '{}' attempting URL attempt {} of {}: session={} proxy_session={} source={}",
             context.kind.label(),
             context.object_id,
             attempt.display_number(),
             attempt.attempts,
-            safe_resource_fetch_session_id(session),
+            identity.session(),
+            identity.proxy_session(),
             context.source.as_log_value()
         );
     }
 }
 
-fn log_hls_resource_attempt_succeeded(session: &str, context: HlsResourceFetchLogContext<'_>, elapsed: Duration) {
+fn log_hls_resource_attempt_succeeded(
+    identity: &HlsLogIdentity,
+    context: HlsResourceFetchLogContext<'_>,
+    elapsed: Duration,
+) {
     debug!(
-        "{} '{}' success: session={} source={} {} took {:.3}s",
+        "{} '{}' success: session={} proxy_session={} source={} {} took {:.3}s",
         context.kind.label(),
         context.object_id,
-        safe_resource_fetch_session_id(session),
+        identity.session(),
+        identity.proxy_session(),
         context.source.as_log_value(),
         context.kind.operation(),
         elapsed.as_secs_f64()
@@ -789,17 +846,18 @@ fn log_hls_resource_attempt_succeeded(session: &str, context: HlsResourceFetchLo
 }
 
 fn log_hls_resource_retry_scheduled(
-    session: &str,
+    identity: &HlsLogIdentity,
     context: HlsResourceFetchLogContext<'_>,
     attempt: HlsResourceFetchAttempt,
     status: HlsResourceFetchLogStatus,
     next_delay_ms: u64,
 ) {
     warn!(
-        "{} '{}' retry scheduled: session={} source={} status {} attempt {} of {} next_delay_ms={}",
+        "{} '{}' retry scheduled: session={} proxy_session={} source={} status {} attempt {} of {} next_delay_ms={}",
         context.kind.label(),
         context.object_id,
-        safe_resource_fetch_session_id(session),
+        identity.session(),
+        identity.proxy_session(),
         context.source.as_log_value(),
         status.label(),
         attempt.display_number(),
@@ -809,16 +867,17 @@ fn log_hls_resource_retry_scheduled(
 }
 
 fn log_hls_resource_fetch_failed(
-    session: &str,
+    identity: &HlsLogIdentity,
     context: HlsResourceFetchLogContext<'_>,
     attempt: HlsResourceFetchAttempt,
     status: HlsResourceFetchLogStatus,
 ) {
     warn!(
-        "{} '{}' failed: session={} source={} status {} attempt {} of {}",
+        "{} '{}' failed: session={} proxy_session={} source={} status {} attempt {} of {}",
         context.kind.label(),
         context.object_id,
-        safe_resource_fetch_session_id(session),
+        identity.session(),
+        identity.proxy_session(),
         context.source.as_log_value(),
         status.label(),
         attempt.display_number(),
@@ -827,14 +886,15 @@ fn log_hls_resource_fetch_failed(
 }
 
 fn log_hls_resource_timeout(
-    session: &str,
+    identity: &HlsLogIdentity,
     context: HlsResourceFetchLogContext<'_>,
     attempt: HlsResourceFetchAttempt,
     deadline_ms: u128,
 ) {
     warn!(
-        "HLS origin object fetch timed out: session={} source={} kind={} object={} attempt={} of {} deadline_ms={}",
-        safe_resource_fetch_session_id(session),
+        "HLS origin object fetch timed out: session={} proxy_session={} source={} kind={} object={} attempt={} of {} deadline_ms={}",
+        identity.session(),
+        identity.proxy_session(),
         context.source.as_log_value(),
         context.kind.label(),
         context.object_id,
@@ -846,7 +906,7 @@ fn log_hls_resource_timeout(
 
 /// Logs one sanitized terminal diagnostic for an origin-body failure after response handoff.
 pub(super) fn log_hls_resource_body_failure(
-    session: &str,
+    identity: &HlsLogIdentity,
     context: HlsResourceFetchLogContext<'_>,
     attempt: HlsResourceFetchAttempt,
     error: &io::Error,
@@ -857,9 +917,9 @@ pub(super) fn log_hls_resource_body_failure(
 
     let failure = HlsOriginResourceFetchError::from_body_read_error(error);
     if matches!(&failure, HlsOriginResourceFetchError::Timeout) {
-        log_hls_resource_timeout(session, context, attempt, deadline_ms);
+        log_hls_resource_timeout(identity, context, attempt, deadline_ms);
     } else {
-        log_hls_resource_fetch_failed(session, context, attempt, failure.log_status());
+        log_hls_resource_fetch_failed(identity, context, attempt, failure.log_status());
     }
 }
 
@@ -873,11 +933,11 @@ mod tests {
         build_hls_origin_resource_headers, build_hls_origin_resource_headers_with_client_range,
         fetch_hls_origin_resource_response, run_hls_origin_resource_retry_loop_with_attempt_prepare,
         HlsCacheCommitFailure, HlsContentCodingFailure, HlsOriginByteRangeExpectation, HlsOriginResourceBodyDeadline,
-        HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchKind,
-        HlsResourceFetchAttempt, HlsResourceFetchLogStatus, HlsResourceFetchSource,
+        HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchAttempt,
+        HlsResourceFetchKind, HlsResourceFetchLogStatus, HlsResourceFetchSource,
     };
     use crate::{
-        api::model::{HlsBoundAccountAcquireErrorKind, SegmentFetchPolicy},
+        api::model::{HlsBoundAccountAcquireErrorKind, HlsLogIdentity, SegmentFetchPolicy},
         processing::parser::hls::origin_manifest::ParsedByteRange,
         utils::content_coding::{ContentCoding, ContentCodingError, ContentDecodingIoError},
     };
@@ -909,6 +969,8 @@ mod tests {
         }
         String::from_utf8(request).expect("request should be HTTP text")
     }
+
+    fn test_log_identity() -> HlsLogIdentity { HlsLogIdentity::for_test("content-session", "proxy-session") }
 
     fn fetch_target(origin_url: String) -> HlsOriginResourceFetchTarget {
         let mut headers = HeaderMap::new();
@@ -1143,12 +1205,13 @@ mod tests {
         let commit_count = Arc::new(AtomicUsize::new(0));
         let cleanup_count_for_callback = Arc::clone(&cleanup_count);
         let commit_count_for_callback = Arc::clone(&commit_count);
+        let identity = test_log_identity();
 
         let result = run_hls_origin_resource_retry_loop_with_attempt_prepare(
             target,
             fetch_clients(false),
             &policy,
-            "session",
+            &identity,
             |_| async { Ok(()) }.boxed(),
             move |()| {
                 let cleanup_count = Arc::clone(&cleanup_count_for_callback);
@@ -1201,12 +1264,13 @@ mod tests {
         let commit_count = Arc::new(AtomicUsize::new(0));
         let cleanup_count_for_callback = Arc::clone(&cleanup_count);
         let commit_count_for_callback = Arc::clone(&commit_count);
+        let identity = test_log_identity();
 
         let result = run_hls_origin_resource_retry_loop_with_attempt_prepare(
             target,
             fetch_clients(false),
             &policy,
-            "session",
+            &identity,
             |_| async { Ok(()) }.boxed(),
             move |()| {
                 let cleanup_count = Arc::clone(&cleanup_count_for_callback);
@@ -1252,6 +1316,83 @@ mod tests {
         assert!(err.aborts_without_retry());
     }
 
+    #[test]
+    fn local_cache_capacity_aborts_origin_retries_but_remains_object_retryable() {
+        let err = HlsOriginResourceFetchError::LocalCacheCapacity {
+            required_session_bytes: 12,
+            required_global_bytes: 0,
+            projected_write_bytes: 12,
+            revision: super::super::HlsCacheCapacityRevision::for_test(),
+        };
+
+        assert!(err.retryable_failure());
+        assert!(err.aborts_without_retry());
+        assert!(!err.object_failure_is_permanent());
+        assert!(err.is_local_cache_capacity());
+    }
+
+    #[test]
+    fn superseded_fetch_aborts_retry_without_marking_the_object_permanent() {
+        let err = HlsOriginResourceFetchError::Superseded;
+
+        assert!(!err.retryable_failure());
+        assert!(err.aborts_without_retry());
+        assert!(!err.object_failure_is_permanent());
+        assert_eq!(err.log_status().label(), "Superseded");
+    }
+
+    #[tokio::test]
+    async fn local_cache_capacity_aborts_after_one_origin_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind local server");
+        let address = listener.local_addr().expect("local address");
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_request_count = Arc::clone(&request_count);
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                read_request(&mut stream).await;
+                server_request_count.fetch_add(1, Ordering::Relaxed);
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .expect("write response");
+            }
+        });
+        let policy = SegmentFetchPolicy {
+            retry_delays_ms: [0, 0, 0, 0, 0],
+            retry_jitter_max_ms: 0,
+            ..SegmentFetchPolicy::default()
+        };
+        let identity = test_log_identity();
+
+        let result = run_hls_origin_resource_retry_loop_with_attempt_prepare(
+            fetch_target(format!("http://{address}/segment.ts")),
+            fetch_clients(false),
+            &policy,
+            &identity,
+            |_| async { Ok(()) }.boxed(),
+            |()| async {}.boxed(),
+            |_response, _attempt, _deadline, ()| {
+                async {
+                    Err::<(), _>(HlsOriginResourceFetchError::LocalCacheCapacity {
+                        required_session_bytes: 12,
+                        required_global_bytes: 0,
+                        projected_write_bytes: 12,
+                        revision: super::super::HlsCacheCapacityRevision::for_test(),
+                    })
+                }
+                .boxed()
+            },
+        )
+        .await;
+
+        server.abort();
+        assert!(matches!(result, Err(HlsOriginResourceFetchError::LocalCacheCapacity { .. })));
+        assert_eq!(request_count.load(Ordering::Relaxed), 1);
+    }
+
     #[tokio::test]
     async fn storage_full_cache_commit_aborts_after_one_origin_request() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind local server");
@@ -1276,12 +1417,13 @@ mod tests {
             retry_jitter_max_ms: 0,
             ..SegmentFetchPolicy::default()
         };
+        let identity = test_log_identity();
 
         let result = run_hls_origin_resource_retry_loop_with_attempt_prepare(
             fetch_target(format!("http://{address}/segment.ts")),
             fetch_clients(false),
             &policy,
-            "session",
+            &identity,
             |_| async { Ok(()) }.boxed(),
             |()| async {}.boxed(),
             |_response, _attempt, _deadline, ()| {

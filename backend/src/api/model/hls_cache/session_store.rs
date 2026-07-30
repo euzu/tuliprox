@@ -1,8 +1,27 @@
 use super::{HlsOriginSource, HlsSession, HlsSessionKey, ProxySessionId};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard, Weak},
+};
 use tokio::sync::RwLock;
 
 pub type HlsSessionHandle = Arc<RwLock<HlsSession>>;
+
+/// Monotonic identity of one concrete session handle created by the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct HlsSessionIncarnation(u64);
+
+#[cfg(test)]
+impl HlsSessionIncarnation {
+    pub(crate) const fn for_test(generation: u64) -> Self { Self(generation) }
+}
+
+/// Result of a non-blocking session-incarnation transaction.
+pub(crate) enum HlsCurrentProxySessionAccess<R> {
+    Acquired(R),
+    Superseded,
+    LockBusy,
+}
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum HlsSessionStoreOutcome {
@@ -28,6 +47,7 @@ pub struct HlsExpiredSessionMarker {
 #[derive(Default)]
 pub struct HlsSessionStore {
     indexes: RwLock<SessionIndexes>,
+    incarnations: Mutex<HlsSessionIncarnationRegistry>,
 }
 
 #[derive(Default)]
@@ -35,6 +55,24 @@ struct SessionIndexes {
     by_key: HashMap<HlsSessionKey, HlsSessionHandle>,
     by_proxy_session_id: HashMap<ProxySessionId, HlsSessionHandle>,
     expired_by_proxy_session_id: HashMap<ProxySessionId, HlsExpiredSessionMarker>,
+}
+
+#[derive(Default)]
+struct HlsSessionIncarnationRegistry {
+    next: u64,
+    // Weak entries retain ordering only for still-live handles and are pruned
+    // on every lookup/registration, so removed session history cannot leak.
+    entries: Vec<HlsSessionIncarnationEntry>,
+}
+
+struct HlsSessionIncarnationEntry {
+    incarnation: HlsSessionIncarnation,
+    session: Weak<RwLock<HlsSession>>,
+}
+
+#[cfg(test)]
+pub(crate) struct HlsSessionIndexWriteGuardForTest<'a> {
+    _guard: tokio::sync::RwLockWriteGuard<'a, SessionIndexes>,
 }
 
 impl HlsSessionStore {
@@ -46,6 +84,41 @@ impl HlsSessionStore {
 
     pub async fn get_by_proxy_session_id(&self, proxy_session_id: &ProxySessionId) -> Option<HlsSessionHandle> {
         self.indexes.read().await.by_proxy_session_id.get(proxy_session_id).map(Arc::clone)
+    }
+
+    pub(crate) fn session_incarnation(&self, session: &HlsSessionHandle) -> Option<HlsSessionIncarnation> {
+        let mut incarnations = self.lock_incarnations();
+        incarnations.entries.retain(|entry| entry.session.strong_count() > 0);
+        incarnations.entries.iter().find_map(|entry| {
+            entry
+                .session
+                .upgrade()
+                .filter(|candidate| Arc::ptr_eq(candidate, session))
+                .map(|_| entry.incarnation)
+        })
+    }
+
+    /// Non-blocking transaction for deadline-bound state changes. The index
+    /// guard is held through `operation`; the closure must not await or perform
+    /// I/O.
+    pub(crate) fn try_with_current_proxy_session<R>(
+        &self,
+        proxy_session_id: &ProxySessionId,
+        expected: &HlsSessionHandle,
+        operation: impl FnOnce() -> R,
+    ) -> HlsCurrentProxySessionAccess<R> {
+        let Ok(indexes) = self.indexes.try_read() else {
+            return HlsCurrentProxySessionAccess::LockBusy;
+        };
+        let Some(current) = indexes.by_proxy_session_id.get(proxy_session_id) else {
+            return HlsCurrentProxySessionAccess::Superseded;
+        };
+        if !Arc::ptr_eq(current, expected) {
+            return HlsCurrentProxySessionAccess::Superseded;
+        }
+        let result = operation();
+        drop(indexes);
+        HlsCurrentProxySessionAccess::Acquired(result)
     }
 
     pub async fn list_sessions(&self) -> Vec<HlsSessionHandle> {
@@ -88,6 +161,7 @@ impl HlsSessionStore {
             HlsSession::new_with_origin_source(key.clone(), origin_source, reverse_proxy_rewrite_secret, now_ms);
         let proxy_session_id = session.proxy_session_id.clone();
         let session = Arc::new(RwLock::new(session));
+        let _incarnation = self.register_session_incarnation(&session);
         indexes.by_key.insert(key, Arc::clone(&session));
         indexes.expired_by_proxy_session_id.remove(&proxy_session_id);
         indexes.by_proxy_session_id.insert(proxy_session_id, Arc::clone(&session));
@@ -161,6 +235,12 @@ impl HlsSessionStore {
         indexes.by_key.clear();
         indexes.by_proxy_session_id.clear();
         indexes.expired_by_proxy_session_id.clear();
+        self.lock_incarnations().entries.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn hold_index_write_for_test(&self) -> HlsSessionIndexWriteGuardForTest<'_> {
+        HlsSessionIndexWriteGuardForTest { _guard: self.indexes.write().await }
     }
 
     #[cfg(test)]
@@ -171,6 +251,23 @@ impl HlsSessionStore {
 
     #[cfg(test)]
     pub async fn is_empty(&self) -> bool { self.indexes.read().await.by_key.is_empty() }
+
+    fn register_session_incarnation(&self, session: &HlsSessionHandle) -> Option<HlsSessionIncarnation> {
+        let mut incarnations = self.lock_incarnations();
+        incarnations.entries.retain(|entry| entry.session.strong_count() > 0);
+        let generation = incarnations.next.checked_add(1)?;
+        incarnations.next = generation;
+        let incarnation = HlsSessionIncarnation(generation);
+        incarnations.entries.push(HlsSessionIncarnationEntry {
+            incarnation,
+            session: Arc::downgrade(session),
+        });
+        Some(incarnation)
+    }
+
+    fn lock_incarnations(&self) -> MutexGuard<'_, HlsSessionIncarnationRegistry> {
+        self.incarnations.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 fn remove_indexed_session(
@@ -189,7 +286,7 @@ fn remove_indexed_session(
 
 #[cfg(test)]
 mod tests {
-    use super::{HlsExpiredSessionReason, HlsSessionStore};
+    use super::{HlsCurrentProxySessionAccess, HlsExpiredSessionReason, HlsSessionStore};
     use crate::api::model::{HlsSessionKey, ProxySessionId};
     use std::sync::Arc;
 
@@ -218,6 +315,21 @@ mod tests {
             .expect("session should be indexed by proxy_session_id");
 
         assert!(Arc::ptr_eq(&created, &found));
+    }
+
+    #[tokio::test]
+    async fn hls_terminal_commit_session_index_check_reports_lock_busy_without_waiting() {
+        let store = HlsSessionStore::new();
+        let key = HlsSessionKey::new(1, "terminal-commit");
+        let session = store.get_or_create_session(key, b"0011223344556677", 100).await;
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        let index_guard = store.indexes.write().await;
+
+        assert!(matches!(
+            store.try_with_current_proxy_session(&proxy_session_id, &session, || ()),
+            HlsCurrentProxySessionAccess::LockBusy
+        ));
+        drop(index_guard);
     }
 
     #[tokio::test]
