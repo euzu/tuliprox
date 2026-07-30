@@ -513,7 +513,8 @@ fn copy_platform_acl(source: &Path, target: &Path) -> io::Result<()> {
     // SAFETY: The buffer has the size returned by getxattr and all pointers remain valid for the call.
     let read = unsafe { libc::getxattr(source.as_ptr(), ACL_NAME.as_ptr().cast(), acl.as_mut_ptr().cast(), acl.len()) };
     if read < 0 {
-        return Err(io::Error::last_os_error());
+        let err = io::Error::last_os_error();
+        return if acl_read_error_is_non_fatal(&err) { Ok(()) } else { Err(err) };
     }
     acl.truncate(usize::try_from(read).map_err(|_| io::Error::other("ACL size is invalid"))?);
     // SAFETY: The target path, attribute name, and ACL buffer are valid for the duration of the call.
@@ -538,6 +539,9 @@ fn copy_platform_acl(source: &Path, target: &Path) -> io::Result<()> {
 fn acl_is_missing_or_unsupported(err: &io::Error) -> bool {
     err.raw_os_error() == Some(libc::ENODATA) || err.raw_os_error() == Some(libc::ENOTSUP)
 }
+
+#[cfg(target_os = "linux")]
+fn acl_read_error_is_non_fatal(err: &io::Error) -> bool { err.raw_os_error() == Some(libc::ERANGE) }
 
 async fn replace_csv_file(source: &Path, target: &Path) -> io::Result<()> {
     match tokio::fs::rename(source, target).await {
@@ -950,6 +954,9 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(target_os = "linux")]
+    use super::acl_read_error_is_non_fatal;
+
     const M3U_BATCH: &str = r"
 #url;name;max_connections;priority
 http://hd.providerline.com:8080/get.php?username=user1&password=user1&type=m3u_plus;input_1
@@ -1279,6 +1286,13 @@ input_1;user;password;http://provider.tv;1;0;keep-me;old-enabled;old-expiry;trai
 
         assert_eq!(tokio::fs::metadata(csv_path).await?.permissions().mode() & 0o777, 0o640);
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn acl_size_race_does_not_abort_rewrite() {
+        assert!(acl_read_error_is_non_fatal(&std::io::Error::from_raw_os_error(libc::ERANGE)));
+        assert!(!acl_read_error_is_non_fatal(&std::io::Error::from_raw_os_error(libc::EIO)));
     }
 
     #[cfg(target_os = "linux")]
