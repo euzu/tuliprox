@@ -1,5 +1,7 @@
 use log::warn;
-use memmap2::{Advice, Mmap};
+use memmap2::Mmap;
+#[cfg(unix)]
+pub(crate) use memmap2::Advice;
 use std::{
     ffi::OsString,
     fs::File,
@@ -12,11 +14,22 @@ use std::io::{Read, Seek, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 
+/// Windows/memmap2 has no madvise-style Advice API; keep a stub so callers stay portable.
+#[cfg(not(unix))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Advice {
+    Normal,
+}
+
+#[cfg(unix)]
 fn advise_mmap(mmap: &Mmap, advice: Advice, context: &str) {
     if let Err(err) = mmap.advise(advice) {
         warn!("Failed to apply mmap advice {advice:?} for {context}: {err}");
     }
 }
+
+#[cfg(not(unix))]
+fn advise_mmap(_mmap: &Mmap, _advice: Advice, _context: &str) {}
 
 pub(crate) fn mmap_with_advice(file: &File, advice: Advice, context: &str) -> Option<Mmap> {
     // SAFETY: Every v3 persisted query holds its shared sidecar lock for the mapping lifetime, and v3 writers require

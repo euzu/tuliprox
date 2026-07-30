@@ -128,13 +128,13 @@ impl DiskProbe {
             let mut total_bytes: u64 = 0;
             let mut total_free_bytes: u64 = 0;
             // SAFETY: `self.path.0` is a NUL-terminated UTF-16 string built from
-            // the CWD; the three output pointers are valid mutable u64 references.
+            // the CWD; the three output pointers alias ULARGE_INTEGER (= u64).
             let ok = unsafe {
                 winapi::um::fileapi::GetDiskFreeSpaceExW(
                     self.path.0.as_ptr(),
-                    &mut free_bytes_available,
-                    &mut total_bytes,
-                    &mut total_free_bytes,
+                    &mut free_bytes_available as *mut u64 as *mut _,
+                    &mut total_bytes as *mut u64 as *mut _,
+                    &mut total_free_bytes as *mut u64 as *mut _,
                 )
             };
             if ok == 0 {
@@ -541,7 +541,7 @@ mod platform {
 #[cfg(target_os = "windows")]
 mod platform {
     use super::{CpuTracker, DiskProbe, SystemInfo};
-    use std::{mem::size_of, ptr::null_mut};
+    use std::mem::size_of;
     use winapi::{
         shared::minwindef::FILETIME,
         um::{
@@ -551,8 +551,14 @@ mod platform {
         },
     };
 
+    /// Pseudo-handle from `GetCurrentProcess` is process-wide and safe across threads.
+    #[derive(Clone, Copy)]
+    struct ProcessHandle(winapi::um::winnt::HANDLE);
+    // SAFETY: only stores the current-process pseudo-handle (-1), not an owned HANDLE.
+    unsafe impl Send for ProcessHandle {}
+
     pub(super) struct Sampler {
-        process: winapi::um::winnt::HANDLE,
+        process: ProcessHandle,
         memory_total: u64,
         disk_probe: Option<DiskProbe>,
         cpu_tracker: CpuTracker,
@@ -562,9 +568,9 @@ mod platform {
 
     impl Sampler {
         pub(super) fn new() -> Option<Self> {
-            let process = unsafe { GetCurrentProcess() };
+            let process = ProcessHandle(unsafe { GetCurrentProcess() });
             let memory_total = query_memory_total()?;
-            let cpu_time_secs = query_process_cpu_time_secs(process)?;
+            let cpu_time_secs = query_process_cpu_time_secs(process.0)?;
             let networks = sysinfo::Networks::new_with_refreshed_list();
             Some(Self {
                 process,
@@ -577,8 +583,8 @@ mod platform {
         }
 
         pub(super) fn sample(&mut self) -> Option<SystemInfo> {
-            let cpu_time_secs = query_process_cpu_time_secs(self.process)?;
-            let memory_usage = query_process_memory_usage(self.process)?;
+            let cpu_time_secs = query_process_cpu_time_secs(self.process.0)?;
+            let memory_usage = query_process_memory_usage(self.process.0)?;
             self.networks.refresh(true);
             let (rx_bytes, tx_bytes) = super::sum_sysinfo_network_bytes(&self.networks);
             let (received_bps, sent_bps) = self.net_tracker.sample(rx_bytes, tx_bytes);
