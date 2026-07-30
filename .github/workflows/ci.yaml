@@ -93,8 +93,12 @@ jobs:
   windows:
     name: Windows Build
     runs-on: windows-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Install Stable Rust
         uses: dtolnay/rust-toolchain@stable

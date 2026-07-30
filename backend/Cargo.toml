@@ -92,7 +92,7 @@ libc = "0.2"
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 sysinfo = { version = "0.38.4", default-features = false, features = ["system", "network"] }
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["psapi", "minwindef", "processthreadsapi", "sysinfoapi", "fileapi"] }
+winapi = { version = "0.3", features = ["psapi", "minwindef", "processthreadsapi", "sysinfoapi", "fileapi", "winbase"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
 #[target.'cfg(target_os = "linux")'.dependencies]
 #mimalloc = "0.1"

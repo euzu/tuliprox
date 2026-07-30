@@ -55,7 +55,11 @@ pub(crate) fn read_exact_at_offset(file: &File, buf: &mut [u8], offset: u64) -> 
     {
         let mut read = 0;
         while read < buf.len() {
-            let chunk_read = file.seek_read(&mut buf[read..], offset + read as u64)?;
+            let read_offset = u64::try_from(read)
+                .ok()
+                .and_then(|read| offset.checked_add(read))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset read position overflow"))?;
+            let chunk_read = file.seek_read(&mut buf[read..], read_offset)?;
             if chunk_read == 0 {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"));
             }
