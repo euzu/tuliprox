@@ -1,7 +1,6 @@
 use crate::utils::LRUResourceCache;
 use crate::{
     api::{
-        config_watch::exec_config_watch,
         endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
         model::active_user_manager::ConnectionAdmission,
         model::provider_dns_manager::exec_provider_dns,
@@ -11,7 +10,6 @@ use crate::{
             ConnectionManager, DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, PlaylistStorage,
             PlaylistStorageState, SharedStreamManager, UpdateGuard,
         },
-        scheduler::exec_scheduler,
     },
     model::{
         AppConfig, Config, ConfigProvider, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig,
@@ -42,6 +40,7 @@ use tokio::sync::RwLock;
 use tokio::task;
 use tokio_util::sync::CancellationToken;
 use url::Url;
+use crate::api::tasks::{exec_config_watch, exec_scheduler};
 
 macro_rules! cancel_service {
     ($field: ident, $flag:expr, $changes:expr, $cancel_tokens:expr) => {

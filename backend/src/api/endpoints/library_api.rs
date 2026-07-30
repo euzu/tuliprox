@@ -1,6 +1,6 @@
 use crate::{api::{
-    library_scan::{spawn_library_scan, LibraryScanTaskOptions},
     model::AppState,
+    tasks::{spawn_library_scan, LibraryScanTaskOptions},
 }, auth::permission_layer, library::{resolve_metadata_storage_path, LibraryProcessor, MetadataStorage}};
 use axum::response::IntoResponse;
 use log::{debug, warn};
@@ -9,6 +9,7 @@ use shared::model::{
     permission::Permission, LibraryScanRequest, LibraryStatus, OperationRunAccepted,
 };
 use std::sync::Arc;
+
 
 // Triggers a library scan
 async fn scan_library(

@@ -18,7 +18,7 @@ use shared::{
     model::ConfigPaths,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -81,7 +81,7 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
 
         let mut debounce_timer = Box::pin(tokio::time::sleep(tokio::time::Duration::from_millis(0)));
         let mut timer_active = false;
-        let mut pending_configs: HashMap<ConfigFile, PathBuf> = HashMap::new();
+        let mut pending_configs: HashMap<ConfigFile, HashSet<PathBuf>> = HashMap::new();
 
         loop {
             tokio::select! {
@@ -123,7 +123,7 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
                                 if let Some(config_file) = resolved {
                                     // Consolidate updates
                                     let effective = if config_file == ConfigFile::SourceFile { ConfigFile::Sources } else { config_file };
-                                    pending_configs.insert(effective, path);
+                                    pending_configs.entry(effective).or_default().insert(path);
                                     trigger = true;
                                 }
                             }
@@ -141,9 +141,15 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
             () = &mut debounce_timer, if timer_active => {
                 timer_active = false;
                 if !pending_configs.is_empty() {
-                    for (config_file, path) in pending_configs.drain() {
-                        if let Err(err) = Box::pin(config_file.reload(&path, &watcher_app_state)).await {
-                           handle_error(err, &path);
+                    for (config_file, paths) in pending_configs.drain() {
+                        if config_file == ConfigFile::Sources
+                            && !has_external_source_write(&watcher_app_state.app_config.file_locks, &paths).await
+                        {
+                            continue;
+                        }
+                        let Some(path) = paths.iter().next() else { continue };
+                        if let Err(err) = Box::pin(config_file.reload(path, &watcher_app_state)).await {
+                           handle_error(err, path);
                         }
                     }
                 }
@@ -156,6 +162,18 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
     });
 
     Ok(())
+}
+
+async fn has_external_source_write(
+    file_locks: &crate::utils::FileLockManager,
+    paths: &HashSet<PathBuf>,
+) -> bool {
+    for path in paths {
+        if !file_locks.is_internal_write_revision(path).await {
+            return true;
+        }
+    }
+    false
 }
 
 fn get_watch_files(
@@ -195,5 +213,29 @@ pub fn exec_config_watch(app_state: &Arc<AppState>, cancel: &CancellationToken) 
         if let Err(err) = start_config_watch(app_state, cancel) {
             error!("Failed to start config watch: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_external_source_write;
+    use crate::utils::FileLockManager;
+    use std::collections::HashSet;
+
+    #[tokio::test]
+    async fn external_source_event_is_not_hidden_by_internal_event() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let internal = dir.path().join("internal.csv");
+        let external = dir.path().join("external.csv");
+        tokio::fs::write(&internal, b"internal").await?;
+        tokio::fs::write(&external, b"external").await?;
+        let locks = FileLockManager::new();
+        locks.mark_internal_write_revision(&internal).await?;
+        let paths = HashSet::from([internal, external.clone()]);
+
+        assert!(has_external_source_write(&locks, &paths).await);
+        locks.mark_internal_write_revision(&external).await?;
+        assert!(!has_external_source_write(&locks, &paths).await);
+        Ok(())
     }
 }
