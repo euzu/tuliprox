@@ -132,9 +132,9 @@ impl DiskProbe {
             let ok = unsafe {
                 winapi::um::fileapi::GetDiskFreeSpaceExW(
                     self.path.0.as_ptr(),
-                    &mut free_bytes_available as *mut u64 as *mut _,
-                    &mut total_bytes as *mut u64 as *mut _,
-                    &mut total_free_bytes as *mut u64 as *mut _,
+                    (&raw mut free_bytes_available).cast(),
+                    (&raw mut total_bytes).cast(),
+                    (&raw mut total_free_bytes).cast(),
                 )
             };
             if ok == 0 {
@@ -606,7 +606,7 @@ mod platform {
             dwLength: u32::try_from(size_of::<MEMORYSTATUSEX>()).ok()?,
             ..unsafe { std::mem::zeroed() }
         };
-        let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+        let ok = unsafe { GlobalMemoryStatusEx(&raw mut status) };
         (ok != 0).then_some(status.ullTotalPhys)
     }
 
@@ -616,17 +616,20 @@ mod platform {
             ..unsafe { std::mem::zeroed() }
         };
         let ok = unsafe {
-            GetProcessMemoryInfo(process, &mut counters, u32::try_from(size_of::<PROCESS_MEMORY_COUNTERS>()).ok()?)
+            GetProcessMemoryInfo(process, &raw mut counters, u32::try_from(size_of::<PROCESS_MEMORY_COUNTERS>()).ok()?)
         };
         (ok != 0).then_some(counters.WorkingSetSize as u64)
     }
 
+    #[allow(clippy::cast_precision_loss)]
     fn query_process_cpu_time_secs(process: winapi::um::winnt::HANDLE) -> Option<f64> {
         let mut created = unsafe { std::mem::zeroed::<FILETIME>() };
         let mut exited = unsafe { std::mem::zeroed::<FILETIME>() };
         let mut kernel = unsafe { std::mem::zeroed::<FILETIME>() };
         let mut user = unsafe { std::mem::zeroed::<FILETIME>() };
-        let ok = unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) };
+        let ok = unsafe {
+            GetProcessTimes(process, &raw mut created, &raw mut exited, &raw mut kernel, &raw mut user)
+        };
         if ok == 0 {
             return None;
         }

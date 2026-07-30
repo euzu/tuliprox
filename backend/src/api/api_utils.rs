@@ -3588,11 +3588,10 @@ pub(crate) async fn local_stream_response(
     };
 
     if check_path {
-        let Ok(canonical_metadata) = tokio::fs::metadata(&canonical).await else { return internal_server_error!() };
-
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
+            let Ok(canonical_metadata) = tokio::fs::metadata(&canonical).await else { return internal_server_error!() };
             if opened_metadata.dev() != canonical_metadata.dev() || opened_metadata.ino() != canonical_metadata.ino() {
                 error!("TOCTOU race detected: file swapped during local_stream_response");
                 return StatusCode::FORBIDDEN.into_response();

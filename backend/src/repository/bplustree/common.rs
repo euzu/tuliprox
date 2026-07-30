@@ -9,10 +9,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(not(unix))]
-use std::io::{Read, Seek, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 
 /// Windows/memmap2 has no madvise-style Advice API; keep a stub so callers stay portable.
 #[cfg(not(unix))]
@@ -51,13 +51,24 @@ pub(crate) fn mmap_with_advice(file: &File, advice: Advice, context: &str) -> Op
 pub(crate) fn read_exact_at_offset(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     #[cfg(unix)]
     file.read_exact_at(buf, offset)?;
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let mut file = file;
-        let current_pos = file.stream_position()?;
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(buf)?;
-        file.seek(SeekFrom::Start(current_pos))?;
+        let mut read = 0;
+        while read < buf.len() {
+            let chunk_read = file.seek_read(&mut buf[read..], offset + read as u64)?;
+            if chunk_read == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"));
+            }
+            read += chunk_read;
+        }
+    }
+    #[cfg(not(unix))]
+    #[cfg(not(windows))]
+    {
+        let _ = file;
+        let _ = buf;
+        let _ = offset;
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "offset reads are not supported on this platform"));
     }
     Ok(())
 }

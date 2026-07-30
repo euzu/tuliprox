@@ -792,10 +792,8 @@ where
             // Windows doesn't allow overwriting an existing file via rename.
             #[cfg(windows)]
             {
-                if fs::remove_file(&path).await.is_ok() {
-                    if fs::rename(&tmp_path, &path).await.is_ok() {
-                        return Ok(());
-                    }
+                if fs::remove_file(&path).await.is_ok() && fs::rename(&tmp_path, &path).await.is_ok() {
+                    return Ok(());
                 }
             }
 
