@@ -378,6 +378,10 @@ pub async fn csv_backup_file(csv_path: &Path, backup_dir: &str) -> Result<(), Tu
         let _ = tokio::fs::remove_file(&backup_path).await;
         return Err(TuliproxError::ConfigInput(format!("Could not preserve alias CSV backup permissions: {err}")));
     }
+    if let Err(err) = copy_csv_acl(csv_path, &backup_path).await {
+        let _ = tokio::fs::remove_file(&backup_path).await;
+        return Err(TuliproxError::ConfigInput(format!("Could not preserve alias CSV backup ACL: {err}")));
+    }
     Ok(())
 }
 
@@ -472,15 +476,23 @@ async fn preserve_csv_metadata(file_path: &Path, tmp_path: &Path) -> Result<(), 
         Err(err) => return Err(err),
     };
     tokio::fs::set_permissions(tmp_path, metadata.permissions()).await?;
+    copy_csv_acl(file_path, tmp_path).await
+}
+
+async fn copy_csv_acl(source: &Path, target: &Path) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let source = file_path.to_path_buf();
-        let target = tmp_path.to_path_buf();
+        let source = source.to_path_buf();
+        let target = target.to_path_buf();
         tokio::task::spawn_blocking(move || copy_platform_acl(&source, &target))
             .await
-            .map_err(|err| io::Error::other(format!("ACL copy task failed: {err}")))??;
+            .map_err(|err| io::Error::other(format!("ACL copy task failed: {err}")))?
     }
-    Ok(())
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (source, target);
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -492,11 +504,17 @@ fn copy_platform_acl(source: &Path, target: &Path) -> io::Result<()> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains a null byte"))?;
     let target = CString::new(target.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains a null byte"))?;
-    // SAFETY: Both pointers are valid null-terminated strings and the null buffer requests the required size.
-    let size = unsafe { libc::getxattr(source.as_ptr(), ACL_NAME.as_ptr().cast(), std::ptr::null_mut(), 0) };
-    if size < 0 {
-        let err = io::Error::last_os_error();
-        if acl_is_missing_or_unsupported(&err) {
+    let acl = match read_acl_value(|buffer, size| {
+        // SAFETY: The paths are null-terminated and buffer is either null for a size probe or valid for size bytes.
+        let result = unsafe { libc::getxattr(source.as_ptr(), ACL_NAME.as_ptr().cast(), buffer, size) };
+        if result < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            usize::try_from(result).map_err(|_| io::Error::other("ACL size is invalid"))
+        }
+    }) {
+        Ok(acl) => acl,
+        Err(err) if acl_is_missing_or_unsupported(&err) => {
             // SAFETY: Both pointers are valid null-terminated strings.
             let removed = unsafe { libc::removexattr(target.as_ptr(), ACL_NAME.as_ptr().cast()) };
             if removed != 0 {
@@ -507,19 +525,31 @@ fn copy_platform_acl(source: &Path, target: &Path) -> io::Result<()> {
             }
             return Ok(());
         }
-        return Err(err);
-    }
-    let mut acl = vec![0_u8; usize::try_from(size).map_err(|_| io::Error::other("ACL size is invalid"))?];
-    // SAFETY: The buffer has the size returned by getxattr and all pointers remain valid for the call.
-    let read = unsafe { libc::getxattr(source.as_ptr(), ACL_NAME.as_ptr().cast(), acl.as_mut_ptr().cast(), acl.len()) };
-    if read < 0 {
-        let err = io::Error::last_os_error();
-        return if acl_read_error_is_non_fatal(&err) { Ok(()) } else { Err(err) };
-    }
-    acl.truncate(usize::try_from(read).map_err(|_| io::Error::other("ACL size is invalid"))?);
+        Err(err) => return Err(err),
+    };
     // SAFETY: The target path, attribute name, and ACL buffer are valid for the duration of the call.
     let written = unsafe { libc::setxattr(target.as_ptr(), ACL_NAME.as_ptr().cast(), acl.as_ptr().cast(), acl.len(), 0) };
     if written == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+#[cfg(target_os = "linux")]
+fn read_acl_value(mut getxattr: impl FnMut(*mut libc::c_void, usize) -> io::Result<usize>) -> io::Result<Vec<u8>> {
+    const MAX_ATTEMPTS: usize = 3;
+
+    for _ in 0..MAX_ATTEMPTS {
+        let size = getxattr(std::ptr::null_mut(), 0)?;
+        let mut acl = vec![0_u8; size];
+        let buffer = if acl.is_empty() { std::ptr::null_mut() } else { acl.as_mut_ptr().cast() };
+        match getxattr(buffer, acl.len()) {
+            Ok(read) => {
+                acl.truncate(read);
+                return Ok(acl);
+            }
+            Err(err) if err.raw_os_error() == Some(libc::ERANGE) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Err(io::Error::from_raw_os_error(libc::ERANGE))
 }
 
 #[cfg(target_os = "macos")]
@@ -539,9 +569,6 @@ fn copy_platform_acl(source: &Path, target: &Path) -> io::Result<()> {
 fn acl_is_missing_or_unsupported(err: &io::Error) -> bool {
     err.raw_os_error() == Some(libc::ENODATA) || err.raw_os_error() == Some(libc::ENOTSUP)
 }
-
-#[cfg(target_os = "linux")]
-fn acl_read_error_is_non_fatal(err: &io::Error) -> bool { err.raw_os_error() == Some(libc::ERANGE) }
 
 async fn replace_csv_file(source: &Path, target: &Path) -> io::Result<()> {
     match tokio::fs::rename(source, target).await {
@@ -955,7 +982,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[cfg(target_os = "linux")]
-    use super::acl_read_error_is_non_fatal;
+    use super::read_acl_value;
 
     const M3U_BATCH: &str = r"
 #url;name;max_connections;priority
@@ -1261,6 +1288,33 @@ input_1;user;password;http://provider.tv;1;0;keep-me;old-enabled;old-expiry;trai
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn alias_backup_preserves_posix_acl() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let csv_path = dir.path().join("aliases.csv");
+        let backup_dir = dir.path().join("backups");
+        tokio::fs::write(&csv_path, XTREAM_BATCH).await?;
+        let status = std::process::Command::new("setfacl").args(["-m", "u:12345:r", csv_path.to_string_lossy().as_ref()]).status();
+        let Ok(status) = status else { return Ok(()) };
+        if !status.success() {
+            return Ok(());
+        }
+        let before = std::process::Command::new("getfacl").args(["-cp", csv_path.to_string_lossy().as_ref()]).output()?;
+
+        csv_backup_file(&csv_path, backup_dir.to_string_lossy().as_ref()).await?;
+
+        let backup_path = tokio::fs::read_dir(&backup_dir)
+            .await?
+            .next_entry()
+            .await?
+            .ok_or("alias backup is missing")?
+            .path();
+        let after = std::process::Command::new("getfacl").args(["-cp", backup_path.to_string_lossy().as_ref()]).output()?;
+        assert_eq!(after.stdout, before.stdout);
+        Ok(())
+    }
+
     #[test]
     fn alias_csv_temp_paths_are_unique_and_stay_next_to_destination() -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
@@ -1290,9 +1344,21 @@ input_1;user;password;http://provider.tv;1;0;keep-me;old-enabled;old-expiry;trai
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn acl_size_race_does_not_abort_rewrite() {
-        assert!(acl_read_error_is_non_fatal(&std::io::Error::from_raw_os_error(libc::ERANGE)));
-        assert!(!acl_read_error_is_non_fatal(&std::io::Error::from_raw_os_error(libc::EIO)));
+    fn acl_size_race_reprobes_and_retries() -> Result<(), Box<dyn std::error::Error>> {
+        let mut calls = 0;
+        let acl = read_acl_value(|_, _| {
+            calls += 1;
+            match calls {
+                1 => Ok(2),
+                2 => Err(std::io::Error::from_raw_os_error(libc::ERANGE)),
+                3 | 4 => Ok(4),
+                _ => Err(std::io::Error::other("unexpected ACL read")),
+            }
+        })?;
+
+        assert_eq!(calls, 4);
+        assert_eq!(acl.len(), 4);
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
