@@ -24,6 +24,7 @@ use std::{
     sync::{atomic::{AtomicU64, Ordering}, Arc},
 };
 use url::Url;
+use uuid::Uuid;
 
 const CSV_SEPARATOR: char = ';';
 const HEADER_PREFIX: char = '#';
@@ -345,10 +346,38 @@ pub async fn csv_backup_file(csv_path: &Path, backup_dir: &str) -> Result<(), Tu
     tokio::fs::create_dir_all(&backup_dir)
         .await
         .map_err(|err| TuliproxError::ConfigInput(format!("Could not create alias CSV backup directory: {err}")))?;
-    let backup_path = backup_dir.join(format!("{filename}_{}", Local::now().format("%Y%m%d_%H%M%S%9f")));
-    tokio::fs::copy(csv_path, &backup_path)
+    let backup_path = backup_dir.join(format!(
+        "{filename}_{}_{}",
+        Local::now().format("%Y%m%d_%H%M%S%9f"),
+        Uuid::new_v4()
+    ));
+    let mut source = tokio::fs::File::open(csv_path)
         .await
-        .map_err(|err| TuliproxError::ConfigInput(format!("Could not backup alias CSV to {}: {err}", backup_path.display())))?;
+        .map_err(|err| TuliproxError::ConfigInput(format!("Could not open alias CSV for backup: {err}")))?;
+    let source_permissions = source
+        .metadata()
+        .await
+        .map_err(|err| TuliproxError::ConfigInput(format!("Could not read alias CSV metadata: {err}")))?
+        .permissions();
+    let mut backup = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup_path)
+        .await
+        .map_err(|err| TuliproxError::ConfigInput(format!("Could not create alias CSV backup {}: {err}", backup_path.display())))?;
+    if let Err(err) = tokio::io::copy(&mut source, &mut backup).await {
+        drop(backup);
+        let _ = tokio::fs::remove_file(&backup_path).await;
+        return Err(TuliproxError::ConfigInput(format!(
+            "Could not backup alias CSV to {}: {err}",
+            backup_path.display()
+        )));
+    }
+    drop(backup);
+    if let Err(err) = tokio::fs::set_permissions(&backup_path, source_permissions).await {
+        let _ = tokio::fs::remove_file(&backup_path).await;
+        return Err(TuliproxError::ConfigInput(format!("Could not preserve alias CSV backup permissions: {err}")));
+    }
     Ok(())
 }
 
@@ -425,17 +454,146 @@ async fn csv_write_input_to_path(file_path: &Path, aliases: &[ConfigInputAliasDt
 async fn csv_write_content_to_path(file_path: &Path, content: String) -> Result<(), Error> {
     let tmp_path = csv_temp_path(file_path)?;
     tokio::fs::write(&tmp_path, content).await.map_err(to_io_error)?;
-    if let Err(err) = tokio::fs::rename(&tmp_path, file_path).await {
-        #[cfg(windows)]
-        {
-            if tokio::fs::remove_file(file_path).await.is_ok() && tokio::fs::rename(&tmp_path, file_path).await.is_ok() {
-                return Ok(());
-            }
-        }
+    if let Err(err) = preserve_csv_metadata(file_path, &tmp_path).await {
         let _ = tokio::fs::remove_file(&tmp_path).await;
-        return Err(to_io_error(err));
+        return Err(err);
+    }
+    if let Err(err) = replace_csv_file(&tmp_path, file_path).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(err);
     }
     Ok(())
+}
+
+async fn preserve_csv_metadata(file_path: &Path, tmp_path: &Path) -> Result<(), Error> {
+    let metadata = match tokio::fs::metadata(file_path).await {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    tokio::fs::set_permissions(tmp_path, metadata.permissions()).await?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let source = file_path.to_path_buf();
+        let target = tmp_path.to_path_buf();
+        tokio::task::spawn_blocking(move || copy_platform_acl(&source, &target))
+            .await
+            .map_err(|err| io::Error::other(format!("ACL copy task failed: {err}")))??;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn copy_platform_acl(source: &Path, target: &Path) -> io::Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    const ACL_NAME: &[u8] = b"system.posix_acl_access\0";
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains a null byte"))?;
+    let target = CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains a null byte"))?;
+    // SAFETY: Both pointers are valid null-terminated strings and the null buffer requests the required size.
+    let size = unsafe { libc::getxattr(source.as_ptr(), ACL_NAME.as_ptr().cast(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        let err = io::Error::last_os_error();
+        if acl_is_missing_or_unsupported(&err) {
+            // SAFETY: Both pointers are valid null-terminated strings.
+            let removed = unsafe { libc::removexattr(target.as_ptr(), ACL_NAME.as_ptr().cast()) };
+            if removed != 0 {
+                let remove_err = io::Error::last_os_error();
+                if !acl_is_missing_or_unsupported(&remove_err) {
+                    return Err(remove_err);
+                }
+            }
+            return Ok(());
+        }
+        return Err(err);
+    }
+    let mut acl = vec![0_u8; usize::try_from(size).map_err(|_| io::Error::other("ACL size is invalid"))?];
+    // SAFETY: The buffer has the size returned by getxattr and all pointers remain valid for the call.
+    let read = unsafe { libc::getxattr(source.as_ptr(), ACL_NAME.as_ptr().cast(), acl.as_mut_ptr().cast(), acl.len()) };
+    if read < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    acl.truncate(usize::try_from(read).map_err(|_| io::Error::other("ACL size is invalid"))?);
+    // SAFETY: The target path, attribute name, and ACL buffer are valid for the duration of the call.
+    let written = unsafe { libc::setxattr(target.as_ptr(), ACL_NAME.as_ptr().cast(), acl.as_ptr().cast(), acl.len(), 0) };
+    if written == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+#[cfg(target_os = "macos")]
+fn copy_platform_acl(source: &Path, target: &Path) -> io::Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let source = CString::new(source.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains a null byte"))?;
+    let target = CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "target path contains a null byte"))?;
+    // SAFETY: Both paths are valid null-terminated strings; COPYFILE_ACL copies metadata without replacing file data.
+    let result = unsafe { libc::copyfile(source.as_ptr(), target.as_ptr(), std::ptr::null_mut(), libc::COPYFILE_ACL) };
+    if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+#[cfg(target_os = "linux")]
+fn acl_is_missing_or_unsupported(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(libc::ENODATA) || err.raw_os_error() == Some(libc::ENOTSUP)
+}
+
+async fn replace_csv_file(source: &Path, target: &Path) -> io::Result<()> {
+    match tokio::fs::rename(source, target).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            #[cfg(windows)]
+            if matches!(tokio::fs::try_exists(target).await, Ok(true)) {
+                return replace_existing_csv_windows(source, target).await;
+            }
+            Err(err)
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn replace_existing_csv_windows(source: &Path, target: &Path) -> io::Result<()> {
+    use std::{iter::once, os::windows::ffi::OsStrExt};
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    let backup_path = target.with_extension(format!("replace-backup-{}", Uuid::new_v4()));
+    let source_wide = source.as_os_str().encode_wide().chain(once(0)).collect::<Vec<_>>();
+    let target_wide = target.as_os_str().encode_wide().chain(once(0)).collect::<Vec<_>>();
+    let backup_wide = backup_path.as_os_str().encode_wide().chain(once(0)).collect::<Vec<_>>();
+    let replace_result = tokio::task::spawn_blocking(move || {
+        // SAFETY: All path buffers are null-terminated and remain alive for the complete system call.
+        let result = unsafe {
+            ReplaceFileW(
+                target_wide.as_ptr(),
+                source_wide.as_ptr(),
+                backup_wide.as_ptr(),
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if result == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    })
+    .await
+    .map_err(|err| io::Error::other(format!("Windows file replacement task failed: {err}")))?;
+
+    match replace_result {
+        Ok(()) => {
+            let _ = tokio::fs::remove_file(&backup_path).await;
+            Ok(())
+        }
+        Err(replace_err) => {
+            if !matches!(tokio::fs::try_exists(target).await, Ok(true))
+                && matches!(tokio::fs::try_exists(&backup_path).await, Ok(true))
+            {
+                tokio::fs::rename(&backup_path, target).await.map_err(|restore_err| {
+                    io::Error::other(format!("File replacement failed ({replace_err}); restoring the original failed: {restore_err}"))
+                })?;
+            }
+            Err(replace_err)
+        }
+    }
 }
 
 fn csv_temp_path(file_path: &Path) -> Result<PathBuf, Error> {
@@ -789,6 +947,9 @@ mod tests {
     use shared::model::{InputType, StalkerAuthMode, StalkerEndpointPreference, StalkerMagPreset};
     use std::{io::Cursor, path::PathBuf};
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     const M3U_BATCH: &str = r"
 #url;name;max_connections;priority
 http://hd.providerline.com:8080/get.php?username=user1&password=user1&type=m3u_plus;input_1
@@ -1080,15 +1241,16 @@ input_1;user;password;http://provider.tv;1;0;keep-me;old-enabled;old-expiry;trai
         let backup_dir = dir.path().join("backups");
         tokio::fs::write(&csv_path, XTREAM_BATCH).await?;
 
-        csv_backup_file(&csv_path, backup_dir.to_string_lossy().as_ref()).await?;
-        csv_backup_file(&csv_path, backup_dir.to_string_lossy().as_ref()).await?;
+        let backup_dir_str = backup_dir.to_string_lossy();
+        let backups = (0..16).map(|_| csv_backup_file(&csv_path, backup_dir_str.as_ref()));
+        futures::future::try_join_all(backups).await?;
 
         let mut entries = tokio::fs::read_dir(&backup_dir).await?;
         let mut count = 0;
         while entries.next_entry().await?.is_some() {
             count += 1;
         }
-        assert_eq!(count, 2);
+        assert_eq!(count, 16);
         Ok(())
     }
 
@@ -1102,6 +1264,40 @@ input_1;user;password;http://provider.tv;1;0;keep-me;old-enabled;old-expiry;trai
         assert_eq!(first.parent(), csv_path.parent());
         assert_eq!(second.parent(), csv_path.parent());
         assert_ne!(first, second);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn alias_csv_rewrite_preserves_file_mode() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let csv_path = dir.path().join("aliases.csv");
+        tokio::fs::write(&csv_path, XTREAM_BATCH).await?;
+        tokio::fs::set_permissions(&csv_path, std::fs::Permissions::from_mode(0o640)).await?;
+
+        csv_write_input_to_path(&csv_path, &[]).await?;
+
+        assert_eq!(tokio::fs::metadata(csv_path).await?.permissions().mode() & 0o777, 0o640);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn alias_csv_rewrite_preserves_posix_acl() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let csv_path = dir.path().join("aliases.csv");
+        tokio::fs::write(&csv_path, XTREAM_BATCH).await?;
+        let status = std::process::Command::new("setfacl").args(["-m", "u:12345:r", csv_path.to_string_lossy().as_ref()]).status();
+        let Ok(status) = status else { return Ok(()) };
+        if !status.success() {
+            return Ok(());
+        }
+        let before = std::process::Command::new("getfacl").args(["-cp", csv_path.to_string_lossy().as_ref()]).output()?;
+
+        csv_write_input_to_path(&csv_path, &[]).await?;
+
+        let after = std::process::Command::new("getfacl").args(["-cp", csv_path.to_string_lossy().as_ref()]).output()?;
+        assert_eq!(after.stdout, before.stdout);
         Ok(())
     }
 }

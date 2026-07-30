@@ -10,6 +10,8 @@ use shared::error::str_to_io_error;
 use path_clean::PathClean;
 use crate::api::model::AppState;
 
+fn revision_is_missing(result: &io::Result<bool>) -> bool { matches!(result, Ok(false)) }
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum LockKey {
     Path(PathBuf),
@@ -55,8 +57,11 @@ impl FileLockManager {
             .collect::<Vec<_>>();
         let mut missing_revisions = Vec::new();
         for (path, revision) in tracked_revisions {
-            if !matches!(tokio::fs::try_exists(&path).await, Ok(true)) {
+            let exists = tokio::fs::try_exists(&path).await;
+            if revision_is_missing(&exists) {
                 missing_revisions.push((path, revision));
+            } else if let Err(err) = exists {
+                log::debug!("Could not check tracked internal-write path {}: {err}", path.display());
             }
         }
         if !missing_revisions.is_empty() {
@@ -231,7 +236,14 @@ pub fn exec_file_lock_prune(app_state: &Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::FileLockManager;
+    use super::{revision_is_missing, FileLockManager};
+    use std::io;
+
+    #[test]
+    fn revision_probe_errors_are_not_treated_as_missing() {
+        assert!(!revision_is_missing(&Err(io::Error::other("probe failed"))));
+        assert!(revision_is_missing(&Ok(false)));
+    }
 
     #[tokio::test]
     async fn internal_write_revision_matches_only_unchanged_content() -> Result<(), Box<dyn std::error::Error>> {
