@@ -3588,15 +3588,31 @@ pub(crate) async fn local_stream_response(
     };
 
     if check_path {
-        let Ok(canonical_metadata) = tokio::fs::metadata(&canonical).await else { return internal_server_error!() };
-
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
+            let Ok(canonical_metadata) = tokio::fs::metadata(&canonical).await else { return internal_server_error!() };
             if opened_metadata.dev() != canonical_metadata.dev() || opened_metadata.ino() != canonical_metadata.ino() {
                 error!("TOCTOU race detected: file swapped during local_stream_response");
                 return StatusCode::FORBIDDEN.into_response();
             }
+        }
+        #[cfg(windows)]
+        match same_windows_file_identity(&file, &canonical).await {
+            Ok(true) => {}
+            Ok(false) => {
+                error!("TOCTOU race detected: file swapped during local_stream_response");
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            Err(err) => {
+                error!("Could not verify local file identity {}: {err}", canonical.display());
+                return internal_server_error!();
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            error!("Secure local file identity validation is unsupported on this platform");
+            return StatusCode::FORBIDDEN.into_response();
         }
 
         let Some(library_paths) = app_state
@@ -3845,6 +3861,27 @@ fn get_mime_type(headers: &HeaderMap, resource_url: &str) -> Option<String> {
             // fallback to guess
             mime_guess::from_path(resource_url).first_raw().map(ToString::to_string)
         })
+}
+
+#[cfg(windows)]
+async fn same_windows_file_identity(opened_file: &tokio::fs::File, canonical_path: &Path) -> std::io::Result<bool> {
+    let canonical_file = tokio::fs::File::open(canonical_path).await?;
+    Ok(windows_file_identity(opened_file)? == windows_file_identity(&canonical_file)?)
+}
+
+#[cfg(windows)]
+fn windows_file_identity(file: &tokio::fs::File) -> std::io::Result<(u32, u32, u32)> {
+    use std::os::windows::io::AsRawHandle;
+    use winapi::um::fileapi::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+
+    let mut info = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
+    // SAFETY: `file.as_raw_handle()` is a live file handle for the duration of
+    // the call, and `info` is a writable output buffer for the WinAPI function.
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &raw mut info) };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
 }
 
 async fn build_resource_stream_response(

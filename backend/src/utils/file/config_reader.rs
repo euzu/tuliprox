@@ -793,10 +793,8 @@ where
             // Windows doesn't allow overwriting an existing file via rename.
             #[cfg(windows)]
             {
-                if fs::remove_file(&path).await.is_ok() {
-                    if fs::rename(&tmp_path, &path).await.is_ok() {
-                        return Ok(());
-                    }
+                if replace_file_windows(&tmp_path, &path).is_ok() {
+                    return Ok(());
                 }
             }
 
@@ -809,6 +807,31 @@ where
             )))
         }
     }
+}
+
+#[cfg(windows)]
+fn replace_file_windows(source: &Path, target: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::winbase::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+
+    let mut source_wide: Vec<u16> = source.as_os_str().encode_wide().collect();
+    source_wide.push(0);
+    let mut target_wide: Vec<u16> = target.as_os_str().encode_wide().collect();
+    target_wide.push(0);
+
+    // SAFETY: both paths are NUL-terminated UTF-16 buffers that remain alive for
+    // the call. `MOVEFILE_REPLACE_EXISTING` leaves the target in place on error.
+    let ok = unsafe {
+        MoveFileExW(
+            source_wide.as_ptr(),
+            target_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 pub async fn save_api_proxy(

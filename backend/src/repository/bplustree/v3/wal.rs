@@ -574,6 +574,7 @@ pub(super) fn sync_parent_directory(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
 pub(super) fn sync_parent_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }

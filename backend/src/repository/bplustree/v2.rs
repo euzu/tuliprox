@@ -6,7 +6,7 @@
 //! live behind an explicit version boundary and a typed migration path.
 
 use crate::{
-    repository::bplustree::common::{mmap_with_advice, read_exact_at_offset},
+    repository::bplustree::common::{mmap_with_advice, read_exact_at_offset, Advice},
     utils,
     utils::binary_deserialize,
 };
@@ -15,7 +15,7 @@ pub(crate) use crate::repository::bplustree::common::BPlusTreeError;
 use crate::utils::binary_serialize_into;
 #[cfg(test)]
 use log::error;
-use memmap2::{Advice, Mmap};
+use memmap2::Mmap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use shared::error::to_io_error;
@@ -37,11 +37,6 @@ use std::{
 };
 #[cfg(test)]
 use tempfile::NamedTempFile;
-#[cfg(windows)]
-use windows_sys::Win32::Foundation::CloseHandle;
-#[cfg(windows)]
-use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-
 const PAGE_SIZE: u16 = 4096;
 pub const PAGE_SIZE_USIZE: usize = PAGE_SIZE as usize;
 const LEN_SIZE: usize = 4;
