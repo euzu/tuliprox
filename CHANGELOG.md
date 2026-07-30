@@ -70,6 +70,16 @@
 
 ## 🌟 New Features
 
+- **Automatic Xtream Account Expiration Refresh**:
+  - Server mode now refreshes missing or soon-expiring Xtream `exp_date` values directly through each account's
+    `player_api.php` credentials, independently of playlist updates and reseller Panel API provisioning.
+  - Per-account daily checks, five-minute panel-wide spacing across aliases, and a six-hour panel cooldown after
+    transport, HTTP 403/429, or server failures reduce the risk of provider bans.
+  - Updates are persisted in 15-minute batches to source YAML and Xtream alias CSV files, with timestamped backups,
+    atomic writes, durable throttle state, and a single in-memory config refresh per batch.
+  - Accounts reported as expired are persisted and disabled immediately; Tuliprox does not re-enable them
+    automatically.
+
 - **QoS snapshot compaction**: `qos_aggregation.compaction_interval_secs` now periodically rebuilds
   `qos_snapshot.db` to reclaim storage from expired snapshots. It defaults to daily; set it to `0` to disable
   automatic compaction without changing QoS summary windows.

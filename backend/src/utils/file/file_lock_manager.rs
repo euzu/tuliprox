@@ -10,6 +10,8 @@ use shared::error::str_to_io_error;
 use path_clean::PathClean;
 use crate::api::model::AppState;
 
+fn revision_is_missing(result: &io::Result<bool>) -> bool { matches!(result, Ok(false)) }
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 enum LockKey {
     Path(PathBuf),
@@ -19,12 +21,14 @@ enum LockKey {
 #[derive(Clone)]
 pub struct FileLockManager {
     locks: Arc<Mutex<HashMap<LockKey, Weak<RwLock<()>>>>>,
+    internal_write_revisions: Arc<Mutex<HashMap<PathBuf, blake3::Hash>>>,
 }
 
 impl FileLockManager {
     pub fn new() -> Self {
         Self {
             locks: Arc::new(Mutex::new(HashMap::new())),
+            internal_write_revisions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -41,6 +45,54 @@ impl FileLockManager {
         let removed = initial_count - locks.len();
         if removed > 0 {
             log::debug!("Pruned {removed} unused file locks ({} remaining)", locks.len());
+        }
+        drop(locks);
+
+        let tracked_revisions = self
+            .internal_write_revisions
+            .lock()
+            .await
+            .iter()
+            .map(|(path, revision)| (path.clone(), *revision))
+            .collect::<Vec<_>>();
+        let mut missing_revisions = Vec::new();
+        for (path, revision) in tracked_revisions {
+            let exists = tokio::fs::try_exists(&path).await;
+            if revision_is_missing(&exists) {
+                missing_revisions.push((path, revision));
+            } else if let Err(err) = exists {
+                log::debug!("Could not check tracked internal-write path {}: {err}", path.display());
+            }
+        }
+        if !missing_revisions.is_empty() {
+            let mut revisions = self.internal_write_revisions.lock().await;
+            for (path, revision) in missing_revisions {
+                if revisions.get(&path) == Some(&revision) {
+                    revisions.remove(&path);
+                }
+            }
+        }
+    }
+
+    pub async fn mark_internal_write_revision(&self, path: &Path) -> io::Result<()> {
+        let content = tokio::fs::read(path).await?;
+        self.internal_write_revisions.lock().await.insert(normalize_path(path), blake3::hash(&content));
+        Ok(())
+    }
+
+    pub async fn is_internal_write_revision(&self, path: &Path) -> bool {
+        let normalized = normalize_path(path);
+        let Ok(content) = tokio::fs::read(path).await else {
+            self.internal_write_revisions.lock().await.remove(&normalized);
+            return false;
+        };
+        let revision = blake3::hash(&content);
+        let mut revisions = self.internal_write_revisions.lock().await;
+        if revisions.get(&normalized) == Some(&revision) {
+            true
+        } else {
+            revisions.remove(&normalized);
+            false
         }
     }
 
@@ -180,4 +232,32 @@ pub fn exec_file_lock_prune(app_state: &Arc<AppState>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{revision_is_missing, FileLockManager};
+    use std::io;
+
+    #[test]
+    fn revision_probe_errors_are_not_treated_as_missing() {
+        assert!(!revision_is_missing(&Err(io::Error::other("probe failed"))));
+        assert!(revision_is_missing(&Ok(false)));
+    }
+
+    #[tokio::test]
+    async fn internal_write_revision_matches_only_unchanged_content() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("source.yml");
+        let locks = FileLockManager::new();
+        tokio::fs::write(&path, b"first").await?;
+
+        locks.mark_internal_write_revision(&path).await?;
+        assert!(locks.is_internal_write_revision(&path).await);
+
+        tokio::fs::write(&path, b"second").await?;
+        assert!(!locks.is_internal_write_revision(&path).await);
+        assert!(!locks.is_internal_write_revision(&path).await);
+        Ok(())
+    }
 }
