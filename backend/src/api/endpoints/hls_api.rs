@@ -103,6 +103,73 @@ fn is_m3u_catchup_session_token(session_token: &str) -> bool {
     session_token.starts_with("m3u-catchup|") || session_token.starts_with("catchup|")
 }
 
+/// Recover archive EPG reference from `m3u-catchup|…|archive|{start}|{duration}` session keys.
+///
+/// BitTV archive media URLs look like `…/2026/07/24/14/13/38-06800.ts` and lose Flussonic
+/// path markers after HLS rewrite, so the panel would otherwise keep showing Live + live EPG.
+pub(in crate::api) fn m3u_catchup_epg_reference_from_session_token(session_token: &str) -> Option<i64> {
+    let rest = session_token.strip_prefix("m3u-catchup|")?;
+    for marker in ["|archive|", "|timeshift_abs|"] {
+        if let Some(idx) = rest.rfind(marker) {
+            let after = &rest[idx + marker.len()..];
+            let start = after.split('|').next()?.trim();
+            if let Ok(ts) = start.parse::<i64>() {
+                return Some(ts);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_m3u_archive_reference(stream_url: &str, session_token: Option<&str>) -> Option<i64> {
+    m3u_archive_epg_reference_ts(stream_url)
+        .or_else(|| session_token.and_then(m3u_catchup_epg_reference_from_session_token))
+}
+
+/// Join a client-leaked relative DVR/media path against the session's origin URL.
+///
+/// When an origin `.m3u8` is force-piped without `rewrite_hls`, players resolve
+/// `dvr-2026/…ts?token=` against the proxy playlist URL (`/hls/…/{token}.m3u8`).
+fn resolve_leaked_hls_relative_origin(
+    session_stream_url: &str,
+    relative_path: &str,
+    request_query: Option<&str>,
+) -> Option<String> {
+    let rel = relative_path.trim_start_matches('/');
+    if rel.is_empty() || rel.contains("://") {
+        return None;
+    }
+    // Only recover archive-style relative paths (BitTV/Flussonic DVR or date trees).
+    let looks_like_archive_rel = rel.starts_with("dvr-")
+        || rel.starts_with("202")
+        || rel.contains("/dvr-")
+        || (rel.len() >= 10 && rel.as_bytes().get(4) == Some(&b'/') && rel.starts_with('2'));
+    if !looks_like_archive_rel {
+        return None;
+    }
+
+    // If the session URL is already inside a DVR/date tree, strip back to the stream root
+    // so sibling relative segments do not nest under the previous segment directory.
+    let joined = if rel.starts_with("dvr-") {
+        if let Some(idx) = session_stream_url.find("/dvr-") {
+            format!("{}{rel}", &session_stream_url[..idx + 1])
+        } else {
+            url::Url::parse(session_stream_url).ok()?.join(rel).ok()?.into()
+        }
+    } else if let Some(idx) = session_stream_url.find("/202") {
+        let root = &session_stream_url[..idx];
+        format!("{root}/{rel}")
+    } else {
+        url::Url::parse(session_stream_url).ok()?.join(rel).ok()?.into()
+    };
+
+    if let Some(query) = request_query.filter(|q| !q.is_empty()) {
+        Some(format!("{joined}?{query}"))
+    } else {
+        Some(joined)
+    }
+}
+
 fn legacy_hls_route_allowed_with_cache(
     cache_enabled: bool,
     decoded_session_token: Option<&str>,
@@ -128,18 +195,16 @@ fn query_flag_marks_start_context(key: &str) -> bool {
 }
 
 pub(in crate::api) fn m3u_archive_epg_reference_ts(stream_url: &str) -> Option<i64> {
+    use crate::iptv::m3u::parse_flussonic_archive_file;
+
     let parsed = Url::parse(stream_url).ok()?;
-    let path = parsed.path();
-    if let Some(rest) = path.split("/archive-").nth(1) {
-        let start = rest.split('-').next()?;
-        if let Ok(ts) = start.parse::<i64>() {
-            return Some(ts);
-        }
-    }
-    if let Some(rest) = path.split("/timeshift_abs-").nth(1) {
-        let start = rest.trim_end_matches(".ts").trim_end_matches(".m3u8");
-        if let Ok(ts) = start.parse::<i64>() {
-            return Some(ts);
+    // Flussonic / TiviMate path forms: archive|index|video|mono-{utc}-{duration}.m3u8
+    // and timeshift_abs / timeshift_rel. Without this, HLS sessions stay LiveHls in the panel.
+    if let Some(file) = parsed.path_segments().and_then(|mut segments| segments.next_back()) {
+        if let Some(archive) = parse_flussonic_archive_file(file) {
+            if let Some(ts) = archive.epg_reference_ts() {
+                return Some(ts);
+            }
         }
     }
     let mut start_ts = None;
@@ -166,6 +231,7 @@ struct HlsApiPathParams {
     target_id: u16,
     input_id: u16,
     stream_id: u32,
+    /// Single obfuscated token, or a leaked relative origin path (`dvr-YYYY/…ts`).
     token: String,
 }
 
@@ -5747,6 +5813,7 @@ async fn hls_proxy_manifest(
 async fn hls_api_stream(
     fingerprint: Fingerprint,
     req_headers: HeaderMap,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
     axum::extract::Path(params): axum::extract::Path<HlsApiPathParams>,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
@@ -5765,6 +5832,23 @@ async fn hls_api_stream(
         }
         (user, target)
     };
+
+    // Nested path = relative origin segment that leaked past rewrite_hls (e.g. dvr-YYYY/…).
+    if params.token.contains('/') {
+        return hls_api_stream_leaked_relative(
+            fingerprint,
+            req_headers,
+            app_state,
+            user,
+            target,
+            params.input_id,
+            params.stream_id,
+            params.token,
+            raw_query.as_deref(),
+        )
+        .await;
+    }
+
     hls_api_stream_resolved(
         fingerprint,
         req_headers,
@@ -5776,6 +5860,58 @@ async fn hls_api_stream(
         params.token,
     )
     .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn hls_api_stream_leaked_relative(
+    fingerprint: Fingerprint,
+    req_headers: HeaderMap,
+    app_state: Arc<AppState>,
+    user: Arc<ProxyUserCredentials>,
+    target: Arc<ConfigTarget>,
+    input_id: u16,
+    stream_id: u32,
+    relative_path: String,
+    request_query: Option<&str>,
+) -> axum::response::Response {
+    if let Err(e) = check_network_access_only(&user, &fingerprint, &app_state) {
+        return e.into_player_response(app_state.app_config.get_auth_error_status());
+    }
+    let Some(mut session) = app_state
+        .active_users
+        .find_latest_session_for_virtual_id(&user.username, stream_id)
+        .await
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(origin_url) =
+        resolve_leaked_hls_relative_origin(&session.stream_url, &relative_path, request_query)
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(input) = app_state.app_config.get_input_by_id(input_id) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    session.stream_url = origin_url.intern();
+    let archive_reference = resolve_m3u_archive_reference(&session.stream_url, Some(session.token.as_str()));
+    let stream_channel =
+        resolve_stream_channel(&app_state, &target, &input, stream_id, &session.stream_url, archive_reference).await;
+    force_provider_stream_response(
+        &fingerprint,
+        &app_state,
+        &session,
+        stream_channel,
+        crate::api::api_utils::ForceStreamRequestContext {
+            req_headers: &req_headers,
+            input: &input,
+            user: &user,
+            session_reservation_ttl_secs: get_hls_session_ttl_secs(&app_state),
+            content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
+        },
+        None,
+    )
+    .await
+    .into_response()
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -5839,7 +5975,8 @@ async fn hls_api_stream_resolved(
     }
 
     if let Some(session) = &mut user_session {
-        let decoded_archive_reference = m3u_archive_epg_reference_ts(&decoded_hls_token.1);
+        let decoded_archive_reference =
+            resolve_m3u_archive_reference(&decoded_hls_token.1, Some(lookup_session_token.as_str()));
         if session.permission == UserConnectionPermission::Exhausted {
             let stream_channel = resolve_stream_channel(
                 &app_state,
@@ -5888,7 +6025,7 @@ async fn hls_api_stream_resolved(
             _ => return axum::http::StatusCode::BAD_REQUEST.into_response(),
         };
         let hls_url = hls_url.intern();
-        let archive_reference = m3u_archive_epg_reference_ts(&hls_url);
+        let archive_reference = resolve_m3u_archive_reference(&hls_url, Some(session.token.as_str()));
         session.stream_url = hls_url.clone();
         if session.virtual_id == virtual_id {
             app_state.connection_manager.touch_http_activity(&user.username, &session.token, &fingerprint.addr).await;
@@ -6062,7 +6199,7 @@ pub fn hls_api_register() -> axum::Router<Arc<AppState>> {
             axum::routing::get(hls_proxy_resource),
         )
         .route(
-            "/hls/{username}/{password}/{target_id}/{input_id}/{stream_id}/{token}",
+            "/hls/{username}/{password}/{target_id}/{input_id}/{stream_id}/{*token}",
             axum::routing::get(hls_api_stream),
         )
     //cfg.service(web::resource("/hls/{token}/{stream}").route(web::get().to(xtream_player_api_hls_stream)));
@@ -6073,7 +6210,8 @@ pub fn hls_api_register() -> axum::Router<Arc<AppState>> {
 mod tests {
     use super::{
         build_hls_manifest_request_headers, extract_hls_provider_session_headers, hls_api_register,
-        m3u_archive_epg_reference_ts, MAX_HLS_MANIFEST_BYTES,
+        m3u_archive_epg_reference_ts, m3u_catchup_epg_reference_from_session_token, resolve_leaked_hls_relative_origin,
+        MAX_HLS_MANIFEST_BYTES,
     };
     use crate::{
         api::model::{
@@ -6154,6 +6292,48 @@ mod tests {
     #[test]
     fn archive_epg_reference_rejects_plain_start_queries() {
         assert_eq!(m3u_archive_epg_reference_ts("http://provider/live/42.m3u8?start=1700000000"), None);
+    }
+
+    #[test]
+    fn session_token_recovers_archive_epg_reference_when_media_url_lost_markers() {
+        assert_eq!(
+            m3u_catchup_epg_reference_from_session_token(
+                "m3u-catchup|user|42|archive|1717200000|3600"
+            ),
+            Some(1_717_200_000)
+        );
+        assert_eq!(
+            m3u_catchup_epg_reference_from_session_token("m3u-catchup|user|42|live"),
+            None
+        );
+    }
+
+    #[test]
+    fn leaked_dvr_relative_joins_against_media_playlist_and_dvr_session_root() {
+        assert_eq!(
+            resolve_leaked_hls_relative_origin(
+                "http://cdn.example/big/aa_1/media.m3u8",
+                "dvr-2026/07/26/15/30/59-06000.ts",
+                Some("token=abc"),
+            ),
+            Some("http://cdn.example/big/aa_1/dvr-2026/07/26/15/30/59-06000.ts?token=abc".to_string())
+        );
+        assert_eq!(
+            resolve_leaked_hls_relative_origin(
+                "http://cdn.example/big/aa_1/dvr-2026/07/26/15/30/59-06000.ts?token=old",
+                "dvr-2026/07/26/15/31/05-06000.ts",
+                Some("token=new"),
+            ),
+            Some("http://cdn.example/big/aa_1/dvr-2026/07/26/15/31/05-06000.ts?token=new".to_string())
+        );
+        assert_eq!(
+            resolve_leaked_hls_relative_origin(
+                "http://cdn.example/big/aa_1/media.m3u8",
+                "segment001.ts",
+                None,
+            ),
+            None
+        );
     }
 
     #[test]

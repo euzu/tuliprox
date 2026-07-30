@@ -12,6 +12,9 @@ pub const M3U_CATCHUP_ROUTE_PREFIX: &str = "m3u-catchup";
 pub const M3U_CATCHUP_MARKER: &str = "tuliprox-catchup";
 const COLLECTOR_PREFIX: &str = "v";
 const M3U_APPEND_TEMPLATE: &str = "?utc={utc}&lutc={lutc}";
+/// Default when source declares append (`catchup=` / `catchup-type=`) without `catchup-source`.
+/// Matches the usual Wink/Zabava query shape; an explicit `catchup-source` always wins.
+const M3U_APPEND_MODE_DEFAULT_TEMPLATE: &str = "?offset=-${offset}&utcstart=${timestamp}";
 const M3U_CATCHUP_PARAM_UTC: &str = "utc";
 const M3U_CATCHUP_PARAM_LUTC: &str = "lutc";
 const XC_START_TEMPLATE: &str = "{Y}-{m}-{d}:{H}-{M}-{S}";
@@ -164,6 +167,16 @@ fn append_siptv_template(source_url: &str) -> String {
     }
 }
 
+fn append_mode_default_template(source_url: &str) -> String {
+    append_query_template(source_url, M3U_APPEND_MODE_DEFAULT_TEMPLATE).unwrap_or_else(|| {
+        if source_url.contains('?') {
+            format!("{source_url}&{}", M3U_APPEND_MODE_DEFAULT_TEMPLATE.trim_start_matches('?'))
+        } else {
+            format!("{source_url}{M3U_APPEND_MODE_DEFAULT_TEMPLATE}")
+        }
+    })
+}
+
 fn derive_xc_template(source_url: &str) -> Option<String> {
     let parsed = Url::parse(source_url).ok()?;
     let mut segments = parsed
@@ -241,6 +254,9 @@ fn derived_template_for_mode<'a>(source_url: &'a str, catchup: &'a CatchupProper
 
     match mode_alias(mode) {
         "shift" => Some(Cow::Owned(format!("{source_url}{}", append_siptv_template(source_url)))),
+        // Append without catchup-source: Wink-style offset/utcstart template.
+        // Explicit catchup-source is handled above and always wins.
+        "append" => Some(Cow::Owned(append_mode_default_template(source_url))),
         "xc" => derive_xc_template(source_url).map(Cow::Owned),
         "fs" => derive_flussonic_template(source_url).map(Cow::Owned),
         "vod" => Some(Cow::Borrowed("{catchup-id}")),

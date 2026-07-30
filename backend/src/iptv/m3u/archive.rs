@@ -28,6 +28,13 @@ impl FlussonicArchiveKind {
             | Self::TimeshiftRel { extension, .. } => extension,
         }
     }
+
+    pub fn epg_reference_ts(&self) -> Option<i64> {
+        match self {
+            Self::Archive { start, .. } | Self::TimeshiftAbs { start, .. } => start.parse().ok(),
+            Self::TimeshiftRel { .. } => None,
+        }
+    }
 }
 
 fn strip_media_suffix(value: &str) -> &str {

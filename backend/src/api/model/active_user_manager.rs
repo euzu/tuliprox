@@ -2873,6 +2873,18 @@ impl ActiveUserManager {
         self.update_user_session(username, token).await
     }
 
+    /// Latest session for `virtual_id` (used to recover leaked relative DVR segment paths).
+    pub async fn find_latest_session_for_virtual_id(&self, username: &str, virtual_id: u32) -> Option<UserSession> {
+        let user_connections = self.connections.read().await;
+        let connection_data = user_connections.by_key.get(username)?;
+        connection_data
+            .sessions
+            .iter()
+            .filter(|session| session.virtual_id == virtual_id)
+            .max_by_key(|session| session.ts)
+            .cloned()
+    }
+
     pub async fn update_session_provider_headers(
         &self,
         username: &str,
