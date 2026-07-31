@@ -112,6 +112,7 @@ generate_form_reducer!(
         SoftPriority => soft_priority: i8,
         ExpDate => exp_date: Option<i64>,
         UiEnabled => ui_enabled: bool,
+        HideAdult => hide_adult: bool,
         EpgTimeshift => epg_timeshift: Option<String>,
         EpgRequestTimeshift => epg_request_timeshift: Option<String>,
         Comment => comment: Option<String>,
@@ -208,6 +209,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 user.status = Some(ProxyUserStatus::Active);
                 user.output_clusters = None;
                 user.ui_enabled = true;
+                user.hide_adult = false;
                 let now = Utc::now();
                 user.created_at = Some(now.timestamp());
                 let in_one_year = now + Duration::days(DEFAULT_EXPIRATION_DAYS);
@@ -394,6 +396,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
             { edit_field_text_option!(form_state,  translate.t("LABEL.EPG_TIMESHIFT"), epg_timeshift, UserFormAction::EpgTimeshift) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.EPG_REQUEST_TIMESHIFT"), epg_request_timeshift, UserFormAction::EpgRequestTimeshift) }
             { edit_field_bool!(form_state,  translate.t("LABEL.USER_UI_ENABLED"), ui_enabled, UserFormAction::UiEnabled) }
+            { edit_field_bool!(form_state,  translate.t("LABEL.HIDE_ADULT"), hide_adult, UserFormAction::HideAdult) }
             { edit_field_text_option!(form_state,  translate.t("LABEL.COMMENT"), comment, UserFormAction::Comment) }
             {edit_field_list_option!(allowed_countries, translate.t("LABEL.ALLOWED_COUNTRIES"), "PROXY_USER_CREDENTIALS.NETWORK_ACCESS_COUNTRIES", translate.t("LABEL.ADD_COUNTRY"), create_country_tag)}
             {edit_field_list_option!(allowed_networks, translate.t("LABEL.ALLOWED_NETWORKS"), "PROXY_USER_CREDENTIALS.NETWORK_ACCESS_NETWORKS", translate.t("LABEL.ADD_NETWORK"), create_network_tag)}

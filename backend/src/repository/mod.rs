@@ -1,5 +1,6 @@
 mod storage;
 mod target_id_mapping;
+mod adult_epg_ids;
 mod bplustree;
 mod playlist_repository;
 mod m3u_repository;
@@ -23,6 +24,7 @@ pub mod stalker_generation_repository;
 
 pub use storage::*;
 pub use target_id_mapping::*;
+pub use adult_epg_ids::*;
 pub use bplustree::*;
 pub use playlist_repository::*;
 pub use m3u_repository::*;

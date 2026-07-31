@@ -267,6 +267,7 @@ impl M3uPlaylistIterator {
         let target_id = target.id;
         let proxy_type = user.proxy;
         let output_clusters = user.output_clusters;
+        let hide_adult = user.hide_adult;
         let target_options = target.options.clone();
         let input_by_name: HashMap<Arc<str>, Arc<crate::model::ConfigInput>> = cfg
             .sources
@@ -309,6 +310,15 @@ impl M3uPlaylistIterator {
                 };
 
                 if !output_clusters.has_cluster(item.item_type) {
+                    continue;
+                }
+
+                if hide_adult
+                    && (crate::model::ProxyUserCredentials::is_adult_group(item.group.as_ref())
+                        || crate::model::ProxyUserCredentials::stream_props_marked_adult(
+                            item.additional_properties.as_ref(),
+                        ))
+                {
                     continue;
                 }
 

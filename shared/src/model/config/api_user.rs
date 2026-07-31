@@ -1,5 +1,7 @@
 use crate::{
-    defaults::{default_as_true, default_user_priority, is_cluster_optional, is_default_user_priority, is_true},
+    defaults::{
+        default_as_true, default_user_priority, is_cluster_optional, is_default_user_priority, is_false, is_true,
+    },
     error::TuliproxError,
     model::{ClusterFlags, NetworkAccessDto, ProxyType, ProxyUserStatus, XtreamCluster},
     utils::{deserialize_timestamp, is_blank_optional_string},
@@ -39,6 +41,9 @@ pub struct ProxyUserCredentialsDto {
     pub output_clusters: Option<ClusterFlags>,
     #[serde(default = "default_as_true", skip_serializing_if = "is_true")]
     pub ui_enabled: bool,
+    /// When true, Adult / 18+ / XXX categories and channels are omitted from playlists.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hide_adult: bool,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub comment: Option<String>,
     #[serde(default = "default_user_priority", skip_serializing_if = "is_default_user_priority")]
@@ -130,6 +135,7 @@ impl Default for ProxyUserCredentialsDto {
             status: None,
             output_clusters: None,
             ui_enabled: default_as_true(),
+            hide_adult: false,
             comment: None,
             priority: default_user_priority(),
             soft_connections: 0,
@@ -268,5 +274,32 @@ mod tests {
                 .as_ref()
                 .is_some_and(|networks| networks.iter().any(|n| n == "192.168.1.0/24")));
         }
+    }
+
+    #[test]
+    fn proxy_user_credentials_roundtrip_preserves_hide_adult() {
+        let user = ProxyUserCredentialsDto {
+            username: "alice".to_string(),
+            password: "secret".to_string(),
+            hide_adult: true,
+            ..ProxyUserCredentialsDto::default()
+        };
+
+        let serialized = serde_json::to_value(&user).expect("user should serialize");
+        let deserialized: ProxyUserCredentialsDto =
+            serde_json::from_value(serialized).expect("user should deserialize");
+
+        assert!(deserialized.hide_adult);
+    }
+
+    #[test]
+    fn proxy_user_credentials_default_hides_adult_false() {
+        let value = serde_json::json!({
+            "username": "alice",
+            "password": "secret"
+        });
+
+        let user: ProxyUserCredentialsDto = serde_json::from_value(value).expect("user should deserialize");
+        assert!(!user.hide_adult);
     }
 }
