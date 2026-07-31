@@ -618,6 +618,28 @@ fn append_m3u_catchup_attributes(
     append_extra_catchup_attributes(line, &catchup.extra_attributes);
 }
 
+fn append_unified_catchup_type_attributes(
+    line: &mut String,
+    catchup: &CatchupProperties,
+    catchup_type: &str,
+    rewritten_source: Option<&Arc<str>>,
+    emit_source: bool,
+) {
+    // Unified export: always `catchup-type=╤В╨Р╨╢`, never `catchup=`.
+    write_m3u_attr(line, "catchup-type", catchup_type);
+    append_catchup_attribute(line, "catchup-days", catchup.days.as_ref());
+    if emit_source {
+        if let Some(source) = rewritten_source.filter(|source| !source.is_empty()) {
+            write_m3u_attr(line, "catchup-source", source.as_ref());
+        } else {
+            append_catchup_attribute(line, "catchup-source", catchup.source.as_ref());
+        }
+    }
+    append_catchup_attribute(line, "catchup-time", catchup.time.as_ref());
+    append_catchup_attribute(line, "catchup-correction", catchup.correction.as_ref());
+    append_extra_catchup_attributes(line, &catchup.extra_attributes);
+}
+
 impl M3uPlaylistItem {
     #[allow(clippy::missing_panics_doc)]
     pub fn to_m3u(&self, target_options: Option<&ConfigTargetOptions>, rewrite_urls: bool) -> String {
@@ -643,6 +665,15 @@ impl M3uPlaylistItem {
         if self.chno != 0 {
             let _ = write!(line, " tvg-chno=\"{}\"", self.chno);
         }
+        let flussonic_mode = self.additional_properties.as_ref().and_then(|props| match props {
+            StreamProperties::Live(live) => live.catchup.as_ref().and_then(CatchupProperties::native_flussonic_player_mode),
+            _ => None,
+        });
+        let append_type = self.additional_properties.as_ref().and_then(|props| match props {
+            StreamProperties::Live(live) => live.catchup.as_ref().and_then(CatchupProperties::append_player_type),
+            _ => None,
+        });
+        // Emit timeshift only when the source had it (non-empty). Never invent catchup attrs.
         to_m3u_non_empty_fields!(self, line,
             (parent_code, "parent-code"),
             (audio_track, "audio-track"),
@@ -650,12 +681,33 @@ impl M3uPlaylistItem {
             (rec, "tvg-rec"););
         if let Some(StreamProperties::Live(live)) = self.additional_properties.as_ref() {
             if let Some(catchup) = live.catchup.as_ref() {
-                append_m3u_catchup_attributes(
-                    &mut line,
-                    catchup,
-                    self.t_catchup_mode.as_ref(),
-                    self.t_catchup_source.as_ref(),
-                );
+                if let Some(mode) = flussonic_mode {
+                    // Unify catchup=/catchup-type=flussonic* ╤В╨Ц╨в catchup-type only.
+                    // No catchup=, no shift-style catchup-source, no invented days.
+                    append_unified_catchup_type_attributes(
+                        &mut line,
+                        catchup,
+                        mode,
+                        None,
+                        false,
+                    );
+                } else if let Some(append_type) = append_type {
+                    // Unify catchup=/catchup-type=append ╤В╨Ц╨в catchup-type="append" only.
+                    append_unified_catchup_type_attributes(
+                        &mut line,
+                        catchup,
+                        append_type,
+                        self.t_catchup_source.as_ref(),
+                        true,
+                    );
+                } else {
+                    append_m3u_catchup_attributes(
+                        &mut line,
+                        catchup,
+                        self.t_catchup_mode.as_ref(),
+                        self.t_catchup_source.as_ref(),
+                    );
+                }
             }
         }
 

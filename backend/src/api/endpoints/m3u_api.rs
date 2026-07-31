@@ -425,7 +425,10 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     };
 
     if let Some(response) = redirect_response(app_state, &redirect_params).await {
-        return response.into_response();
+        // Archive/catchup must keep the resolved provider archive URL — do not redirect to live.
+        if archive_discriminator.is_none() && pli.item_type != PlaylistItemType::Catchup {
+            return response.into_response();
+        }
     }
 
     let is_session_request = is_session_based_playback(pli.item_type, Some(extension));
@@ -435,7 +438,14 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     // branch attaches it to the StreamChannel so the frontend's stream_epg
     // request can centre its EPG window on the archive timestamp instead of
     // falling back to `now`.
-    let archive_reference = m3u_archive_epg_reference_ts(&pli.url);
+    let archive_reference = m3u_archive_epg_reference_ts(&pli.url).or_else(|| {
+        archive_discriminator.and_then(|disc| {
+            disc.strip_prefix("archive|")
+                .or_else(|| disc.strip_prefix("timeshift_abs|"))
+                .and_then(|rest| rest.split('|').next())
+                .and_then(|start| start.parse::<i64>().ok())
+        })
+    });
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
     if is_session_request && extension == shared::defaults::HLS_EXT {
         let Some(stream_identity) = HlsEntryStreamIdentity::from_playlist_item(&pli) else {
@@ -452,6 +462,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             &user,
             &target,
             user_session.as_ref(),
+            Some(session_key.as_str()),
             &pli.url,
             archive_reference,
             stream_identity,
@@ -524,6 +535,30 @@ fn playlist_item_native_flussonic_mode(item: &shared::model::M3uPlaylistItem) ->
         StreamProperties::Live(live) => live.catchup.as_ref()?.native_flussonic_player_mode(),
         _ => None,
     }
+}
+
+/// Accept Flussonic archive routes when catchup-type is Flussonic OR when BitTV-style
+/// rows only have timeshift / catchup-days (v3.3.81 fallback).
+fn playlist_item_allows_flussonic_archive(item: &shared::model::M3uPlaylistItem) -> bool {
+    if playlist_item_native_flussonic_mode(item).is_some() {
+        return true;
+    }
+    if !item.time_shift.trim().is_empty() {
+        return true;
+    }
+    match item.additional_properties.as_ref() {
+        Some(StreamProperties::Live(live)) => live
+            .catchup
+            .as_ref()
+            .is_some_and(|c| c.days.as_ref().is_some_and(|d| !d.is_empty())),
+        _ => false,
+    }
+}
+
+fn playlist_item_flussonic_mode_or_default(item: &shared::model::M3uPlaylistItem) -> Option<&'static str> {
+    playlist_item_native_flussonic_mode(item).or_else(|| {
+        playlist_item_allows_flussonic_archive(item).then_some("flussonic")
+    })
 }
 
 fn native_live_file_matches_mode(mode: &str, file: &str) -> bool {
@@ -608,7 +643,7 @@ async fn m3u_api_stream(
                 return axum::http::StatusCode::NOT_FOUND.into_response();
             }
         };
-        let Some(mode) = playlist_item_native_flussonic_mode(&pli) else {
+        let Some(mode) = playlist_item_flussonic_mode_or_default(&pli) else {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         };
         if !native_archive_matches_mode(mode, &archive) {
@@ -720,7 +755,7 @@ async fn m3u_api_stream_nested(
     );
     let stream_ext = extract_extension_from_url(file);
     let resolved = if let Some(archive) = parse_flussonic_archive_file(file) {
-        let Some(mode) = playlist_item_native_flussonic_mode(&pli) else {
+        let Some(mode) = playlist_item_flussonic_mode_or_default(&pli) else {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         };
         if !native_archive_matches_mode(mode, &archive) {
@@ -730,7 +765,7 @@ async fn m3u_api_stream_nested(
             (item, Some(discriminator))
         })
     } else if is_flussonic_live_file(file) {
-        let Some(mode) = playlist_item_native_flussonic_mode(&pli) else {
+        let Some(mode) = playlist_item_flussonic_mode_or_default(&pli) else {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         };
         if !native_live_file_matches_mode(mode, file) {

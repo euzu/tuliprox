@@ -25,19 +25,58 @@ type ServerStatusState =
 
 fn stream_identity_key(stream: &StreamInfo) -> (SocketAddr, u32) { (stream.addr, stream.uid) }
 
+fn is_catchup_session_token(session_token: &str) -> bool {
+    session_token.starts_with("m3u-catchup|")
+        || session_token.starts_with("catchup|")
+        || session_token.contains("|archive|")
+        || session_token.contains("|timeshift_abs|")
+}
+
+fn stream_url_looks_adaptive(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.contains(".m3u8") || lower.contains(".mpd")
+}
+
+fn is_sticky_session_stream(stream: &StreamInfo) -> bool {
+    // Match backend `is_stable_session_stream`, plus Catchup without a token so soft-preserve
+    // still wins when archive segments briefly lose session metadata.
+    if stream.channel.item_type == PlaylistItemType::Catchup {
+        return true;
+    }
+    if stream.channel.item_type.is_live_adaptive() || is_shared_hls_stream(stream) {
+        return true;
+    }
+    if stream_url_looks_adaptive(stream.channel.url.as_ref()) {
+        return true;
+    }
+    stream.session_token.as_deref().is_some_and(is_catchup_session_token)
+}
+
 fn find_stream_update_index(streams: &[StreamInfo], updated_stream: &StreamInfo) -> Option<usize> {
     let updated_key = stream_identity_key(updated_stream);
     if let Some(index) = streams.iter().position(|stream| stream_identity_key(stream) == updated_key) {
         return Some(index);
     }
 
-    if updated_stream.session_token.is_some() && updated_stream.channel.item_type.requires_provider_affinity() {
-        if let Some(session_token) = updated_stream.session_token.as_deref() {
+    if let Some(session_token) = updated_stream.session_token.as_deref() {
+        if is_sticky_session_stream(updated_stream) {
             if let Some(index) =
                 streams.iter().position(|stream| stream.session_token.as_deref() == Some(session_token))
             {
                 return Some(index);
             }
+        }
+    }
+
+    // Catchup without a stable token still remaps by channel identity so Streams does not accumulate
+    // one row per HLS segment addr/uid churn.
+    if updated_stream.channel.item_type == PlaylistItemType::Catchup {
+        if let Some(index) = streams.iter().position(|stream| {
+            stream.channel.item_type == PlaylistItemType::Catchup
+                && stream.username == updated_stream.username
+                && stream.channel.virtual_id == updated_stream.channel.virtual_id
+        }) {
+            return Some(index);
         }
     }
 
@@ -53,10 +92,56 @@ fn dedupe_streams_by_identity(streams: &mut Vec<StreamInfo>) {
     streams.retain(|stream| seen.insert(stream_identity_key(stream)));
 }
 
-fn should_keep_preserved_stream_visible(stream: &StreamInfo) -> bool {
-    stream.session_token.is_some() && (stream.channel.item_type.is_live_adaptive() || is_shared_hls_stream(stream))
+/// Drop preserved sticky rows for channels the same user+IP is no longer watching.
+/// Keeps soft-preserve during HLS segment gaps (no active row yet); clears zapped channels immediately
+/// instead of waiting for hls_session_ttl (~15s).
+fn prune_zapped_preserved_streams(streams: &mut Vec<StreamInfo>) {
+    let active_channels: HashSet<(String, String, u32)> = streams
+        .iter()
+        .filter(|stream| !stream.preserved && stream.client_ip != BACKGROUND_TRANSFER_CLIENT_IP)
+        .map(|stream| (stream.username.clone(), stream.client_ip.clone(), stream.channel.virtual_id))
+        .collect();
+    if active_channels.is_empty() {
+        return;
+    }
+    let users_with_active: HashSet<(String, String)> =
+        active_channels.iter().map(|(username, client_ip, _)| (username.clone(), client_ip.clone())).collect();
+
+    streams.retain(|stream| {
+        if stream.client_ip == BACKGROUND_TRANSFER_CLIENT_IP {
+            return true;
+        }
+        if !stream.preserved || !is_sticky_session_stream(stream) {
+            return true;
+        }
+        let user_ip = (stream.username.clone(), stream.client_ip.clone());
+        if !users_with_active.contains(&user_ip) {
+            return true;
+        }
+        active_channels.contains(&(stream.username.clone(), stream.client_ip.clone(), stream.channel.virtual_id))
+    });
 }
 
+fn should_keep_preserved_stream_visible(stream: &StreamInfo) -> bool {
+    // Match backend `is_stable_session_stream`: Catchup/HLS/DASH (and shared HLS) stay visible
+    // while preserved between short segment requests — otherwise archive playback vanishes from Streams.
+    is_sticky_session_stream(stream)
+}
+
+/// Soft-preserve safety net for partial StatusCheck snapshots. Must not resurrect ended sessions.
+#[allow(dead_code)] // kept as documentation of the old merge TTL; snapshot merge was removed
+const STICKY_SNAPSHOT_MERGE_TTL_SECS: u64 = 20;
+
+fn mark_sticky_session_preserved(stream: &mut StreamInfo) -> bool {
+    if is_sticky_session_stream(stream) {
+        stream.preserved = true;
+        true
+    } else {
+        false
+    }
+}
+
+#[allow(dead_code)] // retained for documentation of the old Connections(0) wipe predicate
 fn should_keep_stream_when_connections_drop_to_zero(stream: &StreamInfo) -> bool {
     stream.preserved && should_keep_preserved_stream_visible(stream)
 }
@@ -138,7 +223,10 @@ fn replace_server_status_snapshot(
     mut server_status: StatusCheck,
     download_streams: &[StreamInfo],
 ) -> Rc<StatusCheck> {
+    // Trust backend `panel_streams` as authoritative. Re-merging sticky FE ghosts resurrected
+    // ended archive/HLS rows until a full page reload.
     dedupe_streams_by_identity(&mut server_status.active_user_streams);
+    prune_zapped_preserved_streams(&mut server_status.active_user_streams);
     merge_aux_streams(&mut server_status, download_streams);
     let server_status = Rc::new(server_status);
     *status_holder = Some(Rc::clone(&server_status));
@@ -199,6 +287,9 @@ fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserCo
     match event {
         ActiveUserConnectionChange::Updated(stream_info) => {
             if stream_info.preserved {
+                // Never drop on Updated(preserved): backend already decided the session row should
+                // linger between HLS segments. Removing here blanked archive Streams when sticky
+                // detection lagged behind backend `is_stable_session_stream`.
                 if should_keep_preserved_stream_visible(&stream_info) {
                     if let Some(pos) = find_stream_update_index(&server_status.active_user_streams, &stream_info) {
                         server_status.active_user_streams[pos] = stream_info;
@@ -206,8 +297,7 @@ fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserCo
                         server_status.active_user_streams.push(stream_info);
                     }
                     dedupe_streams_by_identity(&mut server_status.active_user_streams);
-                } else if let Some(pos) = find_stream_update_index(&server_status.active_user_streams, &stream_info) {
-                    server_status.active_user_streams.remove(pos);
+                    prune_zapped_preserved_streams(&mut server_status.active_user_streams);
                 }
                 return;
             }
@@ -217,18 +307,70 @@ fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserCo
                 server_status.active_user_streams.push(stream_info);
             }
             dedupe_streams_by_identity(&mut server_status.active_user_streams);
+            // Channel zap: new active channel replaces preserved soft-kept previous channel immediately.
+            prune_zapped_preserved_streams(&mut server_status.active_user_streams);
         }
         ActiveUserConnectionChange::Disconnected(addr) => {
-            server_status.active_user_streams.retain(|stream_info| stream_info.addr != addr);
+            // Active sticky rows: soft-preserve across short HLS segment teardown.
+            // Already-preserved rows: this is backend expiry (AdaptiveSessionExpired) — hard remove.
+            let mut expired = false;
+            for stream in &server_status.active_user_streams {
+                if stream.addr == addr && stream.preserved && is_sticky_session_stream(stream) {
+                    expired = true;
+                    break;
+                }
+            }
+            if expired {
+                server_status.active_user_streams.retain(|stream_info| stream_info.addr != addr);
+            } else {
+                for stream in &mut server_status.active_user_streams {
+                    if stream.addr == addr {
+                        mark_sticky_session_preserved(stream);
+                    }
+                }
+                server_status
+                    .active_user_streams
+                    .retain(|stream_info| stream_info.addr != addr || should_keep_preserved_stream_visible(stream_info));
+            }
         }
         ActiveUserConnectionChange::DisconnectedStream { addr, uid } => {
-            server_status.active_user_streams.retain(|stream_info| stream_info.addr != addr || stream_info.uid != uid);
+            let already_preserved = server_status.active_user_streams.iter().any(|stream_info| {
+                stream_info.addr == addr && stream_info.uid == uid && stream_info.preserved
+            });
+            if already_preserved {
+                // Backend session TTL expiry — do not soft-preserve again (that left ghosts until reload).
+                server_status
+                    .active_user_streams
+                    .retain(|stream_info| stream_info.addr != addr || stream_info.uid != uid);
+                return;
+            }
+            if let Some(stream) = server_status
+                .active_user_streams
+                .iter_mut()
+                .find(|stream_info| stream_info.addr == addr && stream_info.uid == uid)
+            {
+                if mark_sticky_session_preserved(stream) {
+                    return;
+                }
+            }
+            server_status
+                .active_user_streams
+                .retain(|stream_info| stream_info.addr != addr || stream_info.uid != uid);
         }
         ActiveUserConnectionChange::Connections(user_count, connections) => {
             server_status.active_users = user_count;
             server_status.active_user_connections = connections;
+            // Connections(0) often arrives before Disconnected* between HLS segments. If we leave
+            // sticky rows as active (preserved=false), adaptive last_seen keeps refreshing and the
+            // Streams TTL never hides them — ghosts until page reload.
             if connections == 0 {
-                server_status.active_user_streams.retain(should_keep_stream_when_connections_drop_to_zero);
+                for stream in &mut server_status.active_user_streams {
+                    mark_sticky_session_preserved(stream);
+                }
+                server_status.active_user_streams.retain(|stream| {
+                    stream.client_ip == BACKGROUND_TRANSFER_CLIENT_IP
+                        || (stream.preserved && should_keep_preserved_stream_visible(stream))
+                });
             }
         }
     }
@@ -461,14 +603,16 @@ mod tests {
     }
 
     #[test]
-    fn test_connections_zero_clears_stale_stream_rows() {
+    fn test_connections_zero_drops_plain_rows_and_soft_preserves_sticky() {
+        let mut plain_a = test_stream(1, "127.0.0.1:1234", Some("tok-a"), PlaylistItemType::Video);
+        plain_a.channel.url = "http://localhost/movie.ts".intern();
+        let mut plain_b = test_stream(2, "127.0.0.1:5678", Some("tok-b"), PlaylistItemType::Series);
+        plain_b.channel.url = "http://localhost/series.ts".intern();
+        let sticky = test_stream(3, "127.0.0.1:9999", Some("tok-catchup"), PlaylistItemType::Catchup);
         let mut status = shared::model::StatusCheck {
             active_users: 1,
             active_user_connections: 1,
-            active_user_streams: vec![
-                test_stream(1, "127.0.0.1:1234", Some("tok-a"), PlaylistItemType::Video),
-                test_stream(2, "127.0.0.1:5678", Some("tok-b"), PlaylistItemType::Series),
-            ],
+            active_user_streams: vec![plain_a, plain_b, sticky.clone()],
             ..Default::default()
         };
 
@@ -476,18 +620,22 @@ mod tests {
 
         assert_eq!(status.active_users, 0);
         assert_eq!(status.active_user_connections, 0);
-        assert!(status.active_user_streams.is_empty());
+        assert_eq!(status.active_user_streams.len(), 1);
+        assert_eq!(status.active_user_streams[0].uid, sticky.uid);
+        assert!(status.active_user_streams[0].preserved);
     }
 
     #[test]
-    fn test_connections_zero_keeps_preserved_adaptive_rows_for_ttl_cleanup() {
+    fn test_connections_zero_soft_preserves_sticky_and_drops_plain_rows() {
         let mut preserved = test_stream(1, "127.0.0.1:1234", Some("tok-hls"), PlaylistItemType::LiveHls);
         preserved.preserved = true;
-        let non_adaptive = test_stream(2, "127.0.0.1:5678", Some("tok-vod"), PlaylistItemType::Video);
+        let mut plain = test_stream(2, "127.0.0.1:5678", Some("tok-vod"), PlaylistItemType::Video);
+        plain.channel.url = "http://localhost/movie.ts".intern();
+        let active_catchup = test_stream(3, "127.0.0.1:9999", Some("tok-catchup"), PlaylistItemType::Catchup);
         let mut status = shared::model::StatusCheck {
             active_users: 1,
             active_user_connections: 1,
-            active_user_streams: vec![preserved.clone(), non_adaptive],
+            active_user_streams: vec![preserved.clone(), plain, active_catchup.clone()],
             ..Default::default()
         };
 
@@ -495,7 +643,10 @@ mod tests {
 
         assert_eq!(status.active_users, 1);
         assert_eq!(status.active_user_connections, 0);
-        assert_eq!(status.active_user_streams, vec![preserved]);
+        assert_eq!(status.active_user_streams.len(), 2);
+        assert!(status.active_user_streams.iter().all(|stream| stream.preserved));
+        assert!(status.active_user_streams.iter().any(|stream| stream.uid == preserved.uid));
+        assert!(status.active_user_streams.iter().any(|stream| stream.uid == active_catchup.uid));
     }
 
     #[test]
@@ -527,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn test_preserved_non_adaptive_update_removes_active_stream_without_clearing_other_rows() {
+    fn test_preserved_non_adaptive_update_is_ignored_without_clearing_other_rows() {
         let mut preserved = test_stream(1, "127.0.0.1:1234", Some("tok-vod"), PlaylistItemType::Video);
         preserved.preserved = true;
         let other = test_stream(2, "127.0.0.1:5678", Some("tok-other"), PlaylistItemType::LiveHls);
@@ -540,10 +691,12 @@ mod tests {
             ],
             ..Default::default()
         };
+        let before = status.active_user_streams.clone();
 
         apply_active_user_change(&mut status, ActiveUserConnectionChange::Updated(preserved));
 
-        assert_eq!(status.active_user_streams, vec![other]);
+        // Non-sticky preserved updates must not delete panel rows (that path blanked archive Streams).
+        assert_eq!(status.active_user_streams, before);
         assert_eq!(status.active_users, 2);
         assert_eq!(status.active_user_connections, 2);
     }
@@ -562,6 +715,277 @@ mod tests {
         apply_active_user_change(&mut status, ActiveUserConnectionChange::Updated(preserved.clone()));
 
         assert_eq!(status.active_user_streams, vec![preserved]);
+    }
+
+    #[test]
+    fn test_preserved_catchup_update_stays_visible_between_archive_segments() {
+        let mut preserved = test_stream(1, "127.0.0.1:1234", Some("tok-catchup"), PlaylistItemType::Catchup);
+        preserved.preserved = true;
+        let other = test_stream(2, "127.0.0.1:5678", Some("tok-live"), PlaylistItemType::LiveHls);
+        let mut status = shared::model::StatusCheck {
+            active_users: 2,
+            active_user_connections: 2,
+            active_user_streams: vec![
+                test_stream(1, "127.0.0.1:1234", Some("tok-catchup"), PlaylistItemType::Catchup),
+                other.clone(),
+            ],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Updated(preserved.clone()));
+
+        assert_eq!(status.active_user_streams.len(), 2);
+        assert!(status
+            .active_user_streams
+            .iter()
+            .any(|stream| stream.uid == preserved.uid && stream.preserved && stream.channel.item_type == PlaylistItemType::Catchup));
+        assert!(status.active_user_streams.iter().any(|stream| stream == &other));
+    }
+
+    #[test]
+    fn test_connections_zero_keeps_preserved_catchup_rows_for_ttl_cleanup() {
+        let mut preserved = test_stream(1, "127.0.0.1:1234", Some("tok-catchup"), PlaylistItemType::Catchup);
+        preserved.preserved = true;
+        let non_session = test_stream(2, "127.0.0.1:5678", Some("tok-vod"), PlaylistItemType::Video);
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 1,
+            active_user_streams: vec![preserved.clone(), non_session],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Connections(1, 0));
+
+        assert_eq!(status.active_user_streams.len(), 2);
+        assert!(status.active_user_streams.iter().any(|s| s.uid == preserved.uid));
+    }
+
+    #[test]
+    fn test_connections_zero_soft_preserves_active_catchup_before_disconnect_event() {
+        // Reproduce backend ordering: Connections(0) can arrive before DisconnectedStream.
+        let active = test_stream(1, "127.0.0.1:1234", Some("m3u-catchup|archive|100|3600"), PlaylistItemType::Catchup);
+        let mut vod = test_stream(2, "127.0.0.1:5678", Some("tok-vod"), PlaylistItemType::Video);
+        vod.channel.url = "http://localhost/movie.ts".intern();
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 1,
+            active_user_streams: vec![active.clone(), vod],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Connections(1, 0));
+
+        assert_eq!(status.active_user_streams.len(), 1);
+        assert_eq!(status.active_user_connections, 0);
+        assert!(status.active_user_streams.iter().any(|s| s.uid == active.uid && s.preserved));
+    }
+
+    #[test]
+    fn test_connections_zero_soft_preserves_live_typed_catchup_session_token() {
+        let active = test_stream(1, "127.0.0.1:1234", Some("m3u-catchup|x|archive|100|3600"), PlaylistItemType::Live);
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 1,
+            active_user_streams: vec![active.clone()],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Connections(1, 0));
+
+        assert_eq!(status.active_user_streams.len(), 1);
+        assert!(status.active_user_streams[0].preserved);
+        assert_eq!(status.active_user_streams[0].uid, active.uid);
+        assert_eq!(status.active_user_connections, 0);
+    }
+
+    #[test]
+    fn test_server_status_snapshot_does_not_resurrect_sticky_omitted_by_backend() {
+        let mut preserved = test_stream(1, "127.0.0.1:1234", Some("tok-catchup"), PlaylistItemType::Catchup);
+        preserved.preserved = true;
+        preserved.ts = current_time_secs();
+        let mut status_holder = Some(Rc::new(shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 0,
+            active_user_streams: vec![preserved],
+            ..Default::default()
+        }));
+        let empty_backend_snapshot = shared::model::StatusCheck {
+            active_users: 0,
+            active_user_connections: 0,
+            active_user_streams: vec![],
+            ..Default::default()
+        };
+
+        let status = replace_server_status_snapshot(&mut status_holder, empty_backend_snapshot, &[]);
+
+        assert!(status.active_user_streams.is_empty());
+    }
+
+    #[test]
+    fn test_connections_zero_soft_preserves_catchup_without_session_token() {
+        let active = test_stream(1, "127.0.0.1:1234", None, PlaylistItemType::Catchup);
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 1,
+            active_user_streams: vec![active.clone()],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Connections(1, 0));
+
+        assert_eq!(status.active_user_streams.len(), 1);
+        assert!(status.active_user_streams[0].preserved);
+        assert_eq!(status.active_user_streams[0].uid, active.uid);
+        assert_eq!(status.active_user_connections, 0);
+    }
+
+    #[test]
+    fn test_catchup_update_remaps_by_virtual_id_across_segment_addr_churn() {
+        let previous = test_stream(1, "127.0.0.1:1111", None, PlaylistItemType::Catchup);
+        let mut next = test_stream(99, "127.0.0.1:2222", None, PlaylistItemType::Catchup);
+        next.channel.virtual_id = previous.channel.virtual_id;
+        next.username = previous.username.clone();
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 1,
+            active_user_streams: vec![previous],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Updated(next.clone()));
+
+        assert_eq!(status.active_user_streams.len(), 1);
+        assert_eq!(status.active_user_streams[0].uid, next.uid);
+        assert_eq!(status.active_user_streams[0].addr, next.addr);
+    }
+
+    #[test]
+    fn test_active_update_drops_preserved_previous_channel_on_zap() {
+        let mut previous = test_stream(1, "127.0.0.1:1111", Some("tok-old"), PlaylistItemType::LiveHls);
+        previous.preserved = true;
+        previous.channel.virtual_id = 100;
+        previous.channel.title = "Old Channel".intern();
+        let mut next = test_stream(2, "127.0.0.1:2222", Some("tok-new"), PlaylistItemType::LiveHls);
+        next.channel.virtual_id = 200;
+        next.channel.title = "New Channel".intern();
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 1,
+            active_user_streams: vec![previous],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Updated(next.clone()));
+
+        assert_eq!(status.active_user_streams.len(), 1);
+        assert_eq!(status.active_user_streams[0].uid, next.uid);
+        assert_eq!(status.active_user_streams[0].channel.virtual_id, 200);
+        assert!(!status.active_user_streams[0].preserved);
+    }
+
+    #[test]
+    fn test_active_update_keeps_preserved_same_channel_during_segment_gap() {
+        let mut previous = test_stream(1, "127.0.0.1:1111", Some("tok-hls"), PlaylistItemType::LiveHls);
+        previous.preserved = true;
+        previous.channel.virtual_id = 100;
+        // Another user's preserved row must stay.
+        let mut other_user = test_stream(9, "127.0.0.1:9999", Some("tok-other"), PlaylistItemType::LiveHls);
+        other_user.preserved = true;
+        other_user.username = "other".to_string();
+        other_user.channel.virtual_id = 999;
+        let mut next = test_stream(2, "127.0.0.1:2222", Some("tok-hls-next"), PlaylistItemType::LiveHls);
+        next.channel.virtual_id = 100;
+        let mut status = shared::model::StatusCheck {
+            active_users: 2,
+            active_user_connections: 1,
+            active_user_streams: vec![previous.clone(), other_user.clone()],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Updated(next.clone()));
+
+        assert_eq!(status.active_user_streams.len(), 2);
+        assert!(status.active_user_streams.iter().any(|s| s.uid == next.uid && s.channel.virtual_id == 100));
+        assert!(status.active_user_streams.iter().any(|s| s.uid == other_user.uid && s.preserved));
+    }
+
+    #[test]
+    fn test_disconnected_stream_soft_preserves_catchup_between_segments() {
+        let active = test_stream(1, "127.0.0.1:1234", Some("tok-catchup"), PlaylistItemType::Catchup);
+        let other = test_stream(2, "127.0.0.1:5678", Some("tok-live"), PlaylistItemType::LiveHls);
+        let mut status = shared::model::StatusCheck {
+            active_users: 2,
+            active_user_connections: 2,
+            active_user_streams: vec![active.clone(), other.clone()],
+            ..Default::default()
+        };
+
+        apply_active_user_change(
+            &mut status,
+            ActiveUserConnectionChange::DisconnectedStream { addr: active.addr, uid: active.uid },
+        );
+
+        assert_eq!(status.active_user_streams.len(), 2);
+        assert!(status.active_user_streams.iter().any(|stream| {
+            stream.uid == active.uid && stream.preserved && stream.channel.item_type == PlaylistItemType::Catchup
+        }));
+        assert!(status.active_user_streams.iter().any(|stream| stream == &other));
+    }
+
+    #[test]
+    fn test_disconnected_stream_hard_removes_already_preserved_on_session_expiry() {
+        let mut preserved = test_stream(1, "127.0.0.1:1234", Some("tok-catchup"), PlaylistItemType::Catchup);
+        preserved.preserved = true;
+        let other = test_stream(2, "127.0.0.1:5678", Some("tok-live"), PlaylistItemType::LiveHls);
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 0,
+            active_user_streams: vec![preserved.clone(), other.clone()],
+            ..Default::default()
+        };
+
+        apply_active_user_change(
+            &mut status,
+            ActiveUserConnectionChange::DisconnectedStream { addr: preserved.addr, uid: preserved.uid },
+        );
+
+        assert_eq!(status.active_user_streams, vec![other]);
+    }
+
+    #[test]
+    fn test_disconnected_addr_soft_preserves_catchup_and_drops_plain_live() {
+        let catchup = test_stream(1, "127.0.0.1:1234", Some("tok-catchup"), PlaylistItemType::Catchup);
+        let mut live = test_stream(2, "127.0.0.1:1234", Some("tok-live"), PlaylistItemType::Live);
+        live.channel.url = "http://localhost/live.ts".intern();
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 2,
+            active_user_streams: vec![catchup.clone(), live],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Disconnected(catchup.addr));
+
+        assert_eq!(status.active_user_streams.len(), 1);
+        assert!(status.active_user_streams[0].preserved);
+        assert_eq!(status.active_user_streams[0].channel.item_type, PlaylistItemType::Catchup);
+    }
+
+    #[test]
+    fn test_disconnected_addr_hard_removes_already_preserved_sticky() {
+        let mut preserved = test_stream(1, "127.0.0.1:1234", Some("tok-catchup"), PlaylistItemType::Catchup);
+        preserved.preserved = true;
+        let other = test_stream(2, "127.0.0.1:5678", Some("tok-live"), PlaylistItemType::LiveHls);
+        let mut status = shared::model::StatusCheck {
+            active_users: 1,
+            active_user_connections: 0,
+            active_user_streams: vec![preserved.clone(), other.clone()],
+            ..Default::default()
+        };
+
+        apply_active_user_change(&mut status, ActiveUserConnectionChange::Disconnected(preserved.addr));
+
+        assert_eq!(status.active_user_streams, vec![other]);
     }
 
     #[test]

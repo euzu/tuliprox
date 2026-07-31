@@ -48,7 +48,7 @@ pub async fn create_status_check(app_state: &Arc<AppState>) -> StatusCheck {
     let (active_users, active_user_connections, active_user_streams) = {
         let active_user = &app_state.active_users;
         let (user_count, connection_count) = active_user.active_users_and_connections().await;
-        (user_count, connection_count, active_user.active_streams().await)
+        (user_count, connection_count, active_user.panel_streams().await)
     };
 
     let active_provider_connections =
@@ -81,7 +81,7 @@ async fn streams(
     ExtractAcceptHeader(accept): ExtractAcceptHeader,
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> axum::response::Response {
-    let streams = app_state.active_users.active_streams().await;
+    let streams = app_state.active_users.panel_streams().await;
     json_or_bin_response(accept.as_deref(), &streams).into_response()
 }
 

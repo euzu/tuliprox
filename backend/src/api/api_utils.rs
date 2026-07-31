@@ -2535,9 +2535,9 @@ pub async fn force_provider_stream_response(
     let item_type = stream_channel.item_type;
 
     // Forced reopens must clear stale provider slots before reacquiring. For adaptive HLS/DASH
-    // sessions we only target old active stream sockets of the same session, never manifest-only
-    // session addresses, otherwise the controlling playlist request gets torn down.
-    let cleanup_addrs = if item_type.is_live_adaptive() {
+    // and Catchup sessions we only target old active stream sockets of the same session, never
+    // manifest-only session addresses, otherwise the controlling playlist request gets torn down.
+    let cleanup_addrs = if item_type.is_live_adaptive() || item_type == PlaylistItemType::Catchup {
         app_state
             .active_users
             .adaptive_session_stream_cleanup_addrs(&ctx.user.username, &user_session.token, &fingerprint.addr)
@@ -3381,7 +3381,7 @@ async fn cleanup_forced_reopen_addrs(
     item_type: PlaylistItemType,
     cleanup_addrs: &[SocketAddr],
 ) {
-    let close_client_socket = !item_type.is_live_adaptive();
+    let close_client_socket = !(item_type.is_live_adaptive() || item_type == PlaylistItemType::Catchup);
     for addr in cleanup_addrs {
         app_state.connection_manager.release_provider_connection(addr).await;
         if close_client_socket {

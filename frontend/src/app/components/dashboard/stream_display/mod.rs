@@ -26,7 +26,8 @@ use shared::{
     defaults::default_kick_secs,
     error::TuliproxError,
     model::{
-        PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, StreamInfoConfigDto, UserCommand,
+        PlaylistItemType, PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo,
+        StreamInfoConfigDto, UserCommand,
     },
 };
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
@@ -37,6 +38,17 @@ const KICK: &str = "kick";
 const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
 const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
 const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
+
+fn stream_display_key(stream: &StreamInfo) -> String {
+    // Prefer a stable session identity so archive HLS segment addr/uid churn does not remount the row.
+    if let Some(token) = stream.session_token.as_deref().filter(|token| !token.is_empty()) {
+        return format!("session-{token}");
+    }
+    if stream.channel.item_type == PlaylistItemType::Catchup {
+        return format!("catchup-{}-{}", stream.username, stream.channel.virtual_id);
+    }
+    format!("{}-{}", stream.addr, stream.uid)
+}
 
 #[derive(Properties, PartialEq, Clone)]
 pub struct StreamDisplayProps {
@@ -315,7 +327,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                             <>
                                 <div class="tp__stream-display__list">
                                     { for streams.iter().cloned().map(|stream| {
-                                        let key = format!("{}-{}", stream.addr, stream.uid);
+                                        let key = stream_display_key(&stream);
                                         let user_comment = user_comments.get(stream.username.as_str()).cloned().flatten();
                                         html! {
                                             <StreamDisplayItem
