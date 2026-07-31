@@ -275,7 +275,8 @@ async fn lineup_status(
                             let cred = Arc::clone(&cred);
                             async move {
                                 let item = res.ok()?;
-                                cred.allows_item_type(item.item_type).then_some(item)
+                                (cred.allows_item_type(item.item_type) && cred.allows_group(item.group.as_ref()))
+                                    .then_some(item)
                             }
                         })
                         .count()

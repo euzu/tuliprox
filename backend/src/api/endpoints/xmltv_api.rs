@@ -11,9 +11,10 @@ use crate::{
     auth::Fingerprint,
     model::{Config, ConfigTarget, ProxyUserCredentials, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
     repository::{
-        epg_query_channels_by_storage_key, get_target_storage_path, m3u_get_epg_file_path_for_target,
-        storage_const, xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTreeQuery,
-        LockedReceiverStream, XML_PREAMBLE,
+        adult_epg_id_blocklist, epg_channel_hidden_by_adult_blocklist, epg_query_channels_by_storage_key,
+        get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const,
+        xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream,
+        XML_PREAMBLE,
     },
     utils,
     utils::{
@@ -34,7 +35,7 @@ use shared::{
     },
     utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
+use std::{collections::{HashMap, HashSet}, path::{Path, PathBuf}, sync::Arc};
 use tokio::{io::{AsyncWrite, AsyncWriteExt}, sync::mpsc, task};
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
@@ -243,6 +244,19 @@ async fn serve_epg_with_rewrites(
         .as_ref()
         .is_some_and(ConfigTargetOptions::lowercase_xmltv_display_names);
 
+    // Cheap Hide Adult filter: shared cached blocklist of adult live tvg-ids only.
+    // Empty / None => no per-channel check (zero overhead for hide_adult=false).
+    let adult_epg_ids: Option<Arc<HashSet<Arc<str>>>> = if user.hide_adult {
+        let ids = adult_epg_id_blocklist(app_state, target).await;
+        if ids.is_empty() {
+            None
+        } else {
+            Some(ids)
+        }
+    } else {
+        None
+    };
+
     let server_info = app_state.app_config.get_user_server_info(user);
     let base_url =
         if !matches!(epg_processing_options.time_shift, EpgTimeShift::None) || epg_processing_options.rewrite_urls {
@@ -269,6 +283,7 @@ async fn serve_epg_with_rewrites(
 
     let epg_path_for_log = epg_path.clone();
     let join_error_tx = channel_tx.clone();
+    let adult_epg_ids_for_scan = adult_epg_ids.clone();
     let spawn_handle = task::spawn_blocking(move || {
         let _guard = bg_lock;
         let mut query = match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) {
@@ -291,6 +306,11 @@ async fn serve_epg_with_rewrites(
                     break;
                 }
             };
+            if let Some(blocked) = adult_epg_ids_for_scan.as_ref() {
+                if epg_channel_hidden_by_adult_blocklist(blocked, &channel.id) {
+                    continue;
+                }
+            }
             if channel_tx.blocking_send(Ok(channel)).is_err() {
                 break;
             }
@@ -933,8 +953,8 @@ mod tests {
     use shared::{
         foundation::Filter,
         model::{
-            ConfigTargetOptions, EpgCategory, EpgChannel, EpgOutputOptions, EpgProgramme, ProcessingOrder,
-            StreamEpgItemRequest, StreamEpgRequest, TargetType,
+            ConfigTargetOptions, EpgCategory, EpgChannel, EpgOutputOptions, EpgProgramme, M3uPlaylistItem,
+            PlaylistItemType, ProcessingOrder, StreamEpgItemRequest, StreamEpgRequest, TargetType,
         },
         utils::{concat_path, obfuscate_text, Internable},
     };
@@ -1469,6 +1489,115 @@ mod tests {
 
         assert_eq!(xml, "<display-name>café network &amp; &lt;hd&gt;</display-name>");
     }
+
+    fn blank_m3u_item() -> M3uPlaylistItem {
+        M3uPlaylistItem {
+            virtual_id: 0,
+            provider_id: "".intern(),
+            input_stream_id: "".intern(),
+            name: "".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "".intern(),
+            title: "".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "".intern(),
+            epg_channel_id: None,
+            input_name: "".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
+            source_ordinal: 0,
+            additional_properties: None,
+            upstream_user_agent: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn hide_adult_skips_adult_channels_in_xmltv_output() {
+        use crate::repository::{
+            clear_adult_epg_id_cache_for_tests, get_target_storage_path, m3u_get_file_path_for_db, BPlusTree,
+        };
+
+        clear_adult_epg_id_cache_for_tests();
+        let dir = tempdir().expect("temp dir");
+        let storage_dir = dir.path().to_string_lossy().to_string();
+        let app_state = create_test_app_state(test_config_with_storage(&storage_dir));
+
+        let mut target = test_target_with_xtream_and_m3u();
+        target.name = "hide-adult-epg".to_string();
+        target.id = 42;
+        let target = Arc::new(target);
+
+        let target_path = get_target_storage_path(&app_state.app_config.config.load(), target.name.as_str())
+            .expect("target storage path");
+        fs::create_dir_all(target_path.join("m3u")).expect("m3u dir");
+        let m3u_db = m3u_get_file_path_for_db(&target_path);
+        let mut playlist = BPlusTree::<u32, M3uPlaylistItem>::new();
+        playlist.insert(
+            1,
+            M3uPlaylistItem {
+                virtual_id: 1,
+                group: "XXX".intern(),
+                item_type: PlaylistItemType::Live,
+                epg_channel_id: Some("adult.one".intern()),
+                title: "Adult One".intern(),
+                name: "Adult One".intern(),
+                ..blank_m3u_item()
+            },
+        );
+        playlist.insert(
+            2,
+            M3uPlaylistItem {
+                virtual_id: 2,
+                group: "News".intern(),
+                item_type: PlaylistItemType::Live,
+                epg_channel_id: Some("news.one".intern()),
+                title: "News One".intern(),
+                name: "News One".intern(),
+                ..blank_m3u_item()
+            },
+        );
+        playlist.store(&m3u_db).expect("store m3u playlist");
+
+        let epg_path = dir.path().join("epg.db");
+        write_test_epg_channels(
+            &epg_path,
+            [
+                EpgChannel {
+                    id: "adult.one".intern(),
+                    title: Some("Adult One".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new(100, 200, "adult.one".intern())],
+                },
+                EpgChannel {
+                    id: "news.one".intern(),
+                    title: Some("News One".intern()),
+                    icon: None,
+                    programmes: vec![EpgProgramme::new(100, 200, "news.one".intern())],
+                },
+            ],
+        );
+
+        let mut user = ProxyUserCredentials::default();
+        user.hide_adult = true;
+        let xml = response_body_text(serve_epg(&app_state, &epg_path, &user, &target, None).await).await;
+        assert!(!xml.contains(r#"id="adult.one""#), "adult channel must be filtered: {xml}");
+        assert!(!xml.contains(r#"channel="adult.one""#), "adult programmes must be filtered: {xml}");
+        assert!(xml.contains(r#"id="news.one""#), "non-adult channel must remain: {xml}");
+
+        user.hide_adult = false;
+        clear_adult_epg_id_cache_for_tests();
+        let xml_all = response_body_text(serve_epg(&app_state, &epg_path, &user, &target, None).await).await;
+        assert!(xml_all.contains(r#"id="adult.one""#), "adult channel visible when hide_adult=false: {xml_all}");
+    }
+
 
     #[tokio::test]
     async fn xmltv_output_uses_canonical_channel_ids_and_only_lowercases_display_names() {

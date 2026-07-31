@@ -70,6 +70,7 @@ impl XtreamPlaylistIterator {
                     })
                     .collect()
             });
+            let hide_adult = user.hide_adult;
 
             let xtream_path = xtream_path.clone();
             let index_path = get_file_path_for_db_index(&xtream_path);
@@ -105,7 +106,7 @@ impl XtreamPlaylistIterator {
                         }
                     };
 
-                    if !Self::matches_filters(cluster, filter_ids.as_ref(), &item) {
+                    if !Self::matches_filters(cluster, filter_ids.as_ref(), hide_adult, &item) {
                         continue;
                     }
 
@@ -141,7 +142,12 @@ impl XtreamPlaylistIterator {
         }
     }
 
-    fn matches_filters(cluster: XtreamCluster, filter_ids: Option<&HashSet<u32>>, item: &XtreamPlaylistItem) -> bool {
+    fn matches_filters(
+        cluster: XtreamCluster,
+        filter_ids: Option<&HashSet<u32>>,
+        hide_adult: bool,
+        item: &XtreamPlaylistItem,
+    ) -> bool {
         // We can't serve episodes within series
         if cluster == XtreamCluster::Series
             && !matches!(item.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
@@ -154,6 +160,13 @@ impl XtreamPlaylistIterator {
             if !set.contains(&item.category_id) {
                 return false;
             }
+        }
+
+        if hide_adult
+            && (crate::model::ProxyUserCredentials::is_adult_group(item.group.as_ref())
+                || crate::model::ProxyUserCredentials::stream_props_marked_adult(item.additional_properties.as_ref()))
+        {
+            return false;
         }
 
         true

@@ -312,7 +312,7 @@ async fn xtream_player_api_stream(
     } else {
         user.allows_item_type(pli.item_type)
     };
-    if !output_allowed {
+    if !output_allowed || !user.allows_playlist_item(pli.group.as_ref(), pli.additional_properties.as_ref()) {
         if is_hls_manifest_request {
             return hls_custom_video_manifest_response(
                 app_state,
@@ -1019,7 +1019,9 @@ async fn xtream_player_api_resource(
         format!("Failed to read xtream item for stream id {req_virtual_id}")
     );
 
-    if !user.allows_item_type(pli.item_type) {
+    if !user.allows_item_type(pli.item_type)
+        || !user.allows_playlist_item(pli.group.as_ref(), pli.additional_properties.as_ref())
+    {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
 
@@ -1445,6 +1447,9 @@ async fn xtream_player_api_handle_content_action(
                     Ok(mut categories) => {
                         if let Some(fltr) = filter {
                             categories.retain(|c| fltr.contains(&c.category_id));
+                        }
+                        if user.hide_adult {
+                            categories.retain(|c| !ProxyUserCredentials::is_adult_group(&c.category_name));
                         }
                         return Some(axum::Json(categories).into_response());
                     }

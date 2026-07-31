@@ -598,8 +598,8 @@ fn resolve_loaded_m3u_catchup(
     Ok((catchup_item, resolved.discriminator))
 }
 
-fn resolved_m3u_item_is_allowed(user: &ProxyUserCredentials, item_type: PlaylistItemType) -> bool {
-    user.allows_item_type(item_type)
+fn resolved_m3u_item_is_allowed(user: &ProxyUserCredentials, pli: &shared::model::M3uPlaylistItem) -> bool {
+    user.allows_item_type(pli.item_type) && user.allows_group(pli.group.as_ref())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -832,7 +832,7 @@ async fn m3u_api_catchup(
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         }
     };
-    if !resolved_m3u_item_is_allowed(user.as_ref(), resolved_pli.item_type) {
+    if !resolved_m3u_item_is_allowed(user.as_ref(), &resolved_pli) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
@@ -1108,10 +1108,74 @@ mod tests {
 
     #[test]
     fn resolved_catchup_item_requires_rechecked_permissions() {
+        use shared::utils::Internable;
+
         let mut user = ProxyUserCredentials::default();
         user.output_clusters = ClusterFlags::Live;
 
-        assert!(!resolved_m3u_item_is_allowed(&user, PlaylistItemType::Catchup));
+        let item = shared::model::M3uPlaylistItem {
+            virtual_id: 1,
+            provider_id: "1".intern(),
+            input_stream_id: "1".intern(),
+            name: "ch".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "News".intern(),
+            title: "ch".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example/live".intern(),
+            epg_channel_id: None,
+            input_name: "in".intern(),
+            item_type: PlaylistItemType::Catchup,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
+            source_ordinal: 0,
+            additional_properties: None,
+            upstream_user_agent: None,
+        };
+        assert!(!resolved_m3u_item_is_allowed(&user, &item));
+    }
+
+    #[test]
+    fn hide_adult_blocks_adult_group_even_when_cluster_allowed() {
+        use shared::utils::Internable;
+
+        let mut user = ProxyUserCredentials::default();
+        user.hide_adult = true;
+
+        let item = shared::model::M3uPlaylistItem {
+            virtual_id: 1,
+            provider_id: "1".intern(),
+            input_stream_id: "1".intern(),
+            name: "xxx".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "18+ (Adult)".intern(),
+            title: "xxx".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example/live".intern(),
+            epg_channel_id: None,
+            input_name: "in".intern(),
+            item_type: PlaylistItemType::LiveHls,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
+            source_ordinal: 0,
+            additional_properties: None,
+            upstream_user_agent: None,
+        };
+        assert!(!resolved_m3u_item_is_allowed(&user, &item));
     }
 
     #[test]
