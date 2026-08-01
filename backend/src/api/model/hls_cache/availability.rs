@@ -3169,7 +3169,7 @@ mod tests {
 
     fn terminal_base_without_timestamps() -> Vec<u8> {
         let mut bytes = TERMINAL_ASSET_BYTES.to_vec();
-        for packet in bytes.chunks_exact_mut(188) {
+        for packet in bytes.as_chunks_mut::<188>().0 {
             let adaptation_field_control = (packet[3] >> 4) & 0b11;
             if matches!(adaptation_field_control, 0b10 | 0b11) && packet[4] > 0 {
                 packet[5] &= !0x10;
@@ -3720,7 +3720,7 @@ mod tests {
             .hls_proxy
             .availability_reevaluations()
             .cancel_session(&fixture.proxy_session_id);
-        wait_for_availability_owner_completion(&fixture).await;
+        wait_for_availability_owner_completion(fixture).await;
     }
 
     async fn post_refresh_terminal_fixture(name: &str, terminal_asset: bool) -> PostRefreshTerminalFixture {
@@ -4070,7 +4070,7 @@ mod tests {
     fn payload_continuity_bounds(bytes: &[u8]) -> std::collections::HashMap<u16, (u8, u8, bool)> {
         let mut payload_bounds = std::collections::HashMap::<u16, (u8, u8)>::new();
         let mut first_packet_discontinuity = std::collections::HashMap::<u16, bool>::new();
-        for packet in bytes.chunks_exact(188).filter(|packet| packet[0] == 0x47) {
+        for packet in bytes.as_chunks::<188>().0.iter().filter(|packet| packet[0] == 0x47) {
             let adaptation_field_control = (packet[3] >> 4) & 0b11;
             let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
             let discontinuity = matches!(adaptation_field_control, 0b10 | 0b11)
@@ -4098,7 +4098,7 @@ mod tests {
     fn with_internal_payload_continuity_jump(bytes: &[u8]) -> Vec<u8> {
         let mut corrupted = bytes.to_vec();
         let mut first_payload_pid = None;
-        for packet in corrupted.chunks_exact_mut(188).filter(|packet| packet[0] == 0x47) {
+        for packet in corrupted.as_chunks_mut::<188>().0.iter_mut().filter(|packet| packet[0] == 0x47) {
             let adaptation_field_control = (packet[3] >> 4) & 0b11;
             if !matches!(adaptation_field_control, 0b01 | 0b11) {
                 continue;

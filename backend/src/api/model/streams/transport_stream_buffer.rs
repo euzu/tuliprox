@@ -1908,7 +1908,7 @@ mod tests {
     fn assert_ffmpeg_compatible_continuity(bytes: &[u8]) {
         assert_eq!(bytes.len() % TS_PACKET_SIZE, 0, "unaligned MPEG-TS fixture");
         let mut last_continuity: [Option<u8>; 8192] = [None; 8192];
-        for (packet_index, packet) in bytes.chunks_exact(TS_PACKET_SIZE).enumerate() {
+        for (packet_index, packet) in bytes.as_chunks::<TS_PACKET_SIZE>().0.iter().enumerate() {
             let evidence =
                 inspect_hls_ts_packet(packet, packet_index.saturating_mul(TS_PACKET_SIZE))
                     .expect("valid MPEG-TS fixture packet");
@@ -2624,7 +2624,7 @@ mod tests {
             )
             .expect("splice segment");
 
-        let packets = finalized.chunks_exact(TS_PACKET_SIZE).collect::<Vec<_>>();
+        let packets = finalized.as_chunks::<TS_PACKET_SIZE>().0.iter().collect::<Vec<_>>();
         let mut marked_pids = Vec::new();
         for pair in packets.windows(2) {
             let marker = pair[0];
@@ -2745,14 +2745,18 @@ mod tests {
 
         assert_eq!(finalized_one.len(), relative_one.len());
         assert!(finalized_one
-            .chunks_exact(TS_PACKET_SIZE)
+            .as_chunks::<TS_PACKET_SIZE>()
+            .0
+            .iter()
             .all(|packet| !((packet[3] >> 4) & 0b11 == 0b10 && packet[4] == 183 && packet[5] & 0x80 != 0)));
         let zero_payload = finalized_zero
-            .chunks_exact(TS_PACKET_SIZE)
+            .as_chunks::<TS_PACKET_SIZE>()
+            .0
+            .iter()
             .filter(|packet| (packet[3] >> 4) & 0b11 != 0b10)
             .collect::<Vec<_>>();
-        let one_payload = finalized_one.chunks_exact(TS_PACKET_SIZE).collect::<Vec<_>>();
-        for (zero, one) in zero_payload.iter().zip(one_payload.iter()) {
+        let one_payload = finalized_one.as_chunks::<TS_PACKET_SIZE>().0.iter().collect::<Vec<_>>();
+        for (zero, one) in zero_payload.into_iter().zip(one_payload) {
             assert_eq!(ts_packet_pid(zero), ts_packet_pid(one));
             assert_eq!((zero[3] & 0x0F).wrapping_add(2) & 0x0F, one[3] & 0x0F);
         }
@@ -2831,16 +2835,15 @@ mod tests {
             )
             .expect("anchored terminal one");
 
-        let zero_packets = terminal_zero.chunks_exact(TS_PACKET_SIZE).collect::<Vec<_>>();
+        let zero_packets = terminal_zero.as_chunks::<TS_PACKET_SIZE>().0.iter().collect::<Vec<_>>();
         assert_eq!((zero_packets[0][3] >> 4) & 0b11, 0b10);
         assert_eq!(zero_packets[0][5] & 0x80, 0x80);
         assert_eq!(
             (zero_packets[0][3] & 0x0F).wrapping_add(1) & 0x0F,
             zero_packets[1][3] & 0x0F
         );
-        assert!(terminal_one
-            .chunks_exact(TS_PACKET_SIZE)
-            .all(|packet| !((packet[3] >> 4) & 0b11 == 0b10 && packet[5] & 0x80 != 0)));
+        let terminal_one_packets = terminal_one.as_chunks::<TS_PACKET_SIZE>().0;
+        assert!(terminal_one_packets.iter().all(|packet| !((packet[3] >> 4) & 0b11 == 0b10 && packet[5] & 0x80 != 0)));
 
         let zero_first = packet_timestamps(zero_packets[1]);
         let zero_last = packet_timestamps(zero_packets[2]);
@@ -2862,7 +2865,7 @@ mod tests {
         concatenated.extend_from_slice(&terminal_one);
         assert_ffmpeg_compatible_continuity(&concatenated);
         let mut scanner = HlsTsTimestampProfileScanner::new(duration.saturating_mul(3));
-        for packet in concatenated.chunks_exact(TS_PACKET_SIZE) {
+        for packet in concatenated.as_chunks::<TS_PACKET_SIZE>().0 {
             scanner.push_aligned_packet(packet);
         }
         let combined = scanner.finish().expect("combined splice profile");

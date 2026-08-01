@@ -3011,7 +3011,7 @@ mod tests {
         let cipher = Aes128::new_from_slice(key).expect("valid test key");
         let mut previous = iv;
         let mut output = Vec::with_capacity(plaintext.len());
-        for chunk in plaintext.chunks_exact(AES_128_BLOCK_BYTES) {
+        for chunk in plaintext.as_chunks::<AES_128_BLOCK_BYTES>().0 {
             let mut block = Block::<Aes128>::default();
             for ((byte, plaintext), previous) in block.iter_mut().zip(chunk).zip(previous) {
                 *byte = plaintext ^ previous;

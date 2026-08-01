@@ -19392,7 +19392,7 @@ mod tests {
         );
         let cipher = Aes128::new_from_slice(key).expect("test key has AES-128 length");
         let mut previous = iv;
-        for block in ciphertext.chunks_exact_mut(16) {
+        for block in ciphertext.as_chunks_mut::<16>().0 {
             for (byte, previous) in block.iter_mut().zip(previous) {
                 *byte ^= previous;
             }
