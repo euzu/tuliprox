@@ -856,7 +856,7 @@ async fn hls_proxy_segment(
     )
     .await
     {
-        return response;
+        return *response;
     }
     let demand_result = if allows_origin_work {
         demand_fetch_hls_live_segment(
@@ -873,7 +873,7 @@ async fn hls_proxy_segment(
         Ok(())
     };
     if let Err(response) = demand_result {
-        return response;
+        return *response;
     }
 
     serve_hls_segment_for_current_lease(
@@ -894,19 +894,19 @@ async fn validate_hls_segment_entry(
     access_context: &HlsAccessContext,
     segment_file: &HlsSegmentFile,
     allows_origin_work: bool,
-) -> Result<(), axum::response::Response> {
+) -> Result<(), Box<axum::response::Response>> {
     let session = session.read().await;
     if session.is_gc_marked_for_removal() {
-        return Err(StatusCode::NOT_FOUND.into_response());
+        return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
     }
     let Some(entry) = session.segments.get(&segment_file.proxy_seq) else {
-        return Err(hls_resource_channel_unavailable_response(app_state, access_context));
+        return Err(Box::new(hls_resource_channel_unavailable_response(app_state, access_context)));
     };
     if entry.proxy_file_ext != segment_file.extension {
-        return Err(hls_resource_channel_unavailable_response(app_state, access_context));
+        return Err(Box::new(hls_resource_channel_unavailable_response(app_state, access_context)));
     }
     if !allows_origin_work && !matches!(&entry.status, SegmentCacheStatus::Ready { .. }) {
-        return Err(StatusCode::NOT_FOUND.into_response());
+        return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
     }
     Ok(())
 }
@@ -919,7 +919,7 @@ async fn demand_fetch_hls_live_segment(
     fingerprint: &Fingerprint,
     headers: &HeaderMap,
     now_ms: u64,
-) -> Result<(), axum::response::Response> {
+) -> Result<(), Box<axum::response::Response>> {
     let preacquired_provider_handle = if hls_segment_request_requires_origin_work(session, segment_file).await {
         match prepare_hls_origin_binding_for_authorized_resource_work(
             app_state,
@@ -933,7 +933,7 @@ async fn demand_fetch_hls_live_segment(
         .await
         {
             Ok(handle) => handle,
-            Err(err) => return Err(hls_origin_runtime_resource_failure_response(app_state, access_context, err)),
+            Err(err) => return Err(Box::new(hls_origin_runtime_resource_failure_response(app_state, access_context, err))),
         }
     } else {
         None
@@ -950,7 +950,7 @@ async fn demand_fetch_hls_live_segment(
     .await
     {
         SegmentDemandFetchOutcome::NotFound => {
-            Err(hls_resource_channel_unavailable_response(app_state, access_context))
+            Err(Box::new(hls_resource_channel_unavailable_response(app_state, access_context)))
         }
         SegmentDemandFetchOutcome::Ready
         | SegmentDemandFetchOutcome::QueuedOrFetching
@@ -5010,6 +5010,7 @@ async fn trigger_hls_canonical_manifest_refresh(
             )
             .await
             .err()
+            .map(|response| *response)
         }
     }
 }
@@ -7384,9 +7385,9 @@ async fn hls_manifest_preflight_refresh_ordering(
     proxy_session_id: &ProxySessionId,
     access_lease_id: &HlsAccessLeaseId,
     now_ms: u64,
-) -> Result<HlsManifestRefreshOrdering, axum::response::Response> {
+) -> Result<HlsManifestRefreshOrdering, Box<axum::response::Response>> {
     match hls_manifest_terminal_preflight(session, lease, now_ms).await {
-        HlsManifestTerminalPreflight::ServeCommittedPlayback => Err(hls_terminal_playback_response(
+        HlsManifestTerminalPreflight::ServeCommittedPlayback => Err(Box::new(hls_terminal_playback_response(
             lease,
             proxy_session_id,
             access_lease_id,
@@ -7395,7 +7396,7 @@ async fn hls_manifest_preflight_refresh_ordering(
             hls_terminal_failed_closed_response(
                 crate::api::model::HlsTerminalFailedClosedReason::RuntimeUnavailable,
             )
-        })),
+        }))),
         HlsManifestTerminalPreflight::BootstrapPendingLease => Ok(HlsManifestRefreshOrdering::Background),
         HlsManifestTerminalPreflight::RefreshBeforeTerminalEvaluation => {
             Ok(HlsManifestRefreshOrdering::AwaitBeforeTerminalEvaluation)
@@ -7412,7 +7413,7 @@ async fn hls_manifest_preflight_refresh_ordering(
             .await
             .map(|_| HlsManifestRefreshOrdering::Background)
         }
-        HlsManifestTerminalPreflight::FailClosed { reason } => Err(hls_terminal_failed_closed_response(reason)),
+        HlsManifestTerminalPreflight::FailClosed { reason } => Err(Box::new(hls_terminal_failed_closed_response(reason))),
     }
 }
 
@@ -7478,7 +7479,7 @@ async fn hls_proxy_manifest(
         .await
         {
             Ok(ordering) => ordering,
-            Err(response) => return response,
+            Err(response) => return *response,
         }
     } else {
         HlsManifestRefreshOrdering::Background
