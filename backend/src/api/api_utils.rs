@@ -863,7 +863,7 @@ where
     use crate::api::model::{evaluate_strategy, AdmissionDecision, StrategyContext};
     use shared::model::UserConnectionPermission;
     let mut candidates = app_state.active_users.get_eviction_candidates(username, client_ip).await;
-    let ctx = StrategyContext { username, client_ip, strategies };
+    let ctx = StrategyContext { username, client_ip };
     let mut idx = 0usize;
 
     for strategy in strategies {
@@ -926,10 +926,6 @@ where
                 }
                 debug!("Admission still denied after eviction for user {username}, continuing with later strategies");
                 candidates = app_state.active_users.get_eviction_candidates(username, client_ip).await;
-            }
-            AdmissionDecision::Deny => {
-                // Caller constructs the final exhausted result.
-                return None;
             }
         }
         idx += 1;

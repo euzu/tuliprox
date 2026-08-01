@@ -19,7 +19,10 @@ use shared::{
         ActiveUserConnectionChange, PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo,
         UserConnectionPermission, VirtualId,
     },
-    utils::{current_time_secs, extract_extension_from_url, sanitize_sensitive_info, strip_port, Internable},
+    utils::{
+        current_time_secs, extract_extension_from_url, is_catchup_session_token, sanitize_sensitive_info, strip_port,
+        Internable,
+    },
 };
 use std::{
     borrow::Cow,
@@ -373,13 +376,6 @@ impl UserConnectionData {
 
 fn create_socket_reentry_guard_key(username: &str, client_ip: &str, virtual_id: VirtualId) -> String {
     shared::concat_string!(username, "|", client_ip, "|", &virtual_id.to_string())
-}
-
-fn is_catchup_session_token(session_token: &str) -> bool {
-    session_token.starts_with("m3u-catchup|")
-        || session_token.starts_with("catchup|")
-        || session_token.contains("|archive|")
-        || session_token.contains("|timeshift_abs|")
 }
 
 fn is_stable_session_stream(stream: &StreamInfo) -> bool {
@@ -1647,8 +1643,13 @@ impl ActiveUserManager {
         let session_token = stream.session_token.as_deref()?;
         // Catchup segment gaps can briefly lose the UserSession row; still preserve the panel
         // row using the stream timestamp so Streams does not blink between archive chunks.
-        let session_ts =
-            sessions.iter().find(|session| session.token == session_token).map_or(stream.ts, |session| session.ts);
+        let session_ts = if let Some(session) = sessions.iter().find(|session| session.token == session_token) {
+            session.ts
+        } else if stream.channel.item_type == PlaylistItemType::Catchup || is_catchup_session_token(session_token) {
+            stream.ts
+        } else {
+            return None;
+        };
 
         let ttl_secs = self.adaptive_session_ttl_secs.load(Ordering::Relaxed);
         let expires_at = session_ts.saturating_add(ttl_secs);
@@ -1797,6 +1798,13 @@ impl ActiveUserManager {
         connection_data.streams.iter().any(|stream| stream.session_token.as_deref() == Some(session_token))
     }
 
+    fn session_has_active_stream(connection_data: &UserConnectionData, session_token: &str) -> bool {
+        connection_data
+            .streams
+            .iter()
+            .any(|stream| !stream.preserved && stream.session_token.as_deref() == Some(session_token))
+    }
+
     fn clear_session_counted_without_stream(connection_data: &mut UserConnectionData, session_token: &str) {
         if Self::session_has_stream(connection_data, session_token) {
             return;
@@ -1883,7 +1891,7 @@ impl ActiveUserManager {
 
         // Existing counted session or session with an active stream: entitled to its slot.
         if connection_data.sessions[session_index].lifecycle.is_counted()
-            || Self::session_has_stream(connection_data, session_token)
+            || Self::session_has_active_stream(connection_data, session_token)
         {
             return ConnectionAdmission {
                 permission: UserConnectionPermission::Allowed,
@@ -1908,15 +1916,12 @@ impl ActiveUserManager {
         if admission.permission == UserConnectionPermission::Allowed {
             let session = &mut connection_data.sessions[session_index];
             Self::update_session_admission(session, admission.permission, Some(kind));
+            if has_preserved {
+                connection_data.increment_kind(kind);
+            }
         }
         if has_preserved {
             return ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: admission.kind };
-        }
-        // Only consume the slot if admission was granted AND the session has a preserved stream
-        // that needs to be accounted for. Fresh uncounted sessions without streams stay
-        // uncounted until the provider commits a stream (via mark_session_committed).
-        if admission.permission == UserConnectionPermission::Allowed && has_preserved {
-            connection_data.increment_kind(kind);
         }
         admission
     }
@@ -2799,22 +2804,27 @@ impl ActiveUserManager {
         self.update_user_session(username, token).await
     }
 
-    /// Latest session for target-scoped `virtual_id` (used to recover leaked relative DVR segment paths).
+    /// Session for target-scoped `virtual_id` and request token (used to recover leaked relative DVR segment paths).
     pub(crate) async fn find_latest_session_for_target_stream(
         &self,
         username: &str,
         target_id: u16,
+        input_name: &str,
         virtual_id: u32,
+        session_token: &str,
     ) -> Option<UserSession> {
         let user_connections = self.connections.read().await;
         let connection_data = user_connections.by_key.get(username)?;
-        let session_token = connection_data
+        connection_data
             .streams
             .iter()
-            .filter(|stream| stream.channel.target_id == target_id && stream.channel.virtual_id == virtual_id)
-            .filter_map(|stream| stream.session_token.as_deref().map(|token| (token, stream.ts)))
-            .max_by_key(|(_, ts)| *ts)
-            .map(|(token, _)| token)?;
+            .any(|stream| {
+                stream.channel.target_id == target_id
+                    && stream.channel.input_name.as_ref() == input_name
+                    && stream.channel.virtual_id == virtual_id
+                    && stream.session_token.as_deref() == Some(session_token)
+            })
+            .then_some(())?;
 
         connection_data
             .sessions
@@ -3529,13 +3539,26 @@ mod tests {
             }));
         }
 
-        let session = manager.find_latest_session_for_target_stream(&user.username, 2, 42).await;
+        let session = manager
+            .find_latest_session_for_target_stream(&user.username, 2, "input", 42, "tok-target-two")
+            .await;
         assert!(session.is_some(), "target-scoped session should resolve");
         let Some(session) = session else {
             return;
         };
         assert_eq!(session.token, "tok-target-two");
-        assert!(manager.find_latest_session_for_target_stream(&user.username, 3, 42).await.is_none());
+        assert!(
+            manager
+                .find_latest_session_for_target_stream(&user.username, 3, "input", 42, "tok-target-two")
+                .await
+                .is_none()
+        );
+        assert!(
+            manager
+                .find_latest_session_for_target_stream(&user.username, 1, "input", 42, "tok-target-two")
+                .await
+                .is_none()
+        );
     }
 
     /// Session refresh normalizes Expired -> Prepared.
@@ -8014,6 +8037,68 @@ mod tests {
             .iter()
             .find(|session| session.token == "tok-release")
             .is_some_and(|session| !session.lifecycle.is_counted()));
+    }
+
+    #[tokio::test]
+    async fn preserved_session_activation_accounts_reserved_slot_before_exhausted_return() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let mut user = ProxyUserCredentials::default();
+        user.username = String::from("user-preserved-activation-accounting");
+        user.max_connections = 1;
+        let addr: SocketAddr = "127.0.0.1:55195".parse().unwrap();
+        let fingerprint = Fingerprint::new("fp-preserved-accounting".to_string(), "127.0.0.1".to_string(), addr);
+
+        manager.add_connection(&addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-preserved-accounting",
+                virtual_id: 9206,
+                provider: "provider-a",
+                stream_url: "http://localhost/live-preserved.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: 501,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: 0,
+                connection_kind: ConnectionKind::Normal,
+                priority: 0,
+                soft_priority: 0,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_adaptive_channel(9206),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some("tok-preserved-accounting"),
+            })
+            .await
+            .expect("session stream should bind");
+        assert!(manager.release_stream(&addr).await.is_none(), "adaptive stream should be preserved");
+
+        let admission = manager
+            .connection_admission_for_session_activation(
+                &user.username,
+                user.max_connections,
+                0,
+                "tok-preserved-accounting",
+            )
+            .await;
+
+        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        let connections = manager.connections.read().await;
+        let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+        assert_eq!(connection_data.counts.normal, 1);
     }
 
     #[tokio::test]

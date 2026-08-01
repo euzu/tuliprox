@@ -42,10 +42,10 @@ const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
 fn stream_display_key(stream: &StreamInfo) -> String {
     // Prefer a stable session identity so archive HLS segment addr/uid churn does not remount the row.
     if let Some(token) = stream.session_token.as_deref().filter(|token| !token.is_empty()) {
-        return format!("session-{token}");
+        return format!("session-{token}-{}-{}", stream.addr, stream.uid);
     }
     if stream.channel.item_type == PlaylistItemType::Catchup {
-        return format!("catchup-{}-{}", stream.username, stream.channel.virtual_id);
+        return format!("catchup-{}-{}-{}-{}", stream.username, stream.channel.virtual_id, stream.addr, stream.uid);
     }
     format!("{}-{}", stream.addr, stream.uid)
 }
@@ -361,8 +361,51 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::build_user_comments;
-    use std::collections::HashMap;
+    use super::{build_user_comments, stream_display_key};
+    use shared::{
+        model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster},
+        utils::Internable,
+    };
+    use std::{
+        collections::HashMap,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+    };
+
+    fn test_stream(uid: u32, session_token: Option<&str>, item_type: PlaylistItemType) -> StreamInfo {
+        StreamInfo {
+            uid,
+            meter_uid: 0,
+            username: "user".to_string(),
+            channel: StreamChannel {
+                target_id: 1,
+                virtual_id: 42,
+                provider_id: 1,
+                item_type,
+                cluster: XtreamCluster::Live,
+                group: "group".intern(),
+                title: "title".intern(),
+                url: "http://example.com/live.ts".intern(),
+                input_name: "input".intern(),
+                shared: false,
+                shared_joined_existing: None,
+                shared_stream_id: None,
+                technical: None,
+                epg_channel_id: None,
+                epg_reference_ts: None,
+                upstream_user_agent: None,
+            },
+            provider: "provider".intern(),
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080 + u16::try_from(uid).unwrap_or(0)),
+            client_ip: "127.0.0.1".to_string(),
+            user_agent: String::new(),
+            ts: 0,
+            started_at: 0,
+            country_code: None,
+            session_token: session_token.map(str::to_string),
+            preserved: false,
+            previous_session_id: None,
+        }
+    }
 
     #[test]
     fn test_build_user_comments_prefers_first_non_none_comment() {
@@ -383,6 +426,19 @@ mod tests {
             build_user_comments([("alice".to_string(), Some("first".to_string())), ("alice".to_string(), None)]);
 
         assert_eq!(comments, HashMap::from([("alice".to_string(), Some("first".to_string()))]));
+    }
+
+    #[test]
+    fn test_stream_display_key_disambiguates_visible_duplicate_sessions() {
+        let first = test_stream(1, Some("tok"), PlaylistItemType::LiveHls);
+        let second = test_stream(2, Some("tok"), PlaylistItemType::LiveHls);
+
+        assert_ne!(stream_display_key(&first), stream_display_key(&second));
+
+        let first = test_stream(1, None, PlaylistItemType::Catchup);
+        let second = test_stream(2, None, PlaylistItemType::Catchup);
+
+        assert_ne!(stream_display_key(&first), stream_display_key(&second));
     }
 }
 

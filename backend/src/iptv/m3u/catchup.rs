@@ -262,7 +262,7 @@ fn archive_discriminator_from_resolved_url(url: &str) -> Option<String> {
             duration_secs = value
                 .parse::<i64>()
                 .ok()
-                .map(i64::abs)
+                .and_then(i64::checked_abs)
                 .or(duration_secs);
         }
     }
@@ -696,6 +696,17 @@ mod tests {
             )
             .as_deref(),
             Some("archive|1717200000|3600")
+        );
+    }
+
+    #[test]
+    fn append_discriminator_ignores_overflowing_i64_min_offset() {
+        assert_eq!(
+            super::archive_discriminator_from_resolved_url(
+                "http://provider.example/live/42.m3u8?offset=-9223372036854775808&utcstart=1717200000"
+            )
+            .as_deref(),
+            Some("archive|1717200000|0")
         );
     }
 

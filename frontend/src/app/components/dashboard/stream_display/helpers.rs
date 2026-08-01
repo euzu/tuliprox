@@ -7,7 +7,7 @@ use gloo_utils::window;
 use shared::{
     defaults::default_hls_session_ttl_secs,
     model::{PlaylistItemType, StreamChannel, StreamInfo, StreamInfoConfigDto, StreamTechnicalInfo},
-    utils::current_time_secs,
+    utils::{contains_ascii_case_insensitive, current_time_secs, is_catchup_session_token},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -54,13 +54,6 @@ pub fn get_adaptive_session_ttl_secs(config_ctx: &ConfigContext) -> u64 {
         .map_or_else(default_hls_session_ttl_secs, |stream| stream.hls_session_ttl_secs)
 }
 
-fn is_catchup_session_token(session_token: &str) -> bool {
-    session_token.starts_with("m3u-catchup|")
-        || session_token.starts_with("catchup|")
-        || session_token.contains("|archive|")
-        || session_token.contains("|timeshift_abs|")
-}
-
 pub fn is_adaptive_session_stream(stream: &StreamInfo) -> bool {
     // Soft-preserve keeps archive/HLS rows between short segment sockets; this TTL path is what
     // eventually hides them after the session ends (without a full page reload).
@@ -70,8 +63,8 @@ pub fn is_adaptive_session_stream(stream: &StreamInfo) -> bool {
     if stream.session_token.as_deref().is_some_and(is_catchup_session_token) {
         return true;
     }
-    let url = stream.channel.url.as_ref().to_ascii_lowercase();
-    if url.contains(".m3u8") || url.contains(".mpd") {
+    let url = stream.channel.url.as_ref();
+    if contains_ascii_case_insensitive(url, b".m3u8") || contains_ascii_case_insensitive(url, b".mpd") {
         return true;
     }
     stream.session_token.is_some() && (stream.channel.item_type.is_live_adaptive() || is_shared_hls_stream(stream))
@@ -246,6 +239,11 @@ mod tests {
     };
 
     fn test_stream(uid: u32, item_type: PlaylistItemType, preserved: bool, has_session: bool) -> Rc<StreamInfo> {
+        let url = match item_type {
+            PlaylistItemType::LiveHls => "http://example.com/stream.m3u8",
+            PlaylistItemType::LiveDash => "http://example.com/stream.mpd",
+            _ => "http://example.com/stream.ts",
+        };
         Rc::new(StreamInfo {
             uid,
             meter_uid: 0,
@@ -258,7 +256,7 @@ mod tests {
                 cluster: XtreamCluster::try_from(item_type).unwrap_or(XtreamCluster::Live),
                 group: "Group".intern(),
                 title: "Title".intern(),
-                url: "http://example.com/stream.m3u8".intern(),
+                url: url.intern(),
                 input_name: "input".intern(),
                 shared: false,
                 shared_joined_existing: None,
@@ -334,10 +332,12 @@ mod tests {
     fn filter_visible_streams_keeps_preserved_catchup_within_adaptive_ttl() {
         use super::filter_visible_streams;
 
-        let streams = Some(vec![
-            test_stream(1, PlaylistItemType::Catchup, true, true),
-            test_stream(2, PlaylistItemType::Video, false, true),
-        ]);
+        let control = {
+            let mut stream = (*test_stream(2, PlaylistItemType::Video, false, true)).clone();
+            stream.channel.url = "http://example.com/movie.ts".intern();
+            Rc::new(stream)
+        };
+        let streams = Some(vec![test_stream(1, PlaylistItemType::Catchup, true, true), control]);
         let last_seen = HashMap::from([(1, 1_000u64)]);
         let ttl = 30u64;
         let visible = filter_visible_streams(streams, &last_seen, 1_000 + ttl, ttl).unwrap();
@@ -349,10 +349,12 @@ mod tests {
     fn filter_visible_streams_hides_preserved_catchup_past_adaptive_ttl() {
         use super::{filter_visible_streams, ADAPTIVE_STREAM_CLEANUP_BUFFER_SECS};
 
-        let streams = Some(vec![
-            test_stream(1, PlaylistItemType::Catchup, true, true),
-            test_stream(2, PlaylistItemType::Video, false, true),
-        ]);
+        let control = {
+            let mut stream = (*test_stream(2, PlaylistItemType::Video, false, true)).clone();
+            stream.channel.url = "http://example.com/movie.ts".intern();
+            Rc::new(stream)
+        };
+        let streams = Some(vec![test_stream(1, PlaylistItemType::Catchup, true, true), control]);
         let last_seen = HashMap::from([(1, 1_000u64)]);
         let ttl = 30u64;
         let visible =

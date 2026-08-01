@@ -39,7 +39,7 @@ use crate::{
             HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsAccessLeaseValidationError, HlsAccountBindingProtection,
             HlsAccountOverlapTiming, HlsBoundAccountAcquireErrorKind, HlsCacheResponseContext,
             HlsCachedManifestOptions, HlsCommittedManifestBody, HlsEffectiveOriginAcquirePolicy,
-            HlsManifestCommitRequirement, HlsMapFile, HlsMediaActivityMarker, HlsOriginAccountBinding,
+            GraceMode, HlsManifestCommitRequirement, HlsMapFile, HlsMediaActivityMarker, HlsOriginAccountBinding,
             HlsOriginAccountBindingMode, HlsOriginAccountDetachedReason, HlsOriginAccountStatus, HlsOriginIoContext,
             HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginSource, HlsOriginSourceKind,
             HlsOriginWorkClass, HlsPanelProvisioningRedirectPaths, HlsPlaybackFamilyKey, HlsProvisioningStatus,
@@ -87,8 +87,8 @@ use shared::{
         TargetType, UserConnectionPermission, XtreamCluster,
     },
     utils::{
-        extract_extension_from_url, generate_random_string, is_hls_url, replace_url_extension, sanitize_sensitive_info,
-        Internable, PROVIDER_SCHEME_PREFIX,
+        extract_extension_from_url, generate_random_string, is_hls_url, is_m3u_catchup_session_token,
+        replace_url_extension, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX,
     },
 };
 use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
@@ -97,10 +97,6 @@ use url::Url;
 const MAX_MANUAL_REDIRECTS: usize = 10;
 const HLS_TEMPORARY_RESOURCE_RETRY_AFTER_SECS: u64 = 1;
 const HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS: u64 = HLS_TEMPORARY_RESOURCE_RETRY_AFTER_SECS * 1_000;
-
-fn is_m3u_catchup_session_token(session_token: &str) -> bool {
-    session_token.starts_with("m3u-catchup|") || session_token.starts_with("catchup|")
-}
 
 /// Recover archive EPG reference from `m3u-catchup|...|archive|{start}|{duration}` session keys.
 ///
@@ -178,25 +174,30 @@ fn resolve_leaked_hls_relative_origin(
         return None;
     }
     // Only recover archive-style relative paths (BitTV/Flussonic DVR or date trees).
-    let looks_like_archive_rel =
-        rel.starts_with("dvr-") || rel.contains("/dvr-") || epg_reference_ts_from_date_tree_path(rel).is_some();
-    if !looks_like_archive_rel {
+    if !looks_like_archive_media_path(rel) {
         return None;
     }
+    let parsed = url::Url::parse(session_stream_url).ok()?;
+    let session_path = parsed.path();
 
     // If the session URL is already inside a DVR/date tree, strip back to the stream root
     // so sibling relative segments do not nest under the previous segment directory.
     let joined = if rel.starts_with("dvr-") {
-        if let Some(idx) = session_stream_url.find("/dvr-") {
-            format!("{}{rel}", &session_stream_url[..=idx])
+        if let Some(idx) = session_path.find("/dvr-") {
+            let mut joined = parsed.clone();
+            joined.set_path(&format!("{}{}", &session_path[..=idx], rel));
+            joined.set_query(None);
+            joined.into()
         } else {
-            url::Url::parse(session_stream_url).ok()?.join(rel).ok()?.into()
+            parsed.join(rel).ok()?.into()
         }
-    } else if let Some(idx) = session_stream_url.find("/202") {
-        let root = &session_stream_url[..idx];
-        format!("{root}/{rel}")
+    } else if let Some(idx) = session_path.find("/202") {
+        let mut joined = parsed.clone();
+        joined.set_path(&format!("{}/{}", &session_path[..idx], rel));
+        joined.set_query(None);
+        joined.into()
     } else {
-        url::Url::parse(session_stream_url).ok()?.join(rel).ok()?.into()
+        parsed.join(rel).ok()?.into()
     };
 
     if let Some(query) = request_query.filter(|q| !q.is_empty()) {
@@ -578,13 +579,7 @@ fn create_hls_cache_user_session_token(
     existing_session_token: Option<&str>,
     archive_reference: Option<i64>,
 ) -> String {
-    let base = if let Some(token) = existing_session_token.filter(|token| is_m3u_catchup_session_token(token)) {
-        token.to_string()
-    } else if let Some(timestamp) = archive_reference {
-        create_m3u_catchup_session_key(fingerprint, username, virtual_id, &format!("archive|{timestamp}|0"))
-    } else {
-        create_playback_session_fingerprint(fingerprint, username, virtual_id, PlaylistItemType::LiveHls, None)
-    };
+    let base = hls_entry_user_session_token(fingerprint, username, virtual_id, existing_session_token, archive_reference);
     format!("{base}|hls-cache|{}", generate_random_string(16))
 }
 
@@ -5932,15 +5927,56 @@ async fn hls_api_stream(
 
     // Nested path = relative origin segment that leaked past rewrite_hls (e.g. dvr-YYYY/...).
     if params.token.contains('/') {
+        let Some((token, relative_path)) = params.token.split_once('/') else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let encrypt_secret = app_state.get_encrypt_secret();
+        let Some(decoded_hls_token) = get_hls_session_token_and_url_from_token(&encrypt_secret, token) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let lookup_session_token = decoded_hls_token
+            .0
+            .clone()
+            .unwrap_or_else(|| create_session_fingerprint(&fingerprint, &user.username, params.stream_id, false));
+        let Some(input) = app_state.app_config.get_input_by_id(params.input_id) else {
+            return StatusCode::BAD_REQUEST.into_response();
+        };
+        let Some(session) = app_state
+            .active_users
+            .find_latest_session_for_target_stream(
+                &user.username,
+                target.id,
+                input.name.as_ref(),
+                params.stream_id,
+                lookup_session_token.as_str(),
+            )
+            .await
+        else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        if !legacy_hls_route_allowed_with_cache(
+            hls_cache_enabled_for_target(&app_state, &target),
+            decoded_hls_token.0.as_deref(),
+            Some(session.token.as_str()),
+        ) {
+            return hls_custom_video_manifest_redirect_response_for_username(
+                &app_state,
+                &user.username,
+                CustomVideoStreamType::ChannelUnavailable,
+                StatusCode::NOT_FOUND,
+            );
+        }
         return hls_api_stream_leaked_relative(
             fingerprint,
             req_headers,
             app_state,
             user,
             target,
-            params.input_id,
+            input,
             params.stream_id,
-            params.token,
+            session,
+            decoded_hls_token.1,
+            relative_path.to_string(),
             raw_query.as_deref(),
         )
         .await;
@@ -5960,31 +5996,93 @@ async fn hls_api_stream(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn admit_recovered_archive_stream(
+    app_state: &Arc<AppState>,
+    fingerprint: &Fingerprint,
+    user: &Arc<ProxyUserCredentials>,
+    req_headers: &HeaderMap,
+    input: &Arc<ConfigInput>,
+    mut session: UserSession,
+    stream_channel: StreamChannel,
+) -> Result<(UserSession, StreamChannel, Option<GraceMode>), Box<axum::response::Response>> {
+    if session.permission == UserConnectionPermission::Exhausted {
+        return Err(Box::new(hls_admission_failure_manifest_response(
+            app_state,
+            fingerprint,
+            user,
+            stream_channel,
+            session.provider.clone(),
+            req_headers,
+            ConnectFailureReason::UserConnectionsExhausted,
+        )));
+    }
+    if app_state.active_provider.is_over_limit(&session.provider).await {
+        return Err(Box::new(hls_admission_failure_manifest_response(
+            app_state,
+            fingerprint,
+            user,
+            stream_channel,
+            session.provider.clone(),
+            req_headers,
+            ConnectFailureReason::ProviderConnectionsExhausted,
+        )));
+    }
+    let (connection_admission, grace_mode, _) = crate::api::api_utils::resolve_playback_request_admission(
+        app_state,
+        user,
+        fingerprint,
+        PlaylistItemType::Catchup,
+        Some(&session),
+        &session.token,
+        true,
+        crate::api::api_utils::EvictionReentryGuard::Session(&session.token),
+        false,
+        false,
+    )
+    .await;
+    let connection_permission = connection_admission.permission;
+    let connection_kind = connection_admission.kind.or(session.connection_kind);
+    session.permission = connection_permission;
+    if let Some(connection_kind) = connection_kind {
+        session.connection_kind = Some(connection_kind);
+    }
+    if connection_permission == UserConnectionPermission::Exhausted
+        || (connection_permission == UserConnectionPermission::GracePeriod && connection_kind.is_none())
+    {
+        let provider = if session.provider.is_empty() { input.name.clone() } else { session.provider.clone() };
+        return Err(Box::new(hls_admission_failure_manifest_response(
+            app_state,
+            fingerprint,
+            user,
+            stream_channel,
+            provider,
+            req_headers,
+            ConnectFailureReason::UserConnectionsExhausted,
+        )));
+    }
+    Ok((session, stream_channel, grace_mode))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn hls_api_stream_leaked_relative(
     fingerprint: Fingerprint,
     req_headers: HeaderMap,
     app_state: Arc<AppState>,
     user: Arc<ProxyUserCredentials>,
     target: Arc<ConfigTarget>,
-    input_id: u16,
+    input: Arc<ConfigInput>,
     stream_id: u32,
+    mut session: UserSession,
+    session_stream_url: String,
     relative_path: String,
     request_query: Option<&str>,
 ) -> axum::response::Response {
     if let Err(e) = check_network_access_only(&user, &fingerprint, &app_state) {
         return e.into_player_response(app_state.app_config.get_auth_error_status());
     }
-    let Some(mut session) =
-        app_state.active_users.find_latest_session_for_target_stream(&user.username, target.id, stream_id).await
+    let Some(origin_url) = resolve_leaked_hls_relative_origin(&session_stream_url, &relative_path, request_query)
     else {
         return StatusCode::NOT_FOUND.into_response();
-    };
-    let Some(origin_url) = resolve_leaked_hls_relative_origin(&session.stream_url, &relative_path, request_query)
-    else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let Some(input) = app_state.app_config.get_input_by_id(input_id) else {
-        return StatusCode::BAD_REQUEST.into_response();
     };
     let archive_reference = resolve_m3u_archive_reference(&origin_url, Some(session.token.as_str()))
         .or_else(|| epg_reference_ts_from_date_tree_path(&relative_path))
@@ -6010,6 +6108,13 @@ async fn hls_api_stream_leaked_relative(
             stream_channel.epg_reference_ts = archive_reference;
         }
     }
+    let (session, stream_channel, grace_mode) =
+        match admit_recovered_archive_stream(&app_state, &fingerprint, &user, &req_headers, &input, session, stream_channel)
+            .await
+        {
+            Ok(admission) => admission,
+            Err(response) => return *response,
+        };
     force_provider_stream_response(
         &fingerprint,
         &app_state,
@@ -6022,7 +6127,7 @@ async fn hls_api_stream_leaked_relative(
             session_reservation_ttl_secs: get_hls_session_ttl_secs(&app_state),
             content_representation: crate::api::model::ProviderContentRepresentationMode::Identity,
         },
-        None,
+        grace_mode,
     )
     .await
     .into_response()
@@ -6476,6 +6581,7 @@ mod tests {
         let from_archive = super::hls_entry_user_session_token(&fingerprint, "alice", 42, None, Some(1_717_200_000));
         assert!(from_archive.contains("|archive|1717200000|0"));
         assert!(super::is_m3u_catchup_session_token(&from_archive));
+        assert!(super::is_m3u_catchup_session_token("m3u-catchup|fp|alice|42|timeshift_abs|1717200000|0"));
     }
 
     #[test]
@@ -6607,7 +6713,6 @@ mod tests {
         user
     }
 
-    #[allow(dead_code)]
     fn test_hls_share_target(hls_enabled: bool) -> ConfigTarget {
         ConfigTarget::from(&ConfigTargetDto {
             id: 1,
@@ -6659,7 +6764,6 @@ mod tests {
             .await;
     }
 
-    #[allow(dead_code)]
     fn test_hls_input() -> ConfigInput {
         ConfigInput {
             id: 1,
@@ -6674,7 +6778,6 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
     fn store_test_sources_with_target(app_state: &Arc<AppState>, input: ConfigInput, target: ConfigTarget) {
         let input = Arc::new(input);
         app_state.app_config.sources.store(Arc::new(SourcesConfig {

@@ -2136,6 +2136,49 @@ mod tests {
     }
 
     #[test]
+    fn m3u_to_m3u_unifies_append_to_catchup_type_only() {
+        let item = M3uPlaylistItem {
+            virtual_id: 0,
+            provider_id: "prov1".intern(),
+            input_stream_id: "prov1".intern(),
+            upstream_user_agent: None,
+            name: "Test Channel".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Test Group".intern(),
+            title: "Test Title".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/stream".intern(),
+            epg_channel_id: Some("channel1".intern()),
+            input_name: "test".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
+            source_ordinal: 0,
+            additional_properties: Some(StreamProperties::Live(Box::new(LiveStreamProperties {
+                catchup: Some(CatchupProperties {
+                    mode: Some("append".intern()),
+                    days: Some("7".intern()),
+                    ..CatchupProperties::default()
+                }),
+                ..LiveStreamProperties::default()
+            }))),
+        };
+
+        let output = item.to_m3u(None, false);
+        assert!(!output.contains(r#"catchup="append""#));
+        assert!(output.contains(r#"catchup-type="append""#));
+        assert!(output.contains(r#"catchup-days="7""#));
+        assert!(!output.contains(r#"catchup-type="xc""#));
+    }
+
+    #[test]
     fn m3u_to_m3u_uses_rewritten_catchup_mode_and_source() {
         let item = M3uPlaylistItem {
             virtual_id: 0,
