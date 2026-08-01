@@ -18,7 +18,7 @@ use crate::{
             hls_api::{
                 build_virtual_hls_entry_path, handle_hls_stream_request, hls_admission_failure_manifest_response,
                 hls_custom_video_manifest_response, m3u_archive_epg_reference_ts,
-                m3u_catchup_epg_reference_from_session_token, HlsEntryStreamIdentity,
+                m3u_catchup_epg_reference_from_session_token, HlsEntryStreamContext,
             },
             xmltv_api::{get_empty_epg_response, get_epg_path_for_target_by_type, serve_short_epg},
         },
@@ -290,7 +290,8 @@ async fn xtream_player_api_stream(
                 &user,
                 CustomVideoStreamType::ChannelUnavailable,
                 axum::http::StatusCode::NOT_FOUND,
-            );
+            )
+            .await;
         }
         return create_custom_video_stream_response(
             app_state,
@@ -318,7 +319,8 @@ async fn xtream_player_api_stream(
                 &user,
                 CustomVideoStreamType::ChannelUnavailable,
                 axum::http::StatusCode::NOT_FOUND,
-            );
+            )
+            .await;
         }
         return create_custom_video_stream_response(
             app_state,
@@ -353,7 +355,8 @@ async fn xtream_player_api_stream(
                 pli.input_name.clone(),
                 req_headers,
                 ConnectFailureReason::UserAccountExpired,
-            );
+            )
+            .await;
         }
         return admission_failure_response(
             app_state,
@@ -483,7 +486,8 @@ async fn xtream_player_api_stream(
                     session.provider.clone(),
                     req_headers,
                     ConnectFailureReason::UserConnectionsExhausted,
-                );
+                )
+                .await;
             }
             return admission_failure_response(
                 app_state,
@@ -507,7 +511,8 @@ async fn xtream_player_api_stream(
                     session.provider.clone(),
                     req_headers,
                     ConnectFailureReason::ProviderConnectionsExhausted,
-                );
+                )
+                .await;
             }
             return admission_failure_response(
                 app_state,
@@ -583,7 +588,8 @@ async fn xtream_player_api_stream(
                 input.name.clone(),
                 req_headers,
                 ConnectFailureReason::UserConnectionsExhausted,
-            );
+            )
+            .await;
         }
         return admission_failure_response(
             app_state,
@@ -629,7 +635,7 @@ async fn xtream_player_api_stream(
     let is_session_request = is_session_based_playback(item_type, Some(playback_ext));
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
     if is_session_request && playback_ext == shared::defaults::HLS_EXT {
-        let Some(stream_identity) = HlsEntryStreamIdentity::from_playlist_item(&pli) else {
+        let Some(stream_context) = HlsEntryStreamContext::from_playlist_item(&pli) else {
             error!(
                 "HLS input stream identity missing for virtual_id={}; refresh target playlist",
                 pli.virtual_id
@@ -649,7 +655,7 @@ async fn xtream_player_api_stream(
             Some(session_key.as_str()),
             &stream_url,
             archive_reference,
-            stream_identity,
+            stream_context,
             &input,
             req_headers,
             connection_permission,
@@ -925,7 +931,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
 
         // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
         if is_session_request && playback_ext == Some(shared::defaults::HLS_EXT) {
-            let Some(stream_identity) = HlsEntryStreamIdentity::from_playlist_item(&pli) else {
+            let Some(stream_context) = HlsEntryStreamContext::from_playlist_item(&pli) else {
                 error!("HLS input stream identity missing for virtual_id={virtual_id}; refresh target playlist");
                 return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
             };
@@ -939,7 +945,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
                 Some(session_key.as_str()),
                 &pli.url,
                 m3u_archive_epg_reference_ts(pli.url.as_ref()),
-                stream_identity,
+                stream_context,
                 &input,
                 req_headers,
                 UserConnectionPermission::Allowed,

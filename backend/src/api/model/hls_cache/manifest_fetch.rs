@@ -1,16 +1,43 @@
 use super::{
-    extract_hls_provider_session_header_map, log_hls_origin_content_coding, safe_origin_log_value, safe_session_key,
-    HlsAccountBindingProtection, HlsBoundAccountAcquireErrorKind, HlsOriginContentCodingObjectKind,
-    HlsOriginContentCodingSource, HlsSessionHandle, HlsSessionMode, TimelineMapError,
+    deterministic_conflict::{
+        HlsDeterministicConflictFingerprint, HlsDeterministicConflictSegmentFingerprint,
+        HlsDeterministicTimelineConflict,
+    },
+    extract_hls_provider_session_header_map, log_hls_origin_content_coding,
+    manifest_acceptance::{
+        classify_host_local_sequence, classify_reduced_retry_landscape, evaluate_manifest_acceptance,
+        held_alternative_after_burst, manifest_acceptance_landscape, HlsAlternativeOriginCohort,
+        HlsCandidateHostRelation, HlsCommittedContentAnchorEvidence, HlsCrossHostAcceptanceEvidence,
+        HlsEmergencyAcceptanceEvidence, HlsEmergencyLiveHandoffCompatibility, HlsHostLocalSequenceRelation,
+        HlsManifestAcceptanceExhaustionReason, HlsManifestAcceptanceGeneration, HlsManifestAcceptanceInput,
+        HlsManifestAcceptanceLandscape, HlsManifestAcceptanceState, HlsManifestAcceptanceTrigger,
+        HlsManifestCandidateObservation, HlsManifestCommitKind, HlsManifestCommitPlan, HlsManifestSegmentFingerprint,
+        HlsDeterministicConflictReceipt, HlsManifestRecoveryCandidateIdentity, HlsManifestTimelineFingerprint,
+        HlsRecoveryWorkloadBindingUpdate,
+        HlsReducedRetryLandscapeChange, HlsResourceTimelineEvidence, HlsSwitchSegmentReadiness,
+        HlsTerminalAlternativeCompatibility,
+        HLS_MANIFEST_ACCEPTANCE_MAX_REQUALIFICATIONS_PER_REFRESH, HLS_MANIFEST_FINGERPRINT_SEGMENT_LIMIT,
+        HLS_MANIFEST_RECOVERY_BURST_SLOT_DELAY_MS,
+    },
+    manifest_origin_binding::HlsManifestOriginBinding,
+    recovery_timing::{
+        HlsAcceptanceDeadlineMs, HlsAcceptanceEpisodeTiming, HlsAcceptanceEpisodeTimingInput,
+        HlsAcceptanceEpisodeTimingSeed, HlsRecoveryTimingPolicy, HlsRecoveryWorkloadEnvelope,
+        HlsTerminalMediaPreparationState, HlsTransitionMarginMs,
+    },
+    resource_identity::{HlsMediaResourceIdentity, HlsMediaResourceSemanticKey},
+    timeline::HlsResourceReplayDecision,
+    hls_origin_log_value, safe_session_key, HlsAccountBindingProtection, HlsBoundAccountAcquireErrorKind,
+    HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource, HlsSessionHandle, HlsSessionMode, TimelineMapError,
 };
 use crate::{
     model::{
         resolve_provider_scheme_url_with_provider_index, AppConfig, ConfigProvider, HlsManifestRecoveryBurstConfig,
-        InputSource, StripConfig,
+        InputSource,
     },
     processing::parser::hls::origin_manifest::{
         parse_manifest_timing, parse_origin_manifest_timeline, parse_origin_media_manifest, OriginManifestParseOutcome,
-        ParsedOriginManifestTimeline,
+        ParsedOriginManifest, ParsedOriginManifestTimeline,
     },
     utils::{
         content_coding::{
@@ -27,19 +54,26 @@ use crate::{
 use axum::http::{header, HeaderMap, StatusCode};
 use log::{debug, warn};
 use reqwest::Client;
+use sha2::{Digest, Sha256};
 use shared::{
-    model::{HlsManifestRecoveryBurstLevel, HlsManifestRecoveryBurstPlan, HlsStripMode, InputFetchMethod},
+    model::{HlsManifestRecoveryBurstLevel, HlsManifestRecoveryBurstPlan, InputFetchMethod},
     utils::sanitize_sensitive_info,
 };
-use std::{collections::HashMap, fmt, future::Future, io, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::{self, Write as _},
+    future::Future,
+    io,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::{task::JoinSet, time::timeout};
 use url::Url;
 
 const MAX_MANUAL_REDIRECTS: usize = 10;
 const DEFAULT_HLS_TARGET_DURATION_SECS: u32 = 15;
-const HLS_MANIFEST_HOST_SWITCH_BASE_WINDOW_SEGMENTS: u32 = 3;
-const HLS_MANIFEST_HOST_SWITCH_MAX_FAILURE_THRESHOLD: u32 = 5;
 const DEFAULT_HLS_SESSION_IDLE_TIMEOUT_SECS: u64 = 300;
+const HLS_COMMITTED_CONTENT_ANCHOR_PROBE_LIMIT: usize = 64;
 pub(crate) const MAX_HLS_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
 
 /// Origin manifest entrypoint snapshot for live HLS refreshes.
@@ -144,6 +178,21 @@ pub fn classify_origin_manifest_status(status: StatusCode) -> OriginManifestStat
     OriginManifestStatusClass::NonRetryableFailure
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HlsManifestRecoveryUnavailableReason {
+    NoEstablishedBindingAfterResponse,
+    BindingSuperseded,
+}
+
+impl fmt::Display for HlsManifestRecoveryUnavailableReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NoEstablishedBindingAfterResponse => "no established binding after origin response",
+            Self::BindingSuperseded => "manifest origin binding superseded",
+        })
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OriginManifestFetchError {
     #[error("origin manifest returned permanent status {0}")]
@@ -152,6 +201,10 @@ pub(crate) enum OriginManifestFetchError {
     RetryableStatus(StatusCode, Option<u64>),
     #[error("origin manifest retry attempts exhausted")]
     RetryExhausted,
+    #[error("origin manifest recovery unavailable: {reason}")]
+    RecoveryUnavailable { reason: HlsManifestRecoveryUnavailableReason },
+    #[error("origin manifest has a deterministic timeline conflict")]
+    DeterministicTimelineConflict(Box<HlsDeterministicTimelineConflict>),
     #[error("origin manifest returned non-retryable status {0}")]
     NonRetryableStatus(StatusCode),
     #[error("origin manifest request failed: {0}")]
@@ -179,6 +232,23 @@ impl OriginManifestFetchError {
             Self::PermanentStatus(status) => format!("permanent_status status={}", status.as_u16()),
             Self::RetryableStatus(status, _) => format!("retryable_status status={}", status.as_u16()),
             Self::RetryExhausted => "retry_exhausted".to_string(),
+            Self::RecoveryUnavailable { reason } => match reason {
+                HlsManifestRecoveryUnavailableReason::NoEstablishedBindingAfterResponse => {
+                    "recovery_unavailable_after_response".to_string()
+                }
+                HlsManifestRecoveryUnavailableReason::BindingSuperseded => {
+                    "recovery_binding_superseded".to_string()
+                }
+            },
+            Self::DeterministicTimelineConflict(conflict) => format!(
+                "deterministic_timeline_conflict previous_proxy_tail={} existing_proxy_seq={} candidate_position={} candidate_origin_seq={} repeated_resource={} decision={}",
+                format_optional_highwater(conflict.previous_proxy_tail),
+                conflict.existing_proxy_seq,
+                conflict.candidate_position,
+                conflict.candidate_origin_seq,
+                format_resource_identity_token(conflict.diagnostic_resource_token()),
+                conflict.decision.as_log_value()
+            ),
             Self::NonRetryableStatus(status) => format!("non_retryable_status status={}", status.as_u16()),
             Self::Request(_) => "request".to_string(),
             Self::Redirect(_) => "redirect".to_string(),
@@ -204,6 +274,14 @@ impl OriginManifestFetchError {
     }
 }
 
+fn format_resource_identity_token(resource_identity: [u8; 8]) -> String {
+    let mut token = String::with_capacity(resource_identity.len().saturating_mul(2));
+    for byte in resource_identity {
+        let _ = write!(token, "{byte:02x}");
+    }
+    token
+}
+
 #[derive(Debug)]
 pub(crate) enum HlsManifestCommitError {
     TimelineRejected { reason: HlsManifestRejectLogReason },
@@ -212,8 +290,6 @@ pub(crate) enum HlsManifestCommitError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HlsManifestAcceptanceRejectReason {
-    MissingPinnedTarget,
-    HostSwitchPending { failures: u32, threshold: u32 },
     MissingOriginHighwater,
     ForwardTooFar { previous: u64, origin: u64, window: Option<u64> },
     BackwardOutsideRollover { previous: u64, origin: u64, window: Option<u64> },
@@ -221,8 +297,6 @@ pub(crate) enum HlsManifestAcceptanceRejectReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HlsManifestRejectLogReason {
-    MissingPinnedTarget,
-    HostSwitchPending { failures: u32, threshold: u32 },
     MissingOriginHighwater,
     ForwardTooFar { previous: u64, origin: u64, window: Option<u64> },
     BackwardOutsideRollover { previous: u64, origin: u64, window: Option<u64> },
@@ -231,16 +305,27 @@ pub(crate) enum HlsManifestRejectLogReason {
     UnsupportedMapExtension,
     ProxySequenceOverflow,
     ProxyMapIdOverflow,
+    MissingKeyResource,
+    PublishedResourceReplay {
+        previous_proxy_tail: Option<u64>,
+        existing_proxy_seq: u64,
+        candidate_position: usize,
+        candidate_origin_seq: u64,
+        resource_key: HlsMediaResourceSemanticKey,
+        decision: HlsResourceReplayDecision,
+    },
+    OriginSequenceResourceConflict { existing_proxy_seq: u64, candidate_origin_seq: u64 },
+    SwitchResourceUnavailable,
+    SwitchEncryptionKeyNotReady,
+    SwitchMapResetUnsupported,
+    CriticalHandoffLockContentionExhausted,
+    StagedSwitchInvalidated,
     MalformedTransientTimeline,
 }
 
 impl HlsManifestRejectLogReason {
     pub(crate) fn status_label(&self) -> String {
         match self {
-            Self::MissingPinnedTarget => "missing-pinned-target".to_string(),
-            Self::HostSwitchPending { failures, threshold } => {
-                format!("host-switch-pending failures={failures} threshold={threshold}")
-            }
             Self::MissingOriginHighwater => "missing-origin-highwater".to_string(),
             Self::ForwardTooFar { previous, origin, window } => {
                 format!(
@@ -259,6 +344,32 @@ impl HlsManifestRejectLogReason {
             Self::UnsupportedMapExtension => "unsupported-map-extension".to_string(),
             Self::ProxySequenceOverflow => "proxy-sequence-overflow".to_string(),
             Self::ProxyMapIdOverflow => "proxy-map-id-overflow".to_string(),
+            Self::MissingKeyResource => "missing-key-resource".to_string(),
+            Self::PublishedResourceReplay {
+                previous_proxy_tail,
+                existing_proxy_seq,
+                candidate_position,
+                candidate_origin_seq,
+                resource_key,
+                decision,
+            } => {
+                let resource_identity = format_resource_identity_token(resource_key.diagnostic_token());
+                format!(
+                    "published-resource-replay previous_proxy_tail={} existing_proxy_seq={existing_proxy_seq} candidate_position={candidate_position} candidate_origin_seq={candidate_origin_seq} repeated_resource={resource_identity} decision={}",
+                    format_optional_highwater(*previous_proxy_tail),
+                    decision.as_log_value()
+                )
+            }
+            Self::OriginSequenceResourceConflict { existing_proxy_seq, candidate_origin_seq } => {
+                format!(
+                    "origin-sequence-resource-conflict existing_proxy_seq={existing_proxy_seq} candidate_origin_seq={candidate_origin_seq}"
+                )
+            }
+            Self::SwitchResourceUnavailable => "switch-resource-unavailable".to_string(),
+            Self::SwitchEncryptionKeyNotReady => "switch-encryption-key-not-ready".to_string(),
+            Self::SwitchMapResetUnsupported => "switch-map-reset-unsupported".to_string(),
+            Self::CriticalHandoffLockContentionExhausted => "critical-handoff-lock-contention-exhausted".to_string(),
+            Self::StagedSwitchInvalidated => "staged-switch-invalidated".to_string(),
             Self::MalformedTransientTimeline => "malformed-transient-timeline".to_string(),
         }
     }
@@ -267,10 +378,6 @@ impl HlsManifestRejectLogReason {
 impl From<HlsManifestAcceptanceRejectReason> for HlsManifestRejectLogReason {
     fn from(reason: HlsManifestAcceptanceRejectReason) -> Self {
         match reason {
-            HlsManifestAcceptanceRejectReason::MissingPinnedTarget => Self::MissingPinnedTarget,
-            HlsManifestAcceptanceRejectReason::HostSwitchPending { failures, threshold } => {
-                Self::HostSwitchPending { failures, threshold }
-            }
             HlsManifestAcceptanceRejectReason::MissingOriginHighwater => Self::MissingOriginHighwater,
             HlsManifestAcceptanceRejectReason::ForwardTooFar { previous, origin, window } => {
                 Self::ForwardTooFar { previous, origin, window }
@@ -289,6 +396,27 @@ impl From<TimelineMapError> for HlsManifestRejectLogReason {
             TimelineMapError::UnsupportedMapExtension => Self::UnsupportedMapExtension,
             TimelineMapError::ProxySequenceOverflow => Self::ProxySequenceOverflow,
             TimelineMapError::ProxyMapIdOverflow => Self::ProxyMapIdOverflow,
+            TimelineMapError::MissingKeyResource => Self::MissingKeyResource,
+            TimelineMapError::PublishedResourceReplay {
+                previous_proxy_tail,
+                existing_proxy_seq,
+                candidate_position,
+                candidate_origin_seq,
+                resource_key,
+                decision,
+            } => {
+                Self::PublishedResourceReplay {
+                    previous_proxy_tail,
+                    existing_proxy_seq,
+                    candidate_position,
+                    candidate_origin_seq,
+                    resource_key,
+                    decision,
+                }
+            }
+            TimelineMapError::OriginSequenceResourceConflict { existing_proxy_seq, candidate_origin_seq } => {
+                Self::OriginSequenceResourceConflict { existing_proxy_seq, candidate_origin_seq }
+            }
         }
     }
 }
@@ -296,7 +424,10 @@ impl From<TimelineMapError> for HlsManifestRejectLogReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HlsManifestCommitAcceptanceMode {
     StrictPinnedHost,
+    FreshPinnedRevalidation,
     AllowHeldHostSwitchCandidate,
+    AllowVerifiedContentAnchorHostSwitchCandidate,
+    AllowVerifiedEmergencyHostSwitchCandidate,
     FreshBaseline,
 }
 
@@ -309,7 +440,28 @@ pub struct FetchedOriginManifest {
     pub provider_url_index: Option<usize>,
     pub provider_session_headers: HeaderMap,
     pub status: StatusCode,
+    /// Logical initial attempts or recovery generations. Existing refresh
+    /// retry metrics intentionally retain this semantic.
     pub attempts: usize,
+    pub(crate) candidate_requests: usize,
+    pub(crate) selection: HlsManifestFetchSelection,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum HlsManifestFetchSelection {
+    Initial,
+    Recovery,
+    Burst,
+}
+
+impl HlsManifestFetchSelection {
+    pub(crate) const fn as_log_value(self) -> &'static str {
+        match self {
+            Self::Initial => "initial",
+            Self::Recovery => "recovery",
+            Self::Burst => "burst",
+        }
+    }
 }
 
 impl fmt::Debug for FetchedOriginManifest {
@@ -318,11 +470,13 @@ impl fmt::Debug for FetchedOriginManifest {
             .field("body_len", &self.body.len())
             .field("final_manifest_url", &"<redacted>")
             .field("resolved_request_url", &"<redacted>")
-            .field("redirect_host", &self.redirect_host)
+            .field("redirect_host", &self.redirect_host.as_ref().map(|_| "<redacted>"))
             .field("provider_url_index", &self.provider_url_index)
             .field("provider_session_headers_len", &self.provider_session_headers.len())
             .field("status", &self.status)
             .field("attempts", &self.attempts)
+            .field("candidate_requests", &self.candidate_requests)
+            .field("selection", &self.selection)
             .finish()
     }
 }
@@ -330,6 +484,21 @@ impl fmt::Debug for FetchedOriginManifest {
 impl FetchedOriginManifest {
     pub(crate) fn with_attempts(mut self, attempts: usize) -> Self {
         self.attempts = attempts;
+        if self.selection == HlsManifestFetchSelection::Initial {
+            self.candidate_requests = attempts;
+        }
+        self
+    }
+
+    fn with_recovery_diagnostics(
+        mut self,
+        recovery_attempts: usize,
+        candidate_requests: usize,
+        selection: HlsManifestFetchSelection,
+    ) -> Self {
+        self.attempts = recovery_attempts;
+        self.candidate_requests = candidate_requests;
+        self.selection = selection;
         self
     }
 }
@@ -346,13 +515,18 @@ pub(crate) struct HlsOriginManifestFetchContext {
     pub origin_manifest_timeout_ms: u64,
     pub manifest_recovery_burst: HlsManifestRecoveryBurstConfig,
     pub retry_policy: RetryPolicy,
+    /// Expected-latency policy. Hard operation timeouts remain separate and do
+    /// not become playback trigger or cutover estimates.
+    pub recovery_timing_policy: HlsRecoveryTimingPolicy,
+    /// Lease-specific pressure evidence captured before refresh scheduling.
+    /// Each started generation freezes its own timing from this seed.
+    pub acceptance_timing_seed: Option<HlsAcceptanceEpisodeTimingSeed>,
 }
 
 enum HlsOriginManifestFetchMode<'a> {
     InitialGlobalPolicy,
     RecoveryDirectTarget {
-        target_url: &'a Url,
-        provider_url_index: Option<usize>,
+        binding: &'a HlsManifestOriginBinding,
         reason: Option<&'a HlsManifestRejectLogReason>,
         log_context: ManifestRecoveryAttemptLogContext,
     },
@@ -370,19 +544,13 @@ impl<'a> HlsOriginManifestFetchRequest<'a> {
 
     const fn recovery_direct_target(
         context: &'a HlsOriginManifestFetchContext,
-        target_url: &'a Url,
-        provider_url_index: Option<usize>,
+        binding: &'a HlsManifestOriginBinding,
         reason: Option<&'a HlsManifestRejectLogReason>,
         log_context: ManifestRecoveryAttemptLogContext,
     ) -> Self {
         Self {
             context,
-            mode: HlsOriginManifestFetchMode::RecoveryDirectTarget {
-                target_url,
-                provider_url_index,
-                reason,
-                log_context,
-            },
+            mode: HlsOriginManifestFetchMode::RecoveryDirectTarget { binding, reason, log_context },
         }
     }
 }
@@ -390,14 +558,23 @@ impl<'a> HlsOriginManifestFetchRequest<'a> {
 enum HlsManifestRecoveryAttemptError<T> {
     Fetch(OriginManifestFetchError),
     Rejected(HlsManifestRejectLogReason),
+    Requalified,
     Committed(T),
 }
 
 #[derive(Debug)]
 struct HlsManifestRecoveryCandidate {
     candidate_index: usize,
+    fetch_elapsed_ms: u64,
     fetched: FetchedOriginManifest,
     report: HlsManifestRecoveryCandidateScoreReport,
+}
+
+struct HlsManifestRecoveryBurstCollection {
+    fetched_candidates: Vec<HlsManifestRecoveryCandidate>,
+    completed_candidates: usize,
+    last_fetch_error: Option<OriginManifestFetchError>,
+    last_reject_reason: Option<HlsManifestRejectLogReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -409,45 +586,21 @@ pub(crate) struct HlsManifestRecoveryCandidateScoreReport {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum HlsManifestOriginQualityScore {
     Rejected,
-    OtherHostUnchanged,
+    OtherHostCandidate,
     SameHostUnchanged,
-    OtherHostRolloverCandidate,
     SameHostRolloverCandidate,
-    OtherHostRebaseCandidate,
-    OtherHostPlausibleForward,
-    OtherHostNextSequence,
     SameHostRebase,
     SameHostPlausibleForward,
     SameHostNextSequence,
 }
 
 impl HlsManifestOriginQualityScore {
-    pub(crate) const fn rank(self) -> u16 {
-        match self {
-            Self::Rejected => 0,
-            Self::OtherHostUnchanged => 10,
-            Self::SameHostUnchanged => 20,
-            Self::OtherHostRolloverCandidate => 35,
-            Self::SameHostRolloverCandidate => 50,
-            Self::OtherHostRebaseCandidate => 60,
-            Self::OtherHostPlausibleForward => 65,
-            Self::OtherHostNextSequence => 75,
-            Self::SameHostRebase => 85,
-            Self::SameHostPlausibleForward => 90,
-            Self::SameHostNextSequence => 100,
-        }
-    }
-
     const fn as_log_value(self) -> &'static str {
         match self {
             Self::Rejected => "rejected",
-            Self::OtherHostUnchanged => "other-host-unchanged",
+            Self::OtherHostCandidate => "other-host-candidate",
             Self::SameHostUnchanged => "same-host-unchanged",
-            Self::OtherHostRolloverCandidate => "other-host-rollover-candidate",
             Self::SameHostRolloverCandidate => "same-host-rollover-candidate",
-            Self::OtherHostRebaseCandidate => "other-host-rebase-candidate",
-            Self::OtherHostPlausibleForward => "other-host-plausible-forward",
-            Self::OtherHostNextSequence => "other-host-next-sequence",
             Self::SameHostRebase => "same-host-rebase",
             Self::SameHostPlausibleForward => "same-host-plausible-forward",
             Self::SameHostNextSequence => "same-host-next-sequence",
@@ -485,15 +638,12 @@ pub(crate) enum HlsManifestContinuityMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HlsManifestOriginQuality {
     pub(crate) score: HlsManifestOriginQualityScore,
-    pub(crate) continuity_mode: HlsManifestContinuityMode,
     pub(crate) host_relation: HlsManifestOriginRelation,
     pub(crate) sequence_relation: HlsManifestSequenceRelation,
     pub(crate) effective_host: Option<String>,
     pub(crate) origin_highwater: Option<u64>,
     pub(crate) previous_highwater: Option<u64>,
     pub(crate) allowed_forward_window: Option<u64>,
-    pub(crate) should_increment_stall_counter: bool,
-    pub(crate) should_reset_stall_counter: bool,
     pub(crate) requires_handoff_discontinuity: bool,
     pub(crate) reject_reason: Option<HlsManifestAcceptanceRejectReason>,
 }
@@ -505,15 +655,8 @@ pub(crate) async fn fetch_hls_origin_manifest_request(
         HlsOriginManifestFetchMode::InitialGlobalPolicy => {
             fetch_hls_origin_manifest_initial_global_policy(request.context).await
         }
-        HlsOriginManifestFetchMode::RecoveryDirectTarget { target_url, provider_url_index, reason, log_context } => {
-            fetch_hls_origin_manifest_recovery_direct_target(
-                request.context,
-                target_url,
-                provider_url_index,
-                reason,
-                log_context,
-            )
-            .await
+        HlsOriginManifestFetchMode::RecoveryDirectTarget { binding, reason, log_context } => {
+            fetch_hls_origin_manifest_recovery_direct_target(request.context, binding, reason, log_context).await
         }
     }
 }
@@ -532,8 +675,8 @@ async fn fetch_hls_origin_manifest_initial_global_policy(
         }
     };
     debug!(
-        "HLS origin manifest request started: account_binding={account_binding} origin_entry={}",
-        safe_origin_log_value(input_source.url.as_str())
+        "HLS origin manifest request started: account_binding={account_binding} request_url={}",
+        hls_origin_log_value(input_source.url.as_str())
     );
     let fetch_options = RequestFetchOptions::with_attempt_idle_timeout(Duration::from_millis(
         context.origin_manifest_timeout_ms.max(1),
@@ -640,20 +783,34 @@ pub(crate) async fn score_hls_manifest_candidate_for_selection_log(
 
 pub(crate) async fn retry_hls_origin_manifest_recovery_chain<T, C, Fut>(
     context: &HlsOriginManifestFetchContext,
-    target_url: Url,
-    provider_url_index: Option<usize>,
+    binding: HlsManifestOriginBinding,
     mut reject_reason: Option<HlsManifestRejectLogReason>,
+    initial_deterministic_conflict: Option<HlsDeterministicTimelineConflict>,
+    trigger: HlsManifestAcceptanceTrigger,
+    acceptance_mode: HlsManifestCommitAcceptanceMode,
     mut commit: C,
 ) -> Result<T, OriginManifestFetchError>
 where
     C: FnMut(FetchedOriginManifest, HlsManifestCommitAcceptanceMode) -> Fut,
     Fut: Future<Output = Result<T, HlsManifestCommitError>>,
 {
+    if !trigger.starts_episode() {
+        return Err(OriginManifestFetchError::RetryExhausted);
+    }
     let attempts = context.retry_policy.attempt_count();
     let mut last_error = OriginManifestFetchError::RetryExhausted;
-
-    for attempt_index in 0..attempts {
-        let delay_ms = {
+    let mut next_attempt_is_full_plan = true;
+    let mut requalifications = 0_u8;
+    let mut attempt_index = 0_usize;
+    let mut attempt_limit = attempts;
+    let mut completed_candidate_requests = 0_usize;
+    while attempt_index < attempt_limit {
+        // A materially changed landscape is requalified immediately. Once
+        // authorized, that new generation must still receive its complete
+        // configured burst rather than losing candidates to a retry delay.
+        let delay_ms = if attempt_index > 0 && next_attempt_is_full_plan {
+            0
+        } else {
             let jitter = if context.retry_policy.jitter_max_ms == 0 {
                 0
             } else {
@@ -661,26 +818,48 @@ where
             };
             context.retry_policy.delay_for_attempt_ms(attempt_index, jitter).unwrap_or_default()
         };
+        let acceptance_deadline = current_acceptance_deadline(context).await;
+        if !acceptance_attempt_may_start(
+            next_attempt_is_full_plan,
+            current_time_millis(),
+            delay_ms,
+            acceptance_deadline,
+        ) {
+            return Err(last_error);
+        }
         if delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
 
         let attempt_plan = HlsManifestRecoveryAttemptPlan {
-            target_url: &target_url,
-            provider_url_index,
+            binding: &binding,
             attempt_index,
-            attempts,
+            attempts: attempt_limit,
             reject_reason: reject_reason.as_ref(),
-            acceptance_mode: HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+            initial_deterministic_conflict: initial_deterministic_conflict.as_ref(),
+            acceptance_mode,
+            trigger,
+            current_burst_is_full_plan: next_attempt_is_full_plan,
+            may_requalify: requalifications < HLS_MANIFEST_ACCEPTANCE_MAX_REQUALIFICATIONS_PER_REFRESH,
+            acceptance_deadline,
+            completed_candidate_requests,
         };
+        let candidate_requests_in_attempt = recovery_burst_plan(context, next_attempt_is_full_plan).total_candidates();
+        next_attempt_is_full_plan = false;
         match fetch_and_commit_manifest_recovery_attempt(context, attempt_plan, &mut commit).await {
             HlsManifestRecoveryAttemptError::Committed(committed) => return Ok(committed),
-            HlsManifestRecoveryAttemptError::Rejected(reason) if attempt_index + 1 < attempts => {
+            HlsManifestRecoveryAttemptError::Requalified => {
+                requalifications = requalifications.saturating_add(1);
+                next_attempt_is_full_plan = true;
+                last_error = OriginManifestFetchError::RetryExhausted;
+                attempt_limit = attempt_limit_for_started_requalification(attempt_limit, attempt_index);
+            }
+            HlsManifestRecoveryAttemptError::Rejected(reason) if attempt_index.saturating_add(1) < attempt_limit => {
                 log_manifest_retry_scheduled(
                     context,
                     ManifestRetryLogKind::PinnedHostRecovery,
                     attempt_index,
-                    attempts,
+                    attempt_limit,
                     next_retry_delay_ms(&context.retry_policy, attempt_index, None, 0),
                     Some(&reason),
                     None,
@@ -693,13 +872,14 @@ where
                 return Err(OriginManifestFetchError::RetryExhausted);
             }
             HlsManifestRecoveryAttemptError::Fetch(err)
-                if is_hls_retryable_manifest_reject_fetch_error(&err) && attempt_index + 1 < attempts =>
+                if is_hls_retryable_manifest_reject_fetch_error(&err)
+                    && attempt_index.saturating_add(1) < attempt_limit =>
             {
                 log_manifest_retry_scheduled(
                     context,
                     ManifestRetryLogKind::PinnedHostRecovery,
                     attempt_index,
-                    attempts,
+                    attempt_limit,
                     next_retry_delay_ms(&context.retry_policy, attempt_index, None, 0),
                     None,
                     Some(&err),
@@ -709,18 +889,52 @@ where
             }
             HlsManifestRecoveryAttemptError::Fetch(err) => return Err(err),
         }
+        completed_candidate_requests =
+            completed_candidate_requests.saturating_add(candidate_requests_in_attempt);
+        attempt_index = attempt_index.saturating_add(1);
     }
 
     Err(last_error)
 }
 
+fn acceptance_attempt_may_start(
+    current_burst_is_full_plan: bool,
+    now_ms: u64,
+    delay_ms: u64,
+    acceptance_deadline: HlsAcceptanceDeadlineMs,
+) -> bool {
+    // Every new episode owns one unconditional configured burst. Budget
+    // enforcement bounds reduced retries and whether a requalification may
+    // begin, but never abandons a generation after it has begun.
+    current_burst_is_full_plan || now_ms.saturating_add(delay_ms) < acceptance_deadline.as_millis_since_epoch()
+}
+
+async fn current_acceptance_deadline(context: &HlsOriginManifestFetchContext) -> HlsAcceptanceDeadlineMs {
+    context.session.read().await.origin_control.acceptance_episode.as_ref().map_or_else(
+        || HlsAcceptanceDeadlineMs::from_millis_since_epoch(u64::MAX),
+        |episode| episode.timing().acceptance_deadline,
+    )
+}
+
+fn attempt_limit_for_started_requalification(attempt_limit: usize, attempt_index: usize) -> usize {
+    // A requalification normally consumes the next configured retry slot. If
+    // the landscape changed in the last slot, reserve exactly one additional
+    // slot for the newly started generation's mandatory configured burst.
+    attempt_limit.max(attempt_index.saturating_add(2))
+}
+
 struct HlsManifestRecoveryAttemptPlan<'a> {
-    target_url: &'a Url,
-    provider_url_index: Option<usize>,
+    binding: &'a HlsManifestOriginBinding,
     attempt_index: usize,
     attempts: usize,
     reject_reason: Option<&'a HlsManifestRejectLogReason>,
+    initial_deterministic_conflict: Option<&'a HlsDeterministicTimelineConflict>,
     acceptance_mode: HlsManifestCommitAcceptanceMode,
+    trigger: HlsManifestAcceptanceTrigger,
+    current_burst_is_full_plan: bool,
+    may_requalify: bool,
+    acceptance_deadline: HlsAcceptanceDeadlineMs,
+    completed_candidate_requests: usize,
 }
 
 async fn fetch_and_commit_manifest_recovery_attempt<T, C, Fut>(
@@ -732,37 +946,10 @@ where
     C: FnMut(FetchedOriginManifest, HlsManifestCommitAcceptanceMode) -> Fut,
     Fut: Future<Output = Result<T, HlsManifestCommitError>>,
 {
-    let burst_plan = recovery_burst_plan(context, plan.attempt_index);
-    let candidates = burst_plan.total_candidates();
-    if candidates == 1 {
-        let fetched = match fetch_hls_origin_manifest_request(HlsOriginManifestFetchRequest::recovery_direct_target(
-            context,
-            plan.target_url,
-            plan.provider_url_index,
-            plan.reject_reason,
-            ManifestRecoveryAttemptLogContext::single(plan.attempt_index, plan.attempts),
-        ))
-        .await
-        {
-            Ok(fetched) => fetched,
-            Err(err) => return HlsManifestRecoveryAttemptError::Fetch(err),
-        };
-        let report = score_manifest_recovery_candidate_with_logging(context, 0, candidates, &fetched).await.ok();
-        let committed = commit(fetched.with_attempts(plan.attempt_index + 1), plan.acceptance_mode).await;
-        match (committed, report.as_ref()) {
-            (Ok(committed), Some(report)) => {
-                log_manifest_recovery_selected(context, 0, candidates, report).await;
-                HlsManifestRecoveryAttemptError::Committed(committed)
-            }
-            (Ok(committed), None) => HlsManifestRecoveryAttemptError::Committed(committed),
-            (Err(err), _) => HlsManifestRecoveryAttemptError::Rejected(commit_error_to_retry_reason(&err)),
-        }
-    } else {
-        fetch_and_commit_manifest_recovery_burst_attempt(context, plan, burst_plan, commit).await
-    }
+    let burst_plan = recovery_burst_plan(context, plan.current_burst_is_full_plan);
+    fetch_and_commit_manifest_recovery_burst_attempt(context, plan, burst_plan, commit).await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn fetch_and_commit_manifest_recovery_burst_attempt<T, C, Fut>(
     context: &HlsOriginManifestFetchContext,
     plan: HlsManifestRecoveryAttemptPlan<'_>,
@@ -773,105 +960,1238 @@ where
     C: FnMut(FetchedOriginManifest, HlsManifestCommitAcceptanceMode) -> Fut,
     Fut: Future<Output = Result<T, HlsManifestCommitError>>,
 {
-    let (mut fetched_candidates, last_fetch_error, mut last_reject_reason) = fetch_manifest_recovery_burst_candidates(
+    let episode_generation = begin_manifest_acceptance_episode(context, &plan, burst_plan).await;
+    let HlsManifestRecoveryBurstCollection {
+        fetched_candidates,
+        completed_candidates,
+        last_fetch_error,
+        mut last_reject_reason,
+    } = fetch_manifest_recovery_burst_candidates(context, &plan, burst_plan).await;
+    record_full_manifest_acceptance_burst(
         context,
-        plan.target_url,
-        plan.provider_url_index,
-        plan.attempt_index,
-        plan.attempts,
-        plan.reject_reason,
-        burst_plan,
+        episode_generation,
+        plan.current_burst_is_full_plan,
+        completed_candidates,
     )
     .await;
-    let candidates = burst_plan.total_candidates();
-
-    fetched_candidates.sort_by(|left, right| {
-        right
-            .report
-            .quality
-            .score
-            .rank()
-            .cmp(&left.report.quality.score.rank())
-            .then_with(|| right.report.quality.origin_highwater.cmp(&left.report.quality.origin_highwater))
-            .then_with(|| left.candidate_index.cmp(&right.candidate_index))
-    });
-    for candidate in fetched_candidates {
-        let HlsManifestRecoveryCandidate { candidate_index, fetched, report } = candidate;
-        match commit(fetched.with_attempts(plan.attempt_index + 1), plan.acceptance_mode).await {
-            Ok(committed) => {
-                log_manifest_recovery_selected(context, candidate_index, candidates, &report).await;
-                return HlsManifestRecoveryAttemptError::Committed(committed);
-            }
-            Err(err) => {
-                let reason = commit_error_to_retry_reason(&err);
-                log_manifest_recovery_candidate_rejected(
-                    context,
-                    candidate_index,
-                    candidates,
-                    report.quality.effective_host.as_deref(),
-                    report.quality.origin_highwater,
-                    &reason,
-                )
-                .await;
-                last_reject_reason = Some(reason);
-            }
+    let evaluation =
+        match evaluate_manifest_recovery_burst(context, &plan, burst_plan, episode_generation, &fetched_candidates)
+    .await
+    {
+        HlsManifestRecoveryBurstEvaluationOutcome::Continue(evaluation) => *evaluation,
+        HlsManifestRecoveryBurstEvaluationOutcome::DeterministicConflict(conflict) => {
+            return HlsManifestRecoveryAttemptError::Fetch(
+                OriginManifestFetchError::DeterministicTimelineConflict(conflict),
+            );
         }
+        HlsManifestRecoveryBurstEvaluationOutcome::Requalified => {
+            return HlsManifestRecoveryAttemptError::Requalified;
+        }
+        HlsManifestRecoveryBurstEvaluationOutcome::Exhausted => {
+            return HlsManifestRecoveryAttemptError::Fetch(OriginManifestFetchError::RetryExhausted);
+        }
+    };
+    match commit_selected_manifest_recovery_candidate(
+        context,
+        &plan,
+        burst_plan,
+        episode_generation,
+        evaluation.acceptance_plan,
+        fetched_candidates,
+        completed_candidates,
+        commit,
+    )
+    .await
+    {
+        HlsSelectedManifestRecoveryCommit::Committed(committed) => {
+            return HlsManifestRecoveryAttemptError::Committed(committed);
+        }
+        HlsSelectedManifestRecoveryCommit::Rejected(reason) => last_reject_reason = Some(reason),
+        HlsSelectedManifestRecoveryCommit::NotSelected => {}
     }
 
+    if plan.current_burst_is_full_plan {
+        record_manifest_acceptance_exhaustion(
+            context,
+            episode_generation,
+            manifest_acceptance_exhaustion_reason(&evaluation.observations),
+        )
+        .await;
+    }
+    hold_uncommitted_manifest_acceptance_episode(
+        context,
+        episode_generation,
+        evaluation.held_alternative,
+        evaluation.next_retry_at_ms,
+    )
+    .await;
     if let Some(reason) = last_reject_reason {
         return HlsManifestRecoveryAttemptError::Rejected(reason);
     }
     HlsManifestRecoveryAttemptError::Fetch(last_fetch_error.unwrap_or(OriginManifestFetchError::RetryExhausted))
 }
 
+struct HlsManifestRecoveryBurstEvaluation {
+    observations: Vec<HlsManifestCandidateObservation>,
+    acceptance_plan: HlsManifestCommitPlan,
+    held_alternative: Option<HlsAlternativeOriginCohort>,
+    next_retry_at_ms: u64,
+}
+
+enum HlsManifestRecoveryBurstEvaluationOutcome {
+    Continue(Box<HlsManifestRecoveryBurstEvaluation>),
+    DeterministicConflict(Box<HlsDeterministicTimelineConflict>),
+    Requalified,
+    Exhausted,
+}
+
+const fn manifest_acceptance_state_for_plan(plan: &HlsManifestCommitPlan) -> HlsManifestAcceptanceState {
+    match plan {
+        HlsManifestCommitPlan::Commit { .. } => HlsManifestAcceptanceState::Committing,
+        HlsManifestCommitPlan::StageAlternative { .. } => HlsManifestAcceptanceState::StagingSwitchSegment,
+        HlsManifestCommitPlan::HoldAlternative | HlsManifestCommitPlan::RejectAll => {
+            HlsManifestAcceptanceState::Holding
+        }
+    }
+}
+
+async fn evaluate_manifest_recovery_burst(
+    context: &HlsOriginManifestFetchContext,
+    plan: &HlsManifestRecoveryAttemptPlan<'_>,
+    burst_plan: HlsManifestRecoveryBurstPlan,
+    episode_generation: Option<HlsManifestAcceptanceGeneration>,
+    fetched_candidates: &[HlsManifestRecoveryCandidate],
+) -> HlsManifestRecoveryBurstEvaluationOutcome {
+    // Candidate order is scheduler order only. In particular, a numerically
+    // larger highwater from a different effective host is never a sort key.
+    // Pressure is the immutable pre-episode snapshot; `Recovering` itself is
+    // deliberately not reserve evidence.
+    let resource_evidence = committed_resource_evidence(context).await;
+    let candidate_evaluations = fetched_candidates
+        .iter()
+        .map(|candidate| {
+            let observation = manifest_candidate_observation(
+                candidate,
+                burst_plan,
+                &resource_evidence.ready_identities,
+                &resource_evidence.published_identities,
+            );
+            let deterministic_conflict = deterministic_timeline_conflict_for_candidate(candidate, &resource_evidence);
+            (observation, deterministic_conflict)
+        })
+        .collect::<Vec<_>>();
+    let observations = candidate_evaluations
+        .iter()
+        .map(|(observation, _)| observation.clone())
+        .collect::<Vec<_>>();
+    if plan.current_burst_is_full_plan {
+        record_manifest_acceptance_landscape(context, episode_generation, manifest_acceptance_landscape(&observations))
+            .await;
+        if let Some(conflict) = deterministic_conflict_proven_by_full_burst(
+            plan.initial_deterministic_conflict,
+            &candidate_evaluations,
+            fetched_candidates.len(),
+            burst_plan.total_candidates(),
+        ) {
+            record_deterministic_conflict_receipt(
+                context,
+                episode_generation,
+                conflict.clone(),
+                &resource_evidence,
+            )
+            .await;
+            return HlsManifestRecoveryBurstEvaluationOutcome::DeterministicConflict(Box::new(conflict));
+        }
+    }
+    let episode_snapshot = manifest_acceptance_episode_snapshot(context, episode_generation).await;
+    let reduced_landscape_changed = !plan.current_burst_is_full_plan
+        && episode_snapshot
+            .as_ref()
+            .and_then(|episode| episode.observed_landscape.as_ref())
+            .map(|landscape| classify_reduced_retry_landscape(landscape, &observations))
+            .is_some_and(HlsReducedRetryLandscapeChange::requires_full_requalification);
+    if reduced_landscape_changed {
+        if plan.may_requalify
+            && begin_requalified_manifest_acceptance_episode(
+                context,
+                episode_generation,
+                plan.trigger,
+                plan.acceptance_deadline,
+            )
+            .await
+        {
+            return HlsManifestRecoveryBurstEvaluationOutcome::Requalified;
+        }
+        // A changed landscape may never fall through into reduced-burst
+        // cross-host acceptance when its full requalification budget is gone.
+        let next_retry_at_ms = current_time_millis().saturating_add(next_retry_delay_ms(
+            &context.retry_policy,
+            plan.attempt_index,
+            None,
+            0,
+        ));
+        hold_uncommitted_manifest_acceptance_episode(
+            context,
+            episode_generation,
+            episode_snapshot.and_then(|episode| episode.held_alternative),
+            next_retry_at_ms,
+        )
+        .await;
+        return HlsManifestRecoveryBurstEvaluationOutcome::Exhausted;
+    }
+    let acceptance_plan = episode_snapshot.as_ref().map_or(HlsManifestCommitPlan::RejectAll, |episode| {
+        evaluate_manifest_acceptance(HlsManifestAcceptanceInput {
+            full_burst_completed: episode.full_burst_completed,
+            current_burst_is_full_plan: plan.current_burst_is_full_plan,
+            trigger: episode.trigger,
+            previous_alternative: episode.held_alternative.as_ref(),
+            observations: &observations,
+        })
+    });
+    let held_alternative = episode_snapshot.as_ref().and_then(|episode| {
+        held_alternative_after_burst(&observations, episode.held_alternative.as_ref(), plan.current_burst_is_full_plan)
+    });
+    let next_retry_at_ms =
+        current_time_millis().saturating_add(next_retry_delay_ms(&context.retry_policy, plan.attempt_index, None, 0));
+    let next_state = manifest_acceptance_state_for_plan(&acceptance_plan);
+    update_manifest_acceptance_episode_state(context, episode_generation, next_state).await;
+    HlsManifestRecoveryBurstEvaluationOutcome::Continue(Box::new(HlsManifestRecoveryBurstEvaluation {
+        observations,
+        acceptance_plan,
+        held_alternative,
+        next_retry_at_ms,
+    }))
+}
+
+enum HlsSelectedManifestRecoveryCommit<T> {
+    Committed(T),
+    Rejected(HlsManifestRejectLogReason),
+    NotSelected,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn commit_selected_manifest_recovery_candidate<T, C, Fut>(
+    context: &HlsOriginManifestFetchContext,
+    plan: &HlsManifestRecoveryAttemptPlan<'_>,
+    burst_plan: HlsManifestRecoveryBurstPlan,
+    episode_generation: Option<HlsManifestAcceptanceGeneration>,
+    acceptance_plan: HlsManifestCommitPlan,
+    fetched_candidates: Vec<HlsManifestRecoveryCandidate>,
+    completed_candidates: usize,
+    commit: &mut C,
+) -> HlsSelectedManifestRecoveryCommit<T>
+where
+    C: FnMut(FetchedOriginManifest, HlsManifestCommitAcceptanceMode) -> Fut,
+    Fut: Future<Output = Result<T, HlsManifestCommitError>>,
+{
+    let Some((selected_candidate_index, selected_commit_kind)) = selected_manifest_candidate(acceptance_plan) else {
+        return HlsSelectedManifestRecoveryCommit::NotSelected;
+    };
+    let Some(candidate) =
+        fetched_candidates.into_iter().find(|candidate| candidate.candidate_index == selected_candidate_index)
+    else {
+        return HlsSelectedManifestRecoveryCommit::NotSelected;
+    };
+    let HlsManifestRecoveryCandidate { candidate_index, fetched, report, .. } = candidate;
+    let candidate_identity = HlsManifestRecoveryCandidateIdentity::from_candidate(
+        candidate_index,
+        report.quality.effective_host.as_deref(),
+        &fetched.body,
+    );
+    if !select_manifest_recovery_candidate(context, episode_generation, candidate_identity).await {
+        return HlsSelectedManifestRecoveryCommit::Rejected(HlsManifestRejectLogReason::StagedSwitchInvalidated);
+    }
+    let acceptance_mode = selected_commit_acceptance_mode(selected_commit_kind, plan.acceptance_mode);
+    let selection = if burst_plan.total_candidates() > 1 {
+        HlsManifestFetchSelection::Burst
+    } else {
+        HlsManifestFetchSelection::Recovery
+    };
+    let candidate_requests = plan.completed_candidate_requests.saturating_add(completed_candidates);
+    match commit(
+        fetched.with_recovery_diagnostics(plan.attempt_index + 1, candidate_requests, selection),
+        acceptance_mode,
+    )
+    .await
+    {
+        Ok(committed) => {
+            complete_manifest_acceptance_episode(context, episode_generation).await;
+            log_manifest_recovery_selected(context, candidate_index, burst_plan.total_candidates(), &report).await;
+            HlsSelectedManifestRecoveryCommit::Committed(committed)
+        }
+        Err(err) => {
+            let reason = commit_error_to_retry_reason(&err);
+            log_manifest_recovery_candidate_rejected(
+                context,
+                candidate_index,
+                burst_plan.total_candidates(),
+                report.quality.effective_host.as_deref(),
+                report.quality.origin_highwater,
+                &reason,
+            )
+            .await;
+            HlsSelectedManifestRecoveryCommit::Rejected(reason)
+        }
+    }
+}
+
+async fn select_manifest_recovery_candidate(
+    context: &HlsOriginManifestFetchContext,
+    generation: Option<HlsManifestAcceptanceGeneration>,
+    candidate_identity: HlsManifestRecoveryCandidateIdentity,
+) -> bool {
+    let Some(generation) = generation else {
+        return false;
+    };
+    let mut session = context.session.write().await;
+    let Some(episode) = session.origin_control.acceptance_episode.as_mut() else {
+        return false;
+    };
+    episode.select_candidate(generation, candidate_identity) == HlsRecoveryWorkloadBindingUpdate::Applied
+}
+
+const fn selected_commit_acceptance_mode(
+    commit_kind: HlsManifestCommitKind,
+    fallback: HlsManifestCommitAcceptanceMode,
+) -> HlsManifestCommitAcceptanceMode {
+    match commit_kind {
+        HlsManifestCommitKind::AnchoredAlternative | HlsManifestCommitKind::AlternativeAsNewEpoch => {
+            HlsManifestCommitAcceptanceMode::AllowHeldHostSwitchCandidate
+        }
+        HlsManifestCommitKind::ContentVerifiedAlternative => {
+            HlsManifestCommitAcceptanceMode::AllowVerifiedContentAnchorHostSwitchCandidate
+        }
+        HlsManifestCommitKind::EmergencyAlternativeAsNewEpoch => {
+            HlsManifestCommitAcceptanceMode::AllowVerifiedEmergencyHostSwitchCandidate
+        }
+        HlsManifestCommitKind::Pinned => fallback,
+    }
+}
+
+fn selected_manifest_candidate(plan: HlsManifestCommitPlan) -> Option<(usize, HlsManifestCommitKind)> {
+    match plan {
+        HlsManifestCommitPlan::Commit { candidate_index, kind }
+        | HlsManifestCommitPlan::StageAlternative { candidate_index, kind } => Some((candidate_index, kind)),
+        HlsManifestCommitPlan::HoldAlternative | HlsManifestCommitPlan::RejectAll => None,
+    }
+}
+
+async fn begin_manifest_acceptance_episode(
+    context: &HlsOriginManifestFetchContext,
+    plan: &HlsManifestRecoveryAttemptPlan<'_>,
+    burst_plan: HlsManifestRecoveryBurstPlan,
+) -> Option<HlsManifestAcceptanceGeneration> {
+    let mut session = context.session.write().await;
+    if plan.attempt_index != 0 {
+        let episode = session.origin_control.acceptance_episode.as_mut()?;
+        if episode.trigger() != plan.trigger || episode.state == HlsManifestAcceptanceState::Completed {
+            return None;
+        }
+        episode.state = HlsManifestAcceptanceState::Collecting;
+        return Some(episode.generation);
+    }
+    let started_at_ms = current_time_millis();
+    let timing = acceptance_episode_timing(context, &session, started_at_ms, burst_plan);
+    let generation = session.origin_control.begin_acceptance_episode(started_at_ms, burst_plan, plan.trigger, &timing);
+    if let Some(episode) = session.origin_control.acceptance_episode.as_mut() {
+        episode.state = HlsManifestAcceptanceState::Collecting;
+        debug!(
+            "HLS manifest acceptance full burst started: generation={} candidates={} max_stagger_ms={} binding_scheme={} binding_host={} provider_url_index={}",
+            generation.0,
+            episode.required_candidates(),
+            episode.burst_max_stagger_ms(),
+            plan.binding.request_url().scheme(),
+            plan.binding
+                .request_url()
+                .host_str()
+                .map_or_else(|| "none".to_string(), hls_origin_log_value),
+            plan.binding
+                .provider_url_index()
+                .map_or_else(|| "none".to_string(), |index| index.to_string())
+        );
+    }
+    Some(generation)
+}
+
+fn acceptance_episode_timing(
+    context: &HlsOriginManifestFetchContext,
+    session: &super::HlsSession,
+    started_at_ms: u64,
+    burst_plan: HlsManifestRecoveryBurstPlan,
+) -> HlsAcceptanceEpisodeTiming {
+    let fallback_target_duration_ms = session
+        .origin_control
+        .target_duration_snapshot_ms
+        .or_else(|| session.target_duration.map(|seconds| u64::from(seconds).saturating_mul(1_000)))
+        .unwrap_or(15_000);
+    let seed = context.acceptance_timing_seed.unwrap_or(HlsAcceptanceEpisodeTimingSeed {
+        target_duration_ms: fallback_target_duration_ms,
+        transition_margin: HlsTransitionMarginMs::from_millis(fallback_target_duration_ms),
+        workload: HlsRecoveryWorkloadEnvelope::acceptance_policy().ceiling(),
+        required_terminal_media_key: None,
+        terminal_media_preparation: HlsTerminalMediaPreparationState::Failed { key: None },
+    });
+    HlsAcceptanceEpisodeTiming::from_input(&HlsAcceptanceEpisodeTimingInput {
+        started_at_ms,
+        burst_plan,
+        target_duration_ms: seed.target_duration_ms,
+        transition_margin: seed.transition_margin,
+        workload: seed.workload,
+        observed_latency: session.origin_control.recovery_samples.latency_snapshot(),
+        required_terminal_media_key: seed.required_terminal_media_key,
+        terminal_media_preparation: seed.terminal_media_preparation,
+        policy: context.recovery_timing_policy,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct HlsManifestAcceptanceEpisodeSnapshot {
+    trigger: HlsManifestAcceptanceTrigger,
+    full_burst_completed: bool,
+    held_alternative: Option<HlsAlternativeOriginCohort>,
+    observed_landscape: Option<HlsManifestAcceptanceLandscape>,
+}
+
+async fn manifest_acceptance_episode_snapshot(
+    context: &HlsOriginManifestFetchContext,
+    generation: Option<HlsManifestAcceptanceGeneration>,
+) -> Option<HlsManifestAcceptanceEpisodeSnapshot> {
+    let generation = generation?;
+    let session = context.session.read().await;
+    session.origin_control.acceptance_episode.as_ref().filter(|episode| episode.generation == generation).map(
+        |episode| HlsManifestAcceptanceEpisodeSnapshot {
+            trigger: episode.trigger(),
+            full_burst_completed: episode.full_burst_completed,
+            held_alternative: episode.held_alternative.clone(),
+            observed_landscape: episode.observed_landscape.clone(),
+        },
+    )
+}
+
+async fn record_manifest_acceptance_landscape(
+    context: &HlsOriginManifestFetchContext,
+    generation: Option<HlsManifestAcceptanceGeneration>,
+    landscape: HlsManifestAcceptanceLandscape,
+) {
+    let Some(generation) = generation else {
+        return;
+    };
+    let mut session = context.session.write().await;
+    let Some(episode) = session.origin_control.acceptance_episode.as_mut() else {
+        return;
+    };
+    if episode.generation == generation {
+        episode.observed_landscape = Some(landscape);
+    }
+}
+
+async fn begin_requalified_manifest_acceptance_episode(
+    context: &HlsOriginManifestFetchContext,
+    generation: Option<HlsManifestAcceptanceGeneration>,
+    trigger: HlsManifestAcceptanceTrigger,
+    acceptance_deadline: HlsAcceptanceDeadlineMs,
+) -> bool {
+    let Some(generation) = generation else {
+        return false;
+    };
+    let mut session = context.session.write().await;
+    let now_ms = current_time_millis();
+    if !acceptance_attempt_may_start(false, now_ms, 0, acceptance_deadline) {
+        return false;
+    }
+    let Some(episode) = session.origin_control.acceptance_episode.as_mut() else {
+        return false;
+    };
+    if episode.generation != generation
+        || !episode.full_burst_completed
+        || episode.state == HlsManifestAcceptanceState::Completed
+    {
+        return false;
+    }
+    episode.state = HlsManifestAcceptanceState::Holding;
+    let configured_plan = context.manifest_recovery_burst.level.plan();
+    let timing = acceptance_episode_timing(context, &session, now_ms, configured_plan);
+    let next_generation = session.origin_control.begin_acceptance_episode(now_ms, configured_plan, trigger, &timing);
+    debug!(
+        "HLS manifest acceptance landscape changed: previous_generation={} next_generation={} candidates={} decision=full-requalification",
+        generation.0,
+        next_generation.0,
+        configured_plan.total_candidates()
+    );
+    true
+}
+
+async fn record_full_manifest_acceptance_burst(
+    context: &HlsOriginManifestFetchContext,
+    generation: Option<HlsManifestAcceptanceGeneration>,
+    current_burst_is_full_plan: bool,
+    completed_candidates: usize,
+) {
+    if !current_burst_is_full_plan {
+        return;
+    }
+    let Some(generation) = generation else {
+        return;
+    };
+    let mut session = context.session.write().await;
+    let Some(episode) = session.origin_control.acceptance_episode.as_mut() else {
+        return;
+    };
+    if episode.generation == generation {
+        episode.record_full_burst_candidates(completed_candidates);
+    }
+}
+
+async fn update_manifest_acceptance_episode_state(
+    context: &HlsOriginManifestFetchContext,
+    generation: Option<HlsManifestAcceptanceGeneration>,
+    state: HlsManifestAcceptanceState,
+) {
+    let Some(generation) = generation else {
+        return;
+    };
+    let mut session = context.session.write().await;
+    let Some(episode) = session.origin_control.acceptance_episode.as_mut() else {
+        return;
+    };
+    if episode.generation == generation {
+        episode.state = state;
+    }
+}
+
+async fn hold_uncommitted_manifest_acceptance_episode(
+    context: &HlsOriginManifestFetchContext,
+    generation: Option<HlsManifestAcceptanceGeneration>,
+    held_alternative: Option<HlsAlternativeOriginCohort>,
+    next_retry_at_ms: u64,
+) {
+    let Some(generation) = generation else {
+        return;
+    };
+    let mut session = context.session.write().await;
+    let Some(episode) = session.origin_control.acceptance_episode.as_mut() else {
+        return;
+    };
+    if episode.generation == generation {
+        episode.hold_after_uncommitted_burst(held_alternative, Some(next_retry_at_ms));
+        session.origin_control.path_condition = super::origin_progress::HlsOriginPathCondition::AcceptanceConflict;
+    }
+}
+
+async fn complete_manifest_acceptance_episode(
+    context: &HlsOriginManifestFetchContext,
+    generation: Option<HlsManifestAcceptanceGeneration>,
+) {
+    let Some(generation) = generation else {
+        return;
+    };
+    let mut session = context.session.write().await;
+    let Some(episode) = session.origin_control.acceptance_episode.as_mut() else {
+        return;
+    };
+    if episode.generation == generation {
+        episode.complete();
+    }
+}
+
+fn manifest_acceptance_exhaustion_reason(
+    observations: &[HlsManifestCandidateObservation],
+) -> HlsManifestAcceptanceExhaustionReason {
+    if observations.is_empty() {
+        return HlsManifestAcceptanceExhaustionReason::AllFailed;
+    }
+    if observations.iter().all(|candidate| {
+        candidate.host_relation == HlsCandidateHostRelation::PinnedHost
+            && matches!(
+                candidate.local_sequence_relation,
+                Some(HlsHostLocalSequenceRelation::Same | HlsHostLocalSequenceRelation::Backward)
+            )
+    }) {
+        HlsManifestAcceptanceExhaustionReason::NoProgress
+    } else {
+        HlsManifestAcceptanceExhaustionReason::NoCommittableCandidate
+    }
+}
+
+async fn record_manifest_acceptance_exhaustion(
+    context: &HlsOriginManifestFetchContext,
+    generation: Option<HlsManifestAcceptanceGeneration>,
+    reason: HlsManifestAcceptanceExhaustionReason,
+) {
+    let Some(generation) = generation else {
+        return;
+    };
+    let mut session = context.session.write().await;
+    let Some(episode) = session.origin_control.acceptance_episode.as_mut() else {
+        return;
+    };
+    if episode.generation == generation {
+        episode.record_exhaustion(reason);
+    }
+}
+
+fn manifest_candidate_observation(
+    candidate: &HlsManifestRecoveryCandidate,
+    burst_plan: HlsManifestRecoveryBurstPlan,
+    committed_resource_identities: &[HlsMediaResourceIdentity],
+    published_resource_identities: &[HlsMediaResourceIdentity],
+) -> HlsManifestCandidateObservation {
+    let host_relation = match candidate.report.quality.host_relation {
+        HlsManifestOriginRelation::SameRedirectHost => HlsCandidateHostRelation::PinnedHost,
+        HlsManifestOriginRelation::OtherRedirectHost => HlsCandidateHostRelation::OtherHost,
+        HlsManifestOriginRelation::Initial => HlsCandidateHostRelation::InitialBaseline,
+        HlsManifestOriginRelation::UnknownHost => HlsCandidateHostRelation::Unknown,
+    };
+    let (timeline_fingerprint, has_switch_segment, emergency_evidence) =
+        build_manifest_timeline_fingerprint(&candidate.fetched.body, &candidate.fetched.final_manifest_url);
+    let resource_timeline_evidence =
+        candidate_resource_timeline_evidence(&timeline_fingerprint, published_resource_identities);
+    let committed_content_anchor = timeline_fingerprint
+        .segment_samples
+        .first()
+        .and_then(|segment| segment.normalized_resource_identity)
+        .filter(|identity| committed_resource_identities.iter().any(|committed| committed.matches(*identity)))
+        .filter(|_| {
+            emergency_evidence.live_handoff == HlsEmergencyLiveHandoffCompatibility::RequiresStagedTrackVerification
+        })
+        .map_or(HlsCommittedContentAnchorEvidence::Unavailable, |_| {
+            HlsCommittedContentAnchorEvidence::RequiresStagedByteVerification
+        });
+    HlsManifestCandidateObservation {
+        candidate_index: candidate.candidate_index,
+        candidate_slot: burst_plan.slot_for_candidate(candidate.candidate_index),
+        effective_host: candidate.report.quality.effective_host.clone(),
+        host_relation,
+        host_local_media_sequence: candidate.report.media_sequence,
+        host_local_highwater: candidate.report.quality.origin_highwater,
+        local_sequence_relation: matches!(
+            host_relation,
+            HlsCandidateHostRelation::PinnedHost | HlsCandidateHostRelation::InitialBaseline
+        )
+        .then(|| {
+            classify_host_local_sequence(
+                candidate.report.quality.previous_highwater,
+                candidate.report.quality.origin_highwater,
+                candidate.report.quality.allowed_forward_window.unwrap_or(1),
+                candidate.report.quality.sequence_relation == HlsManifestSequenceRelation::Rebase,
+            )
+        })
+        .flatten(),
+        resource_timeline_evidence,
+        timeline_fingerprint,
+        manifest_fetch_elapsed_ms: candidate.fetch_elapsed_ms,
+        switch_segment_readiness: if has_switch_segment {
+            HlsSwitchSegmentReadiness::RequiresStaging
+        } else {
+            HlsSwitchSegmentReadiness::Unavailable
+        },
+        committed_content_anchor,
+        emergency_evidence,
+        evidence: HlsCrossHostAcceptanceEvidence::Insufficient,
+    }
+}
+
+struct HlsCommittedResourceEvidence {
+    ready_identities: Vec<HlsMediaResourceIdentity>,
+    published_identities: Vec<HlsMediaResourceIdentity>,
+    published_entries: Vec<(HlsMediaResourceIdentity, u64)>,
+    previous_proxy_tail: Option<u64>,
+    origin_progress_generation: u64,
+    published_resource_history_generation: u64,
+    pinned_host_generation: u64,
+}
+
+async fn committed_resource_evidence(context: &HlsOriginManifestFetchContext) -> HlsCommittedResourceEvidence {
+    let session = context.session.read().await;
+    let ready_identities = session
+        .segments
+        .values()
+        .rev()
+        .filter(|entry| entry.origin_key.origin_epoch == session.origin_epoch)
+        .filter(|entry| matches!(&entry.status, super::SegmentCacheStatus::Ready { .. }))
+        .filter_map(|entry| {
+            let fetch_ref = entry.origin_fetch_ref.as_ref()?;
+            Some(HlsMediaResourceIdentity::from_url(&fetch_ref.resolved_origin_url, fetch_ref.byte_range))
+        })
+        .take(HLS_COMMITTED_CONTENT_ANCHOR_PROBE_LIMIT)
+        .collect::<Vec<_>>();
+    let published_entries = session.published_resource_history.recent_entries(usize::MAX).collect::<Vec<_>>();
+    let published_identities = published_entries.iter().map(|(identity, _)| *identity).collect();
+    HlsCommittedResourceEvidence {
+        ready_identities,
+        published_identities,
+        published_entries,
+        previous_proxy_tail: session.proxy_next_seq.and_then(|next| next.checked_sub(1)),
+        origin_progress_generation: session.origin_control.progress_generation,
+        published_resource_history_generation: session.published_resource_history.generation(),
+        pinned_host_generation: session.origin_epoch,
+    }
+}
+
+fn candidate_resource_timeline_evidence(
+    fingerprint: &HlsManifestTimelineFingerprint,
+    published: &[HlsMediaResourceIdentity],
+) -> HlsResourceTimelineEvidence {
+    let mut saw_published = false;
+    let mut saw_new = false;
+    for identity in fingerprint
+        .segment_samples
+        .iter()
+        .filter_map(|segment| segment.normalized_resource_identity)
+    {
+        let was_published = published.iter().any(|existing| existing.matches(identity));
+        if was_published && saw_new {
+            return HlsResourceTimelineEvidence::ContradictoryOrder;
+        }
+        saw_published |= was_published;
+        saw_new |= !was_published;
+    }
+    if saw_published && !saw_new {
+        HlsResourceTimelineEvidence::ReplayOnly
+    } else {
+        HlsResourceTimelineEvidence::Eligible
+    }
+}
+
+fn deterministic_timeline_conflict_for_candidate(
+    candidate: &HlsManifestRecoveryCandidate,
+    evidence: &HlsCommittedResourceEvidence,
+) -> Option<HlsDeterministicTimelineConflict> {
+    let OriginManifestParseOutcome::Normal(manifest) =
+        parse_origin_media_manifest(&candidate.fetched.body, &candidate.fetched.final_manifest_url)
+    else {
+        return None;
+    };
+    let candidate_fingerprint = deterministic_conflict_fingerprint(
+        &manifest,
+        &candidate.fetched.body,
+        &candidate.fetched.final_manifest_url,
+    );
+    let mut saw_new = false;
+    for (candidate_position, segment) in manifest.segments.iter().enumerate() {
+        let identity = HlsMediaResourceIdentity::from_url(&segment.resolved_origin_url, segment.origin_byte_range);
+        let resource_key = identity.semantic_key();
+        let published = evidence
+            .published_entries
+            .iter()
+            .find(|(published, _)| published.semantic_key() == resource_key);
+        if let Some((_, existing_proxy_seq)) = published {
+            if saw_new {
+                return Some(HlsDeterministicTimelineConflict {
+                    previous_proxy_tail: evidence.previous_proxy_tail,
+                    existing_proxy_seq: *existing_proxy_seq,
+                    candidate_position,
+                    candidate_origin_seq: segment.origin_seq,
+                    resource_key,
+                    decision: HlsResourceReplayDecision::RejectContradictoryOrder,
+                    candidate_fingerprint,
+                });
+            }
+        } else {
+            saw_new = true;
+        }
+    }
+    None
+}
+
+fn deterministic_conflict_proven_by_full_burst(
+    initial: Option<&HlsDeterministicTimelineConflict>,
+    evaluations: &[(HlsManifestCandidateObservation, Option<HlsDeterministicTimelineConflict>)],
+    fetched_candidates: usize,
+    required_candidates: usize,
+) -> Option<HlsDeterministicTimelineConflict> {
+    if fetched_candidates != required_candidates || evaluations.len() != required_candidates {
+        return None;
+    }
+    let first = evaluations.first()?.1.as_ref()?;
+    if initial.is_some_and(|initial| initial != first)
+        || evaluations.iter().any(|(_, conflict)| conflict.as_ref() != Some(first))
+    {
+        return None;
+    }
+    Some(first.clone())
+}
+
+async fn record_deterministic_conflict_receipt(
+    context: &HlsOriginManifestFetchContext,
+    generation: Option<HlsManifestAcceptanceGeneration>,
+    conflict: HlsDeterministicTimelineConflict,
+    evidence: &HlsCommittedResourceEvidence,
+) {
+    let Some(generation) = generation else {
+        return;
+    };
+    let mut session = context.session.write().await;
+    let receipt = HlsDeterministicConflictReceipt {
+        conflict,
+        origin_progress_generation: evidence.origin_progress_generation,
+        published_resource_history_generation: evidence.published_resource_history_generation,
+        pinned_host_generation: evidence.pinned_host_generation,
+    };
+    let Some(episode) = session.origin_control.acceptance_episode.as_mut() else {
+        return;
+    };
+    if episode.generation == generation {
+        episode.record_deterministic_conflict(receipt);
+    }
+}
+
+pub(crate) fn deterministic_conflict_receipt_matches(
+    session: &super::HlsSession,
+    conflict: &HlsDeterministicTimelineConflict,
+) -> bool {
+    session
+        .origin_control
+        .acceptance_episode
+        .as_ref()
+        .and_then(|episode| episode.deterministic_conflict_receipt())
+        .is_some_and(|receipt| {
+            receipt.conflict == *conflict && deterministic_conflict_receipt_is_current_for_session(receipt, session)
+        })
+}
+
+pub(crate) fn deterministic_conflict_receipt_is_current(session: &super::HlsSession) -> bool {
+    session
+        .origin_control
+        .acceptance_episode
+        .as_ref()
+        .and_then(|episode| episode.deterministic_conflict_receipt())
+        .is_some_and(|receipt| deterministic_conflict_receipt_is_current_for_session(receipt, session))
+}
+
+fn deterministic_conflict_receipt_is_current_for_session(
+    receipt: &HlsDeterministicConflictReceipt,
+    session: &super::HlsSession,
+) -> bool {
+    receipt.origin_progress_generation == session.origin_control.progress_generation
+        && receipt.published_resource_history_generation == session.published_resource_history.generation()
+        && receipt.pinned_host_generation == session.origin_epoch
+}
+
+fn build_manifest_timeline_fingerprint(
+    body: &str,
+    final_manifest_url: &str,
+) -> (HlsManifestTimelineFingerprint, bool, HlsEmergencyAcceptanceEvidence) {
+    match parse_origin_media_manifest(body, final_manifest_url) {
+        OriginManifestParseOutcome::Normal(manifest) => {
+            let has_switch_segment = !manifest.segments.is_empty();
+            let emergency_evidence = emergency_manifest_evidence(&manifest);
+            (fingerprint_parsed_manifest(&manifest, body, final_manifest_url), has_switch_segment, emergency_evidence)
+        }
+        OriginManifestParseOutcome::TransientPassthrough { .. } => {
+            let (fingerprint, _has_media_uri) = fingerprint_transient_manifest(body, final_manifest_url);
+            // Cross-host transient manifests cannot use the normal typed timeline/MAP staging contract. They remain
+            // valid on the pinned host, but an alternative host is not acceptance-ready until a dedicated typed
+            // transient receipt exists.
+            (fingerprint, false, HlsEmergencyAcceptanceEvidence::INCOMPATIBLE)
+        }
+    }
+}
+
+pub(crate) fn deterministic_timeline_conflict_from_rejection(
+    fetched: &FetchedOriginManifest,
+    reason: &HlsManifestRejectLogReason,
+) -> Option<HlsDeterministicTimelineConflict> {
+    let HlsManifestRejectLogReason::PublishedResourceReplay {
+        previous_proxy_tail,
+        existing_proxy_seq,
+        candidate_position,
+        candidate_origin_seq,
+        resource_key: expected_resource_key,
+        decision: HlsResourceReplayDecision::RejectContradictoryOrder,
+    } = reason
+    else {
+        return None;
+    };
+    let OriginManifestParseOutcome::Normal(manifest) =
+        parse_origin_media_manifest(&fetched.body, &fetched.final_manifest_url)
+    else {
+        return None;
+    };
+    let segment = manifest.segments.get(*candidate_position)?;
+    let resource_key =
+        HlsMediaResourceIdentity::from_url(&segment.resolved_origin_url, segment.origin_byte_range).semantic_key();
+    if resource_key != *expected_resource_key {
+        return None;
+    }
+    let candidate_fingerprint =
+        deterministic_conflict_fingerprint(&manifest, &fetched.body, &fetched.final_manifest_url);
+    Some(HlsDeterministicTimelineConflict {
+        previous_proxy_tail: *previous_proxy_tail,
+        existing_proxy_seq: *existing_proxy_seq,
+        candidate_position: *candidate_position,
+        candidate_origin_seq: *candidate_origin_seq,
+        resource_key,
+        decision: HlsResourceReplayDecision::RejectContradictoryOrder,
+        candidate_fingerprint,
+    })
+}
+
+fn emergency_manifest_evidence(manifest: &ParsedOriginManifest) -> HlsEmergencyAcceptanceEvidence {
+    let clear_mpeg_ts_without_map = manifest.maps.is_empty()
+        && !manifest.segments.is_empty()
+        && manifest.segments.iter().all(|segment| segment.encryption.is_none())
+        && manifest.segments.iter().all(|segment| is_mpeg_ts_resource(&segment.resolved_origin_url));
+    if clear_mpeg_ts_without_map {
+        HlsEmergencyAcceptanceEvidence {
+            live_handoff: HlsEmergencyLiveHandoffCompatibility::RequiresStagedTrackVerification,
+            terminal_alternative: HlsTerminalAlternativeCompatibility::RequiresStagedComparison,
+        }
+    } else {
+        HlsEmergencyAcceptanceEvidence::INCOMPATIBLE
+    }
+}
+
+fn is_mpeg_ts_resource(resource: &str) -> bool {
+    Url::parse(resource).ok().map_or_else(
+        || {
+            resource
+                .split(['?', '#'])
+                .next()
+                .and_then(|path| path.rsplit_once('.'))
+                .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("ts"))
+        },
+        |url| url.path().rsplit_once('.').is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("ts")),
+    )
+}
+
+fn fingerprint_parsed_manifest(
+    manifest: &ParsedOriginManifest,
+    body: &str,
+    final_manifest_url: &str,
+) -> HlsManifestTimelineFingerprint {
+    let mut duration_hasher = Sha256::new();
+    let mut discontinuity_hasher = Sha256::new();
+    let mut resource_hasher = Sha256::new();
+    let mut container_hasher = Sha256::new();
+    let mut segment_samples = Vec::with_capacity(manifest.segments.len().min(HLS_MANIFEST_FINGERPRINT_SEGMENT_LIMIT));
+    let mut first_program_date_time_ms = None;
+    let mut last_program_date_time_ms = None;
+    for segment in &manifest.segments {
+        duration_hasher.update(segment.duration_ms.to_be_bytes());
+        discontinuity_hasher.update([u8::from(segment.discontinuity_before)]);
+        let resource_identity =
+            HlsMediaResourceIdentity::from_url(&segment.resolved_origin_url, segment.origin_byte_range);
+        resource_hasher.update(resource_identity.exact_path_hash());
+        update_container_signature(&mut container_hasher, &segment.resolved_origin_url);
+        let program_date_time_ms = parse_program_date_time_ms(segment.program_date_time.as_deref());
+        first_program_date_time_ms = first_program_date_time_ms.or(program_date_time_ms);
+        if program_date_time_ms.is_some() {
+            last_program_date_time_ms = program_date_time_ms;
+        }
+        if segment_samples.len() < HLS_MANIFEST_FINGERPRINT_SEGMENT_LIMIT {
+            segment_samples.push(HlsManifestSegmentFingerprint {
+                duration_ms: segment.duration_ms,
+                discontinuity_before: segment.discontinuity_before,
+                program_date_time_ms,
+                normalized_resource_identity: Some(resource_identity),
+            });
+        }
+    }
+    if !manifest.maps.is_empty() {
+        container_hasher.update(b"map");
+    }
+    HlsManifestTimelineFingerprint {
+        segment_count: u32::try_from(manifest.segments.len()).unwrap_or(u32::MAX),
+        first_program_date_time_ms,
+        last_program_date_time_ms,
+        duration_pattern_hash: duration_hasher.finalize().into(),
+        discontinuity_pattern_hash: discontinuity_hasher.finalize().into(),
+        normalized_resource_pattern_hash: (!manifest.segments.is_empty()).then(|| resource_hasher.finalize().into()),
+        map_and_encryption_hash: map_and_encryption_hash(body, &manifest.maps, final_manifest_url),
+        container_signature_hash: container_hasher.finalize().into(),
+        segment_samples,
+    }
+}
+
+fn deterministic_conflict_fingerprint(
+    manifest: &ParsedOriginManifest,
+    body: &str,
+    final_manifest_url: &str,
+) -> HlsDeterministicConflictFingerprint {
+    let mut duration_hasher = Sha256::new();
+    let mut discontinuity_hasher = Sha256::new();
+    let mut resource_hasher = Sha256::new();
+    let mut container_hasher = Sha256::new();
+    let mut segment_samples = Vec::with_capacity(manifest.segments.len().min(HLS_MANIFEST_FINGERPRINT_SEGMENT_LIMIT));
+    let mut first_program_date_time_ms = None;
+    let mut last_program_date_time_ms = None;
+    for segment in &manifest.segments {
+        duration_hasher.update(segment.duration_ms.to_be_bytes());
+        discontinuity_hasher.update([u8::from(segment.discontinuity_before)]);
+        let resource_key =
+            HlsMediaResourceIdentity::from_url(&segment.resolved_origin_url, segment.origin_byte_range).semantic_key();
+        resource_hasher.update(resource_key.bytes());
+        update_container_signature(&mut container_hasher, &segment.resolved_origin_url);
+        let program_date_time_ms = parse_program_date_time_ms(segment.program_date_time.as_deref());
+        first_program_date_time_ms = first_program_date_time_ms.or(program_date_time_ms);
+        if program_date_time_ms.is_some() {
+            last_program_date_time_ms = program_date_time_ms;
+        }
+        if segment_samples.len() < HLS_MANIFEST_FINGERPRINT_SEGMENT_LIMIT {
+            segment_samples.push(HlsDeterministicConflictSegmentFingerprint {
+                duration_ms: segment.duration_ms,
+                discontinuity_before: segment.discontinuity_before,
+                program_date_time_ms,
+                resource_key: Some(resource_key),
+            });
+        }
+    }
+    if !manifest.maps.is_empty() {
+        container_hasher.update(b"map");
+    }
+    HlsDeterministicConflictFingerprint {
+        segment_count: u32::try_from(manifest.segments.len()).unwrap_or(u32::MAX),
+        first_program_date_time_ms,
+        last_program_date_time_ms,
+        duration_pattern_hash: duration_hasher.finalize().into(),
+        discontinuity_pattern_hash: discontinuity_hasher.finalize().into(),
+        semantic_resource_pattern_hash: (!manifest.segments.is_empty()).then(|| resource_hasher.finalize().into()),
+        map_and_encryption_hash: semantic_map_and_encryption_hash(body, &manifest.maps, final_manifest_url),
+        container_signature_hash: container_hasher.finalize().into(),
+        segment_samples,
+    }
+}
+
+fn fingerprint_transient_manifest(body: &str, final_manifest_url: &str) -> (HlsManifestTimelineFingerprint, bool) {
+    let timeline = parse_origin_manifest_timeline(body).ok();
+    let mut duration_hasher = Sha256::new();
+    let mut discontinuity_hasher = Sha256::new();
+    let mut resource_hasher = Sha256::new();
+    let mut container_hasher = Sha256::new();
+    let mut segment_samples = Vec::new();
+    let mut pending_duration_ms = None;
+    let mut pending_discontinuity = false;
+    let mut pending_program_date_time_ms = None;
+    let mut first_program_date_time_ms = None;
+    let mut last_program_date_time_ms = None;
+    for line in body.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some(value) = line.strip_prefix("#EXTINF:") {
+            pending_duration_ms = parse_extinf_millis(value);
+        } else if line == "#EXT-X-DISCONTINUITY" {
+            pending_discontinuity = true;
+        } else if let Some(value) = line.strip_prefix("#EXT-X-PROGRAM-DATE-TIME:") {
+            pending_program_date_time_ms = parse_program_date_time_ms(Some(value.trim()));
+        } else if !line.starts_with('#') {
+            let Some(duration_ms) = pending_duration_ms.take() else {
+                continue;
+            };
+            let resolved = resolve_fingerprint_resource(final_manifest_url, line);
+            let resource_identity = HlsMediaResourceIdentity::from_url(&resolved, None);
+            duration_hasher.update(duration_ms.to_be_bytes());
+            discontinuity_hasher.update([u8::from(pending_discontinuity)]);
+            resource_hasher.update(resource_identity.exact_path_hash());
+            update_container_signature(&mut container_hasher, &resolved);
+            first_program_date_time_ms = first_program_date_time_ms.or(pending_program_date_time_ms);
+            if pending_program_date_time_ms.is_some() {
+                last_program_date_time_ms = pending_program_date_time_ms;
+            }
+            if segment_samples.len() < HLS_MANIFEST_FINGERPRINT_SEGMENT_LIMIT {
+                segment_samples.push(HlsManifestSegmentFingerprint {
+                    duration_ms,
+                    discontinuity_before: pending_discontinuity,
+                    program_date_time_ms: pending_program_date_time_ms,
+                    normalized_resource_identity: Some(resource_identity),
+                });
+            }
+            pending_discontinuity = false;
+            pending_program_date_time_ms = None;
+        }
+    }
+    let segment_count = timeline
+        .map(|timeline| u32::try_from(timeline.origin_manifest_segment_cnt).unwrap_or(u32::MAX))
+        .unwrap_or_default();
+    let has_switch_segment = segment_count > 0 && !segment_samples.is_empty();
+    (
+        HlsManifestTimelineFingerprint {
+            segment_count,
+            first_program_date_time_ms,
+            last_program_date_time_ms,
+            duration_pattern_hash: duration_hasher.finalize().into(),
+            discontinuity_pattern_hash: discontinuity_hasher.finalize().into(),
+            normalized_resource_pattern_hash: has_switch_segment.then(|| resource_hasher.finalize().into()),
+            map_and_encryption_hash: map_and_encryption_hash(body, &[], final_manifest_url),
+            container_signature_hash: container_hasher.finalize().into(),
+            segment_samples,
+        },
+        has_switch_segment,
+    )
+}
+
+fn parse_extinf_millis(value: &str) -> Option<u64> {
+    let seconds = value.split(',').next()?.trim().parse::<f64>().ok()?;
+    if !seconds.is_finite() || seconds.is_sign_negative() {
+        return None;
+    }
+    let Ok(duration) = Duration::try_from_secs_f64(seconds) else {
+        return Some(u64::MAX);
+    };
+    let rounded = duration.checked_add(Duration::from_micros(500)).unwrap_or(Duration::MAX);
+    Some(u64::try_from(rounded.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn parse_program_date_time_ms(value: Option<&str>) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(value?).ok().map(|timestamp| timestamp.timestamp_millis())
+}
+
+fn resolve_fingerprint_resource(final_manifest_url: &str, resource: &str) -> String {
+    Url::parse(final_manifest_url)
+        .ok()
+        .and_then(|base| base.join(resource).ok())
+        .map_or_else(|| resource.to_string(), |resolved| resolved.to_string())
+}
+
+fn update_container_signature(hasher: &mut Sha256, url: &str) {
+    let path = Url::parse(url)
+        .ok()
+        .map_or_else(|| url.split('?').next().unwrap_or_default().to_string(), |parsed| parsed.path().to_string());
+    let extension = path.rsplit_once('.').map(|(_, extension)| extension).unwrap_or_default();
+    hasher.update(extension.to_ascii_lowercase().as_bytes());
+    hasher.update([0]);
+}
+
+fn map_and_encryption_hash(
+    body: &str,
+    maps: &[crate::processing::parser::hls::origin_manifest::ParsedOriginMap],
+    final_manifest_url: &str,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for map in maps {
+        hasher.update(
+            HlsMediaResourceIdentity::from_url(&map.resolved_origin_uri, map.byte_range).exact_path_hash(),
+        );
+    }
+    for line in body
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("#EXT-X-KEY:") || (maps.is_empty() && line.starts_with("#EXT-X-MAP:")))
+    {
+        hasher.update(normalized_tag_uri(line, final_manifest_url).as_bytes());
+        hasher.update([0]);
+    }
+    hasher.finalize().into()
+}
+
+fn semantic_map_and_encryption_hash(
+    body: &str,
+    maps: &[crate::processing::parser::hls::origin_manifest::ParsedOriginMap],
+    final_manifest_url: &str,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for map in maps {
+        hasher.update(
+            HlsMediaResourceIdentity::from_url(&map.resolved_origin_uri, map.byte_range)
+                .semantic_key()
+                .bytes(),
+        );
+    }
+    for line in body
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("#EXT-X-KEY:") || (maps.is_empty() && line.starts_with("#EXT-X-MAP:")))
+    {
+        update_semantic_tag_identity(&mut hasher, line, final_manifest_url);
+        hasher.update([0]);
+    }
+    hasher.finalize().into()
+}
+
+fn update_semantic_tag_identity(hasher: &mut Sha256, line: &str, final_manifest_url: &str) {
+    let Some(uri_start) = line.find("URI=\"") else {
+        hasher.update(line.as_bytes());
+        return;
+    };
+    let value_start = uri_start.saturating_add(5);
+    let Some(relative_end) = line.get(value_start..).and_then(|tail| tail.find('"')) else {
+        hasher.update(line.as_bytes());
+        return;
+    };
+    let value_end = value_start.saturating_add(relative_end);
+    let uri = line.get(value_start..value_end).unwrap_or_default();
+    let resolved = resolve_fingerprint_resource(final_manifest_url, uri);
+    hasher.update(&line.as_bytes()[..value_start]);
+    hasher.update(HlsMediaResourceIdentity::from_url(&resolved, None).semantic_key().bytes());
+    hasher.update(&line.as_bytes()[value_end..]);
+}
+
+fn normalized_tag_uri(line: &str, final_manifest_url: &str) -> String {
+    let Some(uri_start) = line.find("URI=\"") else {
+        return line.to_string();
+    };
+    let value_start = uri_start.saturating_add(5);
+    let Some(relative_end) = line.get(value_start..).and_then(|tail| tail.find('"')) else {
+        return line.to_string();
+    };
+    let value_end = value_start.saturating_add(relative_end);
+    let uri = line.get(value_start..value_end).unwrap_or_default();
+    let normalized_uri = Url::parse(uri)
+        .ok()
+        .or_else(|| Url::parse(final_manifest_url).ok()?.join(uri).ok())
+        .map_or_else(|| uri.split(['?', '#']).next().unwrap_or_default().to_string(), |url| url.path().to_string());
+    format!("{}{}{}", &line[..value_start], normalized_uri, &line[value_end..])
+}
+
 async fn fetch_manifest_recovery_burst_candidates(
     context: &HlsOriginManifestFetchContext,
-    target_url: &Url,
-    provider_url_index: Option<usize>,
-    attempt_index: usize,
-    attempts: usize,
-    reject_reason: Option<&HlsManifestRejectLogReason>,
+    plan: &HlsManifestRecoveryAttemptPlan<'_>,
     burst_plan: HlsManifestRecoveryBurstPlan,
-) -> (Vec<HlsManifestRecoveryCandidate>, Option<OriginManifestFetchError>, Option<HlsManifestRejectLogReason>) {
+) -> HlsManifestRecoveryBurstCollection {
     let mut tasks = JoinSet::new();
     let candidates = burst_plan.total_candidates();
     for candidate_index in 0..candidates {
         let context = context.clone();
-        let target_url = target_url.clone();
-        let reject_reason = reject_reason.cloned();
+        let binding = plan.binding.clone();
+        let reject_reason = plan.reject_reason.cloned();
+        let attempt_index = plan.attempt_index;
+        let attempts = plan.attempts;
         tasks.spawn(async move {
-            let stagger_ms =
-                u64::try_from(burst_plan.slot_for_candidate(candidate_index)).unwrap_or_default().saturating_mul(100);
+            let stagger_ms = u64::try_from(burst_plan.slot_for_candidate(candidate_index))
+                .unwrap_or_default()
+                .saturating_mul(HLS_MANIFEST_RECOVERY_BURST_SLOT_DELAY_MS);
             if stagger_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(stagger_ms)).await;
             }
             let request = HlsOriginManifestFetchRequest::recovery_direct_target(
                 &context,
-                &target_url,
-                provider_url_index,
+                &binding,
                 reject_reason.as_ref(),
                 ManifestRecoveryAttemptLogContext { attempt_index, attempts, candidate_index, candidates },
             );
+            let fetch_started = Instant::now();
             let result = fetch_hls_origin_manifest_request(request).await;
-            (candidate_index, result)
+            let fetch_elapsed_ms = u64::try_from(fetch_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            (candidate_index, fetch_elapsed_ms, result)
         });
     }
 
     let mut last_fetch_error = None;
     let mut last_reject_reason = None;
     let mut fetched_candidates = Vec::new();
+    let mut completed_candidates = 0_usize;
     while let Some(join_result) = tasks.join_next().await {
-        let Ok((candidate_index, result)) = join_result else {
+        completed_candidates = completed_candidates.saturating_add(1);
+        let Ok((candidate_index, fetch_elapsed_ms, result)) = join_result else {
             last_fetch_error = Some(OriginManifestFetchError::Request("manifest recovery task failed".to_string()));
             continue;
         };
         match result {
             Ok(fetched) => {
-                match score_manifest_recovery_candidate_with_logging(context, candidate_index, candidates, &fetched)
-                    .await
+                match score_manifest_recovery_candidate_with_logging(
+                    context,
+                    candidate_index,
+                    candidates,
+                    &fetched,
+                    plan.acceptance_mode,
+                )
+                .await
                 {
                     Ok(report) => {
-                        fetched_candidates.push(HlsManifestRecoveryCandidate { candidate_index, fetched, report });
+                        fetched_candidates.push(HlsManifestRecoveryCandidate {
+                            candidate_index,
+                            fetch_elapsed_ms,
+                            fetched,
+                            report,
+                        });
                     }
                     Err(reason) => last_reject_reason = Some(reason),
                 }
@@ -881,7 +2201,12 @@ async fn fetch_manifest_recovery_burst_candidates(
             }
         }
     }
-    (fetched_candidates, last_fetch_error, last_reject_reason)
+    HlsManifestRecoveryBurstCollection {
+        fetched_candidates,
+        completed_candidates,
+        last_fetch_error,
+        last_reject_reason,
+    }
 }
 
 async fn score_manifest_recovery_candidate_with_logging(
@@ -889,10 +2214,11 @@ async fn score_manifest_recovery_candidate_with_logging(
     candidate_index: usize,
     candidates: usize,
     fetched: &FetchedOriginManifest,
+    acceptance_mode: HlsManifestCommitAcceptanceMode,
 ) -> Result<HlsManifestRecoveryCandidateScoreReport, HlsManifestRejectLogReason> {
     let score_result = {
         let session = context.session.read().await;
-        score_hls_manifest_recovery_candidate(&session, fetched, context)
+        score_hls_manifest_recovery_candidate_with_mode(&session, fetched, context, acceptance_mode)
     };
     match score_result {
         Ok(report) => {
@@ -914,16 +2240,38 @@ async fn score_manifest_recovery_candidate_with_logging(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn score_hls_manifest_recovery_candidate(
     session: &super::HlsSession,
     fetched: &FetchedOriginManifest,
     context: &HlsOriginManifestFetchContext,
 ) -> Result<HlsManifestRecoveryCandidateScoreReport, HlsManifestRejectLogReason> {
+    score_hls_manifest_recovery_candidate_with_mode(
+        session,
+        fetched,
+        context,
+        HlsManifestCommitAcceptanceMode::StrictPinnedHost,
+    )
+}
+
+fn score_hls_manifest_recovery_candidate_with_mode(
+    session: &super::HlsSession,
+    fetched: &FetchedOriginManifest,
+    context: &HlsOriginManifestFetchContext,
+    acceptance_mode: HlsManifestCommitAcceptanceMode,
+) -> Result<HlsManifestRecoveryCandidateScoreReport, HlsManifestRejectLogReason> {
     let timeline = parse_manifest_timeline_for_recovery_scoring(session, fetched)?;
     let media_sequence = timeline.origin_manifest_sequence;
     Ok(HlsManifestRecoveryCandidateScoreReport {
         media_sequence,
-        quality: evaluate_manifest_origin_quality(session, fetched, timeline, context, current_time_millis()),
+        quality: evaluate_manifest_origin_quality_with_mode(
+            session,
+            fetched,
+            timeline,
+            context,
+            current_time_millis(),
+            acceptance_mode,
+        ),
     })
 }
 
@@ -945,23 +2293,6 @@ fn parse_manifest_timeline_for_recovery_scoring(
     }
 }
 
-pub(crate) fn evaluate_manifest_origin_quality(
-    session: &super::HlsSession,
-    fetched: &FetchedOriginManifest,
-    timeline: ParsedOriginManifestTimeline,
-    context: &HlsOriginManifestFetchContext,
-    now_ms: u64,
-) -> HlsManifestOriginQuality {
-    evaluate_manifest_origin_quality_with_mode(
-        session,
-        fetched,
-        timeline,
-        context,
-        now_ms,
-        HlsManifestCommitAcceptanceMode::StrictPinnedHost,
-    )
-}
-
 pub(crate) fn evaluate_manifest_origin_quality_with_mode(
     session: &super::HlsSession,
     fetched: &FetchedOriginManifest,
@@ -972,6 +2303,7 @@ pub(crate) fn evaluate_manifest_origin_quality_with_mode(
 ) -> HlsManifestOriginQuality {
     let effective_host = fetched_effective_manifest_host(fetched);
     let fresh_baseline = matches!(acceptance_mode, HlsManifestCommitAcceptanceMode::FreshBaseline);
+    let fresh_pinned_revalidation = matches!(acceptance_mode, HlsManifestCommitAcceptanceMode::FreshPinnedRevalidation);
     let host_relation = if fresh_baseline {
         if effective_host.is_some() {
             HlsManifestOriginRelation::Initial
@@ -987,48 +2319,38 @@ pub(crate) fn evaluate_manifest_origin_quality_with_mode(
         }
     };
     let origin_highwater = timeline.origin_highwater();
-    let previous_highwater = if fresh_baseline { None } else { session.origin_seq_highwater };
-    let continuity_mode = if fresh_baseline {
+    let previous_highwater = if fresh_baseline || host_relation == HlsManifestOriginRelation::OtherRedirectHost {
+        None
+    } else {
+        session.origin_seq_highwater
+    };
+    let continuity_mode = if fresh_baseline || fresh_pinned_revalidation {
         HlsManifestContinuityMode::RebaseAllowed
     } else {
         manifest_continuity_mode(session, now_ms)
     };
     let allowed_forward_window = allowed_manifest_forward_window(session, context, Some(&fetched.body));
-    let sequence_relation = classify_manifest_sequence_relation(
-        previous_highwater,
-        origin_highwater,
-        allowed_forward_window,
-        continuity_mode,
-    );
+    let sequence_relation = if host_relation == HlsManifestOriginRelation::OtherRedirectHost {
+        HlsManifestSequenceRelation::NoPreviousHighwater
+    } else {
+        classify_manifest_sequence_relation(
+            previous_highwater,
+            origin_highwater,
+            allowed_forward_window,
+            continuity_mode,
+        )
+    };
     let reject_reason =
         manifest_quality_reject_reason(sequence_relation, previous_highwater, origin_highwater, allowed_forward_window);
     let score = manifest_origin_quality_score(host_relation, sequence_relation, reject_reason.is_some());
-    let should_reset_stall_counter = matches!(
-        sequence_relation,
-        HlsManifestSequenceRelation::NoPreviousHighwater
-            | HlsManifestSequenceRelation::Rebase
-            | HlsManifestSequenceRelation::Next
-            | HlsManifestSequenceRelation::PlausibleForward
-    );
-    let should_increment_stall_counter = matches!(
-        sequence_relation,
-        HlsManifestSequenceRelation::NoOriginHighwater
-            | HlsManifestSequenceRelation::Same
-            | HlsManifestSequenceRelation::ForwardTooFar
-            | HlsManifestSequenceRelation::Backward
-    );
-
     HlsManifestOriginQuality {
         score,
-        continuity_mode,
         host_relation,
         sequence_relation,
         effective_host,
         origin_highwater,
         previous_highwater,
         allowed_forward_window,
-        should_increment_stall_counter,
-        should_reset_stall_counter,
         requires_handoff_discontinuity: matches!(
             (host_relation, sequence_relation),
             (HlsManifestOriginRelation::OtherRedirectHost, _) | (_, HlsManifestSequenceRelation::RolloverCandidate)
@@ -1132,31 +2454,20 @@ fn manifest_origin_quality_score(
     }
     let same_host =
         matches!(host_relation, HlsManifestOriginRelation::Initial | HlsManifestOriginRelation::SameRedirectHost);
-    match (same_host, sequence_relation) {
-        (true, HlsManifestSequenceRelation::Next) => HlsManifestOriginQualityScore::SameHostNextSequence,
-        (true, HlsManifestSequenceRelation::Rebase) => HlsManifestOriginQualityScore::SameHostRebase,
-        (true, HlsManifestSequenceRelation::NoPreviousHighwater | HlsManifestSequenceRelation::PlausibleForward) => {
+    if !same_host {
+        return HlsManifestOriginQualityScore::OtherHostCandidate;
+    }
+    match sequence_relation {
+        HlsManifestSequenceRelation::Next => HlsManifestOriginQualityScore::SameHostNextSequence,
+        HlsManifestSequenceRelation::Rebase => HlsManifestOriginQualityScore::SameHostRebase,
+        HlsManifestSequenceRelation::NoPreviousHighwater | HlsManifestSequenceRelation::PlausibleForward => {
             HlsManifestOriginQualityScore::SameHostPlausibleForward
         }
-        (true, HlsManifestSequenceRelation::RolloverCandidate) => {
-            HlsManifestOriginQualityScore::SameHostRolloverCandidate
-        }
-        (true, HlsManifestSequenceRelation::Same) => HlsManifestOriginQualityScore::SameHostUnchanged,
-        (false, HlsManifestSequenceRelation::Next) => HlsManifestOriginQualityScore::OtherHostNextSequence,
-        (false, HlsManifestSequenceRelation::Rebase) => HlsManifestOriginQualityScore::OtherHostRebaseCandidate,
-        (false, HlsManifestSequenceRelation::NoPreviousHighwater | HlsManifestSequenceRelation::PlausibleForward) => {
-            HlsManifestOriginQualityScore::OtherHostPlausibleForward
-        }
-        (false, HlsManifestSequenceRelation::RolloverCandidate) => {
-            HlsManifestOriginQualityScore::OtherHostRolloverCandidate
-        }
-        (false, HlsManifestSequenceRelation::Same) => HlsManifestOriginQualityScore::OtherHostUnchanged,
-        (
-            _,
-            HlsManifestSequenceRelation::NoOriginHighwater
-            | HlsManifestSequenceRelation::ForwardTooFar
-            | HlsManifestSequenceRelation::Backward,
-        ) => HlsManifestOriginQualityScore::Rejected,
+        HlsManifestSequenceRelation::RolloverCandidate => HlsManifestOriginQualityScore::SameHostRolloverCandidate,
+        HlsManifestSequenceRelation::Same => HlsManifestOriginQualityScore::SameHostUnchanged,
+        HlsManifestSequenceRelation::NoOriginHighwater
+        | HlsManifestSequenceRelation::ForwardTooFar
+        | HlsManifestSequenceRelation::Backward => HlsManifestOriginQualityScore::Rejected,
     }
 }
 
@@ -1171,7 +2482,7 @@ pub(crate) async fn log_hls_manifest_initial_selected(
     debug!(
         "Manifest '{}' initial selected: host={} media-sequence={} highwater={} score={}",
         session_label,
-        report.quality.effective_host.as_deref().unwrap_or("none"),
+        report.quality.effective_host.as_deref().map_or_else(|| "none".to_string(), hls_origin_log_value),
         report.media_sequence,
         format_optional_highwater(report.quality.origin_highwater),
         report.quality.score.as_log_value()
@@ -1193,7 +2504,7 @@ async fn log_manifest_recovery_candidate_scored(
         session_label,
         candidate_index + 1,
         candidates,
-        report.quality.effective_host.as_deref().unwrap_or("none"),
+        report.quality.effective_host.as_deref().map_or_else(|| "none".to_string(), hls_origin_log_value),
         report.media_sequence,
         format_optional_highwater(report.quality.origin_highwater),
         report.quality.score.as_log_value()
@@ -1217,7 +2528,7 @@ async fn log_manifest_recovery_candidate_rejected(
         session_label,
         candidate_index + 1,
         candidates,
-        host.unwrap_or("none"),
+        host.map_or_else(|| "none".to_string(), hls_origin_log_value),
         format_optional_highwater(highwater),
         reason.status_label()
     );
@@ -1253,9 +2564,9 @@ async fn log_manifest_initial_attempt(context: &HlsOriginManifestFetchContext) {
     };
     let input_source = context.origin_entry.to_input_source();
     debug!(
-        "Manifest '{}' attempting URL attempt initial: {} reason=origin-refresh",
+        "Manifest '{}' attempting URL attempt initial: request_url={} reason=origin-refresh",
         session_label,
-        safe_origin_log_value(input_source.url.as_str())
+        hls_origin_log_value(input_source.url.as_str())
     );
 }
 
@@ -1276,7 +2587,7 @@ async fn log_manifest_recovery_selected(
         phase.as_log_label(),
         candidate_index + 1,
         candidates,
-        report.quality.effective_host.as_deref().unwrap_or("none"),
+        report.quality.effective_host.as_deref().map_or_else(|| "none".to_string(), hls_origin_log_value),
         report.media_sequence,
         format_optional_highwater(report.quality.origin_highwater),
         report.quality.score.as_log_value()
@@ -1287,8 +2598,11 @@ pub(crate) fn format_optional_highwater(highwater: Option<u64>) -> String {
     highwater.map_or_else(|| "none".to_string(), |value| value.to_string())
 }
 
-fn recovery_burst_plan(context: &HlsOriginManifestFetchContext, attempt_index: usize) -> HlsManifestRecoveryBurstPlan {
-    if attempt_index == 0 {
+fn recovery_burst_plan(
+    context: &HlsOriginManifestFetchContext,
+    current_burst_is_full_plan: bool,
+) -> HlsManifestRecoveryBurstPlan {
+    if current_burst_is_full_plan {
         context.manifest_recovery_burst.level.plan()
     } else {
         HlsManifestRecoveryBurstLevel::Off.plan()
@@ -1335,67 +2649,6 @@ fn origin_highwater_is_within_limit(origin_highwater: u64, origin_highwater_limi
     origin_highwater_limit.is_some_and(|limit| origin_highwater <= limit)
 }
 
-pub(crate) fn manifest_origin_quality_from_candidate(
-    candidate: Option<&super::HlsManifestHostSwitchCandidate>,
-) -> HlsManifestOriginQuality {
-    let (effective_host, origin_highwater, score) =
-        candidate.map_or((None, None, HlsManifestOriginQualityScore::Rejected), |candidate| {
-            (
-                Some(candidate.host.clone()),
-                candidate.highwater,
-                manifest_origin_quality_score_from_rank(candidate.quality_score),
-            )
-        });
-    HlsManifestOriginQuality {
-        score,
-        continuity_mode: HlsManifestContinuityMode::StrictContinuity,
-        host_relation: HlsManifestOriginRelation::OtherRedirectHost,
-        sequence_relation: HlsManifestSequenceRelation::NoOriginHighwater,
-        effective_host,
-        origin_highwater,
-        previous_highwater: None,
-        allowed_forward_window: None,
-        should_increment_stall_counter: true,
-        should_reset_stall_counter: false,
-        requires_handoff_discontinuity: false,
-        reject_reason: None,
-    }
-}
-
-fn manifest_origin_quality_score_from_rank(rank: u16) -> HlsManifestOriginQualityScore {
-    match rank {
-        100 => HlsManifestOriginQualityScore::SameHostNextSequence,
-        90 => HlsManifestOriginQualityScore::SameHostPlausibleForward,
-        85 => HlsManifestOriginQualityScore::SameHostRebase,
-        75 => HlsManifestOriginQualityScore::OtherHostNextSequence,
-        65 => HlsManifestOriginQualityScore::OtherHostPlausibleForward,
-        60 => HlsManifestOriginQualityScore::OtherHostRebaseCandidate,
-        50 => HlsManifestOriginQualityScore::SameHostRolloverCandidate,
-        35 => HlsManifestOriginQualityScore::OtherHostRolloverCandidate,
-        20 => HlsManifestOriginQualityScore::SameHostUnchanged,
-        10 => HlsManifestOriginQualityScore::OtherHostUnchanged,
-        _ => HlsManifestOriginQualityScore::Rejected,
-    }
-}
-
-pub(crate) fn manifest_host_switch_failure_threshold(session: &super::HlsSession, strip: &StripConfig) -> u32 {
-    let effective_strip_segments = match strip.mode {
-        HlsStripMode::Segments => {
-            u32::try_from(strip.value).unwrap_or(u32::MAX.saturating_sub(HLS_MANIFEST_HOST_SWITCH_BASE_WINDOW_SEGMENTS))
-        }
-        HlsStripMode::Seconds => u32::try_from(session.initial_prefetch_gap_segments)
-            .unwrap_or(u32::MAX.saturating_sub(HLS_MANIFEST_HOST_SWITCH_BASE_WINDOW_SEGMENTS)),
-    };
-    manifest_host_switch_failure_threshold_for_strip_segments(effective_strip_segments)
-}
-
-pub(crate) fn manifest_host_switch_failure_threshold_for_strip_segments(effective_strip_segments: u32) -> u32 {
-    HLS_MANIFEST_HOST_SWITCH_BASE_WINDOW_SEGMENTS
-        .saturating_add(effective_strip_segments)
-        .saturating_div(2)
-        .clamp(1, HLS_MANIFEST_HOST_SWITCH_MAX_FAILURE_THRESHOLD)
-}
-
 pub(crate) fn fetched_effective_manifest_host(fetched: &FetchedOriginManifest) -> Option<String> {
     if fetched.redirect_host.is_some() {
         return fetched.redirect_host.clone();
@@ -1427,17 +2680,11 @@ fn is_hls_retryable_manifest_reject_fetch_error(err: &OriginManifestFetchError) 
         OriginManifestFetchError::PermanentStatus(_)
         | OriginManifestFetchError::NonRetryableStatus(_)
         | OriginManifestFetchError::ProviderUnavailable(_)
+        | OriginManifestFetchError::RecoveryUnavailable { .. }
+        | OriginManifestFetchError::DeterministicTimelineConflict(_)
         | OriginManifestFetchError::ContentCoding(_)
         | OriginManifestFetchError::DecodedBodyLimitExceeded { .. }
         | OriginManifestFetchError::InvalidUtf8 { .. } => false,
-    }
-}
-
-pub(crate) fn commit_error_to_fetch_error(err: &HlsManifestCommitError) -> OriginManifestFetchError {
-    match err {
-        HlsManifestCommitError::TimelineRejected { .. } | HlsManifestCommitError::RetryCurrentTarget => {
-            OriginManifestFetchError::RetryExhausted
-        }
     }
 }
 
@@ -1610,11 +2857,11 @@ async fn fetch_origin_manifest_with_manual_redirects(
 
 async fn fetch_hls_origin_manifest_recovery_direct_target(
     context: &HlsOriginManifestFetchContext,
-    target_url: &Url,
-    provider_url_index: Option<usize>,
+    binding: &HlsManifestOriginBinding,
     reject_reason: Option<&HlsManifestRejectLogReason>,
     log_context: ManifestRecoveryAttemptLogContext,
 ) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
+    let target_url = binding.request_url();
     let session_label = {
         let session = context.session.read().await;
         safe_session_key(&session.key)
@@ -1623,24 +2870,32 @@ async fn fetch_hls_origin_manifest_recovery_direct_target(
         reject_reason.map_or_else(|| "pinned-host-recovery".to_string(), HlsManifestRejectLogReason::status_label);
     if log_context.candidates > 1 {
         debug!(
-            "Manifest '{}' attempting URL attempt {} of {} candidate {} of {}: {} reason={}",
+            "Manifest '{}' attempting URL attempt {} of {} candidate {} of {}: request_url={} reason={}",
             session_label,
             log_context.attempt_index + 1,
             log_context.attempts,
             log_context.candidate_index + 1,
             log_context.candidates,
-            safe_origin_log_value(target_url.as_str()),
+            hls_origin_log_value(target_url.as_str()),
             reason
         );
     } else {
         debug!(
-            "Manifest '{}' attempting URL attempt {} of {}: {} reason={}",
+            "Manifest '{}' attempting URL attempt {} of {}: request_url={} reason={}",
             session_label,
             log_context.attempt_index + 1,
             log_context.attempts,
-            safe_origin_log_value(target_url.as_str()),
+            hls_origin_log_value(target_url.as_str()),
             reason
         );
+    }
+    match target_url.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(OriginManifestFetchError::Request(
+                "invalid non-HTTP manifest recovery binding".to_string(),
+            ));
+        }
     }
     timeout(
         Duration::from_millis(context.origin_manifest_timeout_ms.max(1)),
@@ -1650,7 +2905,7 @@ async fn fetch_hls_origin_manifest_recovery_direct_target(
             &context.client,
             &context.no_redirect_client,
             context.use_manual_redirects,
-            provider_url_index,
+            binding.provider_url_index(),
             context.origin_manifest_timeout_ms,
         ),
     )
@@ -1666,12 +2921,6 @@ struct ManifestRecoveryAttemptLogContext {
     candidates: usize,
 }
 
-impl ManifestRecoveryAttemptLogContext {
-    const fn single(attempt_index: usize, attempts: usize) -> Self {
-        Self { attempt_index, attempts, candidate_index: 0, candidates: 1 }
-    }
-}
-
 async fn response_to_fetched_manifest(
     response: reqwest::Response,
     provider_url_index: Option<usize>,
@@ -1680,9 +2929,9 @@ async fn response_to_fetched_manifest(
 ) -> Result<FetchedOriginManifest, OriginManifestFetchError> {
     let status = response.status();
     debug!(
-        "HLS origin manifest response received: request_target={} final_target={} status={}",
-        safe_origin_log_value(resolved_request_url.as_str()),
-        safe_origin_log_value(response.url().as_str()),
+        "HLS origin manifest response received: request_url={} final_url={} status={}",
+        hls_origin_log_value(resolved_request_url.as_str()),
+        hls_origin_log_value(response.url().as_str()),
         status.as_u16()
     );
     match classify_origin_manifest_status(status) {
@@ -1699,6 +2948,8 @@ async fn response_to_fetched_manifest(
                 provider_session_headers,
                 status: decoded.status,
                 attempts: 1,
+                candidate_requests: 1,
+                selection: HlsManifestFetchSelection::Initial,
             })
         }
         OriginManifestStatusClass::Retryable => {
@@ -1790,17 +3041,17 @@ pub(crate) fn resolved_hls_manifest_request_url_from_input(
     ) {
         Ok((_provider, resolved_url)) => Url::parse(resolved_url.as_ref()).unwrap_or_else(|err| {
             debug!(
-                "HLS provider URL resolution returned invalid URL: error={} origin={}",
+                "HLS provider URL resolution returned invalid URL: error={} request_url={}",
                 sanitize_sensitive_info(err.to_string().as_str()),
-                safe_origin_log_value(input_source.url.as_str())
+                hls_origin_log_value(input_source.url.as_str())
             );
             fallback()
         }),
         Err(err) => {
             debug!(
-                "HLS provider URL resolution failed: error={} origin={}",
+                "HLS provider URL resolution failed: error={} request_url={}",
                 sanitize_sensitive_info(err.to_string().as_str()),
-                safe_origin_log_value(input_source.url.as_str())
+                hls_origin_log_value(input_source.url.as_str())
             );
             fallback()
         }
@@ -1949,13 +3200,6 @@ pub(crate) async fn refresh_from_live_hls_entrypoint_with_retries(
                     format!("error={}", err.log_label()),
                 );
             }
-            Ok(Err(
-                err @ (OriginManifestFetchError::RetryExhausted
-                | OriginManifestFetchError::ProviderUnavailable(_)
-                | OriginManifestFetchError::ContentCoding(_)
-                | OriginManifestFetchError::DecodedBodyLimitExceeded { .. }
-                | OriginManifestFetchError::InvalidUtf8 { .. }),
-            )) => return Err(err),
             Err(OriginManifestFetchError::Timeout) => {
                 if attempt_index + 1 == attempts {
                     return Err(OriginManifestFetchError::Timeout);
@@ -1967,7 +3211,16 @@ pub(crate) async fn refresh_from_live_hls_entrypoint_with_retries(
                     "error=timeout",
                 );
             }
-            Err(err) => Err(err)?,
+            Ok(Err(
+                err @ (OriginManifestFetchError::RetryExhausted
+                | OriginManifestFetchError::RecoveryUnavailable { .. }
+                | OriginManifestFetchError::DeterministicTimelineConflict(_)
+                | OriginManifestFetchError::ProviderUnavailable(_)
+                | OriginManifestFetchError::ContentCoding(_)
+                | OriginManifestFetchError::DecodedBodyLimitExceeded { .. }
+                | OriginManifestFetchError::InvalidUtf8 { .. }),
+            ))
+            | Err(err) => return Err(err),
         }
     }
 
@@ -1982,8 +3235,8 @@ fn log_origin_refresh_retry_scheduled(
     detail: impl AsRef<str>,
 ) {
     warn!(
-        "HLS origin manifest refresh retry scheduled: origin_entry={} attempt={} {} delay_ms={delay_ms}",
-        safe_origin_log_value(origin_entry.url().as_str()),
+        "HLS origin manifest refresh retry scheduled: request_url={} attempt={} {} delay_ms={delay_ms}",
+        hls_origin_log_value(origin_entry.url().as_str()),
         attempt_index + 1,
         detail.as_ref()
     );
@@ -1992,11 +3245,21 @@ fn log_origin_refresh_retry_scheduled(
 #[cfg(test)]
 mod tests {
     use super::{
-        fetch_origin_manifest_once, origin_manifest_content_coding_error, origin_manifest_fetch_error_from_io_error,
-        origin_manifest_fetch_error_from_request_error, request_failed_status_from_message, ManifestRetryLogKind,
-        OriginManifestFetchError, RetryPolicy, MAX_HLS_MANIFEST_BYTES,
+        acceptance_attempt_may_start, attempt_limit_for_started_requalification, build_manifest_timeline_fingerprint,
+        candidate_resource_timeline_evidence, deterministic_conflict_fingerprint,
+        deterministic_timeline_conflict_from_rejection, fetch_origin_manifest_once, origin_manifest_content_coding_error,
+        origin_manifest_fetch_error_from_io_error, origin_manifest_fetch_error_from_request_error,
+        request_failed_status_from_message,
+        selected_manifest_candidate, HlsEmergencyLiveHandoffCompatibility, HlsManifestCommitKind, HlsManifestCommitPlan,
+        FetchedOriginManifest, HlsManifestFetchSelection, HlsManifestRejectLogReason, HlsMediaResourceIdentity,
+        HlsMediaResourceSemanticKey, HlsResourceReplayDecision, HlsResourceTimelineEvidence,
+        HlsTerminalAlternativeCompatibility, ManifestRetryLogKind, OriginManifestFetchError,
+        OriginManifestParseOutcome, RetryPolicy, TimelineMapError, MAX_HLS_MANIFEST_BYTES,
     };
-    use crate::utils::content_coding::{ContentCoding, ContentCodingError};
+    use crate::{
+        api::model::hls_cache::recovery_timing::HlsAcceptanceDeadlineMs,
+        utils::content_coding::{ContentCoding, ContentCodingError},
+    };
     use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
     use flate2::{
         write::{DeflateEncoder, GzEncoder},
@@ -2012,6 +3275,239 @@ mod tests {
     use url::Url;
 
     const TEST_MANIFEST: &[u8] = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nsegment.ts\n";
+
+    #[test]
+    fn hls_recovery_timing_deadline_never_abandons_started_full_burst_but_blocks_late_follow_ups() {
+        let deadline = HlsAcceptanceDeadlineMs::from_millis_since_epoch;
+        assert!(acceptance_attempt_may_start(true, 1_501, 500, deadline(1_000)));
+
+        let reduced_retry_before_deadline = acceptance_attempt_may_start(false, 1_000, 499, deadline(1_500));
+        let reduced_retry_at_deadline = acceptance_attempt_may_start(false, 1_000, 500, deadline(1_500));
+        let requalification_after_deadline = acceptance_attempt_may_start(false, 1_501, 0, deadline(1_500));
+        let saturated_follow_up = acceptance_attempt_may_start(false, u64::MAX - 5, 10, deadline(u64::MAX));
+
+        assert!(reduced_retry_before_deadline);
+        assert!(!reduced_retry_at_deadline);
+        assert!(!requalification_after_deadline);
+        assert!(!saturated_follow_up);
+    }
+
+    #[test]
+    fn requalification_in_last_retry_slot_reserves_exactly_one_mandatory_full_burst() {
+        assert_eq!(attempt_limit_for_started_requalification(5, 1), 5);
+        assert_eq!(attempt_limit_for_started_requalification(5, 4), 6);
+        assert_eq!(attempt_limit_for_started_requalification(usize::MAX, usize::MAX), usize::MAX);
+    }
+
+    #[test]
+    fn encrypted_normal_candidate_is_not_critical_emergency_handoff_evidence() {
+        let encrypted =
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4,\nsegment.ts\n";
+        let (_, has_switch_segment, evidence) =
+            build_manifest_timeline_fingerprint(encrypted, "http://origin.example/live/index.m3u8");
+
+        assert!(has_switch_segment);
+        assert_eq!(evidence.live_handoff, HlsEmergencyLiveHandoffCompatibility::Incompatible);
+        assert_eq!(evidence.terminal_alternative, HlsTerminalAlternativeCompatibility::TerminalTailPreferred);
+    }
+
+    #[test]
+    fn stage_alternative_is_forwarded_to_commit_callback_selection() {
+        let plan = HlsManifestCommitPlan::StageAlternative {
+            candidate_index: 7,
+            kind: HlsManifestCommitKind::AlternativeAsNewEpoch,
+        };
+
+        assert_eq!(selected_manifest_candidate(plan), Some((7, HlsManifestCommitKind::AlternativeAsNewEpoch)));
+    }
+
+    #[test]
+    fn timeline_fingerprint_is_structured_and_ignores_origin_host_and_query_tokens() {
+        let manifest_a = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:7\n\
+            #EXT-X-PROGRAM-DATE-TIME:2026-07-16T10:00:00Z\n#EXTINF:4,\n\
+            https://origin-a.example/live/7.ts?token=secret-a\n#EXT-X-DISCONTINUITY\n#EXTINF:4,\n\
+            https://origin-a.example/live/8.ts?token=secret-a\n";
+        let manifest_b = manifest_a
+            .replace("origin-a.example", "origin-b.example")
+            .replace("secret-a", "secret-b")
+            .replace("#EXT-X-TARGETDURATION:4", "#EXT-X-TARGETDURATION:9");
+
+        let (fingerprint_a, has_media_a, _) =
+            build_manifest_timeline_fingerprint(manifest_a, "https://origin-a.example/live/index.m3u8");
+        let (fingerprint_b, has_media_b, _) =
+            build_manifest_timeline_fingerprint(&manifest_b, "https://origin-b.example/live/index.m3u8");
+
+        assert!(has_media_a);
+        assert!(has_media_b);
+        assert_eq!(fingerprint_a, fingerprint_b);
+        assert_eq!(fingerprint_a.segment_count, 2);
+        assert_eq!(fingerprint_a.first_program_date_time_ms, Some(1_784_196_000_000));
+        assert!(fingerprint_a.segment_samples[1].discontinuity_before);
+    }
+
+    #[test]
+    fn rotating_volatile_parent_has_one_semantic_conflict_fingerprint() {
+        let body_a = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:490\n#EXTINF:4,\n\
+            /stream/0123456789abcdef/1745190_490.ts\n#EXTINF:4,\n\
+            /stream/0123456789abcdef/1745180_480.ts\n#EXTINF:4,\n\
+            /stream/0123456789abcdef/1745191_491.ts\n";
+        let body_b = body_a.replace("0123456789abcdef", "fedcba9876543210");
+        let parsed_a = match crate::processing::parser::hls::origin_manifest::parse_origin_media_manifest(
+            body_a,
+            "https://origin-a.example/live/index.m3u8",
+        ) {
+            OriginManifestParseOutcome::Normal(manifest) => manifest,
+            OriginManifestParseOutcome::TransientPassthrough { .. } => panic!("normal manifest expected"),
+        };
+        let parsed_b = match crate::processing::parser::hls::origin_manifest::parse_origin_media_manifest(
+            &body_b,
+            "https://origin-b.example/live/index.m3u8",
+        ) {
+            OriginManifestParseOutcome::Normal(manifest) => manifest,
+            OriginManifestParseOutcome::TransientPassthrough { .. } => panic!("normal manifest expected"),
+        };
+
+        assert_eq!(
+            deterministic_conflict_fingerprint(&parsed_a, body_a, "https://origin-a.example/live/index.m3u8"),
+            deterministic_conflict_fingerprint(&parsed_b, &body_b, "https://origin-b.example/live/index.m3u8")
+        );
+        assert_ne!(
+            build_manifest_timeline_fingerprint(body_a, "https://origin-a.example/live/index.m3u8").0,
+            build_manifest_timeline_fingerprint(&body_b, "https://origin-b.example/live/index.m3u8").0,
+            "ordinary origin-acceptance fingerprint remains exact-path based"
+        );
+    }
+
+    #[test]
+    fn different_stream_namespace_is_not_the_same_conflict() {
+        let body_a = "#EXTM3U\n#EXTINF:4,\n/stream-a/0123456789abcdef/1745180_480.ts\n";
+        let body_b = body_a.replace("stream-a", "stream-b");
+        let parse = |body: &str| {
+            match crate::processing::parser::hls::origin_manifest::parse_origin_media_manifest(
+                body,
+                "https://origin.example/live/index.m3u8",
+            ) {
+                OriginManifestParseOutcome::Normal(manifest) => manifest,
+                OriginManifestParseOutcome::TransientPassthrough { .. } => panic!("normal manifest expected"),
+            }
+        };
+
+        assert_ne!(
+            deterministic_conflict_fingerprint(
+                &parse(body_a),
+                body_a,
+                "https://origin.example/live/index.m3u8",
+            ),
+            deterministic_conflict_fingerprint(
+                &parse(&body_b),
+                &body_b,
+                "https://origin.example/live/index.m3u8",
+            )
+        );
+    }
+
+    #[test]
+    fn resource_timeline_evidence_rejects_replay_after_new_even_with_forward_sequence() {
+        let published = HlsMediaResourceIdentity::from_url("https://old.example/live/484.ts", None);
+        let replay_only = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:490\n#EXTINF:4,\n484.ts\n";
+        let prefix_then_new =
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:490\n#EXTINF:4,\n484.ts\n#EXTINF:4,\n490.ts\n";
+        let new_then_replay =
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:490\n#EXTINF:4,\n490.ts\n#EXTINF:4,\n484.ts\n";
+        let fingerprint = |body| {
+            build_manifest_timeline_fingerprint(body, "https://new.example/live/index.m3u8").0
+        };
+
+        assert_eq!(
+            candidate_resource_timeline_evidence(&fingerprint(replay_only), &[published]),
+            HlsResourceTimelineEvidence::ReplayOnly
+        );
+        assert_eq!(
+            candidate_resource_timeline_evidence(&fingerprint(prefix_then_new), &[published]),
+            HlsResourceTimelineEvidence::Eligible
+        );
+        assert_eq!(
+            candidate_resource_timeline_evidence(&fingerprint(new_then_replay), &[published]),
+            HlsResourceTimelineEvidence::ContradictoryOrder
+        );
+    }
+
+    #[test]
+    fn resource_replay_diagnostic_is_bounded_and_contains_decision_evidence() {
+        let reason = HlsManifestRejectLogReason::from(TimelineMapError::PublishedResourceReplay {
+            previous_proxy_tail: Some(23),
+            existing_proxy_seq: 17,
+            candidate_position: 2,
+            candidate_origin_seq: 490,
+            resource_key: HlsMediaResourceSemanticKey::for_test([0xab; 32]),
+            decision: HlsResourceReplayDecision::RejectContradictoryOrder,
+        })
+        .status_label();
+
+        assert!(reason.contains("previous_proxy_tail=23"));
+        assert!(reason.contains("candidate_position=2"));
+        assert!(reason.contains("repeated_resource=abababababababab"));
+        assert!(reason.contains("decision=reject-contradictory-order"));
+        assert!(!reason.contains("http"));
+    }
+
+    #[test]
+    fn deterministic_conflict_rejects_matching_log_token_with_different_full_semantic_key() {
+        let fetched = FetchedOriginManifest {
+            body: "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:490\n\
+                   #EXTINF:4,\n490.ts\n#EXTINF:4,\n480.ts\n#EXTINF:4,\n491.ts\n"
+                .to_string(),
+            final_manifest_url: "https://origin.example/live/index.m3u8".to_string(),
+            resolved_request_url: "https://origin.example/live/index.m3u8".to_string(),
+            redirect_host: None,
+            provider_url_index: None,
+            provider_session_headers: HeaderMap::new(),
+            status: StatusCode::OK,
+            attempts: 1,
+            candidate_requests: 1,
+            selection: HlsManifestFetchSelection::Initial,
+        };
+        let actual_key =
+            HlsMediaResourceIdentity::from_url("https://origin.example/live/480.ts", None).semantic_key();
+        let mut different_bytes = actual_key.bytes();
+        different_bytes[31] ^= 0xff;
+        let different_key = HlsMediaResourceSemanticKey::for_test(different_bytes);
+        assert_eq!(actual_key.diagnostic_token(), different_key.diagnostic_token());
+        assert_ne!(actual_key, different_key);
+
+        let reason = HlsManifestRejectLogReason::PublishedResourceReplay {
+            previous_proxy_tail: Some(2),
+            existing_proxy_seq: 0,
+            candidate_position: 1,
+            candidate_origin_seq: 480,
+            resource_key: different_key,
+            decision: HlsResourceReplayDecision::RejectContradictoryOrder,
+        };
+        assert!(deterministic_timeline_conflict_from_rejection(&fetched, &reason).is_none());
+    }
+
+    #[test]
+    fn timeline_fingerprint_distinguishes_technical_state_and_keeps_compatible_aes_media_stageable() {
+        let clear_ts = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4,\n1.ts\n";
+        let discontinuous_ts = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXT-X-DISCONTINUITY\n#EXTINF:4,\n1.ts\n";
+        let encrypted_ts = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n\
+            #EXT-X-KEY:METHOD=AES-128,URI=\"https://keys.example/key.bin?token=secret\"\n#EXTINF:4,\n1.ts\n";
+        let mapped = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n\
+            #EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4,\n1.m4s\n";
+
+        let (clear, _, _) = build_manifest_timeline_fingerprint(clear_ts, "https://origin.example/live/index.m3u8");
+        let (discontinuous, _, _) =
+            build_manifest_timeline_fingerprint(discontinuous_ts, "https://origin.example/live/index.m3u8");
+        let (encrypted, encrypted_has_media, _) =
+            build_manifest_timeline_fingerprint(encrypted_ts, "https://origin.example/live/index.m3u8");
+        let (mapped, _, _) = build_manifest_timeline_fingerprint(mapped, "https://origin.example/live/index.m3u8");
+
+        assert_ne!(clear.discontinuity_pattern_hash, discontinuous.discontinuity_pattern_hash);
+        assert_ne!(clear.map_and_encryption_hash, encrypted.map_and_encryption_hash);
+        assert_ne!(clear.map_and_encryption_hash, mapped.map_and_encryption_hash);
+        assert_ne!(clear.container_signature_hash, mapped.container_signature_hash);
+        assert!(encrypted_has_media);
+    }
 
     struct TestOriginResponse {
         status: &'static str,
@@ -2394,4 +3890,5 @@ mod tests {
 
         assert!(matches!(error, OriginManifestFetchError::ContentCoding(ContentCodingError::EncodedPartialContent)));
     }
+
 }

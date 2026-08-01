@@ -2,14 +2,14 @@ use super::{
     build_hls_origin_resource_headers_with_client_range, finish_hls_origin_account_io, hls_client_body_send_deadline,
     refresh_hls_client_body_send_deadline,
     resource_fetch::{log_hls_resource_body_failure, HlsResourceFetchLogContext},
-    run_hls_origin_resource_retry_loop_with_attempt_prepare, safe_proxy_session_id, CacheAccessState,
-    HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseId, HlsMediaActivityMarker, HlsOriginAccountIoLeaseGuard,
-    HlsOriginByteRangeExpectation, HlsOriginIoContext, HlsOriginResourceBodyDeadline, HlsOriginResourceClients,
-    HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsProxyManager, HlsRepairRenderedObjectId,
-    HlsResourceFetchAttempt, HlsResourceFetchKind, HlsResourceFetchSource, HlsSegmentCache, HlsSegmentFailureObject,
-    HlsSegmentFailureTransition, HlsSegmentRepairManager, HlsSegmentRepairObjectContext, HlsSegmentRepairSource,
-    HlsSessionHandle, ProxySessionId, SegmentFetchPolicy, TransientObjectCacheKey, TransientObjectFetchDecision,
-    TransientPassthroughState, TransientResourceFile, TransientResourceKind, TransientResourceRef,
+    run_hls_origin_resource_retry_loop_with_attempt_prepare, CacheAccessState, HlsAccessLeaseId, HlsLogIdentity,
+    HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation, HlsOriginIoContext, HlsOriginResourceBodyDeadline,
+    HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget,
+    HlsRepairRenderedObjectId, HlsResourceFetchAttempt, HlsResourceFetchKind, HlsResourceFetchSource, HlsSegmentCache,
+    HlsSegmentFailureObject, HlsSegmentFailureTransition, HlsSegmentRepairManager, HlsSegmentRepairObjectContext,
+    HlsSegmentRepairSource, HlsSessionHandle, HlsSessionMode, ProtectedSet, ProxySessionId, SegmentFetchPolicy,
+    TransientObjectCacheKey, TransientObjectFetchDecision, TransientObjectFetchToken, TransientPassthroughState,
+    TransientResourceFile, TransientResourceKind, TransientResourceRef,
 };
 use crate::{
     api::api_utils::{mark_response_as_uncompressed, try_unwrap_body},
@@ -94,7 +94,7 @@ pub struct HlsTransientOriginFetchRequest {
     pub resource_kind: TransientResourceKind,
     pub clients: HlsOriginResourceClients,
     pub policy: SegmentFetchPolicy,
-    pub session_log_id: String,
+    pub log_identity: HlsLogIdentity,
 }
 
 /// A decoded direct-origin response together with the attempt and guards that own its origin work.
@@ -125,7 +125,7 @@ where
         target,
         request.clients,
         &request.policy,
-        &request.session_log_id,
+        &request.log_identity,
         prepare_attempt,
         |guard| async move { drop(guard) }.boxed(),
         |decoded, attempt, body_deadline, guard| {
@@ -137,7 +137,7 @@ where
 
 pub enum HlsTransientObjectCacheAction {
     ServeReady,
-    FetchAndCache(TransientObjectCacheKey),
+    FetchAndCache(Box<TransientObjectFetchToken>),
     WaitForFetch(Arc<Notify>),
     PassthroughNoCache,
 }
@@ -147,6 +147,18 @@ pub struct HlsTransientObjectCacheResolution {
     pub origin_headers: HeaderMap,
     pub origin_provider_session_headers: HeaderMap,
     pub action: HlsTransientObjectCacheAction,
+}
+
+#[derive(Clone, Copy)]
+struct HlsTransientObjectCacheActionInput<'a> {
+    proxy_session_id: &'a ProxySessionId,
+    resource: &'a TransientResourceRef,
+    resource_file: &'a TransientResourceFile,
+    range_header: Option<&'a HeaderValue>,
+    now_ms: u64,
+    cache_duration_ms: u64,
+    protected: bool,
+    key_object_cache_allowed: bool,
 }
 
 pub async fn resolve_hls_transient_object_cache_action(
@@ -165,20 +177,28 @@ pub async fn resolve_hls_transient_object_cache_action(
         return Err(StatusCode::NOT_FOUND);
     }
     let mut session = session.write().await;
-    let Some(resource) = session.transient.get_valid_resource(&resource_file.resource_id, now_ms) else {
+    let protected = ProtectedSet::from_session(&session);
+    session.transient.prune_expired_except(now_ms, &protected.key_resource_ids);
+    let Some(resource) = session.transient.resources.get(&resource_file.resource_id).cloned() else {
         return Err(StatusCode::NOT_FOUND);
     };
     if resource.file_ext_hint.as_deref().is_some_and(|extension| extension != resource_file.extension) {
         return Err(StatusCode::NOT_FOUND);
     }
+    let key_object_cache_allowed =
+        resource.kind != TransientResourceKind::Key || session.mode == HlsSessionMode::NormalCacheTimeline;
     let action = transient_object_cache_action(
         &mut session,
-        proxy_session_id,
-        &resource,
-        resource_file,
-        range_header,
-        now_ms,
-        cache_duration_ms,
+        HlsTransientObjectCacheActionInput {
+            proxy_session_id,
+            resource: &resource,
+            resource_file,
+            range_header,
+            now_ms,
+            cache_duration_ms,
+            protected: protected.key_resource_ids.contains(&resource_file.resource_id),
+            key_object_cache_allowed,
+        },
     );
     Ok(HlsTransientObjectCacheResolution {
         resource,
@@ -190,30 +210,35 @@ pub async fn resolve_hls_transient_object_cache_action(
 
 fn transient_object_cache_action(
     session: &mut super::HlsSession,
-    proxy_session_id: &ProxySessionId,
-    resource: &TransientResourceRef,
-    resource_file: &TransientResourceFile,
-    range_header: Option<&HeaderValue>,
-    now_ms: u64,
-    cache_duration_ms: u64,
+    input: HlsTransientObjectCacheActionInput<'_>,
 ) -> HlsTransientObjectCacheAction {
-    if matches!(resource.kind, TransientResourceKind::Key) {
+    if input.resource.kind == TransientResourceKind::Key && !input.key_object_cache_allowed {
         return HlsTransientObjectCacheAction::PassthroughNoCache;
     }
     let cache_key = TransientPassthroughState::transient_object_key(
-        proxy_session_id,
-        &resource.id,
-        resource_file.extension.clone(),
+        input.proxy_session_id,
+        &input.resource.id,
+        input.resource_file.extension.clone(),
     );
-    if session.transient.ready_object(&cache_key, now_ms).is_some() {
+    if session
+        .transient
+        .ready_object(&cache_key, input.resource.kind, input.now_ms, input.protected)
+        .is_some()
+    {
         return HlsTransientObjectCacheAction::ServeReady;
     }
-    if !is_hls_transient_full_object_cacheable_request(range_header) {
+    if !is_hls_transient_full_object_cacheable_request(input.range_header) {
         return HlsTransientObjectCacheAction::PassthroughNoCache;
     }
     session
         .transient
-        .begin_object_fetch(proxy_session_id, resource, &resource_file.extension, now_ms, cache_duration_ms)
+        .begin_object_fetch(
+            input.proxy_session_id,
+            input.resource,
+            &input.resource_file.extension,
+            input.now_ms,
+            input.cache_duration_ms,
+        )
         .into()
 }
 
@@ -236,14 +261,20 @@ pub fn is_hls_transient_full_object_cacheable_request(range_header: Option<&Head
 
 pub struct HlsTransientObjectFetchFinalizer {
     session: HlsSessionHandle,
-    cache_key: TransientObjectCacheKey,
+    segment_cache: Arc<HlsSegmentCache>,
+    fetch_token: TransientObjectFetchToken,
     completed: bool,
     retry_after_ms: u64,
 }
 
 impl HlsTransientObjectFetchFinalizer {
-    pub fn new(session: HlsSessionHandle, cache_key: TransientObjectCacheKey, retry_after_ms: u64) -> Self {
-        Self { session, cache_key, completed: false, retry_after_ms }
+    pub fn new(
+        session: HlsSessionHandle,
+        segment_cache: Arc<HlsSegmentCache>,
+        fetch_token: TransientObjectFetchToken,
+        retry_after_ms: u64,
+    ) -> Self {
+        Self { session, segment_cache, fetch_token, completed: false, retry_after_ms }
     }
 
     pub fn complete(&mut self) { self.completed = true; }
@@ -255,15 +286,32 @@ impl Drop for HlsTransientObjectFetchFinalizer {
             return;
         }
         let session = Arc::clone(&self.session);
-        let cache_key = self.cache_key.clone();
+        let segment_cache = Arc::clone(&self.segment_cache);
+        let fetch_token = self.fetch_token.clone();
         let retry_after_ms = self.retry_after_ms;
         tokio::spawn(async move {
-            session.write().await.transient.mark_object_failed_retryable(
-                &cache_key,
+            if let Err(err) = segment_cache.delete(fetch_token.cache_key()).await {
+                debug!("HLS abandoned transient cache fill cleanup failed: error={err}");
+            }
+            delete_superseded_transient_object(&segment_cache, &fetch_token).await;
+            session.write().await.fail_transient_object_retryable_if_current(
+                &fetch_token,
                 current_time_millis(),
                 retry_after_ms,
             );
         });
+    }
+}
+
+pub(super) async fn delete_superseded_transient_object(
+    segment_cache: &HlsSegmentCache,
+    fetch_token: &TransientObjectFetchToken,
+) {
+    let Some(superseded) = fetch_token.superseded_object() else {
+        return;
+    };
+    if let Err(err) = segment_cache.delete(&superseded.key).await {
+        debug!("HLS superseded transient cache object cleanup failed: error={err}");
     }
 }
 
@@ -275,7 +323,7 @@ pub struct HlsTransientCacheCommitContext {
     pub access_lease_id: HlsAccessLeaseId,
     pub resource: TransientResourceRef,
     pub resource_file: TransientResourceFile,
-    pub cache_key: TransientObjectCacheKey,
+    pub fetch_token: TransientObjectFetchToken,
     pub cache_duration_ms: u64,
 }
 
@@ -305,7 +353,7 @@ where
         target,
         request.fetch.clients,
         &request.fetch.policy,
-        &request.fetch.session_log_id,
+        &request.fetch.log_identity,
         prepare_attempt,
         |guard| async move { drop(guard) }.boxed(),
         move |decoded, _attempt, body_deadline, guard| {
@@ -333,9 +381,14 @@ async fn commit_hls_transient_origin_response_attempt(
         .map(str::to_string)
         .or_else(|| context.resource.content_type_hint.clone())
         .unwrap_or_else(|| "application/octet-stream".to_string());
+    let (proxy_session_id, log_identity) = {
+        let session = context.session.read().await;
+        (session.proxy_session_id.clone(), super::HlsLogIdentity::from_session(&session))
+    };
     let repair_context = HlsSegmentRepairObjectContext {
         source: HlsSegmentRepairSource::Transient,
-        proxy_session_id: context.session.read().await.proxy_session_id.clone(),
+        log_identity,
+        proxy_session_id,
         hls_access_lease_id: Some(context.access_lease_id.clone()),
         rendered_object_id: HlsRepairRenderedObjectId::Transient {
             resource_id: context.resource_file.resource_id.0.clone(),
@@ -346,12 +399,13 @@ async fn commit_hls_transient_origin_response_attempt(
         media_sequence: None,
         discontinuity_sequence: None,
         complete_object: true,
-        encrypted: context.resource.kind == TransientResourceKind::Key,
+        encrypted: context.resource.encrypted_media || context.resource.kind == TransientResourceKind::Key,
         custom_response: false,
     };
+    let cache_key = context.fetch_token.cache_key().clone();
     let commit = Box::pin(context.segment_repair.commit_origin_response(
         &context.segment_cache,
-        &context.cache_key,
+        &cache_key,
         decoded.body,
         body_deadline.deadline(),
         repair_context,
@@ -363,25 +417,47 @@ async fn commit_hls_transient_origin_response_attempt(
         Err(err) => return Err(HlsOriginResourceFetchError::cache_body(&err)),
     };
     let expires_at_ms = ready_at_ms.saturating_add(context.cache_duration_ms).max(context.resource.expires_at_ms);
-    context.session.write().await.transient.mark_object_ready(
-        &context.cache_key,
+    let mut session = context.session.write().await;
+    if context.resource.kind == TransientResourceKind::Key && metadata.size != 16 {
+        session.fail_transient_object_permanent_if_current(
+            &context.fetch_token,
+            ready_at_ms,
+            Some(StatusCode::BAD_GATEWAY),
+        );
+        drop(session);
+        delete_stale_transient_fill(&context.segment_cache, &cache_key).await;
+        return Err(HlsOriginResourceFetchError::NonRetryableStatus(StatusCode::BAD_GATEWAY));
+    }
+    let committed = session.commit_transient_object_ready_if_current(
+        context.resource.kind,
+        &context.fetch_token,
         content_type,
         metadata.size,
         ready_at_ms,
         expires_at_ms,
     );
+    drop(session);
+    if !committed {
+        delete_stale_transient_fill(&context.segment_cache, &cache_key).await;
+        return Err(HlsOriginResourceFetchError::Superseded);
+    }
+    delete_superseded_transient_object(&context.segment_cache, &context.fetch_token).await;
     Ok(())
+}
+
+async fn delete_stale_transient_fill(segment_cache: &HlsSegmentCache, cache_key: &TransientObjectCacheKey) {
+    if let Err(err) = segment_cache.delete(cache_key).await {
+        debug!("HLS stale transient cache fill cleanup failed: error={err}");
+    }
 }
 
 /// Context retained until a direct transient response body reaches one terminal outcome.
 pub struct HlsTransientDirectResponseContext {
-    pub hls_proxy: Arc<HlsProxyManager>,
     pub session: HlsSessionHandle,
     pub resource: TransientResourceRef,
     pub policy: SegmentFetchPolicy,
-    pub media_activity_marker: Option<HlsMediaActivityMarker>,
     pub now_ms: u64,
-    pub proxy_session_id: ProxySessionId,
+    pub log_identity: HlsLogIdentity,
 }
 
 #[derive(Clone, Copy)]
@@ -392,22 +468,20 @@ enum HlsTransientDirectStreamOutcome {
 }
 
 // Sole owner of the direct-body outcome: EOF is success, origin read failures
-// count as segment failures, and downstream cancellation remains neutral.
+// degrade affected media/dependencies, and downstream cancellation remains neutral.
 struct HlsTransientDirectResponseFinalizer {
     context: Option<HlsTransientDirectResponseLifecycleContext>,
 }
 
 struct HlsTransientDirectResponseLifecycleContext {
-    hls_proxy: Arc<HlsProxyManager>,
     session: HlsSessionHandle,
     resource: TransientResourceRef,
     policy: SegmentFetchPolicy,
-    proxy_session_id: ProxySessionId,
 }
 
 impl HlsTransientDirectResponseFinalizer {
     fn new(context: HlsTransientDirectResponseLifecycleContext) -> Self {
-        let context = (context.resource.kind == TransientResourceKind::Segment).then_some(context);
+        let context = transient_resource_affects_media_readiness(context.resource.kind).then_some(context);
         Self { context }
     }
 
@@ -438,23 +512,13 @@ impl HlsTransientDirectResponseFinalizer {
                 }
                 HlsTransientDirectStreamOutcome::OriginBodyFailure => {
                     let failed_at_ms = current_time_millis();
-                    if let Some(reason) = record_temporary_transient_segment_fetch_failure(
+                    record_temporary_transient_segment_fetch_failure(
                         &context.session,
                         &context.resource,
                         &context.policy,
                         failed_at_ms,
                     )
-                    .await
-                    {
-                        context
-                            .hls_proxy
-                            .mark_access_leases_channel_unavailable_for_session(
-                                &context.proxy_session_id,
-                                failed_at_ms,
-                                reason,
-                            )
-                            .await;
-                    }
+                    .await;
                 }
                 HlsTransientDirectStreamOutcome::ClientAborted => {}
             }
@@ -502,23 +566,18 @@ fn hls_transient_direct_body(
 ) -> Body {
     let HlsTransientDecodedOriginResponse { decoded, body_deadline, attempt, guard: origin_io_guard } = response;
     let HlsTransientDirectResponseContext {
-        hls_proxy,
         session,
         resource,
         policy,
-        media_activity_marker,
         now_ms,
-        proxy_session_id,
+        log_identity,
     } = context;
 
     let guard = HlsTransientReadGuard::new(Arc::clone(&resource.access), now_ms);
-    let media_activity_guard = HlsTransientMediaActivityGuard::new(media_activity_marker, now_ms);
     let finalizer = HlsTransientDirectResponseFinalizer::new(HlsTransientDirectResponseLifecycleContext {
-        hls_proxy,
         session,
         resource: resource.clone(),
         policy,
-        proxy_session_id: proxy_session_id.clone(),
     });
     let resource_id = resource.id.0.clone();
     let resource_kind = resource.kind;
@@ -527,21 +586,12 @@ fn hls_transient_direct_body(
             ReaderStream::new(decoded.body),
             Some(guard),
             origin_io_guard,
-            Some(media_activity_guard),
             finalizer,
             Box::pin(sleep(hls_client_body_send_deadline())),
             false,
         ),
-        move |(
-            mut stream,
-            guard,
-            origin_io_guard,
-            media_activity_guard,
-            mut finalizer,
-            mut send_deadline,
-            finished,
-        )| {
-            let proxy_session_id = proxy_session_id.0.clone();
+        move |(mut stream, guard, origin_io_guard, mut finalizer, mut send_deadline, finished)| {
+            let log_identity = log_identity.clone();
             let resource_id = resource_id.clone();
             async move {
                 if finished {
@@ -552,7 +602,7 @@ fn hls_transient_direct_body(
                         finalizer.finish(HlsTransientDirectStreamOutcome::ClientAborted).await;
                         return Some((
                             Err(io::Error::new(io::ErrorKind::TimedOut, "hls client body send timed out")),
-                            (stream, None, None, None, finalizer, send_deadline, true),
+                            (stream, None, None, finalizer, send_deadline, true),
                         ));
                     }
                     // Decoder setup is bounded by the absolute attempt deadline before this
@@ -565,19 +615,19 @@ fn hls_transient_direct_body(
                         refresh_hls_client_body_send_deadline(send_deadline.as_mut());
                         Some((
                             Ok(chunk),
-                            (stream, guard, origin_io_guard, media_activity_guard, finalizer, send_deadline, false),
+                            (stream, guard, origin_io_guard, finalizer, send_deadline, false),
                         ))
                     }
                     Ok(Some(Err(err))) => {
                         log_hls_resource_body_failure(
-                            &proxy_session_id,
+                            &log_identity,
                             hls_transient_direct_log_context(&resource_id, resource_kind),
                             attempt,
                             &err,
                             body_deadline.timeout().as_millis(),
                         );
                         finalizer.finish(HlsTransientDirectStreamOutcome::OriginBodyFailure).await;
-                        Some((Err(err), (stream, None, None, None, finalizer, send_deadline, true)))
+                        Some((Err(err), (stream, None, None, finalizer, send_deadline, true)))
                     }
                     Ok(None) => {
                         finalizer.finish(HlsTransientDirectStreamOutcome::CleanEof).await;
@@ -586,14 +636,14 @@ fn hls_transient_direct_body(
                     Err(_) => {
                         let error = io::Error::new(io::ErrorKind::TimedOut, "transient passthrough body timed out");
                         log_hls_resource_body_failure(
-                            &proxy_session_id,
+                            &log_identity,
                             hls_transient_direct_log_context(&resource_id, resource_kind),
                             attempt,
                             &error,
                             body_deadline.timeout().as_millis(),
                         );
                         finalizer.finish(HlsTransientDirectStreamOutcome::OriginBodyFailure).await;
-                        Some((Err(error), (stream, None, None, None, finalizer, send_deadline, true)))
+                        Some((Err(error), (stream, None, None, finalizer, send_deadline, true)))
                     }
                 }
             }
@@ -615,15 +665,22 @@ fn hls_transient_direct_log_context(
 }
 
 pub async fn record_successful_transient_segment_fetch(session: &HlsSessionHandle, resource: &TransientResourceRef) {
-    if resource.kind != TransientResourceKind::Segment {
+    if !transient_resource_is_media(resource.kind) {
         return;
     }
     let mut session = session.write().await;
+    if !transient_resource_is_current(&session, resource) {
+        return;
+    }
     if let Some(reset_failures) = session.record_successful_segment_fetch() {
-        debug!(
-            "HLS segment temporary failure counter reset: session={} previous_failures={reset_failures}",
-            safe_proxy_session_id(&session.proxy_session_id)
-        );
+        if log::log_enabled!(log::Level::Debug) {
+            let identity = HlsLogIdentity::from_session(&session);
+            debug!(
+                "HLS segment temporary failure counter reset: session={} proxy_session={} previous_failures={reset_failures}",
+                identity.session(),
+                identity.proxy_session()
+            );
+        }
     }
 }
 
@@ -632,41 +689,75 @@ pub async fn record_temporary_transient_segment_fetch_failure(
     resource: &TransientResourceRef,
     policy: &SegmentFetchPolicy,
     now_ms: u64,
-) -> Option<HlsAccessLeaseChannelUnavailableReason> {
-    if resource.kind != TransientResourceKind::Segment {
-        return None;
+) -> bool {
+    if !transient_resource_affects_media_readiness(resource.kind) {
+        return false;
     }
     let mut session = session.write().await;
-    let threshold = session.segment_temporary_failure_threshold(policy.permanent_failure_segment_threshold);
+    if !transient_resource_is_current(&session, resource) {
+        return false;
+    }
+    session.origin_control.path_condition = super::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure;
+    if !transient_resource_is_media(resource.kind) {
+        return false;
+    }
+    let threshold = policy.permanent_failure_segment_threshold.max(1);
     match session.record_temporary_segment_fetch_failure(
         now_ms,
         HlsSegmentFailureObject::Transient { resource_id: resource.id.0.clone() },
         threshold,
     ) {
         HlsSegmentFailureTransition::StillRetryable { failures, threshold } => {
-            debug!(
-                "HLS segment temporary failure counted: session={} object={} failures={} threshold={}",
-                safe_proxy_session_id(&session.proxy_session_id),
-                resource.id.0,
-                failures,
-                threshold
-            );
-            None
+            if log::log_enabled!(log::Level::Debug) {
+                let identity = HlsLogIdentity::from_session(&session);
+                debug!(
+                    "HLS segment temporary failure counted: session={} proxy_session={} object={} failures={} threshold={}",
+                    identity.session(),
+                    identity.proxy_session(),
+                    resource.id.0,
+                    failures,
+                    threshold
+                );
+            }
+            false
         }
         HlsSegmentFailureTransition::BecamePermanentlyFailed { failures, threshold } => {
-            warn!(
-                "HLS segment temporary failure threshold reached: session={} failures={} threshold={}",
-                safe_proxy_session_id(&session.proxy_session_id),
-                failures,
-                threshold
-            );
+            if log::log_enabled!(log::Level::Warn) {
+                let identity = HlsLogIdentity::from_session(&session);
+                warn!(
+                    "HLS segment temporary failure threshold reached: session={} proxy_session={} failures={} threshold={}",
+                    identity.session(),
+                    identity.proxy_session(),
+                    failures,
+                    threshold
+                );
+            }
             session.invalidate_queued_origin_work();
-            Some(HlsAccessLeaseChannelUnavailableReason::TransientObjectTemporaryFailureThreshold {
-                failures,
-                threshold,
-            })
+            true
         }
     }
+}
+
+const fn transient_resource_is_media(kind: TransientResourceKind) -> bool {
+    matches!(kind, TransientResourceKind::Segment | TransientResourceKind::Part)
+}
+
+const fn transient_resource_affects_media_readiness(kind: TransientResourceKind) -> bool {
+    matches!(
+        kind,
+        TransientResourceKind::Segment
+            | TransientResourceKind::Part
+            | TransientResourceKind::Key
+            | TransientResourceKind::Map
+    )
+}
+
+fn transient_resource_is_current(session: &super::HlsSession, resource: &TransientResourceRef) -> bool {
+    session.transient.resources.get(&resource.id).is_some_and(|current| {
+        current.kind == resource.kind
+            && current.resolved_origin_uri == resource.resolved_origin_uri
+            && Arc::ptr_eq(&current.access, &resource.access)
+    })
 }
 
 struct HlsTransientReadGuard {
@@ -682,22 +773,6 @@ impl HlsTransientReadGuard {
 
 impl Drop for HlsTransientReadGuard {
     fn drop(&mut self) { self.access.reader_finished(); }
-}
-
-struct HlsTransientMediaActivityGuard {
-    marker: Option<HlsMediaActivityMarker>,
-}
-
-impl HlsTransientMediaActivityGuard {
-    fn new(marker: Option<HlsMediaActivityMarker>, _now_ms: u64) -> Self { Self { marker } }
-}
-
-impl Drop for HlsTransientMediaActivityGuard {
-    fn drop(&mut self) {
-        if let Some(marker) = &self.marker {
-            marker.spawn_mark_now();
-        }
-    }
 }
 
 pub struct HlsTransientOriginIoGuard {
@@ -756,24 +831,27 @@ fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into
 #[cfg(test)]
 mod tests {
     use super::{
-        super::resource_fetch::take_body_failure_log_attempts,
+        super::{
+            origin_progress::{HlsOriginPathCondition, HlsOriginProgressPhase},
+            resource_fetch::take_body_failure_log_attempts,
+        },
         fetch_and_commit_hls_transient_origin_response_with_attempt_prepare,
         fetch_hls_transient_origin_response_with_attempt_prepare, hls_transient_object_fetch_failure,
         hls_transient_origin_response, record_temporary_transient_segment_fetch_failure,
         HlsTransientCacheCommitContext, HlsTransientDecodedOriginResponse, HlsTransientDirectResponseContext,
         HlsTransientDirectResponseFinalizer, HlsTransientDirectResponseLifecycleContext,
         HlsTransientDirectStreamOutcome, HlsTransientObjectFetchFailure, HlsTransientOriginCacheFetchRequest,
-        HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard,
+        HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard, HlsLogIdentity,
     };
     use crate::{
         api::{
             api_utils::should_compress_response,
             model::{
-                HlsAccessLeaseId, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsProxyManager,
-                HlsSegmentCache, HlsSegmentFailureObject, HlsSegmentRepairManager, HlsSession, HlsSessionHandle,
-                HlsSessionKey, HlsSessionStore, ProxySessionId, SegmentFetchPolicy, TransientObjectCacheKey,
-                TransientObjectCacheStatus, TransientObjectFetchDecision, TransientResourceFile, TransientResourceKind,
-                TransientResourceRef,
+                HlsAccessLeaseId, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsSegmentCache,
+                HlsSegmentFailureObject, HlsSegmentRepairManager, HlsSession, HlsSessionHandle, HlsSessionKey,
+                HlsSessionStore, SegmentFetchPolicy, TransientObjectCacheKey, TransientObjectCacheStatus,
+                TransientObjectFetchDecision, TransientObjectFetchToken, TransientPassthroughState,
+                TransientResourceFile, TransientResourceKind, TransientResourceRef,
             },
         },
         model::HlsSegmentRepairConfig,
@@ -1017,7 +1095,10 @@ mod tests {
                 retry_jitter_max_ms: 0,
                 ..SegmentFetchPolicy::default()
             },
-            session_log_id: "direct-transient-content-coding-test".to_string(),
+            log_identity: HlsLogIdentity::for_test(
+                "direct-transient-content-session",
+                "direct-transient-proxy-session",
+            ),
         };
         fetch_hls_transient_origin_response_with_attempt_prepare(request, |_| async { Ok(None) }.boxed()).await
     }
@@ -1030,11 +1111,10 @@ mod tests {
     }
 
     struct TestDirectResponseFixture {
-        hls_proxy: Arc<HlsProxyManager>,
         session: HlsSessionHandle,
         resource: TransientResourceRef,
         policy: SegmentFetchPolicy,
-        proxy_session_id: ProxySessionId,
+        log_identity: HlsLogIdentity,
     }
 
     impl TestDirectResponseFixture {
@@ -1049,15 +1129,10 @@ mod tests {
             );
             let policy =
                 SegmentFetchPolicy { retry_delays_ms: [0; 5], retry_jitter_max_ms: 0, ..SegmentFetchPolicy::default() };
-            let session = HlsSession::new(HlsSessionKey::new(1, "direct-test"), b"rewrite-secret", 10);
-            let proxy_session_id = session.proxy_session_id.clone();
-            Self {
-                hls_proxy: Arc::new(HlsProxyManager::new()),
-                session: Arc::new(RwLock::new(session)),
-                resource,
-                policy,
-                proxy_session_id,
-            }
+            let mut session = HlsSession::new(HlsSessionKey::new(1, "direct-test"), b"rewrite-secret", 10);
+            session.transient.upsert_resources([resource.clone()]);
+            let log_identity = HlsLogIdentity::from_session(&session);
+            Self { session: Arc::new(RwLock::new(session)), resource, policy, log_identity }
         }
 
         fn response(
@@ -1069,30 +1144,26 @@ mod tests {
 
         fn response_context(&self) -> HlsTransientDirectResponseContext {
             HlsTransientDirectResponseContext {
-                hls_proxy: Arc::clone(&self.hls_proxy),
                 session: Arc::clone(&self.session),
                 resource: self.resource.clone(),
                 policy: self.policy.clone(),
-                media_activity_marker: None,
                 now_ms: 10,
-                proxy_session_id: self.proxy_session_id.clone(),
+                log_identity: self.log_identity.clone(),
             }
         }
 
         fn lifecycle_context(&self) -> HlsTransientDirectResponseLifecycleContext {
             HlsTransientDirectResponseLifecycleContext {
-                hls_proxy: Arc::clone(&self.hls_proxy),
                 session: Arc::clone(&self.session),
                 resource: self.resource.clone(),
                 policy: self.policy.clone(),
-                proxy_session_id: self.proxy_session_id.clone(),
             }
         }
 
         async fn seed_segment_failure(&self) {
-            assert!(record_temporary_transient_segment_fetch_failure(&self.session, &self.resource, &self.policy, 9)
-                .await
-                .is_none());
+            assert!(
+                !record_temporary_transient_segment_fetch_failure(&self.session, &self.resource, &self.policy, 9).await
+            );
         }
 
         async fn segment_failure_count(&self) -> u32 {
@@ -1122,35 +1193,54 @@ mod tests {
         segment_cache: Arc<HlsSegmentCache>,
         segment_repair: Arc<HlsSegmentRepairManager>,
         session: HlsSessionHandle,
-        proxy_session_id: ProxySessionId,
+        log_identity: HlsLogIdentity,
         resource: TransientResourceRef,
         resource_file: TransientResourceFile,
+        lookup_key: TransientObjectCacheKey,
         cache_key: TransientObjectCacheKey,
+        fetch_token: TransientObjectFetchToken,
     }
 
     impl TestTransientCacheFixture {
         async fn new(origin_url: String) -> Self {
+            let now_ms = super::current_time_millis();
             let resource = TransientResourceRef::new(
                 TransientResourceKind::Segment,
                 origin_url,
                 b"rewrite-secret",
-                10,
+                now_ms,
                 60_000,
                 Some("ts".to_string()),
             );
             let resource_file = TransientResourceFile { resource_id: resource.id.clone(), extension: "ts".to_string() };
             let store = HlsSessionStore::new();
             let session = store.get_or_create_session(HlsSessionKey::new(1, "1"), b"rewrite-secret", 10).await;
-            let proxy_session_id = session.read().await.proxy_session_id.clone();
-            let cache_key = {
+            let (proxy_session_id, log_identity) = {
+                let session = session.read().await;
+                (session.proxy_session_id.clone(), HlsLogIdentity::from_session(&session))
+            };
+            let lookup_key = TransientPassthroughState::transient_object_key(
+                &proxy_session_id,
+                &resource.id,
+                resource_file.extension.clone(),
+            );
+            let (resource, fetch_token) = {
                 let mut session = session.write().await;
-                match session.transient.begin_object_fetch(&proxy_session_id, &resource, "ts", 10, 60_000) {
-                    TransientObjectFetchDecision::Fetch(cache_key) => cache_key,
+                session.transient.upsert_resources([resource]);
+                let resource = session
+                    .transient
+                    .resources
+                    .get(&resource_file.resource_id)
+                    .expect("registered transient resource")
+                    .clone();
+                match session.transient.begin_object_fetch(&proxy_session_id, &resource, "ts", now_ms, 60_000) {
+                    TransientObjectFetchDecision::Fetch(fetch_token) => (resource, *fetch_token),
                     TransientObjectFetchDecision::Ready | TransientObjectFetchDecision::Wait(_) => {
                         panic!("new transient resource should start a cache fetch")
                     }
                 }
             };
+            let cache_key = fetch_token.cache_key().clone();
             let temp_dir = tempfile::tempdir().expect("tempdir");
             let segment_cache = Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path()));
             let segment_repair = Arc::new(HlsSegmentRepairManager::new(HlsSegmentRepairConfig {
@@ -1164,10 +1254,12 @@ mod tests {
                 segment_cache,
                 segment_repair,
                 session,
-                proxy_session_id,
+                log_identity,
                 resource,
                 resource_file,
+                lookup_key,
                 cache_key,
+                fetch_token,
             }
         }
 
@@ -1194,7 +1286,7 @@ mod tests {
                         retry_jitter_max_ms: 0,
                         ..SegmentFetchPolicy::default()
                     },
-                    session_log_id: self.proxy_session_id.0.clone(),
+                    log_identity: self.log_identity.clone(),
                 },
                 commit: HlsTransientCacheCommitContext {
                     segment_cache: Arc::clone(&self.segment_cache),
@@ -1203,7 +1295,7 @@ mod tests {
                     access_lease_id: HlsAccessLeaseId("transient-content-coding-test".to_string()),
                     resource: self.resource.clone(),
                     resource_file: self.resource_file.clone(),
-                    cache_key: self.cache_key.clone(),
+                    fetch_token: self.fetch_token.clone(),
                     cache_duration_ms: 60_000,
                 },
             }
@@ -1512,21 +1604,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_non_segment_finalizers_do_not_start_lifecycle_tasks() {
-        for kind in [
-            TransientResourceKind::Key,
-            TransientResourceKind::Map,
-            TransientResourceKind::Part,
-            TransientResourceKind::Other,
-        ] {
-            for outcome in
-                [HlsTransientDirectStreamOutcome::CleanEof, HlsTransientDirectStreamOutcome::OriginBodyFailure]
-            {
-                let fixture = TestDirectResponseFixture::new(kind, "http://127.0.0.1/non-segment.bin");
-                let mut finalizer = HlsTransientDirectResponseFinalizer::new(fixture.lifecycle_context());
+    async fn unrelated_transient_objects_do_not_start_media_lifecycle_tasks() {
+        let kind = TransientResourceKind::Other;
+        for outcome in [HlsTransientDirectStreamOutcome::CleanEof, HlsTransientDirectStreamOutcome::OriginBodyFailure] {
+            let fixture = TestDirectResponseFixture::new(kind, "http://127.0.0.1/non-segment.bin");
+            let mut finalizer = HlsTransientDirectResponseFinalizer::new(fixture.lifecycle_context());
 
-                assert!(finalizer.begin_finish(outcome).is_none(), "{kind:?} must not start a segment lifecycle task");
-            }
+            assert!(finalizer.begin_finish(outcome).is_none(), "{kind:?} must not start a segment lifecycle task");
+        }
+    }
+
+    #[tokio::test]
+    async fn key_and_map_body_failures_degrade_readiness_without_incrementing_media_failure_count() {
+        for kind in [TransientResourceKind::Key, TransientResourceKind::Map] {
+            let fixture = TestDirectResponseFixture::new(kind, "http://127.0.0.1/media-dependency.bin");
+            let mut finalizer = HlsTransientDirectResponseFinalizer::new(fixture.lifecycle_context());
+
+            finalizer
+                .begin_finish(HlsTransientDirectStreamOutcome::OriginBodyFailure)
+                .expect("media dependency starts a lifecycle task")
+                .await
+                .expect("media dependency lifecycle task joins");
+
+            let session = fixture.session.read().await;
+            assert_eq!(session.segment_failure_tracker.consecutive_temporary_failures, 0);
+            assert_eq!(session.origin_control.path_condition, HlsOriginPathCondition::SegmentReadinessFailure);
         }
     }
 
@@ -1580,13 +1682,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_non_segment_body_failures_are_failure_tracker_neutral() {
-        for kind in [
-            TransientResourceKind::Key,
-            TransientResourceKind::Map,
-            TransientResourceKind::Part,
-            TransientResourceKind::Other,
-        ] {
+    async fn direct_non_media_body_failures_are_failure_tracker_neutral() {
+        for kind in [TransientResourceKind::Key, TransientResourceKind::Map, TransientResourceKind::Other] {
             let mut truncated = gzip_encode(b"non-segment decoder failure").await;
             truncated.truncate(truncated.len().saturating_sub(8));
             let origin = spawn_test_origin(
@@ -1603,6 +1700,44 @@ mod tests {
 
             assert!(to_bytes(response.into_body(), usize::MAX).await.is_err());
             assert_eq!(fixture.segment_failure_count().await, 0, "{kind:?} must not affect segment failure state");
+            let path_condition = fixture.session.read().await.origin_control.path_condition;
+            if matches!(kind, TransientResourceKind::Key | TransientResourceKind::Map) {
+                assert_eq!(path_condition, HlsOriginPathCondition::SegmentReadinessFailure);
+            } else {
+                assert_eq!(path_condition, HlsOriginPathCondition::ProgressExpected);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_media_failure_degrades_availability_without_direct_terminal_transition() {
+        for kind in [TransientResourceKind::Segment, TransientResourceKind::Part] {
+            let fixture = TestDirectResponseFixture::new(kind, "http://127.0.0.1/media.bin");
+
+            assert!(
+                !record_temporary_transient_segment_fetch_failure(
+                    &fixture.session,
+                    &fixture.resource,
+                    &fixture.policy,
+                    100,
+                )
+                .await
+            );
+
+            let session = fixture.session.read().await;
+            assert_eq!(session.segment_failure_tracker.consecutive_temporary_failures, 1);
+            assert_eq!(session.origin_control.path_condition, HlsOriginPathCondition::SegmentReadinessFailure);
+            assert!(session.origin_control.acceptance_episode.is_none());
+            assert!(!matches!(
+                session.origin_control.progress_phase,
+                HlsOriginProgressPhase::Terminal | HlsOriginProgressPhase::TerminalPartial
+            ));
+            drop(session);
+
+            super::record_successful_transient_segment_fetch(&fixture.session, &fixture.resource).await;
+            let session = fixture.session.read().await;
+            assert_eq!(session.segment_failure_tracker.consecutive_temporary_failures, 0);
+            assert_eq!(session.origin_control.path_condition, HlsOriginPathCondition::SegmentReadinessFailure);
         }
     }
 
@@ -1676,10 +1811,10 @@ mod tests {
         assert!(matches!(result, Err(HlsOriginResourceFetchError::UnexpectedByteRangeStatus)));
         assert_eq!(dropped_guards.load(Ordering::Relaxed), 1);
         assert!(fixture.segment_cache.metadata(&fixture.cache_key).await.expect("cache metadata reads").is_none());
-        assert!(!fixture.segment_cache.has_active_temp_files().await);
+        assert!(!fixture.segment_cache.has_active_temp_files());
         assert_eq!(std::fs::read_dir(fixture.temp_dir.path()).expect("cache root reads").count(), 0);
         let session = fixture.session.read().await;
-        let entry = session.transient.object_cache.get(&fixture.cache_key).expect("fetching cache entry remains");
+        let entry = session.transient.object_cache.get(&fixture.lookup_key).expect("fetching cache entry remains");
         assert!(!matches!(entry.status, TransientObjectCacheStatus::Ready { .. }));
         drop(session);
 
@@ -1688,6 +1823,40 @@ mod tests {
         let request = requests[0].to_ascii_lowercase();
         assert!(request.contains("accept-encoding: identity"));
         assert!(!request.contains("\r\nrange:"));
+    }
+
+    #[tokio::test]
+    async fn stale_resource_revision_commit_deletes_the_physical_fill_after_controlled_mapping_replacement() {
+        let origin = spawn_test_origin("200 OK", vec![("Content-Type", "video/mp2t")], b"stale-body".to_vec()).await;
+        let fixture = TestTransientCacheFixture::new(format!("{}/stale.ts", origin.base_url)).await;
+        {
+            let mut session = fixture.session.write().await;
+            let replacement_now_ms = super::current_time_millis();
+            let mut replacement = TransientResourceRef::new(
+                TransientResourceKind::Segment,
+                "http://replacement.example.com/live/replacement.ts",
+                b"rewrite-secret",
+                replacement_now_ms,
+                60_000,
+                Some("ts".to_string()),
+            );
+            replacement.id = fixture.resource.id.clone();
+            session.transient.upsert_resources([replacement]);
+        }
+
+        let result = fetch_and_commit_hls_transient_origin_response_with_attempt_prepare(fixture.request(None), |_| {
+            async { Ok(()) }.boxed()
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(HlsOriginResourceFetchError::Superseded)),
+            "the superseded resource revision aborts without a retryable timeout"
+        );
+        assert!(fixture.segment_cache.metadata(&fixture.cache_key).await.expect("cache metadata reads").is_none());
+        assert!(!fixture.segment_cache.has_active_temp_files());
+        assert!(!fixture.session.read().await.transient.object_cache.contains_key(&fixture.lookup_key));
+        assert_eq!(origin.requests.lock().await.len(), 1);
     }
 
     #[tokio::test]
@@ -1727,7 +1896,7 @@ mod tests {
         assert_eq!(range, ciphertext[5..9]);
 
         let session = fixture.session.read().await;
-        let entry = session.transient.object_cache.get(&fixture.cache_key).expect("transient cache entry");
+        let entry = session.transient.object_cache.get(&fixture.lookup_key).expect("transient cache entry");
         assert!(matches!(
             entry.status,
             TransientObjectCacheStatus::Ready { content_length, .. }

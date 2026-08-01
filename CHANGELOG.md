@@ -124,6 +124,20 @@
   - Added the remaining Stalker config fields to the Web UI, including device identity overrides and per-action response-size caps.
   - The remaining open edge case is portal-specific header/cookie forwarding for temp-link media requests; fresh temp-link resolution
     itself is already implemented.
+
+- **Shared HLS stale-origin recovery and finite terminal tails**:
+  - Detects reachable-but-stale HTTP `200` origins from host/epoch-local progress evidence and retains the complete
+    configured acceptance burst, including all derived `beast` lanes and slots.
+  - Uses lease-specific READY reserve, measured playback position, recovery ETA, and transition margin for admission,
+    recovery, and cutover; publication lateness and request counters no longer terminalize playback.
+  - Validates critical MPEG-TS handoffs with bounded read-only `mpeg2ts-reader` inspection without modifying origin,
+    candidate, or cached media.
+  - Prepares twelve finite terminal TS blocks ahead of cutover with target-duration timestamp stride and measured asset
+    duration, then serves compatible warm terminal manifests as HTTP `200` with discontinuity, optional key reset, and
+    `#EXT-X-ENDLIST` on lease- and generation-bound routes.
+  - Adds bounded autonomous terminal-commit retries, sticky terminal leases, GC protection for referenced live tails,
+    and operational alert/rollout guidance for probe, bundle, recovery-deadline, and commit-retry failures.
+
 - **ICS Calendar EPG Sources**: Import iCalendar (`.ics`) events as XMLTV EPG data with M3U and Xtream channel
   assignment, Smart Match support, configurable four-hour dummy gap filling, bounded atomic cache downloads, and
   aggregated warnings for recurring events that are detected but not expanded yet.

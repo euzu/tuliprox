@@ -1,16 +1,64 @@
-use super::rewrite_hls_url;
+use super::{origin_manifest::parse_attribute_list, rewrite_hls_url};
 use crate::{
     api::model::{
         ProxySessionId, TransientResourceId, TransientResourceKind, TransientResourceRef,
         HLS_ACCESS_LEASE_ID_PLACEHOLDER,
     },
     model::StripConfig,
+    utils::format_hls_duration_ms,
 };
 use shared::{model::HlsStripMode, utils::CONSTANTS};
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 use url::Url;
 
 pub(super) const MIN_HLS_INITIAL_VISIBLE_SEGMENTS: usize = 3;
+const MAX_ACTIVE_TRANSIENT_KEY_FORMATS: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TransientKeyFormat {
+    Identity,
+    Other(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TransientKeyTransition {
+    Enable(TransientKeyFormat),
+    DisableIdentity,
+    ConservativeEncrypted,
+}
+
+#[derive(Debug, Default)]
+struct TransientEncryptionState {
+    identity_active: bool,
+    other_active_formats: HashSet<String>,
+    conservative_encrypted: bool,
+}
+
+impl TransientEncryptionState {
+    fn apply_key_tag(&mut self, line: &str) {
+        match parse_transient_key_transition(line) {
+            TransientKeyTransition::Enable(TransientKeyFormat::Identity) => self.identity_active = true,
+            TransientKeyTransition::Enable(TransientKeyFormat::Other(key_format)) => {
+                if self.other_active_formats.len() < MAX_ACTIVE_TRANSIENT_KEY_FORMATS
+                    || self.other_active_formats.contains(&key_format)
+                {
+                    self.other_active_formats.insert(key_format);
+                } else {
+                    self.conservative_encrypted = true;
+                }
+            }
+            TransientKeyTransition::DisableIdentity => self.identity_active = false,
+            TransientKeyTransition::ConservativeEncrypted => self.conservative_encrypted = true,
+        }
+    }
+
+    fn encrypted_media(&self) -> bool {
+        self.identity_active || !self.other_active_formats.is_empty() || self.conservative_encrypted
+    }
+}
 
 /// Result of a transient passthrough manifest rewrite.
 #[derive(Debug, Clone)]
@@ -67,20 +115,26 @@ impl TransientManifestRewriter {
     ) -> TransientRewriteResult {
         let mut rewritten_body = String::with_capacity(body.len());
         let mut resources = HashMap::<TransientResourceId, TransientResourceRef>::new();
+        let mut encryption_state = TransientEncryptionState::default();
 
-        for part in body.split_inclusive('\n') {
-            let (line, line_ending) = split_line_ending(part);
-            let rewritten_line = rewrite_line(
-                line,
+        {
+            let mut rewrite_context = TransientResourceRewriteContext {
                 final_manifest_url,
                 proxy_session_id,
                 reverse_proxy_rewrite_secret,
                 now_ms,
                 ttl_ms,
-                &mut resources,
-            );
-            rewritten_body.push_str(&rewritten_line);
-            rewritten_body.push_str(line_ending);
+                resources: &mut resources,
+            };
+            for part in body.split_inclusive('\n') {
+                let (line, line_ending) = split_line_ending(part);
+                if line.trim().starts_with("#EXT-X-KEY:") {
+                    encryption_state.apply_key_tag(line);
+                }
+                let rewritten_line = rewrite_context.rewrite_line(line, encryption_state.encrypted_media());
+                rewritten_body.push_str(&rewritten_line);
+                rewritten_body.push_str(line_ending);
+            }
         }
 
         if body.is_empty() {
@@ -102,6 +156,13 @@ pub fn materialize_transient_provisioning_handoff_view(
     provisioning_segment_duration_ms: u64,
 ) -> Option<String> {
     let previous_provisioning_body = previous_provisioning_body?;
+    // Provisioning segments are local clear MPEG-TS. Splicing them ahead of encrypted
+    // origin media would either place clear bytes under an active key or require a
+    // MEDIA-SEQUENCE rewrite that changes the implicit AES-128 IV. Keep the rewritten
+    // origin-only handoff view for every encrypted/unsupported encryption method.
+    if transient_manifest_contains_encrypted_media(origin_body) {
+        return None;
+    }
     let origin_lines = manifest_lines(origin_body);
     let origin_units = media_segment_units(&origin_lines);
     if origin_units.is_empty() {
@@ -142,10 +203,9 @@ pub fn materialize_transient_provisioning_handoff_view(
     for line in &origin_lines[..first_origin_unit.start] {
         if line.line.trim().starts_with("#EXT-X-MEDIA-SEQUENCE:") {
             if let Some(media_sequence) = media_sequence {
-                let _ = std::fmt::Write::write_fmt(
-                    &mut rewritten,
-                    format_args!("#EXT-X-MEDIA-SEQUENCE:{media_sequence}{}", line.ending),
-                );
+                rewritten.push_str("#EXT-X-MEDIA-SEQUENCE:");
+                rewritten.push_str(&media_sequence.to_string());
+                rewritten.push_str(line.ending);
                 continue;
             }
         }
@@ -182,19 +242,17 @@ pub fn apply_transient_discontinuity_sequence(body: &str, discontinuity_sequence
     let mut rewritten = String::with_capacity(body.len().saturating_add(40));
     for index in 0..=lines.len() {
         if existing_sequence_index.is_none() && index == insert_sequence_index {
-            let _ = std::fmt::Write::write_fmt(
-                &mut rewritten,
-                format_args!("#EXT-X-DISCONTINUITY-SEQUENCE:{discontinuity_sequence}\n"),
-            );
+            rewritten.push_str("#EXT-X-DISCONTINUITY-SEQUENCE:");
+            rewritten.push_str(&discontinuity_sequence.to_string());
+            rewritten.push('\n');
         }
         if index == lines.len() {
             break;
         }
         if existing_sequence_index == Some(index) {
-            let _ = std::fmt::Write::write_fmt(
-                &mut rewritten,
-                format_args!("#EXT-X-DISCONTINUITY-SEQUENCE:{}{}", discontinuity_sequence, lines[index].ending),
-            );
+            rewritten.push_str("#EXT-X-DISCONTINUITY-SEQUENCE:");
+            rewritten.push_str(&discontinuity_sequence.to_string());
+            rewritten.push_str(lines[index].ending);
         } else {
             rewritten.push_str(lines[index].line);
             rewritten.push_str(lines[index].ending);
@@ -212,151 +270,122 @@ pub fn transient_visible_discontinuity_count(body: &str) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-fn rewrite_line(
-    line: &str,
-    final_manifest_url: &str,
-    proxy_session_id: &ProxySessionId,
-    reverse_proxy_rewrite_secret: &[u8],
+struct TransientResourceRewriteContext<'a> {
+    final_manifest_url: &'a str,
+    proxy_session_id: &'a ProxySessionId,
+    reverse_proxy_rewrite_secret: &'a [u8],
     now_ms: u64,
     ttl_ms: u64,
-    resources: &mut HashMap<TransientResourceId, TransientResourceRef>,
-) -> String {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return line.to_string();
-    }
-
-    if trimmed.starts_with("#EXT-X-KEY:") {
-        return rewrite_uri_attribute(
-            line,
-            final_manifest_url,
-            proxy_session_id,
-            reverse_proxy_rewrite_secret,
-            now_ms,
-            ttl_ms,
-            resources,
-            TransientResourceKind::Key,
-        );
-    }
-
-    if trimmed.starts_with("#EXT-X-MAP:") {
-        return rewrite_uri_attribute(
-            line,
-            final_manifest_url,
-            proxy_session_id,
-            reverse_proxy_rewrite_secret,
-            now_ms,
-            ttl_ms,
-            resources,
-            TransientResourceKind::Map,
-        );
-    }
-
-    if trimmed.starts_with("#EXT-X-PART:")
-        || (trimmed.starts_with("#EXT-X-PRELOAD-HINT:") && trimmed.contains("TYPE=PART"))
-    {
-        return rewrite_uri_attribute(
-            line,
-            final_manifest_url,
-            proxy_session_id,
-            reverse_proxy_rewrite_secret,
-            now_ms,
-            ttl_ms,
-            resources,
-            TransientResourceKind::Part,
-        );
-    }
-
-    if trimmed.starts_with('#') && CONSTANTS.re_hls_uri.is_match(line) {
-        return rewrite_uri_attribute(
-            line,
-            final_manifest_url,
-            proxy_session_id,
-            reverse_proxy_rewrite_secret,
-            now_ms,
-            ttl_ms,
-            resources,
-            TransientResourceKind::Other,
-        );
-    }
-
-    if trimmed.starts_with('#') {
-        return line.to_string();
-    }
-
-    rewrite_resource_uri(
-        trimmed,
-        final_manifest_url,
-        proxy_session_id,
-        reverse_proxy_rewrite_secret,
-        now_ms,
-        ttl_ms,
-        resources,
-        TransientResourceKind::Segment,
-    )
-    .0
+    resources: &'a mut HashMap<TransientResourceId, TransientResourceRef>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn rewrite_uri_attribute(
-    line: &str,
-    final_manifest_url: &str,
-    proxy_session_id: &ProxySessionId,
-    reverse_proxy_rewrite_secret: &[u8],
-    now_ms: u64,
-    ttl_ms: u64,
-    resources: &mut HashMap<TransientResourceId, TransientResourceRef>,
-    kind: TransientResourceKind,
-) -> String {
-    let Some(caps) = CONSTANTS.re_hls_uri.captures(line) else {
-        return line.to_string();
+impl TransientResourceRewriteContext<'_> {
+    fn rewrite_line(&mut self, line: &str, encrypted_media: bool) -> String {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return line.to_string();
+        }
+
+        if trimmed.starts_with("#EXT-X-KEY:") {
+            return self.rewrite_uri_attribute(line, false, TransientResourceKind::Key);
+        }
+        if trimmed.starts_with("#EXT-X-MAP:") {
+            return self.rewrite_uri_attribute(line, false, TransientResourceKind::Map);
+        }
+        if trimmed.starts_with("#EXT-X-PART:")
+            || (trimmed.starts_with("#EXT-X-PRELOAD-HINT:") && trimmed.contains("TYPE=PART"))
+        {
+            return self.rewrite_uri_attribute(line, encrypted_media, TransientResourceKind::Part);
+        }
+        if trimmed.starts_with('#') && CONSTANTS.re_hls_uri.is_match(line) {
+            return self.rewrite_uri_attribute(line, encrypted_media, TransientResourceKind::Other);
+        }
+        if trimmed.starts_with('#') {
+            return line.to_string();
+        }
+
+        self.rewrite_resource_uri(trimmed, encrypted_media, TransientResourceKind::Segment).0
+    }
+
+    fn rewrite_uri_attribute(&mut self, line: &str, encrypted_media: bool, kind: TransientResourceKind) -> String {
+        let Some(caps) = CONSTANTS.re_hls_uri.captures(line) else {
+            return line.to_string();
+        };
+        let uri = &caps[1];
+        let (proxy_uri, _) = self.rewrite_resource_uri(uri, encrypted_media, kind);
+        CONSTANTS.re_hls_uri.replace(line, format!(r#"URI="{proxy_uri}""#)).to_string()
+    }
+
+    fn rewrite_resource_uri(
+        &mut self,
+        uri: &str,
+        encrypted_media: bool,
+        kind: TransientResourceKind,
+    ) -> (String, TransientResourceId) {
+        // Resolve against the final fetched manifest URL, not the configured provider:// entry or pre-redirect URL.
+        let resolved_origin_uri = rewrite_hls_url(self.final_manifest_url, uri).into_owned();
+        let extension = extension_for_resource(&resolved_origin_uri, kind);
+        let mut resource = TransientResourceRef::new(
+            kind,
+            resolved_origin_uri,
+            self.reverse_proxy_rewrite_secret,
+            self.now_ms,
+            self.ttl_ms,
+            Some(extension.clone()),
+        );
+        resource.encrypted_media = encrypted_media;
+        let resource_id = resource.id.clone();
+        self.resources
+            .entry(resource_id.clone())
+            .and_modify(|existing| {
+                resource.encrypted_media |= existing.encrypted_media;
+                *existing = resource.clone();
+            })
+            .or_insert(resource);
+        (
+            format!(
+                "/hls/shared/live/{}/{}/r/{}.{}",
+                self.proxy_session_id.0, HLS_ACCESS_LEASE_ID_PLACEHOLDER, resource_id.0, extension
+            ),
+            resource_id,
+        )
+    }
+}
+
+fn parse_transient_key_transition(line: &str) -> TransientKeyTransition {
+    let Some(attributes) = line.trim().strip_prefix("#EXT-X-KEY:").and_then(parse_attribute_list) else {
+        return TransientKeyTransition::ConservativeEncrypted;
     };
-    let uri = &caps[1];
-    let (proxy_uri, _) = rewrite_resource_uri(
-        uri,
-        final_manifest_url,
-        proxy_session_id,
-        reverse_proxy_rewrite_secret,
-        now_ms,
-        ttl_ms,
-        resources,
-        kind,
-    );
-    CONSTANTS.re_hls_uri.replace(line, format!(r#"URI="{proxy_uri}""#)).to_string()
+    let Some(method) = attributes.get("METHOD") else {
+        return TransientKeyTransition::ConservativeEncrypted;
+    };
+    if method.eq_ignore_ascii_case("NONE") {
+        return if attributes.len() == 1 {
+            TransientKeyTransition::DisableIdentity
+        } else {
+            TransientKeyTransition::ConservativeEncrypted
+        };
+    }
+    if !attributes.contains_key("URI") {
+        return TransientKeyTransition::ConservativeEncrypted;
+    }
+    match attributes.get("KEYFORMAT") {
+        None => TransientKeyTransition::Enable(TransientKeyFormat::Identity),
+        Some(key_format) if key_format.eq_ignore_ascii_case("identity") => {
+            TransientKeyTransition::Enable(TransientKeyFormat::Identity)
+        }
+        Some(key_format) => TransientKeyTransition::Enable(TransientKeyFormat::Other(key_format.to_ascii_lowercase())),
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn rewrite_resource_uri(
-    uri: &str,
-    final_manifest_url: &str,
-    proxy_session_id: &ProxySessionId,
-    reverse_proxy_rewrite_secret: &[u8],
-    now_ms: u64,
-    ttl_ms: u64,
-    resources: &mut HashMap<TransientResourceId, TransientResourceRef>,
-    kind: TransientResourceKind,
-) -> (String, TransientResourceId) {
-    // Resolve against the final fetched manifest URL, not the configured provider:// entry or pre-redirect URL. Relative
-    // resources commonly live under the redirect/CDN host returned by the manifest request.
-    let resolved_origin_uri = rewrite_hls_url(final_manifest_url, uri).into_owned();
-    let extension = extension_for_resource(&resolved_origin_uri, kind);
-    let resource = TransientResourceRef::new(
-        kind,
-        resolved_origin_uri,
-        reverse_proxy_rewrite_secret,
-        now_ms,
-        ttl_ms,
-        Some(extension.clone()),
-    );
-    let resource_id = resource.id.clone();
-    resources.entry(resource_id.clone()).and_modify(|existing| *existing = resource.clone()).or_insert(resource);
-    (
-        format!(
-            "/hls/shared/live/{}/{}/r/{}.{}",
-            proxy_session_id.0, HLS_ACCESS_LEASE_ID_PLACEHOLDER, resource_id.0, extension
-        ),
-        resource_id,
-    )
+fn key_tag_enables_encryption(line: &str) -> bool {
+    !matches!(parse_transient_key_transition(line), TransientKeyTransition::DisableIdentity)
+}
+
+fn transient_manifest_contains_encrypted_media(body: &str) -> bool {
+    body.lines().map(str::trim).any(|line| {
+        line.starts_with("#EXT-X-SESSION-KEY:") || (line.starts_with("#EXT-X-KEY:") && key_tag_enables_encryption(line))
+    })
 }
 
 fn extension_for_resource(resolved_origin_uri: &str, kind: TransientResourceKind) -> String {
@@ -493,10 +522,10 @@ fn append_media_unit_with_duration_override(
     for line in &lines[unit.start..=unit.end] {
         if line.line.trim().starts_with("#EXTINF:") {
             if let Some(duration_ms) = duration_ms {
-                let _ = std::fmt::Write::write_fmt(
-                    output,
-                    format_args!("#EXTINF:{},{}", format_duration_ms(duration_ms), line.ending),
-                );
+                output.push_str("#EXTINF:");
+                output.push_str(&format_hls_duration_ms(duration_ms));
+                output.push(',');
+                output.push_str(line.ending);
                 continue;
             }
         }
@@ -515,10 +544,10 @@ fn append_gap_media_unit(output: &mut String, lines: &[ManifestLine<'_>], unit: 
         })
         .map(|relative_index| unit.start + relative_index);
     if let Some(uri_index) = uri_index {
-        let _ = std::fmt::Write::write_fmt(
-            output,
-            format_args!("#EXTINF:{},{}", format_duration_ms(duration_ms), lines[uri_index].ending),
-        );
+        output.push_str("#EXTINF:");
+        output.push_str(&format_hls_duration_ms(duration_ms));
+        output.push(',');
+        output.push_str(lines[uri_index].ending);
         output.push_str(lines[uri_index].line);
         output.push_str(lines[uri_index].ending);
     }
@@ -554,8 +583,6 @@ fn parse_media_sequence(line: &str) -> Option<u64> {
     line.trim().strip_prefix("#EXT-X-MEDIA-SEQUENCE:")?.trim().parse().ok()
 }
 
-fn format_duration_ms(duration_ms: u64) -> String { format!("{}.{:03}", duration_ms / 1_000, duration_ms % 1_000) }
-
 fn apply_handoff_discontinuity_boundary(body: &str, handoff_discontinuity_sequence: u64) -> String {
     let lines = manifest_lines(body);
     let origin_discontinuity_sequence =
@@ -568,10 +595,9 @@ fn apply_handoff_discontinuity_boundary(body: &str, handoff_discontinuity_sequen
     let mut rewritten = String::with_capacity(body.len().saturating_add(64));
     for index in 0..=lines.len() {
         if existing_sequence_index.is_none() && index == insert_sequence_index {
-            let _ = std::fmt::Write::write_fmt(
-                &mut rewritten,
-                format_args!("#EXT-X-DISCONTINUITY-SEQUENCE:{effective_discontinuity_sequence}\n"),
-            );
+            rewritten.push_str("#EXT-X-DISCONTINUITY-SEQUENCE:");
+            rewritten.push_str(&effective_discontinuity_sequence.to_string());
+            rewritten.push('\n');
         }
         if let Some((boundary_index, has_discontinuity)) = first_segment {
             if !has_discontinuity && index == boundary_index {
@@ -582,13 +608,9 @@ fn apply_handoff_discontinuity_boundary(body: &str, handoff_discontinuity_sequen
             break;
         }
         if existing_sequence_index == Some(index) {
-            let _ = std::fmt::Write::write_fmt(
-                &mut rewritten,
-                format_args!(
-                    "#EXT-X-DISCONTINUITY-SEQUENCE:{}{}",
-                    effective_discontinuity_sequence, lines[index].ending
-                ),
-            );
+            rewritten.push_str("#EXT-X-DISCONTINUITY-SEQUENCE:");
+            rewritten.push_str(&effective_discontinuity_sequence.to_string());
+            rewritten.push_str(lines[index].ending);
         } else {
             rewritten.push_str(lines[index].line);
             rewritten.push_str(lines[index].ending);
@@ -709,6 +731,58 @@ mod tests {
             .contains("#EXT-X-KEY:METHOD=AES-128,URI=\"/hls/shared/live/proxy-id/__hls_access_lease_id__/r/"));
         assert!(result.body.contains(".bin\",IV=0x1"));
         assert!(!result.body.contains("keys/key.bin"));
+    }
+
+    #[test]
+    fn transient_resources_track_segment_local_encryption_and_method_none() {
+        let result = rewrite(
+            "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4,\nencrypted.ts\n\
+             #EXT-X-KEY:METHOD=NONE\n#EXTINF:4,\nclear.ts\n",
+        );
+        let encrypted = result
+            .resources
+            .iter()
+            .find(|resource| resource.resolved_origin_uri.ends_with("encrypted.ts"))
+            .expect("encrypted segment resource");
+        let clear = result
+            .resources
+            .iter()
+            .find(|resource| resource.resolved_origin_uri.ends_with("clear.ts"))
+            .expect("clear segment resource");
+
+        assert!(encrypted.encrypted_media);
+        assert!(!clear.encrypted_media);
+    }
+
+    #[test]
+    fn method_none_clears_identity_without_clearing_an_active_non_identity_keyformat() {
+        let result = rewrite(
+            "#EXTM3U\n\
+             #EXT-X-KEY:METHOD=AES-128,URI=\"identity.bin\"\n\
+             #EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"drm.bin\",KEYFORMAT=\"com.example.drm\"\n\
+             #EXTINF:4,\nbefore-none.ts\n\
+             #EXT-X-KEY:METHOD=NONE\n\
+             #EXTINF:4,\nafter-none.ts\n",
+        );
+        let after_none = result
+            .resources
+            .iter()
+            .find(|resource| resource.resolved_origin_uri.ends_with("after-none.ts"))
+            .expect("segment after identity reset");
+
+        assert!(after_none.encrypted_media);
+    }
+
+    #[test]
+    fn malformed_key_tag_keeps_following_media_conservatively_encrypted() {
+        let result = rewrite("#EXTM3U\n#EXT-X-KEY:URI=\"key.bin\"\n#EXTINF:4,\nsegment.ts\n");
+        let segment = result
+            .resources
+            .iter()
+            .find(|resource| resource.resolved_origin_uri.ends_with("segment.ts"))
+            .expect("segment after malformed key");
+
+        assert!(segment.encrypted_media);
     }
 
     #[test]
@@ -883,6 +957,28 @@ mod tests {
         let gap = body.find("\n#EXT-X-GAP\n").expect("gap tag");
         let discontinuity = body.find("\n#EXT-X-DISCONTINUITY\n#EXTINF:1.92,").expect("handoff discontinuity");
         assert!(gap < discontinuity);
+    }
+
+    #[test]
+    fn encrypted_transient_handoff_keeps_origin_sequence_and_skips_clear_provisioning_splice() {
+        let previous = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2,\n/hls/shared/live/proxy-id/__hls_access_lease_id__/000000.ts?pseq=0\n";
+        for key_tag in ["#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"", "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"key.bin\""] {
+            let origin =
+                format!("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:2455\n{key_tag}\n#EXTINF:4,\na.ts\n");
+            let rewritten_origin = rewrite_with_handoff(&origin);
+
+            let delivered = materialize_transient_provisioning_handoff_view(
+                &rewritten_origin.body,
+                Some(previous),
+                &strip_segments(2),
+                2_000,
+            )
+            .unwrap_or_else(|| rewritten_origin.body.clone());
+
+            assert!(delivered.contains("#EXT-X-MEDIA-SEQUENCE:2455\n"));
+            assert!(!delivered.contains("000000.ts?pseq=0"));
+            assert!(delivered.contains("#EXT-X-DISCONTINUITY\n#EXTINF:4,"));
+        }
     }
 
     #[test]

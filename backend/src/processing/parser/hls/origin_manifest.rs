@@ -19,6 +19,33 @@ pub enum OriginManifestTransientReason {
     ParserUnsupportedFeature { feature: String },
 }
 
+/// Strictly supported segment encryption for the normal cache timeline.
+///
+/// The origin URI is volatile fetch metadata and is never rendered. The opaque proxy resource fields are filled by
+/// the HLS runtime immediately before a timeline preview or commit.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ParsedOriginEncryption {
+    pub resolved_origin_uri: String,
+    pub iv: Option<String>,
+    pub key_format: Option<String>,
+    pub key_format_versions: Option<String>,
+    pub proxy_resource_id: Option<String>,
+    pub proxy_resource_extension: Option<String>,
+}
+
+impl fmt::Debug for ParsedOriginEncryption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ParsedOriginEncryption")
+            .field("resolved_origin_uri", &"<redacted>")
+            .field("iv", &self.iv)
+            .field("key_format", &self.key_format)
+            .field("key_format_versions", &self.key_format_versions)
+            .field("proxy_resource_id", &self.proxy_resource_id)
+            .field("proxy_resource_extension", &self.proxy_resource_extension)
+            .finish()
+    }
+}
+
 /// Parsed normal-timeline view of a live HLS origin media playlist.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ParsedOriginManifest {
@@ -104,6 +131,7 @@ pub struct ParsedOriginSegment {
     pub daterange_tags_before: Vec<String>,
     pub origin_byte_range: Option<ParsedByteRange>,
     pub map_ref: Option<usize>,
+    pub encryption: Option<ParsedOriginEncryption>,
 }
 
 impl fmt::Debug for ParsedOriginSegment {
@@ -117,6 +145,7 @@ impl fmt::Debug for ParsedOriginSegment {
             .field("daterange_tags_before", &self.daterange_tags_before)
             .field("origin_byte_range", &self.origin_byte_range)
             .field("map_ref", &self.map_ref)
+            .field("encryption", &self.encryption)
             .finish()
     }
 }
@@ -311,6 +340,7 @@ struct OriginManifestParser<'a> {
     pending_daterange_tags: Vec<String>,
     pending_byte_range: Option<PendingByteRange>,
     current_map_ref: Option<usize>,
+    current_encryption: Option<ParsedOriginEncryption>,
     maps: Vec<ParsedOriginMap>,
     segments_without_seq: Vec<ParsedOriginSegment>,
     next_byte_range_offset_by_uri: HashMap<String, u64>,
@@ -332,6 +362,7 @@ impl<'a> OriginManifestParser<'a> {
             pending_daterange_tags: Vec::new(),
             pending_byte_range: None,
             current_map_ref: None,
+            current_encryption: None,
             maps: Vec::new(),
             segments_without_seq: Vec::new(),
             next_byte_range_offset_by_uri: HashMap::new(),
@@ -350,9 +381,6 @@ impl<'a> OriginManifestParser<'a> {
             return Ok(());
         }
         let tag = tag_name(line);
-        if tag == "#EXT-X-KEY" {
-            return Err(OriginManifestTransientReason::ExtXKey);
-        }
         if !is_allowed_normal_timeline_tag(tag) {
             return Err(OriginManifestTransientReason::UnsupportedTag { tag: tag.to_string() });
         }
@@ -373,6 +401,7 @@ impl<'a> OriginManifestParser<'a> {
                     Some(parse_tag_value(line, tag)?.parse_numeric("invalid_discontinuity_sequence")?);
             }
             "#EXT-X-MAP" => self.current_map_ref = Some(self.parse_map(line)?),
+            "#EXT-X-KEY" => self.current_encryption = self.parse_key(line)?,
             "#EXT-X-BYTERANGE" => self.pending_byte_range = Some(parse_byterange_tag(line)?),
             "#EXT-X-PROGRAM-DATE-TIME" => {
                 self.pending_program_date_time = Some(parse_tag_value(line, tag)?.to_string());
@@ -382,6 +411,46 @@ impl<'a> OriginManifestParser<'a> {
             _ => {}
         }
         Ok(())
+    }
+
+    fn parse_key(&self, line: &str) -> Result<Option<ParsedOriginEncryption>, OriginManifestTransientReason> {
+        let attributes =
+            parse_attribute_list(parse_tag_value(line, "#EXT-X-KEY")?).ok_or(OriginManifestTransientReason::ExtXKey)?;
+        let method = attributes.get("METHOD").map(String::as_str).ok_or(OriginManifestTransientReason::ExtXKey)?;
+        if method.eq_ignore_ascii_case("NONE") {
+            return (attributes.len() == 1).then_some(None).ok_or(OriginManifestTransientReason::ExtXKey);
+        }
+        if !method.eq_ignore_ascii_case("AES-128")
+            || attributes
+                .keys()
+                .any(|name| !matches!(name.as_str(), "METHOD" | "URI" | "IV" | "KEYFORMAT" | "KEYFORMATVERSIONS"))
+        {
+            return Err(OriginManifestTransientReason::ExtXKey);
+        }
+        let uri =
+            attributes.get("URI").filter(|uri| valid_key_uri(uri)).ok_or(OriginManifestTransientReason::ExtXKey)?;
+        let iv = attributes.get("IV").cloned();
+        if iv.as_deref().is_some_and(|value| !valid_aes_iv(value)) {
+            return Err(OriginManifestTransientReason::ExtXKey);
+        }
+        let key_format = attributes.get("KEYFORMAT").cloned();
+        if key_format.as_deref().is_some_and(|value| !value.eq_ignore_ascii_case("identity")) {
+            return Err(OriginManifestTransientReason::ExtXKey);
+        }
+        let key_format_versions = attributes.get("KEYFORMATVERSIONS").cloned();
+        if key_format_versions.as_deref().is_some_and(|value| value != "1")
+            || (key_format_versions.is_some() && key_format.is_none())
+        {
+            return Err(OriginManifestTransientReason::ExtXKey);
+        }
+        Ok(Some(ParsedOriginEncryption {
+            resolved_origin_uri: resolve_uri(self.final_manifest_url, uri),
+            iv,
+            key_format,
+            key_format_versions,
+            proxy_resource_id: None,
+            proxy_resource_extension: None,
+        }))
     }
 
     fn parse_map(&mut self, line: &str) -> Result<usize, OriginManifestTransientReason> {
@@ -414,6 +483,7 @@ impl<'a> OriginManifestParser<'a> {
             daterange_tags_before: std::mem::take(&mut self.pending_daterange_tags),
             origin_byte_range,
             map_ref: self.current_map_ref,
+            encryption: self.current_encryption.clone(),
         });
         Ok(())
     }
@@ -500,12 +570,63 @@ fn is_allowed_normal_timeline_tag(tag: &str) -> bool {
             | "#EXT-X-DISCONTINUITY"
             | "#EXT-X-DISCONTINUITY-SEQUENCE"
             | "#EXT-X-MAP"
+            | "#EXT-X-KEY"
             | "#EXT-X-BYTERANGE"
             | "#EXT-X-PROGRAM-DATE-TIME"
             | "#EXT-X-DATERANGE"
             | "#EXT-X-INDEPENDENT-SEGMENTS"
             | "#EXT-X-ALLOW-CACHE"
     )
+}
+
+pub(super) fn parse_attribute_list(value: &str) -> Option<HashMap<String, String>> {
+    let mut attributes = HashMap::new();
+    let mut start = 0_usize;
+    let mut quoted = false;
+    for (index, byte) in value.bytes().enumerate() {
+        match byte {
+            b'\"' => quoted = !quoted,
+            b',' if !quoted => {
+                parse_attribute_part(&value[start..index], &mut attributes)?;
+                start = index.saturating_add(1);
+            }
+            byte if byte.is_ascii_control() => return None,
+            _ => {}
+        }
+    }
+    if quoted {
+        return None;
+    }
+    parse_attribute_part(&value[start..], &mut attributes)?;
+    Some(attributes)
+}
+
+fn parse_attribute_part(part: &str, attributes: &mut HashMap<String, String>) -> Option<()> {
+    let (name, raw_value) = part.trim().split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_uppercase() || byte == b'-') {
+        return None;
+    }
+    let raw_value = raw_value.trim();
+    let value = if raw_value.starts_with('"') || raw_value.ends_with('"') {
+        raw_value.strip_prefix('"')?.strip_suffix('"')?
+    } else {
+        raw_value
+    };
+    if value.is_empty() || value.contains('"') || attributes.insert(name.to_string(), value.to_string()).is_some() {
+        return None;
+    }
+    Some(())
+}
+
+fn valid_key_uri(uri: &str) -> bool {
+    !uri.is_empty() && uri.bytes().all(|byte| !byte.is_ascii_control() && byte != b'"')
+}
+
+fn valid_aes_iv(iv: &str) -> bool {
+    iv.strip_prefix("0x")
+        .or_else(|| iv.strip_prefix("0X"))
+        .is_some_and(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn parse_tag_value<'a>(line: &'a str, tag: &str) -> Result<&'a str, OriginManifestTransientReason> {
@@ -589,8 +710,8 @@ fn parser_feature(feature: &str) -> OriginManifestTransientReason {
 #[cfg(test)]
 mod tests {
     use super::{
-        OriginManifestParseOutcome, OriginManifestTransientReason, ParsedByteRange, ParsedManifestValiditySource,
         parse_manifest_timing, parse_manifest_validity, parse_origin_manifest_timeline, parse_origin_media_manifest,
+        OriginManifestParseOutcome, OriginManifestTransientReason, ParsedByteRange, ParsedManifestValiditySource,
     };
 
     const BASE_URL: &str = "http://origin.example.com/live/final/index.m3u8";
@@ -654,13 +775,46 @@ mod tests {
     }
 
     #[test]
-    fn ext_x_key_triggers_transient_passthrough() {
-        let outcome = parse_origin_media_manifest("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n", BASE_URL);
+    fn aes_128_identity_key_and_method_none_are_segment_local_normal_state() {
+        let manifest = normal_manifest(
+            "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\",IV=0x00000000000000000000000000000001,KEYFORMAT=\"identity\",KEYFORMATVERSIONS=\"1\"\n#EXTINF:4,\n1.ts\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:4,\n2.ts\n",
+        );
+
+        let encryption = manifest.segments[0].encryption.as_ref().expect("first segment encrypted");
+        assert_eq!(encryption.resolved_origin_uri, "http://origin.example.com/live/final/key.bin");
+        assert_eq!(encryption.iv.as_deref(), Some("0x00000000000000000000000000000001"));
+        assert_eq!(encryption.key_format.as_deref(), Some("identity"));
+        assert_eq!(encryption.key_format_versions.as_deref(), Some("1"));
+        assert!(manifest.segments[1].encryption.is_none());
+    }
+
+    #[test]
+    fn aes_128_iv_accepts_uppercase_hex_prefix() {
+        let manifest = normal_manifest(
+            "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\",IV=0X0000000000000000000000000000000A\n#EXTINF:4,\n1.ts\n",
+        );
 
         assert_eq!(
-            outcome,
-            OriginManifestParseOutcome::TransientPassthrough { reason: OriginManifestTransientReason::ExtXKey }
+            manifest.segments[0].encryption.as_ref().and_then(|encryption| encryption.iv.as_deref()),
+            Some("0X0000000000000000000000000000000A")
         );
+    }
+
+    #[test]
+    fn unsupported_or_unsafe_key_attributes_trigger_typed_transient_passthrough() {
+        for key in [
+            "METHOD=SAMPLE-AES,URI=\"key.bin\"",
+            "METHOD=AES-128,URI=\"key.bin\",KEYFORMAT=\"com.example\"",
+            "METHOD=AES-128,URI=\"key.bin\",IV=0x1",
+            "METHOD=AES-128,URI=\"key.bin\",UNSUPPORTED=1",
+            "METHOD=NONE,URI=\"key.bin\"",
+        ] {
+            let outcome = parse_origin_media_manifest(&format!("#EXTM3U\n#EXT-X-KEY:{key}\n"), BASE_URL);
+            assert_eq!(
+                outcome,
+                OriginManifestParseOutcome::TransientPassthrough { reason: OriginManifestTransientReason::ExtXKey }
+            );
+        }
     }
 
     #[test]
@@ -686,8 +840,10 @@ mod tests {
     #[test]
     fn ext_x_map_relative_uri_is_resolved_against_final_manifest_url_after_redirect() {
         let final_manifest_url = "https://cdn.example.net/live/redirected/playlist.m3u8";
-        let outcome =
-            parse_origin_media_manifest("#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\nseg001.m4s\n", final_manifest_url);
+        let outcome = parse_origin_media_manifest(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\nseg001.m4s\n",
+            final_manifest_url,
+        );
         let OriginManifestParseOutcome::Normal(manifest) = outcome else {
             panic!("manifest should parse as normal timeline");
         };
@@ -795,10 +951,9 @@ mod tests {
 
     #[test]
     fn manifest_validity_prefers_extinf_sum() {
-        let validity = parse_manifest_validity(
-            "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:4.000,\na.ts\n#EXTINF:6.250,\nb.ts\n",
-        )
-        .expect("validity");
+        let validity =
+            parse_manifest_validity("#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:4.000,\na.ts\n#EXTINF:6.250,\nb.ts\n")
+                .expect("validity");
 
         assert_eq!(validity.playlist_duration_ms, 10_250);
         assert_eq!(validity.segment_count, 2);
@@ -807,8 +962,9 @@ mod tests {
 
     #[test]
     fn manifest_validity_falls_back_to_target_duration() {
-        let validity = parse_manifest_validity("#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXTINF:x,\na.ts\n#EXTINF:y,\nb.ts\n")
-            .expect("validity");
+        let validity =
+            parse_manifest_validity("#EXTM3U\n#EXT-X-TARGETDURATION:12\n#EXTINF:x,\na.ts\n#EXTINF:y,\nb.ts\n")
+                .expect("validity");
 
         assert_eq!(validity.playlist_duration_ms, 24_000);
         assert_eq!(validity.segment_count, 2);

@@ -5,7 +5,9 @@ use crate::model::{AppConfig, ConfigInput, ConfigInputFlags};
 use shared::model::{LiveStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem};
 use crate::repository::{get_input_storage_path, persist_input_live_info, BPlusTreeQuery, xtream_get_file_path};
 use crate::utils::{debug_if_enabled};
-use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
+use crate::utils::ffmpeg::{
+    is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome,
+};
 use log::{debug, warn};
 use crate::processing::parser::xtream::create_xtream_url;
 use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType};
@@ -160,15 +162,8 @@ pub async fn update_live_stream_metadata(
         .await
     };
     match probe_result {
-        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, _stats) => {
-            // 3. Update properties on success
-            if let Some(v) = raw_video {
-                properties.video = Some(v.to_string().into());
-            }
-            if let Some(a) = raw_audio {
-                properties.audio = Some(a.to_string().into());
-            }
-            properties.last_success_timestamp = Some(now);
+        ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => {
+            apply_live_probe_success(&mut properties, raw_video, raw_audio, stats, now);
             success = true;
 
             debug_if_enabled!("Successfully probed Live Stream ID {}", display_id);
@@ -205,4 +200,68 @@ pub async fn update_live_stream_metadata(
     }
     
     Ok(Some(properties))
+}
+
+fn apply_live_probe_success(
+    properties: &mut LiveStreamProperties,
+    raw_video: Option<serde_json::Value>,
+    raw_audio: Option<serde_json::Value>,
+    stats: ProbeStreamStats,
+    now: i64,
+) {
+    if let Some(video) = raw_video {
+        properties.video = Some(video.to_string().into());
+    }
+    if let Some(audio) = raw_audio {
+        properties.audio = Some(audio.to_string().into());
+    }
+    if let Some(bitrate) = stats.bitrate.filter(|bitrate| *bitrate > 0) {
+        properties.bitrate = properties.bitrate.max(bitrate);
+    }
+    properties.last_success_timestamp = Some(now);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_live_probe_success;
+    use crate::utils::ffmpeg::ProbeStreamStats;
+    use serde_json::json;
+    use shared::model::LiveStreamProperties;
+
+    #[test]
+    fn apply_live_probe_success_persists_positive_bitrate() {
+        let mut properties = LiveStreamProperties {
+            bitrate: 1_500_000,
+            ..LiveStreamProperties::default()
+        };
+
+        apply_live_probe_success(
+            &mut properties,
+            Some(json!({ "codec_name": "h264" })),
+            Some(json!({ "codec_name": "aac" })),
+            ProbeStreamStats {
+                duration_secs: None,
+                bitrate: Some(2_500_000),
+            },
+            123,
+        );
+
+        assert_eq!(properties.bitrate, 2_500_000);
+        assert_eq!(properties.last_success_timestamp, Some(123));
+        assert!(properties.video.is_some());
+        assert!(properties.audio.is_some());
+
+        apply_live_probe_success(
+            &mut properties,
+            None,
+            None,
+            ProbeStreamStats {
+                duration_secs: None,
+                bitrate: Some(2_000_000),
+            },
+            124,
+        );
+        assert_eq!(properties.bitrate, 2_500_000);
+        assert_eq!(properties.last_success_timestamp, Some(124));
+    }
 }

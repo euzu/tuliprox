@@ -139,6 +139,13 @@ if [ "$BUILD_BACKEND" = true ]; then
     export CARGO_PROFILE_RELEASE_STRIP=false
   fi
 
+  if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+    SOURCE_DATE_EPOCH="$(date -u +%s)"
+  fi
+  export SOURCE_DATE_EPOCH
+
+  echo "==> Backend build SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}"
+
   case "$TARGET" in
     linux-musl)
       if [ "$(uname)" = "Darwin" ]; then

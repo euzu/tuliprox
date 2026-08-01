@@ -1140,8 +1140,15 @@ fn extract_probe_stream_stats(json: &Value, video_stream: Option<&Value>, audio_
             .or_else(|| parse_duration_secs(audio_stream.and_then(|value| value.get("duration")))),
         bitrate: format
             .and_then(|value| parse_u32_field(value.get("bit_rate")))
-            .or_else(|| parse_u32_field(video_stream.and_then(|value| value.get("bit_rate"))))
-            .or_else(|| parse_u32_field(audio_stream.and_then(|value| value.get("bit_rate")))),
+            .or_else(|| {
+                let video_bitrate = parse_u32_field(video_stream.and_then(|value| value.get("bit_rate")));
+                let audio_bitrate = parse_u32_field(audio_stream.and_then(|value| value.get("bit_rate")));
+                match (video_bitrate, audio_bitrate) {
+                    (Some(video), Some(audio)) => Some(video.saturating_add(audio)),
+                    (Some(bitrate), None) | (None, Some(bitrate)) => Some(bitrate),
+                    (None, None) => None,
+                }
+            }),
     }
 }
 
@@ -1468,11 +1475,12 @@ mod tests {
                 "duration": "1541.4",
                 "bit_rate": "3100000"
             },
-            "streams": []
         });
+        let video = json!({ "bit_rate": "2500000" });
+        let audio = json!({ "bit_rate": "192000" });
 
         assert_eq!(
-            extract_probe_stream_stats(&payload, None, None),
+            extract_probe_stream_stats(&payload, Some(&video), Some(&audio)),
             ProbeStreamStats {
                 duration_secs: Some(1541),
                 bitrate: Some(3_100_000),
@@ -1494,6 +1502,30 @@ mod tests {
                 duration_secs: Some(120),
                 bitrate: Some(1500),
             }
+        );
+    }
+
+    #[test]
+    fn extract_probe_stream_stats_sums_video_and_audio_bitrates() {
+        let payload = json!({});
+        let video = json!({ "bit_rate": "2500000" });
+        let audio = json!({ "bit_rate": 192_000 });
+
+        assert_eq!(
+            extract_probe_stream_stats(&payload, Some(&video), Some(&audio)).bitrate,
+            Some(2_692_000)
+        );
+    }
+
+    #[test]
+    fn extract_probe_stream_stats_saturates_combined_stream_bitrate() {
+        let payload = json!({});
+        let video = json!({ "bit_rate": u32::MAX });
+        let audio = json!({ "bit_rate": 1 });
+
+        assert_eq!(
+            extract_probe_stream_stats(&payload, Some(&video), Some(&audio)).bitrate,
+            Some(u32::MAX)
         );
     }
 

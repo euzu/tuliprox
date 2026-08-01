@@ -1,11 +1,10 @@
 use super::{
     begin_hls_origin_account_io_bounded, build_hls_origin_resource_headers, finish_hls_origin_account_io,
     hls_object_body_deadline, run_hls_origin_resource_retry_loop_with_attempt_prepare, CachedSegmentMetadata,
-    HlsAccessLeaseChannelUnavailableReason, HlsAccessLeaseStore, HlsBoundAccountAcquireErrorKind,
-    HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation, HlsOriginIoContext, HlsOriginResourceBodyDeadline,
-    HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchKind,
-    HlsResourceFetchSource, HlsSegmentCache, HlsSessionHandle, MapCacheKey, MapCacheStatus, OriginMapFetchRef,
-    ProxyMapId, SegmentFetchPolicy,
+    HlsAccessLeaseStore, HlsBoundAccountAcquireErrorKind, HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation,
+    HlsOriginIoContext, HlsOriginResourceBodyDeadline, HlsOriginResourceClients, HlsOriginResourceFetchError,
+    HlsOriginResourceFetchTarget, HlsResourceFetchKind, HlsResourceFetchSource, HlsSegmentCache, HlsSessionHandle,
+    MapCacheKey, MapCacheStatus, OriginMapFetchRef, ProxyMapId, SegmentFetchPolicy,
 };
 use crate::{processing::parser::hls::origin_manifest::ParsedByteRange, utils::content_coding::DecodedHttpResponse};
 use arc_swap::ArcSwap;
@@ -35,6 +34,7 @@ struct MapFetchSnapshot {
     proxy_map_id_log: String,
     cache_key: MapCacheKey,
     fetch_ref: OriginMapFetchRef,
+    origin_work_generation: u64,
 }
 
 struct MapFetchCommit {
@@ -55,6 +55,7 @@ impl fmt::Debug for MapFetchSnapshot {
             .field("proxy_map_id_log", &self.proxy_map_id_log)
             .field("cache_key", &self.cache_key)
             .field("fetch_ref", &self.fetch_ref)
+            .field("origin_work_generation", &self.origin_work_generation)
             .finish()
     }
 }
@@ -75,6 +76,7 @@ impl MapWorkerRuntime {
 pub struct HlsMapWorkerPool {
     runtime: ArcSwap<MapWorkerRuntime>,
     access_leases: Arc<RwLock<HlsAccessLeaseStore>>,
+    availability_reevaluations: Option<Arc<super::availability_reevaluation::HlsAvailabilityReevaluationCoordinator>>,
 }
 
 impl HlsMapWorkerPool {
@@ -96,7 +98,27 @@ impl HlsMapWorkerPool {
         global_semaphore: Arc<Semaphore>,
         access_leases: Arc<RwLock<HlsAccessLeaseStore>>,
     ) -> Self {
-        Self { runtime: ArcSwap::from_pointee(MapWorkerRuntime::new(policy, global_semaphore)), access_leases }
+        Self::with_global_semaphore_access_leases_and_availability(
+            policy,
+            global_semaphore,
+            access_leases,
+            None,
+        )
+    }
+
+    pub(crate) fn with_global_semaphore_access_leases_and_availability(
+        policy: SegmentFetchPolicy,
+        global_semaphore: Arc<Semaphore>,
+        access_leases: Arc<RwLock<HlsAccessLeaseStore>>,
+        availability_reevaluations: Option<
+            Arc<super::availability_reevaluation::HlsAvailabilityReevaluationCoordinator>,
+        >,
+    ) -> Self {
+        Self {
+            runtime: ArcSwap::from_pointee(MapWorkerRuntime::new(policy, global_semaphore)),
+            access_leases,
+            availability_reevaluations,
+        }
     }
 
     pub fn update_config(&self, policy: SegmentFetchPolicy, global_semaphore: Arc<Semaphore>) {
@@ -158,6 +180,7 @@ impl HlsMapWorkerPool {
             matches!(entry.status, MapCacheStatus::Discovered | MapCacheStatus::Queued { .. }).then_some(*proxy_map_id)
         })?;
 
+        let origin_work_generation = session.activity.origin_work_generation;
         let entry = session.maps.get_mut(&proxy_map_id)?;
         let fetch_ref = entry.origin_fetch_ref.clone()?;
         if !fetch_ref.is_valid_at(now_ms) {
@@ -167,13 +190,17 @@ impl HlsMapWorkerPool {
         entry.status = MapCacheStatus::Fetching { started_at_ms: now_ms };
         session.active_map_fetches = session.active_map_fetches.saturating_add(1);
         let proxy_map_id_log = format!("{:06}", proxy_map_id.0);
-        debug!(
-            "HLS map fetch started: session={} source=normal resource=map/{}",
-            super::safe_proxy_session_id(&session.proxy_session_id),
-            proxy_map_id_log
-        );
+        if log::log_enabled!(log::Level::Debug) {
+            let identity = super::HlsLogIdentity::from_session(&session);
+            debug!(
+                "HLS map fetch started: session={} proxy_session={} source=normal resource=map/{}",
+                identity.session(),
+                identity.proxy_session(),
+                proxy_map_id_log
+            );
+        }
 
-        Some(MapFetchSnapshot { proxy_map_id, proxy_map_id_log, cache_key, fetch_ref })
+        Some(MapFetchSnapshot { proxy_map_id, proxy_map_id_log, cache_key, fetch_ref, origin_work_generation })
     }
 
     async fn fetch_one_map(
@@ -185,66 +212,89 @@ impl HlsMapWorkerPool {
     ) {
         let result = fetch_map_into_cache(&context, &snapshot, &policy).await;
         let finished_at_ms = current_time_millis();
-        let generation_valid = result.as_ref().map_or(true, |commit| commit.generation_valid);
         let fetch_succeeded = result.is_ok();
-        let mut response_flag_reason = None;
-        {
+        let (generation_valid, evidence_changed_for) = {
             let mut session = context.session.write().await;
             session.active_map_fetches = session.active_map_fetches.saturating_sub(1);
+            let generation_valid = session.activity.origin_work_generation == snapshot.origin_work_generation
+                && result.as_ref().map_or(true, |commit| commit.generation_valid)
+                && session.maps.get(&snapshot.proxy_map_id).is_some_and(|entry| {
+                    entry.cache_key == snapshot.cache_key && matches!(entry.status, MapCacheStatus::Fetching { .. })
+                });
+            if generation_valid && result.is_err() {
+                session.origin_control.path_condition =
+                    super::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure;
+            }
             if let Some(entry) = session.maps.get_mut(&snapshot.proxy_map_id) {
-                match result {
-                    Ok(commit) => {
-                        let content_length = commit.content_length;
-                        entry.status = MapCacheStatus::Ready { content_length, ready_at_ms: finished_at_ms };
-                        debug!(
-                            "HLS map cached: session={} source=normal resource=map/{} content_length={content_length}",
-                            super::safe_proxy_session_id(&session.proxy_session_id),
-                            snapshot.proxy_map_id_log
-                        );
-                    }
-                    Err(err) => {
-                        if err.retryable_failure() {
-                            entry.status =
-                                MapCacheStatus::FailedRetryable { failed_at_ms: finished_at_ms, retry_after_ms: 1_000 };
-                        } else {
-                            response_flag_reason = Some(HlsAccessLeaseChannelUnavailableReason::MapPermanentFailure {
-                                status: err.permanent_status(),
-                            });
-                            entry.status = MapCacheStatus::FailedPermanent {
-                                failed_at_ms: finished_at_ms,
-                                status: err.permanent_status(),
-                            };
+                if generation_valid {
+                    match result {
+                        Ok(commit) => {
+                            let content_length = commit.content_length;
+                            entry.status = MapCacheStatus::Ready { content_length, ready_at_ms: finished_at_ms };
+                            if log::log_enabled!(log::Level::Debug) {
+                                let identity = super::HlsLogIdentity::from_session(&session);
+                                debug!(
+                                    "HLS map cached: session={} proxy_session={} source=normal resource=map/{} content_length={content_length}",
+                                    identity.session(),
+                                    identity.proxy_session(),
+                                    snapshot.proxy_map_id_log
+                                );
+                            }
+                            session.advance_media_readiness_generation();
+                        }
+                        Err(err) => {
+                            if err.retryable_failure() {
+                                entry.status = MapCacheStatus::FailedRetryable {
+                                    failed_at_ms: finished_at_ms,
+                                    retry_after_ms: 1_000,
+                                };
+                            } else {
+                                entry.status = MapCacheStatus::FailedPermanent {
+                                    failed_at_ms: finished_at_ms,
+                                    status: err.permanent_status(),
+                                };
+                            }
                         }
                     }
+                } else if entry.cache_key == snapshot.cache_key
+                    && matches!(entry.status, MapCacheStatus::Fetching { .. })
+                {
+                    entry.status = MapCacheStatus::Discovered;
                 }
             }
             if fetch_succeeded && generation_valid {
-                let _ = session.render_and_store_manifest(finished_at_ms);
+                if let Err(err) = session.render_and_store_manifest(finished_at_ms) {
+                    if log::log_enabled!(log::Level::Debug) {
+                        let identity = super::HlsLogIdentity::from_session(&session);
+                        debug!(
+                            "HLS manifest render deferred after map readiness: session={} proxy_session={} resource=map/{} error={err:?}",
+                            identity.session(),
+                            identity.proxy_session(),
+                            snapshot.proxy_map_id_log
+                        );
+                    }
+                }
+            }
+            (
+                generation_valid,
+                generation_valid.then(|| session.proxy_session_id.clone()),
+            )
+        };
+        if fetch_succeeded && !generation_valid {
+            if let Err(err) = context.segment_cache.delete(&snapshot.cache_key).await {
+                debug!("HLS stale map cache cleanup failed: resource=map/{} error={err}", snapshot.proxy_map_id_log);
             }
         }
-        if let Some(reason) = response_flag_reason {
-            let marked = self.mark_channel_unavailable_for_session(&context.session, finished_at_ms, reason).await;
-            if marked > 0 {
-                debug!(
-                    "HLS access leases marked channel unavailable: session={} marked={marked}",
-                    super::safe_proxy_session_id(&context.session.read().await.proxy_session_id)
-                );
-            }
+        if let (Some(coordinator), Some(proxy_session_id)) = (
+            self.availability_reevaluations.as_ref(),
+            evidence_changed_for.as_ref(),
+        ) {
+            coordinator.notify_session_evidence_changed(proxy_session_id);
         }
         drop(permit);
         if generation_valid {
             self.schedule_wake(context, finished_at_ms);
         }
-    }
-
-    async fn mark_channel_unavailable_for_session(
-        &self,
-        session: &HlsSessionHandle,
-        now_ms: u64,
-        reason: HlsAccessLeaseChannelUnavailableReason,
-    ) -> usize {
-        let proxy_session_id = session.read().await.proxy_session_id.clone();
-        self.access_leases.write().await.mark_channel_unavailable_for_session(&proxy_session_id, now_ms, reason)
     }
 
     fn schedule_wake(self: &Arc<Self>, context: MapFetchContext, now_ms: u64) {
@@ -281,7 +331,7 @@ async fn prepare_map_origin_attempt(
         if context.origin_io.is_some() { context.session.read().await.origin_account_binding.clone() } else { None };
     let provider_lease = if let (Some(origin_io), Some(binding)) = (context.origin_io.as_ref(), binding.as_ref()) {
         if binding.is_detached() {
-            let _ = finish_map_origin_work(&context, started_generation).await;
+            finish_map_origin_work(&context, started_generation).await;
             touch_map_origin_account_binding(&context, false).await;
             return Err(MapFetchError::ProviderUnavailable(HlsBoundAccountAcquireErrorKind::Detached));
         }
@@ -295,7 +345,7 @@ async fn prepare_map_origin_attempt(
         {
             Ok(guard) => guard,
             Err(err) => {
-                let _ = finish_map_origin_work(&context, started_generation).await;
+                finish_map_origin_work(&context, started_generation).await;
                 touch_map_origin_account_binding(&context, false).await;
                 return Err(MapFetchError::ProviderUnavailable(err));
             }
@@ -386,7 +436,10 @@ async fn fetch_map_with_retries_into_cache(
         no_redirect_client: context.no_redirect_client.clone(),
         use_manual_redirects: context.use_manual_redirects,
     };
-    let session_log_id = context.session.read().await.proxy_session_id.0.clone();
+    let log_identity = {
+        let session = context.session.read().await;
+        super::HlsLogIdentity::from_session(&session)
+    };
     let context = context.clone();
     let snapshot = snapshot.clone();
     let policy_for_prepare = policy.clone();
@@ -396,7 +449,7 @@ async fn fetch_map_with_retries_into_cache(
         target,
         clients,
         policy,
-        &session_log_id,
+        &log_identity,
         move |_attempt| {
             let context = prepare_context.clone();
             let policy = policy_for_prepare.clone();
@@ -451,11 +504,23 @@ fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into
 
 #[cfg(test)]
 mod tests {
-    use super::{build_map_origin_headers, HlsMapWorkerPool, MapFetchContext};
+    use super::{
+        super::{
+            availability_reevaluation::{
+                HlsAvailabilityReevaluationCoordinator, HlsAvailabilityReevaluationMode,
+                HlsAvailabilityReevaluationObservation, HlsAvailabilityReevaluationOwnerKey,
+                HlsAvailabilityReevaluationRegistration,
+            },
+            lease::HlsAvailabilityEvidenceGeneration,
+            session_store::HlsSessionIncarnation,
+        },
+        super::origin_progress::{HlsOriginPathCondition, HlsOriginProgressPhase},
+        build_map_origin_headers, HlsMapWorkerPool, MapFetchContext,
+    };
     use crate::{
         api::model::{
-            HlsAccessLease, HlsAccessLeaseId, HlsPlaybackFamilyKey, HlsSegmentCache, HlsSessionKey, HlsSessionStore,
-            MapCacheStatus, ProxySessionId, SegmentFetchPolicy,
+            HlsAccessLease, HlsAccessLeaseId, HlsAccessLeaseStore, HlsPlaybackFamilyKey, HlsSegmentCache,
+            HlsSessionKey, HlsSessionStore, MapCacheStatus, ProxySessionId, SegmentFetchPolicy,
         },
         processing::parser::hls::origin_manifest::{
             parse_origin_media_manifest, OriginManifestParseOutcome, ParsedByteRange,
@@ -467,6 +532,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
+        sync::{oneshot, Notify, RwLock, Semaphore},
     };
 
     fn normal_manifest(
@@ -587,7 +653,190 @@ mod tests {
         let session_read = session.read().await;
         let map = session_read.maps.values().next().expect("map");
         assert!(matches!(map.status, MapCacheStatus::Ready { content_length: 5, .. }));
+        assert_eq!(session_read.activity.media_readiness_generation, 1);
         assert!(cache.metadata(&map.cache_key).await.expect("metadata").is_some());
+        server.await.expect("server joins");
+    }
+
+    #[tokio::test]
+    async fn invalidated_generation_discards_late_map_completion_without_sleep() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
+        let addr = listener.local_addr().expect("local addr");
+        let (request_seen_tx, request_seen_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 2048];
+                let Ok(read) = socket.read(&mut chunk).await else {
+                    return;
+                };
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let _ = request_seen_tx.send(());
+            if release_rx.await.is_err() {
+                return;
+            }
+            let body = b"controlled-map";
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(body).await;
+        });
+        let manifest = normal_manifest(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\n1.m4s\n",
+            &format!("http://{addr}/live/index.m3u8"),
+        );
+        let store = HlsSessionStore::new();
+        let session = store.get_or_create_session(HlsSessionKey::new(1, "1"), b"secret", 0).await;
+        {
+            let mut session = session.write().await;
+            session.apply_origin_manifest(&manifest).expect("manifest maps");
+            session.queue_map_fetch_candidates(1);
+        }
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache = Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path().to_path_buf()));
+        let policy = SegmentFetchPolicy { retry_jitter_max_ms: 0, ..SegmentFetchPolicy::default() };
+        let worker = Arc::new(HlsMapWorkerPool::new(policy.clone()));
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        grant_usable_map_access_lease(&worker, &proxy_session_id).await;
+        let context = MapFetchContext {
+            session: Arc::clone(&session),
+            segment_cache: Arc::clone(&cache),
+            headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
+            client: reqwest::Client::new(),
+            no_redirect_client: reqwest::Client::new(),
+            use_manual_redirects: false,
+            origin_io: None,
+        };
+        let snapshot = worker.next_fetch_snapshot(&context, 2, &policy).await.expect("map snapshot");
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.expect("test permit");
+        let fetch = tokio::spawn(Arc::clone(&worker).fetch_one_map(context.clone(), snapshot, policy, permit));
+
+        request_seen_rx.await.expect("origin request starts");
+        session.write().await.invalidate_queued_origin_work();
+        release_tx.send(()).expect("origin response released");
+        fetch.await.expect("map fetch joins");
+
+        let cache_key = {
+            let session = session.read().await;
+            assert_eq!(session.active_map_fetches, 0);
+            let map = session.maps.values().next().expect("map remains mapped");
+            assert!(matches!(map.status, MapCacheStatus::Discovered));
+            assert_eq!(session.origin_control.path_condition, HlsOriginPathCondition::ProgressExpected);
+            assert_eq!(session.activity.media_readiness_generation, 0);
+            map.cache_key.clone()
+        };
+        assert!(cache.metadata(&cache_key).await.expect("metadata reads").is_none());
+        server.await.expect("server joins");
+    }
+
+    #[tokio::test]
+    async fn current_required_map_failure_degrades_availability_without_terminalizing_the_lease() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("test origin binds");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let mut chunk = [0_u8; 2048];
+                let Ok(read) = socket.read(&mut chunk).await else {
+                    return;
+                };
+                if read == 0 {
+                    return;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
+        });
+        let manifest = normal_manifest(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.0,\n1.m4s\n",
+            &format!("http://{addr}/live/index.m3u8"),
+        );
+        let store = HlsSessionStore::new();
+        let session = store.get_or_create_session(HlsSessionKey::new(1, "1"), b"secret", 0).await;
+        {
+            let mut session = session.write().await;
+            session.apply_origin_manifest(&manifest).expect("manifest maps");
+            session.queue_map_fetch_candidates(1);
+        }
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let cache = Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path().to_path_buf()));
+        let policy = SegmentFetchPolicy { retry_delays_ms: [0; 5], retry_jitter_max_ms: 0, ..Default::default() };
+        let availability = Arc::new(HlsAvailabilityReevaluationCoordinator::with_capacity(1));
+        let worker = Arc::new(HlsMapWorkerPool::with_global_semaphore_access_leases_and_availability(
+            policy.clone(),
+            Arc::new(Semaphore::new(1)),
+            Arc::new(RwLock::new(HlsAccessLeaseStore::default())),
+            Some(Arc::clone(&availability)),
+        ));
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        grant_usable_map_access_lease(&worker, &proxy_session_id).await;
+        let release_owner = Arc::new(Notify::new());
+        let owner_finished = Arc::new(Notify::new());
+        let task_release_owner = Arc::clone(&release_owner);
+        let task_owner_finished = Arc::clone(&owner_finished);
+        assert_eq!(
+            availability.register(
+                HlsAvailabilityReevaluationOwnerKey {
+                    session_incarnation: HlsSessionIncarnation::for_test(1),
+                    proxy_session_id: proxy_session_id.clone(),
+                    origin_progress_generation: 0,
+                    media_readiness_generation: 0,
+                    availability_evidence_generation: HlsAvailabilityEvidenceGeneration::for_test(1),
+                },
+                HlsAvailabilityReevaluationMode::RecoveryPressure,
+                move |_| async move {
+                    task_release_owner.notified().await;
+                    task_owner_finished.notify_one();
+                },
+            ),
+            HlsAvailabilityReevaluationRegistration::Scheduled
+        );
+        let mut observer = availability.observe_owner(&proxy_session_id).expect("availability owner observation");
+        let mut evidence_change = Box::pin(observer.changed());
+        assert!(matches!(futures::poll!(evidence_change.as_mut()), std::task::Poll::Pending));
+        let context = MapFetchContext {
+            session: Arc::clone(&session),
+            segment_cache: cache,
+            headers: HeaderMap::new(),
+            origin_provider_session_headers: HeaderMap::new(),
+            client: reqwest::Client::new(),
+            no_redirect_client: reqwest::Client::new(),
+            use_manual_redirects: false,
+            origin_io: None,
+        };
+        let snapshot = worker.next_fetch_snapshot(&context, 2, &policy).await.expect("map snapshot");
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.expect("test permit");
+
+        Arc::clone(&worker).fetch_one_map(context, snapshot, policy, permit).await;
+
+        assert_eq!(
+            futures::poll!(evidence_change.as_mut()),
+            std::task::Poll::Ready(HlsAvailabilityReevaluationObservation::EvidenceChanged)
+        );
+        release_owner.notify_one();
+        owner_finished.notified().await;
+        let session = session.read().await;
+        assert!(matches!(
+            session.maps.values().next().expect("required map").status,
+            MapCacheStatus::FailedPermanent { .. }
+        ));
+        assert_eq!(session.origin_control.path_condition, HlsOriginPathCondition::SegmentReadinessFailure);
+        assert_eq!(session.activity.media_readiness_generation, 0);
+        assert!(!matches!(
+            session.origin_control.progress_phase,
+            HlsOriginProgressPhase::Terminal | HlsOriginProgressPhase::TerminalPartial
+        ));
         server.await.expect("server joins");
     }
 
@@ -678,7 +927,7 @@ mod tests {
         let cached_map = tokio::fs::read(metadata.path).await.expect("cached map reads");
         assert_eq!(cached_map, FMP4_MAP);
         assert!(!cached_map.starts_with(&[0x1f, 0x8b]));
-        assert!(!cache.has_active_temp_files().await);
+        assert!(!cache.has_active_temp_files());
         server.await.expect("server joins");
     }
 

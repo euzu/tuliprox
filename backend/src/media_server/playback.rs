@@ -258,7 +258,6 @@ mod tests {
         stream_error: Option<MediaServerError>,
     }
 
-    #[allow(clippy::unused_async_trait_impl)]
     impl MediaServerCatalogClient for MockPlaybackClient {
         fn discover(&self) -> impl std::future::Future<Output = Result<MediaServerStatus, MediaServerError>> {
             std::future::pending::<Result<MediaServerStatus, MediaServerError>>()

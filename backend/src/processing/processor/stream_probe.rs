@@ -496,6 +496,9 @@ pub fn update_properties(
         if let Some(a) = raw_audio {
             props.audio = Some(a);
         }
+        if let Some(bitrate) = stats.bitrate.filter(|bitrate| *bitrate > 0) {
+            props.bitrate = props.bitrate.max(bitrate);
+        }
 
        let now = chrono::Utc::now().timestamp();
        props.last_probed_timestamp = Some(now);
@@ -572,5 +575,49 @@ mod tests {
         let details = video.details.as_ref().unwrap_or_else(|| unreachable!());
         assert_eq!(details.duration_secs.as_deref().map(std::convert::AsRef::as_ref), Some("1541"));
         assert_eq!(details.bitrate, 3_100_000);
+    }
+
+    #[test]
+    fn update_properties_applies_positive_probe_bitrate_to_live_stream() {
+        let mut props_opt = Some(StreamProperties::Live(Box::new(LiveStreamProperties {
+            bitrate: 1_500_000,
+            ..LiveStreamProperties::default()
+        })));
+
+        update_properties(
+            &mut props_opt,
+            PlaylistItemType::Live,
+            "Example",
+            77,
+            None,
+            None,
+            ProbeStreamStats {
+                duration_secs: None,
+                bitrate: Some(3_100_000),
+            },
+        );
+
+        let Some(StreamProperties::Live(live)) = props_opt else {
+            panic!("expected live properties");
+        };
+        assert_eq!(live.bitrate, 3_100_000);
+
+        let mut props_opt = Some(StreamProperties::Live(live));
+        update_properties(
+            &mut props_opt,
+            PlaylistItemType::Live,
+            "Example",
+            77,
+            None,
+            None,
+            ProbeStreamStats {
+                duration_secs: None,
+                bitrate: Some(2_000_000),
+            },
+        );
+        let Some(StreamProperties::Live(live)) = props_opt else {
+            panic!("expected live properties");
+        };
+        assert_eq!(live.bitrate, 3_100_000);
     }
 }

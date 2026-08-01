@@ -1014,6 +1014,7 @@ mod tests {
         assert_eq!(decoded.tv_archive, Some(1));
         assert_eq!(decoded.tv_archive_duration, Some(7));
         assert!(decoded.catchup.is_none());
+        assert_eq!(decoded.bitrate, 0);
     }
 
     #[test]

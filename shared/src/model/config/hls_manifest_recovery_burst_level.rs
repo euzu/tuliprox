@@ -70,4 +70,26 @@ mod tests {
         assert_eq!("balanced".parse::<HlsManifestRecoveryBurstLevel>(), Ok(HlsManifestRecoveryBurstLevel::Balanced));
         assert!("nonsense".parse::<HlsManifestRecoveryBurstLevel>().is_err());
     }
+
+    #[test]
+    fn beast_plan_keeps_six_slots_with_two_lanes_and_derived_candidate_count() {
+        let plan = HlsManifestRecoveryBurstLevel::Beast.plan();
+
+        assert_eq!(plan.slots, 6);
+        assert_eq!(plan.lanes_per_slot, 2);
+        assert_eq!(plan.total_candidates(), plan.slots * plan.lanes_per_slot);
+        assert_eq!(
+            (0..plan.total_candidates()).map(|candidate| plan.slot_for_candidate(candidate)).collect::<Vec<_>>(),
+            vec![0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
+        );
+    }
+
+    #[test]
+    fn off_plan_keeps_exactly_one_candidate() {
+        let plan = HlsManifestRecoveryBurstLevel::Off.plan();
+
+        assert_eq!(plan.slots, 1);
+        assert_eq!(plan.lanes_per_slot, 1);
+        assert_eq!(plan.total_candidates(), 1);
+    }
 }

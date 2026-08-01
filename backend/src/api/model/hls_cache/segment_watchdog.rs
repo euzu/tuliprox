@@ -8,7 +8,7 @@ use super::{
     CachedSegmentMetadata, HlsCacheObjectKey, HlsSegmentCache, StagedCacheObject,
 };
 use crate::model::HlsCorruptSegmentWatchdogConfig;
-use log::debug;
+use log::{debug, warn};
 use serde_json::Value;
 use shared::model::HlsCorruptSegmentWatchdogMode;
 use std::{
@@ -52,6 +52,11 @@ struct HlsWatchdogArtifactMetadata {
     raw_size: u64,
     final_size: u64,
     validation_reason: Option<String>,
+}
+
+enum HlsWatchdogCommitOutcome {
+    Sanitized(CachedSegmentMetadata),
+    RawFallback(CachedSegmentMetadata),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -271,7 +276,7 @@ impl HlsCorruptSegmentWatchdogManager {
         }
         let fixed_path = watchdog_output_path(&raw.path);
         if let Err(reason) = sanitize_corrupt_segment(&raw.path, &fixed_path, deadline).await {
-            let _ = fs::remove_file(&fixed_path).await;
+            cleanup_watchdog_output(&fixed_path).await;
             let status = if reason == "timeout" {
                 HlsCorruptSegmentWatchdogStatus::Timeout
             } else {
@@ -284,7 +289,7 @@ impl HlsCorruptSegmentWatchdogManager {
             Ok(metadata) => metadata.len(),
             Err(err) => {
                 let reason = format!("metadata_failed:{err}");
-                let _ = fs::remove_file(&fixed_path).await;
+                cleanup_watchdog_output(&fixed_path).await;
                 self.record_metadata(
                     identity,
                     HlsCorruptSegmentWatchdogStatus::ValidationFailed { reason: reason.clone() },
@@ -299,7 +304,7 @@ impl HlsCorruptSegmentWatchdogManager {
         let fixed_detect = match detect_packet_corrupt(&fixed_path, deadline).await {
             Ok(count) => count,
             Err(reason) if reason == "timeout" => {
-                let _ = fs::remove_file(&fixed_path).await;
+                cleanup_watchdog_output(&fixed_path).await;
                 self.record_metadata(
                     identity,
                     HlsCorruptSegmentWatchdogStatus::Timeout,
@@ -311,7 +316,7 @@ impl HlsCorruptSegmentWatchdogManager {
                 return segment_cache.commit_staged(key, raw).await;
             }
             Err(reason) => {
-                let _ = fs::remove_file(&fixed_path).await;
+                cleanup_watchdog_output(&fixed_path).await;
                 self.record_metadata(
                     identity,
                     HlsCorruptSegmentWatchdogStatus::ValidationFailed { reason: reason.clone() },
@@ -334,7 +339,7 @@ impl HlsCorruptSegmentWatchdogManager {
         )
         .await;
         if let Err(reason) = validation {
-            let _ = fs::remove_file(&fixed_path).await;
+            cleanup_watchdog_output(&fixed_path).await;
             self.record_metadata(
                 identity,
                 HlsCorruptSegmentWatchdogStatus::ValidationFailed { reason: reason.clone() },
@@ -345,9 +350,19 @@ impl HlsCorruptSegmentWatchdogManager {
             .await;
             return segment_cache.commit_staged(key, raw).await;
         }
-        let _ = segment_cache.remove_staged(raw.clone()).await;
-        let committed =
-            segment_cache.commit_staged(key, StagedCacheObject { path: fixed_path, size: fixed_size }).await?;
+        let raw_size = raw.size;
+        let committed = match commit_watchdog_output_or_raw(
+            segment_cache,
+            key,
+            raw,
+            fixed_path,
+            fixed_size,
+        )
+        .await?
+        {
+            HlsWatchdogCommitOutcome::Sanitized(committed) => committed,
+            HlsWatchdogCommitOutcome::RawFallback(committed) => return Ok(committed),
+        };
         let status = if config.mode == HlsCorruptSegmentWatchdogMode::Diagnostic {
             HlsCorruptSegmentWatchdogStatus::DiagnosticSanitized {
                 packet_corrupt_before: raw_detect,
@@ -360,7 +375,7 @@ impl HlsCorruptSegmentWatchdogManager {
             }
         };
         let committed_sha = sha256_file(&committed.path).await.unwrap_or(raw_sha256);
-        self.record_metadata(identity, status, raw.size, committed.size, Some(committed_sha)).await;
+        self.record_metadata(identity, status, raw_size, committed.size, Some(committed_sha)).await;
         debug_watchdog_event(context, config.mode, "sanitized", Some("action=fixed_commit"));
         Ok(committed)
     }
@@ -654,6 +669,64 @@ fn watchdog_output_path(input_path: &Path) -> PathBuf {
     PathBuf::from(value)
 }
 
+async fn cleanup_watchdog_output(path: &Path) {
+    match fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => warn!("HLS watchdog fixed staging cleanup deferred: error_kind={:?}", error.kind()),
+    }
+}
+
+async fn adopt_watchdog_output(
+    segment_cache: &HlsSegmentCache,
+    path: PathBuf,
+    size: u64,
+) -> io::Result<StagedCacheObject> {
+    match segment_cache.adopt_staged_file(path.clone(), size) {
+        Ok(staged) => Ok(staged),
+        Err(error) => {
+            cleanup_watchdog_output(&path).await;
+            Err(error)
+        }
+    }
+}
+
+async fn commit_watchdog_output_or_raw<K>(
+    segment_cache: &HlsSegmentCache,
+    key: &K,
+    raw: StagedCacheObject,
+    fixed_path: PathBuf,
+    fixed_size: u64,
+) -> io::Result<HlsWatchdogCommitOutcome>
+where
+    K: HlsCacheObjectKey,
+{
+    let fixed = match adopt_watchdog_output(segment_cache, fixed_path, fixed_size).await {
+        Ok(fixed) => fixed,
+        Err(error) => {
+            warn!(
+                "HLS watchdog fixed staging adoption failed; committing raw fallback: error_kind={:?}",
+                error.kind()
+            );
+            return segment_cache.commit_staged(key, raw).await.map(HlsWatchdogCommitOutcome::RawFallback);
+        }
+    };
+    let committed = match segment_cache.commit_staged(key, fixed).await {
+        Ok(committed) => committed,
+        Err(error) => {
+            warn!(
+                "HLS watchdog fixed staging commit failed; committing raw fallback: error_kind={:?}",
+                error.kind()
+            );
+            return segment_cache.commit_staged(key, raw).await.map(HlsWatchdogCommitOutcome::RawFallback);
+        }
+    };
+    if let Err(error) = segment_cache.remove_staged(raw).await {
+        warn!("HLS watchdog raw staging cleanup deferred: error_kind={:?}", error.kind());
+    }
+    Ok(HlsWatchdogCommitOutcome::Sanitized(committed))
+}
+
 fn status_log_value(status: &HlsCorruptSegmentWatchdogStatus) -> &'static str {
     match status {
         HlsCorruptSegmentWatchdogStatus::Clean => "clean",
@@ -703,7 +776,12 @@ fn debug_watchdog_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{count_packet_corrupt_events, parse_packet_corrupt_dts, unsupported_sanitize_extension};
+    use super::{
+        commit_watchdog_output_or_raw, count_packet_corrupt_events, parse_packet_corrupt_dts,
+        unsupported_sanitize_extension, HlsWatchdogCommitOutcome,
+    };
+    use crate::api::model::{HlsSegmentCache, ProxySessionId, SegmentCacheKey};
+    use std::time::Duration;
 
     #[test]
     fn packet_corrupt_counter_dedupes_mpegts_and_hls_same_dts() {
@@ -737,5 +815,61 @@ Last message repeated 3 times
         assert_eq!(unsupported_sanitize_extension("000001.mpegts"), None);
         assert_eq!(unsupported_sanitize_extension("000001.m4s"), Some("m4s".to_string()));
         assert_eq!(unsupported_sanitize_extension("000001.mp4"), Some("mp4".to_string()));
+    }
+
+    #[tokio::test]
+    async fn failed_watchdog_output_adoption_commits_the_raw_fallback() {
+        let cache_root = tempfile::tempdir().expect("cache root");
+        let outside = tempfile::tempdir().expect("outside root");
+        let output = outside.path().join("fixed.ts");
+        tokio::fs::write(&output, b"fixed").await.expect("write output");
+        let cache = HlsSegmentCache::with_cache_path(cache_root.path());
+        let key = SegmentCacheKey::new(ProxySessionId("watchdog-test".to_string()), 1, "ts");
+        let raw = cache
+            .stage_temp_with_deadline(
+                &key,
+                &b"raw"[..],
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("raw segment stages");
+
+        let outcome = commit_watchdog_output_or_raw(&cache, &key, raw, output.clone(), 5)
+            .await
+            .expect("raw fallback commits");
+
+        let HlsWatchdogCommitOutcome::RawFallback(committed) = outcome else {
+            panic!("failed fixed adoption must use the raw fallback");
+        };
+        assert_eq!(tokio::fs::read(committed.path).await.expect("committed fallback reads"), b"raw");
+        assert!(!output.exists());
+    }
+
+    #[tokio::test]
+    async fn failed_watchdog_output_commit_keeps_the_raw_fallback_available() {
+        let cache_root = tempfile::tempdir().expect("cache root");
+        let cache = HlsSegmentCache::with_cache_path(cache_root.path());
+        let key = SegmentCacheKey::new(ProxySessionId("watchdog-test".to_string()), 2, "ts");
+        let raw = cache
+            .stage_temp_with_deadline(
+                &key,
+                &b"raw"[..],
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("raw segment stages");
+        let fixed_path = cache_root.path().join("fixed.watchdog.ts");
+        tokio::fs::write(&fixed_path, b"fixed").await.expect("fixed output writes");
+        cache.update_cache_limits(4, 4);
+
+        let outcome = commit_watchdog_output_or_raw(&cache, &key, raw, fixed_path.clone(), 5)
+            .await
+            .expect("raw fallback commits after fixed commit failure");
+
+        let HlsWatchdogCommitOutcome::RawFallback(committed) = outcome else {
+            panic!("failed fixed commit must use the raw fallback");
+        };
+        assert_eq!(tokio::fs::read(committed.path).await.expect("committed fallback reads"), b"raw");
+        assert!(!fixed_path.exists());
     }
 }

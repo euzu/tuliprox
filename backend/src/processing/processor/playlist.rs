@@ -1612,7 +1612,7 @@ fn is_probe_supported_item_type(item_type: PlaylistItemType) -> bool {
 fn has_probe_details(item: &PlaylistItem) -> bool {
     match item.header.additional_properties.as_ref() {
         Some(StreamProperties::Video(v)) => v.details.as_ref().is_some_and(|d| d.video.is_some() && d.audio.is_some()),
-        Some(StreamProperties::Live(l)) => l.video.is_some() && l.audio.is_some(),
+        Some(StreamProperties::Live(l)) => l.video.is_some() && l.audio.is_some() && l.bitrate > 0,
         Some(StreamProperties::Episode(e)) => e.video.is_some() && e.audio.is_some(),
         Some(StreamProperties::Series(_)) | None => false,
     }
@@ -1638,11 +1638,7 @@ fn get_live_probe_interval_settings(
 fn needs_live_probe(item: &PlaylistItem, cutoff_ts: i64) -> bool {
     match item.header.additional_properties.as_ref() {
         Some(StreamProperties::Live(props)) => {
-            if let Some(last_ts) = props.last_probed_timestamp {
-                last_ts < cutoff_ts
-            } else {
-                true
-            }
+            props.bitrate == 0 || props.last_probed_timestamp.is_none_or(|last_ts| last_ts < cutoff_ts)
         }
         _ => true,
     }
@@ -2112,6 +2108,16 @@ mod tests {
         PlaylistItem { header }
     }
 
+    fn live_item_with_probe_timestamp_and_bitrate(last_probed_timestamp: i64, bitrate: u32) -> PlaylistItem {
+        item_with_props(StreamProperties::Live(Box::new(shared::model::LiveStreamProperties {
+            video: Some("{\"codec_name\":\"h264\"}".intern()),
+            audio: Some("{\"codec_name\":\"aac\"}".intern()),
+            bitrate,
+            last_probed_timestamp: Some(last_probed_timestamp),
+            ..Default::default()
+        })))
+    }
+
     #[test]
     fn rename_preserves_input_stream_id_captured_at_target_boundary() {
         let mut item = PlaylistItem {
@@ -2351,7 +2357,7 @@ mod tests {
     }
 
     #[test]
-    fn has_probe_details_requires_video_and_audio_for_live() {
+    fn has_probe_details_requires_video_audio_and_bitrate_for_live() {
         let live_missing_audio = shared::model::LiveStreamProperties {
             video: Some("{\"codec_name\":\"h264\"}".intern()),
             audio: None,
@@ -2360,13 +2366,43 @@ mod tests {
         let item_missing_audio = item_with_props(StreamProperties::Live(Box::new(live_missing_audio)));
         assert!(!has_probe_details(&item_missing_audio));
 
-        let live_complete = shared::model::LiveStreamProperties {
+        let live_missing_bitrate = shared::model::LiveStreamProperties {
             video: Some("{\"codec_name\":\"h264\"}".intern()),
             audio: Some("{\"codec_name\":\"aac\"}".intern()),
             ..Default::default()
         };
+        let item_missing_bitrate = item_with_props(StreamProperties::Live(Box::new(live_missing_bitrate)));
+        assert!(!has_probe_details(&item_missing_bitrate));
+
+        let live_complete = shared::model::LiveStreamProperties {
+            video: Some("{\"codec_name\":\"h264\"}".intern()),
+            audio: Some("{\"codec_name\":\"aac\"}".intern()),
+            bitrate: 2_500_000,
+            ..Default::default()
+        };
         let item_complete = item_with_props(StreamProperties::Live(Box::new(live_complete)));
         assert!(has_probe_details(&item_complete));
+    }
+
+    #[test]
+    fn needs_live_probe_when_fresh_probe_has_no_bitrate() {
+        let item = live_item_with_probe_timestamp_and_bitrate(101, 0);
+
+        assert!(needs_live_probe(&item, 100));
+    }
+
+    #[test]
+    fn does_not_need_live_probe_when_fresh_probe_has_positive_bitrate() {
+        let item = live_item_with_probe_timestamp_and_bitrate(101, 2_500_000);
+
+        assert!(!needs_live_probe(&item, 100));
+    }
+
+    #[test]
+    fn needs_live_probe_when_positive_bitrate_probe_is_older_than_cutoff() {
+        let item = live_item_with_probe_timestamp_and_bitrate(99, 2_500_000);
+
+        assert!(needs_live_probe(&item, 100));
     }
 
     #[test]

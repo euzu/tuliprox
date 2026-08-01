@@ -474,11 +474,11 @@ mod tests {
 
         assert_eq!(plan.slots, 6);
         assert_eq!(plan.lanes_per_slot, 2);
-        assert_eq!(plan.total_candidates(), 12);
+        assert_eq!(plan.total_candidates(), plan.slots.saturating_mul(plan.lanes_per_slot));
         assert_eq!(plan.slot_for_candidate(0), 0);
         assert_eq!(plan.slot_for_candidate(1), 0);
         assert_eq!(plan.slot_for_candidate(2), 1);
-        assert_eq!(plan.slot_for_candidate(11), 5);
+        assert_eq!(plan.slot_for_candidate(plan.total_candidates().saturating_sub(1)), plan.slots.saturating_sub(1));
     }
 
     #[test]

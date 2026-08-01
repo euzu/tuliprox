@@ -1,8 +1,20 @@
-use super::{HlsAccessLeaseId, HlsSessionKey, ProxySessionId};
+use super::{
+    manifest_acceptance::HlsManifestAcceptanceTrigger,
+    media_reserve::HlsLeasePlaybackCursor,
+    origin_progress::{HlsOriginPathCondition, HlsOriginProgressPhase},
+    HlsAccessLeaseId, HlsSession, HlsSessionKey, ProxySessionId,
+};
 use crate::utils::content_coding::ContentCodingObservation;
 use log::debug;
 use sha2::{Digest, Sha256};
-use std::sync::atomic::{AtomicU64, Ordering};
+use shared::utils::sanitize_sensitive_info;
+use std::{
+    fmt,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 /// Fixed HLS object classes allowed in content-coding diagnostics.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -192,7 +204,190 @@ pub fn safe_user_session_token(session_token: &str) -> String { short_hash(sessi
 
 pub fn safe_proxy_session_id(proxy_session_id: &ProxySessionId) -> String { short_hash(&proxy_session_id.0) }
 
-pub fn safe_origin_log_value(value: impl AsRef<str>) -> String { format!("origin#{}", short_hash(value.as_ref())) }
+/// Canonical HLS log identity source. Raw identifiers remain private and are
+/// converted to safe short values only at the logging boundary.
+#[derive(Clone, Eq, PartialEq)]
+pub struct HlsLogIdentity {
+    session_key: Arc<str>,
+    proxy_session_id: Arc<str>,
+}
+
+impl HlsLogIdentity {
+    pub(crate) fn new(session_key: &HlsSessionKey, proxy_session_id: &ProxySessionId) -> Self {
+        Self {
+            session_key: Arc::from(session_key.stable_value()),
+            proxy_session_id: Arc::from(proxy_session_id.0.as_str()),
+        }
+    }
+
+    pub(crate) fn from_session(session: &HlsSession) -> Self {
+        Self::new(&session.key, &session.proxy_session_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(session: impl Into<String>, proxy_session: impl Into<String>) -> Self {
+        Self { session_key: Arc::from(session.into()), proxy_session_id: Arc::from(proxy_session.into()) }
+    }
+
+    pub(crate) fn session(&self) -> String { short_hash(&self.session_key) }
+
+    pub(crate) fn proxy_session(&self) -> String { short_hash(&self.proxy_session_id) }
+}
+
+impl fmt::Debug for HlsLogIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HlsLogIdentity")
+            .field("session", &self.session())
+            .field("proxy_session", &self.proxy_session())
+            .finish()
+    }
+}
+
+/// Applies the process-wide logging policy without adding HLS-specific
+/// hashing, truncation, parsing, or forced redaction.
+pub fn hls_origin_log_value(value: impl AsRef<str>) -> String {
+    sanitize_sensitive_info(value.as_ref()).into_owned()
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum HlsRecoveryTriggerSource {
+    ProvisioningHandoff,
+    HardFetchFailure,
+    OtherRedirectHost,
+    TimelineRejection,
+    PublicationLate,
+    ReservePressure,
+    Other,
+}
+
+impl HlsRecoveryTriggerSource {
+    const fn as_log_value(self) -> &'static str {
+        match self {
+            Self::ProvisioningHandoff => "provisioning_handoff",
+            Self::HardFetchFailure => "hard_fetch_failure",
+            Self::OtherRedirectHost => "other_redirect_host",
+            Self::TimelineRejection => "timeline_rejection",
+            Self::PublicationLate => "publication_late",
+            Self::ReservePressure => "reserve_pressure",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct HlsRecoveryAvailabilityLogEvidence {
+    pub(crate) progress_phase_before: HlsOriginProgressPhase,
+    pub(crate) progress_condition_before: HlsOriginPathCondition,
+    pub(crate) progress_phase_after: HlsOriginProgressPhase,
+    pub(crate) progress_condition_after: HlsOriginPathCondition,
+    pub(crate) controlling_lease_id: HlsAccessLeaseId,
+    pub(crate) cursor: HlsLeasePlaybackCursor,
+    pub(crate) guaranteed_reserve_ms: u64,
+    pub(crate) recovery_required: bool,
+    pub(crate) cutover_required: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct HlsRecoveryTriggerDiagnostic {
+    source: HlsRecoveryTriggerSource,
+    availability: Option<HlsRecoveryAvailabilityLogEvidence>,
+    pinned_host: Option<String>,
+    candidate_host: Option<String>,
+}
+
+impl HlsRecoveryTriggerDiagnostic {
+    pub(crate) const fn new(source: HlsRecoveryTriggerSource) -> Self {
+        Self { source, availability: None, pinned_host: None, candidate_host: None }
+    }
+
+    pub(crate) fn availability(
+        source: HlsRecoveryTriggerSource,
+        evidence: HlsRecoveryAvailabilityLogEvidence,
+    ) -> Self {
+        Self { source, availability: Some(evidence), pinned_host: None, candidate_host: None }
+    }
+
+    pub(crate) fn other_redirect_host(pinned_host: Option<String>, candidate_host: Option<String>) -> Self {
+        Self {
+            source: HlsRecoveryTriggerSource::OtherRedirectHost,
+            availability: None,
+            pinned_host,
+            candidate_host,
+        }
+    }
+}
+
+pub(crate) fn hls_manifest_recovery_log_fields(
+    identity: &HlsLogIdentity,
+    trigger: HlsManifestAcceptanceTrigger,
+    diagnostic: &HlsRecoveryTriggerDiagnostic,
+) -> Option<String> {
+    if !trigger.starts_episode() {
+        return None;
+    }
+    let availability = diagnostic.availability.as_ref();
+    Some(format!(
+        "session={} proxy_session={} trigger={} trigger_source={} progress_phase_before={} progress_condition_before={} progress_phase_after={} progress_condition_after={} controlling_lease={} cursor_generation={} first_requested_proxy_seq={} highest_contiguous_completed_proxy_seq={} last_requested_proxy_seq={} guaranteed_reserve_ms={} recovery_required={} cutover_required={} pinned_host={} candidate_host={}",
+        identity.session(),
+        identity.proxy_session(),
+        trigger.as_log_value(),
+        diagnostic.source.as_log_value(),
+        availability.map_or("none", |evidence| progress_phase_log_value(evidence.progress_phase_before)),
+        availability.map_or("none", |evidence| progress_condition_log_value(evidence.progress_condition_before)),
+        availability.map_or("none", |evidence| progress_phase_log_value(evidence.progress_phase_after)),
+        availability.map_or("none", |evidence| progress_condition_log_value(evidence.progress_condition_after)),
+        availability.map_or_else(
+            || "none".to_string(),
+            |evidence| safe_hls_access_lease_id(&evidence.controlling_lease_id),
+        ),
+        availability.map_or_else(|| "none".to_string(), |evidence| evidence.cursor.cursor_generation.to_string()),
+        format_optional_u64(availability.and_then(|evidence| evidence.cursor.first_requested_proxy_seq)),
+        format_optional_u64(
+            availability.and_then(|evidence| evidence.cursor.highest_contiguous_completed_proxy_seq),
+        ),
+        format_optional_u64(availability.and_then(|evidence| evidence.cursor.last_requested_proxy_seq)),
+        availability.map_or_else(|| "none".to_string(), |evidence| evidence.guaranteed_reserve_ms.to_string()),
+        availability.map_or_else(|| "none".to_string(), |evidence| evidence.recovery_required.to_string()),
+        availability.map_or_else(|| "none".to_string(), |evidence| evidence.cutover_required.to_string()),
+        diagnostic
+            .pinned_host
+            .as_deref()
+            .map_or_else(|| "none".to_string(), hls_origin_log_value),
+        diagnostic
+            .candidate_host
+            .as_deref()
+            .map_or_else(|| "none".to_string(), hls_origin_log_value),
+    ))
+}
+
+const fn progress_phase_log_value(phase: HlsOriginProgressPhase) -> &'static str {
+    match phase {
+        HlsOriginProgressPhase::Cold => "cold",
+        HlsOriginProgressPhase::Fresh => "fresh",
+        HlsOriginProgressPhase::PublicationLate => "publication_late",
+        HlsOriginProgressPhase::RecoveryRequired => "recovery_required",
+        HlsOriginProgressPhase::Recovering => "recovering",
+        HlsOriginProgressPhase::Critical => "critical",
+        HlsOriginProgressPhase::TerminalPartial => "terminal_partial",
+        HlsOriginProgressPhase::Terminal => "terminal",
+    }
+}
+
+const fn progress_condition_log_value(condition: HlsOriginPathCondition) -> &'static str {
+    match condition {
+        HlsOriginPathCondition::ProgressExpected => "progress_expected",
+        HlsOriginPathCondition::PublicationLate => "publication_late",
+        HlsOriginPathCondition::RetryableFetchFailure => "retryable_fetch_failure",
+        HlsOriginPathCondition::HardFetchFailure => "hard_fetch_failure",
+        HlsOriginPathCondition::AcceptanceConflict => "acceptance_conflict",
+        HlsOriginPathCondition::SegmentReadinessFailure => "segment_readiness_failure",
+    }
+}
+
+fn format_optional_u64(value: Option<u64>) -> String {
+    value.map_or_else(|| "none".to_string(), |value| value.to_string())
+}
 
 fn increment(counter: &AtomicU64, count: u64) { counter.fetch_add(count, Ordering::Relaxed); }
 
@@ -207,25 +402,154 @@ fn short_hash(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        hls_origin_content_coding_log_fields, safe_origin_log_value, safe_proxy_session_id, safe_session_key,
-        HlsCacheMetrics, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource,
+        hls_manifest_recovery_log_fields, hls_origin_content_coding_log_fields, hls_origin_log_value,
+        safe_proxy_session_id, safe_session_key, HlsCacheMetrics, HlsLogIdentity,
+        HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource, HlsRecoveryAvailabilityLogEvidence,
+        HlsRecoveryTriggerDiagnostic, HlsRecoveryTriggerSource,
     };
     use crate::{
-        api::model::{HlsSessionKey, ProxySessionId},
+        api::model::{
+            hls_cache::{
+                media_reserve::HlsLeasePlaybackCursor,
+                origin_progress::{HlsOriginPathCondition, HlsOriginProgressPhase},
+            },
+            HlsAccessLeaseId, HlsManifestAcceptanceTrigger, HlsSession, HlsSessionKey, ProxySessionId,
+        },
         utils::content_coding::ContentCodingObservation,
     };
     use reqwest::StatusCode;
+    use shared::utils::{is_sanitize_sensitive_info_enabled, sanitize_sensitive_info, set_sanitize_sensitive_info};
+    use std::sync::Mutex;
+
+    static SANITIZATION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct SanitizationSettingGuard(bool);
+
+    impl SanitizationSettingGuard {
+        fn set(enabled: bool) -> Self {
+            let previous = is_sanitize_sensitive_info_enabled();
+            set_sanitize_sensitive_info(enabled);
+            Self(previous)
+        }
+    }
+
+    impl Drop for SanitizationSettingGuard {
+        fn drop(&mut self) { set_sanitize_sensitive_info(self.0); }
+    }
 
     #[test]
-    fn safe_log_helpers_do_not_emit_credentials_or_full_proxy_session_id() {
-        let sanitized = safe_origin_log_value("http://user:password@example.com/live/user/password/123.ts");
-        assert!(sanitized.starts_with("origin#"));
-        assert!(!sanitized.contains("user:password"));
-        assert!(!sanitized.contains("/user/password/"));
+    fn hls_origin_diagnostics_follow_global_sanitization_for_all_supported_value_shapes() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let values = [
+            "http://user:password@example.com/live/user/password/123.ts?token=secret",
+            "origin.example.com:8443",
+            "http://192.0.2.10/live/user/password/123.ts",
+            "http://[2001:db8::1]/live/user/password/123.ts",
+            "provider://demo/live/user/password/123.m3u8",
+            "not a valid URL user:password",
+        ];
+
+        let _guard = SanitizationSettingGuard::set(false);
+        for value in values {
+            assert_eq!(hls_origin_log_value(value), value);
+        }
+
+        set_sanitize_sensitive_info(true);
+        for value in values {
+            let logged = hls_origin_log_value(value);
+            assert_eq!(logged, sanitize_sensitive_info(value));
+            assert!(!logged.starts_with("origin#"));
+        }
+    }
+
+    #[test]
+    fn segment_fetch_diagnostic_identity_uses_content_session_key_and_separate_proxy_session() {
+        let session = HlsSession::new(HlsSessionKey::new(7, "channel-a"), b"secret", 10);
+        let identity = HlsLogIdentity::from_session(&session);
 
         let proxy_session_id = ProxySessionId("a8f31c9eQ7sLk92pV0mTaw".to_string());
         assert_eq!(safe_proxy_session_id(&proxy_session_id).len(), 8);
         assert!(!safe_proxy_session_id(&proxy_session_id).contains("Lk92pV0mTaw"));
+        assert_eq!(identity.session(), safe_session_key(&session.key));
+        assert_eq!(identity.proxy_session(), safe_proxy_session_id(&session.proxy_session_id));
+        assert_ne!(identity.session(), identity.proxy_session());
+    }
+
+    #[test]
+    fn recovery_diagnostic_requires_trigger_and_uses_frozen_cursor_evidence() {
+        let identity = HlsLogIdentity::for_test("content-session", "proxy-session");
+        let mut cursor = HlsLeasePlaybackCursor::default();
+        cursor.first_requested_proxy_seq = Some(40);
+        cursor.highest_contiguous_completed_proxy_seq = Some(42);
+        cursor.last_requested_proxy_seq = Some(43);
+        cursor.cursor_generation = 9;
+        let diagnostic = HlsRecoveryTriggerDiagnostic::availability(
+            HlsRecoveryTriggerSource::ReservePressure,
+            HlsRecoveryAvailabilityLogEvidence {
+                progress_phase_before: HlsOriginProgressPhase::PublicationLate,
+                progress_condition_before: HlsOriginPathCondition::PublicationLate,
+                progress_phase_after: HlsOriginProgressPhase::RecoveryRequired,
+                progress_condition_after: HlsOriginPathCondition::PublicationLate,
+                controlling_lease_id: HlsAccessLeaseId("lease-secret".to_string()),
+                cursor,
+                guaranteed_reserve_ms: 12_345,
+                recovery_required: true,
+                cutover_required: false,
+            },
+        );
+
+        assert!(hls_manifest_recovery_log_fields(
+            &identity,
+            HlsManifestAcceptanceTrigger::None,
+            &diagnostic,
+        )
+        .is_none());
+        let fields = hls_manifest_recovery_log_fields(
+            &identity,
+            HlsManifestAcceptanceTrigger::RecoveryRequired,
+            &diagnostic,
+        )
+        .expect("non-none trigger produces diagnostic");
+        assert!(fields.contains(&format!(
+            "session={} proxy_session={}",
+            identity.session(),
+            identity.proxy_session()
+        )));
+        assert!(fields.contains("trigger=recovery_required trigger_source=reserve_pressure"));
+        assert!(fields.contains("progress_phase_before=publication_late"));
+        assert!(fields.contains("cursor_generation=9 first_requested_proxy_seq=40"));
+        assert!(fields.contains("highest_contiguous_completed_proxy_seq=42 last_requested_proxy_seq=43"));
+        assert!(fields.contains("guaranteed_reserve_ms=12345 recovery_required=true cutover_required=false"));
+    }
+
+    #[test]
+    fn other_redirect_host_diagnostic_uses_canonical_host_policy_without_hashes() {
+        let _serial = SANITIZATION_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let identity = HlsLogIdentity::for_test("content-session", "proxy-session");
+        let diagnostic = HlsRecoveryTriggerDiagnostic::other_redirect_host(
+            Some("pinned.example.com".to_string()),
+            Some("candidate.example.net".to_string()),
+        );
+        let _guard = SanitizationSettingGuard::set(false);
+        let raw = hls_manifest_recovery_log_fields(&identity, HlsManifestAcceptanceTrigger::Observe, &diagnostic)
+            .expect("observe trigger produces diagnostic");
+        assert!(raw.contains("trigger_source=other_redirect_host"));
+        assert!(raw.contains("pinned_host=pinned.example.com candidate_host=candidate.example.net"));
+        assert!(!raw.contains("origin#"));
+
+        set_sanitize_sensitive_info(true);
+        let sanitized = hls_manifest_recovery_log_fields(
+            &identity,
+            HlsManifestAcceptanceTrigger::Observe,
+            &diagnostic,
+        )
+        .expect("observe trigger produces sanitized diagnostic");
+        assert!(sanitized.contains(&format!(
+            "pinned_host={} candidate_host={}",
+            sanitize_sensitive_info("pinned.example.com"),
+            sanitize_sensitive_info("candidate.example.net")
+        )));
+        assert!(!sanitized.contains("origin#"));
     }
 
     #[test]

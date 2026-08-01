@@ -798,8 +798,7 @@ fn preserve_details_input_xtream_playlist_cluster_to_disk(
             if old_props.has_details() {
                 if let Ok(Some(mut new_item)) = new_tree.query(&old_item.provider_id) {
                     if let Some(new_props) = new_item.additional_properties.as_mut() {
-                        if needs_preserved_stream_property_merge(new_props, old_props)
-                            && merge_preserved_stream_properties(new_props, old_props) {
+                        if merge_preserved_stream_properties(new_props, old_props) {
                             updates.push((new_item.provider_id, new_item));
                             if updates.len() >= BATCH_SIZE {
                                 let refs: Vec<(&u32, &XtreamPlaylistItem)> = updates.iter().map(|(id, pli)| (id, pli)).collect();
@@ -1133,9 +1132,7 @@ pub async fn persist_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_
                 if let Ok(provider_id) = pli.header.id.parse::<u32>() {
                     if let Some(stored_pli) = stored_col.get_mut(&provider_id) {
                         if let (Some(new_stream_props), Some(old_stream_props)) = (&mut pli.header.additional_properties, stored_pli.additional_properties.take()) {
-                            if needs_preserved_stream_property_merge(new_stream_props, &old_stream_props) {
-                                merge_preserved_stream_properties(new_stream_props, &old_stream_props);
-                            }
+                            merge_preserved_stream_properties(new_stream_props, &old_stream_props);
                         }
                     }
                 }
@@ -1225,39 +1222,12 @@ pub(crate) fn needs_update_info_details(
     }
 }
 
-fn needs_preserved_stream_property_merge(
-    new_stream_props: &StreamProperties,
-    old_stream_props: &StreamProperties,
-) -> bool {
-    let preserve_info_details = old_stream_props.has_details() && !needs_update_info_details(new_stream_props, old_stream_props);
-
-    match (new_stream_props, old_stream_props) {
-        (StreamProperties::Video(v_new), StreamProperties::Video(v_old)) => {
-            (preserve_info_details && v_old.details.is_some() && v_new.details != v_old.details)
-                || (v_new.tmdb.is_none() && v_old.tmdb.is_some())
-        }
-        (StreamProperties::Series(s_new), StreamProperties::Series(s_old)) => {
-            (preserve_info_details && s_old.details.is_some() && s_new.details != s_old.details)
-                || (s_new.tmdb.is_none() && s_old.tmdb.is_some())
-                || (s_new.release_date.is_none() && s_old.release_date.is_some())
-        }
-        (StreamProperties::Live(l_new), StreamProperties::Live(l_old)) => {
-            (l_new.video.is_none() && l_old.video.is_some())
-                || (l_new.audio.is_none() && l_old.audio.is_some())
-                || (l_new.last_probed_timestamp.is_none() && l_old.last_probed_timestamp.is_some())
-                || (l_new.last_success_timestamp.is_none() && l_old.last_success_timestamp.is_some())
-                || (l_new.catchup.is_none() && l_old.catchup.is_some())
-        }
-        _ => false,
-    }
-}
-
 /// Merges persisted fields from old stream properties into freshly fetched properties.
 ///
 /// This keeps long-lived metadata stable across full playlist rewrites:
 /// - VOD/Series `details` are preserved when incoming provider metadata is not newer.
-/// - Live probe fields (`video`, `audio`, `last_probed_timestamp`, `last_success_timestamp`)
-///   are copied only when missing in the incoming payload.
+/// - Learned Live fields are merged through [`LiveStreamProperties::merge_learned_metadata_from`].
+/// - Live catchup remains separate provider metadata and is copied only when missing.
 pub(crate) fn merge_preserved_stream_properties(
     new_stream_props: &mut StreamProperties,
     old_stream_props: &StreamProperties,
@@ -1302,27 +1272,7 @@ pub(crate) fn merge_preserved_stream_properties(
             changed
         }
         (StreamProperties::Live(l_new), StreamProperties::Live(l_old)) => {
-            let mut changed = false;
-
-            if l_new.video.is_none() && l_old.video.is_some() {
-                l_new.video.clone_from(&l_old.video);
-                changed = true;
-            }
-
-            if l_new.audio.is_none() && l_old.audio.is_some() {
-                l_new.audio.clone_from(&l_old.audio);
-                changed = true;
-            }
-
-            if l_new.last_probed_timestamp.is_none() && l_old.last_probed_timestamp.is_some() {
-                l_new.last_probed_timestamp = l_old.last_probed_timestamp;
-                changed = true;
-            }
-
-            if l_new.last_success_timestamp.is_none() && l_old.last_success_timestamp.is_some() {
-                l_new.last_success_timestamp = l_old.last_success_timestamp;
-                changed = true;
-            }
+            let mut changed = l_new.merge_learned_metadata_from(l_old);
 
             if l_new.catchup.is_none() && l_old.catchup.is_some() {
                 l_new.catchup.clone_from(&l_old.catchup);
@@ -1631,6 +1581,26 @@ mod tests {
     }
 
     #[test]
+    fn merge_preserves_higher_learned_live_bitrate() {
+        let mut new_props = StreamProperties::Live(Box::new(LiveStreamProperties {
+            stream_id: 1,
+            bitrate: 1_500_000,
+            ..LiveStreamProperties::default()
+        }));
+        let old_props = StreamProperties::Live(Box::new(LiveStreamProperties {
+            stream_id: 1,
+            bitrate: 2_500_000,
+            ..LiveStreamProperties::default()
+        }));
+
+        assert!(merge_preserved_stream_properties(&mut new_props, &old_props));
+        match new_props {
+            StreamProperties::Live(live) => assert_eq!(live.bitrate, 2_500_000),
+            _ => panic!("expected live properties"),
+        }
+    }
+
+    #[test]
     fn merge_preserves_missing_live_catchup_properties() {
         let mut new_props = StreamProperties::Live(Box::new(LiveStreamProperties {
             stream_id: 1,
@@ -1707,6 +1677,7 @@ mod tests {
         audio: Option<&str>,
         last_probed_timestamp: Option<i64>,
         last_success_timestamp: Option<i64>,
+        bitrate: u32,
     ) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
             virtual_id: provider_id,
@@ -1726,6 +1697,7 @@ mod tests {
                 audio: audio.map(Internable::intern),
                 last_probed_timestamp,
                 last_success_timestamp,
+                bitrate,
                 ..Default::default()
             }))),
             item_type: shared::model::PlaylistItemType::Live,
@@ -1780,9 +1752,10 @@ mod tests {
                 Some("{\"codec_name\":\"aac\"}"),
                 Some(1_700_000_000),
                 Some(1_700_000_100),
+                2_500_000,
             ),
         );
-        write_single_item(&tmp_path, &make_live_item(provider_id, None, None, None, None));
+        write_single_item(&tmp_path, &make_live_item(provider_id, None, None, None, None, 0));
 
         preserve_details_input_xtream_playlist_cluster_to_disk(&old_path, &tmp_path).expect("merge should succeed");
 
@@ -1791,6 +1764,7 @@ mod tests {
         assert_eq!(merged.audio, Some("{\"codec_name\":\"aac\"}".intern()));
         assert_eq!(merged.last_probed_timestamp, Some(1_700_000_000));
         assert_eq!(merged.last_success_timestamp, Some(1_700_000_100));
+        assert_eq!(merged.bitrate, 2_500_000);
     }
 
     #[test]
@@ -1808,6 +1782,7 @@ mod tests {
                 Some("{\"codec_name\":\"aac\"}"),
                 Some(1_700_000_000),
                 Some(1_700_000_100),
+                2_500_000,
             ),
         );
         write_single_item(
@@ -1818,6 +1793,7 @@ mod tests {
                 Some("{\"codec_name\":\"ac3\"}"),
                 Some(1_800_000_000),
                 Some(1_800_000_100),
+                3_500_000,
             ),
         );
 
@@ -1828,6 +1804,7 @@ mod tests {
         assert_eq!(merged.audio, Some("{\"codec_name\":\"ac3\"}".intern()));
         assert_eq!(merged.last_probed_timestamp, Some(1_800_000_000));
         assert_eq!(merged.last_success_timestamp, Some(1_800_000_100));
+        assert_eq!(merged.bitrate, 3_500_000);
     }
 
     #[test]
@@ -1845,6 +1822,7 @@ mod tests {
                 Some("{\"codec_name\":\"aac\"}"),
                 Some(1_700_000_000),
                 Some(1_700_000_100),
+                2_500_000,
             ),
         );
         write_single_item(
@@ -1855,6 +1833,7 @@ mod tests {
                 None,
                 Some(1_800_000_000),
                 None,
+                3_500_000,
             ),
         );
 

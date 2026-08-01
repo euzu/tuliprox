@@ -34,9 +34,9 @@ sequenceDiagram
     Player->>Entry: GET generated live HLS URL
     Entry->>Entry: Authenticate user, resolve target/input/stream
     Entry->>Lease: Create Pending HlsAccessLease
-    Entry-->>Player: 307 Location: /hls/shared/live/.../manifest.m3u8
+    Entry-->>Player: 200 single-variant master playlist
 
-    Player->>Session: GET canonical manifest
+    Player->>Session: GET variant URI /hls/shared/live/.../manifest.m3u8
     Session->>Lease: Validate manifest access
     Session->>Session: Create or reuse HlsSession
     Session->>Origin: Fetch or refresh origin manifest if needed
@@ -58,19 +58,22 @@ stream ID, stream URL, and user connection permission. The original input stream
 and is not replaced by the target's virtual ID.
 
 If Shared HLS is enabled for the target, Tuliprox creates a fresh `Pending` `HlsAccessLease` for this playback and returns
-an HTTP `307 Temporary Redirect` to the canonical shared manifest path:
+an HTTP `200 OK` single-variant master playlist. Its only variant points to the canonical shared media-playlist path:
 
 ```text
 /hls/shared/live/<proxy_session_id>/<hls_access_lease_id>/manifest.m3u8
 ```
 
-The redirect response uses `Cache-Control: no-store`, because the lease ID is user-specific and should not be cached by a
-browser, proxy, or IPTV client.
+The response uses `Cache-Control: private, no-store, no-cache, must-revalidate`, because the lease ID is user-specific and
+should not be cached by a browser, proxy, or IPTV client. The advertised `BANDWIDTH` uses a known positive item or
+persisted live bitrate with safety headroom. Unknown streams use the single-variant fallback of exactly 1 Mbit/s; normal
+playback can learn a later value asynchronously from ready Shared HLS segments.
 
 ## Step 2: Canonical manifest request
 
-The player follows the redirect and requests the canonical manifest. Tuliprox validates the access lease, restores the
-user context, checks admission, then creates or reuses the shared `HlsSession` for the `proxy_session_id`.
+The player loads the master playlist's only variant and requests the canonical media playlist. Tuliprox validates the
+access lease, restores the user context, checks admission, then creates or reuses the shared `HlsSession` for the
+`proxy_session_id`.
 
 A manifest request can keep a lease alive, but it does not necessarily prove active playback. For that reason, a manifest
 request for a `Pending` lease usually keeps it pending. Media requests are what activate the lease.
@@ -107,7 +110,7 @@ segment.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending: Entry redirect creates lease
+    [*] --> Pending: Entry master playlist creates lease
     Pending --> Pending: Manifest access
     Pending --> Activated: Segment, MAP, or transient resource access
     Pending --> Denied: User/provider admission denied
@@ -131,7 +134,7 @@ Important timing rules:
 
 | Rule | Meaning |
 | :--- | :--- |
-| Initial pending bootstrap window | A newly redirected lease can wait for the first useful manifest decision. The current bootstrap window is 90 seconds. |
+| Initial pending bootstrap window | A newly created lease can wait for the first useful media-playlist decision. The current bootstrap window is 90 seconds. |
 | Pending follow-up window | After a pending manifest response, Tuliprox can shorten the pending window to `max(10 seconds, 2 * target_duration)`. |
 | Active window | A media request keeps a lease active for `2 * target_duration`. If target duration is unknown, Tuliprox uses a 15-second fallback. |
 | Validity window | The lease validity baseline comes from `hls_cache.session_idle_timeout`. Default: 300 seconds. |
@@ -178,6 +181,63 @@ they start too close to the live edge.
 
 Manifest acceptance is conservative. Tuliprox tracks media sequence progress, host changes, and recovery signals so it can
 avoid accepting a manifest that would move the shared session backwards or suddenly switch to an unsafe origin host.
+
+Media sequence and highwater are local to an effective origin host and origin epoch. Tuliprox never treats matching
+sequence numbers or similar URIs on two hosts as continuity evidence. When reserve pressure requires recovery, the first
+acceptance attempt runs the complete configured burst; it does not start with a reduced probe. A cross-host winner is
+staged, checked against the lease-centered handoff base, committed under its acceptance generation, and starts a new
+origin epoch with a discontinuity when required.
+
+`PublicationLate` begins at `1.5 * TARGETDURATION`, but it is only an observation that the origin is publishing late. The
+runtime starts recovery and closes startup admission only when lease-specific READY reserve, full-burst recovery ETA, and
+transition margin require it. It cuts over only at the lease-specific safe deadline. Manifest request counts never
+terminalize a lease, and initial strip contributes only the READY media actually available to that lease and its measured
+start distance.
+
+## MPEG-TS inspection and prepared terminal media
+
+Tuliprox uses `mpeg2ts-reader` as a read-only, bounded prefix parser behind Tuliprox-owned result types. PAT/PMT tracks are
+compatibility evidence for a possible splice; they are not content identity and do not weaken cross-host acceptance.
+Origin, cache, and candidate media bytes are never modified by inspection.
+
+The existing Tuliprox transport-stream writer remains narrowly scoped to terminal bundle preparation. It prepares one
+bounded, generation-independent media bundle before a lease reaches cutover; no manifest or terminal-segment HTTP request
+runs the parser or writer. The prepared-bundle key binds:
+
+- the terminal asset revision and fingerprint;
+- the target duration;
+- the fixed terminal segment count and bundle format.
+
+One ready bundle contains twelve small immutable terminal blocks. For block index `x`, timestamp progression is:
+
+```text
+offset_90khz(x) = x * target_duration_ms * 90
+offset_pcr(x) = offset_90khz(x) * 300
+```
+
+The target duration is intentionally the timestamp stride; the measured terminal asset duration is the `#EXTINF` value.
+When that asset is shorter than the target duration, the resulting bounded timestamp gap is intentional. There is no old
+`index * asset_duration_ticks` terminal calculation.
+
+## Warm terminal-tail response
+
+If recovery cannot commit before one lease's safe cutover deadline, Tuliprox evaluates the prepared bundle against the
+lease's safe READY live suffix. MPEG-TS terminal media is permitted only for a compatible TS container, inactive
+`EXT-X-MAP`, compatible track layout, and a key state that can safely reset to clear media. A required encryption reset is
+announced with `#EXT-X-KEY:METHOD=NONE`; an fMP4 MAP or unsupported key transition fails closed instead of creating a TS
+splice.
+
+The canonical manifest URL then returns HTTP `200` without `Location`. Its immutable body contains the safe live tail,
+the optional key reset, `#EXT-X-DISCONTINUITY`, twelve finite terminal segment references, and `#EXT-X-ENDLIST`:
+
+```text
+/hls/shared/live/<proxy_session_id>/<hls_access_lease_id>/terminal/<generation>/<index>.ts
+```
+
+Only that lease- and generation-bound route serves prepared terminal bytes and finite full/range responses. Existing
+normal segment, MAP, and `/r` URLs retain their original meaning and never redirect to a manifest or substitute slate
+bytes. Terminal playback mode is sticky for the lease; later shared-session recovery can serve other or new leases but
+cannot reactivate the terminal lease.
 
 ## Origin account binding
 

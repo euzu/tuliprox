@@ -180,6 +180,42 @@ pub struct LiveStreamProperties {
     pub last_success_timestamp: Option<i64>,
     #[serde(default)]
     pub catchup: Option<CatchupProperties>,
+    #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
+    pub bitrate: u32,
+}
+
+impl LiveStreamProperties {
+    /// Merges metadata learned from probing or playback without replacing newer provider data.
+    pub fn merge_learned_metadata_from(&mut self, previous: &Self) -> bool {
+        let mut changed = false;
+
+        if self.video.is_none() && previous.video.is_some() {
+            self.video.clone_from(&previous.video);
+            changed = true;
+        }
+
+        if self.audio.is_none() && previous.audio.is_some() {
+            self.audio.clone_from(&previous.audio);
+            changed = true;
+        }
+
+        if previous.bitrate > self.bitrate {
+            self.bitrate = previous.bitrate;
+            changed = true;
+        }
+
+        if self.last_probed_timestamp.is_none() && previous.last_probed_timestamp.is_some() {
+            self.last_probed_timestamp = previous.last_probed_timestamp;
+            changed = true;
+        }
+
+        if self.last_success_timestamp.is_none() && previous.last_success_timestamp.is_some() {
+            self.last_success_timestamp = previous.last_success_timestamp;
+            changed = true;
+        }
+
+        changed
+    }
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -465,6 +501,7 @@ impl StreamProperties {
                     || live.last_probed_timestamp.is_some()
                     || live.last_success_timestamp.is_some()
                     || live.catchup.is_some()
+                    || live.bitrate > 0
             }
             StreamProperties::Episode(_) => false,
         }
@@ -1222,5 +1259,51 @@ mod tests {
         };
         assert!(!shift_type_wins.is_flussonic());
         assert_eq!(shift_type_wins.native_flussonic_player_mode(), None);
+    }
+
+    #[test]
+    fn positive_live_bitrate_counts_as_details() {
+        let props = StreamProperties::Live(Box::new(LiveStreamProperties {
+            bitrate: 2_500_000,
+            ..LiveStreamProperties::default()
+        }));
+
+        assert!(props.has_details());
+    }
+
+    #[test]
+    fn live_bitrate_deserializes_from_string_and_defaults_when_missing() {
+        let measured: LiveStreamProperties =
+            serde_json::from_value(json!({ "bitrate": "2500000" })).expect("string bitrate should deserialize");
+        let unknown: LiveStreamProperties =
+            serde_json::from_value(json!({})).expect("missing bitrate should deserialize");
+
+        assert_eq!(measured.bitrate, 2_500_000);
+        assert_eq!(unknown.bitrate, 0);
+    }
+
+    #[test]
+    fn merge_learned_live_metadata_preserves_existing_values_and_higher_bitrate() {
+        let mut current = LiveStreamProperties {
+            video: Some("current-video".into()),
+            bitrate: 1_500_000,
+            last_probed_timestamp: Some(200),
+            ..LiveStreamProperties::default()
+        };
+        let previous = LiveStreamProperties {
+            video: Some("previous-video".into()),
+            audio: Some("previous-audio".into()),
+            bitrate: 2_500_000,
+            last_probed_timestamp: Some(100),
+            last_success_timestamp: Some(150),
+            ..LiveStreamProperties::default()
+        };
+
+        assert!(current.merge_learned_metadata_from(&previous));
+        assert_eq!(current.video.as_deref(), Some("current-video"));
+        assert_eq!(current.audio.as_deref(), Some("previous-audio"));
+        assert_eq!(current.bitrate, 2_500_000);
+        assert_eq!(current.last_probed_timestamp, Some(200));
+        assert_eq!(current.last_success_timestamp, Some(150));
     }
 }
