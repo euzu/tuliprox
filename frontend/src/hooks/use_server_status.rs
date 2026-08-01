@@ -328,15 +328,16 @@ fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserCo
                         mark_sticky_session_preserved(stream);
                     }
                 }
-                server_status
-                    .active_user_streams
-                    .retain(|stream_info| stream_info.addr != addr || should_keep_preserved_stream_visible(stream_info));
+                server_status.active_user_streams.retain(|stream_info| {
+                    stream_info.addr != addr || should_keep_preserved_stream_visible(stream_info)
+                });
             }
         }
         ActiveUserConnectionChange::DisconnectedStream { addr, uid } => {
-            let already_preserved = server_status.active_user_streams.iter().any(|stream_info| {
-                stream_info.addr == addr && stream_info.uid == uid && stream_info.preserved
-            });
+            let already_preserved = server_status
+                .active_user_streams
+                .iter()
+                .any(|stream_info| stream_info.addr == addr && stream_info.uid == uid && stream_info.preserved);
             if already_preserved {
                 // Backend session TTL expiry — do not soft-preserve again (that left ghosts until reload).
                 server_status
@@ -353,9 +354,7 @@ fn apply_active_user_change(server_status: &mut StatusCheck, event: ActiveUserCo
                     return;
                 }
             }
-            server_status
-                .active_user_streams
-                .retain(|stream_info| stream_info.addr != addr || stream_info.uid != uid);
+            server_status.active_user_streams.retain(|stream_info| stream_info.addr != addr || stream_info.uid != uid);
         }
         ActiveUserConnectionChange::Connections(user_count, connections) => {
             server_status.active_users = user_count;
@@ -735,10 +734,9 @@ mod tests {
         apply_active_user_change(&mut status, ActiveUserConnectionChange::Updated(preserved.clone()));
 
         assert_eq!(status.active_user_streams.len(), 2);
-        assert!(status
-            .active_user_streams
-            .iter()
-            .any(|stream| stream.uid == preserved.uid && stream.preserved && stream.channel.item_type == PlaylistItemType::Catchup));
+        assert!(status.active_user_streams.iter().any(|stream| stream.uid == preserved.uid
+            && stream.preserved
+            && stream.channel.item_type == PlaylistItemType::Catchup));
         assert!(status.active_user_streams.iter().any(|stream| stream == &other));
     }
 
@@ -802,7 +800,7 @@ mod tests {
     fn test_server_status_snapshot_does_not_resurrect_sticky_omitted_by_backend() {
         let mut preserved = test_stream(1, "127.0.0.1:1234", Some("tok-catchup"), PlaylistItemType::Catchup);
         preserved.preserved = true;
-        preserved.ts = current_time_secs();
+        preserved.ts = shared::utils::current_time_secs();
         let mut status_holder = Some(Rc::new(shared::model::StatusCheck {
             active_users: 1,
             active_user_connections: 0,

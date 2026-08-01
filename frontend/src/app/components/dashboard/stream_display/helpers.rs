@@ -74,8 +74,7 @@ pub fn is_adaptive_session_stream(stream: &StreamInfo) -> bool {
     if url.contains(".m3u8") || url.contains(".mpd") {
         return true;
     }
-    stream.session_token.is_some()
-        && (stream.channel.item_type.is_live_adaptive() || is_shared_hls_stream(stream))
+    stream.session_token.is_some() && (stream.channel.item_type.is_live_adaptive() || is_shared_hls_stream(stream))
 }
 
 pub fn is_background_transfer_stream(stream: &StreamInfo) -> bool {
@@ -356,13 +355,9 @@ mod tests {
         ]);
         let last_seen = HashMap::from([(1, 1_000u64)]);
         let ttl = 30u64;
-        let visible = filter_visible_streams(
-            streams,
-            &last_seen,
-            1_000 + ttl + ADAPTIVE_STREAM_CLEANUP_BUFFER_SECS + 1,
-            ttl,
-        )
-        .unwrap();
+        let visible =
+            filter_visible_streams(streams, &last_seen, 1_000 + ttl + ADAPTIVE_STREAM_CLEANUP_BUFFER_SECS + 1, ttl)
+                .unwrap();
         // Soft-preserve is for segment gaps only; past TTL the row must leave Streams without reload.
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].channel.item_type, PlaylistItemType::Video);
@@ -378,13 +373,9 @@ mod tests {
         ]);
         let last_seen = HashMap::from([(1, 1_000u64)]);
         let ttl = 30u64;
-        let visible = filter_visible_streams(
-            streams,
-            &last_seen,
-            1_000 + ttl + ADAPTIVE_STREAM_CLEANUP_BUFFER_SECS + 1,
-            ttl,
-        )
-        .unwrap();
+        let visible =
+            filter_visible_streams(streams, &last_seen, 1_000 + ttl + ADAPTIVE_STREAM_CLEANUP_BUFFER_SECS + 1, ttl)
+                .unwrap();
         // Active rows refresh last_seen in the UI; a frozen last_seen past TTL must hide.
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].channel.item_type, PlaylistItemType::Video);
@@ -395,11 +386,8 @@ mod tests {
         use super::build_technical_chips;
         use shared::model::StreamTechnicalInfo;
 
-        let tech = StreamTechnicalInfo {
-            container: "hls".to_string(),
-            video_codec: "h264".to_string(),
-            ..Default::default()
-        };
+        let tech =
+            StreamTechnicalInfo { container: "hls".to_string(), video_codec: "h264".to_string(), ..Default::default() };
         let chips = build_technical_chips(PlaylistItemType::LiveHls, Some(&tech));
         let labels: Vec<_> = chips.iter().map(|(label, _)| label.as_str()).collect();
         assert_eq!(labels, vec!["HLS", "h264"]);

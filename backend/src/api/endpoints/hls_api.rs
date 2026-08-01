@@ -104,7 +104,7 @@ fn is_m3u_catchup_session_token(session_token: &str) -> bool {
 
 /// Recover archive EPG reference from `m3u-catchup|...|archive|{start}|{duration}` session keys.
 ///
-/// BitTV archive media URLs look like `2026/07/24/14/13/38-06800.ts` and lose Flussonic
+/// `BitTV` archive media URLs look like `2026/07/24/14/13/38-06800.ts` and lose Flussonic
 /// path markers after HLS rewrite, so the panel would otherwise keep showing Live + live EPG.
 pub(in crate::api) fn m3u_catchup_epg_reference_from_session_token(session_token: &str) -> Option<i64> {
     let rest = session_token.strip_prefix("m3u-catchup|")?;
@@ -134,7 +134,7 @@ fn looks_like_archive_media_path(path: &str) -> bool {
     rel.starts_with("dvr-") || rel.contains("/dvr-") || epg_reference_ts_from_date_tree_path(rel).is_some()
 }
 
-/// BitTV / Flussonic date-tree segments: `YYYY/MM/DD/HH/MM/SS-*.ts` or `dvr-YYYY/...`.
+/// `BitTV` / Flussonic date-tree segments: `YYYY/MM/DD/HH/MM/SS-*.ts` or `dvr-YYYY/...`.
 pub(in crate::api) fn epg_reference_ts_from_date_tree_path(path: &str) -> Option<i64> {
     let owned_path;
     let mut rel = path.trim_start_matches('/');
@@ -188,7 +188,7 @@ fn resolve_leaked_hls_relative_origin(
     // so sibling relative segments do not nest under the previous segment directory.
     let joined = if rel.starts_with("dvr-") {
         if let Some(idx) = session_stream_url.find("/dvr-") {
-            format!("{}{rel}", &session_stream_url[..idx + 1])
+            format!("{}{rel}", &session_stream_url[..=idx])
         } else {
             url::Url::parse(session_stream_url).ok()?.join(rel).ok()?.into()
         }
@@ -5974,7 +5974,8 @@ async fn hls_api_stream_leaked_relative(
     if let Err(e) = check_network_access_only(&user, &fingerprint, &app_state) {
         return e.into_player_response(app_state.app_config.get_auth_error_status());
     }
-    let Some(mut session) = app_state.active_users.find_latest_session_for_virtual_id(&user.username, stream_id).await
+    let Some(mut session) =
+        app_state.active_users.find_latest_session_for_target_stream(&user.username, target.id, stream_id).await
     else {
         return StatusCode::NOT_FOUND.into_response();
     };

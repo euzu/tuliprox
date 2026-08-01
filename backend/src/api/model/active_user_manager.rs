@@ -1,25 +1,25 @@
 use crate::{
-    api::model::{active_provider_manager::ConnectionKind, ActiveProviderManager, CustomVideoStreamType, EventManager, EventMessage},
+    api::model::{
+        active_provider_manager::ConnectionKind, connection_manager::CleanupEvent, ActiveProviderManager,
+        CustomVideoStreamType, EventManager, EventMessage,
+    },
     auth::Fingerprint,
     model::{Config, ProxyUserCredentials},
-    utils::{debug_if_enabled, GeoIp},
+    utils::{debug_if_enabled, utc_day_from_secs, GeoIp},
 };
 use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
 use log::{debug, info, log_enabled};
+use lru::LruCache;
 use shared::{
+    defaults::{
+        default_grace_period_millis, default_grace_period_timeout_secs, default_hls_session_ttl_secs, DASH_EXT, HLS_EXT,
+    },
     model::{
         ActiveUserConnectionChange, PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo,
         UserConnectionPermission, VirtualId,
     },
-    utils::{
-        current_time_secs,
-        extract_extension_from_url, sanitize_sensitive_info, strip_port, Internable,
-    },
-    defaults::{
-        default_grace_period_millis, default_grace_period_timeout_secs, default_hls_session_ttl_secs,
-        DASH_EXT, HLS_EXT,
-    }
+    utils::{current_time_secs, extract_extension_from_url, sanitize_sensitive_info, strip_port, Internable},
 };
 use std::{
     borrow::Cow,
@@ -33,11 +33,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use lru::LruCache;
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
-use crate::api::model::connection_manager::CleanupEvent;
 use tokio_util::sync::CancellationToken;
-use crate::utils::utc_day_from_secs;
 
 const USER_GC_TTL: u64 = 900; // 15 Min
 const USER_CON_TTL: u64 = 1_800; // 30 minutes
@@ -62,9 +59,7 @@ fn get_adaptive_session_ttl_secs(config: &Config) -> u64 {
         .map_or_else(default_hls_session_ttl_secs, |s| s.hls_session_ttl_secs)
 }
 
-fn stream_history_session_id(ts: u64, uid: u32) -> u64 {
-    (ts << 32) | u64::from(uid)
-}
+fn stream_history_session_id(ts: u64, uid: u32) -> u64 { (ts << 32) | u64::from(uid) }
 
 fn decide_connection_kind(
     counts: UserConnectionCounts,
@@ -107,7 +102,9 @@ pub enum PlaybackLifecycle {
     #[default]
     Prepared,
     /// Waiting for a provider slot (`GraceMode::Hold`). The `data` field holds the pending state.
-    PendingProvider { data: PendingProviderState },
+    PendingProvider {
+        data: PendingProviderState,
+    },
     Active,
     /// Provisional counted state for `GraceMode::Instant`. Counts against limits immediately
     /// while the grace window resolves (success -> Active, failure -> Expired).
@@ -120,9 +117,7 @@ impl PlaybackLifecycle {
     /// Returns true for lifecycle states that own a counted admission lease.
     /// Both `Active` and `GraceActive` count — `GraceActive` is a provisional
     /// counted state for `GraceMode::Instant` sessions.
-    pub fn is_counted(&self) -> bool {
-        matches!(self, Self::Active | Self::GraceActive)
-    }
+    pub fn is_counted(&self) -> bool { matches!(self, Self::Active | Self::GraceActive) }
 }
 
 #[derive(Clone, Debug)]
@@ -206,9 +201,7 @@ impl UserConnectionData {
     }
 
     fn has_session_addr(&self, addr: &SocketAddr) -> bool {
-        self.sessions
-            .iter()
-            .any(|session| session.addr == *addr || session.active_addrs.contains(addr))
+        self.sessions.iter().any(|session| session.addr == *addr || session.active_addrs.contains(addr))
     }
 
     fn release_addr_from_sessions(&mut self, addr: &SocketAddr) -> HashMap<String, Option<SocketAddr>> {
@@ -280,7 +273,9 @@ impl UserConnectionData {
     }
 
     fn try_promote_soft_stream(&mut self) -> Option<PromotionAction> {
-        if self.counts.normal >= self.max_connections || (u32::from(self.counts.soft)) <= u32::from(self.soft_connections) {
+        if self.counts.normal >= self.max_connections
+            || (u32::from(self.counts.soft)) <= u32::from(self.soft_connections)
+        {
             return None;
         }
 
@@ -306,23 +301,18 @@ impl UserConnectionData {
         }
         self.stream_kinds.insert(uid, ConnectionKind::Normal);
 
-        Some(PromotionAction {
-            addr,
-            uid,
-            new_priority,
-        })
+        Some(PromotionAction { addr, uid, new_priority })
     }
 
     fn try_promote_soft_session_reservation(&mut self) -> bool {
-        if self.counts.normal >= self.max_connections || (u32::from(self.counts.soft)) <= u32::from(self.soft_connections) {
+        if self.counts.normal >= self.max_connections
+            || (u32::from(self.counts.soft)) <= u32::from(self.soft_connections)
+        {
             return false;
         }
 
-        let active_tokens = self
-            .streams
-            .iter()
-            .filter_map(|stream| stream.session_token.as_deref())
-            .collect::<HashSet<_>>();
+        let active_tokens =
+            self.streams.iter().filter_map(|stream| stream.session_token.as_deref()).collect::<HashSet<_>>();
 
         let candidate_index = self.sessions.iter().position(|session| {
             session.lifecycle.is_counted()
@@ -393,7 +383,7 @@ fn is_catchup_session_token(session_token: &str) -> bool {
 }
 
 fn is_stable_session_stream(stream: &StreamInfo) -> bool {
-    // Catchup-token Live/.ts segment sockets must preserve too ╤В╨Р╨д otherwise archive panel rows
+    // Catchup-token Live/.ts segment sockets must preserve too; otherwise archive panel rows
     // hard-remove every HLS chunk and Streams blinks even when frontend soft-preserve is present.
     stream.channel.item_type == PlaylistItemType::Catchup
         || stream.channel.item_type.is_live_adaptive()
@@ -529,12 +519,7 @@ fn clear_session_addr(session: &mut UserSession, addr: &SocketAddr) -> bool {
 }
 
 impl SocketRegistration {
-    fn anonymous() -> Self {
-        Self {
-            username: String::new(),
-            ts: current_time_secs(),
-        }
-    }
+    fn anonymous() -> Self { Self { username: String::new(), ts: current_time_secs() } }
 }
 
 struct UserSessionParams<'a> {
@@ -603,9 +588,7 @@ struct DivergenceSnapshot {
 }
 
 impl ActiveUserManager {
-    pub fn shutdown(&self) {
-        self.adaptive_expiry_cancel.cancel();
-    }
+    pub fn shutdown(&self) { self.adaptive_expiry_cancel.cancel(); }
 
     pub fn start_adaptive_expiry_worker(self: &Arc<Self>) {
         if self
@@ -624,9 +607,7 @@ impl ActiveUserManager {
 
     fn lookup_country(&self, client_ip: &str) -> Option<String> {
         let geoip = self.geo_ip.load();
-        (*geoip)
-            .as_ref()
-            .and_then(|geoip_db| geoip_db.lookup(&strip_port(client_ip)))
+        (*geoip).as_ref().and_then(|geoip_db| geoip_db.lookup(&strip_port(client_ip)))
     }
 
     fn custom_stream_technical_info() -> StreamTechnicalInfo {
@@ -689,16 +670,16 @@ impl ActiveUserManager {
         transition_gates.retain(|_, gate| Arc::strong_count(gate) > 1);
     }
 
-    pub(crate) async fn acquire_playback_transition(&self, username: &str, token: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    pub(crate) async fn acquire_playback_transition(
+        &self,
+        username: &str,
+        token: &str,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
         let key = Self::transition_gate_key(username, token);
         let gate = {
             let mut transition_gates = self.transition_gates.lock().await;
             Self::cleanup_idle_transition_gates(&mut transition_gates);
-            Arc::clone(
-                transition_gates
-                    .entry(key)
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
-            )
+            Arc::clone(transition_gates.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
         };
         gate.lock_owned().await
     }
@@ -708,22 +689,17 @@ impl ActiveUserManager {
         let gate = {
             let mut transition_gates = self.transition_gates.lock().await;
             Self::cleanup_idle_transition_gates(&mut transition_gates);
-            Arc::clone(
-                transition_gates
-                    .entry(key)
-                    .or_insert_with(|| Arc::new(Mutex::new(()))),
-            )
+            Arc::clone(transition_gates.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
         };
         gate.lock_owned().await
     }
 
     fn should_reuse_stream_for_session(existing_stream: &StreamInfo, incoming_channel: &StreamChannel) -> bool {
-        existing_stream.channel.item_type.requires_provider_affinity() || incoming_channel.item_type.requires_provider_affinity()
+        existing_stream.channel.item_type.requires_provider_affinity()
+            || incoming_channel.item_type.requires_provider_affinity()
     }
 
-    pub(crate) fn set_cleanup_sender(&self, tx: mpsc::Sender<CleanupEvent>) {
-        let _ = self.cleanup_tx.set(tx);
-    }
+    pub(crate) fn set_cleanup_sender(&self, tx: mpsc::Sender<CleanupEvent>) { let _ = self.cleanup_tx.set(tx); }
 
     pub(crate) fn set_provider_manager(&self, provider_manager: Arc<ActiveProviderManager>) {
         let _ = self.provider_manager.set(provider_manager);
@@ -732,7 +708,9 @@ impl ActiveUserManager {
     /// Collect a snapshot of all currently active streams for shutdown history recording.
     pub(crate) async fn get_all_active_streams(&self) -> Vec<shared::model::StreamInfo> {
         let connections = self.connections.read().await;
-        connections.by_key.values()
+        connections
+            .by_key
+            .values()
             .flat_map(|data| data.streams.iter().filter(|stream| !stream.preserved).cloned())
             .collect()
     }
@@ -758,17 +736,14 @@ impl ActiveUserManager {
 
     async fn emit_promotion_update(&self, username: &str, action: PromotionAction) {
         if let Some(provider_manager) = self.provider_manager.get() {
-            provider_manager
-                .reclassify_connection(&action.addr, ConnectionKind::Normal, action.new_priority)
-                .await;
+            provider_manager.reclassify_connection(&action.addr, ConnectionKind::Normal, action.new_priority).await;
         }
 
         let maybe_stream = {
             let user_connections = self.connections.read().await;
-            user_connections
-                .by_key
-                .get(username)
-                .and_then(|connection_data| connection_data.streams.iter().find(|stream| stream.uid == action.uid).cloned())
+            user_connections.by_key.get(username).and_then(|connection_data| {
+                connection_data.streams.iter().find(|stream| stream.uid == action.uid).cloned()
+            })
         };
         if let Some(stream_info) = maybe_stream {
             self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
@@ -790,7 +765,15 @@ impl ActiveUserManager {
 
     #[allow(clippy::too_many_lines)]
     async fn release_stream_inner(&self, addr: &SocketAddr, stream_uid: Option<u32>) -> Option<StreamInfo> {
-        let (removed_stream, username, expiry_entry, preserved_update, connection_changed, promotion, divergence_snapshot) = {
+        let (
+            removed_stream,
+            username,
+            expiry_entry,
+            preserved_update,
+            connection_changed,
+            promotion,
+            divergence_snapshot,
+        ) = {
             let mut user_connections = self.connections.write().await;
 
             let username = match stream_uid {
@@ -826,11 +809,8 @@ impl ActiveUserManager {
                 let migrated_session_addrs = connection_data.release_addr_from_sessions(addr);
                 if let Some(stream_idx) = connection_data.streams.iter().position(|stream| {
                     !stream.preserved
-                        && stream_uid.map_or(stream.addr == *addr, |uid| {
-                                                    stream.uid == uid && stream.addr == *addr
-                                                })
-                })
-                {
+                        && stream_uid.map_or(stream.addr == *addr, |uid| stream.uid == uid && stream.addr == *addr)
+                }) {
                     let migrated_addr = connection_data.streams[stream_idx]
                         .session_token
                         .as_deref()
@@ -841,20 +821,19 @@ impl ActiveUserManager {
                         connection_data.streams[stream_idx].addr = next_addr;
                         connection_data.streams[stream_idx].ts = current_time_secs();
                     } else if Self::should_preserve_session_stream(&connection_data.streams[stream_idx]) {
-                        let preserved_session_token =
-                            connection_data.streams[stream_idx].session_token.clone();
+                        let preserved_session_token = connection_data.streams[stream_idx].session_token.clone();
                         if let Some(entry) = self.build_preserved_stream_expiry(
                             &username,
                             &connection_data.streams[stream_idx],
                             &connection_data.sessions,
                         ) {
-                            if let Some(kind) = connection_data.stream_kinds.remove(&connection_data.streams[stream_idx].uid) {
+                            if let Some(kind) =
+                                connection_data.stream_kinds.remove(&connection_data.streams[stream_idx].uid)
+                            {
                                 connection_data.decrement_kind(kind);
                                 connection_changed = true;
                             }
-                            connection_data
-                                .stream_normal_priorities
-                                .remove(&connection_data.streams[stream_idx].uid);
+                            connection_data.stream_normal_priorities.remove(&connection_data.streams[stream_idx].uid);
                             if let Some(session_token) = preserved_session_token.as_deref() {
                                 Self::clear_session_counted(connection_data, session_token);
                             }
@@ -887,9 +866,8 @@ impl ActiveUserManager {
                             }
                             promotion = Some(action);
                         }
-                        if let Some(session_token) = removed_stream
-                            .as_ref()
-                            .and_then(|stream| stream.session_token.as_deref())
+                        if let Some(session_token) =
+                            removed_stream.as_ref().and_then(|stream| stream.session_token.as_deref())
                         {
                             Self::clear_session_counted_without_stream(connection_data, session_token);
                         }
@@ -897,7 +875,15 @@ impl ActiveUserManager {
                     }
                 }
                 let divergence_snapshot = Self::collect_divergence_snapshot(connection_data, &username);
-                (removed_stream, username, expiry_entry, preserved_update, connection_changed, promotion, divergence_snapshot)
+                (
+                    removed_stream,
+                    username,
+                    expiry_entry,
+                    preserved_update,
+                    connection_changed,
+                    promotion,
+                    divergence_snapshot,
+                )
             } else {
                 (None, username, None, None, false, None, None)
             }
@@ -990,9 +976,11 @@ impl ActiveUserManager {
                                 stream_info.ts = now;
                                 remaining_streams.push(stream_info);
                             } else if preserve_session_streams && Self::should_preserve_session_stream(&stream_info) {
-                                if let Some(entry) =
-                                    self.build_preserved_stream_expiry(username, &stream_info, &connection_data.sessions)
-                                {
+                                if let Some(entry) = self.build_preserved_stream_expiry(
+                                    username,
+                                    &stream_info,
+                                    &connection_data.sessions,
+                                ) {
                                     if let Some(kind) = connection_data.stream_kinds.remove(&stream_info.uid) {
                                         released_kinds.push(kind);
                                     }
@@ -1032,9 +1020,7 @@ impl ActiveUserManager {
                     }
                     connection_data.streams = remaining_streams;
                     if !preserve_session_streams && !removed_session_tokens.is_empty() {
-                        connection_data
-                            .sessions
-                            .retain(|session| !removed_session_tokens.contains(&session.token));
+                        connection_data.sessions.retain(|session| !removed_session_tokens.contains(&session.token));
                     }
                     for kind in released_kinds {
                         connection_data.decrement_kind(kind);
@@ -1129,8 +1115,7 @@ impl ActiveUserManager {
         let (grace_period_millis, grace_period_timeout_secs) = get_grace_options(config);
         self.grace_period_millis.store(grace_period_millis, Ordering::Relaxed);
         self.grace_period_timeout_secs.store(grace_period_timeout_secs, Ordering::Relaxed);
-        self.adaptive_session_ttl_secs
-            .store(get_adaptive_session_ttl_secs(config), Ordering::Relaxed);
+        self.adaptive_session_ttl_secs.store(get_adaptive_session_ttl_secs(config), Ordering::Relaxed);
         self.log_active_user.store(log_active_user, Ordering::Relaxed);
     }
 
@@ -1147,7 +1132,8 @@ impl ActiveUserManager {
         connection_data: &mut UserConnectionData,
         counts: UserConnectionCounts,
     ) -> ConnectionAdmission {
-        let selected_kind = decide_connection_kind(counts, connection_data.max_connections, connection_data.soft_connections);
+        let selected_kind =
+            decide_connection_kind(counts, connection_data.max_connections, connection_data.soft_connections);
         let effective_connections = counts.normal.saturating_add(u32::from(counts.soft));
 
         if let Some(kind) = selected_kind {
@@ -1156,10 +1142,7 @@ impl ActiveUserManager {
                 connection_data.granted_grace = false;
                 connection_data.grace_ts = 0;
             }
-            return ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: Some(kind),
-            };
+            return ConnectionAdmission { permission: UserConnectionPermission::Allowed, kind: Some(kind) };
         }
 
         let now = get_current_timestamp();
@@ -1170,10 +1153,7 @@ impl ActiveUserManager {
             {
                 // Grace timeout, still active, deny connection
                 debug!("User access denied, grace exhausted, too many connections: {username}");
-                return ConnectionAdmission {
-                    permission: UserConnectionPermission::Exhausted,
-                    kind: None,
-                };
+                return ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: None };
             }
             // Grace timeout expired, reset grace counters
             if effective_connections < connection_data.max_connections {
@@ -1183,13 +1163,14 @@ impl ActiveUserManager {
         }
 
         debug!("User access denied, too many connections: {username}");
-        ConnectionAdmission {
-            permission: UserConnectionPermission::Exhausted,
-            kind: None,
-        }
+        ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: None }
     }
 
-    fn check_connection_admission(&self, username: &str, connection_data: &mut UserConnectionData) -> ConnectionAdmission {
+    fn check_connection_admission(
+        &self,
+        username: &str,
+        connection_data: &mut UserConnectionData,
+    ) -> ConnectionAdmission {
         self.check_connection_admission_with_counts(
             username,
             connection_data,
@@ -1210,10 +1191,7 @@ impl ActiveUserManager {
                 return self.check_connection_admission(username, connection_data);
             }
         }
-        ConnectionAdmission {
-            permission: UserConnectionPermission::Allowed,
-            kind: Some(ConnectionKind::Normal),
-        }
+        ConnectionAdmission { permission: UserConnectionPermission::Allowed, kind: Some(ConnectionKind::Normal) }
     }
 
     pub async fn connection_permission(
@@ -1249,16 +1227,15 @@ impl ActiveUserManager {
         connection_data.max_connections = max_connections;
         connection_data.soft_connections = soft_connections;
 
-        let Some(session_index) = connection_data.sessions.iter().position(|session| session.token == session_token) else {
+        let Some(session_index) = connection_data.sessions.iter().position(|session| session.token == session_token)
+        else {
             return self.check_connection_admission(username, connection_data);
         };
 
         if connection_data.sessions[session_index].lifecycle.is_counted() {
             return ConnectionAdmission {
                 permission: UserConnectionPermission::Allowed,
-                kind: connection_data.sessions[session_index]
-                    .connection_kind
-                    .or(Some(ConnectionKind::Normal)),
+                kind: connection_data.sessions[session_index].connection_kind.or(Some(ConnectionKind::Normal)),
             };
         }
 
@@ -1304,11 +1281,7 @@ impl ActiveUserManager {
             let connection_kind = if connection_data.sessions[session_index].lifecycle.is_counted()
                 || Self::session_has_stream(connection_data, session_token)
             {
-                Some(
-                    connection_data.sessions[session_index]
-                        .connection_kind
-                        .unwrap_or(ConnectionKind::Normal),
-                )
+                Some(connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal))
             } else {
                 let admission = self.check_connection_admission_with_counts(
                     username,
@@ -1374,7 +1347,8 @@ impl ActiveUserManager {
             .iter()
             .filter(|stream| {
                 if let Some(token) = stream.session_token.as_deref() {
-                    connection_data.sessions.iter().any(|s| s.token == token && s.lifecycle.is_counted()) || stream.preserved
+                    connection_data.sessions.iter().any(|s| s.token == token && s.lifecycle.is_counted())
+                        || stream.preserved
                 } else {
                     true
                 }
@@ -1395,11 +1369,7 @@ impl ActiveUserManager {
                     addr_count == 1
                 }
             })
-            .map(|s| crate::api::model::EvictionCandidate {
-                addr: s.addr,
-                client_ip: s.client_ip.clone(),
-                ts: s.ts,
-            })
+            .map(|s| crate::api::model::EvictionCandidate { addr: s.addr, client_ip: s.client_ip.clone(), ts: s.ts })
             .collect();
         candidates
     }
@@ -1415,8 +1385,7 @@ impl ActiveUserManager {
             if connection_data.connections < connection_data.max_connections {
                 debug!(
                     "Grace grant denied for {username}, user not at connection limit ({}/{})",
-                    connection_data.connections,
-                    connection_data.max_connections
+                    connection_data.connections, connection_data.max_connections
                 );
                 return false;
             }
@@ -1443,7 +1412,11 @@ impl ActiveUserManager {
             .values()
             .filter_map(|c| {
                 let effective = c.connections as usize;
-                if effective > 0 { Some(effective) } else { None }
+                if effective > 0 {
+                    Some(effective)
+                } else {
+                    None
+                }
             })
             .fold((0usize, 0usize), |(user_count, conn_count), effective| (user_count + 1, conn_count + effective))
     }
@@ -1512,13 +1485,9 @@ impl ActiveUserManager {
                 registration.username = username.to_string();
                 registration.ts = now;
             } else {
-                user_connections.key_by_addr.insert(
-                    fingerprint.addr,
-                    SocketRegistration {
-                        username: username.to_string(),
-                        ts: now,
-                    },
-                );
+                user_connections
+                    .key_by_addr
+                    .insert(fingerprint.addr, SocketRegistration { username: username.to_string(), ts: now });
             }
 
             let tracked_socket_count = user_connections.key_by_addr.len();
@@ -1559,15 +1528,14 @@ impl ActiveUserManager {
                 })
                 .map(|stream_idx| {
                     let session_started_at = session_token.and_then(|token| {
-                        connection_data.sessions.iter()
-                            .find(|s| s.token == token)
-                            .map(|s| s.started_at)
+                        connection_data.sessions.iter().find(|s| s.token == token).map(|s| s.started_at)
                     });
 
                     let stream_info = &mut connection_data.streams[stream_idx];
                     let client_ip = fingerprint.client_ip.clone();
                     let preserve_started_at = stream_info.session_token.is_some()
-                        && (stream_info.channel.item_type.is_live_adaptive() || stream_channel.item_type.is_live_adaptive());
+                        && (stream_info.channel.item_type.is_live_adaptive()
+                            || stream_channel.item_type.is_live_adaptive());
                     let was_preserved = stream_info.preserved;
                     let old_session_id = stream_history_session_id(stream_info.ts, stream_info.uid);
                     stream_info.meter_uid = meter_uid;
@@ -1577,7 +1545,7 @@ impl ActiveUserManager {
                     stream_info.channel = stream_channel.clone();
                     stream_info.provider = provider.clone();
                     stream_info.user_agent.clone_from(&user_agent_string);
-                    
+
                     if let Some(started_at) = session_started_at {
                         stream_info.started_at = started_at;
                     }
@@ -1679,11 +1647,8 @@ impl ActiveUserManager {
         let session_token = stream.session_token.as_deref()?;
         // Catchup segment gaps can briefly lose the UserSession row; still preserve the panel
         // row using the stream timestamp so Streams does not blink between archive chunks.
-        let session_ts = sessions
-            .iter()
-            .find(|session| session.token == session_token)
-            .map(|session| session.ts)
-            .unwrap_or(stream.ts);
+        let session_ts =
+            sessions.iter().find(|session| session.token == session_token).map_or(stream.ts, |session| session.ts);
 
         let ttl_secs = self.adaptive_session_ttl_secs.load(Ordering::Relaxed);
         let expires_at = session_ts.saturating_add(ttl_secs);
@@ -1713,7 +1678,6 @@ impl ActiveUserManager {
             self.adaptive_expiry_notify.notify_one();
         }
     }
-
 
     fn new_user_session(params: &UserSessionParams<'_>) -> UserSession {
         let now = current_time_secs();
@@ -1782,21 +1746,15 @@ impl ActiveUserManager {
         Self::bump_session_transition_version(&mut connection_data.sessions[session_index]);
 
         let mut promotions = Vec::new();
-        for stream in connection_data
-            .streams
-            .iter()
-            .filter(|stream| stream.session_token.as_deref() == Some(session_token))
+        for stream in
+            connection_data.streams.iter().filter(|stream| stream.session_token.as_deref() == Some(session_token))
         {
             if connection_data.stream_kinds.get(&stream.uid) != Some(&ConnectionKind::Soft) {
                 continue;
             }
             let new_priority = connection_data.stream_normal_priorities.get(&stream.uid).copied().unwrap_or_default();
             connection_data.stream_kinds.insert(stream.uid, ConnectionKind::Normal);
-            promotions.push(PromotionAction {
-                addr: stream.addr,
-                uid: stream.uid,
-                new_priority,
-            });
+            promotions.push(PromotionAction { addr: stream.addr, uid: stream.uid, new_priority });
         }
         promotions
     }
@@ -1836,10 +1794,7 @@ impl ActiveUserManager {
     }
 
     fn session_has_stream(connection_data: &UserConnectionData, session_token: &str) -> bool {
-        connection_data
-            .streams
-            .iter()
-            .any(|stream| stream.session_token.as_deref() == Some(session_token))
+        connection_data.streams.iter().any(|stream| stream.session_token.as_deref() == Some(session_token))
     }
 
     fn clear_session_counted_without_stream(connection_data: &mut UserConnectionData, session_token: &str) {
@@ -1921,17 +1876,18 @@ impl ActiveUserManager {
         connection_data.max_connections = max_connections;
         connection_data.soft_connections = soft_connections;
 
-        let Some(session_index) = connection_data.sessions.iter().position(|session| session.token == session_token) else {
+        let Some(session_index) = connection_data.sessions.iter().position(|session| session.token == session_token)
+        else {
             return self.check_connection_admission(username, connection_data);
         };
 
         // Existing counted session or session with an active stream: entitled to its slot.
-        if connection_data.sessions[session_index].lifecycle.is_counted() || Self::session_has_stream(connection_data, session_token) {
+        if connection_data.sessions[session_index].lifecycle.is_counted()
+            || Self::session_has_stream(connection_data, session_token)
+        {
             return ConnectionAdmission {
                 permission: UserConnectionPermission::Allowed,
-                kind: connection_data.sessions[session_index]
-                    .connection_kind
-                    .or(Some(ConnectionKind::Normal)),
+                kind: connection_data.sessions[session_index].connection_kind.or(Some(ConnectionKind::Normal)),
             };
         }
 
@@ -1940,10 +1896,8 @@ impl ActiveUserManager {
         // Returning Exhausted here ensures eviction strategies are evaluated to free the
         // preserved slot. This fixes the HLS->TS transition bug where preserved HLS
         // streams were never evicted because strategy evaluation was skipped.
-        let has_preserved = connection_data
-            .streams
-            .iter()
-            .any(|s| s.session_token.as_deref() == Some(session_token) && s.preserved);
+        let has_preserved =
+            connection_data.streams.iter().any(|s| s.session_token.as_deref() == Some(session_token) && s.preserved);
 
         let admission = self.check_connection_admission_with_counts(
             username,
@@ -2040,21 +1994,21 @@ impl ActiveUserManager {
                 return;
             }
 
-            let Some(session_index) = connection_data.sessions.iter().position(|session| session.token == session_token) else {
+            let Some(session_index) =
+                connection_data.sessions.iter().position(|session| session.token == session_token)
+            else {
                 return;
             };
 
-            if expected_transition_version.is_some_and(|expected| {
-                connection_data.sessions[session_index].transition_version != expected
-            }) {
+            if expected_transition_version
+                .is_some_and(|expected| connection_data.sessions[session_index].transition_version != expected)
+            {
                 return;
             }
 
             let mut connection_changed = false;
             if connection_data.sessions[session_index].lifecycle.is_counted() {
-                let kind = connection_data.sessions[session_index]
-                    .connection_kind
-                    .unwrap_or(ConnectionKind::Normal);
+                let kind = connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal);
                 connection_data.decrement_kind(kind);
                 connection_data.sessions[session_index].lifecycle = PlaybackLifecycle::Expired;
                 connection_changed = true;
@@ -2103,11 +2057,7 @@ impl ActiveUserManager {
         }
     }
 
-    pub async fn release_session_streams_and_counted_reservation(
-        &self,
-        username: &str,
-        session_token: &str,
-    ) -> bool {
+    pub async fn release_session_streams_and_counted_reservation(&self, username: &str, session_token: &str) -> bool {
         let (connection_changed, user_removed, promotions, divergence_snapshot) = {
             let mut user_connections = self.connections.write().await;
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
@@ -2172,17 +2122,16 @@ impl ActiveUserManager {
         let connection_data = user_connections.by_key.entry(username.clone()).or_insert_with(|| {
             debug_if_enabled!("Creating first session for user {username} {}", sanitize_sensitive_info(stream_url));
             let mut data = UserConnectionData::new(0, user.max_connections, user.soft_connections);
-            let session =
-                Self::new_user_session(&UserSessionParams {
-                    session_token,
-                    virtual_id,
-                    provider,
-                    stream_url,
-                    addr,
-                    connection_permission,
-                    connection_kind,
-                    socket_bound,
-                });
+            let session = Self::new_user_session(&UserSessionParams {
+                session_token,
+                virtual_id,
+                provider,
+                stream_url,
+                addr,
+                connection_permission,
+                connection_kind,
+                socket_bound,
+            });
             data.add_session(session);
             data
         });
@@ -2291,13 +2240,9 @@ impl ActiveUserManager {
                     registration.ts = now;
                     registration.username = username.to_string();
                 } else {
-                    user_connections.key_by_addr.insert(
-                        *addr,
-                        SocketRegistration {
-                            username: username.to_string(),
-                            ts: now,
-                        },
-                    );
+                    user_connections
+                        .key_by_addr
+                        .insert(*addr, SocketRegistration { username: username.to_string(), ts: now });
                 }
                 if prune_previous_registration {
                     let can_remove_previous = user_connections
@@ -2323,14 +2268,16 @@ impl ActiveUserManager {
         let Some(connection_data) = user_connections.by_key.get_mut(username) else {
             return;
         };
-        let addr_has_active_stream_for_session = connection_data.streams.iter().any(|stream| {
-            stream.session_token.as_deref() == Some(token) && stream.addr == *addr && !stream.preserved
-        });
+        let addr_has_active_stream_for_session = connection_data
+            .streams
+            .iter()
+            .any(|stream| stream.session_token.as_deref() == Some(token) && stream.addr == *addr && !stream.preserved);
         if addr_has_active_stream_for_session {
             return;
         }
 
-        let cleared = if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token) {
+        let cleared = if let Some(session) = connection_data.sessions.iter_mut().find(|session| session.token == token)
+        {
             let changed = clear_session_addr(session, addr);
             if changed {
                 Self::bump_session_transition_version(session);
@@ -2395,13 +2342,7 @@ impl ActiveUserManager {
             Self::bump_session_transition_version(session);
             Self::update_session_admission(session, UserConnectionPermission::GracePeriod, None);
             session.lifecycle = PlaybackLifecycle::PendingProvider {
-                data: PendingProviderState {
-                    reason_code,
-                    created_at: now,
-                    deadline,
-                    version,
-                    wake_source: None,
-                },
+                data: PendingProviderState { reason_code, created_at: now, deadline, version, wake_source: None },
             };
             if let Some(kind) = kind {
                 connection_data.decrement_kind(kind);
@@ -2469,9 +2410,7 @@ impl ActiveUserManager {
             return; // already grace active
         }
         // Collect fields while only borrowing sessions.
-        let kind = connection_data.sessions[session_index]
-            .connection_kind
-            .unwrap_or(ConnectionKind::Normal);
+        let kind = connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal);
         let needs_count = !connection_data.sessions[session_index].lifecycle.is_counted();
         let now = current_time_secs();
         // Now mutate. Use index access to avoid nested &mut borrows.
@@ -2516,11 +2455,7 @@ impl ActiveUserManager {
             let Some(connection_data) = user_connections.by_key.get_mut(username) else {
                 return;
             };
-            let Some(session_index) = connection_data
-                .sessions
-                .iter()
-                .position(|session| session.token == token)
-            else {
+            let Some(session_index) = connection_data.sessions.iter().position(|session| session.token == token) else {
                 return;
             };
 
@@ -2563,10 +2498,8 @@ impl ActiveUserManager {
             // Remove all streams for these addresses (never preserve on expire).
             let mut removed_count = 0;
             for addr in &addrs {
-                if let Some(stream_idx) = connection_data
-                    .streams
-                    .iter()
-                    .position(|stream| stream.addr == *addr && !stream.preserved)
+                if let Some(stream_idx) =
+                    connection_data.streams.iter().position(|stream| stream.addr == *addr && !stream.preserved)
                 {
                     if let Some(kind) = connection_data.stream_kinds.remove(&connection_data.streams[stream_idx].uid) {
                         connection_data.decrement_kind(kind);
@@ -2593,9 +2526,7 @@ impl ActiveUserManager {
         if connection_changed {
             self.log_active_user().await;
         }
-        debug!(
-            "GraceActive expired for session {token} in {username}, released {removed_count} streams"
-        );
+        debug!("GraceActive expired for session {token} in {username}, released {removed_count} streams");
     }
 
     /// Terminates the session and all associated streams for a playback.
@@ -2615,10 +2546,8 @@ impl ActiveUserManager {
                 return;
             };
 
-            let Some(session_index) = connection_data
-                .sessions
-                .iter()
-                .position(|session| session.token == session_token)
+            let Some(session_index) =
+                connection_data.sessions.iter().position(|session| session.token == session_token)
             else {
                 return;
             };
@@ -2626,13 +2555,9 @@ impl ActiveUserManager {
             let counted_kind = connection_data.sessions[session_index]
                 .lifecycle
                 .is_counted()
-                .then(|| {
-                    connection_data.sessions[session_index]
-                        .connection_kind
-                        .unwrap_or(ConnectionKind::Normal)
-                });
-            let (removed_count, connection_changed) = connection_data
-                .remove_streams_for_session_and_release_counted(session_token, counted_kind);
+                .then(|| connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal));
+            let (removed_count, connection_changed) =
+                connection_data.remove_streams_for_session_and_release_counted(session_token, counted_kind);
 
             // Expire and remove the session immediately. Unlike `release_unbound_session_reservation`
             // which keeps the expired session for TTL-based GC cleanup, terminate_session explicitly
@@ -2660,9 +2585,7 @@ impl ActiveUserManager {
         for action in promotions {
             self.emit_promotion_update(username, action).await;
         }
-        debug!(
-            "Terminated session {session_token} for user {username}, released {removed_count} streams"
-        );
+        debug!("Terminated session {session_token} for user {username}, released {removed_count} streams");
     }
 
     /// Terminates all sessions associated with a given socket address for a user.
@@ -2694,23 +2617,17 @@ impl ActiveUserManager {
             let mut connection_changed = false;
 
             for token in &tokens_to_remove {
-                let Some(session_index) =
-                    connection_data.sessions.iter().position(|s| s.token == *token)
-                else {
+                let Some(session_index) = connection_data.sessions.iter().position(|s| s.token == *token) else {
                     continue;
                 };
 
                 let counted_kind = connection_data.sessions[session_index]
                     .lifecycle
                     .is_counted()
-                    .then(|| {
-                        connection_data.sessions[session_index]
-                            .connection_kind
-                            .unwrap_or(ConnectionKind::Normal)
-                    });
+                    .then(|| connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal));
 
-                let (_, session_connection_changed) = connection_data
-                    .remove_streams_for_session_and_release_counted(token, counted_kind);
+                let (_, session_connection_changed) =
+                    connection_data.remove_streams_for_session_and_release_counted(token, counted_kind);
                 connection_changed |= session_connection_changed;
 
                 // Expire and remove the session.
@@ -2739,9 +2656,7 @@ impl ActiveUserManager {
         for action in promotions {
             self.emit_promotion_update(username, action).await;
         }
-        debug!(
-            "Terminated {removed_count} sessions for user {username} at addr {kick_addr}"
-        );
+        debug!("Terminated {removed_count} sessions for user {username} at addr {kick_addr}");
     }
 
     pub async fn expire_pending_provider(
@@ -2769,11 +2684,7 @@ impl ActiveUserManager {
         // PendingProvider is not counted (is_counted() = false), so checking here
         // captures whether there is a previously-counted lease to release.
         let kind_to_release = if connection_data.sessions[session_index].lifecycle.is_counted() {
-            Some(
-                connection_data.sessions[session_index]
-                    .connection_kind
-                    .unwrap_or(ConnectionKind::Normal),
-            )
+            Some(connection_data.sessions[session_index].connection_kind.unwrap_or(ConnectionKind::Normal))
         } else {
             None
         };
@@ -2797,10 +2708,8 @@ impl ActiveUserManager {
         };
 
         let mut addrs = Vec::new();
-        for stream in connection_data
-            .streams
-            .iter()
-            .filter(|stream| stream.session_token.as_deref() == Some(session_token))
+        for stream in
+            connection_data.streams.iter().filter(|stream| stream.session_token.as_deref() == Some(session_token))
         {
             if stream.addr != *current_addr && !addrs.contains(&stream.addr) {
                 addrs.push(stream.addr);
@@ -2822,7 +2731,11 @@ impl ActiveUserManager {
 
     pub fn active_socket_ttl_secs(&self) -> u64 {
         let configured_ttl = self.adaptive_session_ttl_secs.load(Ordering::Relaxed);
-        if configured_ttl == 0 { DEFAULT_ACTIVE_SOCKET_TTL_SECS } else { configured_ttl }
+        if configured_ttl == 0 {
+            DEFAULT_ACTIVE_SOCKET_TTL_SECS
+        } else {
+            configured_ttl
+        }
     }
 
     pub async fn socket_expiry_deadline(&self, addr: &SocketAddr) -> Option<u64> {
@@ -2859,10 +2772,7 @@ impl ActiveUserManager {
         let now = current_time_secs();
         let mut user_connections = self.connections.write().await;
 
-        let registration = user_connections
-            .key_by_addr
-            .entry(*addr)
-            .or_insert_with(SocketRegistration::anonymous);
+        let registration = user_connections.key_by_addr.entry(*addr).or_insert_with(SocketRegistration::anonymous);
         registration.username = username.to_string();
         registration.ts = now;
 
@@ -2889,15 +2799,27 @@ impl ActiveUserManager {
         self.update_user_session(username, token).await
     }
 
-    /// Latest session for `virtual_id` (used to recover leaked relative DVR segment paths).
-    pub async fn find_latest_session_for_virtual_id(&self, username: &str, virtual_id: u32) -> Option<UserSession> {
+    /// Latest session for target-scoped `virtual_id` (used to recover leaked relative DVR segment paths).
+    pub(crate) async fn find_latest_session_for_target_stream(
+        &self,
+        username: &str,
+        target_id: u16,
+        virtual_id: u32,
+    ) -> Option<UserSession> {
         let user_connections = self.connections.read().await;
         let connection_data = user_connections.by_key.get(username)?;
+        let session_token = connection_data
+            .streams
+            .iter()
+            .filter(|stream| stream.channel.target_id == target_id && stream.channel.virtual_id == virtual_id)
+            .filter_map(|stream| stream.session_token.as_deref().map(|token| (token, stream.ts)))
+            .max_by_key(|(_, ts)| *ts)
+            .map(|(token, _)| token)?;
+
         connection_data
             .sessions
             .iter()
-            .filter(|session| session.virtual_id == virtual_id)
-            .max_by_key(|session| session.ts)
+            .find(|session| session.token == session_token && session.virtual_id == virtual_id)
             .cloned()
     }
 
@@ -2971,7 +2893,7 @@ impl ActiveUserManager {
         streams
     }
 
-    /// Streams for the WebUI / StatusCheck snapshot.
+    /// Streams for the `WebUI` / `StatusCheck` snapshot.
     ///
     /// Includes preserved Catchup/HLS/DASH session rows so the panel keeps showing archive
     /// playback between short segment sockets. Do not use this for shared-HLS accounting.
@@ -3040,11 +2962,7 @@ impl ActiveUserManager {
         }
 
         let username = connections.by_key.iter().find_map(|(username, connection_data)| {
-            connection_data
-                .sessions
-                .iter()
-                .any(|session| session.token == session_token)
-                .then_some(username.as_str())
+            connection_data.sessions.iter().any(|session| session.token == session_token).then_some(username.as_str())
         })?;
         connections
             .key_by_addr
@@ -3104,12 +3022,8 @@ impl ActiveUserManager {
 
         let mut connections = self.connections.write().await;
         let now = current_time_secs();
-        connections
-            .recently_evicted_sessions
-            .retain(|_, protection| protection.expires_at > now);
-        connections
-            .recent_socket_reentry_guards
-            .retain(|_, protection| protection.expires_at > now);
+        connections.recently_evicted_sessions.retain(|_, protection| protection.expires_at > now);
+        connections.recent_socket_reentry_guards.retain(|_, protection| protection.expires_at > now);
 
         let Some(username) = connections
             .key_by_addr
@@ -3124,10 +3038,7 @@ impl ActiveUserManager {
             return;
         };
 
-        let protection = RecentWinnerProtection {
-            protected_addr,
-            expires_at: now + ttl_secs,
-        };
+        let protection = RecentWinnerProtection { protected_addr, expires_at: now + ttl_secs };
         let mut session_tokens = Vec::new();
         let mut socket_guard_keys = Vec::new();
 
@@ -3147,36 +3058,22 @@ impl ActiveUserManager {
         }
 
         for session_token in session_tokens {
-            connections
-                .recently_evicted_sessions
-                .insert(session_token, protection);
+            connections.recently_evicted_sessions.insert(session_token, protection);
         }
         for key in socket_guard_keys {
-            connections
-                .recent_socket_reentry_guards
-                .insert(key, protection);
+            connections.recent_socket_reentry_guards.insert(key, protection);
         }
     }
 
     pub async fn get_username_for_addr(&self, addr: &SocketAddr) -> Option<String> {
-        self.connections
-            .read()
-            .await
-            .key_by_addr
-            .get(addr)
-            .map(|registration| registration.username.clone())
+        self.connections.read().await.key_by_addr.get(addr).map(|registration| registration.username.clone())
     }
 
     fn should_preserve_session_stream(stream: &StreamInfo) -> bool {
         stream.session_token.is_some() && is_stable_session_stream(stream)
     }
 
-    fn is_preserved_stream_expired(
-        &self,
-        stream: &StreamInfo,
-        sessions: &[UserSession],
-        now: u64,
-    ) -> bool {
+    fn is_preserved_stream_expired(&self, stream: &StreamInfo, sessions: &[UserSession], now: u64) -> bool {
         if !stream.preserved || !Self::should_preserve_session_stream(stream) {
             return false;
         }
@@ -3186,19 +3083,13 @@ impl ActiveUserManager {
             return true;
         };
 
-        let session_ts = sessions
-            .iter()
-            .find(|session| session.token == session_token)
-            .map(|session| session.ts)
-            .unwrap_or(stream.ts);
+        let session_ts =
+            sessions.iter().find(|session| session.token == session_token).map_or(stream.ts, |session| session.ts);
 
         now.saturating_sub(session_ts) >= ttl_secs
     }
 
-    fn collect_divergence_snapshot(
-        connection_data: &UserConnectionData,
-        username: &str,
-    ) -> Option<DivergenceSnapshot> {
+    fn collect_divergence_snapshot(connection_data: &UserConnectionData, username: &str) -> Option<DivergenceSnapshot> {
         log_enabled!(log::Level::Debug).then(|| Self::build_divergence_snapshot(connection_data, username))
     }
 
@@ -3212,7 +3103,8 @@ impl ActiveUserManager {
             if !session.lifecycle.is_counted() {
                 continue;
             }
-            if matches!(session.lifecycle, PlaybackLifecycle::PendingProvider { ref data } if data.reason_code == PendingProviderReason::GraceHold) {
+            if matches!(session.lifecycle, PlaybackLifecycle::PendingProvider { ref data } if data.reason_code == PendingProviderReason::GraceHold)
+            {
                 continue;
             }
             let has_active_stream = connection_data
@@ -3231,7 +3123,8 @@ impl ActiveUserManager {
             let Some(token) = stream.session_token.as_deref() else {
                 continue;
             };
-            let has_counted_session = connection_data.sessions.iter().any(|s| s.token == token && s.lifecycle.is_counted());
+            let has_counted_session =
+                connection_data.sessions.iter().any(|s| s.token == token && s.lifecycle.is_counted());
             if !has_counted_session {
                 kinds.push(DivergenceKind::StreamWithoutCountedSession);
             }
@@ -3240,19 +3133,10 @@ impl ActiveUserManager {
         #[allow(clippy::cast_possible_truncation)]
         let counted_sessions_u32 = counted_sessions as u32;
         if connections != counted_sessions_u32 {
-            kinds.push(DivergenceKind::ConnectionCountMismatch {
-                legacy: connections,
-                counted: counted_sessions_u32,
-            });
+            kinds.push(DivergenceKind::ConnectionCountMismatch { legacy: connections, counted: counted_sessions_u32 });
         }
 
-        DivergenceSnapshot {
-            username: username.to_string(),
-            connections,
-            counted_sessions,
-            streams_count,
-            kinds,
-        }
+        DivergenceSnapshot { username: username.to_string(), connections, counted_sessions, streams_count, kinds }
     }
 
     async fn log_divergence_snapshot(&self, snapshot: Option<DivergenceSnapshot>) {
@@ -3274,13 +3158,7 @@ impl ActiveUserManager {
                         false
                     }
                 } else {
-                    cache.push(
-                        key,
-                        DivergenceEntry {
-                            last_logged: Instant::now(),
-                            count_since_last_log: 0,
-                        },
-                    );
+                    cache.push(key, DivergenceEntry { last_logged: Instant::now(), count_since_last_log: 0 });
                     true
                 }
             };
@@ -3288,10 +3166,7 @@ impl ActiveUserManager {
             if should_log {
                 debug!(
                     "ADMISSION DIVERGENCE user={} kind={kind:?} connections={} counted_sessions={} streams={}",
-                    snapshot.username,
-                    snapshot.connections,
-                    snapshot.counted_sessions,
-                    snapshot.streams_count,
+                    snapshot.username, snapshot.connections, snapshot.counted_sessions, snapshot.streams_count,
                 );
             }
         }
@@ -3382,14 +3257,11 @@ impl ActiveUserManager {
 
                 let mut remove_user = false;
                 if let Some(connection_data) = user_connections.by_key.get_mut(&entry.username) {
-                    let stream_idx_opt = connection_data
-                        .streams
-                        .iter()
-                        .position(|stream| {
-                            stream.uid == entry.uid
-                                && stream.preserved
-                                && stream.session_token.as_deref() == Some(entry.session_token.as_str())
-                        });
+                    let stream_idx_opt = connection_data.streams.iter().position(|stream| {
+                        stream.uid == entry.uid
+                            && stream.preserved
+                            && stream.session_token.as_deref() == Some(entry.session_token.as_str())
+                    });
 
                     if let Some(stream_idx) = stream_idx_opt {
                         let should_remove = self.is_preserved_stream_expired(
@@ -3454,10 +3326,7 @@ impl ActiveUserManager {
         for username in usernames_to_check {
             let snapshot = {
                 let connections = self.connections.read().await;
-                connections
-                    .by_key
-                    .get(username)
-                    .and_then(|data| Self::collect_divergence_snapshot(data, username))
+                connections.by_key.get(username).and_then(|data| Self::collect_divergence_snapshot(data, username))
             };
             self.log_divergence_snapshot(snapshot).await;
         }
@@ -3482,8 +3351,7 @@ impl ActiveUserManager {
 
         let had_removals = !removed_addrs.is_empty();
         for addr in removed_addrs {
-            self.event_manager
-                .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(addr)));
+            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Disconnected(addr)));
         }
         if had_removals {
             self.log_active_user().await;
@@ -3500,12 +3368,8 @@ impl ActiveUserManager {
             {
                 if let Ok(mut user_connections) = self.connections.try_write() {
                     user_connections.kicked.retain(|_, (expires_at, _)| *expires_at > now);
-                    user_connections
-                        .recently_evicted_sessions
-                        .retain(|_, protection| protection.expires_at > now);
-                    user_connections
-                        .recent_socket_reentry_guards
-                        .retain(|_, protection| protection.expires_at > now);
+                    user_connections.recently_evicted_sessions.retain(|_, protection| protection.expires_at > now);
+                    user_connections.recent_socket_reentry_guards.retain(|_, protection| protection.expires_at > now);
                     for connection_data in user_connections.by_key.values_mut() {
                         Self::release_expired_session_reservations(connection_data, now);
                         connection_data.sessions.retain(|s| now.saturating_sub(s.ts) < USER_CON_TTL);
@@ -3528,14 +3392,17 @@ impl ActiveUserManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{api::model::EventManager, auth::Fingerprint, model::{Config, ProxyUserCredentials}};
+    use crate::{
+        api::model::EventManager,
+        auth::Fingerprint,
+        model::{Config, ProxyUserCredentials},
+    };
     use arc_swap::ArcSwapOption;
     use shared::{
-        model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster},
+        model::{PlaylistItemType, ProxyType, StreamChannel, StreamInfo, XtreamCluster},
         utils::Internable,
     };
     use std::{borrow::Cow, collections::HashMap, sync::Arc};
-    use shared::model::ProxyType;
 
     fn test_channel(virtual_id: u32) -> StreamChannel {
         StreamChannel {
@@ -3588,6 +3455,89 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn target_scoped_session_lookup_does_not_use_same_virtual_id_from_other_target() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let addr: SocketAddr = "127.0.0.1:55499".parse().unwrap();
+        let mut user = ProxyUserCredentials::default();
+        user.username = "target-scoped-user".to_string();
+        let mut target_one = test_channel(42);
+        target_one.target_id = 1;
+        let mut target_two = test_channel(42);
+        target_two.target_id = 2;
+
+        let _ = manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-target-one",
+                virtual_id: 42,
+                provider: "provider",
+                stream_url: "http://localhost/target-one.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+        let _ = manager
+            .create_user_session(CreateUserSessionParams {
+                user: &user,
+                session_token: "tok-target-two",
+                virtual_id: 42,
+                provider: "provider",
+                stream_url: "http://localhost/target-two.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(ConnectionKind::Normal),
+                socket_bound: false,
+            })
+            .await;
+
+        {
+            let mut connections = manager.connections.write().await;
+            assert!(connections.by_key.contains_key(&user.username), "user connection data should exist");
+            let Some(data) = connections.by_key.get_mut(&user.username) else {
+                return;
+            };
+            data.streams.push(StreamInfo::new(shared::model::StreamInfoParams {
+                uid: 1,
+                meter_uid: 1,
+                username: &user.username,
+                addr: &addr,
+                client_ip: "127.0.0.1",
+                provider: "provider".intern(),
+                stream_channel: target_one,
+                user_agent: "ua".to_string(),
+                country_code: None,
+                session_token: Some("tok-target-one"),
+            }));
+            data.streams.push(StreamInfo::new(shared::model::StreamInfoParams {
+                uid: 2,
+                meter_uid: 2,
+                username: &user.username,
+                addr: &addr,
+                client_ip: "127.0.0.1",
+                provider: "provider".intern(),
+                stream_channel: target_two,
+                user_agent: "ua".to_string(),
+                country_code: None,
+                session_token: Some("tok-target-two"),
+            }));
+        }
+
+        let session = manager.find_latest_session_for_target_stream(&user.username, 2, 42).await;
+        assert!(session.is_some(), "target-scoped session should resolve");
+        let Some(session) = session else {
+            return;
+        };
+        assert_eq!(session.token, "tok-target-two");
+        assert!(manager.find_latest_session_for_target_stream(&user.username, 3, 42).await.is_none());
+    }
+
     /// Session refresh normalizes Expired -> Prepared.
     /// When a new request arrives on an expired session, the lifecycle should be
     /// reset to Prepared so that full activation evaluation happens.
@@ -3605,8 +3555,8 @@ mod tests {
         // Create a session in Expired state directly via session manipulation
         {
             let mut connections = manager.connections.write().await;
-            let data = connections.by_key.entry(user.username.clone())
-                .or_insert_with(|| UserConnectionData::new(0, 1, 0));
+            let data =
+                connections.by_key.entry(user.username.clone()).or_insert_with(|| UserConnectionData::new(0, 1, 0));
             data.add_session(UserSession {
                 token: "tok-refresh-expired".to_string(),
                 transition_version: 1,
@@ -3667,8 +3617,8 @@ mod tests {
         // Create a session in PendingProvider state
         {
             let mut connections = manager.connections.write().await;
-            let data = connections.by_key.entry(user.username.clone())
-                .or_insert_with(|| UserConnectionData::new(0, 1, 0));
+            let data =
+                connections.by_key.entry(user.username.clone()).or_insert_with(|| UserConnectionData::new(0, 1, 0));
             data.add_session(UserSession {
                 token: "tok-refresh-pending".to_string(),
                 transition_version: 1,
@@ -3690,7 +3640,7 @@ mod tests {
                         deadline: current_time_secs() + 30,
                         version: 1,
                         wake_source: None,
-                    }
+                    },
                 },
             });
         }
@@ -3751,9 +3701,7 @@ mod tests {
         let previous_ts = before.ts;
         let headers = HashMap::from([(String::from("cookie"), String::from("sid=abc"))]);
 
-        assert!(manager
-            .update_session_provider_headers(&user.username, "tok-provider-headers", &headers)
-            .await);
+        assert!(manager.update_session_provider_headers(&user.username, "tok-provider-headers", &headers).await);
 
         let after = manager
             .get_and_update_user_session(&user.username, "tok-provider-headers")
@@ -3771,9 +3719,7 @@ mod tests {
         let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
         let headers = HashMap::from([(String::from("cookie"), String::from("sid=abc"))]);
 
-        assert!(!manager
-            .update_session_provider_headers("missing-user", "missing-token", &headers)
-            .await);
+        assert!(!manager.update_session_provider_headers("missing-user", "missing-token", &headers).await);
 
         let addr: SocketAddr = "127.0.0.1:55403".parse().unwrap_or_else(|_| unreachable!());
         let mut user = ProxyUserCredentials::default();
@@ -3792,9 +3738,7 @@ mod tests {
             })
             .await;
 
-        assert!(!manager
-            .update_session_provider_headers(&user.username, "tok-missing", &headers)
-            .await);
+        assert!(!manager.update_session_provider_headers(&user.username, "tok-missing", &headers).await);
     }
 
     #[tokio::test]
@@ -3822,9 +3766,7 @@ mod tests {
                 socket_bound: false,
             })
             .await;
-        assert!(manager
-            .update_session_provider_headers(&user.username, "tok-reset", &headers)
-            .await);
+        assert!(manager.update_session_provider_headers(&user.username, "tok-reset", &headers).await);
 
         manager
             .create_user_session(CreateUserSessionParams {
@@ -3840,10 +3782,8 @@ mod tests {
             })
             .await;
 
-        let session = manager
-            .get_and_update_user_session(&user.username, "tok-reset")
-            .await
-            .expect("session should exist");
+        let session =
+            manager.get_and_update_user_session(&user.username, "tok-reset").await.expect("session should exist");
         assert!(session.provider_session_headers.is_empty());
     }
 
@@ -3875,9 +3815,7 @@ mod tests {
             .await;
 
         // Verify session exists.
-        let before = manager
-            .get_and_update_user_session(&user.username, &token)
-            .await;
+        let before = manager.get_and_update_user_session(&user.username, &token).await;
         assert!(before.is_some(), "session should exist before terminate");
         assert_eq!(before.as_ref().unwrap().lifecycle, PlaybackLifecycle::Prepared);
 
@@ -3885,9 +3823,7 @@ mod tests {
         manager.terminate_session(&user.username, &token).await;
 
         // Session should be gone.
-        let after = manager
-            .get_and_update_user_session(&user.username, &token)
-            .await;
+        let after = manager.get_and_update_user_session(&user.username, &token).await;
         assert!(after.is_none(), "session should be removed after terminate");
     }
 
@@ -3930,10 +3866,7 @@ mod tests {
 
         // Verify counted before terminate.
         {
-            let before = manager
-                .get_and_update_user_session(&user.username, &token)
-                .await
-                .unwrap();
+            let before = manager.get_and_update_user_session(&user.username, &token).await.unwrap();
             assert!(before.lifecycle.is_counted(), "session should be counted before terminate");
         }
 
@@ -3941,9 +3874,7 @@ mod tests {
         manager.terminate_session(&user.username, &token).await;
 
         // Session should be gone.
-        let after = manager
-            .get_and_update_user_session(&user.username, &token)
-            .await;
+        let after = manager.get_and_update_user_session(&user.username, &token).await;
         assert!(after.is_none(), "session should be removed after terminate");
     }
 
@@ -4001,14 +3932,8 @@ mod tests {
         manager.terminate_session(&user.username, &token).await;
 
         let connections = manager.connections.read().await;
-        let connection_data = connections
-            .by_key
-            .get(&user.username)
-            .expect("user data should remain inspectable");
-        assert!(
-            connection_data.streams.is_empty(),
-            "terminating a session must remove its preserved adaptive stream"
-        );
+        let connection_data = connections.by_key.get(&user.username).expect("user data should remain inspectable");
+        assert!(connection_data.streams.is_empty(), "terminating a session must remove its preserved adaptive stream");
         assert!(connection_data.sessions.iter().all(|session| session.token != token));
     }
 
@@ -4132,31 +4057,21 @@ mod tests {
 
         {
             let mut connections = manager.connections.write().await;
-            let connection_data = connections
-                .by_key
-                .get_mut(&user.username)
-                .expect("user data should exist");
+            let connection_data = connections.by_key.get_mut(&user.username).expect("user data should exist");
             connection_data.soft_connections = 1;
         }
 
         manager.terminate_session(&user.username, &normal_token).await;
 
         let connections = manager.connections.read().await;
-        let connection_data = connections
-            .by_key
-            .get(&user.username)
-            .expect("user data should remain inspectable");
+        let connection_data = connections.by_key.get(&user.username).expect("user data should remain inspectable");
         assert_eq!(connection_data.counts.normal, 1);
         assert_eq!(connection_data.counts.soft, 1);
         let promoted_uid = [8102_u32, 8103_u32]
             .into_iter()
             .find(|uid| connection_data.stream_kinds.get(uid) == Some(&ConnectionKind::Normal))
             .expect("one soft stream should be promoted to normal");
-        let promoted_token = if promoted_uid == 8102 {
-            soft_token.as_str()
-        } else {
-            soft_token_two.as_str()
-        };
+        let promoted_token = if promoted_uid == 8102 { soft_token.as_str() } else { soft_token_two.as_str() };
         let promoted_session = connection_data
             .sessions
             .iter()
@@ -4198,10 +4113,7 @@ mod tests {
             .await;
         assert!(first.is_some());
         assert_eq!(manager.user_connections(username).await, 1);
-        assert_eq!(
-            manager.connection_permission(username, 1, 0).await,
-            UserConnectionPermission::Exhausted
-        );
+        assert_eq!(manager.connection_permission(username, 1, 0).await, UserConnectionPermission::Exhausted);
 
         let second = manager
             .update_connection(ActiveUserConnectionParams {
@@ -4259,10 +4171,8 @@ mod tests {
             .mark_pending_provider(&user.username, "tok-pending", PendingProviderReason::GraceHold, 12_345)
             .await;
 
-        let session = manager
-            .get_and_update_user_session(&user.username, "tok-pending")
-            .await
-            .expect("session should exist");
+        let session =
+            manager.get_and_update_user_session(&user.username, "tok-pending").await.expect("session should exist");
         let PlaybackLifecycle::PendingProvider { data: pending } = &session.lifecycle else {
             panic!("pending provider should be tracked")
         };
@@ -4325,12 +4235,7 @@ mod tests {
             })
             .await;
         manager
-            .activate_pending_provider(
-                &user.username,
-                "tok-pending-activate",
-                1,
-                PendingProviderWakeSource::Activated,
-            )
+            .activate_pending_provider(&user.username, "tok-pending-activate", 1, PendingProviderWakeSource::Activated)
             .await;
 
         let session = manager
@@ -4338,7 +4243,10 @@ mod tests {
             .await
             .expect("session should exist");
         assert!(session.lifecycle.is_counted());
-        assert!(!matches!(session.lifecycle, PlaybackLifecycle::PendingProvider { .. }), "explicit pending resolution must clear pending provider state");
+        assert!(
+            !matches!(session.lifecycle, PlaybackLifecycle::PendingProvider { .. }),
+            "explicit pending resolution must clear pending provider state"
+        );
     }
 
     #[tokio::test]
@@ -4367,21 +4275,11 @@ mod tests {
             .await;
 
         let first_version = manager
-            .mark_pending_provider(
-                &user.username,
-                "tok-pending-stale",
-                PendingProviderReason::GraceHold,
-                5_000,
-            )
+            .mark_pending_provider(&user.username, "tok-pending-stale", PendingProviderReason::GraceHold, 5_000)
             .await
             .expect("first pending version should be created");
         let second_version = manager
-            .mark_pending_provider(
-                &user.username,
-                "tok-pending-stale",
-                PendingProviderReason::GraceHold,
-                6_000,
-            )
+            .mark_pending_provider(&user.username, "tok-pending-stale", PendingProviderReason::GraceHold, 6_000)
             .await
             .expect("second pending version should replace the first");
         assert!(second_version > first_version);
@@ -4433,22 +4331,12 @@ mod tests {
             .await;
 
         let version = manager
-            .mark_pending_provider(
-                &user.username,
-                "tok-pending-expire",
-                PendingProviderReason::GraceHold,
-                6_000,
-            )
+            .mark_pending_provider(&user.username, "tok-pending-expire", PendingProviderReason::GraceHold, 6_000)
             .await
             .expect("pending version should be created");
 
         manager
-            .expire_pending_provider(
-                &user.username,
-                "tok-pending-expire",
-                version,
-                PendingProviderWakeSource::Timeout,
-            )
+            .expire_pending_provider(&user.username, "tok-pending-expire", version, PendingProviderWakeSource::Timeout)
             .await;
 
         let session = manager
@@ -4488,10 +4376,8 @@ mod tests {
 
         {
             let mut connections = manager.connections.write().await;
-            let connection_data = connections
-                .by_key
-                .get_mut(&user.username)
-                .expect("session should have created connection data");
+            let connection_data =
+                connections.by_key.get_mut(&user.username).expect("session should have created connection data");
             connection_data.increment_kind(ConnectionKind::Normal);
             let session = connection_data
                 .sessions
@@ -4730,22 +4616,22 @@ mod tests {
 
         // Create sessions first so update_connection can mark them as counted.
         let user = test_user_credentials("same-user", 3, 0);
-        for (token, addr, channel_id) in [
-            ("tok-31", shared_addr, 1031u32),
-            ("tok-32", shared_addr, 1032),
-            ("tok-33", unique_addr, 1033),
-        ] {
-            manager.create_user_session(crate::api::model::CreateUserSessionParams {
-                user: &user,
-                session_token: token,
-                virtual_id: channel_id,
-                provider: "provider-a",
-                stream_url: "",
-                addr: &addr,
-                connection_permission: UserConnectionPermission::Allowed,
-                connection_kind: Some(ConnectionKind::Normal),
-                socket_bound: false,
-            }).await;
+        for (token, addr, channel_id) in
+            [("tok-31", shared_addr, 1031u32), ("tok-32", shared_addr, 1032), ("tok-33", unique_addr, 1033)]
+        {
+            manager
+                .create_user_session(crate::api::model::CreateUserSessionParams {
+                    user: &user,
+                    session_token: token,
+                    virtual_id: channel_id,
+                    provider: "provider-a",
+                    stream_url: "",
+                    addr: &addr,
+                    connection_permission: UserConnectionPermission::Allowed,
+                    connection_kind: Some(ConnectionKind::Normal),
+                    socket_bound: false,
+                })
+                .await;
         }
 
         // update_connection marks the session as counted.
@@ -4808,21 +4694,20 @@ mod tests {
         manager.add_connection(&second_addr).await;
 
         let user = test_user_credentials("same-user", 2, 0);
-        for (token, addr, channel_id) in [
-            ("tok-41", first_addr, 1041u32),
-            ("tok-42", second_addr, 1042),
-        ] {
-            manager.create_user_session(crate::api::model::CreateUserSessionParams {
-                user: &user,
-                session_token: token,
-                virtual_id: channel_id,
-                provider: "provider-a",
-                stream_url: "",
-                addr: &addr,
-                connection_permission: UserConnectionPermission::Allowed,
-                connection_kind: Some(ConnectionKind::Normal),
-                socket_bound: false,
-            }).await;
+        for (token, addr, channel_id) in [("tok-41", first_addr, 1041u32), ("tok-42", second_addr, 1042)] {
+            manager
+                .create_user_session(crate::api::model::CreateUserSessionParams {
+                    user: &user,
+                    session_token: token,
+                    virtual_id: channel_id,
+                    provider: "provider-a",
+                    stream_url: "",
+                    addr: &addr,
+                    connection_permission: UserConnectionPermission::Allowed,
+                    connection_kind: Some(ConnectionKind::Normal),
+                    socket_bound: false,
+                })
+                .await;
         }
 
         manager
@@ -4906,10 +4791,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(1043)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(1043) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-preserved"),
             })
@@ -5115,17 +4997,11 @@ mod tests {
         assert!(removed.addr_removed);
         assert_eq!(removed.removed_streams.len(), 1);
         assert_eq!(
-            manager
-                .connection_admission_for_session(&user.username, 1, 0, "tok-kicked")
-                .await
-                .permission,
+            manager.connection_admission_for_session(&user.username, 1, 0, "tok-kicked").await.permission,
             UserConnectionPermission::Exhausted
         );
         assert_eq!(
-            manager
-                .connection_admission_for_session(&user.username, 1, 0, "tok-survivor")
-                .await
-                .permission,
+            manager.connection_admission_for_session(&user.username, 1, 0, "tok-survivor").await.permission,
             UserConnectionPermission::Allowed
         );
     }
@@ -5288,19 +5164,14 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &first_segment,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(2002)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(2002) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-hls-cleanup"),
             })
             .await;
 
         assert_eq!(
-            manager
-                .adaptive_session_stream_cleanup_addrs("user1", "tok-hls-cleanup", &next_segment_addr)
-                .await,
+            manager.adaptive_session_stream_cleanup_addrs("user1", "tok-hls-cleanup", &next_segment_addr).await,
             vec![first_segment_addr]
         );
     }
@@ -5391,9 +5262,7 @@ mod tests {
             })
             .await;
 
-        manager
-            .mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 1)
-            .await;
+        manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 1).await;
         {
             let mut connections = manager.connections.write().await;
             if let Some(registration) = connections.key_by_addr.get_mut(&protected_addr) {
@@ -5406,12 +5275,7 @@ mod tests {
             protection.expires_at = current_time_secs().saturating_sub(1);
         }
 
-        assert_eq!(
-            manager
-                .recently_evicted_session_protected_addr("tok-guard-session")
-                .await,
-            Some(protected_addr)
-        );
+        assert_eq!(manager.recently_evicted_session_protected_addr("tok-guard-session").await, Some(protected_addr));
     }
 
     #[tokio::test]
@@ -5465,16 +5329,9 @@ mod tests {
             })
             .await;
 
-        manager
-            .mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10)
-            .await;
+        manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10).await;
 
-        assert_eq!(
-            manager
-                .recently_evicted_session_protected_addr("tok-guard-vod")
-                .await,
-            Some(protected_addr)
-        );
+        assert_eq!(manager.recently_evicted_session_protected_addr("tok-guard-vod").await, Some(protected_addr));
         let connections = manager.connections.read().await;
         assert!(
             connections.recent_socket_reentry_guards.is_empty(),
@@ -5516,14 +5373,10 @@ mod tests {
             })
             .await;
 
-        manager
-            .mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10)
-            .await;
+        manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10).await;
 
         assert_eq!(
-            manager
-                .recent_socket_reentry_protected_addr("vod-no-token-user", "127.0.0.1", channel.virtual_id)
-                .await,
+            manager.recent_socket_reentry_protected_addr("vod-no-token-user", "127.0.0.1", channel.virtual_id).await,
             Some(protected_addr)
         );
     }
@@ -5762,15 +5615,9 @@ mod tests {
 
         assert_eq!(manager.user_connections(username).await, 3);
         assert_eq!(manager.active_streams().await.len(), 3);
+        assert_eq!(manager.connection_admission(username, 0, 0).await.permission, UserConnectionPermission::Allowed);
         assert_eq!(
-            manager.connection_admission(username, 0, 0).await.permission,
-            UserConnectionPermission::Allowed
-        );
-        assert_eq!(
-            manager
-                .connection_admission_for_session(username, 0, 0, "tok-unlimited-new")
-                .await
-                .permission,
+            manager.connection_admission_for_session(username, 0, 0, "tok-unlimited-new").await.permission,
             UserConnectionPermission::Allowed
         );
     }
@@ -5986,10 +5833,7 @@ mod tests {
             "unchanged connection counts must not broadcast another full snapshot"
         );
 
-        manager
-            .release_stream_by_uid(&addr, 48)
-            .await
-            .expect("direct Series stream should release");
+        manager.release_stream_by_uid(&addr, 48).await.expect("direct Series stream should release");
         assert_eq!(
             tokio::time::timeout(Duration::from_secs(1), events.recv())
                 .await
@@ -6040,10 +5884,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(4001)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(4001) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-hls"),
             })
@@ -6080,10 +5921,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &next_fingerprint,
                 provider: "provider-b".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveDash,
-                    ..test_channel(4002)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveDash, ..test_channel(4002) },
                 user_agent: Cow::Borrowed("ua-2"),
                 session_token: Some("tok-hls"),
             })
@@ -6140,10 +5978,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(5001)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(5001) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-hls"),
             })
@@ -6194,10 +6029,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(6001)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(6001) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-expire"),
             })
@@ -6208,11 +6040,7 @@ mod tests {
         {
             let mut connections = manager.connections.write().await;
             let connection_data = connections.by_key.get_mut("user1").unwrap();
-            let session = connection_data
-                .sessions
-                .iter_mut()
-                .find(|session| session.token == "tok-expire")
-                .unwrap();
+            let session = connection_data.sessions.iter_mut().find(|session| session.token == "tok-expire").unwrap();
             session.ts = session.ts.saturating_sub(default_hls_session_ttl_secs() + 1);
         }
         if let Some(gc_ts) = &manager.gc_ts {
@@ -6270,10 +6098,7 @@ mod tests {
                 soft_priority: 9,
                 fingerprint: &normal_fp,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(6002)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(6002) },
                 user_agent: Cow::Borrowed("ua-normal"),
                 session_token: Some("tok-expire-normal"),
             })
@@ -6302,11 +6127,8 @@ mod tests {
         {
             let mut connections = manager.connections.write().await;
             let connection_data = connections.by_key.get_mut("user1").unwrap();
-            let session = connection_data
-                .sessions
-                .iter_mut()
-                .find(|session| session.token == "tok-expire-normal")
-                .unwrap();
+            let session =
+                connection_data.sessions.iter_mut().find(|session| session.token == "tok-expire-normal").unwrap();
             session.ts = session.ts.saturating_sub(default_hls_session_ttl_secs() + 1);
         }
 
@@ -6361,10 +6183,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fp_a,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(7001)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(7001) },
                 user_agent: Cow::Borrowed("ua-a"),
                 session_token: Some("tok-reuse"),
             })
@@ -6385,10 +6204,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fp_b,
                 provider: "provider-b".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveDash,
-                    ..test_channel(7002)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveDash, ..test_channel(7002) },
                 user_agent: Cow::Borrowed("ua-b"),
                 session_token: Some("tok-reuse"),
             })
@@ -6445,10 +6261,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(8001)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(8001) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-event"),
             })
@@ -6485,10 +6298,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(8002)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(8002) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("missing-session"),
             })
@@ -6538,10 +6348,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(8003)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(8003) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-reschedule"),
             })
@@ -6621,10 +6428,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(8004)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(8004) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-stale"),
             })
@@ -6632,11 +6436,8 @@ mod tests {
         let released = manager.release_connection(&addr).await;
         assert!(released.addr_removed);
 
-        let key = AdaptiveExpiryKey {
-            username: String::from("user1"),
-            session_token: String::from("tok-stale"),
-            uid: 134,
-        };
+        let key =
+            AdaptiveExpiryKey { username: String::from("user1"), session_token: String::from("tok-stale"), uid: 134 };
         let old_expires_at = {
             let expiry_index = manager.adaptive_expiry_index.lock().await;
             *expiry_index.get(&key).unwrap()
@@ -6693,10 +6494,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(8004)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(8004) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-full-channel"),
             })
@@ -6718,15 +6516,14 @@ mod tests {
         }
 
         let (cleanup_tx, mut cleanup_rx) = mpsc::channel(1);
-        cleanup_tx
-            .send(CleanupEvent::ReleaseConnection { addr })
-            .await
-            .expect("prefill cleanup channel");
+        cleanup_tx.send(CleanupEvent::ReleaseConnection { addr }).await.expect("prefill cleanup channel");
         manager.set_cleanup_sender(cleanup_tx);
 
         let process_result = tokio::time::timeout(
             Duration::from_millis(100),
-            manager.process_due_adaptive_expiry_entries(current_time_secs().saturating_add(default_hls_session_ttl_secs() + 1)),
+            manager.process_due_adaptive_expiry_entries(
+                current_time_secs().saturating_add(default_hls_session_ttl_secs() + 1),
+            ),
         )
         .await;
 
@@ -6778,10 +6575,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveHls,
-                    ..test_channel(8005)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveHls, ..test_channel(8005) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-rollover"),
             })
@@ -6818,10 +6612,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &next_fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::LiveDash,
-                    ..test_channel(8005)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::LiveDash, ..test_channel(8005) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-rollover"),
             })
@@ -6946,10 +6737,8 @@ mod tests {
 
         {
             let mut connections = manager.connections.write().await;
-            let stale_registration = connections
-                .key_by_addr
-                .get_mut(&stale_addr)
-                .expect("stale registration should exist");
+            let stale_registration =
+                connections.key_by_addr.get_mut(&stale_addr).expect("stale registration should exist");
             stale_registration.ts = stale_registration.ts.saturating_sub(DEFAULT_ACTIVE_SOCKET_TTL_SECS + 1);
         }
 
@@ -6999,7 +6788,8 @@ mod tests {
                 registration.ts
             };
             let connection_data = connections.by_key.get_mut("user1").expect("user should exist");
-            connection_data.sessions[0].ts = connection_data.sessions[0].ts.saturating_sub(DEFAULT_ACTIVE_SOCKET_TTL_SECS + 5);
+            connection_data.sessions[0].ts =
+                connection_data.sessions[0].ts.saturating_sub(DEFAULT_ACTIVE_SOCKET_TTL_SECS + 5);
             previous_ts
         };
 
@@ -7134,9 +6924,7 @@ mod tests {
             .await
             .expect("stream should be created");
 
-        manager
-            .touch_http_activity(&user.username, "tok-hls-manifest-touch", &manifest_addr)
-            .await;
+        manager.touch_http_activity(&user.username, "tok-hls-manifest-touch", &manifest_addr).await;
 
         let released = manager.release_connection(&segment_addr).await;
         assert!(released.addr_removed);
@@ -7165,11 +6953,15 @@ mod tests {
 
         let mut saw_preserved_update = false;
         while let Ok(event) = events.try_recv() {
-            if matches!(event, EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream)) if stream.addr == segment_addr && stream.preserved) {
+            if matches!(event, EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream)) if stream.addr == segment_addr && stream.preserved)
+            {
                 saw_preserved_update = true;
             }
         }
-        assert!(saw_preserved_update, "preserving a stream must notify the frontend so adaptive TTL cleanup can hide it");
+        assert!(
+            saw_preserved_update,
+            "preserving a stream must notify the frontend so adaptive TTL cleanup can hide it"
+        );
     }
 
     #[tokio::test]
@@ -7234,9 +7026,7 @@ mod tests {
             })
             .await;
 
-        manager
-            .clear_unbound_session_addr(&user.username, "tok-hls-manifest-clear", &manifest_addr)
-            .await;
+        manager.clear_unbound_session_addr(&user.username, "tok-hls-manifest-clear", &manifest_addr).await;
 
         let connections = manager.connections.read().await;
         assert!(!connections.key_by_addr.contains_key(&manifest_addr));
@@ -7292,12 +7082,8 @@ mod tests {
             .await
             .expect("stream should be created");
 
-        manager
-            .touch_http_activity(&user.username, "tok-hls-manifest-touch-clear", &manifest_addr)
-            .await;
-        manager
-            .clear_unbound_session_addr(&user.username, "tok-hls-manifest-touch-clear", &manifest_addr)
-            .await;
+        manager.touch_http_activity(&user.username, "tok-hls-manifest-touch-clear", &manifest_addr).await;
+        manager.clear_unbound_session_addr(&user.username, "tok-hls-manifest-touch-clear", &manifest_addr).await;
 
         let connections = manager.connections.read().await;
         assert!(!connections.key_by_addr.contains_key(&manifest_addr));
@@ -7366,10 +7152,8 @@ mod tests {
             registration.ts
         };
 
-        let deadline = manager
-            .socket_expiry_deadline(&addr)
-            .await
-            .expect("VOD streams should stay scheduled for expiry tracking");
+        let deadline =
+            manager.socket_expiry_deadline(&addr).await.expect("VOD streams should stay scheduled for expiry tracking");
 
         let unchanged_registration_ts = {
             let connections = manager.connections.read().await;
@@ -7488,10 +7272,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &old_fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::Live,
-                    ..test_channel(9101)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::Live, ..test_channel(9101) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-move"),
             })
@@ -7557,10 +7338,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &base_fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::Video,
-                    ..test_channel(9102)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::Video, ..test_channel(9102) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-vod"),
             })
@@ -7580,10 +7358,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &range_fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::Video,
-                    ..test_channel(9102)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::Video, ..test_channel(9102) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-vod"),
             })
@@ -7672,10 +7447,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::Catchup,
-                    ..test_channel(9103)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::Catchup, ..test_channel(9103) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-catchup"),
             })
@@ -7714,10 +7486,7 @@ mod tests {
                 soft_priority: 0,
                 fingerprint: &next_fingerprint,
                 provider: "provider-a".intern(),
-                stream_channel: &StreamChannel {
-                    item_type: PlaylistItemType::Catchup,
-                    ..test_channel(9103)
-                },
+                stream_channel: &StreamChannel { item_type: PlaylistItemType::Catchup, ..test_channel(9103) },
                 user_agent: Cow::Borrowed("ua"),
                 session_token: Some("tok-catchup"),
             })
@@ -7834,20 +7603,16 @@ mod tests {
         assert_eq!(connection_data.connections, 0);
         assert_eq!(connection_data.counts.normal, 0);
         assert_eq!(connection_data.streams.len(), 0);
-        assert!(
-            connection_data
-                .sessions
-                .iter()
-                .find(|session| session.token == "tok-first")
-                .is_some_and(|session| !session.lifecycle.is_counted())
-        );
-        assert!(
-            connection_data
-                .sessions
-                .iter()
-                .find(|session| session.token == "tok-second")
-                .is_some_and(|session| !session.lifecycle.is_counted())
-        );
+        assert!(connection_data
+            .sessions
+            .iter()
+            .find(|session| session.token == "tok-first")
+            .is_some_and(|session| !session.lifecycle.is_counted()));
+        assert!(connection_data
+            .sessions
+            .iter()
+            .find(|session| session.token == "tok-second")
+            .is_some_and(|session| !session.lifecycle.is_counted()));
     }
 
     #[tokio::test]
@@ -7899,7 +7664,12 @@ mod tests {
             .await;
 
         let first_admission = manager
-            .connection_admission_for_session_activation(&user.username, user.max_connections, user.soft_connections, "tok-normal")
+            .connection_admission_for_session_activation(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                "tok-normal",
+            )
             .await;
         assert_eq!(first_admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(first_admission.kind, Some(ConnectionKind::Normal));
@@ -7924,7 +7694,12 @@ mod tests {
             .expect("reserved normal session should bind");
 
         let second_admission = manager
-            .connection_admission_for_session_activation(&user.username, user.max_connections, user.soft_connections, "tok-soft")
+            .connection_admission_for_session_activation(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                "tok-soft",
+            )
             .await;
         assert_eq!(second_admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(second_admission.kind, Some(ConnectionKind::Soft));
@@ -8014,7 +7789,12 @@ mod tests {
             .await;
 
         let normal_admission = manager
-            .connection_admission_for_session_activation(&user.username, user.max_connections, user.soft_connections, "tok-normal")
+            .connection_admission_for_session_activation(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                "tok-normal",
+            )
             .await;
         assert_eq!(normal_admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(normal_admission.kind, Some(ConnectionKind::Normal));
@@ -8038,7 +7818,12 @@ mod tests {
             .expect("normal stream should bind");
 
         let soft_admission = manager
-            .connection_admission_for_session_activation(&user.username, user.max_connections, user.soft_connections, "tok-soft")
+            .connection_admission_for_session_activation(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                "tok-soft",
+            )
             .await;
         assert_eq!(soft_admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(soft_admission.kind, Some(ConnectionKind::Soft));
@@ -8061,9 +7846,7 @@ mod tests {
             .await
             .expect("soft stream should bind");
 
-        assert!(manager
-            .release_session_streams_and_counted_reservation(&user.username, "tok-normal")
-            .await);
+        assert!(manager.release_session_streams_and_counted_reservation(&user.username, "tok-normal").await);
         {
             let connections = manager.connections.read().await;
             let connection_data = connections.by_key.get(&user.username).expect("user connection data");
@@ -8219,22 +8002,18 @@ mod tests {
             .await;
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
 
-        manager
-            .release_unbound_session_reservation(&user.username, "tok-release", None, false)
-            .await;
+        manager.release_unbound_session_reservation(&user.username, "tok-release", None, false).await;
 
         let connections = manager.connections.read().await;
         let connection_data = connections.by_key.get(&user.username).expect("user connection data");
         assert_eq!(connection_data.connections, 0);
         assert_eq!(connection_data.counts.normal, 0);
         assert_eq!(connection_data.streams.len(), 0);
-        assert!(
-            connection_data
-                .sessions
-                .iter()
-                .find(|session| session.token == "tok-release")
-                .is_some_and(|session| !session.lifecycle.is_counted())
-        );
+        assert!(connection_data
+            .sessions
+            .iter()
+            .find(|session| session.token == "tok-release")
+            .is_some_and(|session| !session.lifecycle.is_counted()));
     }
 
     #[tokio::test]
@@ -8331,20 +8110,19 @@ mod tests {
             })
             .await;
 
-        manager
-            .clear_unbound_session_addr(&user.username, "tok-clear-addr", &second_addr)
-            .await;
+        manager.clear_unbound_session_addr(&user.username, "tok-clear-addr", &second_addr).await;
 
         let connections = manager.connections.read().await;
         let session = connections
             .by_key
             .get(&user.username)
-            .and_then(|connection_data| connection_data.sessions.iter().find(|session| session.token == "tok-clear-addr"))
+            .and_then(|connection_data| {
+                connection_data.sessions.iter().find(|session| session.token == "tok-clear-addr")
+            })
             .expect("session should remain");
         assert_eq!(session.addr, first_addr);
         assert_eq!(session.active_addrs, vec![first_addr]);
     }
-
 
     #[tokio::test]
     async fn get_eviction_candidates_keeps_preserved_streams_evictable() {
@@ -8417,8 +8195,7 @@ mod tests {
         let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
 
         let addr: SocketAddr = "127.0.0.1:55801".parse().unwrap();
-        let fingerprint =
-            Fingerprint::new("fp-preserved-no-count".to_string(), "10.0.0.5".to_string(), addr);
+        let fingerprint = Fingerprint::new("fp-preserved-no-count".to_string(), "10.0.0.5".to_string(), addr);
         let username = "user-preserved-addr-count";
         let mut user = ProxyUserCredentials::default();
         user.username = username.to_string();
@@ -8462,16 +8239,14 @@ mod tests {
 
         // Preserved streams do not consume a counted slot — user_connections should be 0
         assert_eq!(
-            manager.user_connections(username).await, 0,
+            manager.user_connections(username).await,
+            0,
             "preserved stream should not count toward active connections"
         );
 
         // But the preserved stream is still a valid eviction candidate (valid victim)
         let candidates = manager.get_eviction_candidates(username, "10.0.0.5").await;
-        assert!(
-            candidates.iter().any(|c| c.addr == addr),
-            "preserved stream should be an eviction candidate"
-        );
+        assert!(candidates.iter().any(|c| c.addr == addr), "preserved stream should be an eviction candidate");
     }
 
     #[tokio::test]
@@ -8522,7 +8297,11 @@ mod tests {
             .expect("preserved stream should be created");
 
         manager.release_connection(&addr).await;
-        assert_eq!(manager.user_connections(username).await, 0, "preserved stream stays uncounted for active snapshots");
+        assert_eq!(
+            manager.user_connections(username).await,
+            0,
+            "preserved stream stays uncounted for active snapshots"
+        );
 
         let admission = manager.connection_admission(username, user.max_connections, 0).await;
         assert_eq!(
@@ -8602,9 +8381,7 @@ mod tests {
         // connection_admission_for_session for the PRESERVED session token should return
         // Exhausted so that eviction strategies can run and evict the preserved stream,
         // freeing a slot for the uncounted session to reactivate
-        let admission = manager
-            .connection_admission_for_session(username, 1, 0, "tok-uncounted")
-            .await;
+        let admission = manager.connection_admission_for_session(username, 1, 0, "tok-uncounted").await;
         assert_eq!(
             admission.permission,
             UserConnectionPermission::Exhausted,
@@ -8669,8 +8446,8 @@ mod tests {
         // Create a counted session without a stream or matching legacy counter.
         {
             let mut connections = manager.connections.write().await;
-            let data = connections.by_key.entry(user.username.clone())
-                .or_insert_with(|| UserConnectionData::new(0, 1, 0));
+            let data =
+                connections.by_key.entry(user.username.clone()).or_insert_with(|| UserConnectionData::new(0, 1, 0));
             data.add_session(UserSession {
                 token: "tok-div-2".to_string(),
                 transition_version: 1,
@@ -8693,10 +8470,7 @@ mod tests {
         let data = connections.by_key.get(&user.username).expect("user connection data");
         let snapshot = ActiveUserManager::build_divergence_snapshot(data, &user.username);
         assert!(snapshot.kinds.contains(&DivergenceKind::CountedSessionWithoutStream));
-        assert!(snapshot.kinds.contains(&DivergenceKind::ConnectionCountMismatch {
-            legacy: 0,
-            counted: 1,
-        }));
+        assert!(snapshot.kinds.contains(&DivergenceKind::ConnectionCountMismatch { legacy: 0, counted: 1 }));
         drop(connections);
         manager.log_divergence_snapshot(Some(snapshot)).await;
     }
@@ -8714,8 +8488,8 @@ mod tests {
 
         {
             let mut connections = manager.connections.write().await;
-            let data = connections.by_key.entry(user.username.clone())
-                .or_insert_with(|| UserConnectionData::new(0, 1, 0));
+            let data =
+                connections.by_key.entry(user.username.clone()).or_insert_with(|| UserConnectionData::new(0, 1, 0));
 
             // Add a session with GraceHold pending — exempt from Invariant 1
             data.add_session(UserSession {
@@ -8739,7 +8513,7 @@ mod tests {
                         deadline: current_time_secs() + 30,
                         version: 1,
                         wake_source: None,
-                    }
+                    },
                 },
             });
             data.increment_kind(ConnectionKind::Normal);
@@ -8753,11 +8527,19 @@ mod tests {
                 client_ip: "127.0.0.1",
                 provider: "provider-a".intern(),
                 stream_channel: StreamChannel {
-                    target_id: 1, virtual_id: 9003, provider_id: 1,
-                    input_name: "provider-a".intern(), item_type: PlaylistItemType::Live,
-                    cluster: XtreamCluster::Live, group: "g".intern(), title: "t".intern(),
+                    target_id: 1,
+                    virtual_id: 9003,
+                    provider_id: 1,
+                    input_name: "provider-a".intern(),
+                    item_type: PlaylistItemType::Live,
+                    cluster: XtreamCluster::Live,
+                    group: "g".intern(),
+                    title: "t".intern(),
                     url: "http://localhost/stream.ts".intern(),
-                    shared: false, shared_joined_existing: None, shared_stream_id: None, technical: None,
+                    shared: false,
+                    shared_joined_existing: None,
+                    shared_stream_id: None,
+                    technical: None,
                     epg_channel_id: None,
                     epg_reference_ts: None,
                     upstream_user_agent: None,
@@ -8792,8 +8574,8 @@ mod tests {
         // Create mismatch
         {
             let mut connections = manager.connections.write().await;
-            let data = connections.by_key.entry(user.username.clone())
-                .or_insert_with(|| UserConnectionData::new(0, 1, 0));
+            let data =
+                connections.by_key.entry(user.username.clone()).or_insert_with(|| UserConnectionData::new(0, 1, 0));
             data.increment_kind(ConnectionKind::Normal);
             data.add_session(UserSession {
                 token: "tok-div-4".to_string(),
@@ -8818,13 +8600,7 @@ mod tests {
         let snapshot = ActiveUserManager::build_divergence_snapshot(data, &user.username);
         drop(connections);
         manager.log_divergence_snapshot(Some(snapshot)).await;
-        let key = divergence_key(
-            &user.username,
-            &DivergenceKind::ConnectionCountMismatch {
-                legacy: 1,
-                counted: 0,
-            },
-        );
+        let key = divergence_key(&user.username, &DivergenceKind::ConnectionCountMismatch { legacy: 1, counted: 0 });
         let first_logged = {
             let cache = manager.divergence_cache.lock().await;
             let entry = cache.peek(&key).expect("first divergence should populate the cache");
@@ -8847,7 +8623,6 @@ mod tests {
         assert_eq!(entry.count_since_last_log, 2);
         assert_eq!(entry.last_logged, first_logged);
     }
-
 }
 
 //

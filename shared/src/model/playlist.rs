@@ -683,7 +683,16 @@ impl M3uPlaylistItem {
             (rec, "tvg-rec"););
         if let Some(StreamProperties::Live(live)) = self.additional_properties.as_ref() {
             if let Some(catchup) = live.catchup.as_ref() {
-                if let Some(mode) = flussonic_mode {
+                let has_rewritten_catchup = self.t_catchup_mode.as_ref().is_some_and(|mode| !mode.is_empty())
+                    || self.t_catchup_source.as_ref().is_some_and(|source| !source.is_empty());
+                if has_rewritten_catchup {
+                    append_m3u_catchup_attributes(
+                        &mut line,
+                        catchup,
+                        self.t_catchup_mode.as_ref(),
+                        self.t_catchup_source.as_ref(),
+                    );
+                } else if let Some(mode) = flussonic_mode {
                     // Unify catchup=/catchup-type=flussonic* to catchup-type only.
                     // No catchup=, no shift-style catchup-source, no invented days.
                     append_unified_catchup_type_attributes(&mut line, catchup, mode, None, false);

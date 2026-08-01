@@ -50,10 +50,7 @@ impl CatchupProperties {
 
     fn is_flussonic_mode_str(mode: Option<&str>) -> bool {
         mode.is_some_and(|m| {
-            matches!(
-                m.trim().to_ascii_lowercase().as_str(),
-                "flussonic" | "flussonic-hls" | "flussonic-ts" | "fs"
-            )
+            matches!(m.trim().to_ascii_lowercase().as_str(), "flussonic" | "flussonic-hls" | "flussonic-ts" | "fs")
         })
     }
 
@@ -89,26 +86,10 @@ impl CatchupProperties {
         if self.native_flussonic_player_mode().is_some() {
             return None;
         }
-        let mode = self
-            .mode
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .or_else(|| self.catchup_type.as_deref().map(str::trim).filter(|value| !value.is_empty()))?;
-        mode.eq_ignore_ascii_case("append").then_some("append")
-    }
-
-    /// Canonical append label for unified M3U export (`catchup-type="append"` only).
-    pub fn append_player_type(&self) -> Option<&'static str> {
-        if self.native_flussonic_player_mode().is_some() {
-            return None;
+        if let Some(catchup_type) = self.catchup_type.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            return catchup_type.eq_ignore_ascii_case("append").then_some("append");
         }
-        let mode = self
-            .mode
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .or_else(|| self.catchup_type.as_deref().map(str::trim).filter(|value| !value.is_empty()))?;
+        let mode = self.mode.as_deref().map(str::trim).filter(|value| !value.is_empty())?;
         mode.eq_ignore_ascii_case("append").then_some("append")
     }
 }

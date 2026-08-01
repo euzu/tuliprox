@@ -26,8 +26,8 @@ use shared::{
     defaults::default_kick_secs,
     error::TuliproxError,
     model::{
-        PlaylistItemType, PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo,
-        StreamInfoConfigDto, UserCommand,
+        PlaylistItemType, PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, StreamInfoConfigDto,
+        UserCommand,
     },
 };
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
