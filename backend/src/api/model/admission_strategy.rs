@@ -1,14 +1,12 @@
 use log::debug;
-use std::net::SocketAddr;
 use shared::model::AdmissionStrategy;
+use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionDecision {
     NoMatch,
     Evict(EvictionTarget),
     Grace(GraceMode),
-    #[cfg_attr(not(test), allow(dead_code))]
-    Deny,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,56 +24,6 @@ pub struct EvictionTarget {
 pub struct StrategyContext<'a> {
     pub username: &'a str,
     pub client_ip: &'a str,
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub strategies: &'a [AdmissionStrategy],
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn evaluate_admission_strategies(
-    ctx: &StrategyContext<'_>,
-    candidates: &[EvictionCandidate],
-) -> AdmissionDecision {
-    if ctx.strategies.is_empty() {
-        debug!("No admission strategies configured, denying request for user {}", ctx.username);
-        return AdmissionDecision::Deny;
-    }
-
-    debug!(
-        "Evaluating {} admission strategies for user {}",
-        ctx.strategies.len(),
-        ctx.username
-    );
-
-    for strategy in ctx.strategies {
-        let decision = evaluate_strategy(*strategy, ctx, candidates);
-        match decision {
-            AdmissionDecision::NoMatch => {}
-            AdmissionDecision::Evict(target) => {
-                debug!(
-                    "Strategy {:?} selected eviction target {} for user {}",
-                    strategy, target.addr, ctx.username
-                );
-                return AdmissionDecision::Evict(target);
-            }
-            AdmissionDecision::Grace(mode) => {
-                debug!(
-                    "Strategy {:?} selected grace mode {:?} for user {} (blocking later strategies)",
-                    strategy, mode, ctx.username
-                );
-                return AdmissionDecision::Grace(mode);
-            }
-            AdmissionDecision::Deny => {
-                debug!("Strategy {:?} denied request for user {}", strategy, ctx.username);
-                return AdmissionDecision::Deny;
-            }
-        }
-    }
-
-    debug!(
-        "No admission strategy matched for user {}, denying",
-        ctx.username
-    );
-    AdmissionDecision::Deny
 }
 
 pub(in crate::api) fn evaluate_strategy(
@@ -169,8 +117,6 @@ pub struct EvictionCandidate {
     pub ts: u64,
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,56 +135,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_strategy_list_returns_deny() {
-        let ctx = StrategyContext {
-            username: "user1",
-            client_ip: "1.1.1.1",
-            strategies: &[],
-        };
-        assert_eq!(evaluate_admission_strategies(&ctx, &[]), AdmissionDecision::Deny);
-    }
-
-    #[test]
-    fn evaluator_stops_at_first_matching_strategy() {
-        let ctx = StrategyContext {
-            username: "user1",
-            client_ip: "1.1.1.1",
-            strategies: &[
-                AdmissionStrategy::GraceInstantStream,
-                AdmissionStrategy::EvictUserSameIpOldest,
-            ],
-        };
+    fn grace_strategy_returns_grace() {
+        let ctx = StrategyContext { username: "user1", client_ip: "1.1.1.1" };
         let candidates = vec![candidate(1000, "1.1.1.1", 100)];
-        let result = evaluate_admission_strategies(&ctx, &candidates);
-        assert_eq!(result, AdmissionDecision::Grace(GraceMode::Instant));
-    }
-
-    #[test]
-    fn grace_is_blocking() {
-        let ctx = StrategyContext {
-            username: "user1",
-            client_ip: "1.1.1.1",
-            strategies: &[
-                AdmissionStrategy::GraceHoldStream,
-                AdmissionStrategy::EvictUserSameIpOldest,
-            ],
-        };
-        let candidates = vec![candidate(1000, "1.1.1.1", 100)];
-        let result = evaluate_admission_strategies(&ctx, &candidates);
+        let result = evaluate_strategy(AdmissionStrategy::GraceHoldStream, &ctx, &candidates);
         assert_eq!(result, AdmissionDecision::Grace(GraceMode::Hold));
     }
 
-    /// Build a single-strategy `StrategyContext` whose `client_ip` is fixed to
-    /// `"1.1.1.1"`, run the strategy against `candidates`, and assert that the
-    /// evicted target's port is `expected_port`. Used by the four
-    /// `evict_*_test` cases below.
     fn assert_evict(strategy: AdmissionStrategy, candidates: &[EvictionCandidate], expected_port: u16) {
-        let ctx = StrategyContext {
-            username: "user1",
-            client_ip: "1.1.1.1",
-            strategies: &[strategy],
-        };
-        let result = evaluate_admission_strategies(&ctx, candidates);
+        let ctx = StrategyContext { username: "user1", client_ip: "1.1.1.1" };
+        let result = evaluate_strategy(strategy, &ctx, candidates);
         match result {
             AdmissionDecision::Evict(target) => assert_eq!(target.addr, addr(expected_port)),
             other => panic!("Expected Evict, got {other:?}"),
@@ -286,43 +192,10 @@ mod tests {
     }
 
     #[test]
-    fn no_same_ip_candidate_returns_no_match_then_deny() {
-        let ctx = StrategyContext {
-            username: "user1",
-            client_ip: "1.1.1.1",
-            strategies: &[AdmissionStrategy::EvictUserSameIpOldest],
-        };
+    fn no_same_ip_candidate_returns_no_match() {
+        let ctx = StrategyContext { username: "user1", client_ip: "1.1.1.1" };
         let candidates = vec![candidate(1000, "2.2.2.2", 100)];
-        let result = evaluate_admission_strategies(&ctx, &candidates);
-        assert_eq!(result, AdmissionDecision::Deny);
-    }
-
-    #[test]
-    fn eviction_falls_through_to_grace() {
-        let ctx = StrategyContext {
-            username: "user1",
-            client_ip: "1.1.1.1",
-            strategies: &[
-                AdmissionStrategy::EvictUserSameIpOldest,
-                AdmissionStrategy::GraceHoldStream,
-            ],
-        };
-        let candidates = vec![candidate(1000, "2.2.2.2", 100)];
-        let result = evaluate_admission_strategies(&ctx, &candidates);
-        assert_eq!(result, AdmissionDecision::Grace(GraceMode::Hold));
-    }
-
-    #[test]
-    fn empty_candidates_with_eviction_then_grace() {
-        let ctx = StrategyContext {
-            username: "user1",
-            client_ip: "1.1.1.1",
-            strategies: &[
-                AdmissionStrategy::EvictUserSameIpLatest,
-                AdmissionStrategy::GraceInstantStream,
-            ],
-        };
-        let result = evaluate_admission_strategies(&ctx, &[]);
-        assert_eq!(result, AdmissionDecision::Grace(GraceMode::Instant));
+        let result = evaluate_strategy(AdmissionStrategy::EvictUserSameIpOldest, &ctx, &candidates);
+        assert_eq!(result, AdmissionDecision::NoMatch);
     }
 }
