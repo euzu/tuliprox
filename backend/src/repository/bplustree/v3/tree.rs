@@ -14,10 +14,10 @@ use super::{
     BPlusTreeMetadata,
 };
 use crate::{
-    repository::bplustree::common::{mmap_with_advice, read_exact_at_offset, BPlusTreeError},
+    repository::bplustree::common::{mmap_with_advice, read_exact_at_offset, Advice, BPlusTreeError},
     utils::{binary_deserialize, binary_serialize, binary_serialize_into},
 };
-use memmap2::{Advice, Mmap};
+use memmap2::Mmap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{

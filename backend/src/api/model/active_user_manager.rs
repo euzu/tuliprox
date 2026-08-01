@@ -385,9 +385,19 @@ fn create_socket_reentry_guard_key(username: &str, client_ip: &str, virtual_id: 
     shared::concat_string!(username, "|", client_ip, "|", &virtual_id.to_string())
 }
 
+fn is_catchup_session_token(session_token: &str) -> bool {
+    session_token.starts_with("m3u-catchup|")
+        || session_token.starts_with("catchup|")
+        || session_token.contains("|archive|")
+        || session_token.contains("|timeshift_abs|")
+}
+
 fn is_stable_session_stream(stream: &StreamInfo) -> bool {
+    // Catchup-token Live/.ts segment sockets must preserve too ╤В╨Р╨д otherwise archive panel rows
+    // hard-remove every HLS chunk and Streams blinks even when frontend soft-preserve is present.
     stream.channel.item_type == PlaylistItemType::Catchup
         || stream.channel.item_type.is_live_adaptive()
+        || stream.session_token.as_deref().is_some_and(is_catchup_session_token)
         || matches!(
             extract_extension_from_url(stream.channel.url.as_ref()),
             Some(ext) if ext == HLS_EXT || ext == DASH_EXT
@@ -1667,10 +1677,16 @@ impl ActiveUserManager {
         sessions: &[UserSession],
     ) -> Option<AdaptiveExpiryEntry> {
         let session_token = stream.session_token.as_deref()?;
-        let session = sessions.iter().find(|session| session.token == session_token)?;
+        // Catchup segment gaps can briefly lose the UserSession row; still preserve the panel
+        // row using the stream timestamp so Streams does not blink between archive chunks.
+        let session_ts = sessions
+            .iter()
+            .find(|session| session.token == session_token)
+            .map(|session| session.ts)
+            .unwrap_or(stream.ts);
 
         let ttl_secs = self.adaptive_session_ttl_secs.load(Ordering::Relaxed);
-        let expires_at = session.ts.saturating_add(ttl_secs);
+        let expires_at = session_ts.saturating_add(ttl_secs);
         Some(AdaptiveExpiryEntry {
             expires_at,
             username: username.to_string(),
@@ -2945,7 +2961,27 @@ impl ActiveUserManager {
         let mut streams = Vec::new();
         for connection_data in user_connections.by_key.values() {
             for stream in &connection_data.streams {
+                // Keep active_streams free of preserved rows — shared-HLS join detection and
+                // connection accounting must not see stale archive segment leases (v3.3.81).
                 if !stream.preserved {
+                    streams.push(stream.clone());
+                }
+            }
+        }
+        streams
+    }
+
+    /// Streams for the WebUI / StatusCheck snapshot.
+    ///
+    /// Includes preserved Catchup/HLS/DASH session rows so the panel keeps showing archive
+    /// playback between short segment sockets. Do not use this for shared-HLS accounting.
+    pub async fn panel_streams(&self) -> Vec<StreamInfo> {
+        self.gc();
+        let user_connections = self.connections.read().await;
+        let mut streams = Vec::new();
+        for connection_data in user_connections.by_key.values() {
+            for stream in &connection_data.streams {
+                if !stream.preserved || Self::should_preserve_session_stream(stream) {
                     streams.push(stream.clone());
                 }
             }
@@ -3150,11 +3186,13 @@ impl ActiveUserManager {
             return true;
         };
 
-        let Some(session) = sessions.iter().find(|session| session.token == session_token) else {
-            return true;
-        };
+        let session_ts = sessions
+            .iter()
+            .find(|session| session.token == session_token)
+            .map(|session| session.ts)
+            .unwrap_or(stream.ts);
 
-        now.saturating_sub(session.ts) >= ttl_secs
+        now.saturating_sub(session_ts) >= ttl_secs
     }
 
     fn collect_divergence_snapshot(
@@ -7104,7 +7142,14 @@ mod tests {
         assert!(released.addr_removed);
         assert!(released.removed_streams.is_empty(), "adaptive close should preserve without history removal");
         assert_eq!(manager.user_connections(&user.username).await, 0);
-        assert!(manager.active_streams().await.is_empty(), "preserved adaptive streams are hidden from active snapshots");
+        assert!(
+            manager.active_streams().await.is_empty(),
+            "preserved rows stay out of active_streams (use panel_streams for StatusCheck)"
+        );
+        let panel = manager.panel_streams().await;
+        assert_eq!(panel.len(), 1, "preserved adaptive/catchup session rows stay in panel snapshots");
+        assert!(panel[0].preserved);
+        assert_eq!(panel[0].session_token.as_deref(), Some("tok-hls-manifest-touch"));
 
         let connections = manager.connections.read().await;
         let data = connections.by_key.get(&user.username).expect("user should remain for preserved session");

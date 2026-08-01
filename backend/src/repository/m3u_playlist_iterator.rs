@@ -163,14 +163,31 @@ fn apply_rewrite(
     };
 
     if should_rewrite_urls {
-        let flussonic_live_file = m3u_pli.additional_properties.as_ref().and_then(|properties| match properties {
-            StreamProperties::Live(live) => live
-                .catchup
-                .as_ref()
-                .and_then(shared::model::CatchupProperties::native_flussonic_player_mode)
-                .map(flussonic_proxy_live_file),
-            _ => None,
-        });
+        let flussonic_live_file = m3u_pli
+            .additional_properties
+            .as_ref()
+            .and_then(|properties| match properties {
+                StreamProperties::Live(live) => live
+                    .catchup
+                    .as_ref()
+                    .and_then(shared::model::CatchupProperties::native_flussonic_player_mode)
+                    .map(flussonic_proxy_live_file),
+                _ => None,
+            })
+            .or_else(|| {
+                // BitTV rows often have timeshift/catchup-days without a Flussonic mode on
+                // catchup=; nested live file is required so TiviMate can rewrite the last
+                // path segment for archive (v3.3.81).
+                let has_timeshift = !m3u_pli.time_shift.trim().is_empty();
+                let has_days = m3u_pli.additional_properties.as_ref().and_then(|props| match props {
+                    StreamProperties::Live(live) => live
+                        .catchup
+                        .as_ref()
+                        .and_then(|c| c.days.as_ref().filter(|d| !d.is_empty())),
+                    _ => None,
+                });
+                (has_timeshift || has_days.is_some()).then_some(flussonic_proxy_live_file("flussonic"))
+            });
         let stream_url = flussonic_live_file.map_or_else(
             || {
                 build_rewritten_url(

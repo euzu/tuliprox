@@ -625,7 +625,7 @@ fn append_unified_catchup_type_attributes(
     rewritten_source: Option<&Arc<str>>,
     emit_source: bool,
 ) {
-    // Unified export: always `catchup-type=…`, never `catchup=`.
+    // Unified export: always `catchup-type=...`, never `catchup=`.
     write_m3u_attr(line, "catchup-type", catchup_type);
     append_catchup_attribute(line, "catchup-days", catchup.days.as_ref());
     if emit_source {
@@ -666,7 +666,9 @@ impl M3uPlaylistItem {
             let _ = write!(line, " tvg-chno=\"{}\"", self.chno);
         }
         let flussonic_mode = self.additional_properties.as_ref().and_then(|props| match props {
-            StreamProperties::Live(live) => live.catchup.as_ref().and_then(CatchupProperties::native_flussonic_player_mode),
+            StreamProperties::Live(live) => {
+                live.catchup.as_ref().and_then(CatchupProperties::native_flussonic_player_mode)
+            }
             _ => None,
         });
         let append_type = self.additional_properties.as_ref().and_then(|props| match props {
@@ -682,17 +684,11 @@ impl M3uPlaylistItem {
         if let Some(StreamProperties::Live(live)) = self.additional_properties.as_ref() {
             if let Some(catchup) = live.catchup.as_ref() {
                 if let Some(mode) = flussonic_mode {
-                    // Unify catchup=/catchup-type=flussonic* → catchup-type only.
+                    // Unify catchup=/catchup-type=flussonic* to catchup-type only.
                     // No catchup=, no shift-style catchup-source, no invented days.
-                    append_unified_catchup_type_attributes(
-                        &mut line,
-                        catchup,
-                        mode,
-                        None,
-                        false,
-                    );
+                    append_unified_catchup_type_attributes(&mut line, catchup, mode, None, false);
                 } else if let Some(append_type) = append_type {
-                    // Unify catchup=/catchup-type=append → catchup-type="append" only.
+                    // Unify catchup=/catchup-type=append to catchup-type="append" only.
                     append_unified_catchup_type_attributes(
                         &mut line,
                         catchup,

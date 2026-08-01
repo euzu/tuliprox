@@ -1,5 +1,7 @@
 use log::warn;
-use memmap2::{Advice, Mmap};
+use memmap2::Mmap;
+#[cfg(unix)]
+pub(crate) use memmap2::Advice;
 use std::{
     ffi::OsString,
     fs::File,
@@ -7,16 +9,27 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(not(unix))]
-use std::io::{Read, Seek, SeekFrom};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 
+/// Windows/memmap2 has no madvise-style Advice API; keep a stub so callers stay portable.
+#[cfg(not(unix))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Advice {
+    Normal,
+}
+
+#[cfg(unix)]
 fn advise_mmap(mmap: &Mmap, advice: Advice, context: &str) {
     if let Err(err) = mmap.advise(advice) {
         warn!("Failed to apply mmap advice {advice:?} for {context}: {err}");
     }
 }
+
+#[cfg(not(unix))]
+fn advise_mmap(_mmap: &Mmap, _advice: Advice, _context: &str) {}
 
 pub(crate) fn mmap_with_advice(file: &File, advice: Advice, context: &str) -> Option<Mmap> {
     // SAFETY: Every v3 persisted query holds its shared sidecar lock for the mapping lifetime, and v3 writers require
@@ -38,13 +51,28 @@ pub(crate) fn mmap_with_advice(file: &File, advice: Advice, context: &str) -> Op
 pub(crate) fn read_exact_at_offset(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     #[cfg(unix)]
     file.read_exact_at(buf, offset)?;
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let mut file = file;
-        let current_pos = file.stream_position()?;
-        file.seek(SeekFrom::Start(offset))?;
-        file.read_exact(buf)?;
-        file.seek(SeekFrom::Start(current_pos))?;
+        let mut read = 0;
+        while read < buf.len() {
+            let read_offset = u64::try_from(read)
+                .ok()
+                .and_then(|read| offset.checked_add(read))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset read position overflow"))?;
+            let chunk_read = file.seek_read(&mut buf[read..], read_offset)?;
+            if chunk_read == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "failed to fill whole buffer"));
+            }
+            read += chunk_read;
+        }
+    }
+    #[cfg(not(unix))]
+    #[cfg(not(windows))]
+    {
+        let _ = file;
+        let _ = buf;
+        let _ = offset;
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "offset reads are not supported on this platform"));
     }
     Ok(())
 }

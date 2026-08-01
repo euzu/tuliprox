@@ -54,8 +54,28 @@ pub fn get_adaptive_session_ttl_secs(config_ctx: &ConfigContext) -> u64 {
         .map_or_else(default_hls_session_ttl_secs, |stream| stream.hls_session_ttl_secs)
 }
 
+fn is_catchup_session_token(session_token: &str) -> bool {
+    session_token.starts_with("m3u-catchup|")
+        || session_token.starts_with("catchup|")
+        || session_token.contains("|archive|")
+        || session_token.contains("|timeshift_abs|")
+}
+
 pub fn is_adaptive_session_stream(stream: &StreamInfo) -> bool {
-    stream.session_token.is_some() && stream.channel.item_type.is_live_adaptive()
+    // Soft-preserve keeps archive/HLS rows between short segment sockets; this TTL path is what
+    // eventually hides them after the session ends (without a full page reload).
+    if stream.channel.item_type == PlaylistItemType::Catchup {
+        return true;
+    }
+    if stream.session_token.as_deref().is_some_and(is_catchup_session_token) {
+        return true;
+    }
+    let url = stream.channel.url.as_ref().to_ascii_lowercase();
+    if url.contains(".m3u8") || url.contains(".mpd") {
+        return true;
+    }
+    stream.session_token.is_some()
+        && (stream.channel.item_type.is_live_adaptive() || is_shared_hls_stream(stream))
 }
 
 pub fn is_background_transfer_stream(stream: &StreamInfo) -> bool {
@@ -106,7 +126,8 @@ fn compute_adaptive_last_seen(
 
         for stream in streams {
             if is_adaptive_session_stream(stream) {
-                if !stream.preserved || is_shared_hls_stream(stream) || !next.contains_key(&stream.uid) {
+                // Freeze last_seen for all preserved rows (including shared) so TTL can hide ended sessions.
+                if !stream.preserved || !next.contains_key(&stream.uid) {
                     next.insert(stream.uid, now);
                 }
             } else {
@@ -140,11 +161,17 @@ pub fn build_technical_chips(
         return chips;
     };
 
-    if let Some(label) = adaptive_tech_label(item_type) {
+    let type_label = adaptive_tech_label(item_type);
+    if let Some(label) = type_label {
         chips.push((label.to_string(), "tp__stream-display__chip--container"));
     }
     if !tech.container.is_empty() {
-        chips.push((tech.container.to_ascii_uppercase(), "tp__stream-display__chip--container"));
+        let container = tech.container.to_ascii_uppercase();
+        // LiveHls/Dash already add HLS/DASH from item_type; metrics often repeat the same container.
+        let duplicate_type_label = type_label.is_some_and(|label| label.eq_ignore_ascii_case(&container));
+        if !duplicate_type_label {
+            chips.push((container, "tp__stream-display__chip--container"));
+        }
     }
     if !tech.video_codec.is_empty() {
         chips.push((tech.video_codec.clone(), "tp__stream-display__chip--video-codec"));
@@ -280,12 +307,101 @@ mod tests {
     }
 
     #[test]
-    fn compute_adaptive_last_seen_refreshes_preserved_shared_hls() {
+    fn compute_adaptive_last_seen_freezes_preserved_shared_hls() {
         let existing = HashMap::from([(2, 200)]);
         let streams = Some(vec![test_shared_hls_stream(2, true, true)]);
 
         let refreshed = compute_adaptive_last_seen(existing, &streams, 999);
 
-        assert_eq!(refreshed.get(&2), Some(&999));
+        assert_eq!(refreshed.get(&2), Some(&200));
+    }
+
+    #[test]
+    fn compute_adaptive_last_seen_tracks_catchup_session_streams() {
+        let existing = HashMap::from([(5, 100)]);
+        let streams = Some(vec![
+            test_stream(5, PlaylistItemType::Catchup, true, true),
+            test_stream(6, PlaylistItemType::Catchup, false, true),
+        ]);
+
+        let refreshed = compute_adaptive_last_seen(existing, &streams, 999);
+
+        // Preserved catchup keeps prior last_seen (sticky between segments).
+        assert_eq!(refreshed.get(&5), Some(&100));
+        assert_eq!(refreshed.get(&6), Some(&999));
+    }
+
+    #[test]
+    fn filter_visible_streams_keeps_preserved_catchup_within_adaptive_ttl() {
+        use super::filter_visible_streams;
+
+        let streams = Some(vec![
+            test_stream(1, PlaylistItemType::Catchup, true, true),
+            test_stream(2, PlaylistItemType::Video, false, true),
+        ]);
+        let last_seen = HashMap::from([(1, 1_000u64)]);
+        let ttl = 30u64;
+        let visible = filter_visible_streams(streams, &last_seen, 1_000 + ttl, ttl).unwrap();
+        assert_eq!(visible.len(), 2);
+        assert!(visible.iter().any(|stream| stream.channel.item_type == PlaylistItemType::Catchup));
+    }
+
+    #[test]
+    fn filter_visible_streams_hides_preserved_catchup_past_adaptive_ttl() {
+        use super::{filter_visible_streams, ADAPTIVE_STREAM_CLEANUP_BUFFER_SECS};
+
+        let streams = Some(vec![
+            test_stream(1, PlaylistItemType::Catchup, true, true),
+            test_stream(2, PlaylistItemType::Video, false, true),
+        ]);
+        let last_seen = HashMap::from([(1, 1_000u64)]);
+        let ttl = 30u64;
+        let visible = filter_visible_streams(
+            streams,
+            &last_seen,
+            1_000 + ttl + ADAPTIVE_STREAM_CLEANUP_BUFFER_SECS + 1,
+            ttl,
+        )
+        .unwrap();
+        // Soft-preserve is for segment gaps only; past TTL the row must leave Streams without reload.
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].channel.item_type, PlaylistItemType::Video);
+    }
+
+    #[test]
+    fn filter_visible_streams_hides_stale_active_catchup_past_adaptive_ttl() {
+        use super::{filter_visible_streams, ADAPTIVE_STREAM_CLEANUP_BUFFER_SECS};
+
+        let streams = Some(vec![
+            test_stream(1, PlaylistItemType::Catchup, false, true),
+            test_stream(2, PlaylistItemType::Video, false, true),
+        ]);
+        let last_seen = HashMap::from([(1, 1_000u64)]);
+        let ttl = 30u64;
+        let visible = filter_visible_streams(
+            streams,
+            &last_seen,
+            1_000 + ttl + ADAPTIVE_STREAM_CLEANUP_BUFFER_SECS + 1,
+            ttl,
+        )
+        .unwrap();
+        // Active rows refresh last_seen in the UI; a frozen last_seen past TTL must hide.
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].channel.item_type, PlaylistItemType::Video);
+    }
+
+    #[test]
+    fn build_technical_chips_dedupes_hls_type_and_container() {
+        use super::build_technical_chips;
+        use shared::model::StreamTechnicalInfo;
+
+        let tech = StreamTechnicalInfo {
+            container: "hls".to_string(),
+            video_codec: "h264".to_string(),
+            ..Default::default()
+        };
+        let chips = build_technical_chips(PlaylistItemType::LiveHls, Some(&tech));
+        let labels: Vec<_> = chips.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(labels, vec!["HLS", "h264"]);
     }
 }

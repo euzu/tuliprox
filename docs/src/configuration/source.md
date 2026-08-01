@@ -138,7 +138,7 @@ inputs:
 | `cache_duration`        | String |    No    | `0`     | **Crucial:** Determines how often Tuliprox actually downloads the raw list from the provider. At `1d` (1 day), Tuliprox serves from its local `.db` for 24 hours, even if you trigger hourly updates. This heavily protects against provider bans! Supported units are `s`, `m`, `h`, and `d`. If `cache_duration` is set, the cached provider playlist stored on disk is reused for subsequent updates instead of downloading it again.  |
 | `persist`               | String |    No    |         | Optional path template (e.g., `./playlist_{}.m3u`) to permanently store the downloaded raw provider list locally on your disk. The `{}` in the filename is filled with the current timestamp. For `m3u` use a full filename. For `xtream` use a prefix like `./playlist_`.                                                                                                                                                                |
 | `method`                | Enum   |    No    | `GET`   | HTTP Request method for playlist downloads (`GET` or `POST`).                                                                                                                                                                                                                                                                                                                                                                             |
-| `exp_date`              | Mixed  |    No    |         | Expiration date as `"YYYY-MM-DD HH:MM:SS"` or Unix timestamp. Used for status tracking and Panel API logic.                                                                                                                                                                                                                                                                                                                               |
+| `exp_date`              | Mixed  |    No    |         | Expiration date as `"YYYY-MM-DD HH:MM:SS"` or Unix timestamp. In server mode, Tuliprox refreshes missing or soon-expiring Xtream account dates through the account's `player_api.php` credentials; see [Automatic Xtream Expiration Refresh](#automatic-xtream-expiration-refresh).                                                                                                                                                       |
 | `headers`               | Dict   |    No    |         | Custom HTTP headers for the download (e.g., `User-Agent: My-Player`).                                                                                                                                                                                                                                                                                                                                                                     |
 | `epg`                   | Object |    No    |         | Allows mapping of external XMLTV files (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                     |
 | `aliases`               | List   |    No    |         | Connection pooling / Sub-accounts (see [below](#input-subsections-object-keys)).                                                                                                                                                                                                                                                                                                                                                          |
@@ -777,8 +777,35 @@ from the parent input; the alias fields below override the concrete account/conn
 | `password`            | String |  Xtream  |         | Account password. Mandatory for regular Xtream YAML aliases. Optional for M3U aliases when credentials are embedded in the playlist URL.                                                                                                           |
 | `priority`            | Int    |    No    | `0`     | Connection selection priority for this alias. Lower numbers have higher priority; negative numbers are allowed.                                                                                                                                    |
 | `max_connections`     | Int    |    No    | `0`     | Allowed concurrent streams for this alias. In YAML, `0` means unlimited/no explicit limit.                                                                                                                                                         |
-| `exp_date`            | Mixed  |    No    |         | Account expiration. Supports `"YYYY-MM-DD HH:MM:SS"` interpreted as UTC or Unix timestamps in seconds. Used for status tracking and Panel API sync/renewal logic.                                                                                  |
+| `exp_date`            | Mixed  |    No    |         | Account expiration. Supports `"YYYY-MM-DD HH:MM:SS"` interpreted as UTC or Unix timestamps in seconds. Xtream dates participate in the automatic refresh described below.                                                                          |
 | `enabled`             | Bool   |    No    | `true`  | If `false`, this alias is ignored when Tuliprox builds the usable connection pool.                                                                                                                                                                 |
+
+#### Automatic Xtream Expiration Refresh
+
+In server mode, Tuliprox runs an autonomous task that refreshes expiration dates for enabled Xtream inputs and aliases.
+It calls the account's standard `player_api.php` endpoint with the configured URL, username, and password. This does not
+require a reseller Panel API key and continues to work when `panel_api` provisioning is absent or disabled.
+
+To limit provider traffic and avoid bans, the task uses these fixed rules:
+
+* Accounts without an expiration date, or whose expiration is at most three days away, are eligible for refresh.
+* An eligible account is queried at most once every 24 hours.
+* Requests to accounts belonging to the same configured panel, including aliases, are spaced at least five minutes
+  apart.
+* Transport errors, HTTP 403/429 responses, and server errors put the complete panel into a six-hour cooldown.
+
+Successful non-expired updates are collected for up to 15 minutes and then persisted as a batch. An expiration date at
+or before the current time is persisted immediately and the account is set to `enabled: false`. Disabled accounts are
+not queried and are not re-enabled automatically.
+
+Tuliprox updates the main source YAML and local `xtream_batch` alias CSV files in place. Before changing either file it
+creates a timestamped copy in `backup_dir`; CSV comments, column order, unknown columns, and environment placeholders
+are preserved. The in-memory source configuration is refreshed once per persisted batch, without triggering a second
+reload for Tuliprox's own file write.
+
+Throttle and pending-batch state is stored in `{storage_dir}/xtream_expiry_state.json`, so restarts do not reset request
+limits or discard already fetched expiration dates. The intervals above are currently fixed and have no configuration
+keys.
 
 ---
 

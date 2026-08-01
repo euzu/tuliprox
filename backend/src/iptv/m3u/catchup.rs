@@ -242,6 +242,38 @@ fn is_append_like_query_source(mode: &str, source: &str) -> bool {
     mode_alias(mode) == "append" || source.starts_with('?')
 }
 
+/// Build `archive|{utc}|{duration}` when the resolved provider URL still carries append/shift
+/// query markers. Session tokens keep this discriminator so the panel can show Catchup/EPG
+/// after HLS rewrite drops `utc`/`utcstart` from segment URLs.
+fn archive_discriminator_from_resolved_url(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    let mut start_ts = None;
+    let mut end_ts = None;
+    let mut duration_secs = None;
+    for (key, value) in parsed.query_pairs() {
+        if key.eq_ignore_ascii_case("utc")
+            || key.eq_ignore_ascii_case("utcstart")
+            || key.eq_ignore_ascii_case("timestamp")
+        {
+            start_ts = value.parse::<i64>().ok().or(start_ts);
+        } else if key.eq_ignore_ascii_case("lutc") {
+            end_ts = value.parse::<i64>().ok().or(end_ts);
+        } else if key.eq_ignore_ascii_case("offset") || key.eq_ignore_ascii_case("duration") {
+            duration_secs = value
+                .parse::<i64>()
+                .ok()
+                .map(i64::abs)
+                .or(duration_secs);
+        }
+    }
+    let start = start_ts?;
+    let duration = end_ts
+        .map(|end| end.saturating_sub(start).max(0))
+        .or(duration_secs)
+        .unwrap_or(0);
+    Some(format!("archive|{start}|{duration}"))
+}
+
 fn derived_template_for_mode<'a>(source_url: &'a str, catchup: &'a CatchupProperties) -> Option<Cow<'a, str>> {
     let mode = effective_catchup_mode(catchup);
     if let Some(source) = catchup.source.as_deref().filter(|source| !source.is_empty()) {
@@ -558,13 +590,17 @@ pub fn resolve_m3u_catchup_url(
     }
 
     let url = render_template(&segments, &collectors)?;
-    let mut discriminator = url::form_urlencoded::Serializer::new(String::new());
-    let mode = effective_catchup_mode(catchup);
-    discriminator.append_pair("mode", if mode.is_empty() { "default" } else { mode });
-    for (idx, value) in collectors {
-        discriminator.append_pair(&format!("{COLLECTOR_PREFIX}{idx}"), &value);
-    }
-    let discriminator = short_hash(&discriminator.finish());
+    // Prefer archive|{utc}|{duration} so Streams/History can recover EPG from the session token
+    // after append/shift query params are stripped from rewritten HLS segment URLs.
+    let discriminator = archive_discriminator_from_resolved_url(&url).unwrap_or_else(|| {
+        let mut discriminator = url::form_urlencoded::Serializer::new(String::new());
+        let mode = effective_catchup_mode(catchup);
+        discriminator.append_pair("mode", if mode.is_empty() { "default" } else { mode });
+        for (idx, value) in &collectors {
+            discriminator.append_pair(&format!("{COLLECTOR_PREFIX}{idx}"), value);
+        }
+        short_hash(&discriminator.finish())
+    });
     Ok(Some(ResolvedM3uCatchup { url, discriminator }))
 }
 
@@ -642,7 +678,25 @@ mod tests {
             resolved.url,
             "http://provider.example/live/42.m3u8?offset=-120&utcstart=1717200000"
         );
-        assert!(!resolved.discriminator.is_empty());
+        assert_eq!(resolved.discriminator, "archive|1717200000|120");
+    }
+
+    #[test]
+    fn append_discriminator_embeds_archive_start_for_panel_epg() {
+        assert_eq!(
+            super::archive_discriminator_from_resolved_url(
+                "http://provider.example/live/42.m3u8?offset=-3600&utcstart=1717200000"
+            )
+            .as_deref(),
+            Some("archive|1717200000|3600")
+        );
+        assert_eq!(
+            super::archive_discriminator_from_resolved_url(
+                "http://provider.example/live/42.ts?utc=1717200000&lutc=1717203600"
+            )
+            .as_deref(),
+            Some("archive|1717200000|3600")
+        );
     }
 
     #[test]

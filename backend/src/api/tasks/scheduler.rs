@@ -1,6 +1,6 @@
 use crate::{
     api::{
-        library_scan::{spawn_library_scan, LibraryScanTaskOptions},
+        tasks::{spawn_library_scan, LibraryScanTaskOptions},
         model::AppState,
     },
     model::{AppConfig, ProcessTargets, ScheduleConfig},
@@ -170,7 +170,7 @@ async fn run_playlist_update_worker(
     }
 }
 
-fn drain_pending_playlist_triggers(rx: &mut mpsc::Receiver<()>) -> bool {
+pub fn drain_pending_playlist_triggers(rx: &mut mpsc::Receiver<()>) -> bool {
     loop {
         match rx.try_recv() {
             Ok(()) => {
@@ -350,7 +350,7 @@ pub fn exec_interner_prune(app_state: &Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::api::scheduler::{datetime_to_instant, drain_pending_playlist_triggers};
+    use crate::api::tasks::{datetime_to_instant, drain_pending_playlist_triggers};
     use chrono::Local;
     use cron::Schedule;
     use std::{
