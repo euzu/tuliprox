@@ -12,6 +12,8 @@ use tokio_util::sync::CancellationToken;
 const SSDP_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
 const SSDP_PORT: u16 = 1900;
 
+fn max_ssdp_delay_ms(mx: u64) -> u64 { mx.min(u64::MAX / 1000) * 1000 }
+
 fn create_ssdp_response(device: &HdHomeRunDeviceConfig, server_host: &str) -> String {
     format!(
         "HTTP/1.1 200 OK\r\n\
@@ -57,7 +59,7 @@ async fn ssdp_task_loop(socket: UdpSocket, app_config: Arc<AppConfig>, server_ho
             continue;
         }
         // Randomized delay per MX
-        let delay_ms = (fastrand::u64(0..=mx * 1000)).min(2000);
+        let delay_ms = fastrand::u64(0..=max_ssdp_delay_ms(mx)).min(2000);
         if delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
@@ -124,4 +126,14 @@ pub fn spawn_ssdp_discover_task(app_config: Arc<AppConfig>, server_host: String,
             Err(e) => error!("Failed to create tokio UdpSocket for SSDP discovery: {e}"),
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::max_ssdp_delay_ms;
+
+    #[test]
+    fn ssdp_delay_bound_does_not_overflow_for_maximum_mx() {
+        assert_eq!(max_ssdp_delay_ms(u64::MAX), (u64::MAX / 1000) * 1000);
+    }
 }

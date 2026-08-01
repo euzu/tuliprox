@@ -57,3 +57,16 @@ pub fn display_vec<T: Display>(vec: &[T]) -> String {
     result.push(']');
     result
 }
+
+pub fn is_m3u_catchup_session_token(session_token: &str) -> bool {
+    session_token.starts_with("m3u-catchup|")
+        || session_token.starts_with("catchup|")
+        || session_token.contains("|archive|")
+        || session_token.contains("|timeshift_abs|")
+}
+
+pub fn is_catchup_session_token(session_token: &str) -> bool { is_m3u_catchup_session_token(session_token) }
+
+pub fn contains_ascii_case_insensitive(haystack: &str, needle: &[u8]) -> bool {
+    haystack.as_bytes().windows(needle.len()).any(|window| window.eq_ignore_ascii_case(needle))
+}

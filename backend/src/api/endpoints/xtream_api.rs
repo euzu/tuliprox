@@ -17,7 +17,8 @@ use crate::{
         endpoints::{
             hls_api::{
                 build_virtual_hls_entry_path, handle_hls_stream_request, hls_admission_failure_manifest_response,
-                hls_custom_video_manifest_response, HlsEntryStreamContext,
+                hls_custom_video_manifest_response, m3u_archive_epg_reference_ts,
+                m3u_catchup_epg_reference_from_session_token, HlsEntryStreamContext,
             },
             xmltv_api::{get_empty_epg_response, get_epg_path_for_target_by_type, serve_short_epg},
         },
@@ -642,14 +643,18 @@ async fn xtream_player_api_stream(
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
         let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id);
+        let archive_reference = m3u_archive_epg_reference_ts(stream_url.as_ref())
+            .or_else(|| m3u_archive_epg_reference_ts(pli.url.as_ref()))
+            .or_else(|| m3u_catchup_epg_reference_from_session_token(&session_key));
         return handle_hls_stream_request(
             fingerprint,
             app_state,
             &user,
             &target,
             user_session.as_ref(),
+            Some(session_key.as_str()),
             &stream_url,
-            None,
+            archive_reference,
             stream_context,
             &input,
             req_headers,
@@ -661,7 +666,11 @@ async fn xtream_player_api_stream(
         .into_response();
     }
 
-    let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
+    let archive_reference = m3u_archive_epg_reference_ts(stream_url.as_ref())
+        .or_else(|| m3u_archive_epg_reference_ts(pli.url.as_ref()))
+        .or_else(|| m3u_catchup_epg_reference_from_session_token(&session_key));
+    let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type)
+        .with_epg_reference_ts(archive_reference);
 
     let pinned_provider =
         user_session.as_ref().filter(|_| item_type.requires_provider_affinity()).map(|session| &session.provider);
@@ -933,8 +942,9 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
                 &user,
                 &target,
                 None,
+                Some(session_key.as_str()),
                 &pli.url,
-                None,
+                m3u_archive_epg_reference_ts(pli.url.as_ref()),
                 stream_context,
                 &input,
                 req_headers,

@@ -220,24 +220,24 @@ async fn current_hls_terminal_lease(
     proxy_session_id: &ProxySessionId,
     access_lease_id: &HlsAccessLeaseId,
     now_ms: u64,
-) -> Result<HlsAccessLease, axum::response::Response> {
+) -> Result<HlsAccessLease, Box<axum::response::Response>> {
     app_state
         .hls_proxy
         .access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms)
         .await
-        .ok_or_else(|| hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::LeaseStateUnavailable))
+        .ok_or_else(|| Box::new(hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::LeaseStateUnavailable)))
 }
 
 async fn current_hls_terminal_session(
     app_state: &Arc<AppState>,
     proxy_session_id: &ProxySessionId,
-) -> Result<HlsSessionHandle, axum::response::Response> {
+) -> Result<HlsSessionHandle, Box<axum::response::Response>> {
     app_state
         .hls_proxy
         .sessions()
         .get_by_proxy_session_id(proxy_session_id)
         .await
-        .ok_or_else(|| hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::LeaseStateUnavailable))
+        .ok_or_else(|| Box::new(hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::LeaseStateUnavailable)))
 }
 
 pub(super) async fn resolve_hls_terminal_manifest_state(
@@ -247,7 +247,7 @@ pub(super) async fn resolve_hls_terminal_manifest_state(
     access_lease_id: &HlsAccessLeaseId,
     initial_lease: HlsAccessLease,
     now_ms: u64,
-) -> Result<HlsAccessLease, axum::response::Response> {
+) -> Result<HlsAccessLease, Box<axum::response::Response>> {
     let mut lease = initial_lease;
     let mut decision_session = Arc::clone(session);
     let mut evaluation_now_ms = now_ms;
@@ -255,7 +255,7 @@ pub(super) async fn resolve_hls_terminal_manifest_state(
 
     loop {
         if let Some(response) = hls_terminal_playback_response(&lease, proxy_session_id, access_lease_id) {
-            return Err(response);
+            return Err(Box::new(response));
         }
         let resolution = commit_terminal_tail_if_lease_reserve_requires_cutover(
             app_state,
@@ -271,15 +271,15 @@ pub(super) async fn resolve_hls_terminal_manifest_state(
                 let current =
                     current_hls_terminal_lease(app_state, proxy_session_id, access_lease_id, snapshot_now_ms).await?;
                 if let Some(response) = hls_terminal_playback_response(&current, proxy_session_id, access_lease_id) {
-                    return Err(response);
+                    return Err(Box::new(response));
                 }
                 if hls_terminal_live_decision_is_current(&lease, &current) {
                     return Ok(current);
                 }
                 if reevaluations >= HLS_TERMINAL_ENDPOINT_MAX_REEVALUATIONS {
-                    return Err(hls_terminal_failed_closed_response(
+                    return Err(Box::new(hls_terminal_failed_closed_response(
                         HlsTerminalFailedClosedReason::RuntimeUnavailable,
-                    ));
+                    )));
                 }
                 let current_session = current_hls_terminal_session(app_state, proxy_session_id).await?;
                 lease = current;
@@ -292,17 +292,17 @@ pub(super) async fn resolve_hls_terminal_manifest_state(
                     current_hls_terminal_lease(app_state, proxy_session_id, access_lease_id, current_time_millis())
                         .await?;
                 return match hls_terminal_playback_response(&reloaded, proxy_session_id, access_lease_id) {
-                    Some(response) => Err(response),
-                    None => Err(hls_terminal_failed_closed_response(
+                    Some(response) => Err(Box::new(response)),
+                    None => Err(Box::new(hls_terminal_failed_closed_response(
                         HlsTerminalFailedClosedReason::RuntimeUnavailable,
-                    )),
+                    ))),
                 };
             }
             HlsTerminalEndpointAction::Reevaluate => {
                 if reevaluations >= HLS_TERMINAL_ENDPOINT_MAX_REEVALUATIONS {
-                    return Err(hls_terminal_failed_closed_response(
+                    return Err(Box::new(hls_terminal_failed_closed_response(
                         HlsTerminalFailedClosedReason::RuntimeUnavailable,
-                    ));
+                    )));
                 }
                 evaluation_now_ms = current_time_millis();
                 let reloaded =
@@ -313,10 +313,10 @@ pub(super) async fn resolve_hls_terminal_manifest_state(
                 reevaluations = reevaluations.saturating_add(1);
             }
             HlsTerminalEndpointAction::RetryAfter { retry_after_ms } => {
-                return Err(hls_temporary_resource_unavailable_response(retry_after_ms));
+                return Err(Box::new(hls_temporary_resource_unavailable_response(retry_after_ms)));
             }
             HlsTerminalEndpointAction::FailClosed { reason } => {
-                return Err(hls_terminal_failed_closed_response(reason));
+                return Err(Box::new(hls_terminal_failed_closed_response(reason)));
             }
         }
     }

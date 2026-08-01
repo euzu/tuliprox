@@ -90,6 +90,25 @@ jobs:
           chmod +x ./bin/build_docs.sh ./bin/build_fe.sh
           ./bin/build_fe.sh release
 
+  windows:
+    name: Windows Build
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install Stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Windows build
+        run: cargo check --package tuliprox
+
   # Job 3: Build and Test (takes longer)
   test:
     name: Build & Test

@@ -618,6 +618,28 @@ fn append_m3u_catchup_attributes(
     append_extra_catchup_attributes(line, &catchup.extra_attributes);
 }
 
+fn append_unified_catchup_type_attributes(
+    line: &mut String,
+    catchup: &CatchupProperties,
+    catchup_type: &str,
+    rewritten_source: Option<&Arc<str>>,
+    emit_source: bool,
+) {
+    // Unified export: always `catchup-type=...`, never `catchup=`.
+    write_m3u_attr(line, "catchup-type", catchup_type);
+    append_catchup_attribute(line, "catchup-days", catchup.days.as_ref());
+    if emit_source {
+        if let Some(source) = rewritten_source.filter(|source| !source.is_empty()) {
+            write_m3u_attr(line, "catchup-source", source.as_ref());
+        } else {
+            append_catchup_attribute(line, "catchup-source", catchup.source.as_ref());
+        }
+    }
+    append_catchup_attribute(line, "catchup-time", catchup.time.as_ref());
+    append_catchup_attribute(line, "catchup-correction", catchup.correction.as_ref());
+    append_extra_catchup_attributes(line, &catchup.extra_attributes);
+}
+
 impl M3uPlaylistItem {
     #[allow(clippy::missing_panics_doc)]
     pub fn to_m3u(&self, target_options: Option<&ConfigTargetOptions>, rewrite_urls: bool) -> String {
@@ -643,6 +665,17 @@ impl M3uPlaylistItem {
         if self.chno != 0 {
             let _ = write!(line, " tvg-chno=\"{}\"", self.chno);
         }
+        let flussonic_mode = self.additional_properties.as_ref().and_then(|props| match props {
+            StreamProperties::Live(live) => {
+                live.catchup.as_ref().and_then(CatchupProperties::native_flussonic_player_mode)
+            }
+            _ => None,
+        });
+        let append_type = self.additional_properties.as_ref().and_then(|props| match props {
+            StreamProperties::Live(live) => live.catchup.as_ref().and_then(CatchupProperties::append_player_type),
+            _ => None,
+        });
+        // Emit timeshift only when the source had it (non-empty). Never invent catchup attrs.
         to_m3u_non_empty_fields!(self, line,
             (parent_code, "parent-code"),
             (audio_track, "audio-track"),
@@ -650,12 +683,36 @@ impl M3uPlaylistItem {
             (rec, "tvg-rec"););
         if let Some(StreamProperties::Live(live)) = self.additional_properties.as_ref() {
             if let Some(catchup) = live.catchup.as_ref() {
-                append_m3u_catchup_attributes(
-                    &mut line,
-                    catchup,
-                    self.t_catchup_mode.as_ref(),
-                    self.t_catchup_source.as_ref(),
-                );
+                let has_rewritten_catchup = self.t_catchup_mode.as_ref().is_some_and(|mode| !mode.is_empty())
+                    || self.t_catchup_source.as_ref().is_some_and(|source| !source.is_empty());
+                if has_rewritten_catchup {
+                    append_m3u_catchup_attributes(
+                        &mut line,
+                        catchup,
+                        self.t_catchup_mode.as_ref(),
+                        self.t_catchup_source.as_ref(),
+                    );
+                } else if let Some(mode) = flussonic_mode {
+                    // Unify catchup=/catchup-type=flussonic* to catchup-type only.
+                    // No catchup=, no shift-style catchup-source, no invented days.
+                    append_unified_catchup_type_attributes(&mut line, catchup, mode, None, false);
+                } else if let Some(append_type) = append_type {
+                    // Unify catchup=/catchup-type=append to catchup-type="append" only.
+                    append_unified_catchup_type_attributes(
+                        &mut line,
+                        catchup,
+                        append_type,
+                        self.t_catchup_source.as_ref(),
+                        true,
+                    );
+                } else {
+                    append_m3u_catchup_attributes(
+                        &mut line,
+                        catchup,
+                        self.t_catchup_mode.as_ref(),
+                        self.t_catchup_source.as_ref(),
+                    );
+                }
             }
         }
 
@@ -2076,6 +2133,49 @@ mod tests {
         assert!(output.contains(r#"catchup-correction="-2.0""#));
         assert!(output.contains(r#"catchup-type="xc""#));
         assert!(output.contains(r#"catchup-extra="keep""#));
+    }
+
+    #[test]
+    fn m3u_to_m3u_unifies_append_to_catchup_type_only() {
+        let item = M3uPlaylistItem {
+            virtual_id: 0,
+            provider_id: "prov1".intern(),
+            input_stream_id: "prov1".intern(),
+            upstream_user_agent: None,
+            name: "Test Channel".intern(),
+            chno: 0,
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: "Test Group".intern(),
+            title: "Test Title".intern(),
+            parent_code: "".intern(),
+            audio_track: "".intern(),
+            time_shift: "".intern(),
+            rec: "".intern(),
+            url: "http://example.com/stream".intern(),
+            epg_channel_id: Some("channel1".intern()),
+            input_name: "test".intern(),
+            item_type: PlaylistItemType::Live,
+            t_stream_url: "".intern(),
+            t_resource_url: None,
+            t_catchup_source: None,
+            t_catchup_mode: None,
+            source_ordinal: 0,
+            additional_properties: Some(StreamProperties::Live(Box::new(LiveStreamProperties {
+                catchup: Some(CatchupProperties {
+                    mode: Some("append".intern()),
+                    days: Some("7".intern()),
+                    ..CatchupProperties::default()
+                }),
+                ..LiveStreamProperties::default()
+            }))),
+        };
+
+        let output = item.to_m3u(None, false);
+        assert!(!output.contains(r#"catchup="append""#));
+        assert!(output.contains(r#"catchup-type="append""#));
+        assert!(output.contains(r#"catchup-days="7""#));
+        assert!(!output.contains(r#"catchup-type="xc""#));
     }
 
     #[test]

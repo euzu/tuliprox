@@ -735,7 +735,7 @@ fn build_hls_finite_ts_layout(buffer: &[u8]) -> Result<HlsFiniteTsLayout, HlsFin
     let mut timestamp_fields = Vec::new();
     let mut assembler = HlsPesHeaderAssembler::new();
 
-    for (packet_index, packet) in buffer.chunks_exact(TS_PACKET_SIZE).enumerate() {
+    for (packet_index, packet) in buffer.as_chunks::<TS_PACKET_SIZE>().0.iter().enumerate() {
         let packet_start = packet_index
             .checked_mul(TS_PACKET_SIZE)
             .ok_or(HlsFiniteTsLayoutError::InvalidTransportPacket)?;

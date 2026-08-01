@@ -763,14 +763,15 @@ where
     }
 
     if file_exists_async(&path).await {
-        let backup_path = PathBuf::from(backup_dir).join(format!("{filename}_{}", Local::now().format("%Y%m%d_%H%M%S")));
+        fs::create_dir_all(backup_dir)
+            .await
+            .map_err(|err| TuliproxError::Config(format!("Could not create backup directory {backup_dir}: {err}")))?;
+        let backup_path =
+            PathBuf::from(backup_dir).join(format!("{filename}_{}", Local::now().format("%Y%m%d_%H%M%S%9f")));
 
-        match fs::copy(&path, &backup_path).await {
-            Ok(_) => {}
-            Err(err) => {
-                error!("Could not backup file {}: {err}", backup_path.to_str().unwrap_or("?"));
-            }
-        }
+        fs::copy(&path, &backup_path)
+            .await
+            .map_err(|err| TuliproxError::Config(format!("Could not backup file {}: {err}", backup_path.display())))?;
         info!("Saving file to {}", path.to_str().unwrap_or("?"));
     }
 
@@ -792,10 +793,8 @@ where
             // Windows doesn't allow overwriting an existing file via rename.
             #[cfg(windows)]
             {
-                if fs::remove_file(&path).await.is_ok() {
-                    if fs::rename(&tmp_path, &path).await.is_ok() {
-                        return Ok(());
-                    }
+                if replace_file_windows(&tmp_path, &path).is_ok() {
+                    return Ok(());
                 }
             }
 
@@ -808,6 +807,31 @@ where
             )))
         }
     }
+}
+
+#[cfg(windows)]
+fn replace_file_windows(source: &Path, target: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::winbase::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
+
+    let mut source_wide: Vec<u16> = source.as_os_str().encode_wide().collect();
+    source_wide.push(0);
+    let mut target_wide: Vec<u16> = target.as_os_str().encode_wide().collect();
+    target_wide.push(0);
+
+    // SAFETY: both paths are NUL-terminated UTF-16 buffers that remain alive for
+    // the call. `MOVEFILE_REPLACE_EXISTING` leaves the target in place on error.
+    let ok = unsafe {
+        MoveFileExW(
+            source_wide.as_ptr(),
+            target_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 pub async fn save_api_proxy(
@@ -1097,7 +1121,7 @@ async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template:
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_sources_batch, sanitize_sources_for_persist};
+    use super::{prepare_sources_batch, sanitize_sources_for_persist, write_config_file};
     use crate::utils::{file::config_reader::get_batch_aliases, resolve_env_var};
     use shared::{
         model::{ConfigInputAliasDto, ConfigInputDto, InputType, SourcesConfigDto},
@@ -1175,6 +1199,27 @@ mod tests {
         let sanitized = sanitize_sources_for_persist(sources).await;
         assert!(sanitized.inputs[0].aliases.is_none());
         assert!(std::fs::read_to_string(path).expect("read persisted csv").contains("updated"));
+    }
+
+    #[tokio::test]
+    async fn config_write_stops_when_backup_fails() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempdir()?;
+        let config_path = dir.path().join("source.yml");
+        let invalid_backup_dir = dir.path().join("not-a-directory");
+        tokio::fs::write(&config_path, "old").await?;
+        tokio::fs::write(&invalid_backup_dir, "file").await?;
+
+        let result = write_config_file(
+            config_path.to_string_lossy().as_ref(),
+            invalid_backup_dir.to_string_lossy().as_ref(),
+            &"new",
+            "source.yml",
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(tokio::fs::read_to_string(config_path).await?, "old");
+        Ok(())
     }
 
 }

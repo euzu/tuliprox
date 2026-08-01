@@ -1862,13 +1862,12 @@ impl HlsAes128CbcPrefixDecoder {
                 self.carry.clear();
             }
         }
-        let mut chunks = input.chunks_exact(AES_128_BLOCK_BYTES);
-        for chunk in &mut chunks {
-            let mut block = [0_u8; AES_128_BLOCK_BYTES];
-            block.copy_from_slice(chunk);
+        let (chunks, remainder) = input.as_chunks::<AES_128_BLOCK_BYTES>();
+        for chunk in chunks {
+            let block = *chunk;
             self.decrypt_block(block, &mut plaintext);
         }
-        self.carry.extend_from_slice(chunks.remainder());
+        self.carry.extend_from_slice(remainder);
         plaintext
     }
 

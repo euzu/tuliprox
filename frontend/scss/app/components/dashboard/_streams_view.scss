@@ -90,6 +90,7 @@
     flex: 1 1 auto;
     min-height: 0;
     padding: var(--padding-default);
+    overflow: hidden;
   }
 
   &__list {
@@ -98,6 +99,10 @@
     flex-flow: column;
     gap: var(--gap-small);
     min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    pointer-events: auto;
+    -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
     padding-right: var(--padding-small);
     z-index: 1;
