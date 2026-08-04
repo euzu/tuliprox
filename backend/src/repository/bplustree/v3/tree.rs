@@ -711,6 +711,44 @@ pub(super) fn publish_database(
     })
 }
 
+/// Invalidates the sorted index whenever publication made the replacement database visible.
+pub(super) fn publish_database_and_invalidate_sorted_index(
+    temporary: &Path,
+    destination: &Path,
+    sync_directory: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let publish_error = match publish_database(temporary, destination, sync_directory) {
+        Ok(()) => None,
+        Err(error) if error.database_was_published() => Some(io::Error::from(error)),
+        Err(error) => return Err(io::Error::from(error)),
+    };
+    let invalidation_error = invalidate_sorted_index(destination).err();
+    match (publish_error, invalidation_error) {
+        (Some(publish_error), Some(invalidation_error)) => Err(io::Error::new(
+            publish_error.kind(),
+            format!(
+                "database {} was published with unknown directory durability: {publish_error}; its previous sorted index could not be invalidated: {invalidation_error}",
+                destination.display()
+            ),
+        )),
+        (Some(publish_error), None) => Err(io::Error::new(
+            publish_error.kind(),
+            format!(
+                "database {} was published and its previous sorted index was invalidated, but publication durability remains unknown: {publish_error}",
+                destination.display()
+            ),
+        )),
+        (None, Some(error)) => Err(io::Error::new(
+            error.kind(),
+            format!(
+                "database {} was published, but its previous sorted index could not be invalidated: {error}",
+                destination.display()
+            ),
+        )),
+        (None, None) => Ok(()),
+    }
+}
+
 impl<K, V> BPlusTree<K, V>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
@@ -738,6 +776,14 @@ where
     }
 
     fn store_exclusive(&mut self, filepath: &Path) -> io::Result<StoredDatabase> {
+        self.store_exclusive_with_directory_sync(filepath, sync_parent_directory)
+    }
+
+    fn store_exclusive_with_directory_sync(
+        &mut self,
+        filepath: &Path,
+        sync_published_directory: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<StoredDatabase> {
         let (mut pages, root_page_id) = build_pages(&self.entries)?;
         let next_page_id = u64::try_from(pages.len()).map_err(|_| invalid_input("page count exceeds u64"))?;
         *pages.first_mut().ok_or_else(|| invalid_input("database header page is missing"))? = DatabaseHeader {
@@ -774,8 +820,7 @@ where
                 return Err(error);
             }
         };
-        publish_database(&temp_path, filepath, sync_parent_directory)?;
-        invalidate_sorted_index(filepath)?;
+        publish_database_and_invalidate_sorted_index(&temp_path, filepath, sync_published_directory)?;
         self.dirty = false;
         Ok(StoredDatabase { root_page_id, verification })
     }
@@ -5729,6 +5774,64 @@ mod tests {
         let mut query = BPlusTreeQuery::<u32, Vec<u8>>::try_new(&destination)?;
         assert_eq!(query.query(&1).map_err(BPlusTreeError::to_io)?, None);
         assert_eq!(query.query(&2).map_err(BPlusTreeError::to_io)?, Some(vec![2]));
+        Ok(())
+    }
+
+    #[test]
+    fn store_sync_failure_after_rename_invalidates_previous_sorted_index() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let destination = dir.path().join("database.db");
+        let index = crate::repository::storage::get_file_path_for_db_index(&destination);
+        let mut old = BPlusTree::new();
+        old.insert(1u32, String::from("old"));
+        let _ = old.store_with_index(&destination, String::clone)?;
+        assert!(index.is_file());
+
+        let mut replacement = BPlusTree::new();
+        replacement.insert(2u32, String::from("new"));
+        let error = replacement
+            .store_exclusive_with_directory_sync(&destination, |_| {
+                Err(io::Error::other("injected directory sync failure"))
+            })
+            .err()
+            .ok_or_else(|| io::Error::other("post-rename sync failure was hidden"))?;
+
+        assert!(error.to_string().contains("publication durability remains unknown"));
+        assert!(!index.exists());
+        assert!(replacement.dirty);
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&destination)?;
+        assert_eq!(query.query(&1).map_err(BPlusTreeError::to_io)?, None);
+        assert_eq!(query.query(&2).map_err(BPlusTreeError::to_io)?, Some(String::from("new")));
+        Ok(())
+    }
+
+    #[test]
+    fn store_reports_sync_and_index_invalidation_failures_together() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let destination = dir.path().join("database.db");
+        let index = crate::repository::storage::get_file_path_for_db_index(&destination);
+        let mut old = BPlusTree::new();
+        old.insert(1u32, String::from("old"));
+        let _ = old.store(&destination)?;
+        fs::create_dir(&index)?;
+
+        let mut replacement = BPlusTree::new();
+        replacement.insert(2u32, String::from("new"));
+        let error = replacement
+            .store_exclusive_with_directory_sync(&destination, |_| {
+                Err(io::Error::other("injected directory sync failure"))
+            })
+            .err()
+            .ok_or_else(|| io::Error::other("publish and index invalidation failures were hidden"))?;
+        let message = error.to_string();
+
+        assert!(message.contains("unknown directory durability"));
+        assert!(message.contains("previous sorted index could not be invalidated"));
+        assert!(index.is_dir());
+        assert!(replacement.dirty);
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&destination)?;
+        assert_eq!(query.query(&1).map_err(BPlusTreeError::to_io)?, None);
+        assert_eq!(query.query(&2).map_err(BPlusTreeError::to_io)?, Some(String::from("new")));
         Ok(())
     }
 

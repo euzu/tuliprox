@@ -1,8 +1,8 @@
 use super::{
-    tree::{publish_database, BPlusTreeUpdate},
+    tree::{publish_database_and_invalidate_sorted_index, BPlusTreeUpdate},
     wal::{
-        invalidate_sorted_index, recover_pending_under_existing_lock, sync_parent_directory, wal_path,
-        wal_temporary_path, ExclusiveSidecarGuard,
+        recover_pending_under_existing_lock, sync_parent_directory, wal_path, wal_temporary_path,
+        ExclusiveSidecarGuard,
     },
 };
 use crate::repository::{
@@ -154,57 +154,12 @@ where
             format!("failed to recover published B+Tree {} before replacement: {error}", published.display()),
         )
     })?;
-    let publish_error = match publish_database(staging, published, sync_published_directory) {
-        Ok(()) => None,
-        Err(error) if error.database_was_published() => Some(io::Error::from(error)),
-        Err(error) => {
-            let error = io::Error::from(error);
-            return Err(io::Error::new(
-                error.kind(),
-                format!(
-                    "failed to atomically publish staging B+Tree {} as {}: {error}",
-                    staging.display(),
-                    published.display()
-                ),
-            ));
-        }
-    };
-    let invalidation_error = invalidate_sorted_index(published).err();
-    match (publish_error, invalidation_error) {
-        (Some(publish_error), Some(invalidation_error)) => {
-            return Err(io::Error::new(
-                publish_error.kind(),
-                format!(
-                    "B+Tree {} was published with unknown directory durability: {publish_error}; its previous sorted index could not be invalidated: {invalidation_error}",
-                    published.display()
-                ),
-            ));
-        }
-        (Some(publish_error), None) => {
-            return Err(io::Error::new(
-                publish_error.kind(),
-                format!(
-                    "B+Tree {} was published and its previous sorted index was invalidated, but publication durability remains unknown: {publish_error}",
-                    published.display()
-                ),
-            ));
-        }
-        (None, Some(error)) => {
-            return Err(io::Error::new(
-                error.kind(),
-                format!(
-                    "B+Tree {} may already be published, but its previous sorted index could not be invalidated: {error}",
-                    published.display()
-                ),
-            ));
-        }
-        (None, None) => {}
-    }
-    sync_parent_directory(published).map_err(|error| {
+    publish_database_and_invalidate_sorted_index(staging, published, sync_published_directory).map_err(|error| {
         io::Error::new(
             error.kind(),
             format!(
-                "B+Tree {} may already be published, but the parent directory could not be synchronized: {error}",
+                "failed to publish staging B+Tree {} as {}: {error}",
+                staging.display(),
                 published.display()
             ),
         )
