@@ -910,6 +910,14 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
                     error!("Batch upsert failed for cluster {cluster}: {e}");
                     TuliproxError::RepositoryXtream(format!("Upsert failed {e}"))
                 })?;
+                // Commit per batch so the write transaction's dirty-page map stays bounded.
+                // Holding it open for the whole cluster buffered ~48k pages (196 MB); the
+                // import writes into a .tmp file that is renamed on success, so atomicity
+                // comes from the rename, not from a single transaction.
+                tree.commit().map_err(|e| {
+                    error!("Batch commit failed for cluster {cluster}: {e}");
+                    TuliproxError::RepositoryXtream(format!("Commit failed {e}"))
+                })?;
                 buffer.clear();
             }
         }

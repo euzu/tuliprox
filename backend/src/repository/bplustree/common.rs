@@ -77,6 +77,35 @@ pub(crate) fn read_exact_at_offset(file: &File, buf: &mut [u8], offset: u64) -> 
     Ok(())
 }
 
+pub(crate) fn write_all_at_offset(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    file.write_all_at(buf, offset)?;
+    #[cfg(windows)]
+    {
+        let mut written = 0;
+        while written < buf.len() {
+            let write_offset = u64::try_from(written)
+                .ok()
+                .and_then(|written| offset.checked_add(written))
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset write position overflow"))?;
+            let chunk_written = file.seek_write(&buf[written..], write_offset)?;
+            if chunk_written == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "failed to write whole buffer"));
+            }
+            written += chunk_written;
+        }
+    }
+    #[cfg(not(unix))]
+    #[cfg(not(windows))]
+    {
+        let _ = file;
+        let _ = buf;
+        let _ = offset;
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "offset writes are not supported on this platform"));
+    }
+    Ok(())
+}
+
 pub(crate) fn sidecar_lock_path(filepath: &Path) -> PathBuf {
     if let Some(stem) = filepath.file_stem() {
         let mut name = OsString::from(".");

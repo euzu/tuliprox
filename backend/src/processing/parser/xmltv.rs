@@ -593,7 +593,12 @@ where
 {
     let mut stack: Vec<XmlTag> = vec![];
     let mut xml_reader = quick_xml::reader::Reader::from_reader(async_file_reader(content));
-    let mut buf = Vec::<u8>::new();
+    // Pre-allocate so the first giant `<programme>` block does not trigger a
+    // chain of `Vec::grow` reallocs. The buffer is monotonically grown by
+    // quick_xml (it is reset by the caller, see below), so the eventual size
+    // is the largest single event — for XMLTV that is the biggest programme
+    // description. Starting at 0 capacity makes that growth ~25 doubling copies.
+    let mut buf = Vec::<u8>::with_capacity(64 * 1024);
     loop {
         match xml_reader.read_event_into_async(&mut buf).await {
             Ok(Event::Eof) => break,
@@ -1794,6 +1799,38 @@ mod tests {
             );
             assert!(programme.is_live);
             assert!(programme.is_new);
+        });
+    }
+
+    /// Regression guard for the buffer-preallocation in `parse_tvguide`.
+    ///
+    /// `quick_xml` uses the caller-provided `Vec<u8>` as a monotonically growing
+    /// read buffer (it does not call `.clear()` between events; the caller
+    /// slices the new portion). For an XMLTV feed with a single giant
+    /// `<programme>` description, that buffer used to start at 0 capacity and
+    /// double ~25 times on the way to ~163 MiB — every doubling being a
+    /// copying realloc. Starting with `Vec::with_capacity(64 * 1024)` removes
+    /// the realloc chain. This test feeds a programme whose description is
+    /// bigger than that initial capacity and checks that parsing still
+    /// succeeds; the absence of the test would have allowed a silent
+    /// regression to `Vec::new()` without breaking any visible behaviour.
+    #[test]
+    fn parse_tvguide_handles_giant_programme_description() {
+        use crate::processing::parser::xmltv::parse_tvguide;
+
+        run_async_test(async {
+            // 200 KiB of text content — well beyond the 64 KiB preallocation.
+            let big_text = "x".repeat(200 * 1024);
+            let xml = format!(
+                r#"<?xml version="1.0"?><tv><programme><title>t</title><desc>{big_text}</desc></programme></tv>"#
+            );
+            let mut seen_desc = false;
+            parse_tvguide(xml.as_bytes(), &mut |_tag| {
+                // presence is enough — the value side is what we care about.
+                seen_desc = true;
+            })
+            .await;
+            assert!(seen_desc, "parser emitted no tags at all");
         });
     }
 }

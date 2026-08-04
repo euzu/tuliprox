@@ -4,9 +4,9 @@ use axum::http::HeaderValue;
 pub(crate) static CT_JSON: HeaderValue = HeaderValue::from_static("application/json");
 pub(crate) static CT_XML: HeaderValue = HeaderValue::from_static("text/xml");
 pub(crate) static CT_M3U: HeaderValue = HeaderValue::from_static("application/vnd.apple.mpegurl");
-pub(crate) static CT_TEXT: HeaderValue = HeaderValue::from_static("text/plain; charset=utf-8");
+//pub(crate) static CT_TEXT: HeaderValue = HeaderValue::from_static("text/plain; charset=utf-8");
 pub(crate) static CT_OCTET: HeaderValue = HeaderValue::from_static("application/octet-stream");
 
 // Cache control
-pub(crate) static CC_NO_CACHE: HeaderValue = HeaderValue::from_static("no-cache");
+//pub(crate) static CC_NO_CACHE: HeaderValue = HeaderValue::from_static("no-cache");
 pub(crate) static CC_NO_STORE: HeaderValue = HeaderValue::from_static("no-store, no-cache, must-revalidate");

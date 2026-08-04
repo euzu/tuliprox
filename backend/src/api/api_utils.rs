@@ -500,6 +500,7 @@ pub use try_result_bad_request;
 pub use try_result_not_found;
 pub use try_result_or_status;
 pub use try_unwrap_body;
+use crate::api::static_headers::CT_OCTET;
 
 pub fn get_server_time() -> String {
     chrono::offset::Local::now().with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z").to_string()
@@ -3653,7 +3654,7 @@ pub(crate) async fn local_stream_response(
                 let ct = content_type_from_ext(&ext);
                 headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
             } else {
-                headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+                headers.insert(header::CONTENT_TYPE, CT_OCTET.clone()); //HeaderValue::from_static("application/octet-stream"));
             }
             headers.insert("Accept-Ranges", HeaderValue::from_static("bytes"));
             headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
