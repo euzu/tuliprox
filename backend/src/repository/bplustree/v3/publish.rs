@@ -6,7 +6,7 @@ use super::{
     },
 };
 use crate::repository::{
-    bplustree::common::{ensure_distinct_sidecar_lock_domains, sidecar_lock_path},
+    bplustree::common::{ensure_distinct_sidecar_lock_domains, resolved_path_identity, sidecar_lock_path},
     storage::get_file_path_for_db_index,
 };
 use serde::{de::DeserializeOwned, Serialize};
@@ -37,12 +37,41 @@ impl BPlusTreeArtifactPaths {
 
     fn remove_all(&self) -> io::Result<()> {
         let mut first_error = None;
-        for path in [&self.database, &self.index, &self.wal, &self.wal_temporary, &self.sidecar_lock] {
+        for path in self.paths() {
             if let Err(error) = remove_file_if_exists(path) {
                 first_error.get_or_insert(error);
             }
         }
         first_error.map_or(Ok(()), Err)
+    }
+
+    fn paths(&self) -> [&Path; 5] {
+        [&self.database, &self.index, &self.wal, &self.wal_temporary, &self.sidecar_lock]
+    }
+
+    fn ensure_disjoint_from(&self, published: &Self) -> io::Result<()> {
+        let mut published_identities = Vec::with_capacity(5);
+        for path in published.paths() {
+            published_identities.push((path, resolved_path_identity(path)?));
+        }
+        for staging_path in self.paths() {
+            let staging_identity = resolved_path_identity(staging_path)?;
+            if let Some((published_path, _)) = published_identities
+                .iter()
+                .find(|(_, published_identity)| published_identity.as_path() == staging_identity.as_path())
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "staging artifact {} aliases published artifact {} at {}",
+                        staging_path.display(),
+                        published_path.display(),
+                        staging_identity.display()
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -52,7 +81,10 @@ pub(crate) struct BPlusTreeStagingArtifacts(BPlusTreeArtifactPaths);
 impl BPlusTreeStagingArtifacts {
     pub(crate) fn new(published: &Path, staging: &Path) -> io::Result<Self> {
         ensure_distinct_sidecar_lock_domains(published, staging)?;
-        Ok(Self(BPlusTreeArtifactPaths::for_database(staging)))
+        let published_artifacts = BPlusTreeArtifactPaths::for_database(published);
+        let staging_artifacts = BPlusTreeArtifactPaths::for_database(staging);
+        staging_artifacts.ensure_disjoint_from(&published_artifacts)?;
+        Ok(Self(staging_artifacts))
     }
 
     pub(crate) fn remove_owned_staging_artifacts(&self) -> io::Result<()> { self.0.remove_all() }
@@ -96,6 +128,7 @@ fn publish_staged_database_inner<K, V>(
     staging: &Path,
     published: &Path,
     acquire_final_lock: impl FnOnce(&Path) -> io::Result<ExclusiveSidecarGuard>,
+    sync_published_directory: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<()>
 where
     K: Ord + Serialize + DeserializeOwned + Clone,
@@ -121,25 +154,52 @@ where
             format!("failed to recover published B+Tree {} before replacement: {error}", published.display()),
         )
     })?;
-    publish_database(staging, published, sync_parent_directory).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "failed to atomically publish staging B+Tree {} as {}: {error}",
-                staging.display(),
-                published.display()
-            ),
-        )
-    })?;
-    invalidate_sorted_index(published).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "B+Tree {} may already be published, but its previous sorted index could not be invalidated: {error}",
-                published.display()
-            ),
-        )
-    })?;
+    let publish_error = match publish_database(staging, published, sync_published_directory) {
+        Ok(()) => None,
+        Err(error) if error.database_was_published() => Some(io::Error::from(error)),
+        Err(error) => {
+            let error = io::Error::from(error);
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to atomically publish staging B+Tree {} as {}: {error}",
+                    staging.display(),
+                    published.display()
+                ),
+            ));
+        }
+    };
+    let invalidation_error = invalidate_sorted_index(published).err();
+    match (publish_error, invalidation_error) {
+        (Some(publish_error), Some(invalidation_error)) => {
+            return Err(io::Error::new(
+                publish_error.kind(),
+                format!(
+                    "B+Tree {} was published with unknown directory durability: {publish_error}; its previous sorted index could not be invalidated: {invalidation_error}",
+                    published.display()
+                ),
+            ));
+        }
+        (Some(publish_error), None) => {
+            return Err(io::Error::new(
+                publish_error.kind(),
+                format!(
+                    "B+Tree {} was published and its previous sorted index was invalidated, but publication durability remains unknown: {publish_error}",
+                    published.display()
+                ),
+            ));
+        }
+        (None, Some(error)) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "B+Tree {} may already be published, but its previous sorted index could not be invalidated: {error}",
+                    published.display()
+                ),
+            ));
+        }
+        (None, None) => {}
+    }
     sync_parent_directory(published).map_err(|error| {
         io::Error::new(
             error.kind(),
@@ -157,6 +217,7 @@ fn publish_staged_database_with_lock_acquirer<K, V>(
     staging: &Path,
     published: &Path,
     acquire_final_lock: impl FnOnce(&Path) -> io::Result<ExclusiveSidecarGuard>,
+    sync_published_directory: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<()>
 where
     K: Ord + Serialize + DeserializeOwned + Clone,
@@ -173,8 +234,12 @@ where
             ),
         ));
     }
-    let publish_result =
-        publish_staged_database_inner::<K, V>(staging, published, acquire_final_lock);
+    let publish_result = publish_staged_database_inner::<K, V>(
+        staging,
+        published,
+        acquire_final_lock,
+        sync_published_directory,
+    );
     let cleanup_result = staging_artifacts.remove_owned_staging_artifacts();
     match (publish_result, cleanup_result) {
         (Ok(()), Ok(())) => Ok(()),
@@ -202,6 +267,7 @@ where
         staging,
         published,
         ExclusiveSidecarGuard::acquire,
+        sync_parent_directory,
     )
 }
 
@@ -215,16 +281,37 @@ where
     K: Ord + Serialize + DeserializeOwned + Clone,
     V: Serialize + DeserializeOwned,
 {
-    publish_staged_database_with_lock_acquirer::<K, V>(staging, published, |database| {
-        ExclusiveSidecarGuard::acquire_after_observed_contention(database, on_contention)
-    })
+    publish_staged_database_with_lock_acquirer::<K, V>(
+        staging,
+        published,
+        |database| ExclusiveSidecarGuard::acquire_after_observed_contention(database, on_contention),
+        sync_parent_directory,
+    )
+}
+
+#[cfg(test)]
+fn publish_staged_database_with_directory_sync<K, V>(
+    staging: &Path,
+    published: &Path,
+    sync_published_directory: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()>
+where
+    K: Ord + Serialize + DeserializeOwned + Clone,
+    V: Serialize + DeserializeOwned,
+{
+    publish_staged_database_with_lock_acquirer::<K, V>(
+        staging,
+        published,
+        ExclusiveSidecarGuard::acquire,
+        sync_published_directory,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         publish_staged_database, publish_staged_database_after_observed_final_lock_contention,
-        BPlusTreeArtifactPaths, BPlusTreeStagingArtifacts,
+        publish_staged_database_with_directory_sync, BPlusTreeArtifactPaths, BPlusTreeStagingArtifacts,
     };
     use super::super::wal::{leave_uncommitted_test_wal_after_database_write, wal_path};
     use crate::repository::{get_file_path_for_db_index, BPlusTree, BPlusTreeError, BPlusTreeQuery};
@@ -454,6 +541,89 @@ mod tests {
             .expect_err("staging artifacts must not represent the published lock domain");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        Ok(())
+    }
+
+    #[test]
+    fn staging_artifacts_reject_parent_component_alias() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let nested = directory.path().join("nested");
+        fs::create_dir(&nested)?;
+        let published = directory.path().join("live.db");
+        let aliased_staging = nested.join("..").join("live.db");
+        fs::write(&published, b"published database")?;
+
+        let error = BPlusTreeStagingArtifacts::new(&published, &aliased_staging)
+            .expect_err("resolved parent aliases must not receive staging ownership");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&published)?, b"published database");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_artifacts_reject_symlinked_parent_alias() -> io::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir()?;
+        let published_parent = directory.path().join("published");
+        let staging_parent_alias = directory.path().join("staging-alias");
+        fs::create_dir(&published_parent)?;
+        symlink(&published_parent, &staging_parent_alias)?;
+        let published = published_parent.join("live.db");
+        let aliased_staging = staging_parent_alias.join("live.db");
+
+        let error = BPlusTreeStagingArtifacts::new(&published, &aliased_staging)
+            .expect_err("symlinked parent aliases must not receive staging ownership");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        Ok(())
+    }
+
+    #[test]
+    fn staging_artifacts_reject_cross_artifact_alias() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let published = directory.path().join("live.db");
+        let staging_database = wal_path(&published);
+        fs::write(&staging_database, b"published WAL")?;
+
+        let error = BPlusTreeStagingArtifacts::new(&published, &staging_database)
+            .expect_err("staging database must not alias a published WAL artifact");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&staging_database)?, b"published WAL");
+        Ok(())
+    }
+
+    #[test]
+    fn post_rename_sync_failure_still_invalidates_published_index() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let published = directory.path().join("live.db");
+        let staging = directory.path().join("live.refresh-sync-failure.db");
+        let published_index = get_file_path_for_db_index(&published);
+
+        let mut published_tree = BPlusTree::new();
+        published_tree.insert(1u32, String::from("published"));
+        published_tree.store(&published)?;
+        fs::write(&published_index, b"stale sorted index")?;
+        let mut staging_tree = BPlusTree::new();
+        staging_tree.insert(2u32, String::from("staged"));
+        staging_tree.store(&staging)?;
+
+        let error = publish_staged_database_with_directory_sync::<u32, String>(
+            &staging,
+            &published,
+            |_| Err(io::Error::other("injected post-rename directory sync failure")),
+        )
+        .expect_err("post-rename sync failure must remain visible");
+
+        assert!(error.to_string().contains("publication durability remains unknown"));
+        assert!(!published_index.exists(), "old sorted index must be invalidated after rename");
+        assert!(!staging.exists(), "renamed staging database must not reappear during cleanup");
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&published)?;
+        assert_eq!(query.query(&1).map_err(BPlusTreeError::to_io)?, None);
+        assert_eq!(query.query(&2).map_err(BPlusTreeError::to_io)?, Some(String::from("staged")));
         Ok(())
     }
 }

@@ -665,24 +665,49 @@ fn temporary_path(filepath: &Path) -> io::Result<PathBuf> {
     Ok(filepath.with_file_name(format!("{name}.{}.v3.tmp", uuid::Uuid::new_v4())))
 }
 
+#[derive(Debug)]
+pub(super) enum PublishDatabaseError {
+    NotPublished(io::Error),
+    PublishedDurabilityUnknown(io::Error),
+}
+
+impl PublishDatabaseError {
+    pub(super) const fn database_was_published(&self) -> bool {
+        matches!(self, Self::PublishedDurabilityUnknown(_))
+    }
+
+    fn into_io(self) -> io::Error {
+        match self {
+            Self::NotPublished(error) | Self::PublishedDurabilityUnknown(error) => error,
+        }
+    }
+}
+
+impl From<PublishDatabaseError> for io::Error {
+    fn from(error: PublishDatabaseError) -> Self { error.into_io() }
+}
+
 pub(super) fn publish_database(
     temporary: &Path,
     destination: &Path,
     sync_directory: impl FnOnce(&Path) -> io::Result<()>,
-) -> io::Result<()> {
+) -> Result<(), PublishDatabaseError> {
     let temporary = match tempfile::TempPath::try_from_path(temporary) {
         Ok(path) => path,
         Err(error) => {
             let _ = std::fs::remove_file(temporary);
-            return Err(error);
+            return Err(PublishDatabaseError::NotPublished(error));
         }
     };
-    temporary.persist(destination).map_err(io::Error::from)?;
+    temporary
+        .persist(destination)
+        .map_err(io::Error::from)
+        .map_err(PublishDatabaseError::NotPublished)?;
     sync_directory(destination).map_err(|error| {
-        io::Error::new(
+        PublishDatabaseError::PublishedDurabilityUnknown(io::Error::new(
             error.kind(),
             format!("database published but directory sync failed; durability unknown: {error}"),
-        )
+        ))
     })
 }
 
@@ -836,7 +861,7 @@ where
             let _ = std::fs::remove_file(&temporary);
             return Err(error);
         }
-        publish_database(&temporary, &index_path, sync_parent_directory)
+        publish_database(&temporary, &index_path, sync_parent_directory).map_err(io::Error::from)
     }
 
 }
@@ -5697,6 +5722,8 @@ mod tests {
         })
         .err()
         .ok_or_else(|| io::Error::other("post-commit sync failure was hidden"))?;
+        assert!(error.database_was_published());
+        let error = io::Error::from(error);
         assert!(error.to_string().contains("database published but directory sync failed; durability unknown"));
         assert!(!temporary.exists());
         let mut query = BPlusTreeQuery::<u32, Vec<u8>>::try_new(&destination)?;
@@ -5713,7 +5740,9 @@ mod tests {
         let temporary = dir.path().join("database.tx.v3.tmp");
         fs::write(&temporary, b"new")?;
 
-        assert!(publish_database(&temporary, &destination, sync_parent_directory).is_err());
+        let error = publish_database(&temporary, &destination, sync_parent_directory)
+            .expect_err("publishing over a directory must fail");
+        assert!(!error.database_was_published());
         assert!(!temporary.exists());
         Ok(())
     }
