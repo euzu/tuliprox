@@ -88,6 +88,23 @@ pub(crate) fn sidecar_lock_path(filepath: &Path) -> PathBuf {
     }
 }
 
+pub(crate) fn ensure_distinct_sidecar_lock_domains(published: &Path, staging: &Path) -> io::Result<()> {
+    let published_lock = sidecar_lock_path(published);
+    let staging_lock = sidecar_lock_path(staging);
+    if published_lock == staging_lock {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "published database {} and staging database {} share sidecar lock {}",
+                published.display(),
+                staging.display(),
+                published_lock.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub enum BPlusTreeError {
     Io(io::Error),

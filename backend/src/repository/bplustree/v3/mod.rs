@@ -1,8 +1,11 @@
 mod format;
 pub(crate) mod migration;
 mod page;
+mod publish;
 mod tree;
 mod wal;
+
+pub(crate) use publish::{publish_staged_database, BPlusTreeStagingArtifacts};
 
 #[allow(unused_imports)]
 pub use tree::{

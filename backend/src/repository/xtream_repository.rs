@@ -4,7 +4,11 @@ use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{Config, ConfigTarget};
 use crate::model::{ConfigInput, PlaylistXtreamCategory};
 use crate::processing::parser::xtream;
-use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy};
+use crate::repository::bplustree::{
+    common::ensure_distinct_sidecar_lock_domains,
+    v3::{publish_staged_database, BPlusTreeStagingArtifacts},
+    BPlusTree, BPlusTreeError, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy,
+};
 use crate::repository::open_playlist_reader;
 use crate::repository::playlist_scratch::PlaylistScratch;
 use crate::repository::storage::{ensure_input_storage_path, ensure_target_storage_subpath, get_file_path_for_db_index, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
@@ -28,12 +32,14 @@ use shared::model::{LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistI
 use shared::utils::{arc_str_serde, get_u32_from_serde_value, Internable};
 use shared::concat_string;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::File;
-use std::io::{Error, ErrorKind};
+use std::io::{self, Error, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use uuid::Uuid;
 
 macro_rules! cant_write_result {
     ($path:expr, $err:expr) => {
@@ -779,31 +785,244 @@ pub(crate) async fn xtream_get_playlist_categories(config: &Config, target_name:
 
 const BATCH_SIZE: usize = 1000;
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct XtreamRefreshPaths {
+    generation: Uuid,
+    published_database: PathBuf,
+    staging_database: PathBuf,
+    published_categories: PathBuf,
+    staging_categories: PathBuf,
+}
+
+impl XtreamRefreshPaths {
+    fn new(storage_path: &Path, cluster: XtreamCluster) -> Result<Self, TuliproxError> {
+        Self::for_generation(storage_path, cluster, Uuid::new_v4())
+    }
+
+    fn for_generation(
+        storage_path: &Path,
+        cluster: XtreamCluster,
+        generation: Uuid,
+    ) -> Result<Self, TuliproxError> {
+        let published_database = xtream_get_file_path(storage_path, cluster);
+        let published_categories = get_collection_path(storage_path, xtream_cluster_category_collection(cluster));
+        let staging_database = refresh_staging_path(&published_database, generation)?;
+        ensure_distinct_sidecar_lock_domains(&published_database, &staging_database).map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Invalid Xtream refresh paths for {cluster}: {error}"
+            ))
+        })?;
+        Ok(Self {
+            generation,
+            staging_database,
+            staging_categories: refresh_staging_path(&published_categories, generation)?,
+            published_database,
+            published_categories,
+        })
+    }
+}
+
+fn refresh_staging_path(path: &Path, generation: Uuid) -> Result<PathBuf, TuliproxError> {
+    let stem = path.file_stem().ok_or_else(|| {
+        TuliproxError::RepositoryXtream(format!("Refresh path has no file stem: {}", path.display()))
+    })?;
+    let extension = path.extension().ok_or_else(|| {
+        TuliproxError::RepositoryXtream(format!("Refresh path has no extension: {}", path.display()))
+    })?;
+    let mut filename = OsString::from(stem);
+    filename.push(".refresh-");
+    filename.push(generation.simple().to_string());
+    filename.push(".");
+    filename.push(extension);
+    Ok(path.with_file_name(filename))
+}
+
+#[derive(Debug, Clone)]
+struct XtreamRefreshLease(Arc<XtreamRefreshLeaseInner>);
+
+#[derive(Debug)]
+struct XtreamRefreshLeaseInner {
+    paths: XtreamRefreshPaths,
+    database_artifacts: BPlusTreeStagingArtifacts,
+}
+
+impl XtreamRefreshLease {
+    fn new(paths: XtreamRefreshPaths) -> Result<Self, TuliproxError> {
+        let database_artifacts = BPlusTreeStagingArtifacts::new(
+            &paths.published_database,
+            &paths.staging_database,
+        )
+        .map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Invalid Xtream staging artifacts for generation {}: {error}",
+                paths.generation
+            ))
+        })?;
+        Ok(Self(Arc::new(XtreamRefreshLeaseInner { paths, database_artifacts })))
+    }
+
+    fn paths(&self) -> &XtreamRefreshPaths { &self.0.paths }
+
+    fn cleanup_staging_artifacts(&self) -> io::Result<()> {
+        let database_result = self.0.database_artifacts.remove_owned_staging_artifacts();
+        let categories_result = remove_file_if_exists(&self.0.paths.staging_categories);
+        match (database_result, categories_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(database_error), Err(categories_error)) => Err(io::Error::new(
+                database_error.kind(),
+                format!("{database_error}; category staging cleanup also failed: {categories_error}"),
+            )),
+        }
+    }
+}
+
+impl Drop for XtreamRefreshLeaseInner {
+    fn drop(&mut self) {
+        let database_result = self.database_artifacts.remove_owned_staging_artifacts();
+        let categories_result = remove_file_if_exists(&self.paths.staging_categories);
+        if let Err(error) = database_result {
+            log::warn!(
+                "Failed to clean Xtream staging database artifacts for generation {}: {error}",
+                self.paths.generation
+            );
+        }
+        if let Err(error) = categories_result {
+            log::warn!(
+                "Failed to clean Xtream staging categories for generation {} at {}: {error}",
+                self.paths.generation,
+                self.paths.staging_categories.display()
+            );
+        }
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("failed to remove Xtream staging file {}: {error}", path.display()),
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum PreserveDetailsOutcome {
+    SourceMissing,
+    Merged { scanned: usize, updated: usize },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DetailPreservationOperation {
+    Query,
+    BatchWrite,
+    Commit,
+}
+
+fn write_preserved_detail_batch<F>(
+    staging_tree: &mut BPlusTreeUpdate<u32, XtreamPlaylistItem>,
+    staging_path: &Path,
+    updates: &mut Vec<(u32, XtreamPlaylistItem)>,
+    before_operation: &mut F,
+) -> Result<usize, TuliproxError>
+where
+    F: FnMut(DetailPreservationOperation) -> io::Result<()>,
+{
+    if updates.is_empty() {
+        return Ok(0);
+    }
+    let batch_len = updates.len();
+    let refs: Vec<(&u32, &XtreamPlaylistItem)> = updates.iter().map(|(id, item)| (id, item)).collect();
+    before_operation(DetailPreservationOperation::BatchWrite)
+        .and_then(|()| staging_tree.update_batch(&refs).map(|_| ()).map_err(BPlusTreeError::to_io))
+        .map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to update staging Xtream tree {} during detail preservation: {error}",
+                staging_path.display()
+            ))
+        })?;
+    updates.clear();
+    Ok(batch_len)
+}
+
 fn preserve_details_input_xtream_playlist_cluster_to_disk(
-    old_path: &Path,
-    tmp_path: &Path,
-) -> Result<(), TuliproxError> {
-    let Ok(mut old_tree) = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(old_path) else {
-        return Ok(())
+    published_path: &Path,
+    staging_path: &Path,
+) -> Result<PreserveDetailsOutcome, TuliproxError> {
+    preserve_details_input_xtream_playlist_cluster_to_disk_with_hook(
+        published_path,
+        staging_path,
+        |_| Ok(()),
+    )
+}
+
+fn preserve_details_input_xtream_playlist_cluster_to_disk_with_hook<F>(
+    published_path: &Path,
+    staging_path: &Path,
+    mut before_operation: F,
+) -> Result<PreserveDetailsOutcome, TuliproxError>
+where
+    F: FnMut(DetailPreservationOperation) -> io::Result<()>,
+{
+    ensure_distinct_sidecar_lock_domains(published_path, staging_path)
+        .map_err(|error| TuliproxError::RepositoryXtream(error.to_string()))?;
+
+    let mut published_tree = match BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(published_path) {
+        Ok(tree) => tree,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(PreserveDetailsOutcome::SourceMissing);
+        }
+        Err(error) => {
+            return Err(TuliproxError::RepositoryXtream(format!(
+                "Failed to open published Xtream tree {} for detail preservation: {error}",
+                published_path.display()
+            )));
+        }
     };
 
-    let Ok(mut new_tree) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(tmp_path) else {
-        return Ok(())
-    };
+    let mut staging_tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(staging_path)
+        .map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to open staging Xtream tree {} for detail preservation: {error}",
+                staging_path.display()
+            ))
+        })?;
 
-    let mut updates: Vec<(u32, XtreamPlaylistItem)> = Vec::with_capacity(BATCH_SIZE);
-    for entry in old_tree.iter() {
-        let (_, old_item) = entry.map_err(|error| TuliproxError::RepositoryXtream(error.to_string()))?;
+    let mut pending_updates: Vec<(u32, XtreamPlaylistItem)> = Vec::with_capacity(BATCH_SIZE);
+    let mut scanned_count = 0usize;
+    let mut updated_count = 0usize;
+    for entry in published_tree.iter() {
+        let (_, old_item) = entry.map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to read published Xtream tree {} during detail preservation: {error}",
+                published_path.display()
+            ))
+        })?;
+        scanned_count = scanned_count.saturating_add(1);
         if let Some(old_props) = old_item.additional_properties.as_ref() {
             if old_props.has_details() {
-                if let Ok(Some(mut new_item)) = new_tree.query(&old_item.provider_id) {
+                let staging_item = before_operation(DetailPreservationOperation::Query)
+                    .and_then(|()| staging_tree.query(&old_item.provider_id).map_err(BPlusTreeError::to_io))
+                    .map_err(|error| {
+                        TuliproxError::RepositoryXtream(format!(
+                            "Failed to query staging Xtream tree {} for provider {}: {error}",
+                            staging_path.display(),
+                            old_item.provider_id
+                        ))
+                    })?;
+                if let Some(mut new_item) = staging_item {
                     if let Some(new_props) = new_item.additional_properties.as_mut() {
                         if merge_preserved_stream_properties(new_props, old_props) {
-                            updates.push((new_item.provider_id, new_item));
-                            if updates.len() >= BATCH_SIZE {
-                                let refs: Vec<(&u32, &XtreamPlaylistItem)> = updates.iter().map(|(id, pli)| (id, pli)).collect();
-                                new_tree.update_batch(&refs).map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to update tmp tree during merge: {e}")))?;
-                                updates.clear();
+                            pending_updates.push((new_item.provider_id, new_item));
+                            if pending_updates.len() >= BATCH_SIZE {
+                                updated_count = updated_count.saturating_add(write_preserved_detail_batch(
+                                    &mut staging_tree,
+                                    staging_path,
+                                    &mut pending_updates,
+                                    &mut before_operation,
+                                )?);
                             }
                         }
                     }
@@ -812,17 +1031,44 @@ fn preserve_details_input_xtream_playlist_cluster_to_disk(
         }
     }
 
-    if !updates.is_empty() {
-        let refs: Vec<(&u32, &XtreamPlaylistItem)> =
-            updates.iter().map(|(id, pli)| (id, pli)).collect();
-        new_tree.update_batch(&refs)
-            .map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to update tmp tree during merge: {e}")))?;
-    }
+    updated_count = updated_count.saturating_add(write_preserved_detail_batch(
+        &mut staging_tree,
+        staging_path,
+        &mut pending_updates,
+        &mut before_operation,
+    )?);
+    before_operation(DetailPreservationOperation::Commit)
+        .and_then(|()| staging_tree.commit())
+        .map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to commit staging Xtream tree {} after detail preservation: {error}",
+                staging_path.display()
+            ))
+        })?;
 
-    new_tree.commit()
-        .map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to commit tmp tree merge: {e}")))?;
+    Ok(PreserveDetailsOutcome::Merged {
+        scanned: scanned_count,
+        updated: updated_count,
+    })
+}
 
-    Ok(())
+#[cfg(test)]
+fn preserve_details_with_injected_operation_failure(
+    published_path: &Path,
+    staging_path: &Path,
+    failure: DetailPreservationOperation,
+) -> Result<PreserveDetailsOutcome, TuliproxError> {
+    preserve_details_input_xtream_playlist_cluster_to_disk_with_hook(
+        published_path,
+        staging_path,
+        move |operation| {
+            if operation == failure {
+                Err(io::Error::other(format!("injected {failure:?} failure")))
+            } else {
+                Ok(())
+            }
+        },
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -835,7 +1081,8 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
 ) -> Result<(), TuliproxError> {
     let cfg = app_config.config.load();
     let storage_path = ensure_input_storage_path(&cfg, &input.name).await?;
-    let xtream_path = xtream_get_file_path(&storage_path, cluster);
+    drop(cfg);
+    let refresh_lease = XtreamRefreshLease::new(XtreamRefreshPaths::new(&storage_path, cluster)?)?;
 
     // Channel for transferring items from Parser (Async Task) to Consumer (Blocking Task)
     let (tx, mut rx) = tokio::sync::mpsc::channel::<XtreamPlaylistItem>(BATCH_SIZE * 2);
@@ -872,24 +1119,25 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
     });
 
     // 2. Consumer Task: Handles heavy Disk I/O (BPlusTree updates)
-    let xtream_path_for_consumer = xtream_path.clone();
+    let consumer_lease = refresh_lease.clone();
     let consumer_task = tokio::task::spawn_blocking(move || {
-        let tmp_xtream_path = xtream_path_for_consumer.with_extension("tmp");
+        let staging_path = &consumer_lease.paths().staging_database;
 
         BPlusTree::<u32, XtreamPlaylistItem>::new()
-            .store(&tmp_xtream_path)
-            .map_err(|e| {
-                error!(
-                    "Failed to initialize ghost BPlusTree at {}: {e}",
-                    tmp_xtream_path.display()
-                );
-                TuliproxError::RepositoryXtream(format!("Init tree error {e}"))
+            .store(staging_path)
+            .map_err(|error| {
+                TuliproxError::RepositoryXtream(format!(
+                    "Failed to initialize staging Xtream tree {} for {cluster}: {error}",
+                    staging_path.display()
+                ))
             })?;
 
         let mut tree: BPlusTreeUpdate<u32, XtreamPlaylistItem> =
-            BPlusTreeUpdate::try_new_with_backoff(&tmp_xtream_path).map_err(|e| {
-                error!("Failed to open ghost tree at {}: {e}", tmp_xtream_path.display());
-                TuliproxError::RepositoryXtream(format!("Failed to open tree {e}"))
+            BPlusTreeUpdate::try_new_with_backoff(staging_path).map_err(|error| {
+                TuliproxError::RepositoryXtream(format!(
+                    "Failed to open staging Xtream tree {} for {cluster}: {error}",
+                    staging_path.display()
+                ))
             })?;
         tree.set_flush_policy(FlushPolicy::Batch);
 
@@ -902,13 +1150,17 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
                 let batch: Vec<(&u32, &XtreamPlaylistItem)> =
                     buffer.iter().map(|i| (&i.provider_id, i)).collect();
                 let prepared = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch)
-                    .map_err(|e| {
-                        error!("Batch prepare failed for cluster {cluster}: {e}");
-                        TuliproxError::RepositoryXtream(format!("Prepare failed {e}"))
+                    .map_err(|error| {
+                        TuliproxError::RepositoryXtream(format!(
+                            "Failed to prepare staging batch for {cluster} at {}: {error}",
+                            staging_path.display()
+                        ))
                     })?;
-                tree.upsert_batch_encoded(prepared).map_err(|e| {
-                    error!("Batch upsert failed for cluster {cluster}: {e}");
-                    TuliproxError::RepositoryXtream(format!("Upsert failed {e}"))
+                tree.upsert_batch_encoded(prepared).map_err(|error| {
+                    TuliproxError::RepositoryXtream(format!(
+                        "Failed to write staging batch for {cluster} at {}: {error}",
+                        staging_path.display()
+                    ))
                 })?;
                 buffer.clear();
             }
@@ -919,19 +1171,25 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
             let batch: Vec<(&u32, &XtreamPlaylistItem)> =
                 buffer.iter().map(|i| (&i.provider_id, i)).collect();
             let prepared = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch)
-                .map_err(|e| {
-                    error!("Final batch prepare failed for cluster {cluster}: {e}");
-                    TuliproxError::RepositoryXtream(format!("Prepare failed {e}"))
+                .map_err(|error| {
+                    TuliproxError::RepositoryXtream(format!(
+                        "Failed to prepare final staging batch for {cluster} at {}: {error}",
+                        staging_path.display()
+                    ))
                 })?;
-            tree.upsert_batch_encoded(prepared).map_err(|e| {
-                error!("Final batch upsert failed for cluster {cluster}: {e}");
-                TuliproxError::RepositoryXtream(format!("Upsert failed {e}"))
+            tree.upsert_batch_encoded(prepared).map_err(|error| {
+                TuliproxError::RepositoryXtream(format!(
+                    "Failed to write final staging batch for {cluster} at {}: {error}",
+                    staging_path.display()
+                ))
             })?;
         }
 
-        tree.commit().map_err(|e| {
-            error!("Commit failed for cluster {cluster}: {e}");
-            TuliproxError::RepositoryXtream(format!("Commit failed {e}"))
+        tree.commit().map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to commit staging Xtream tree for {cluster} at {}: {error}",
+                staging_path.display()
+            ))
         })?;
         Ok::<(), TuliproxError>(())
     });
@@ -945,94 +1203,181 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
     let parsed_categories = parse_res?;
     consumer_res?;
 
-    // --- Post-Processing & Atomic Swap ---
+    save_xtream_categories_to_file(refresh_lease.clone(), &parsed_categories).await?;
 
-    let col_path = match cluster {
-        XtreamCluster::Live => get_live_cat_collection_path(&storage_path),
-        XtreamCluster::Video => get_vod_cat_collection_path(&storage_path),
-        XtreamCluster::Series => get_series_cat_collection_path(&storage_path),
-    };
+    // Lock order for the publish phase is always FileLockManager(final) followed by B+Tree sidecars. No B+Tree
+    // handle escapes its blocking closure, so none is held while this async lock is acquired.
+    let publish_lock = Arc::new(
+        app_config
+            .file_locks
+            .write_lock(&refresh_lease.paths().published_database)
+            .await,
+    );
 
-    let tmp_col_path = col_path.with_extension("tmp");
+    let merge_lease = refresh_lease.clone();
+    let merge_lock = Arc::clone(&publish_lock);
+    let merge_outcome = tokio::task::spawn_blocking(move || {
+        let _publish_guard = merge_lock;
+        preserve_details_input_xtream_playlist_cluster_to_disk(
+            &merge_lease.paths().published_database,
+            &merge_lease.paths().staging_database,
+        )
+    })
+    .await
+    .map_err(|error| {
+        TuliproxError::RepositoryXtream(format!(
+            "Detail-preservation task failed to join during {cluster} refresh: {error}"
+        ))
+    })??;
+    log::debug!(
+        "Xtream cluster detail preservation completed: cluster={cluster} generation={} outcome={merge_outcome:?}",
+        refresh_lease.paths().generation
+    );
 
-    // Use the parsed_categories returned from the task, not the 'categories' reader
-    save_xtream_categories_to_file(&tmp_col_path, &parsed_categories).await?;
+    let compact_lease = refresh_lease.clone();
+    let compact_lock = Arc::clone(&publish_lock);
+    tokio::task::spawn_blocking(move || {
+        let _publish_guard = compact_lock;
+        let staging_path = &compact_lease.paths().staging_database;
+        let mut tree = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(staging_path)
+            .map_err(|error| {
+                TuliproxError::RepositoryXtream(format!(
+                    "Failed to open staging Xtream tree {} for compaction: {error}",
+                    staging_path.display()
+                ))
+            })?;
+        tree.compact().map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to compact staging Xtream tree {}: {error}",
+                staging_path.display()
+            ))
+        })
+    })
+    .await
+    .map_err(|error| {
+        TuliproxError::RepositoryXtream(format!("Compaction task failed to join during {cluster} refresh: {error}"))
+    })??;
 
-    let tmp_xtream_path = xtream_path.with_extension("tmp");
+    let database_publish_lease = refresh_lease.clone();
+    let database_publish_lock = Arc::clone(&publish_lock);
+    tokio::task::spawn_blocking(move || {
+        let _publish_guard = database_publish_lock;
+        publish_staged_database::<u32, XtreamPlaylistItem>(
+            &database_publish_lease.paths().staging_database,
+            &database_publish_lease.paths().published_database,
+        )
+        .map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to publish staging Xtream database for {cluster}: {error}"
+            ))
+        })
+    })
+    .await
+    .map_err(|error| {
+        TuliproxError::RepositoryXtream(format!("Database publish task failed to join for {cluster}: {error}"))
+    })??;
 
-    // Acquire file lock to ensure atomic operations
-    let swap_lock = app_config.file_locks.write_lock(&xtream_path).await;
+    let category_publish_lease = refresh_lease.clone();
+    let category_publish_lock = Arc::clone(&publish_lock);
+    tokio::task::spawn_blocking(move || {
+        let _publish_guard = category_publish_lock;
+        publish_staged_file_same_directory(
+            &category_publish_lease.paths().staging_categories,
+            &category_publish_lease.paths().published_categories,
+        )
+        .map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Xtream database for {cluster} was published, but category publication failed: {error}"
+            ))
+        })
+    })
+    .await
+    .map_err(|error| {
+        TuliproxError::RepositoryXtream(format!(
+            "Xtream database for {cluster} was published, but the category publish task failed to join: {error}"
+        ))
+    })??;
 
-    {
-        let old_path = xtream_path.clone();
-        let new_tmp_path = tmp_xtream_path.clone();
-        tokio::task::spawn_blocking(move || preserve_details_input_xtream_playlist_cluster_to_disk(&old_path, &new_tmp_path))
-            .await
-            .map_err(|e| TuliproxError::RepositoryXtream(format!("Merge task join error during cluster {cluster} update: {e}")))??;
-    }
-
-    // Optional compaction to optimize the newly created database file.
-    // Run on blocking pool because B+Tree lock backoff uses std::thread::sleep.
-    let compact_path = tmp_xtream_path.clone();
-    match tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
-        if let Ok(mut tree_update) = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new_with_backoff(&compact_path) {
-            tree_update.compact()?;
-        }
-        Ok(())
+    let cleanup_lease = refresh_lease.clone();
+    let cleanup_lock = Arc::clone(&publish_lock);
+    tokio::task::spawn_blocking(move || {
+        let _publish_guard = cleanup_lock;
+        cleanup_lease.cleanup_staging_artifacts()
     })
         .await
-    {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            error!(
-                "Failed to compact temporary database for {cluster} at {:?}: {e}",
-                tmp_xtream_path.display()
-            );
-        }
-        Err(e) => {
-            error!(
-                "Compaction task join failed for {cluster} at {:?}: {e}",
-                tmp_xtream_path.display()
-            );
-        }
-    }
+        .map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Xtream refresh for {cluster} was published, but cleanup task failed to join: {error}"
+            ))
+        })?
+        .map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Xtream refresh for {cluster} was published, but staging cleanup failed: {error}"
+            ))
+        })?;
 
-    // Atomic Swap: Replace old database with new one
-    if let Err(e) = crate::utils::rename_or_copy(&tmp_xtream_path, &xtream_path, false) {
-        error!(
-            "Failed to swap xtream database for {cluster} (from {:?} to {:?}): {e}",
-            tmp_xtream_path.display(),
-            xtream_path.display()
-        );
-        return Err(TuliproxError::RepositoryXtream(format!("Failed to swap database: {e}")));
-    }
-
-    // Atomic Swap: Replace old categories with new ones
-    if let Err(e) = crate::utils::rename_or_copy(&tmp_col_path, &col_path, false) {
-        error!(
-            "Failed to swap xtream categories for {cluster} (from {:?} to {:?}): {e}",
-            tmp_col_path.display(),
-            col_path.display()
-        );
-        return Err(TuliproxError::RepositoryXtream(format!("Failed to swap categories: {e}")));
-    }
-
-    // Cleanup: Remove temporary files if they still exist (defensive)
-    let _ = tokio::fs::remove_file(&tmp_xtream_path).await;
-    let _ = tokio::fs::remove_file(&tmp_col_path).await;
-
-    // Explicitly release the lock (though RAII would handle it too)
-    drop(swap_lock);
-
-    log::debug!("Cluster {cluster} updated successfully.");
+    drop(publish_lock);
+    log::debug!(
+        "Xtream cluster updated successfully: cluster={cluster} generation={}",
+        refresh_lease.paths().generation
+    );
     Ok(())
 }
 
+fn publish_staged_file_same_directory(staging: &Path, published: &Path) -> io::Result<()> {
+    let staging_parent = staging
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let published_parent = published
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if staging_parent != published_parent {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "staging file {} and published file {} must share one parent directory",
+                staging.display(),
+                published.display()
+            ),
+        ));
+    }
+    let staging_path = tempfile::TempPath::try_from_path(staging).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to prepare staging file {} for publication: {error}", staging.display()),
+        )
+    })?;
+    staging_path.persist(published).map_err(io::Error::from)?;
+    sync_published_file_parent(published).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "file {} was published, but its parent directory could not be synchronized: {error}",
+                published.display()
+            ),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn sync_published_file_parent(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn sync_published_file_parent(_path: &Path) -> io::Result<()> { Ok(()) }
+
 async fn save_xtream_categories_to_file(
-    col_path: &Path,
+    refresh_lease: XtreamRefreshLease,
     categories: &[XtreamCategory],
 ) -> Result<(), TuliproxError> {
-    let col_path_buf = col_path.to_path_buf();
     let cat_entries: Vec<CategoryEntry> = categories
         .iter()
         .map(|c| CategoryEntry {
@@ -1043,21 +1388,37 @@ async fn save_xtream_categories_to_file(
         .collect();
 
     tokio::task::spawn_blocking(move || {
-        if let Ok(file) = File::create(&col_path_buf) {
-            if let Err(e) = file.lock_exclusive() {
-                log::warn!(
-                    "Could not acquire exclusive lock for {}: {e}, proceeding without lock",
-                    col_path_buf.display()
-                );
-            }
-            serde_json::to_writer(&file, &cat_entries).map_err(|e| {
-                error!("Failed to write categories to file {}: {e}", col_path_buf.display());
-                TuliproxError::RepositoryXtream(format!("Write failed: {e}"))
-            })?;
-            let _ = file.unlock();
-        } else {
-            return Err(TuliproxError::RepositoryXtream(format!("Failed to create category file {}", col_path_buf.display())));
-        }
+        let staging_path = &refresh_lease.paths().staging_categories;
+        let file = File::create(staging_path).map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to create staging category file {}: {error}",
+                staging_path.display()
+            ))
+        })?;
+        file.lock_exclusive().map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to lock staging category file {}: {error}",
+                staging_path.display()
+            ))
+        })?;
+        serde_json::to_writer(&file, &cat_entries).map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to write staging category file {}: {error}",
+                staging_path.display()
+            ))
+        })?;
+        file.sync_all().map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to synchronize staging category file {}: {error}",
+                staging_path.display()
+            ))
+        })?;
+        fs2::FileExt::unlock(&file).map_err(|error| {
+            TuliproxError::RepositoryXtream(format!(
+                "Failed to unlock staging category file {}: {error}",
+                staging_path.display()
+            ))
+        })?;
         Ok(())
     })
         .await
@@ -1476,15 +1837,98 @@ pub async fn load_input_xtream_playlist(app_config: &Arc<AppConfig>, storage_pat
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_preserved_stream_properties, needs_update_info_details, preserve_details_input_xtream_playlist_cluster_to_disk};
-    use crate::repository::{BPlusTreeQuery, BPlusTreeUpdate};
+    use super::{
+        merge_preserved_stream_properties, needs_update_info_details,
+        persist_input_xtream_playlist_cluster_to_disk, preserve_details_input_xtream_playlist_cluster_to_disk,
+        preserve_details_with_injected_operation_failure, publish_staged_file_same_directory,
+        refresh_staging_path, DetailPreservationOperation, PreserveDetailsOutcome, XtreamRefreshLease,
+        XtreamRefreshPaths,
+    };
+    use crate::model::{
+        ApiProxyConfig, AppConfig, Config, ConfigInput, CustomStreamResponse, HdHomeRunConfig,
+        MediaToolCapabilities, SourcesConfig,
+    };
+    use crate::repository::{
+        bplustree::common::{ensure_distinct_sidecar_lock_domains, sidecar_lock_path},
+        build_input_storage_path, get_file_path_for_db_index, BPlusTreeQuery, BPlusTreeUpdate,
+    };
+    use crate::utils::{request::DynReader, FileLockManager};
+    use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::model::{
-        CatchupProperties, LiveStreamProperties, SeriesStreamProperties, StreamProperties, VideoStreamProperties,
-        XtreamCluster, XtreamPlaylistItem,
+        CatchupProperties, ConfigPaths, InputType, LiveStreamProperties, SeriesStreamProperties, StreamProperties,
+        VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
     };
     use shared::utils::Internable;
-    use std::path::Path;
+    use std::{
+        env, fs, io,
+        path::Path,
+        process::{Child, Command, ExitStatus, Stdio},
+        sync::Arc,
+        thread,
+        time::{Duration, Instant},
+    };
     use tempfile::tempdir;
+    use tokio::io::AsyncWriteExt;
+    use uuid::Uuid;
+
+    fn test_app_config(storage_dir: &Path) -> Arc<AppConfig> {
+        Arc::new(AppConfig {
+            config: Arc::new(ArcSwap::from_pointee(Config {
+                storage_dir: storage_dir.to_string_lossy().into_owned(),
+                ..Config::default()
+            })),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
+            hdhomerun: Arc::new(ArcSwapOption::<HdHomeRunConfig>::default()),
+            api_proxy: Arc::new(ArcSwapOption::<ApiProxyConfig>::default()),
+            file_locks: Arc::new(FileLockManager::default()),
+            paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(ArcSwapOption::<CustomStreamResponse>::default()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(MediaToolCapabilities::new()),
+        })
+    }
+
+    fn json_reader(content: &'static str) -> DynReader {
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        tokio::spawn(async move {
+            writer.write_all(content.as_bytes()).await.expect("fixture should fit into duplex reader");
+            writer.shutdown().await.expect("fixture writer should shut down");
+        });
+        Box::pin(reader)
+    }
+
+    fn wait_for_child(mut child: Child, timeout: Duration) -> io::Result<ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "Xtream refresh child timed out"));
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            }
+        }
+    }
 
     #[test]
     fn keeps_existing_details_when_new_timestamp_is_missing() {
@@ -1737,15 +2181,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn preserve_details_for_disk_cluster_copies_missing_live_probe_fields() {
-        let dir = tempdir().expect("temp dir should be created");
-        let old_path = dir.path().join("old_live.db");
-        let tmp_path = dir.path().join("tmp_live.db");
-        let provider_id = 100_u32;
+    fn fixed_refresh_paths(path: &Path, generation: u128) -> XtreamRefreshPaths {
+        XtreamRefreshPaths::for_generation(path, XtreamCluster::Live, Uuid::from_u128(generation))
+            .expect("fixed refresh paths should be valid")
+    }
 
+    fn write_detail_preservation_fixture(paths: &XtreamRefreshPaths, provider_id: u32) {
         write_single_item(
-            &old_path,
+            &paths.published_database,
             &make_live_item(
                 provider_id,
                 Some("{\"codec_name\":\"h264\"}"),
@@ -1755,16 +2198,379 @@ mod tests {
                 2_500_000,
             ),
         );
-        write_single_item(&tmp_path, &make_live_item(provider_id, None, None, None, None, 0));
+        write_single_item(
+            &paths.staging_database,
+            &make_live_item(provider_id, None, None, None, None, 0),
+        );
+    }
 
-        preserve_details_input_xtream_playlist_cluster_to_disk(&old_path, &tmp_path).expect("merge should succeed");
+    #[test]
+    fn refresh_staging_database_uses_distinct_published_lock_domain() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 1);
 
-        let merged = read_live_props(&tmp_path, provider_id);
+        assert_eq!(paths.published_database.file_name().and_then(|name| name.to_str()), Some("live.db"));
+        assert_ne!(sidecar_lock_path(&paths.published_database), sidecar_lock_path(&paths.staging_database));
+    }
+
+    #[test]
+    fn refresh_staging_database_and_index_share_one_generation_lock_domain() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 2);
+        let staging_index = get_file_path_for_db_index(&paths.staging_database);
+
+        assert_eq!(sidecar_lock_path(&paths.staging_database), sidecar_lock_path(&staging_index));
+    }
+
+    #[test]
+    fn colliding_staging_path_is_rejected_before_lock_acquisition() {
+        let dir = tempdir().expect("temp dir should be created");
+        let published = dir.path().join("live.db");
+        let colliding = dir.path().join("live.tmp");
+
+        let error = ensure_distinct_sidecar_lock_domains(&published, &colliding)
+            .expect_err("colliding sidecar domains must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn preserve_details_for_disk_cluster_copies_missing_live_probe_fields() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 3);
+        let provider_id = 100_u32;
+
+        write_single_item(
+            &paths.published_database,
+            &make_live_item(
+                provider_id,
+                Some("{\"codec_name\":\"h264\"}"),
+                Some("{\"codec_name\":\"aac\"}"),
+                Some(1_700_000_000),
+                Some(1_700_000_100),
+                2_500_000,
+            ),
+        );
+        write_single_item(
+            &paths.staging_database,
+            &make_live_item(provider_id, None, None, None, None, 0),
+        );
+
+        let outcome = preserve_details_input_xtream_playlist_cluster_to_disk(
+            &paths.published_database,
+            &paths.staging_database,
+        )
+        .expect("merge should succeed");
+        assert_eq!(outcome, PreserveDetailsOutcome::Merged { scanned: 1, updated: 1 });
+
+        let merged = read_live_props(&paths.staging_database, provider_id);
         assert_eq!(merged.video, Some("{\"codec_name\":\"h264\"}".intern()));
         assert_eq!(merged.audio, Some("{\"codec_name\":\"aac\"}".intern()));
         assert_eq!(merged.last_probed_timestamp, Some(1_700_000_000));
         assert_eq!(merged.last_success_timestamp, Some(1_700_000_100));
         assert_eq!(merged.bitrate, 2_500_000);
+    }
+
+    #[test]
+    fn preserve_details_reports_missing_published_database_explicitly() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 4);
+        write_single_item(&paths.staging_database, &make_live_item(101, None, None, None, None, 0));
+
+        let outcome = preserve_details_input_xtream_playlist_cluster_to_disk(
+            &paths.published_database,
+            &paths.staging_database,
+        )
+        .expect("a missing published database should not fail the refresh");
+
+        assert_eq!(outcome, PreserveDetailsOutcome::SourceMissing);
+    }
+
+    #[test]
+    fn preserve_details_propagates_corrupt_published_database() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 5);
+        fs::write(&paths.published_database, b"corrupt").expect("corrupt fixture should be written");
+        write_single_item(&paths.staging_database, &make_live_item(102, None, None, None, None, 0));
+
+        let error = preserve_details_input_xtream_playlist_cluster_to_disk(
+            &paths.published_database,
+            &paths.staging_database,
+        )
+        .expect_err("corrupt published data must fail");
+
+        assert!(error.to_string().contains(&paths.published_database.display().to_string()));
+    }
+
+    #[test]
+    fn preserve_details_propagates_corrupt_staging_database() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 6);
+        write_single_item(&paths.published_database, &make_live_item(103, None, None, None, None, 0));
+        fs::write(&paths.staging_database, b"corrupt").expect("corrupt fixture should be written");
+
+        let error = preserve_details_input_xtream_playlist_cluster_to_disk(
+            &paths.published_database,
+            &paths.staging_database,
+        )
+        .expect_err("corrupt staging data must fail");
+
+        assert!(error.to_string().contains(&paths.staging_database.display().to_string()));
+    }
+
+    #[test]
+    fn preserve_details_propagates_missing_staging_database() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 14);
+        write_single_item(&paths.published_database, &make_live_item(105, None, None, None, None, 0));
+
+        let error = preserve_details_input_xtream_playlist_cluster_to_disk(
+            &paths.published_database,
+            &paths.staging_database,
+        )
+        .expect_err("a missing staging database must fail");
+        let message = error.to_string();
+
+        assert!(message.contains("Failed to open staging Xtream tree"));
+        assert!(message.contains(&paths.staging_database.display().to_string()));
+    }
+
+    #[test]
+    fn preserve_details_propagates_staging_query_failure() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 15);
+        write_detail_preservation_fixture(&paths, 106);
+
+        let error = preserve_details_with_injected_operation_failure(
+            &paths.published_database,
+            &paths.staging_database,
+            DetailPreservationOperation::Query,
+        )
+        .expect_err("a staging query failure must fail the merge");
+        let message = error.to_string();
+
+        assert!(message.contains("Failed to query staging Xtream tree"));
+        assert!(message.contains(&paths.staging_database.display().to_string()));
+        assert!(message.contains("injected Query failure"));
+    }
+
+    #[test]
+    fn preserve_details_propagates_staging_batch_write_failure() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 16);
+        write_detail_preservation_fixture(&paths, 107);
+
+        let error = preserve_details_with_injected_operation_failure(
+            &paths.published_database,
+            &paths.staging_database,
+            DetailPreservationOperation::BatchWrite,
+        )
+        .expect_err("a staging batch write failure must fail the merge");
+        let message = error.to_string();
+
+        assert!(message.contains("Failed to update staging Xtream tree"));
+        assert!(message.contains(&paths.staging_database.display().to_string()));
+        assert!(message.contains("injected BatchWrite failure"));
+    }
+
+    #[test]
+    fn preserve_details_propagates_staging_commit_failure() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 17);
+        write_detail_preservation_fixture(&paths, 108);
+
+        let error = preserve_details_with_injected_operation_failure(
+            &paths.published_database,
+            &paths.staging_database,
+            DetailPreservationOperation::Commit,
+        )
+        .expect_err("a staging commit failure must fail the merge");
+        let message = error.to_string();
+
+        assert!(message.contains("Failed to commit staging Xtream tree"));
+        assert!(message.contains(&paths.staging_database.display().to_string()));
+        assert!(message.contains("injected Commit failure"));
+    }
+
+    #[test]
+    fn preserve_details_empty_merge_reports_zero_updates() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 7);
+        let item = make_live_item(104, None, None, None, None, 0);
+        write_single_item(&paths.published_database, &item);
+        write_single_item(&paths.staging_database, &item);
+
+        let outcome = preserve_details_input_xtream_playlist_cluster_to_disk(
+            &paths.published_database,
+            &paths.staging_database,
+        )
+        .expect("empty merge should succeed");
+
+        assert_eq!(outcome, PreserveDetailsOutcome::Merged { scanned: 1, updated: 0 });
+    }
+
+    #[test]
+    fn refresh_lease_cleanup_is_idempotent_and_generation_local() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 8);
+        let other_paths = fixed_refresh_paths(dir.path(), 9);
+        let lease = XtreamRefreshLease::new(paths.clone()).expect("refresh lease should be valid");
+
+        fs::write(&paths.published_database, b"published").expect("published fixture should be written");
+        let published_lock = sidecar_lock_path(&paths.published_database);
+        fs::write(&published_lock, b"").expect("published lock fixture should be written");
+        for artifact in lease.0.database_artifacts.owned_paths() {
+            fs::write(artifact, b"staging").expect("staging artifact should be written");
+        }
+        fs::write(&paths.staging_categories, b"staging").expect("staging category should be written");
+        fs::write(&other_paths.staging_database, b"other generation")
+            .expect("other generation fixture should be written");
+
+        lease.cleanup_staging_artifacts().expect("first cleanup should succeed");
+        lease.cleanup_staging_artifacts().expect("second cleanup should be idempotent");
+
+        assert!(paths.published_database.exists());
+        assert!(published_lock.exists());
+        assert!(other_paths.staging_database.exists());
+        assert!(!paths.staging_database.exists());
+        assert!(!paths.staging_categories.exists());
+    }
+
+    #[test]
+    fn refresh_lease_defers_cleanup_until_last_worker_clone_drops() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 13);
+        let parent_lease = XtreamRefreshLease::new(paths.clone()).expect("refresh lease should be valid");
+        let worker_lease = parent_lease.clone();
+        fs::write(&paths.staging_database, b"staging").expect("staging fixture should be written");
+        fs::write(&paths.staging_categories, b"categories").expect("category fixture should be written");
+
+        drop(parent_lease);
+        assert!(paths.staging_database.exists());
+        assert!(paths.staging_categories.exists());
+
+        drop(worker_lease);
+        assert!(!paths.staging_database.exists());
+        assert!(!paths.staging_categories.exists());
+    }
+
+    #[test]
+    fn sequential_refresh_generations_use_distinct_stems() {
+        let dir = tempdir().expect("temp dir should be created");
+        let first = fixed_refresh_paths(dir.path(), 10);
+        let second = fixed_refresh_paths(dir.path(), 11);
+
+        assert_ne!(first.staging_database.file_stem(), second.staging_database.file_stem());
+        assert_ne!(sidecar_lock_path(&first.staging_database), sidecar_lock_path(&second.staging_database));
+    }
+
+    #[test]
+    fn category_publish_atomically_replaces_same_directory_file() {
+        let dir = tempdir().expect("temp dir should be created");
+        let published = dir.path().join("cat_live.json");
+        let staging = dir.path().join("cat_live.refresh-fixed.json");
+        fs::write(&published, b"old").expect("published fixture should be written");
+        fs::write(&staging, b"new").expect("staging fixture should be written");
+
+        publish_staged_file_same_directory(&staging, &published).expect("category publish should succeed");
+
+        assert_eq!(fs::read(&published).expect("published categories should be readable"), b"new");
+        assert!(!staging.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_staging_path_preserves_non_utf8_stem() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let mut input_name = std::ffi::OsString::from_vec(vec![b'l', b'i', b'v', b'e', 0xff]);
+        input_name.push(".db");
+        let published = Path::new("/tmp").join(input_name);
+        let generation = Uuid::from_u128(12);
+
+        let staging = refresh_staging_path(&published, generation).expect("non-UTF-8 path should be supported");
+        let bytes = staging.file_name().expect("staging file name").as_bytes();
+        assert!(bytes.starts_with(&[b'l', b'i', b'v', b'e', 0xff]));
+        assert!(bytes.ends_with(b".db"));
+        assert!(bytes.windows(b".refresh-".len()).any(|window| window == b".refresh-"));
+    }
+
+    #[test]
+    fn xtream_refresh_end_to_end_child() -> io::Result<()> {
+        let Some(storage_root) = env::var_os("TULIPROX_XTREAM_REFRESH_TEST_ROOT") else {
+            return Ok(());
+        };
+        let storage_root = Path::new(&storage_root);
+        let app_config = test_app_config(storage_root);
+        let input = ConfigInput {
+            name: "deadlock-test".intern(),
+            input_type: InputType::Xtream,
+            ..ConfigInput::default()
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+        runtime.block_on(async {
+            for _ in 0..2 {
+                persist_input_xtream_playlist_cluster_to_disk(
+                    &app_config,
+                    &input,
+                    XtreamCluster::Live,
+                    json_reader(r#"[{"category_id":"1","category_name":"Sports"}]"#),
+                    json_reader(r#"[{"name":"Live","stream_id":700,"category_id":"1","added":"0"}]"#),
+                )
+                .await
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            }
+            Ok::<(), io::Error>(())
+        })?;
+
+        let input_storage = build_input_storage_path(&input.name, storage_root.to_string_lossy().as_ref());
+        let published = super::xtream_get_file_path(&input_storage, XtreamCluster::Live);
+        let learned = read_live_props(&published, 700);
+        assert_eq!(learned.video, Some("{\"codec_name\":\"h264\"}".intern()));
+        assert_eq!(learned.bitrate, 2_500_000);
+        Ok(())
+    }
+
+    #[test]
+    fn two_sequential_cluster_refreshes_complete_without_generation_artifacts() -> io::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let input_name = "deadlock-test".intern();
+        let input_storage = build_input_storage_path(&input_name, directory.path().to_string_lossy().as_ref());
+        fs::create_dir_all(&input_storage)?;
+        let published = super::xtream_get_file_path(&input_storage, XtreamCluster::Live);
+        write_single_item(
+            &published,
+            &make_live_item(
+                700,
+                Some("{\"codec_name\":\"h264\"}"),
+                Some("{\"codec_name\":\"aac\"}"),
+                Some(1_700_000_000),
+                Some(1_700_000_100),
+                2_500_000,
+            ),
+        );
+
+        let child = Command::new(env::current_exe()?)
+            .arg("--exact")
+            .arg("repository::xtream_repository::tests::xtream_refresh_end_to_end_child")
+            .arg("--nocapture")
+            .env("TULIPROX_XTREAM_REFRESH_TEST_ROOT", directory.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let status = wait_for_child(child, Duration::from_secs(20))?;
+        assert!(status.success(), "Xtream refresh child failed with {status}");
+
+        let learned = read_live_props(&published, 700);
+        assert_eq!(learned.video, Some("{\"codec_name\":\"h264\"}".intern()));
+        assert_eq!(learned.bitrate, 2_500_000);
+        let entries = fs::read_dir(&input_storage)?.collect::<io::Result<Vec<_>>>()?;
+        let generation_artifacts = entries
+            .into_iter()
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".refresh-"))
+            .collect::<Vec<_>>();
+        assert!(generation_artifacts.is_empty(), "generation artifacts survived successful refreshes");
+        assert!(sidecar_lock_path(&published).exists());
+        Ok(())
     }
 
     #[test]

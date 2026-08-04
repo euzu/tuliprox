@@ -665,7 +665,7 @@ fn temporary_path(filepath: &Path) -> io::Result<PathBuf> {
     Ok(filepath.with_file_name(format!("{name}.{}.v3.tmp", uuid::Uuid::new_v4())))
 }
 
-fn publish_database(
+pub(super) fn publish_database(
     temporary: &Path,
     destination: &Path,
     sync_directory: impl FnOnce(&Path) -> io::Result<()>,
