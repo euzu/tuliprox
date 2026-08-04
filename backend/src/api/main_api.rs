@@ -466,9 +466,25 @@ fn allow_response_compression(
 ) -> bool {
     if let Some(content_type) = headers.get(axum::http::header::CONTENT_TYPE) {
         if let Ok(ct) = content_type.to_str() {
-        // Disable compression for wasm , WebKit browser dont like it.
-            if ct.starts_with("application/wasm") {
+            // Disable compression for wasm , WebKit browser dont like it.
+            // Also skip compression for binary, already-compressed, or non-compressible types.
+            if ct.starts_with("application/wasm")
+                || ct.starts_with("video/")
+                || ct.starts_with("audio/")
+                || ct.starts_with("image/")
+                || ct.starts_with("application/octet-stream")
+            {
                 return false;
+            }
+        }
+    }
+    // Skip compression for small responses where overhead exceeds benefit.
+    if let Some(content_length) = headers.get(axum::http::header::CONTENT_LENGTH) {
+        if let Ok(len_str) = content_length.to_str() {
+            if let Ok(len) = len_str.parse::<u64>() {
+                if len < 1024 {
+                    return false;
+                }
             }
         }
     }
@@ -478,10 +494,10 @@ fn allow_response_compression(
 fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl Predicate> {
     let predicate = DefaultPredicate::new().and(allow_response_compression);
     tower_http::compression::CompressionLayer::new()
-        .br(true)
+        .br(false)
         .deflate(true)
         .gzip(true)
-        .zstd(true)
+        .zstd(false)
         .compress_when(predicate)
 }
 

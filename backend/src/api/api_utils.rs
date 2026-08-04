@@ -3246,8 +3246,8 @@ async fn detected_catchup_hls_response(
 fn catchup_hls_manifest_response(content: String) -> axum::response::Response {
     let mut response = try_unwrap_body!(axum::response::Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-        .header(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate")
+        .header(header::CONTENT_TYPE, crate::api::static_headers::CT_M3U.clone())
+        .header(header::CACHE_CONTROL, crate::api::static_headers::CC_NO_STORE.clone())
         .body(Body::from(content)));
     mark_response_as_uncompressed(&mut response);
     response
@@ -4145,7 +4145,7 @@ pub fn separate_number_and_remainder(input: &str) -> (&str, Option<&str>) {
 pub fn empty_json_list_response() -> axum::response::Response {
     try_unwrap_body!(axum::response::Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+        .header(header::CONTENT_TYPE, crate::api::static_headers::CT_JSON.clone())
         .body("[]".to_owned()))
 }
 
@@ -4598,14 +4598,14 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
 pub fn empty_json_response_as_object() -> axum::http::Result<axum::response::Response> {
     axum::response::Response::builder()
         .status(axum::http::StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+        .header(axum::http::header::CONTENT_TYPE, crate::api::static_headers::CT_JSON.clone())
         .body(axum::body::Body::from("{}".as_bytes()))
 }
 
 pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Response> {
     axum::response::Response::builder()
         .status(axum::http::StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+        .header(axum::http::header::CONTENT_TYPE, crate::api::static_headers::CT_JSON.clone())
         .body(axum::body::Body::from("[]".as_bytes()))
 }
 

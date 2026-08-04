@@ -23,6 +23,8 @@ fn checked_end(offset: usize, length: usize, kind: io::ErrorKind) -> io::Result<
     offset.checked_add(length).ok_or_else(|| io::Error::new(kind, "page offset overflow"))
 }
 
+const _: () = assert!(PAGE_HEADER_LEN + INTERNAL_PREAMBLE_LEN <= PAGE_SIZE);
+
 fn slot_base(page_type: PageType) -> io::Result<usize> {
     match page_type {
         PageType::Leaf => Ok(PAGE_HEADER_LEN),
@@ -257,19 +259,16 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
     where
         I: IntoIterator<Item = &'a [u8]>,
     {
+        if self.bytes.as_ref().len() != PAGE_SIZE {
+            return Err(invalid_data("page must be exactly 4096 bytes"));
+        }
         let base = slot_base(self.header.page_type)?;
         let mut rebuilt = [0; PAGE_SIZE];
         if self.header.page_type == PageType::Internal {
-            let preamble_end = checked_end(PAGE_HEADER_LEN, INTERNAL_PREAMBLE_LEN, io::ErrorKind::InvalidData)?;
-            let preamble = self
-                .bytes
-                .as_ref()
-                .get(PAGE_HEADER_LEN..preamble_end)
-                .ok_or_else(|| invalid_data("internal preamble is outside page"))?;
-            rebuilt
-                .get_mut(PAGE_HEADER_LEN..preamble_end)
-                .ok_or_else(|| invalid_data("internal preamble destination is outside page"))?
-                .copy_from_slice(preamble);
+            // INTERNAL_PREAMBLE_LEN is a compile-time constant; the range is always in bounds.
+            let preamble_end = PAGE_HEADER_LEN + INTERNAL_PREAMBLE_LEN; // 32 + 8 = 40
+            rebuilt[PAGE_HEADER_LEN..preamble_end]
+                .copy_from_slice(&self.bytes.as_ref()[PAGE_HEADER_LEN..preamble_end]);
         }
 
         let mut count = 0u16;
@@ -280,29 +279,22 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
             }
             let length = u16::try_from(cell.len()).map_err(|_| invalid_input("cell length exceeds u16"))?;
             let next_count = count.checked_add(1).ok_or_else(|| invalid_input("cell count exceeds u16"))?;
-            let slot_offset = usize::from(count)
-                .checked_mul(SLOT_LEN)
-                .and_then(|size| base.checked_add(size))
-                .ok_or_else(|| invalid_input("slot offset overflow"))?;
-            let slot_end = checked_end(slot_offset, SLOT_LEN, io::ErrorKind::InvalidInput)?;
+            // SLOT_LEN=4, count<=u16::MAX, base<=40 — overflow is impossible within PAGE_SIZE.
+            let slot_offset = base + usize::from(count) * SLOT_LEN;
+            let slot_end = slot_offset + SLOT_LEN;
             let next_cell_start = cell_start
                 .checked_sub(cell.len())
                 .ok_or_else(|| invalid_input("cells exceed page capacity"))?;
             if next_cell_start < slot_end {
                 return Err(invalid_input("cells exceed page capacity"));
             }
-            rebuilt
-                .get_mut(next_cell_start..cell_start)
-                .ok_or_else(|| invalid_input("cell destination is outside page"))?
-                .copy_from_slice(cell);
+            // Both ranges are within [0..PAGE_SIZE] — validated by next_cell_start < slot_end check.
+            rebuilt[next_cell_start..cell_start].copy_from_slice(cell);
             let slot = Slot {
                 offset: u16::try_from(next_cell_start).map_err(|_| invalid_input("cell offset exceeds u16"))?,
                 length,
             };
-            rebuilt
-                .get_mut(slot_offset..slot_end)
-                .ok_or_else(|| invalid_input("slot destination is outside page"))?
-                .copy_from_slice(&slot.encode());
+            rebuilt[slot_offset..slot_end].copy_from_slice(&slot.encode());
             count = next_count;
             cell_start = next_cell_start;
         }
@@ -464,6 +456,26 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_ordered_slot_bytes_match_slot_encode() -> io::Result<()> {
+        let mut page = empty_leaf()?;
+        let mut leaf = SlottedPage::open(page.as_mut_slice(), PAGE_ID, NEXT_PAGE_ID)?;
+        leaf.rebuild_ordered([b"a".as_slice(), b"bc".as_slice()])?;
+        let expected = [
+            Slot { offset: u16::try_from(PAGE_SIZE - 1).map_err(io::Error::other)?, length: 1 },
+            Slot { offset: u16::try_from(PAGE_SIZE - 3).map_err(io::Error::other)?, length: 2 },
+        ];
+        for (index, slot) in expected.into_iter().enumerate() {
+            let offset = PAGE_HEADER_LEN
+                .checked_add(index.checked_mul(SLOT_LEN).ok_or_else(|| io::Error::other("test slot overflow"))?)
+                .ok_or_else(|| io::Error::other("test slot overflow"))?;
+            let end = offset.checked_add(SLOT_LEN).ok_or_else(|| io::Error::other("test slot overflow"))?;
+            let written = page.get(offset..end).ok_or_else(|| io::Error::other("test slot outside page"))?;
+            assert_eq!(written, slot.encode(), "inline slot encoding drifted from Slot::encode at {index}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn opens_empty_leaf_from_immutable_and_mutable_buffers() -> io::Result<()> {
         let page = empty_leaf()?;
         let immutable = SlottedPage::open(page.as_slice(), PAGE_ID, NEXT_PAGE_ID)?;
@@ -545,6 +557,27 @@ mod tests {
         assert_eq!(changing.calls, 1);
         assert_eq!(changing.bytes, original);
         Ok(())
+    }
+
+    #[test]
+    fn rebuild_rejects_a_short_page_without_panicking() -> io::Result<()> {
+        let mut page = [0; PAGE_SIZE];
+        InternalPreamble { leftmost_child: 3 }.encode_into(&mut page, 2, NEXT_PAGE_ID)?;
+        page[40..44].copy_from_slice(&Slot { offset: 4095, length: 1 }.encode());
+        page[4095] = b'x';
+        PageHeader {
+            page_type: PageType::Internal,
+            cell_count: 1,
+            free_start: 44,
+            free_end: 4095,
+            left: 0,
+            right: 0,
+        }
+        .encode_into(&mut page, 2, NEXT_PAGE_ID)?;
+
+        let mut changing = ChangingMutView { bytes: page, calls: 0 };
+        let mut slotted = SlottedPage::open(&mut changing, 2, NEXT_PAGE_ID)?;
+        invalid_data(slotted.rebuild_ordered([b"a".as_slice()]))
     }
 
     #[test]
@@ -684,6 +717,17 @@ mod tests {
         let reopened = SlottedPage::open(page.as_slice(), 2, NEXT_PAGE_ID)?;
         assert_eq!(InternalPreamble::decode(&page, 2, NEXT_PAGE_ID)?.leftmost_child, 3);
         assert_eq!(reopened.cells().collect::<io::Result<Vec<_>>>()?, [b"a".as_slice(), b"bc".as_slice()]);
+        Ok(())
+    }
+
+    #[test]
+    fn rebuild_ordered_roundtrip() -> io::Result<()> {
+        let mut page = empty_leaf()?;
+        let mut slotted = SlottedPage::open(page.as_mut_slice(), PAGE_ID, NEXT_PAGE_ID)?;
+        let cells: Vec<&[u8]> = vec![b"alpha", b"beta", b"gamma"];
+        slotted.rebuild_ordered(cells.iter().copied())?;
+        let read_back: Vec<&[u8]> = slotted.cells().collect::<io::Result<_>>()?;
+        assert_eq!(read_back, cells);
         Ok(())
     }
 }
