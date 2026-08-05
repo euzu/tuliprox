@@ -684,25 +684,88 @@ fn temporary_path(filepath: &Path) -> io::Result<PathBuf> {
     Ok(filepath.with_file_name(format!("{name}.{}.v3.tmp", uuid::Uuid::new_v4())))
 }
 
-fn publish_database(
+#[derive(Debug)]
+pub(super) enum PublishDatabaseError {
+    NotPublished(io::Error),
+    PublishedDurabilityUnknown(io::Error),
+}
+
+impl PublishDatabaseError {
+    pub(super) const fn database_was_published(&self) -> bool {
+        matches!(self, Self::PublishedDurabilityUnknown(_))
+    }
+
+    fn into_io(self) -> io::Error {
+        match self {
+            Self::NotPublished(error) | Self::PublishedDurabilityUnknown(error) => error,
+        }
+    }
+}
+
+impl From<PublishDatabaseError> for io::Error {
+    fn from(error: PublishDatabaseError) -> Self { error.into_io() }
+}
+
+pub(super) fn publish_database(
     temporary: &Path,
     destination: &Path,
     sync_directory: impl FnOnce(&Path) -> io::Result<()>,
-) -> io::Result<()> {
+) -> Result<(), PublishDatabaseError> {
     let temporary = match tempfile::TempPath::try_from_path(temporary) {
         Ok(path) => path,
         Err(error) => {
             let _ = std::fs::remove_file(temporary);
-            return Err(error);
+            return Err(PublishDatabaseError::NotPublished(error));
         }
     };
-    temporary.persist(destination).map_err(io::Error::from)?;
+    temporary
+        .persist(destination)
+        .map_err(io::Error::from)
+        .map_err(PublishDatabaseError::NotPublished)?;
     sync_directory(destination).map_err(|error| {
-        io::Error::new(
+        PublishDatabaseError::PublishedDurabilityUnknown(io::Error::new(
             error.kind(),
             format!("database published but directory sync failed; durability unknown: {error}"),
-        )
+        ))
     })
+}
+
+/// Invalidates the sorted index whenever publication made the replacement database visible.
+pub(super) fn publish_database_and_invalidate_sorted_index(
+    temporary: &Path,
+    destination: &Path,
+    sync_directory: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let publish_error = match publish_database(temporary, destination, sync_directory) {
+        Ok(()) => None,
+        Err(error) if error.database_was_published() => Some(io::Error::from(error)),
+        Err(error) => return Err(io::Error::from(error)),
+    };
+    let invalidation_error = invalidate_sorted_index(destination).err();
+    match (publish_error, invalidation_error) {
+        (Some(publish_error), Some(invalidation_error)) => Err(io::Error::new(
+            publish_error.kind(),
+            format!(
+                "database {} was published with unknown directory durability: {publish_error}; its previous sorted index could not be invalidated: {invalidation_error}",
+                destination.display()
+            ),
+        )),
+        (Some(publish_error), None) => Err(io::Error::new(
+            publish_error.kind(),
+            format!(
+                "database {} was published and its previous sorted index was invalidated, but publication durability remains unknown: {publish_error}",
+                destination.display()
+            ),
+        )),
+        (None, Some(error)) => Err(io::Error::new(
+            error.kind(),
+            format!(
+                "database {} was published, but its previous sorted index could not be invalidated: {error}",
+                destination.display()
+            ),
+        )),
+        (None, None) => Ok(()),
+    }
 }
 
 impl<K, V> BPlusTree<K, V>
@@ -732,6 +795,14 @@ where
     }
 
     fn store_exclusive(&mut self, filepath: &Path) -> io::Result<StoredDatabase> {
+        self.store_exclusive_with_directory_sync(filepath, sync_parent_directory)
+    }
+
+    fn store_exclusive_with_directory_sync(
+        &mut self,
+        filepath: &Path,
+        sync_published_directory: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<StoredDatabase> {
         let temp_path = temporary_path(filepath)?;
         // The builder streams into the temp file, so it exists from here on — every error
         // path below has to remove it again.
@@ -762,8 +833,7 @@ where
                 return Err(error);
             }
         };
-        publish_database(&temp_path, filepath, sync_parent_directory)?;
-        invalidate_sorted_index(filepath)?;
+        publish_database_and_invalidate_sorted_index(&temp_path, filepath, sync_published_directory)?;
         self.dirty = false;
         Ok(StoredDatabase { root_page_id, verification })
     }
@@ -849,7 +919,7 @@ where
             let _ = std::fs::remove_file(&temporary);
             return Err(error);
         }
-        publish_database(&temporary, &index_path, sync_parent_directory)
+        publish_database(&temporary, &index_path, sync_parent_directory).map_err(io::Error::from)
     }
 
 }
@@ -5886,11 +5956,71 @@ mod tests {
         })
         .err()
         .ok_or_else(|| io::Error::other("post-commit sync failure was hidden"))?;
+        assert!(error.database_was_published());
+        let error = io::Error::from(error);
         assert!(error.to_string().contains("database published but directory sync failed; durability unknown"));
         assert!(!temporary.exists());
         let mut query = BPlusTreeQuery::<u32, Vec<u8>>::try_new(&destination)?;
         assert_eq!(query.query(&1).map_err(BPlusTreeError::to_io)?, None);
         assert_eq!(query.query(&2).map_err(BPlusTreeError::to_io)?, Some(vec![2]));
+        Ok(())
+    }
+
+    #[test]
+    fn store_sync_failure_after_rename_invalidates_previous_sorted_index() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let destination = dir.path().join("database.db");
+        let index = crate::repository::storage::get_file_path_for_db_index(&destination);
+        let mut old = BPlusTree::new();
+        old.insert(1u32, String::from("old"));
+        let _ = old.store_with_index(&destination, String::clone)?;
+        assert!(index.is_file());
+
+        let mut replacement = BPlusTree::new();
+        replacement.insert(2u32, String::from("new"));
+        let error = replacement
+            .store_exclusive_with_directory_sync(&destination, |_| {
+                Err(io::Error::other("injected directory sync failure"))
+            })
+            .err()
+            .ok_or_else(|| io::Error::other("post-rename sync failure was hidden"))?;
+
+        assert!(error.to_string().contains("publication durability remains unknown"));
+        assert!(!index.exists());
+        assert!(replacement.dirty);
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&destination)?;
+        assert_eq!(query.query(&1).map_err(BPlusTreeError::to_io)?, None);
+        assert_eq!(query.query(&2).map_err(BPlusTreeError::to_io)?, Some(String::from("new")));
+        Ok(())
+    }
+
+    #[test]
+    fn store_reports_sync_and_index_invalidation_failures_together() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let destination = dir.path().join("database.db");
+        let index = crate::repository::storage::get_file_path_for_db_index(&destination);
+        let mut old = BPlusTree::new();
+        old.insert(1u32, String::from("old"));
+        let _ = old.store(&destination)?;
+        fs::create_dir(&index)?;
+
+        let mut replacement = BPlusTree::new();
+        replacement.insert(2u32, String::from("new"));
+        let error = replacement
+            .store_exclusive_with_directory_sync(&destination, |_| {
+                Err(io::Error::other("injected directory sync failure"))
+            })
+            .err()
+            .ok_or_else(|| io::Error::other("publish and index invalidation failures were hidden"))?;
+        let message = error.to_string();
+
+        assert!(message.contains("unknown directory durability"));
+        assert!(message.contains("previous sorted index could not be invalidated"));
+        assert!(index.is_dir());
+        assert!(replacement.dirty);
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&destination)?;
+        assert_eq!(query.query(&1).map_err(BPlusTreeError::to_io)?, None);
+        assert_eq!(query.query(&2).map_err(BPlusTreeError::to_io)?, Some(String::from("new")));
         Ok(())
     }
 
@@ -5902,7 +6032,9 @@ mod tests {
         let temporary = dir.path().join("database.tx.v3.tmp");
         fs::write(&temporary, b"new")?;
 
-        assert!(publish_database(&temporary, &destination, sync_parent_directory).is_err());
+        let error = publish_database(&temporary, &destination, sync_parent_directory)
+            .expect_err("publishing over a directory must fail");
+        assert!(!error.database_was_published());
         assert!(!temporary.exists());
         Ok(())
     }

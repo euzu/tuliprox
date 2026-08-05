@@ -4,7 +4,7 @@ use memmap2::Mmap;
 pub(crate) use memmap2::Advice;
 use std::{
     ffi::OsString,
-    fs::File,
+    fs::{self, File},
     io,
     path::{Path, PathBuf},
 };
@@ -114,6 +114,99 @@ pub(crate) fn sidecar_lock_path(filepath: &Path) -> PathBuf {
         filepath.with_file_name(name)
     } else {
         filepath.with_extension("lock")
+    }
+}
+
+/// Resolves an existing path, or its existing parent plus the not-yet-created leaf.
+///
+/// B+Tree staging names are validated before every artifact exists. Canonicalizing the
+/// parent still collapses `..` components and symlinked directory aliases without
+/// requiring callers to create cleanup-owned files first.
+pub(crate) fn resolved_path_identity(path: &Path) -> io::Result<PathBuf> {
+    match fs::canonicalize(path) {
+        Ok(resolved) => Ok(resolved),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let leaf = path.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("path has no file name for identity resolution: {}", path.display()),
+                )
+            })?;
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            fs::canonicalize(parent)
+                .map(|resolved_parent| resolved_parent.join(leaf))
+                .map_err(|parent_error| {
+                    io::Error::new(
+                        parent_error.kind(),
+                        format!(
+                            "failed to resolve parent directory for path identity {}: {parent_error}",
+                            path.display()
+                        ),
+                    )
+                })
+        }
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("failed to resolve path identity {}: {error}", path.display()),
+        )),
+    }
+}
+
+pub(crate) fn ensure_distinct_sidecar_lock_domains(published: &Path, staging: &Path) -> io::Result<()> {
+    let published_lock = sidecar_lock_path(published);
+    let staging_lock = sidecar_lock_path(staging);
+    let published_identity = resolved_path_identity(&published_lock)?;
+    let staging_identity = resolved_path_identity(&staging_lock)?;
+    if published_identity == staging_identity {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "published database {} and staging database {} share resolved sidecar lock {}",
+                published.display(),
+                staging.display(),
+                published_identity.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn remove_file_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("failed to remove file {}: {error}", path.display()),
+        )),
+    }
+}
+
+pub(crate) fn parent_or_dot(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+pub(crate) fn same_parent_directory(left: &Path, right: &Path) -> bool {
+    parent_or_dot(left) == parent_or_dot(right)
+}
+
+pub(crate) fn require_same_parent_directory(staging: &Path, published: &Path) -> io::Result<()> {
+    if same_parent_directory(staging, published) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "staging path {} and published path {} must share one parent directory",
+                staging.display(),
+                published.display()
+            ),
+        ))
     }
 }
 

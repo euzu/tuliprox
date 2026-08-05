@@ -763,6 +763,43 @@ fn commit_prepared_pages_with_hook(
 }
 
 #[cfg(test)]
+pub(super) fn leave_uncommitted_test_wal_after_database_write(database: &Path) -> io::Result<()> {
+    let mut header_page = [0u8; PAGE_SIZE];
+    File::open(database)?.read_exact(&mut header_page)?;
+    let mut updated_header = DatabaseHeader::decode(&header_page)?;
+    updated_header.generation = updated_header
+        .generation
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("test database generation overflow"))?;
+    let prepared = [(0, updated_header.encode()?)];
+    let commit_result = commit_prepared_pages_with_hook(database, &prepared, |boundary| {
+        if boundary == CommitBoundary::DatabaseWritten {
+            Err(io::Error::other("test fault after database write"))
+        } else {
+            Ok(())
+        }
+    });
+    match commit_result {
+        Err(error) if !error.to_string().contains("test fault after database write") => Err(io::Error::new(
+            error.kind(),
+            format!("test commit for {} failed before the requested boundary: {error}", database.display()),
+        )),
+        Err(error) if !wal_path(database).try_exists()? => Err(io::Error::new(
+            error.kind(),
+            format!(
+                "test commit for {} reached the requested boundary without leaving an active WAL: {error}",
+                database.display()
+            ),
+        )),
+        Err(_) => Ok(()),
+        Ok(()) => Err(io::Error::other(format!(
+            "test commit for {} unexpectedly completed",
+            database.display()
+        ))),
+    }
+}
+
+#[cfg(test)]
 fn commit_prepared_pages_with_hook_under_existing_lock(
     database_path: &Path,
     prepared: &[(u64, [u8; PAGE_SIZE])],
@@ -946,6 +983,26 @@ impl ExclusiveSidecarGuard {
         let file = open_sidecar(database)?;
         file.lock_exclusive()?;
         Ok(Self { _file: file })
+    }
+
+    #[cfg(test)]
+    pub(super) fn acquire_after_observed_contention(
+        database: &Path,
+        on_contention: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<Self> {
+        let file = open_sidecar(database)?;
+        match file.try_lock_exclusive() {
+            Ok(()) => Err(io::Error::other(format!(
+                "expected final B+Tree sidecar lock contention for {}",
+                database.display()
+            ))),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                on_contention()?;
+                file.lock_exclusive()?;
+                Ok(Self { _file: file })
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
