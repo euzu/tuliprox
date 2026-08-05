@@ -1900,10 +1900,10 @@ impl ActiveUserManager {
         }
 
         // Existing uncounted session without a stream: check for a preserved stream.
-        // A preserved stream consumed a slot in the past and must remain evictable.
-        // Returning Exhausted here ensures eviction strategies are evaluated to free the
-        // preserved slot. This fixes the HLS->TS transition bug where preserved HLS
-        // streams were never evicted because strategy evaluation was skipped.
+        // Preserved streams hold no counted slot — `effective_counts_for_admission`
+        // virtually counts them so strategies still treat them as evictable. Return
+        // Exhausted (without committing a new slot) so the eviction path clears the
+        // preserved row before reactivation.
         let has_preserved =
             connection_data.streams.iter().any(|s| s.session_token.as_deref() == Some(session_token) && s.preserved);
 
