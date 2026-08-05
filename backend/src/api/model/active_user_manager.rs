@@ -1900,10 +1900,10 @@ impl ActiveUserManager {
         }
 
         // Existing uncounted session without a stream: check for a preserved stream.
-        // A preserved stream consumed a slot in the past and must remain evictable.
-        // Returning Exhausted here ensures eviction strategies are evaluated to free the
-        // preserved slot. This fixes the HLS->TS transition bug where preserved HLS
-        // streams were never evicted because strategy evaluation was skipped.
+        // Preserved streams hold no counted slot — `effective_counts_for_admission`
+        // virtually counts them so strategies still treat them as evictable. Return
+        // Exhausted (without committing a new slot) so the eviction path clears the
+        // preserved row before reactivation.
         let has_preserved =
             connection_data.streams.iter().any(|s| s.session_token.as_deref() == Some(session_token) && s.preserved);
 
@@ -1912,16 +1912,12 @@ impl ActiveUserManager {
             connection_data,
             connection_data.effective_counts_for_admission(Some(session_token)),
         );
-        let kind = admission.kind.unwrap_or(ConnectionKind::Normal);
-        if admission.permission == UserConnectionPermission::Allowed {
-            let session = &mut connection_data.sessions[session_index];
-            Self::update_session_admission(session, admission.permission, Some(kind));
-            if has_preserved {
-                connection_data.increment_kind(kind);
-            }
-        }
         if has_preserved {
             return ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: admission.kind };
+        }
+        if admission.permission == UserConnectionPermission::Allowed {
+            let session = &mut connection_data.sessions[session_index];
+            Self::update_session_admission(session, admission.permission, admission.kind);
         }
         admission
     }
@@ -4620,6 +4616,187 @@ mod tests {
             t_is_api_user: false,
             network_access: None,
         }
+    }
+
+    fn record_owned_slot(counts: &mut UserConnectionCounts, kind: ConnectionKind) {
+        match kind {
+            ConnectionKind::Normal => counts.normal += 1,
+            ConnectionKind::Soft => counts.soft += 1,
+        }
+    }
+
+    fn assert_connection_ownership_invariants(connection_data: &UserConnectionData) {
+        let mut owned_slots = UserConnectionCounts::default();
+
+        // A counted session owns one logical slot. Active streams tied to that
+        // session validate its kind below, but do not add another slot.
+        for session in connection_data.sessions.iter().filter(|session| session.lifecycle.is_counted()) {
+            record_owned_slot(
+                &mut owned_slots,
+                session.connection_kind.unwrap_or(ConnectionKind::Normal),
+            );
+        }
+
+        for stream in &connection_data.streams {
+            let stream_kind = connection_data.stream_kinds.get(&stream.uid);
+            if stream.preserved {
+                assert!(
+                    stream_kind.is_none(),
+                    "preserved stream {} must not own a real connection slot",
+                    stream.uid
+                );
+                continue;
+            }
+
+            let stream_kind = stream_kind.expect("every active stream must have a connection kind");
+            let counted_session = stream.session_token.as_deref().and_then(|session_token| {
+                connection_data
+                    .sessions
+                    .iter()
+                    .find(|session| session.token == session_token && session.lifecycle.is_counted())
+            });
+            if let Some(session) = counted_session {
+                assert_eq!(
+                    *stream_kind,
+                    session.connection_kind.unwrap_or(ConnectionKind::Normal),
+                    "a counted session and its active stream must use the same slot kind"
+                );
+            } else {
+                record_owned_slot(&mut owned_slots, *stream_kind);
+            }
+        }
+
+        for uid in connection_data.stream_kinds.keys() {
+            assert!(
+                connection_data.streams.iter().any(|stream| stream.uid == *uid && !stream.preserved),
+                "stream kind for uid {uid} must belong to an active stream"
+            );
+        }
+
+        assert_eq!(connection_data.counts.normal, owned_slots.normal, "normal slots must match their owners");
+        assert_eq!(connection_data.counts.soft, owned_slots.soft, "soft slots must match their owners");
+        assert_eq!(
+            connection_data.connections,
+            connection_data.counts.normal + u32::from(connection_data.counts.soft),
+            "aggregate connection count must equal the normal and soft counters"
+        );
+    }
+
+    fn assert_no_real_connection_slots(connection_data: &UserConnectionData) {
+        assert_eq!(connection_data.connections, 0);
+        assert_eq!(connection_data.counts.normal, 0);
+        assert_eq!(connection_data.counts.soft, 0);
+        assert_connection_ownership_invariants(connection_data);
+    }
+
+    fn assert_active_stream_kind(
+        connection_data: &UserConnectionData,
+        stream_uid: u32,
+        expected_kind: ConnectionKind,
+    ) {
+        assert!(
+            connection_data.streams.iter().any(|stream| stream.uid == stream_uid && !stream.preserved),
+            "stream {stream_uid} must remain active"
+        );
+        assert_eq!(connection_data.stream_kinds.get(&stream_uid), Some(&expected_kind));
+    }
+
+    fn assert_single_normal_stream_slot(connection_data: &UserConnectionData, stream_uid: u32) {
+        assert_eq!(connection_data.connections, 1);
+        assert_eq!(connection_data.counts.normal, 1);
+        assert_eq!(connection_data.counts.soft, 0);
+        assert_active_stream_kind(connection_data, stream_uid, ConnectionKind::Normal);
+        assert_connection_ownership_invariants(connection_data);
+    }
+
+    fn assert_preserved_session_is_uncounted(
+        connection_data: &UserConnectionData,
+        session_token: &str,
+        stream_uid: u32,
+    ) {
+        let session = connection_data
+            .sessions
+            .iter()
+            .find(|session| session.token == session_token)
+            .expect("preserved session must exist");
+        assert_eq!(session.lifecycle, PlaybackLifecycle::Preserved);
+
+        let stream = connection_data
+            .streams
+            .iter()
+            .find(|stream| stream.uid == stream_uid)
+            .expect("preserved stream must exist");
+        assert!(stream.preserved);
+        assert_eq!(stream.session_token.as_deref(), Some(session_token));
+        assert!(!connection_data.stream_kinds.contains_key(&stream_uid));
+    }
+
+    async fn commit_and_preserve_adaptive_session(
+        manager: &ActiveUserManager,
+        user: &ProxyUserCredentials,
+        session_token: &str,
+        stream_uid: u32,
+        addr: SocketAddr,
+        connection_kind: ConnectionKind,
+    ) {
+        let fingerprint = Fingerprint::new(
+            format!("fp-preserved-{stream_uid}"),
+            addr.ip().to_string(),
+            addr,
+        );
+
+        manager.add_connection(&addr).await;
+        manager
+            .create_user_session(CreateUserSessionParams {
+                user,
+                session_token,
+                virtual_id: stream_uid,
+                provider: "provider-a",
+                stream_url: "http://localhost/live-preserved.m3u8",
+                addr: &addr,
+                connection_permission: UserConnectionPermission::Allowed,
+                connection_kind: Some(connection_kind),
+                socket_bound: false,
+            })
+            .await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: stream_uid,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind,
+                priority: user.priority,
+                soft_priority: user.soft_priority,
+                fingerprint: &fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_adaptive_channel(stream_uid),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: Some(session_token),
+            })
+            .await
+            .expect("adaptive session stream should bind");
+
+        {
+            let connections = manager.connections.read().await;
+            let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+            let session = connection_data
+                .sessions
+                .iter()
+                .find(|session| session.token == session_token)
+                .expect("committed session must exist");
+            assert_eq!(session.lifecycle, PlaybackLifecycle::Active);
+            assert_eq!(connection_data.stream_kinds.get(&stream_uid), Some(&connection_kind));
+            assert_connection_ownership_invariants(connection_data);
+        }
+
+        assert!(manager.release_stream(&addr).await.is_none(), "adaptive stream should be preserved");
+
+        let connections = manager.connections.read().await;
+        let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+        assert_preserved_session_is_uncounted(connection_data, session_token, stream_uid);
+        assert_connection_ownership_invariants(connection_data);
     }
 
     #[tokio::test]
@@ -8040,65 +8217,350 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preserved_session_activation_accounts_reserved_slot_before_exhausted_return() {
+    async fn preserved_reactivation_admission_does_not_create_ownerless_counted_slot() {
         let config = Config::default();
         let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
         let event_manager = Arc::new(EventManager::new());
         let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
 
-        let mut user = ProxyUserCredentials::default();
-        user.username = String::from("user-preserved-activation-accounting");
-        user.max_connections = 1;
+        let user = test_user_credentials("user-preserved-activation", 1, 0);
         let addr: SocketAddr = "127.0.0.1:55195".parse().unwrap();
-        let fingerprint = Fingerprint::new("fp-preserved-accounting".to_string(), "127.0.0.1".to_string(), addr);
+        let session_token = "tok-preserved-activation";
+        let stream_uid = 501;
 
-        manager.add_connection(&addr).await;
-        manager
-            .create_user_session(CreateUserSessionParams {
-                user: &user,
-                session_token: "tok-preserved-accounting",
-                virtual_id: 9206,
-                provider: "provider-a",
-                stream_url: "http://localhost/live-preserved.m3u8",
-                addr: &addr,
-                connection_permission: UserConnectionPermission::Allowed,
-                connection_kind: Some(ConnectionKind::Normal),
-                socket_bound: false,
-            })
+        commit_and_preserve_adaptive_session(
+            &manager,
+            &user,
+            session_token,
+            stream_uid,
+            addr,
+            ConnectionKind::Normal,
+        )
+        .await;
+
+        let virtual_admission = manager
+            .connection_admission(&user.username, user.max_connections, user.soft_connections)
             .await;
-        manager
-            .update_connection(ActiveUserConnectionParams {
-                uid: 501,
-                meter_uid: 0,
-                username: &user.username,
-                max_connections: user.max_connections,
-                soft_connections: 0,
-                connection_kind: ConnectionKind::Normal,
-                priority: 0,
-                soft_priority: 0,
-                fingerprint: &fingerprint,
-                provider: "provider-a".intern(),
-                stream_channel: &test_adaptive_channel(9206),
-                user_agent: Cow::Borrowed("ua"),
-                session_token: Some("tok-preserved-accounting"),
-            })
-            .await
-            .expect("session stream should bind");
-        assert!(manager.release_stream(&addr).await.is_none(), "adaptive stream should be preserved");
+        assert_eq!(virtual_admission.permission, UserConnectionPermission::Exhausted);
 
         let admission = manager
             .connection_admission_for_session_activation(
                 &user.username,
                 user.max_connections,
-                0,
-                "tok-preserved-accounting",
+                user.soft_connections,
+                session_token,
             )
             .await;
 
         assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(admission.kind, Some(ConnectionKind::Normal));
         let connections = manager.connections.read().await;
         let connection_data = connections.by_key.get(&user.username).expect("user connection data");
-        assert_eq!(connection_data.counts.normal, 1);
+        assert_preserved_session_is_uncounted(connection_data, session_token, stream_uid);
+        assert_no_real_connection_slots(connection_data);
+    }
+
+    #[tokio::test]
+    async fn preserved_reactivation_admission_then_kicked_release_removes_state_without_ghost_counter() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let user = test_user_credentials("user-preserved-eviction", 1, 0);
+        let addr: SocketAddr = "127.0.0.1:55201".parse().unwrap();
+        let session_token = "tok-preserved-eviction";
+        let stream_uid = 601;
+
+        commit_and_preserve_adaptive_session(
+            &manager,
+            &user,
+            session_token,
+            stream_uid,
+            addr,
+            ConnectionKind::Normal,
+        )
+        .await;
+        let admission = manager
+            .connection_admission_for_session_activation(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                session_token,
+            )
+            .await;
+        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        {
+            let connections = manager.connections.read().await;
+            let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+            assert_preserved_session_is_uncounted(connection_data, session_token, stream_uid);
+            assert_no_real_connection_slots(connection_data);
+        }
+
+        let released = manager.release_connection_as_kicked(&addr).await;
+        assert!(released.addr_removed);
+        assert_eq!(released.removed_streams.len(), 1);
+        let removed_stream = released.removed_streams.first().expect("kicked release must remove the preserved stream");
+        assert_eq!(removed_stream.uid, stream_uid);
+        assert!(removed_stream.preserved);
+        assert_eq!(removed_stream.session_token.as_deref(), Some(session_token));
+
+        let connections = manager.connections.read().await;
+        let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+        assert!(connection_data.streams.iter().all(|stream| stream.uid != stream_uid));
+        assert!(connection_data.sessions.iter().all(|session| session.token != session_token));
+        assert!(!connection_data.stream_kinds.contains_key(&stream_uid));
+        assert_no_real_connection_slots(connection_data);
+        drop(connections);
+        assert_eq!(manager.active_users_and_connections().await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn preserved_reactivation_admission_then_lease_idle_cleanup_leaves_counters_at_zero() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let user = test_user_credentials("user-preserved-idle-cleanup", 1, 0);
+        let addr: SocketAddr = "127.0.0.1:55202".parse().unwrap();
+        let session_token = "tok-preserved-idle-cleanup";
+        let stream_uid = 602;
+
+        commit_and_preserve_adaptive_session(
+            &manager,
+            &user,
+            session_token,
+            stream_uid,
+            addr,
+            ConnectionKind::Normal,
+        )
+        .await;
+        let admission = manager
+            .connection_admission_for_session_activation(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                session_token,
+            )
+            .await;
+        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        {
+            let connections = manager.connections.read().await;
+            let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+            assert_preserved_session_is_uncounted(connection_data, session_token, stream_uid);
+            assert_no_real_connection_slots(connection_data);
+        }
+
+        // Shared-HLS lease-idle cleanup delegates to this manager operation.
+        let counter_changed = manager
+            .release_session_streams_and_counted_reservation(&user.username, session_token)
+            .await;
+        assert!(!counter_changed, "removing an uncounted preserved stream must not change real counters");
+
+        let connections = manager.connections.read().await;
+        let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+        assert!(connection_data.streams.iter().all(|stream| stream.uid != stream_uid));
+        assert!(connection_data
+            .sessions
+            .iter()
+            .find(|session| session.token == session_token)
+            .is_some_and(|session| session.lifecycle == PlaybackLifecycle::Preserved));
+        assert!(!connection_data.stream_kinds.contains_key(&stream_uid));
+        assert_no_real_connection_slots(connection_data);
+        drop(connections);
+        assert_eq!(manager.active_users_and_connections().await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn repeated_preserved_reactivation_cleanup_does_not_accumulate_connections() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let user = test_user_credentials("user-preserved-repeat", 4, 0);
+        for (session_token, stream_uid, addr) in [
+            ("tok-preserved-repeat-one", 603, "127.0.0.1:55203"),
+            ("tok-preserved-repeat-two", 604, "127.0.0.1:55204"),
+        ] {
+            let addr = addr.parse().unwrap();
+            commit_and_preserve_adaptive_session(
+                &manager,
+                &user,
+                session_token,
+                stream_uid,
+                addr,
+                ConnectionKind::Normal,
+            )
+            .await;
+
+            let admission = manager
+                .connection_admission_for_session_activation(
+                    &user.username,
+                    user.max_connections,
+                    user.soft_connections,
+                    session_token,
+                )
+                .await;
+            assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+
+            let counter_changed = manager
+                .release_session_streams_and_counted_reservation(&user.username, session_token)
+                .await;
+            assert!(!counter_changed, "cleanup must not release a slot that was never committed");
+
+            let connections = manager.connections.read().await;
+            let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+            assert_no_real_connection_slots(connection_data);
+            drop(connections);
+            assert_eq!(manager.active_users_and_connections().await, (0, 0));
+        }
+    }
+
+    #[tokio::test]
+    async fn dashboard_counts_only_real_slots_during_preserved_reactivation_admission() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let user = test_user_credentials("user-preserved-dashboard", 1, 0);
+        let addr: SocketAddr = "127.0.0.1:55205".parse().unwrap();
+        let session_token = "tok-preserved-dashboard";
+        let stream_uid = 605;
+
+        commit_and_preserve_adaptive_session(
+            &manager,
+            &user,
+            session_token,
+            stream_uid,
+            addr,
+            ConnectionKind::Normal,
+        )
+        .await;
+        assert_eq!(manager.active_users_and_connections().await, (0, 0));
+
+        let admission = manager
+            .connection_admission_for_session_activation(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                session_token,
+            )
+            .await;
+        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(manager.active_users_and_connections().await, (0, 0));
+
+        let connections = manager.connections.read().await;
+        let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+        assert_preserved_session_is_uncounted(connection_data, session_token, stream_uid);
+        assert_no_real_connection_slots(connection_data);
+    }
+
+    #[tokio::test]
+    async fn preserved_soft_reactivation_and_cleanup_leave_normal_slot_unchanged() {
+        let config = Config::default();
+        let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+        let event_manager = Arc::new(EventManager::new());
+        let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
+
+        let user = test_user_credentials("user-preserved-soft", 1, 1);
+        let normal_addr: SocketAddr = "127.0.0.1:55206".parse().unwrap();
+        let normal_fingerprint =
+            Fingerprint::new("fp-preserved-soft-normal".to_string(), normal_addr.ip().to_string(), normal_addr);
+        let soft_addr: SocketAddr = "127.0.0.1:55207".parse().unwrap();
+        let normal_stream_uid = 606;
+        let session_token = "tok-preserved-soft";
+        let soft_stream_uid = 607;
+
+        manager.add_connection(&normal_addr).await;
+        manager
+            .update_connection(ActiveUserConnectionParams {
+                uid: normal_stream_uid,
+                meter_uid: 0,
+                username: &user.username,
+                max_connections: user.max_connections,
+                soft_connections: user.soft_connections,
+                connection_kind: ConnectionKind::Normal,
+                priority: user.priority,
+                soft_priority: user.soft_priority,
+                fingerprint: &normal_fingerprint,
+                provider: "provider-a".intern(),
+                stream_channel: &test_channel(normal_stream_uid),
+                user_agent: Cow::Borrowed("ua"),
+                session_token: None,
+            })
+            .await
+            .expect("normal stream should bind");
+        {
+            let connections = manager.connections.read().await;
+            let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+            assert_single_normal_stream_slot(connection_data, normal_stream_uid);
+        }
+
+        commit_and_preserve_adaptive_session(
+            &manager,
+            &user,
+            session_token,
+            soft_stream_uid,
+            soft_addr,
+            ConnectionKind::Soft,
+        )
+        .await;
+        {
+            let connections = manager.connections.read().await;
+            let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+            assert_preserved_session_is_uncounted(connection_data, session_token, soft_stream_uid);
+            assert_single_normal_stream_slot(connection_data, normal_stream_uid);
+        }
+
+        let admission = manager
+            .connection_admission_for_session_activation(
+                &user.username,
+                user.max_connections,
+                user.soft_connections,
+                session_token,
+            )
+            .await;
+        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(admission.kind, Some(ConnectionKind::Soft));
+
+        {
+            let connections = manager.connections.read().await;
+            let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+            assert_preserved_session_is_uncounted(connection_data, session_token, soft_stream_uid);
+            assert_single_normal_stream_slot(connection_data, normal_stream_uid);
+        }
+
+        let counter_changed = manager
+            .release_session_streams_and_counted_reservation(&user.username, session_token)
+            .await;
+        assert!(!counter_changed, "preserved soft cleanup must not release an uncommitted slot");
+        {
+            let connections = manager.connections.read().await;
+            let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+            assert!(connection_data.streams.iter().all(|stream| stream.uid != soft_stream_uid));
+            assert!(!connection_data.stream_kinds.contains_key(&soft_stream_uid));
+            assert!(connection_data
+                .sessions
+                .iter()
+                .find(|session| session.token == session_token)
+                .is_some_and(|session| session.lifecycle == PlaybackLifecycle::Preserved));
+            assert_single_normal_stream_slot(connection_data, normal_stream_uid);
+        }
+
+        manager
+            .release_stream_by_uid(&normal_addr, normal_stream_uid)
+            .await
+            .expect("normal stream should release");
+        let connections = manager.connections.read().await;
+        let connection_data = connections.by_key.get(&user.username).expect("user connection data");
+        assert!(connection_data.streams.is_empty());
+        assert!(connection_data.stream_kinds.is_empty());
+        assert_no_real_connection_slots(connection_data);
+        drop(connections);
+        assert_eq!(manager.active_users_and_connections().await, (0, 0));
     }
 
     #[tokio::test]

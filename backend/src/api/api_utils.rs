@@ -9450,6 +9450,12 @@ mod tests {
             .await;
 
         app_state.connection_manager.release_connection(&hls_addr).await;
+        assert_eq!(
+            app_state.active_users.user_connections(&user.username).await,
+            0,
+            "the preserved HLS playback must reserve capacity only virtually"
+        );
+        assert_eq!(app_state.active_users.active_users_and_connections().await, (0, 0));
         assert!(
             app_state.active_users.get_and_update_user_session(&user.username, &hls_token).await.is_some(),
             "preserved HLS session should still exist before the competing TS request"
@@ -9493,6 +9499,12 @@ mod tests {
                 .is_none(),
             "the competing TS activation must remove the old preserved HLS session even though there is no live socket left to kick"
         );
+        assert_eq!(
+            app_state.active_users.user_connections(&user.username).await,
+            0,
+            "eviction must not leave a real slot before the TS stream commits"
+        );
+        assert_eq!(app_state.active_users.active_users_and_connections().await, (0, 0));
 
         app_state.connection_manager.add_connection(&ts_addr).await;
         app_state
@@ -9527,6 +9539,14 @@ mod tests {
             })
             .await;
 
+        assert_eq!(app_state.active_users.user_connections(&user.username).await, 1);
+        assert_eq!(app_state.active_users.active_users_and_connections().await, (1, 1));
+        let active_streams = app_state.active_users.active_streams().await;
+        assert_eq!(active_streams.len(), 1);
+        assert_eq!(
+            active_streams.first().and_then(|stream| stream.session_token.as_deref()),
+            Some(ts_token.as_str())
+        );
         assert!(
             app_state
                 .active_users
