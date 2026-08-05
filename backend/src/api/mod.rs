@@ -11,3 +11,4 @@ pub mod main_api;
 mod serve;
 mod sys_usage;
 mod tasks;
+pub(crate) mod static_headers;

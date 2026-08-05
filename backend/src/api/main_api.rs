@@ -58,7 +58,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
-use tower_http::compression::predicate::{DefaultPredicate, Predicate};
+use tower_http::compression::predicate::{DefaultPredicate, Predicate, SizeAbove};
 use tower_http::services::ServeDir;
 
 const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
@@ -466,22 +466,32 @@ fn allow_response_compression(
 ) -> bool {
     if let Some(content_type) = headers.get(axum::http::header::CONTENT_TYPE) {
         if let Ok(ct) = content_type.to_str() {
-        // Disable compression for wasm , WebKit browser dont like it.
-            if ct.starts_with("application/wasm") {
+            // Disable compression for wasm , WebKit browser dont like it.
+            // Also skip compression for binary, already-compressed, or non-compressible types.
+            if ct.starts_with("application/wasm")
+                || ct.starts_with("video/")
+                || ct.starts_with("audio/")
+                || ct.starts_with("image/")
+                || ct.starts_with("application/octet-stream")
+            {
                 return false;
             }
         }
     }
+    // Body-aware 1 KiB cutoff lives on `SizeAbove` in the outer predicate
+    // chain. This closure only handles the content-type and extension checks.
     crate::api::api_utils::should_compress_response_extensions(extensions)
 }
 
 fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl Predicate> {
-    let predicate = DefaultPredicate::new().and(allow_response_compression);
+    let predicate = DefaultPredicate::new()
+        .and(SizeAbove::new(1024))
+        .and(allow_response_compression);
     tower_http::compression::CompressionLayer::new()
-        .br(true)
+        .br(false)
         .deflate(true)
         .gzip(true)
-        .zstd(true)
+        .zstd(false)
         .compress_when(predicate)
 }
 

@@ -1148,6 +1148,14 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
                         staging_path.display()
                     ))
                 })?;
+                // Commit per batch so the write transaction's dirty-page map stays bounded.
+                // Holding it open for the whole cluster buffered ~48k pages (196 MB); the
+                // import writes into a .tmp file that is renamed on success, so atomicity
+                // comes from the rename, not from a single transaction.
+                tree.commit().map_err(|e| {
+                    error!("Batch commit failed for cluster {cluster}: {e}");
+                    TuliproxError::RepositoryXtream(format!("Commit failed {e}"))
+                })?;
                 buffer.clear();
             }
         }
@@ -1337,9 +1345,14 @@ fn sync_published_file_parent(path: &Path) -> io::Result<()> {
     File::open(crate::repository::bplustree::common::parent_or_dot(path))?.sync_all()
 }
 
+/// Windows (NTFS) and other non-Unix targets open directories as files for
+/// `sync_all`, just as Unix does. The durability barrier is required after
+/// every rename so a power loss cannot leave the directory entry pointing at
+/// the pre-rename file.
 #[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
-fn sync_published_file_parent(_path: &Path) -> io::Result<()> { Ok(()) }
+fn sync_published_file_parent(path: &Path) -> io::Result<()> {
+    File::open(crate::repository::bplustree::common::parent_or_dot(path))?.sync_all()
+}
 
 /// Owns the staging category file plus its `flock`, so the lock is released
 /// even when a later step (`serde_json::to_writer`, `sync_all`) returns an

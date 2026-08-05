@@ -1,9 +1,11 @@
 use crate::model::Config;
+use crate::repository::bplustree::common::sidecar_lock_path;
 use crate::repository::storage_const;
 use crate::utils;
+use fs2::FileExt;
+use shared::concat_string;
 use shared::error::TuliproxError;
 use std::path::{Path, PathBuf};
-use shared::concat_string;
 
 pub fn get_target_id_mapping_file(target_path: &Path) -> PathBuf {
     // Join directly with &str to avoid an intermediate PathBuf allocation
@@ -151,6 +153,33 @@ pub(crate) fn cleanup_orphaned_staging_artifacts(storage_path: &Path, min_age: s
             );
             continue;
         }
+        // Cross-process safety: an active refresh holds an exclusive `flock` on the
+        // staging sidecar lock file. A non-blocking attempt that fails means another
+        // process (or a still-active older lease in this process) owns the artifact,
+        // even if the mtime looks stale.
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(sidecar_lock_path(&entry.path()))
+        {
+            Ok(lock_file) => if let Ok(()) = lock_file.try_lock_exclusive() {
+                let _ = lock_file.unlock();
+            } else {
+                log::debug!(
+                    "Skipping refresh artifact {} owned by an active generation",
+                    entry.path().display()
+                );
+                continue;
+            },
+            Err(error) => {
+                log::debug!(
+                    "Skipping refresh artifact {}: sidecar lock probe failed: {error}",
+                    entry.path().display()
+                );
+                continue;
+            }
+        }
         if let Err(error) = std::fs::remove_file(entry.path()) {
             log::warn!(
                 "Failed to remove orphaned refresh artifact {}: {error}",
@@ -164,12 +193,17 @@ pub(crate) fn cleanup_orphaned_staging_artifacts(storage_path: &Path, min_age: s
 
 fn is_orphan_staging_name(leaf: &str) -> bool {
     // `<stem>.refresh-<uuid>.<ext>`. The UUID is 32 lowercase hex chars via
-    // `Uuid::simple()`; requiring hex keeps operators safe from accidental
-    // matches on filenames that happen to contain `.refresh-`.
+    // `Uuid::simple()`; requiring the dot boundary after the 32 hex chars and
+    // lowercase-only hex keeps operators safe from accidental matches on
+    // filenames that happen to contain `.refresh-`.
     leaf.match_indices(".refresh-").any(|(index, _)| {
         let after = &leaf[index + ".refresh-".len()..];
-        let uuid_len = after.as_bytes().iter().take_while(|byte| byte.is_ascii_hexdigit()).count();
-        uuid_len == 32
+        let uuid_bytes = after.as_bytes();
+        if uuid_bytes.len() < 33 || uuid_bytes[32] != b'.' {
+            return false;
+        }
+        let uuid = &uuid_bytes[..32];
+        uuid.iter().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
     })
 }
 
@@ -185,6 +219,7 @@ pub fn get_file_path_for_db_index(db_path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{cleanup_orphaned_staging_artifacts, is_orphan_staging_name};
+    use fs2::FileExt;
     use std::{
         fs,
         path::Path,
@@ -198,6 +233,21 @@ mod tests {
         assert!(!is_orphan_staging_name("live.db"));
         assert!(!is_orphan_staging_name("cat_live.json"));
         assert!(!is_orphan_staging_name("live.refresh-fixed.db"));
+    }
+
+    #[test]
+    fn orphan_pattern_rejects_missing_extension_boundary() {
+        // 32 hex chars but no dot boundary after them — must not match.
+        assert!(!is_orphan_staging_name("live.refresh-0d8f0d8f0d8f0d8f0d8f0d8f0d8f0d8fdb"));
+        // 32 hex chars plus extra suffix with no extension — must not match.
+        assert!(!is_orphan_staging_name("live.refresh-0d8f0d8f0d8f0d8f0d8f0d8f0d8f0d8fX"));
+    }
+
+    #[test]
+    fn orphan_pattern_rejects_uppercase_hex_identifiers() {
+        // Uppercase hex must be rejected — `Uuid::simple()` always emits lowercase.
+        assert!(!is_orphan_staging_name("live.refresh-0D8F0D8F0D8F0D8F0D8F0D8F0D8F0D8F.db"));
+        assert!(!is_orphan_staging_name("live.refresh-0d8f0d8f0d8f0d8f0d8f0D8F0D8F0D8F.db"));
     }
 
     fn touch_with_age(path: &Path, age: Duration) {
@@ -244,5 +294,27 @@ mod tests {
         assert!(active.exists(), "in-flight staging must survive");
         assert!(!orphan_db.exists());
         assert!(!orphan_cat.exists());
+    }
+
+    #[test]
+    fn cleanup_skips_active_generation_older_than_min_age() {
+        // An in-flight refresh that exceeds `min_age` because it is unusually slow
+        // must not be reaped: the sidecar lock proves another owner is still alive.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let active = dir.path().join("live.refresh-44444444444444444444444444444444.db");
+        let sidecar = dir.path().join(".live.refresh-44444444444444444444444444444444.lock");
+
+        touch_with_age(&active, Duration::from_secs(3600));
+        let lock_file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&sidecar)
+            .expect("open sidecar");
+        lock_file.lock_exclusive().expect("acquire active lease");
+
+        cleanup_orphaned_staging_artifacts(dir.path(), Duration::from_secs(600));
+
+        assert!(active.exists(), "active generation older than min_age must survive");
     }
 }

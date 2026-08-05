@@ -39,7 +39,7 @@ use std::{
     },
 };
 use tokio::sync::{oneshot, Mutex, RwLock};
-use tower_http::{compression::predicate::{DefaultPredicate, Predicate}, services::ServeDir};
+use tower_http::{compression::predicate::{DefaultPredicate, Predicate, SizeAbove}, services::ServeDir};
 
 const DEFAULT_SETUP_HOST: &str = "0.0.0.0";
 
@@ -855,7 +855,12 @@ async fn setup_complete_inner(
 }
 
 fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl Predicate> {
-    let predicate = DefaultPredicate::new().and(|
+    // Body-aware 1 KiB cutoff is delegated to `SizeAbove` so the two layers
+    // share the same size-detection logic (Content-Length first, then
+    // Body::size_hint::exact, defaulting to compress when size is unknown).
+    let predicate = DefaultPredicate::new()
+        .and(SizeAbove::new(1024))
+        .and(|
         _status: axum::http::StatusCode,
         _version: axum::http::Version,
         headers: &axum::http::HeaderMap,
@@ -863,8 +868,14 @@ fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl 
     | {
         if let Some(content_type) = headers.get(axum::http::header::CONTENT_TYPE) {
             if let Ok(ct) = content_type.to_str() {
-                    // Disable compression for wasm , WebKit browser dont like it.
-                if ct.starts_with("application/wasm") {
+                // Disable compression for wasm , WebKit browser dont like it.
+                // Also skip compression for binary, already-compressed, or non-compressible types.
+                if ct.starts_with("application/wasm")
+                    || ct.starts_with("video/")
+                    || ct.starts_with("audio/")
+                    || ct.starts_with("image/")
+                    || ct.starts_with("application/octet-stream")
+                {
                     return false;
                 }
             }
@@ -872,10 +883,10 @@ fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl 
         true
     });
     tower_http::compression::CompressionLayer::new()
-        .br(true)
+        .br(false)
         .deflate(true)
         .gzip(true)
-        .zstd(true)
+        .zstd(false)
         .compress_when(predicate)
 }
 

@@ -5,6 +5,33 @@ use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::{io, sync::Arc};
 
+/// Formats a JSON number into a stack buffer and parses it, without touching the heap.
+///
+/// `serde_json` renders numbers via `itoa`/`ryu`, so the longest possible output is
+/// `-1.7976931348623157e-308` at 24 bytes; 32 leaves headroom. Deliberately takes
+/// `&Number` rather than `impl Display` — `Display for f64` writes `f64::MIN` as 310
+/// bytes of decimal expansion, which would silently truncate to `None`.
+struct StackNumber {
+    buf: [u8; 32],
+    len: usize,
+}
+
+impl std::fmt::Write for StackNumber {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let end = self.len.checked_add(text.len()).ok_or(std::fmt::Error)?;
+        self.buf.get_mut(self.len..end).ok_or(std::fmt::Error)?.copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+fn parse_number<T: std::str::FromStr>(number: &serde_json::Number) -> Option<T> {
+    use std::fmt::Write;
+    let mut out = StackNumber { buf: [0; 32], len: 0 };
+    write!(out, "{number}").ok()?;
+    std::str::from_utf8(out.buf.get(..out.len)?).ok()?.parse().ok()
+}
+
 fn value_to_string_array(value: &[Value]) -> Vec<Arc<str>> { value.iter().filter_map(value_to_arc_str).collect() }
 
 fn value_to_arc_str(v: &Value) -> Option<Arc<str>> {
@@ -86,14 +113,7 @@ where
         Value::Null => Ok(None),
 
         // its a number
-        Value::Number(n) => {
-            let s = n.to_string();
-            if let Ok(r) = s.parse::<T>() {
-                Ok(Some(r))
-            } else {
-                Ok(None)
-            }
-        }
+        Value::Number(n) => Ok(parse_number(&n)),
 
         // String -> extract first number
         Value::String(s) => {
@@ -417,4 +437,36 @@ where
     // the xtream api uses padding!
     let encoded = general_purpose::STANDARD.encode(value.as_bytes());
     serializer.serialize_str(&encoded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_number;
+    use serde_json::Number;
+
+    /// The stack buffer must hold every number `serde_json` can render. If a future
+    /// serde_json bump changes the float formatting, this fails instead of silently
+    /// turning large values into `None`.
+    #[test]
+    fn parse_number_matches_to_string_roundtrip_at_the_extremes() {
+        for value in [0u64, 1, 42, u64::from(u32::MAX), u64::MAX] {
+            let number = Number::from(value);
+            assert_eq!(parse_number::<u64>(&number), number.to_string().parse().ok(), "u64 {value}");
+        }
+        for value in [i64::MIN, -1, 0, i64::MAX] {
+            let number = Number::from(value);
+            assert_eq!(parse_number::<i64>(&number), number.to_string().parse().ok(), "i64 {value}");
+        }
+        for value in [f64::MIN, -f64::MIN_POSITIVE, -0.5, 0.0, 4.7, f64::MAX] {
+            let Some(number) = Number::from_f64(value) else {
+                panic!("{value} is not representable as a JSON number");
+            };
+            assert_eq!(parse_number::<f64>(&number), number.to_string().parse().ok(), "f64 {value}");
+        }
+    }
+
+    #[test]
+    fn parse_number_returns_none_instead_of_panicking_on_type_mismatch() {
+        assert_eq!(parse_number::<u32>(&Number::from(-1i64)), None);
+    }
 }
