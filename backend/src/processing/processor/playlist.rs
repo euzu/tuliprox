@@ -1571,10 +1571,46 @@ async fn finalize_prepared_target(
             step.tick("group watches");
             log_memory_snapshot(format!("target '{}' after_group_watches", target.name).as_str());
         }
+        let merged_epg = if ctx.config.config.load().disk_based_processing {
+            // Per-source drain to disk, then multi-way merge. Mirrors the
+            // first-source-wins behaviour of `flatten_tvguide` (which loses
+            // per-channel priority metadata in the Epg round-trip anyway —
+            // pre-existing limitation we deliberately match here).
+            let dir = tempfile::tempdir().ok();
+            let sources: Vec<_> = new_epg
+                .into_iter()
+                .enumerate()
+                .filter_map(|(source_order, guide)| {
+                    let dir = dir.as_ref()?;
+                    let mut acc = crate::processing::parser::xmltv::EpgMergeAccumulator::new();
+                    acc.set_attributes_if_preferred(guide.priority, source_order, guide.attributes);
+                    for channel in guide.children {
+                        acc.add_channel_with_programmes(
+                            guide.priority,
+                            source_order,
+                            guide.logo_override,
+                            std::sync::Arc::unwrap_or_clone(channel),
+                        );
+                    }
+                    let path = dir.path().join(format!("epg-src-{source_order}.db"));
+                    acc.finish_into_disk(path).ok()
+                })
+                .collect();
+            if sources.is_empty() {
+                None
+            } else {
+                crate::processing::parser::xmltv::merge_epg_trees(sources)
+                    .ok()
+                    .flatten()
+                    .map(|(epg, _)| epg)
+            }
+        } else {
+            flatten_tvguide(new_epg)
+        };
         let result = persist_playlist(
             &ctx.config,
             &mut flat_new_playlist,
-            flatten_tvguide(new_epg).as_ref(),
+            merged_epg.as_ref(),
             target,
             ctx.playlist_state.as_ref(),
         )
