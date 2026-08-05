@@ -6,12 +6,15 @@ use super::{
     },
 };
 use crate::repository::{
-    bplustree::common::{ensure_distinct_sidecar_lock_domains, resolved_path_identity, sidecar_lock_path},
+    bplustree::common::{
+        ensure_distinct_sidecar_lock_domains, remove_file_if_exists, require_same_parent_directory,
+        resolved_path_identity, sidecar_lock_path,
+    },
     storage::get_file_path_for_db_index,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
-    fs, io,
+    io,
     path::{Path, PathBuf},
 };
 
@@ -101,29 +104,6 @@ impl BPlusTreeStagingArtifacts {
     }
 }
 
-fn remove_file_if_exists(path: &Path) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(io::Error::new(
-            error.kind(),
-            format!("failed to remove B+Tree staging artifact {}: {error}", path.display()),
-        )),
-    }
-}
-
-fn same_parent_directory(left: &Path, right: &Path) -> bool {
-    let left_parent = left
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let right_parent = right
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    left_parent == right_parent
-}
-
 fn publish_staged_database_inner<K, V>(
     staging: &Path,
     published: &Path,
@@ -179,16 +159,7 @@ where
     V: Serialize + DeserializeOwned,
 {
     let staging_artifacts = BPlusTreeStagingArtifacts::new(published, staging)?;
-    if !same_parent_directory(staging, published) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "staging database {} and published database {} must share one parent directory",
-                staging.display(),
-                published.display()
-            ),
-        ));
-    }
+    require_same_parent_directory(staging, published)?;
     let publish_result = publish_staged_database_inner::<K, V>(
         staging,
         published,

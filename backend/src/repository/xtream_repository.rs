@@ -5,7 +5,7 @@ use crate::model::{Config, ConfigTarget};
 use crate::model::{ConfigInput, PlaylistXtreamCategory};
 use crate::processing::parser::xtream;
 use crate::repository::bplustree::{
-    common::ensure_distinct_sidecar_lock_domains,
+    common::{ensure_distinct_sidecar_lock_domains, remove_file_if_exists},
     v3::{publish_staged_database, BPlusTreeStagingArtifacts},
     BPlusTree, BPlusTreeError, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy,
 };
@@ -807,11 +807,8 @@ impl XtreamRefreshPaths {
         let published_database = xtream_get_file_path(storage_path, cluster);
         let published_categories = get_collection_path(storage_path, xtream_cluster_category_collection(cluster));
         let staging_database = refresh_staging_path(&published_database, generation)?;
-        ensure_distinct_sidecar_lock_domains(&published_database, &staging_database).map_err(|error| {
-            TuliproxError::RepositoryXtream(format!(
-                "Invalid Xtream refresh paths for {cluster}: {error}"
-            ))
-        })?;
+        // The lock-domain check is repeated by `XtreamRefreshLease::new` with a stricter
+        // aliasing scan; doing it here too would canonicalize the same paths twice.
         Ok(Self {
             generation,
             staging_database,
@@ -894,17 +891,6 @@ impl Drop for XtreamRefreshLeaseInner {
                 self.paths.staging_categories.display()
             );
         }
-    }
-}
-
-fn remove_file_if_exists(path: &Path) -> io::Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(io::Error::new(
-            error.kind(),
-            format!("failed to remove Xtream staging file {}: {error}", path.display()),
-        )),
     }
 }
 
@@ -1325,24 +1311,8 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
 }
 
 fn publish_staged_file_same_directory(staging: &Path, published: &Path) -> io::Result<()> {
-    let staging_parent = staging
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let published_parent = published
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    if staging_parent != published_parent {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "staging file {} and published file {} must share one parent directory",
-                staging.display(),
-                published.display()
-            ),
-        ));
-    }
+    use crate::repository::bplustree::common::{parent_or_dot, require_same_parent_directory};
+    require_same_parent_directory(staging, published)?;
     let staging_path = tempfile::TempPath::try_from_path(staging).map_err(|error| {
         io::Error::new(
             error.kind(),
@@ -1354,8 +1324,9 @@ fn publish_staged_file_same_directory(staging: &Path, published: &Path) -> io::R
         io::Error::new(
             error.kind(),
             format!(
-                "file {} was published, but its parent directory could not be synchronized: {error}",
-                published.display()
+                "file {} was published, but its parent directory {} could not be synchronized: {error}",
+                published.display(),
+                parent_or_dot(published).display()
             ),
         )
     })
@@ -1363,16 +1334,42 @@ fn publish_staged_file_same_directory(staging: &Path, published: &Path) -> io::R
 
 #[cfg(unix)]
 fn sync_published_file_parent(path: &Path) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    File::open(parent)?.sync_all()
+    File::open(crate::repository::bplustree::common::parent_or_dot(path))?.sync_all()
 }
 
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
 fn sync_published_file_parent(_path: &Path) -> io::Result<()> { Ok(()) }
+
+/// Owns the staging category file plus its `flock`, so the lock is released
+/// even when a later step (`serde_json::to_writer`, `sync_all`) returns an
+/// error. The unlock runs in `Drop` and is logged on failure; closing the
+/// underlying `File` releases the OS-level lock either way.
+struct LockedCategoryFile {
+    file: File,
+    path: PathBuf,
+}
+
+impl LockedCategoryFile {
+    fn create(path: &Path) -> io::Result<Self> {
+        let file = File::create(path)?;
+        file.lock_exclusive()?;
+        Ok(Self { file, path: path.to_path_buf() })
+    }
+
+    fn sync_all(&self) -> io::Result<()> { self.file.sync_all() }
+}
+
+impl Drop for LockedCategoryFile {
+    fn drop(&mut self) {
+        if let Err(error) = fs2::FileExt::unlock(&self.file) {
+            log::warn!(
+                "Failed to unlock staging category file {}: {error}; the OS will release it on close",
+                self.path.display()
+            );
+        }
+    }
+}
 
 async fn save_xtream_categories_to_file(
     refresh_lease: XtreamRefreshLease,
@@ -1389,33 +1386,21 @@ async fn save_xtream_categories_to_file(
 
     tokio::task::spawn_blocking(move || {
         let staging_path = &refresh_lease.paths().staging_categories;
-        let file = File::create(staging_path).map_err(|error| {
+        let locked = LockedCategoryFile::create(staging_path).map_err(|error| {
             TuliproxError::RepositoryXtream(format!(
-                "Failed to create staging category file {}: {error}",
+                "Failed to create or lock staging category file {}: {error}",
                 staging_path.display()
             ))
         })?;
-        file.lock_exclusive().map_err(|error| {
-            TuliproxError::RepositoryXtream(format!(
-                "Failed to lock staging category file {}: {error}",
-                staging_path.display()
-            ))
-        })?;
-        serde_json::to_writer(&file, &cat_entries).map_err(|error| {
+        serde_json::to_writer(&locked.file, &cat_entries).map_err(|error| {
             TuliproxError::RepositoryXtream(format!(
                 "Failed to write staging category file {}: {error}",
                 staging_path.display()
             ))
         })?;
-        file.sync_all().map_err(|error| {
+        locked.sync_all().map_err(|error| {
             TuliproxError::RepositoryXtream(format!(
                 "Failed to synchronize staging category file {}: {error}",
-                staging_path.display()
-            ))
-        })?;
-        fs2::FileExt::unlock(&file).map_err(|error| {
-            TuliproxError::RepositoryXtream(format!(
-                "Failed to unlock staging category file {}: {error}",
                 staging_path.display()
             ))
         })?;

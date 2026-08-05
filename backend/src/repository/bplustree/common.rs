@@ -145,6 +145,42 @@ pub(crate) fn ensure_distinct_sidecar_lock_domains(published: &Path, staging: &P
     Ok(())
 }
 
+pub(crate) fn remove_file_if_exists(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!("failed to remove file {}: {error}", path.display()),
+        )),
+    }
+}
+
+pub(crate) fn parent_or_dot(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+pub(crate) fn same_parent_directory(left: &Path, right: &Path) -> bool {
+    parent_or_dot(left) == parent_or_dot(right)
+}
+
+pub(crate) fn require_same_parent_directory(staging: &Path, published: &Path) -> io::Result<()> {
+    if same_parent_directory(staging, published) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "staging path {} and published path {} must share one parent directory",
+                staging.display(),
+                published.display()
+            ),
+        ))
+    }
+}
+
 #[derive(Debug)]
 pub enum BPlusTreeError {
     Io(io::Error),
