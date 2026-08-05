@@ -156,22 +156,15 @@ pub(crate) fn cleanup_orphaned_staging_artifacts(storage_path: &Path, min_age: s
         // Cross-process safety: an active refresh holds an exclusive `flock` on the
         // staging sidecar lock file. A non-blocking attempt that fails means another
         // process (or a still-active older lease in this process) owns the artifact,
-        // even if the mtime looks stale.
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(sidecar_lock_path(&entry.path()))
-        {
-            Ok(lock_file) => if let Ok(()) = lock_file.try_lock_exclusive() {
-                let _ = lock_file.unlock();
-            } else {
-                log::debug!(
-                    "Skipping refresh artifact {} owned by an active generation",
-                    entry.path().display()
-                );
-                continue;
-            },
+        // even if the mtime looks stale. The lock handle is held through `remove_file`
+        // so a new refresh cannot acquire the sidecar and start writing before the
+        // deletion lands. We never create or truncate the sidecar: a missing sidecar
+        // means nothing owns the artifact, and creating it here would leave a stale
+        // `.lock` behind for every probed orphan.
+        let lock_path = sidecar_lock_path(&entry.path());
+        let lock_file = match std::fs::OpenOptions::new().read(true).write(true).open(&lock_path) {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 log::debug!(
                     "Skipping refresh artifact {}: sidecar lock probe failed: {error}",
@@ -179,8 +172,23 @@ pub(crate) fn cleanup_orphaned_staging_artifacts(storage_path: &Path, min_age: s
                 );
                 continue;
             }
+        };
+        if let Some(lock_file) = lock_file {
+            if lock_file.try_lock_exclusive().is_err() {
+                log::debug!(
+                    "Skipping refresh artifact {} owned by an active generation",
+                    entry.path().display()
+                );
+                continue;
+            }
         }
-        if let Err(error) = std::fs::remove_file(entry.path()) {
+        let remove_result = std::fs::remove_file(entry.path());
+        debug_assert!(
+            !lock_path.exists(),
+            "cleanup must not leave a generated sidecar behind at {}",
+            lock_path.display()
+        );
+        if let Err(error) = remove_result {
             log::warn!(
                 "Failed to remove orphaned refresh artifact {}: {error}",
                 entry.path().display()
@@ -199,7 +207,7 @@ fn is_orphan_staging_name(leaf: &str) -> bool {
     leaf.match_indices(".refresh-").any(|(index, _)| {
         let after = &leaf[index + ".refresh-".len()..];
         let uuid_bytes = after.as_bytes();
-        if uuid_bytes.len() < 33 || uuid_bytes[32] != b'.' {
+        if uuid_bytes.len() <= 33 || uuid_bytes[32] != b'.' {
             return false;
         }
         let uuid = &uuid_bytes[..32];
@@ -241,6 +249,8 @@ mod tests {
         assert!(!is_orphan_staging_name("live.refresh-0d8f0d8f0d8f0d8f0d8f0d8f0d8f0d8fdb"));
         // 32 hex chars plus extra suffix with no extension — must not match.
         assert!(!is_orphan_staging_name("live.refresh-0d8f0d8f0d8f0d8f0d8f0d8f0d8f0d8fX"));
+        // 32 hex chars plus dot but no extension after the dot — must not match.
+        assert!(!is_orphan_staging_name("live.refresh-0d8f0d8f0d8f0d8f0d8f0d8f0d8f0d8f."));
     }
 
     #[test]
