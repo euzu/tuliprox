@@ -20,7 +20,7 @@ use crate::{
     processing::{
         input_cache,
         input_cache::ClusterState,
-        parser::xmltv::flatten_tvguide,
+        parser::xmltv::{flatten_tvguide, EpgMergeAccumulator, merge_epg_trees},
         playlist_watch::process_group_watch,
         processor::{
             epg::process_playlist_epg, library, sort::sort_playlist, stalker, StalkerRefreshMode,
@@ -1525,6 +1525,45 @@ async fn prepare_playlist_for_target(
     Ok(PreparedTarget { target: target.clone(), playlist: new_playlist, epg: new_epg })
 }
 
+/// Spill each `Epg` source to a temp `BPlusTree` and merge them. Extracted
+/// from `finalize_prepared_target` so it can be unit-tested without
+/// constructing a full `PlaylistProcessingContext`.
+///
+/// Returns `Ok(None)` if `sources` is empty (no EPG to merge), matching
+/// the contract of `flatten_tvguide`. The temp directory lives inside
+/// this function call — all temp files are removed by the
+/// `DiskEpgSource` drop guards before this function returns.
+fn spill_epg_to_disk(sources: Vec<Epg>) -> Result<Option<Epg>, TuliproxError> {
+    let dir = tempfile::tempdir()
+        .map_err(|e| TuliproxError::RepositoryXtream(format!("tempdir for EPG spill: {e}")))?;
+    let mut disk_sources = Vec::with_capacity(sources.len());
+    for (source_order, guide) in sources.into_iter().enumerate() {
+        let mut acc = EpgMergeAccumulator::new();
+        acc.set_attributes_if_preferred(guide.priority, source_order, guide.attributes);
+        for channel in guide.children {
+            acc.add_channel_with_programmes(
+                guide.priority,
+                source_order,
+                guide.logo_override,
+                std::sync::Arc::unwrap_or_clone(channel),
+            );
+        }
+        let path = dir.path().join(format!("epg-src-{source_order}.db"));
+        let source_order_u32 = u32::try_from(source_order).unwrap_or(0);
+        let source = acc
+            .finish_into_disk(path, guide.priority, source_order_u32)
+            .map_err(|e| TuliproxError::RepositoryXtream(format!("EPG spill to disk failed: {e}")))?;
+        disk_sources.push(source);
+    }
+    if disk_sources.is_empty() {
+        Ok(None)
+    } else {
+        merge_epg_trees(disk_sources)
+            .map_err(|e| TuliproxError::RepositoryXtream(format!("EPG disk merge failed: {e}")))
+            .map(|opt| opt.map(|(epg, _)| epg))
+    }
+}
+
 async fn finalize_prepared_target(
     ctx: Arc<PlaylistProcessingContext>,
     prepared: PreparedTarget,
@@ -1572,37 +1611,18 @@ async fn finalize_prepared_target(
             log_memory_snapshot(format!("target '{}' after_group_watches", target.name).as_str());
         }
         let merged_epg = if ctx.config.config.load().disk_based_processing {
-            // Per-source drain to disk, then multi-way merge. Mirrors the
-            // first-source-wins behaviour of `flatten_tvguide` (which loses
-            // per-channel priority metadata in the Epg round-trip anyway —
-            // pre-existing limitation we deliberately match here).
-            let dir = tempfile::tempdir().ok();
-            let sources: Vec<_> = new_epg
-                .into_iter()
-                .enumerate()
-                .filter_map(|(source_order, guide)| {
-                    let dir = dir.as_ref()?;
-                    let mut acc = crate::processing::parser::xmltv::EpgMergeAccumulator::new();
-                    acc.set_attributes_if_preferred(guide.priority, source_order, guide.attributes);
-                    for channel in guide.children {
-                        acc.add_channel_with_programmes(
-                            guide.priority,
-                            source_order,
-                            guide.logo_override,
-                            std::sync::Arc::unwrap_or_clone(channel),
-                        );
-                    }
-                    let path = dir.path().join(format!("epg-src-{source_order}.db"));
-                    acc.finish_into_disk(path).ok()
-                })
-                .collect();
-            if sources.is_empty() {
-                None
-            } else {
-                crate::processing::parser::xmltv::merge_epg_trees(sources)
-                    .ok()
-                    .flatten()
-                    .map(|(epg, _)| epg)
+            // Per-source drain to disk, then multi-way merge. Errors are pushed
+            // to `errors` rather than `?` because the function returns
+            // `(Result, Vec<TuliproxError>)`, not `Result` directly. We must
+            // surface tempdir / write / merge failures — the user opted in to
+            // disk spilling, and silently falling back to the in-memory path
+            // can OOM on large feeds.
+            match spill_epg_to_disk(new_epg) {
+                Ok(epg) => epg,
+                Err(err) => {
+                    errors.push(err);
+                    None
+                }
             }
         } else {
             flatten_tvguide(new_epg)
@@ -3215,5 +3235,105 @@ match {
                 assert_eq!(stats[&input.name].processed_stats.channel_count, 3);
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod disk_epg_wireup_tests {
+    use super::spill_epg_to_disk;
+    use crate::model::Epg;
+    use shared::model::EpgChannel;
+    use std::sync::Arc;
+
+    /// Build an `Epg` with `channel_count` channels whose ids follow the
+    /// `id_base` prefix. Two sources built with the same `id_base` and
+    /// `channel_count` will share all channel ids, which is what we need to
+    /// exercise the priority-override `Occupied` branch in
+    /// `EpgMergeAccumulator::upsert_channel`.
+    fn build_epg(id_base: &str, priority: i16, channel_count: usize) -> Epg {
+        Epg {
+            priority,
+            logo_override: false,
+            attributes: None,
+            children: (0..channel_count)
+                .map(|i| {
+                    let id: Arc<str> = format!("{id_base}-ch-{i:04}").into();
+                    Arc::new(EpgChannel {
+                        id: Arc::clone(&id),
+                        title: Some(format!("title-{priority}-{i}").into()),
+                        icon: None,
+                        programmes: vec![shared::model::EpgProgramme::new(
+                            i64::try_from(i).expect("test index fits in i64"),
+                            i64::try_from(i + 1).expect("test index fits in i64"),
+                            id,
+                        )],
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    /// Wire-up regression guard: `spill_epg_to_disk` is the function called
+    /// by `finalize_prepared_target` when `disk_based_processing = true`. It
+    /// must (a) preserve per-source priority on shared channels, (b) clean up
+    /// its temp files, and (c) merge into a single `Epg` of the right size.
+    ///
+    /// Both sources share channel ids (`shared-ch-NNNN`), forcing the merge
+    /// to take the `Occupied` branch in `EpgMergeAccumulator::upsert_channel`.
+    /// The lower-priority source (priority 3) must win, the higher-priority
+    /// (priority 7) must be discarded for shared ids. Without this assertion
+    /// the test would pass even if priority resolution were broken — the
+    /// earlier version used unique ids and therefore never hit the merge path.
+    #[test]
+    fn spill_epg_to_disk_merges_shared_channels_by_priority() {
+        let epg_low = build_epg("shared", 3, 50); // wins on every shared channel
+        let epg_high = build_epg("shared", 7, 50); // discarded on every shared channel
+
+        let merged = spill_epg_to_disk(vec![epg_low, epg_high])
+            .expect("disk merge returned an error")
+            .expect("merged Epg is unexpectedly None for two non-empty sources");
+
+        // 50 distinct channels, not 100 — the merge must have collapsed the
+        // shared ids.
+        assert_eq!(
+            merged.children.len(),
+            50,
+            "shared channel ids must collapse to one entry, not be duplicated"
+        );
+
+        // Every channel title comes from the lower-priority source. If the
+        // merge logic is wrong, some titles will carry the "-7-" marker.
+        for ch in &merged.children {
+            let title = ch.title.as_deref().expect("title preserved through merge");
+            assert!(
+                title.starts_with("title-3-"),
+                "channel {:?} kept title {title:?} from higher-priority source; \
+                 priority override is broken",
+                ch.id,
+            );
+        }
+    }
+
+    /// The non-shared case: sources with disjoint channel ids. Both
+    /// sources' channels appear in the result with no priority loss (no
+    /// `Occupied` branch is taken).
+    #[test]
+    fn spill_epg_to_disk_keeps_disjoint_sources_intact() {
+        let epg_low = build_epg("src-a", 3, 50);
+        let epg_high = build_epg("src-b", 7, 50);
+
+        let merged = spill_epg_to_disk(vec![epg_low, epg_high])
+            .expect("disk merge returned an error")
+            .expect("merged Epg is unexpectedly None for two non-empty sources");
+
+        assert_eq!(merged.children.len(), 100, "disjoint ids must not collapse");
+        assert!(merged.children.iter().any(|ch| ch.title.as_deref() == Some("title-3-0")));
+        assert!(merged.children.iter().any(|ch| ch.title.as_deref() == Some("title-7-0")));
+    }
+
+    #[test]
+    fn spill_epg_to_disk_returns_none_for_empty_input() {
+        let merged = spill_epg_to_disk(vec![]).expect("disk merge returned an error");
+        assert!(merged.is_none());
     }
 }
