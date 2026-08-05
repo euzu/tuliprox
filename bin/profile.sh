@@ -47,6 +47,9 @@ HEAP_BASE="$OUTPUT_DIR/tuliprox-${MODE}.heaptrack"
 # .zst, older ones fall back to .gz. Resolve the real path after the run.
 HEAP_OUTPUT_ZST="${HEAP_BASE}.zst"
 HEAP_OUTPUT_GZ="${HEAP_BASE}.gz"
+# Pre-declare so the early diagnostic below is `set -u` safe; the real value
+# is assigned after `heaptrack` exits.
+HEAP_OUTPUT=""
 
 case "$MODE" in
     debug)
@@ -104,7 +107,7 @@ echo "  mode: $MODE"
 echo "  binary: $BIN_PATH"
 echo "  settings: $SETTINGS_DIR"
 echo "  target: ${PROFILE_TARGET:-<none - will hang in server mode>}"
-echo "  heaptrack: $HEAP_OUTPUT"
+echo "  heaptrack: ${HEAP_OUTPUT_ZST} (or ${HEAP_OUTPUT_GZ})"
 
 TARGET_ARGS=()
 if [[ -n "$PROFILE_TARGET" ]]; then

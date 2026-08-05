@@ -925,6 +925,12 @@ impl EpgMergeAccumulator {
         BPlusTree::<EpgDiskChannelKey, EpgChannel>::new()
             .store(&path)
             .map_err(|e| io::Error::other(format!("create temp EPG tree: {e}")))?;
+        // The temp file exists from here until `DiskEpgSource::new` takes
+        // ownership at the end. Any `?` in between would otherwise leak the
+        // file because no `Drop` is wired up yet. The local guard covers the
+        // fallible window and is disarmed just before we hand the path off.
+        let mut temp_guard = TempFileGuard(Some(path.clone()));
+
         let mut updater = BPlusTreeUpdate::<EpgDiskChannelKey, EpgChannel>::try_new_with_backoff(&path)
             .map_err(|e| io::Error::other(format!("open temp EPG tree: {e}")))?;
         updater.set_flush_policy(FlushPolicy::Batch);
@@ -965,12 +971,34 @@ impl EpgMergeAccumulator {
             path.display()
         );
 
-        Ok(DiskEpgSource::new(
+        let source = DiskEpgSource::new(
             path,
             attributes.map(|a| a.attributes),
             source_priority,
             source_order,
-        ))
+        );
+        // DiskEpgSource now owns the path; disarm the guard so its Drop does
+        // not double-remove the file. `mem::forget` would also work, but
+        // `take()` keeps the guard in scope and is auditable.
+        temp_guard.0.take();
+        Ok(source)
+    }
+}
+
+/// Removes the wrapped file path on drop unless `take()` was called first.
+/// Mirrors the cleanup logic of `DiskEpgSource::Drop` for the fallible window
+/// inside `finish_into_disk` where no `DiskEpgSource` exists yet.
+struct TempFileGuard(Option<PathBuf>);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            if let Err(err) = std::fs::remove_file(&path) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("Failed to remove temp EPG tree at {}: {err}", path.display());
+                }
+            }
+        }
     }
 }
 
@@ -2140,12 +2168,20 @@ mod tests {
     fn disk_path_matches_in_memory_finish() {
         use super::{merge_epg_trees, EpgMergeAccumulator};
 
+        // Build one source by appending one programme per channel through the
+        // accumulator's primary entry point. `add_channel_with_programmes` is
+        // the same call the in-memory `merge_epg_channels_by_priority` uses,
+        // so the in-memory reference and the disk path go through identical
+        // APIs. The two sources use disjoint programme intervals
+        // (source 0: 0..1, source 1: 100..101) so the merged channel should
+        // retain both programmes end-to-end.
         fn build_acc(source: usize, channels: std::ops::Range<u32>) -> EpgMergeAccumulator {
             let mut acc = EpgMergeAccumulator::new();
             for i in channels {
                 let id: Arc<str> = format!("ch-{i:04}").into();
                 let priority = if source == 0 { 5 } else { 3 }; // source 1 wins
-                acc.upsert_channel(
+                let (start, stop) = if source == 0 { (i64::from(i), i64::from(i + 1)) } else { (100 + i64::from(i), 101 + i64::from(i)) };
+                acc.add_channel_with_programmes(
                     i16::try_from(priority).unwrap_or(0),
                     source,
                     false,
@@ -2153,15 +2189,34 @@ mod tests {
                         id: Arc::clone(&id),
                         title: Some(format!("title-{source}-{i}").into()),
                         icon: None,
-                        programmes: vec![shared::model::EpgProgramme::new(i64::from(i), i64::from(i + 1), id)],
+                        programmes: vec![shared::model::EpgProgramme::new(start, stop, id)],
                     },
                 );
             }
             acc
         }
 
-        // Reference: in-memory merge.
-        let mut ref_acc = build_acc(0, 0..50);
+        // Reference: in-memory merge of the same two sources.
+        let ref_acc_a = build_acc(0, 0..50);
+        let ref_acc_b = build_acc(1, 0..50);
+        // `EpgMergeAccumulator` is single-shot, so the reference merge has to
+        // rebuild a fresh accumulator. The two halves contribute disjoint
+        // programme intervals, so a single accumulator sees both.
+        let mut ref_acc = EpgMergeAccumulator::new();
+        for i in 0..50 {
+            let id: Arc<str> = format!("ch-{i:04}").into();
+            ref_acc.add_channel_with_programmes(
+                5,
+                0,
+                false,
+                shared::model::EpgChannel {
+                    id: Arc::clone(&id),
+                    title: Some(format!("title-0-{i}").into()),
+                    icon: None,
+                    programmes: vec![shared::model::EpgProgramme::new(i64::from(i), i64::from(i + 1), id)],
+                },
+            );
+        }
         for i in 0..50 {
             let id: Arc<str> = format!("ch-{i:04}").into();
             ref_acc.add_channel_with_programmes(
@@ -2172,11 +2227,12 @@ mod tests {
                     id: Arc::clone(&id),
                     title: Some(format!("title-1-{i}").into()),
                     icon: None,
-                    programmes: vec![shared::model::EpgProgramme::new(i64::from(i), i64::from(i + 1), id)],
+                    programmes: vec![shared::model::EpgProgramme::new(100 + i64::from(i), 101 + i64::from(i), id)],
                 },
             );
         }
         let reference = ref_acc.finish_epg_with_icon_overrides().unwrap().0;
+        let _ = (ref_acc_a, ref_acc_b); // keep the per-source builder API in the test
 
         // Disk path: two temp trees, then merge.
         let dir = tempfile::tempdir().unwrap();
@@ -2189,18 +2245,20 @@ mod tests {
             assert_eq!(left.id, right.id, "channel order must match");
             // Source 1 had priority 3 (lower = wins) so its title should win.
             assert_eq!(left.title, right.title, "priority winner's title must propagate");
-            // `add_channel_with_programmes` is used on the disk-merge path so
-            // per-channel programmes survive the round trip; verify the count
-            // matches the in-memory reference and the values round-trip.
+            // Both sources contribute distinct, non-overlapping programmes.
+            // The merged channel must keep both — the disk path uses
+            // `add_channel_with_programmes` so nothing is dropped on the way in.
             assert_eq!(
                 left.programmes.len(),
-                right.programmes.len(),
-                "programme counts must match for channel {}",
-                left.id
+                2,
+                "channel {} should retain both source programmes, got {}",
+                left.id,
+                left.programmes.len()
             );
+            assert_eq!(right.programmes.len(), 2, "disk-merged channel {} lost programmes", right.id);
             for (lp, rp) in left.programmes.iter().zip(right.programmes.iter()) {
-                assert_eq!(lp.start, rp.start, "programme start must match");
-                assert_eq!(lp.stop, rp.stop, "programme stop must match");
+                assert_eq!(lp.start, rp.start, "programme start must match for channel {}", left.id);
+                assert_eq!(lp.stop, rp.stop, "programme stop must match for channel {}", left.id);
             }
         }
     }
