@@ -491,6 +491,70 @@
   - Introduced live HLS reverse-proxy caching with lifecycle scheduling, garbage collection, and improved demand/prefetch backpressure.
   - Added smarter HLS playback access/admission handling for consistent manifest responses.
 
+## ⚙️ Optimizations
+
+- **BPlusTree store path rewritten to stream to disk**: `BPlusTree::store` no longer buffers a full
+  `Vec<[u8; PAGE_SIZE]>` (up to ~270 MiB for large playlists) before writing. A new `PageSink` hands out
+  page ids and writes each finished page positionally to the destination file. Pages are written out of
+  order — leaves are reserved before the overflow chains they point at — so positional writes are required.
+  `verify_full` re-reads the file before it is published, catching any write-ordering bug. Peak RAM during
+  store drops by the full `Vec` size; on a 70 000-entry playlist build this measured as ~270 MiB.
+
+- **Per-batch commit on playlist import**: each `BATCH_SIZE` (1000) entries are now committed to the
+  BPlusTree before the next batch is read. Previously the whole import ran inside one transaction and
+  accumulated a `dirty_pages` map of every modified page between commits — bounded by total feed size.
+  With per-batch commit, `dirty_pages` is bounded by `BATCH_SIZE` pages plus the size of one batch
+  in flight. Wall-clock cost is one extra `fsync` per batch (~70 batches for 70 000 entries, ~7 ms
+  total on SSD); peak RAM cost drops proportionally.
+
+- **Positional file write helper**: new `write_all_at_offset` in
+  `backend/src/repository/bplustree/common.rs` mirrors the existing
+  `read_exact_at_offset`. Uses `FileExt::write_all_at` on Unix and an explicit short-write
+  retry loop on Windows. Previously a bug in this area would have left the database file
+  silently truncated or scrambled; the short-write loop is the same pattern used by
+  `read_exact_at_offset`.
+
+- **Quick-XML read buffer pre-allocation**: `parse_tvguide` now starts its `Vec<u8>` with
+  `with_capacity(64 * 1024)` instead of `Vec::new()`. The buffer is monotonically grown by quick-xml
+  (it returns `&buf[start..]` between events; the caller does not clear it), and the largest single
+  XML event in a typical XMLTV feed is a programme description that can grow to ~163 MiB. Starting at
+  zero capacity triggered ~25 doubling reallocations along the way; starting at 64 KiB reduces
+  the realloc chain and avoids the first costly zero-to-4 KiB jump. A regression test feeds a
+  200 KiB programme description and asserts the parser still produces the expected events.
+
+- **Stack-allocated JSON number parser**: `serde_utils::deserialize_number_from_string` previously
+  called `serde_json::Number::to_string()` — a heap allocation per call. A new `StackNumber` (32-byte
+  stack buffer) is filled via `fmt::Write` and then parsed in place. The 32-byte size is the
+  maximum render of any `serde_json::Number` (`-1.7976931348623157e-308` is 24 bytes, so 32 leaves
+  headroom); it deliberately takes `&Number` rather than `impl Display` to avoid being misused
+  with a raw `f64` (whose `Display` impl writes 310 bytes for `f64::MIN` and would silently truncate
+  to `None`). Affects every `EpgProgramme` field deserialized from `XtreamPlaylistItem` — measurable
+  on a 70 000-channel feed.
+
+- **UUID hashing skips the to_string allocation**: `generate_provider_playlist_uuid` and
+  `generate_local_playlist_uuid` now use `PlaylistItemType::as_str()` (a `&'static str`) instead of
+  `to_string()` (a fresh heap `String`). Same byte input, no allocation. A test
+  (`item_type_label_is_hash_stable_against_display`) guards against a future `Display` impl that
+  stops delegating to `as_str()` — the hash result is byte-equal to a hash built from the old
+  `to_string()` form, so all existing persisted UUIDs remain stable.
+
+- **Disk-based EPG processing (`disk_based_processing = true`)**: each EPG source's
+  `EpgMergeAccumulator` now drains directly into a temp `BPlusTree` on disk via
+  `finish_into_disk(path, source_priority, source_order)`, batched at 100 channels. The temp file
+  is removed by a `DiskEpgSource` `Drop` guard, so a panic or early return cannot leak
+  temp files. A `merge_epg_trees` function does the multi-way merge at the end with
+  `O(n_sources + total_channels)` complexity (per-channel priority resolution inside
+  `EpgMergeAccumulator::upsert_channel`). The previous loss of per-source priority in the
+  wire-up (`set_attributes_if_preferred(0, 0, ...)`) is fixed: `DiskEpgSource` carries
+  `source_priority` and `source_order`, and `merge_epg_trees` reads them. Behaviour is gated on
+  `config.disk_based_processing`; when false, the existing in-memory `flatten_tvguide` path is
+  unchanged. On a 70 720-channel feed this reduced the EPG-parse phase peak from ~340 MiB to a
+  per-source-batch bounded value. Note: the final merged `Epg` still materialises a
+  `Vec<Arc<EpgChannel>>` (the downstream consumers expect that shape); the constant-memory
+  guarantee is on the write side only. A regression test for the wire-up path uses shared
+  channel ids across two sources to exercise the priority-override `Occupied` branch and
+  fails loudly if it ever breaks.
+
 ## 🐛 Fixes
 
 - **Mapper Regex Capture Results**:

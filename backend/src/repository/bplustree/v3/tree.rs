@@ -14,7 +14,7 @@ use super::{
     BPlusTreeMetadata,
 };
 use crate::{
-    repository::bplustree::common::{mmap_with_advice, read_exact_at_offset, Advice, BPlusTreeError},
+    repository::bplustree::common::{mmap_with_advice, read_exact_at_offset, write_all_at_offset, Advice, BPlusTreeError},
     utils::{binary_deserialize, binary_serialize, binary_serialize_into},
 };
 use memmap2::Mmap;
@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs::{File, OpenOptions},
-    io::{self, BufWriter, Read, Write},
+    io::{self, Read},
     marker::PhantomData,
     ops::{Bound, Range},
     path::{Path, PathBuf},
@@ -395,11 +395,41 @@ struct NodeInfo {
     minimum_key: Vec<u8>,
 }
 
-fn allocate_page(pages: &mut Vec<[u8; PAGE_SIZE]>) -> io::Result<u64> {
-    let page_id = u64::try_from(pages.len()).map_err(|_| invalid_input("page count exceeds u64"))?;
-    pages.try_reserve(1).map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
-    pages.push([0; PAGE_SIZE]);
-    Ok(page_id)
+/// Sink for the bulk tree builder: hands out page ids and writes each finished page
+/// straight to the destination file instead of buffering the whole database in memory.
+///
+/// Pages are **not** emitted in ascending id order — a leaf reserves its id before the
+/// overflow chain it points at, but is encoded only once all of its cells are known, so
+/// it is written after them. Writes must therefore be positional; a sequential writer
+/// would silently scramble the file. Every id handed out is written exactly once, so the
+/// finished file has no holes, and `verify_full` re-reads it before it is published.
+struct PageSink {
+    file: File,
+    next_page_id: u64,
+}
+
+const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
+
+impl PageSink {
+    const fn new(file: File) -> Self { Self { file, next_page_id: 0 } }
+
+    fn allocate(&mut self) -> io::Result<u64> {
+        let page_id = self.next_page_id;
+        self.next_page_id = page_id.checked_add(1).ok_or_else(|| invalid_input("page count exceeds u64"))?;
+        Ok(page_id)
+    }
+
+    fn allocate_many(&mut self, count: usize) -> io::Result<u64> {
+        let head = self.next_page_id;
+        let count = u64::try_from(count).map_err(|_| invalid_input("page count exceeds u64"))?;
+        self.next_page_id = head.checked_add(count).ok_or_else(|| invalid_input("page count exceeds u64"))?;
+        Ok(head)
+    }
+
+    fn write(&self, page_id: u64, page: &[u8; PAGE_SIZE]) -> io::Result<()> {
+        let offset = page_id.checked_mul(PAGE_SIZE_U64).ok_or_else(|| invalid_input("page offset overflow"))?;
+        write_all_at_offset(&self.file, page, offset)
+    }
 }
 
 fn leaf_page<T: AsRef<[u8]>>(page_id: u64, left: u64, right: u64, cells: &[T]) -> io::Result<[u8; PAGE_SIZE]> {
@@ -460,16 +490,12 @@ fn internal_page<T: AsRef<[u8]>>(
     Ok(bytes)
 }
 
-fn allocate_overflow_chain(pages: &mut Vec<[u8; PAGE_SIZE]>, stored: &[u8]) -> io::Result<u64> {
+fn allocate_overflow_chain(sink: &mut PageSink, stored: &[u8]) -> io::Result<u64> {
     let count = stored.len().div_ceil(OVERFLOW_PAYLOAD_LEN);
     if count == 0 {
         return Err(invalid_input("overflow value must not be empty"));
     }
-    let head = u64::try_from(pages.len()).map_err(|_| invalid_input("page count exceeds u64"))?;
-    pages.try_reserve(count).map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
-    for _ in 0..count {
-        pages.push([0; PAGE_SIZE]);
-    }
+    let head = sink.allocate_many(count)?;
     for (index, payload) in stored.chunks(OVERFLOW_PAYLOAD_LEN).enumerate() {
         let page_id = head
             .checked_add(u64::try_from(index).map_err(|_| invalid_input("overflow index exceeds u64"))?)
@@ -480,31 +506,22 @@ fn allocate_overflow_chain(pages: &mut Vec<[u8; PAGE_SIZE]>, stored: &[u8]) -> i
             page_id.checked_add(1).ok_or_else(|| invalid_input("overflow page id overflow"))?
         };
         let page = encode_overflow_page(page_id, u64::MAX, next, payload)?;
-        let slot = usize::try_from(page_id).map_err(|_| invalid_input("overflow page id exceeds usize"))?;
-        *pages.get_mut(slot).ok_or_else(|| invalid_input("overflow page allocation missing"))? = page;
+        sink.write(page_id, &page)?;
     }
     Ok(head)
 }
 
-fn finish_leaf(
-    pages: &mut [[u8; PAGE_SIZE]],
-    page_id: u64,
-    left: u64,
-    right: u64,
-    cells: &[Vec<u8>],
-) -> io::Result<()> {
+fn finish_leaf(sink: &PageSink, page_id: u64, left: u64, right: u64, cells: &[Vec<u8>]) -> io::Result<()> {
     let page = leaf_page(page_id, left, right, cells)?;
-    let index = usize::try_from(page_id).map_err(|_| invalid_input("leaf page id exceeds usize"))?;
-    *pages.get_mut(index).ok_or_else(|| invalid_input("leaf page allocation missing"))? = page;
-    Ok(())
+    sink.write(page_id, &page)
 }
 
-fn build_leaf_level<K, V>(entries: &BTreeMap<K, V>, pages: &mut Vec<[u8; PAGE_SIZE]>) -> io::Result<Vec<NodeInfo>>
+fn build_leaf_level<K, V>(entries: &BTreeMap<K, V>, sink: &mut PageSink) -> io::Result<Vec<NodeInfo>>
 where
     K: Ord + Serialize,
     V: Serialize,
 {
-    let mut leaf_id = allocate_page(pages)?;
+    let mut leaf_id = sink.allocate()?;
     let mut left_leaf = 0;
     let mut cells = Vec::<Vec<u8>>::new();
     let mut leaves = Vec::<NodeInfo>::new();
@@ -526,7 +543,7 @@ where
         if stored_bytes.len() <= MAX_INLINE_STORED_VALUE && inline_footprint <= MAX_CELL_FOOTPRINT {
             encode_inline_leaf_cell(&key_bytes, logical_len, stored.compression(), stored_bytes, &mut cell)?;
         } else {
-            let head = allocate_overflow_chain(pages, stored_bytes)?;
+            let head = allocate_overflow_chain(sink, stored_bytes)?;
             encode_overflow_leaf_cell(
                 &key_bytes,
                 logical_len,
@@ -546,8 +563,8 @@ where
             MAX_CELL_FOOTPRINT,
         )?;
         if next_usage > PAGE_SIZE {
-            let next_leaf = allocate_page(pages)?;
-            finish_leaf(pages, leaf_id, left_leaf, next_leaf, &cells)?;
+            let next_leaf = sink.allocate()?;
+            finish_leaf(sink, leaf_id, left_leaf, next_leaf, &cells)?;
             leaves.push(NodeInfo {
                 page_id: leaf_id,
                 minimum_key: leaf_minimum.take().ok_or_else(|| invalid_input("non-empty leaf has no minimum key"))?,
@@ -563,7 +580,7 @@ where
         cells.push(std::mem::take(&mut cell));
     }
 
-    finish_leaf(pages, leaf_id, left_leaf, 0, &cells)?;
+    finish_leaf(sink, leaf_id, left_leaf, 0, &cells)?;
     leaves.push(NodeInfo { page_id: leaf_id, minimum_key: leaf_minimum.unwrap_or_default() });
     Ok(leaves)
 }
@@ -614,7 +631,7 @@ fn group_internal_children(level: &[NodeInfo]) -> io::Result<Vec<(usize, usize)>
     Ok(groups)
 }
 
-fn build_parent_level(level: &[NodeInfo], pages: &mut Vec<[u8; PAGE_SIZE]>) -> io::Result<Vec<NodeInfo>> {
+fn build_parent_level(level: &[NodeInfo], sink: &mut PageSink) -> io::Result<Vec<NodeInfo>> {
     let groups = group_internal_children(level)?;
     let mut parents = Vec::with_capacity(groups.len());
     for (start, end) in groups {
@@ -622,7 +639,7 @@ fn build_parent_level(level: &[NodeInfo], pages: &mut Vec<[u8; PAGE_SIZE]>) -> i
         if children.len() < 2 {
             return Err(invalid_input("internal page requires two children"));
         }
-        let page_id = allocate_page(pages)?;
+        let page_id = sink.allocate()?;
         let (first_child, remaining_children) =
             children.split_first().ok_or_else(|| invalid_input("internal page has no children"))?;
         let mut encoded_cells = Vec::with_capacity(remaining_children.len());
@@ -632,29 +649,31 @@ fn build_parent_level(level: &[NodeInfo], pages: &mut Vec<[u8; PAGE_SIZE]>) -> i
             encoded_cells.push(encoded);
         }
         let encoded = internal_page(page_id, first_child.page_id, &encoded_cells)?;
-        let page_index = usize::try_from(page_id).map_err(|_| invalid_input("internal page id exceeds usize"))?;
-        *pages.get_mut(page_index).ok_or_else(|| invalid_input("internal page allocation missing"))? = encoded;
+        sink.write(page_id, &encoded)?;
         parents.push(NodeInfo { page_id, minimum_key: first_child.minimum_key.clone() });
     }
     Ok(parents)
 }
 
-fn build_pages<K, V>(entries: &BTreeMap<K, V>) -> io::Result<(Vec<[u8; PAGE_SIZE]>, u64)>
+/// Streams the whole tree into `sink` and returns the root page id. Page 0 is reserved
+/// for the database header, which the caller writes last once `sink.next_page_id` is final.
+fn build_pages<K, V>(entries: &BTreeMap<K, V>, sink: &mut PageSink) -> io::Result<u64>
 where
     K: Ord + Serialize,
     V: Serialize,
 {
-    let mut pages = vec![[0; PAGE_SIZE]];
-    let mut level = build_leaf_level(entries, &mut pages)?;
+    let header_page_id = sink.allocate()?;
+    if header_page_id != 0 {
+        return Err(invalid_input("database header must be the first allocated page"));
+    }
+    let mut level = build_leaf_level(entries, sink)?;
     if entries.is_empty() {
-        let root = level.first().ok_or_else(|| invalid_input("tree has no root page"))?.page_id;
-        return Ok((pages, root));
+        return Ok(level.first().ok_or_else(|| invalid_input("tree has no root page"))?.page_id);
     }
     while level.len() > 1 {
-        level = build_parent_level(&level, &mut pages)?;
+        level = build_parent_level(&level, sink)?;
     }
-    let root_page_id = level.first().ok_or_else(|| invalid_input("tree has no root page"))?.page_id;
-    Ok((pages, root_page_id))
+    Ok(level.first().ok_or_else(|| invalid_input("tree has no root page"))?.page_id)
 }
 
 fn temporary_path(filepath: &Path) -> io::Result<PathBuf> {
@@ -665,25 +684,88 @@ fn temporary_path(filepath: &Path) -> io::Result<PathBuf> {
     Ok(filepath.with_file_name(format!("{name}.{}.v3.tmp", uuid::Uuid::new_v4())))
 }
 
-fn publish_database(
+#[derive(Debug)]
+pub(super) enum PublishDatabaseError {
+    NotPublished(io::Error),
+    PublishedDurabilityUnknown(io::Error),
+}
+
+impl PublishDatabaseError {
+    pub(super) const fn database_was_published(&self) -> bool {
+        matches!(self, Self::PublishedDurabilityUnknown(_))
+    }
+
+    fn into_io(self) -> io::Error {
+        match self {
+            Self::NotPublished(error) | Self::PublishedDurabilityUnknown(error) => error,
+        }
+    }
+}
+
+impl From<PublishDatabaseError> for io::Error {
+    fn from(error: PublishDatabaseError) -> Self { error.into_io() }
+}
+
+pub(super) fn publish_database(
     temporary: &Path,
     destination: &Path,
     sync_directory: impl FnOnce(&Path) -> io::Result<()>,
-) -> io::Result<()> {
+) -> Result<(), PublishDatabaseError> {
     let temporary = match tempfile::TempPath::try_from_path(temporary) {
         Ok(path) => path,
         Err(error) => {
             let _ = std::fs::remove_file(temporary);
-            return Err(error);
+            return Err(PublishDatabaseError::NotPublished(error));
         }
     };
-    temporary.persist(destination).map_err(io::Error::from)?;
+    temporary
+        .persist(destination)
+        .map_err(io::Error::from)
+        .map_err(PublishDatabaseError::NotPublished)?;
     sync_directory(destination).map_err(|error| {
-        io::Error::new(
+        PublishDatabaseError::PublishedDurabilityUnknown(io::Error::new(
             error.kind(),
             format!("database published but directory sync failed; durability unknown: {error}"),
-        )
+        ))
     })
+}
+
+/// Invalidates the sorted index whenever publication made the replacement database visible.
+pub(super) fn publish_database_and_invalidate_sorted_index(
+    temporary: &Path,
+    destination: &Path,
+    sync_directory: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let publish_error = match publish_database(temporary, destination, sync_directory) {
+        Ok(()) => None,
+        Err(error) if error.database_was_published() => Some(io::Error::from(error)),
+        Err(error) => return Err(io::Error::from(error)),
+    };
+    let invalidation_error = invalidate_sorted_index(destination).err();
+    match (publish_error, invalidation_error) {
+        (Some(publish_error), Some(invalidation_error)) => Err(io::Error::new(
+            publish_error.kind(),
+            format!(
+                "database {} was published with unknown directory durability: {publish_error}; its previous sorted index could not be invalidated: {invalidation_error}",
+                destination.display()
+            ),
+        )),
+        (Some(publish_error), None) => Err(io::Error::new(
+            publish_error.kind(),
+            format!(
+                "database {} was published and its previous sorted index was invalidated, but publication durability remains unknown: {publish_error}",
+                destination.display()
+            ),
+        )),
+        (None, Some(error)) => Err(io::Error::new(
+            error.kind(),
+            format!(
+                "database {} was published, but its previous sorted index could not be invalidated: {error}",
+                destination.display()
+            ),
+        )),
+        (None, None) => Ok(()),
+    }
 }
 
 impl<K, V> BPlusTree<K, V>
@@ -713,44 +795,45 @@ where
     }
 
     fn store_exclusive(&mut self, filepath: &Path) -> io::Result<StoredDatabase> {
-        let (mut pages, root_page_id) = build_pages(&self.entries)?;
-        let next_page_id = u64::try_from(pages.len()).map_err(|_| invalid_input("page count exceeds u64"))?;
-        *pages.first_mut().ok_or_else(|| invalid_input("database header page is missing"))? = DatabaseHeader {
-            root_page_id,
-            next_page_id,
-            free_page_head: 0,
-            generation: 1,
-            database_id: *uuid::Uuid::new_v4().as_bytes(),
-            metadata: self.metadata.clone(),
-        }
-        .encode()?;
+        self.store_exclusive_with_directory_sync(filepath, sync_parent_directory)
+    }
 
+    fn store_exclusive_with_directory_sync(
+        &mut self,
+        filepath: &Path,
+        sync_published_directory: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<StoredDatabase> {
         let temp_path = temporary_path(filepath)?;
+        // The builder streams into the temp file, so it exists from here on — every error
+        // path below has to remove it again.
         let prepared = (|| {
-            let mut file = OpenOptions::new().write(true).create_new(true).open(&temp_path)?;
-            {
-                let mut writer = BufWriter::with_capacity(1024 * 1024, &mut file);
-                for page in &pages {
-                    writer.write_all(page)?;
-                }
-                writer.flush()?;
+            let mut sink = PageSink::new(OpenOptions::new().write(true).create_new(true).open(&temp_path)?);
+            let root_page_id = build_pages(&self.entries, &mut sink)?;
+            let header = DatabaseHeader {
+                root_page_id,
+                next_page_id: sink.next_page_id,
+                free_page_head: 0,
+                generation: 1,
+                database_id: *uuid::Uuid::new_v4().as_bytes(),
+                metadata: self.metadata.clone(),
             }
-            file.sync_all()?;
-            drop(file);
+            .encode()?;
+            sink.write(0, &header)?;
+            sink.file.sync_all()?;
+            drop(sink);
             let mut query = BPlusTreeQuery::<K, V>::from_file_unlocked(File::open(&temp_path)?)?;
             let verification = verify_full(&mut query)?;
             drop(query);
-            Ok(verification)
+            Ok((root_page_id, verification))
         })();
-        let verification = match prepared {
-            Ok(verification) => verification,
+        let (root_page_id, verification) = match prepared {
+            Ok(prepared) => prepared,
             Err(error) => {
                 let _ = std::fs::remove_file(&temp_path);
                 return Err(error);
             }
         };
-        publish_database(&temp_path, filepath, sync_parent_directory)?;
-        invalidate_sorted_index(filepath)?;
+        publish_database_and_invalidate_sorted_index(&temp_path, filepath, sync_published_directory)?;
         self.dirty = false;
         Ok(StoredDatabase { root_page_id, verification })
     }
@@ -836,7 +919,7 @@ where
             let _ = std::fs::remove_file(&temporary);
             return Err(error);
         }
-        publish_database(&temporary, &index_path, sync_parent_directory)
+        publish_database(&temporary, &index_path, sync_parent_directory).map_err(io::Error::from)
     }
 
 }
@@ -4197,6 +4280,182 @@ mod tests {
         Ok(())
     }
 
+    /// The Xtream cluster import commits after every batch so the transaction's
+    /// dirty-page map stays bounded. That reopens the write transaction mid-import,
+    /// so every batch must survive and stay readable — including values large enough
+    /// to spill into overflow chains, which is what dominated the dirty-page map.
+    #[test]
+    fn committing_between_batches_keeps_every_entry_readable() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("batched-commits.db");
+        BPlusTree::<u32, String>::new().store(&path)?;
+
+        let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&path)?;
+        updater.set_flush_policy(FlushPolicy::Batch);
+        for batch in 0..4u32 {
+            let keys: Vec<u32> = (0..8).map(|index| batch * 8 + index).collect();
+            let values: Vec<String> = keys.iter().map(|key| format!("{key}").repeat(600)).collect();
+            let items = keys.iter().zip(&values).collect::<Vec<_>>();
+            let prepared = BPlusTreeUpdate::<u32, String>::prepare_upsert_batch(&items)?;
+            updater.upsert_batch_encoded(prepared)?;
+            updater.commit()?;
+            assert!(updater.active.is_none(), "commit must release the transaction after batch {batch}");
+        }
+
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+        for key in 0..32u32 {
+            assert_eq!(
+                query.query(&key).map_err(BPlusTreeError::to_io)?,
+                Some(format!("{key}").repeat(600)),
+                "key {key} is missing after a mid-import commit"
+            );
+        }
+        assert!(!wal_path(&path).try_exists()?);
+        Ok(())
+    }
+
+
+    /// Throughput benchmark for `BPlusTree::store` across three workload sizes.
+    #[test]
+    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
+    fn bench_store_throughput() -> io::Result<()> {
+        let noise = |seed: u32, len: usize| -> Vec<u8> {
+            let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    u8::try_from(state >> 24).unwrap_or(0)
+                })
+                .collect()
+        };
+        for (label, count, size) in [("klein", 2_000u32, 800usize), ("mittel", 20_000, 2_000), ("gross", 60_000, 2_000)] {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("bench.db");
+            let mut tree = BPlusTree::<u32, Vec<u8>>::new();
+            for key in 0..count {
+                tree.insert(key, noise(key, size));
+            }
+            let start = std::time::Instant::now();
+            tree.store(&path)?;
+            let elapsed = start.elapsed();
+            println!(
+                "BENCH {label:6} entries={count:6} bytes={size:5} -> {:>8.1} ms  file={} MiB",
+                elapsed.as_secs_f64() * 1000.0,
+                fs::metadata(&path)?.len() / (1024 * 1024)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn streamed_store_writes_every_page_despite_out_of_order_overflow_chains() -> io::Result<()> {
+        // The streaming builder hands out a leaf's page id *before* the overflow chain it
+        // points at, but writes the leaf *after* those pages — so page ids do not reach the
+        // file in ascending order. Worse, this nests: leaf A is reserved, its chains are
+        // written, A is written, then leaf B repeats the whole dance at higher ids.
+        //
+        // The entry count is sized to produce many leaves, not one: overflow leaf cells are
+        // tiny (key plus pointers, ~34 bytes), so a few hundred entries would all land in a
+        // single leaf and never exercise the nesting. Values are incompressible on purpose —
+        // a repeated string would compress back under `MAX_INLINE_STORED_VALUE` and skip
+        // overflow entirely. Both properties are asserted below rather than assumed.
+        //
+        // The file-length check is the real guard: writing pages sequentially instead of
+        // positionally would leave the file short or the ids scrambled.
+        // Deterministic LCG — compresses badly, so values are forced into overflow chains.
+        let noise = |seed: u32, len: usize| -> Vec<u8> {
+            let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    u8::try_from(state >> 24).unwrap_or(0)
+                })
+                .collect()
+        };
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("streamed.db");
+        let mut tree = BPlusTree::<u32, Vec<u8>>::new();
+        for key in 0..1_200u32 {
+            // Spans one, two and three overflow pages (OVERFLOW_PAYLOAD_LEN = 4056).
+            tree.insert(key, noise(key, 3000 + (key as usize % 3) * 4000));
+        }
+        let report = tree.store_verified(&path)?;
+        assert!(
+            report.overflow_pages > 2_000,
+            "test must force multi-page overflow chains, got {} overflow pages",
+            report.overflow_pages
+        );
+        assert!(
+            report.tree_pages > 8,
+            "test must produce many leaves so the reserve-then-write dance nests, got {} tree pages",
+            report.tree_pages
+        );
+
+        let header = BPlusTreeQuery::<u32, Vec<u8>>::try_new(&path)?.header;
+        assert_eq!(
+            fs::metadata(&path)?.len(),
+            header.next_page_id * PAGE_SIZE as u64,
+            "file length must match the allocated page count exactly"
+        );
+
+        let mut query = BPlusTreeQuery::<u32, Vec<u8>>::try_new(&path)?;
+        for key in 0..1_200u32 {
+            assert_eq!(
+                query.query(&key).map_err(BPlusTreeError::to_io)?,
+                Some(noise(key, 3000 + (key as usize % 3) * 4000)),
+                "key {key} did not survive the streamed store"
+            );
+        }
+        Ok(())
+    }
+
+    /// Compaction is NOT optional cleanup on an insert-built tree: leaf splits leave
+    /// pages roughly half full, and `build_pages` repacks them to near-capacity.
+    ///
+    /// Note `free_page_head` stays 0 throughout — inserts never free a page — so it is
+    /// NOT a usable "nothing to compact" signal. Guarding compaction on an empty free
+    /// list would skip exactly the case that gains the most.
+    #[test]
+    fn compaction_repacks_an_insert_built_tree_despite_an_empty_free_list() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("repack.db");
+        BPlusTree::<u32, String>::new().store(&path)?;
+
+        let mut updater = BPlusTreeUpdate::<u32, String>::try_new(&path)?;
+        updater.set_flush_policy(FlushPolicy::Batch);
+        for batch in 0..8u32 {
+            let keys: Vec<u32> = (0..250).map(|index| batch * 250 + index).collect();
+            let values: Vec<String> = keys.iter().map(|key| format!("{key:07}").repeat(90)).collect();
+            let items = keys.iter().zip(&values).collect::<Vec<_>>();
+            updater.upsert_batch_encoded(BPlusTreeUpdate::<u32, String>::prepare_upsert_batch(&items)?)?;
+            updater.commit()?;
+        }
+
+        let before = BPlusTreeQuery::<u32, String>::try_new(&path)?.header;
+        assert_eq!(before.free_page_head, 0, "inserts must not free pages");
+
+        updater.compact()?;
+
+        let after = BPlusTreeQuery::<u32, String>::try_new(&path)?.header;
+        assert!(
+            after.next_page_id * 3 < before.next_page_id * 2,
+            "compaction must reclaim over a third of the pages, got {} -> {}",
+            before.next_page_id,
+            after.next_page_id
+        );
+
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
+        for key in 0..2000u32 {
+            assert_eq!(
+                query.query(&key).map_err(BPlusTreeError::to_io)?,
+                Some(format!("{key:07}").repeat(90)),
+                "key {key} did not survive compaction"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn identical_batch_metadata_is_a_true_noop() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
@@ -5697,11 +5956,71 @@ mod tests {
         })
         .err()
         .ok_or_else(|| io::Error::other("post-commit sync failure was hidden"))?;
+        assert!(error.database_was_published());
+        let error = io::Error::from(error);
         assert!(error.to_string().contains("database published but directory sync failed; durability unknown"));
         assert!(!temporary.exists());
         let mut query = BPlusTreeQuery::<u32, Vec<u8>>::try_new(&destination)?;
         assert_eq!(query.query(&1).map_err(BPlusTreeError::to_io)?, None);
         assert_eq!(query.query(&2).map_err(BPlusTreeError::to_io)?, Some(vec![2]));
+        Ok(())
+    }
+
+    #[test]
+    fn store_sync_failure_after_rename_invalidates_previous_sorted_index() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let destination = dir.path().join("database.db");
+        let index = crate::repository::storage::get_file_path_for_db_index(&destination);
+        let mut old = BPlusTree::new();
+        old.insert(1u32, String::from("old"));
+        let _ = old.store_with_index(&destination, String::clone)?;
+        assert!(index.is_file());
+
+        let mut replacement = BPlusTree::new();
+        replacement.insert(2u32, String::from("new"));
+        let error = replacement
+            .store_exclusive_with_directory_sync(&destination, |_| {
+                Err(io::Error::other("injected directory sync failure"))
+            })
+            .err()
+            .ok_or_else(|| io::Error::other("post-rename sync failure was hidden"))?;
+
+        assert!(error.to_string().contains("publication durability remains unknown"));
+        assert!(!index.exists());
+        assert!(replacement.dirty);
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&destination)?;
+        assert_eq!(query.query(&1).map_err(BPlusTreeError::to_io)?, None);
+        assert_eq!(query.query(&2).map_err(BPlusTreeError::to_io)?, Some(String::from("new")));
+        Ok(())
+    }
+
+    #[test]
+    fn store_reports_sync_and_index_invalidation_failures_together() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let destination = dir.path().join("database.db");
+        let index = crate::repository::storage::get_file_path_for_db_index(&destination);
+        let mut old = BPlusTree::new();
+        old.insert(1u32, String::from("old"));
+        let _ = old.store(&destination)?;
+        fs::create_dir(&index)?;
+
+        let mut replacement = BPlusTree::new();
+        replacement.insert(2u32, String::from("new"));
+        let error = replacement
+            .store_exclusive_with_directory_sync(&destination, |_| {
+                Err(io::Error::other("injected directory sync failure"))
+            })
+            .err()
+            .ok_or_else(|| io::Error::other("publish and index invalidation failures were hidden"))?;
+        let message = error.to_string();
+
+        assert!(message.contains("unknown directory durability"));
+        assert!(message.contains("previous sorted index could not be invalidated"));
+        assert!(index.is_dir());
+        assert!(replacement.dirty);
+        let mut query = BPlusTreeQuery::<u32, String>::try_new(&destination)?;
+        assert_eq!(query.query(&1).map_err(BPlusTreeError::to_io)?, None);
+        assert_eq!(query.query(&2).map_err(BPlusTreeError::to_io)?, Some(String::from("new")));
         Ok(())
     }
 
@@ -5713,7 +6032,9 @@ mod tests {
         let temporary = dir.path().join("database.tx.v3.tmp");
         fs::write(&temporary, b"new")?;
 
-        assert!(publish_database(&temporary, &destination, sync_parent_directory).is_err());
+        let error = publish_database(&temporary, &destination, sync_parent_directory)
+            .expect_err("publishing over a directory must fail");
+        assert!(!error.database_was_published());
         assert!(!temporary.exists());
         Ok(())
     }

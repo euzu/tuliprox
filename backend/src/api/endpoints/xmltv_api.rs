@@ -38,13 +38,14 @@ use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
 use tokio::{io::{AsyncWrite, AsyncWriteExt}, sync::mpsc, task};
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
+use crate::api::static_headers::CT_XML;
 use crate::auth::resolve_api_user_context;
 use crate::model::{ApiProxyServerInfo, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY, EPG_TAG_LIVE, EPG_TAG_NEW};
 
 pub fn get_empty_epg_response() -> axum::response::Response {
     try_unwrap_body!(axum::response::Response::builder()
         .status(axum::http::StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/xml"))
+        .header(axum::http::header::CONTENT_TYPE, CT_XML.clone()) //axum::http::HeaderValue::from_static("text/xml"))
         .body(axum::body::Body::from(r#"<?xml version="1.0" encoding="utf-8" ?><!DOCTYPE tv SYSTEM "xmltv.dtd"><tv generator-info-name="Xtream Codes" generator-info-url=""></tv>"#)))
 }
 

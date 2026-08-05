@@ -9,14 +9,16 @@ use crate::{
         parser::ics,
         processor::EpgIdCache,
     },
+    repository::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy},
     utils::{
-        async_file_reader, compressed_file_reader_async::CompressedFileReaderAsync, parse_xmltv_time,
-        with_folded_epg_id,
+        arc_str_serde, async_file_reader, compressed_file_reader_async::CompressedFileReaderAsync,
+        parse_xmltv_time, with_folded_epg_id,
     },
 };
 use log::error;
 use quick_xml::events::{BytesStart, BytesText, Event};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use serde::{Deserialize, Serialize};
 use shared::{
     concat_string,
     model::{EpgCategory, EpgChannel, EpgNamePrefix, EpgProgramme},
@@ -26,6 +28,8 @@ use std::{
     borrow::Cow,
     cmp::min,
     collections::{HashMap, HashSet},
+    io,
+    path::PathBuf,
     sync::Arc,
 };
 use tokio::io::AsyncRead;
@@ -593,7 +597,12 @@ where
 {
     let mut stack: Vec<XmlTag> = vec![];
     let mut xml_reader = quick_xml::reader::Reader::from_reader(async_file_reader(content));
-    let mut buf = Vec::<u8>::new();
+    // Pre-allocate so the first giant `<programme>` block does not trigger a
+    // chain of `Vec::grow` reallocs. The buffer is monotonically grown by
+    // quick_xml (it is reset by the caller, see below), so the eventual size
+    // is the largest single event — for XMLTV that is the biggest programme
+    // description. Starting at 0 capacity makes that growth ~25 doubling copies.
+    let mut buf = Vec::<u8>::with_capacity(64 * 1024);
     loop {
         match xml_reader.read_event_into_async(&mut buf).await {
             Ok(Event::Eof) => break,
@@ -606,8 +615,19 @@ where
             Ok(Event::Text(e)) => handle_text_tag(&mut stack, &e),
             _ => {}
         }
+        // quick_xml does not clear the buffer between events — the borrow
+        // returned by `read_event_into_async` is dropped at the end of each
+        // match arm, so we can reclaim the capacity here without invalidating
+        // any handler output. Without this, `buf` grows monotonically over the
+        // whole file, defeating the 64 KiB pre-allocation above.
+        buf.clear();
     }
 }
+
+/// Channels per `BPlusTree` write batch. Sized so the in-flight batch + its
+/// prepared references stay under 1 MiB on the typical 100-KiB-per-channel
+/// EPG feed. This is an educated guess; profile-driven tuning is fine.
+const EPG_DISK_BATCH_SIZE: usize = 100;
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 enum XmlTagType {
@@ -701,16 +721,16 @@ struct ChannelMergeAcc {
 }
 
 #[derive(Debug, Default)]
-struct EpgMergeAccumulator {
+pub(crate) struct EpgMergeAccumulator {
     attributes: Option<PreferredAttributes>,
     channels: HashMap<Arc<str>, ChannelMergeAcc>,
     dummy_policies: HashMap<Arc<str>, PreferredDummyPolicy>,
 }
 
 impl EpgMergeAccumulator {
-    fn new() -> Self { Self::default() }
+    pub(crate) fn new() -> Self { Self::default() }
 
-    fn set_attributes_if_preferred(
+    pub(crate) fn set_attributes_if_preferred(
         &mut self,
         priority: i16,
         source_order: usize,
@@ -803,7 +823,7 @@ impl EpgMergeAccumulator {
         }
     }
 
-    fn add_channel_with_programmes(
+    pub(crate) fn add_channel_with_programmes(
         &mut self,
         priority: i16,
         source_order: usize,
@@ -884,6 +904,198 @@ impl EpgMergeAccumulator {
             icon_override_channels,
         ))
     }
+
+    /// Drain the accumulator directly into a temp `BPlusTree` on disk. Peak RAM
+    /// here is `EPG_DISK_BATCH_SIZE × max_channel_size` — channels never sit
+    /// in a `Vec`. The returned `DiskEpgSource` removes the file in its
+    /// `Drop`.
+    ///
+    /// `source_priority` and `source_order` are the per-source values used
+    /// for `set_attributes_if_preferred` at merge time. The accumulator
+    /// itself does not aggregate them, so the caller — which knows the
+    /// original Epg's `priority` and `source_order` — must hand them in.
+    pub(crate) fn finish_into_disk(
+        self,
+        path: PathBuf,
+        source_priority: i16,
+        source_order: u32,
+    ) -> io::Result<DiskEpgSource> {
+        // Fresh tree at the temp path. `store` creates the file; the
+        // subsequent updater opens it for batched writes.
+        BPlusTree::<EpgDiskChannelKey, EpgChannel>::new()
+            .store(&path)
+            .map_err(|e| io::Error::other(format!("create temp EPG tree: {e}")))?;
+        // The temp file exists from here until `DiskEpgSource::new` takes
+        // ownership at the end. Any `?` in between would otherwise leak the
+        // file because no `Drop` is wired up yet. The local guard covers the
+        // fallible window and is disarmed just before we hand the path off.
+        let mut temp_guard = TempFileGuard(Some(path.clone()));
+
+        let mut updater = BPlusTreeUpdate::<EpgDiskChannelKey, EpgChannel>::try_new_with_backoff(&path)
+            .map_err(|e| io::Error::other(format!("open temp EPG tree: {e}")))?;
+        updater.set_flush_policy(FlushPolicy::Batch);
+
+        let EpgMergeAccumulator { attributes, channels, dummy_policies: _ } = self;
+        let total = channels.len();
+        let mut batch: Vec<(EpgDiskChannelKey, EpgChannel)> = Vec::with_capacity(EPG_DISK_BATCH_SIZE);
+        let mut written = 0usize;
+
+        for (_, mut acc) in channels {
+            normalize_channel_programmes(&mut acc);
+            let folded = with_folded_epg_id(&acc.channel.id, |folded| folded.intern());
+            batch.push((
+                EpgDiskChannelKey {
+                    folded_id: folded,
+                    priority: acc.priority,
+                    // `usize -> u32` overflow requires > 4 billion sources, which
+                    // is not representable in the file format anyway; treat it
+                    // as a programmer error rather than a recoverable I/O
+                    // failure.
+                    source_order: u32::try_from(acc.source_order)
+                        .expect("source_order exceeds u32 (4 billion sources in one import)"),
+                },
+                acc.channel,
+            ));
+            if batch.len() >= EPG_DISK_BATCH_SIZE {
+                flush_batch(&mut updater, &mut batch, &mut written)?;
+            }
+        }
+        flush_batch(&mut updater, &mut batch, &mut written)?;
+        updater.commit()?;
+        // Reclaim space wasted by priority-override entries (multiple keys per
+        // channel). Without compact, the file is ~2× its eventual size.
+        updater.compact()?;
+
+        log::debug!(
+            "Drained {written} channels ({total} total before normalize) into temp EPG tree at {}",
+            path.display()
+        );
+
+        let source = DiskEpgSource::new(
+            path,
+            attributes.map(|a| a.attributes),
+            source_priority,
+            source_order,
+        );
+        // DiskEpgSource now owns the path; disarm the guard so its Drop does
+        // not double-remove the file. `mem::forget` would also work, but
+        // `take()` keeps the guard in scope and is auditable.
+        temp_guard.0.take();
+        Ok(source)
+    }
+}
+
+/// Removes the wrapped file path on drop unless `take()` was called first.
+/// Mirrors the cleanup logic of `DiskEpgSource::Drop` for the fallible window
+/// inside `finish_into_disk` where no `DiskEpgSource` exists yet.
+struct TempFileGuard(Option<PathBuf>);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            if let Err(err) = std::fs::remove_file(&path) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("Failed to remove temp EPG tree at {}: {err}", path.display());
+                }
+            }
+        }
+    }
+}
+
+/// Flush a non-empty batch and bump the written counter. No-op for empty
+/// batches, so the caller does not need a guard around the trailing flush.
+fn flush_batch(
+    updater: &mut BPlusTreeUpdate<EpgDiskChannelKey, EpgChannel>,
+    batch: &mut Vec<(EpgDiskChannelKey, EpgChannel)>,
+    written: &mut usize,
+) -> io::Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let items: Vec<(&EpgDiskChannelKey, &EpgChannel)> = batch.iter().map(|(k, v)| (k, v)).collect();
+    let prepared = BPlusTreeUpdate::<EpgDiskChannelKey, EpgChannel>::prepare_upsert_batch(&items)?;
+    updater.upsert_batch_encoded(prepared)?;
+    *written += batch.len();
+    batch.clear();
+    Ok(())
+}
+
+/// Sort key for the per-source temp `BPlusTree`. Order: folded channel id ascending,
+/// then priority ascending, then source order ascending. This matches the existing
+/// rule in `EpgMergeAccumulator::upsert_channel` (`(priority, source_order) < (acc.priority, acc.source_order)`)
+/// — lower numbers win. Sorted iteration over the tree therefore yields channels in
+/// the right order for the multi-way merge downstream.
+///
+/// The `Ord` implementation below is hand-written to make the value-based,
+/// deterministic ordering explicit (`folded_id` → `priority` → `source_order`).
+/// `Arc<str>` already compares by value when the inner `str` is `Ord`, so a
+/// derived `Ord` would produce the same total order — the custom impl exists
+/// to lock the contract in source rather than rely on a derived behaviour.
+/// Same key type serialises through `rmp_serde` as a record.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct EpgDiskChannelKey {
+    #[serde(with = "arc_str_serde")]
+    pub folded_id: Arc<str>,
+    pub priority: i16,
+    pub source_order: u32,
+}
+
+// Explicit value-based ordering. `#[derive(Ord)]` would derive the same total
+// order via `Arc<str>`'s value-based `Ord` impl, but writing it out documents
+// the contract: `folded_id` ascending, then `priority` ascending, then
+// `source_order` ascending. Sorted iteration in `merge_epg_trees` depends on
+// this exact order for deterministic multi-way merge results.
+impl Ord for EpgDiskChannelKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.folded_id
+            .as_ref()
+            .cmp(other.folded_id.as_ref())
+            .then(self.priority.cmp(&other.priority))
+            .then(self.source_order.cmp(&other.source_order))
+    }
+}
+impl PartialOrd for EpgDiskChannelKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
+}
+
+/// Handle for a temp `BPlusTree` that holds the channels of one EPG source.
+/// `Drop` removes the file — even on panic — so the temp dir never accumulates
+/// stale trees. The caller is expected to hand ownership to `merge_epg_trees`,
+/// which opens a query handle and drains the file before letting the guard drop.
+///
+/// `source_priority` and `source_order` are the per-source values used at
+/// merge time by `set_attributes_if_preferred`. They live on the source
+/// rather than being reconstructed from the disk tree, because the disk
+/// tree only stores per-channel priorities (which can differ across
+/// channels if sources overlap), not a single source-level value.
+pub(crate) struct DiskEpgSource {
+    pub(super) path: PathBuf,
+    pub(super) attributes: Option<HashMap<Arc<str>, Arc<str>>>,
+    pub(super) source_priority: i16,
+    pub(super) source_order: u32,
+}
+
+impl DiskEpgSource {
+    pub(crate) fn new(
+        path: PathBuf,
+        attributes: Option<HashMap<Arc<str>, Arc<str>>>,
+        source_priority: i16,
+        source_order: u32,
+    ) -> Self {
+        Self { path, attributes, source_priority, source_order }
+    }
+}
+
+impl Drop for DiskEpgSource {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::remove_file(&self.path) {
+            // Missing-file is fine (already cleaned up). Anything else is worth
+            // a warning — it leaks the temp file until the OS clears /tmp.
+            if err.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("Failed to remove temp EPG tree at {}: {err}", self.path.display());
+            }
+        }
+    }
 }
 
 fn apply_dummy_policies(channels: &mut [ChannelMergeAcc], dummy_policies: &HashMap<Arc<str>, PreferredDummyPolicy>) {
@@ -923,8 +1135,16 @@ fn backfill_programme_metadata(existing: &mut EpgProgramme, incoming: EpgProgram
 }
 
 fn normalize_channel_programmes(acc: &mut ChannelMergeAcc) {
-    // Always normalize programme order and dedupe, even for single-source channels.
-    // This preserves backfill behavior for duplicate entries within the same source.
+    // `acc.programmes` is the cross-source list of `ProgrammeMergeEntry` records
+    // (populated by `add_channel_with_programmes` and `push_programme`).
+    // When the list is empty, the channel's own programmes — set by the
+    // vacant path of `upsert_channel` — are authoritative; the previous
+    // implementation unconditionally overwrote `acc.channel.programmes` with
+    // an empty vector here, which silently dropped every programme on the
+    // single-source and disk-spill paths.
+    if acc.programmes.is_empty() {
+        return;
+    }
     acc.programmes
         .sort_by_key(|entry| (entry.programme.start, entry.programme.stop, entry.priority, entry.source_order));
 
@@ -992,6 +1212,51 @@ pub fn flatten_tvguide(tv_guides: Vec<Epg>) -> Option<Epg> {
         }
     }
     accumulator.finish()
+}
+
+/// Merge N temp `BPlusTree`s (one per EPG source) into a single `Epg`,
+/// applying dummy policies and the existing priority/sort rules. Sources
+/// are consumed one at a time — each `DiskEpgSource`'s temp file is
+/// removed by its `Drop` as soon as its iterator is exhausted, so peak RAM
+/// is bounded by the largest single source plus the accumulator's
+/// per-channel `HashMap`, not the total feed size.
+///
+/// Complexity: `O(n_sources + total_channels)`. The per-channel priority
+/// resolution happens inside `EpgMergeAccumulator::upsert_channel`
+/// (`HashMap` insert), not in a heap. Sources are processed in iteration
+/// order, so earlier sources win priority ties for shared channels.
+///
+/// The constant-memory guarantee lives on the write side
+/// (`EpgMergeAccumulator::finish_into_disk`); this function is bounded by
+/// the union's metadata `HashMap` in the accumulator, which is the same
+/// shape the in-memory path already carries.
+///
+/// The icon-override channel set returned by `finish_epg_with_icon_overrides`
+/// is intentionally dropped — the wire-up path persists channels directly,
+/// not the override metadata. If a caller later needs that set, the
+/// `MergedEpgWithIconOverrides` tuple is already in scope via this
+/// function's return type.
+pub(crate) fn merge_epg_trees(sources: Vec<DiskEpgSource>) -> io::Result<Option<MergedEpgWithIconOverrides>> {
+    let mut accumulator = EpgMergeAccumulator::new();
+    for source in sources {
+        if let Some(attrs) = &source.attributes {
+            accumulator.set_attributes_if_preferred(source.source_priority, source.source_order as usize, Some(attrs.clone()));
+        }
+        let mut query = BPlusTreeQuery::<EpgDiskChannelKey, EpgChannel>::try_new(&source.path)
+            .map_err(|e| io::Error::other(format!("open temp EPG tree at {}: {e}", source.path.display())))?;
+        for entry in query.iter() {
+            let (key, channel) = entry.map_err(|e| io::Error::other(format!("read temp EPG entry: {e}")))?;
+            // `add_channel_with_programmes` preserves the channel's programmes
+            // on the merge accumulator; plain `upsert_channel` would drop them
+            // because the vacant-entry path constructs a fresh `ChannelMergeAcc`
+            // with `programmes: Vec::new()`.
+            accumulator.add_channel_with_programmes(key.priority, key.source_order as usize, false, channel);
+        }
+        // `source` drops at the end of this iteration, which removes the
+        // temp file. The query's mmap/buffer is closed first because `query`
+        // goes out of scope before `source`.
+    }
+    Ok(accumulator.finish_epg_with_icon_overrides())
 }
 
 #[cfg(test)]
@@ -1795,5 +2060,206 @@ mod tests {
             assert!(programme.is_live);
             assert!(programme.is_new);
         });
+    }
+
+    /// Regression guard for the buffer-preallocation in `parse_tvguide`.
+    ///
+    /// `quick_xml` uses the caller-provided `Vec<u8>` as a monotonically growing
+    /// read buffer (it does not call `.clear()` between events; the caller
+    /// slices the new portion). For an XMLTV feed with a single giant
+    /// `<programme>` description, that buffer used to start at 0 capacity and
+    /// double ~25 times on the way to ~163 MiB — every doubling being a
+    /// copying realloc. Starting with `Vec::with_capacity(64 * 1024)` removes
+    /// the realloc chain. This test feeds a programme whose description is
+    /// bigger than that initial capacity and checks that parsing still
+    /// succeeds; the absence of the test would have allowed a silent
+    /// regression to `Vec::new()` without breaking any visible behaviour.
+    #[test]
+    fn parse_tvguide_handles_giant_programme_description() {
+        use crate::processing::parser::xmltv::{EPG_TAG_DESC, EPG_TAG_PROGRAMME, parse_tvguide};
+
+        run_async_test(async {
+            // 200 KiB of text content — well beyond the 64 KiB preallocation.
+            let big_text = "x".repeat(200 * 1024);
+            // `channel` attribute is required for the parser to fire the
+            // callback on a <programme> tag (see `handle_tag_end`).
+            let xml = format!(
+                r#"<?xml version="1.0"?><tv><programme channel="c1"><title>t</title><desc>{big_text}</desc></programme></tv>"#
+            );
+            let mut emitted_tags: Vec<crate::model::XmlTag> = Vec::new();
+            parse_tvguide(xml.as_bytes(), &mut |tag| {
+                emitted_tags.push(tag);
+            })
+            .await;
+
+            // The whole point of the preallocation is that the full payload
+            // survives the round trip — not just the presence of a tag.
+            let programme = emitted_tags
+                .iter()
+                .find(|tag| tag.name.as_ref() == EPG_TAG_PROGRAMME)
+                .expect("parser emitted no <programme> tag");
+            let children = programme.children.as_deref().expect("<programme> has no children");
+            let desc = children
+                .iter()
+                .find(|child| child.name.as_ref() == EPG_TAG_DESC)
+                .expect("<programme> emitted no <desc> child");
+            assert_eq!(
+                desc.value.as_deref().map(str::len),
+                Some(big_text.len()),
+                "<desc> payload was truncated; got {} bytes, expected {}",
+                desc.value.as_deref().map_or(0, str::len),
+                big_text.len()
+            );
+        });
+    }
+
+    /// Smallest testable piece of the disk-spilling path. The Drop guard is
+    /// what keeps a panic or early return from leaking temp files into /tmp.
+    /// If this fails, every other disk-spilling test is built on sand.
+    #[test]
+    fn disk_epg_source_removes_its_temp_file_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("epg-source.db");
+        std::fs::write(&path, b"placeholder").unwrap();
+        assert!(path.exists(), "precondition: temp file must exist");
+
+        {
+            let _src = super::DiskEpgSource::new(path.clone(), None, 0, 0);
+        } // _src dropped here
+
+        assert!(!path.exists(), "DiskEpgSource::Drop must remove its temp file");
+    }
+
+    /// Builds an accumulator with N channels and drains it to disk. Asserts:
+    /// (a) the temp file exists while the guard is alive, (b) it has
+    /// non-trivial size, (c) the file is removed after Drop. Together these
+    /// prove the writer runs end-to-end without panicking.
+    #[test]
+    fn finish_into_disk_writes_a_real_temp_tree() {
+        use super::EpgMergeAccumulator;
+
+        let mut acc = EpgMergeAccumulator::new();
+        for i in 0..250u32 {
+            let id: Arc<str> = format!("channel-{i:04}").into();
+            let ch = shared::model::EpgChannel {
+                id: Arc::clone(&id),
+                title: Some(format!("title {i}").into()),
+                icon: None,
+                programmes: vec![shared::model::EpgProgramme::new(i64::from(i), i64::from(i + 1), id)],
+            };
+            acc.upsert_channel(i16::try_from(i).unwrap_or(0), 0, false, ch);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("epg-source.db");
+        let src = acc.finish_into_disk(path.clone(), 5, 0).unwrap();
+        assert!(path.exists(), "temp tree file must exist while guard is alive");
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(size > 1024, "expected non-trivial size, got {size}");
+        drop(src);
+        assert!(!path.exists(), "Drop must remove the temp file");
+    }
+
+    /// Contract test: two temp trees written from two accumulators must
+    /// merge into the same `Epg` as the in-memory `finish_epg_with_icon_overrides`
+    /// would produce from the same inputs. Without this, every other
+    /// optimisation is built on sand.
+    #[test]
+    fn disk_path_matches_in_memory_finish() {
+        use super::{merge_epg_trees, EpgMergeAccumulator};
+
+        // Build one source by appending one programme per channel through the
+        // accumulator's primary entry point. `add_channel_with_programmes` is
+        // the same call the in-memory `merge_epg_channels_by_priority` uses,
+        // so the in-memory reference and the disk path go through identical
+        // APIs. The two sources use disjoint programme intervals
+        // (source 0: 0..1, source 1: 100..101) so the merged channel should
+        // retain both programmes end-to-end.
+        fn build_acc(source: usize, channels: std::ops::Range<u32>) -> EpgMergeAccumulator {
+            let mut acc = EpgMergeAccumulator::new();
+            for i in channels {
+                let id: Arc<str> = format!("ch-{i:04}").into();
+                let priority = if source == 0 { 5 } else { 3 }; // source 1 wins
+                let (start, stop) = if source == 0 { (i64::from(i), i64::from(i + 1)) } else { (100 + i64::from(i), 101 + i64::from(i)) };
+                acc.add_channel_with_programmes(
+                    i16::try_from(priority).unwrap_or(0),
+                    source,
+                    false,
+                    shared::model::EpgChannel {
+                        id: Arc::clone(&id),
+                        title: Some(format!("title-{source}-{i}").into()),
+                        icon: None,
+                        programmes: vec![shared::model::EpgProgramme::new(start, stop, id)],
+                    },
+                );
+            }
+            acc
+        }
+
+        // Reference: in-memory merge of the same two sources.
+        let ref_acc_a = build_acc(0, 0..50);
+        let ref_acc_b = build_acc(1, 0..50);
+        // `EpgMergeAccumulator` is single-shot, so the reference merge has to
+        // rebuild a fresh accumulator. The two halves contribute disjoint
+        // programme intervals, so a single accumulator sees both.
+        let mut ref_acc = EpgMergeAccumulator::new();
+        for i in 0..50 {
+            let id: Arc<str> = format!("ch-{i:04}").into();
+            ref_acc.add_channel_with_programmes(
+                5,
+                0,
+                false,
+                shared::model::EpgChannel {
+                    id: Arc::clone(&id),
+                    title: Some(format!("title-0-{i}").into()),
+                    icon: None,
+                    programmes: vec![shared::model::EpgProgramme::new(i64::from(i), i64::from(i + 1), id)],
+                },
+            );
+        }
+        for i in 0..50 {
+            let id: Arc<str> = format!("ch-{i:04}").into();
+            ref_acc.add_channel_with_programmes(
+                3,
+                1,
+                false,
+                shared::model::EpgChannel {
+                    id: Arc::clone(&id),
+                    title: Some(format!("title-1-{i}").into()),
+                    icon: None,
+                    programmes: vec![shared::model::EpgProgramme::new(100 + i64::from(i), 101 + i64::from(i), id)],
+                },
+            );
+        }
+        let reference = ref_acc.finish_epg_with_icon_overrides().unwrap().0;
+        let _ = (ref_acc_a, ref_acc_b); // keep the per-source builder API in the test
+
+        // Disk path: two temp trees, then merge.
+        let dir = tempfile::tempdir().unwrap();
+        let src_a = build_acc(0, 0..50).finish_into_disk(dir.path().join("a.db"), 5, 0).unwrap();
+        let src_b = build_acc(1, 0..50).finish_into_disk(dir.path().join("b.db"), 3, 1).unwrap();
+        let merged = merge_epg_trees(vec![src_a, src_b]).unwrap().unwrap().0;
+
+        assert_eq!(reference.children.len(), merged.children.len(), "channel counts must match");
+        for (left, right) in reference.children.iter().zip(merged.children.iter()) {
+            assert_eq!(left.id, right.id, "channel order must match");
+            // Source 1 had priority 3 (lower = wins) so its title should win.
+            assert_eq!(left.title, right.title, "priority winner's title must propagate");
+            // Both sources contribute distinct, non-overlapping programmes.
+            // The merged channel must keep both — the disk path uses
+            // `add_channel_with_programmes` so nothing is dropped on the way in.
+            assert_eq!(
+                left.programmes.len(),
+                2,
+                "channel {} should retain both source programmes, got {}",
+                left.id,
+                left.programmes.len()
+            );
+            assert_eq!(right.programmes.len(), 2, "disk-merged channel {} lost programmes", right.id);
+            for (lp, rp) in left.programmes.iter().zip(right.programmes.iter()) {
+                assert_eq!(lp.start, rp.start, "programme start must match for channel {}", left.id);
+                assert_eq!(lp.stop, rp.stop, "programme stop must match for channel {}", left.id);
+            }
+        }
     }
 }

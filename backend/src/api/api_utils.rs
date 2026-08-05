@@ -500,6 +500,7 @@ pub use try_result_bad_request;
 pub use try_result_not_found;
 pub use try_result_or_status;
 pub use try_unwrap_body;
+use crate::api::static_headers::CT_OCTET;
 
 pub fn get_server_time() -> String {
     chrono::offset::Local::now().with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z").to_string()
@@ -3246,8 +3247,8 @@ async fn detected_catchup_hls_response(
 fn catchup_hls_manifest_response(content: String) -> axum::response::Response {
     let mut response = try_unwrap_body!(axum::response::Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-        .header(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate")
+        .header(header::CONTENT_TYPE, crate::api::static_headers::CT_M3U.clone())
+        .header(header::CACHE_CONTROL, crate::api::static_headers::CC_NO_STORE.clone())
         .body(Body::from(content)));
     mark_response_as_uncompressed(&mut response);
     response
@@ -3653,7 +3654,7 @@ pub(crate) async fn local_stream_response(
                 let ct = content_type_from_ext(&ext);
                 headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
             } else {
-                headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+                headers.insert(header::CONTENT_TYPE, CT_OCTET.clone()); //HeaderValue::from_static("application/octet-stream"));
             }
             headers.insert("Accept-Ranges", HeaderValue::from_static("bytes"));
             headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("0"));
@@ -4145,7 +4146,7 @@ pub fn separate_number_and_remainder(input: &str) -> (&str, Option<&str>) {
 pub fn empty_json_list_response() -> axum::response::Response {
     try_unwrap_body!(axum::response::Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+        .header(header::CONTENT_TYPE, crate::api::static_headers::CT_JSON.clone())
         .body("[]".to_owned()))
 }
 
@@ -4598,14 +4599,14 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
 pub fn empty_json_response_as_object() -> axum::http::Result<axum::response::Response> {
     axum::response::Response::builder()
         .status(axum::http::StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+        .header(axum::http::header::CONTENT_TYPE, crate::api::static_headers::CT_JSON.clone())
         .body(axum::body::Body::from("{}".as_bytes()))
 }
 
 pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Response> {
     axum::response::Response::builder()
         .status(axum::http::StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+        .header(axum::http::header::CONTENT_TYPE, crate::api::static_headers::CT_JSON.clone())
         .body(axum::body::Body::from("[]".as_bytes()))
 }
 
