@@ -39,7 +39,7 @@ use std::{
     },
 };
 use tokio::sync::{oneshot, Mutex, RwLock};
-use tower_http::{compression::predicate::{DefaultPredicate, Predicate}, services::ServeDir};
+use tower_http::{compression::predicate::{DefaultPredicate, Predicate, SizeAbove}, services::ServeDir};
 
 const DEFAULT_SETUP_HOST: &str = "0.0.0.0";
 
@@ -855,7 +855,12 @@ async fn setup_complete_inner(
 }
 
 fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl Predicate> {
-    let predicate = DefaultPredicate::new().and(|
+    // Body-aware 1 KiB cutoff is delegated to `SizeAbove` so the two layers
+    // share the same size-detection logic (Content-Length first, then
+    // Body::size_hint::exact, defaulting to compress when size is unknown).
+    let predicate = DefaultPredicate::new()
+        .and(SizeAbove::new(1024))
+        .and(|
         _status: axum::http::StatusCode,
         _version: axum::http::Version,
         headers: &axum::http::HeaderMap,
@@ -872,16 +877,6 @@ fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl 
                     || ct.starts_with("application/octet-stream")
                 {
                     return false;
-                }
-            }
-        }
-        // Skip compression for small responses where overhead exceeds benefit.
-        if let Some(content_length) = headers.get(axum::http::header::CONTENT_LENGTH) {
-            if let Ok(len_str) = content_length.to_str() {
-                if let Ok(len) = len_str.parse::<u64>() {
-                    if len < 1024 {
-                        return false;
-                    }
                 }
             }
         }

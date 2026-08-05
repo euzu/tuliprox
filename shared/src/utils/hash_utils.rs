@@ -677,6 +677,8 @@ mod tests {
             PlaylistItemType::LiveHls,
             PlaylistItemType::Video,
             PlaylistItemType::LocalVideo,
+            PlaylistItemType::LocalSeries,
+            PlaylistItemType::LocalSeriesInfo,
             PlaylistItemType::Series,
             PlaylistItemType::SeriesInfo,
             PlaylistItemType::Catchup,

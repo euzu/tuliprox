@@ -4245,25 +4245,7 @@ mod tests {
     }
 
 
-    /// Compaction is NOT optional cleanup on an insert-built tree: leaf splits leave
-    /// pages roughly half full, and `build_pages` repacks them to near-capacity.
-    ///
-    /// Note `free_page_head` stays 0 throughout — inserts never free a page — so it is
-    /// NOT a usable "nothing to compact" signal. Guarding compaction on an empty free
-    /// list would skip exactly the case that gains the most.
-    /// The streaming builder hands out a leaf's page id *before* the overflow chain it
-    /// points at, but writes the leaf *after* those pages — so page ids do not reach the
-    /// file in ascending order. Worse, this nests: leaf A is reserved, its chains are
-    /// written, A is written, then leaf B repeats the whole dance at higher ids.
-    ///
-    /// The entry count is sized to produce many leaves, not one: overflow leaf cells are
-    /// tiny (key plus pointers, ~34 bytes), so a few hundred entries would all land in a
-    /// single leaf and never exercise the nesting. Values are incompressible on purpose —
-    /// a repeated string would compress back under `MAX_INLINE_STORED_VALUE` and skip
-    /// overflow entirely. Both properties are asserted below rather than assumed.
-    ///
-    /// The file-length check is the real guard: writing pages sequentially instead of
-    /// positionally would leave the file short or the ids scrambled.
+    /// Throughput benchmark for `BPlusTree::store` across three workload sizes.
     #[test]
     #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
     fn bench_store_throughput() -> io::Result<()> {
@@ -4297,6 +4279,19 @@ mod tests {
 
     #[test]
     fn streamed_store_writes_every_page_despite_out_of_order_overflow_chains() -> io::Result<()> {
+        // The streaming builder hands out a leaf's page id *before* the overflow chain it
+        // points at, but writes the leaf *after* those pages — so page ids do not reach the
+        // file in ascending order. Worse, this nests: leaf A is reserved, its chains are
+        // written, A is written, then leaf B repeats the whole dance at higher ids.
+        //
+        // The entry count is sized to produce many leaves, not one: overflow leaf cells are
+        // tiny (key plus pointers, ~34 bytes), so a few hundred entries would all land in a
+        // single leaf and never exercise the nesting. Values are incompressible on purpose —
+        // a repeated string would compress back under `MAX_INLINE_STORED_VALUE` and skip
+        // overflow entirely. Both properties are asserted below rather than assumed.
+        //
+        // The file-length check is the real guard: writing pages sequentially instead of
+        // positionally would leave the file short or the ids scrambled.
         // Deterministic LCG — compresses badly, so values are forced into overflow chains.
         let noise = |seed: u32, len: usize| -> Vec<u8> {
             let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
@@ -4345,6 +4340,12 @@ mod tests {
         Ok(())
     }
 
+    /// Compaction is NOT optional cleanup on an insert-built tree: leaf splits leave
+    /// pages roughly half full, and `build_pages` repacks them to near-capacity.
+    ///
+    /// Note `free_page_head` stays 0 throughout — inserts never free a page — so it is
+    /// NOT a usable "nothing to compact" signal. Guarding compaction on an empty free
+    /// list would skip exactly the case that gains the most.
     #[test]
     fn compaction_repacks_an_insert_built_tree_despite_an_empty_free_list() -> io::Result<()> {
         let dir = tempfile::tempdir()?;

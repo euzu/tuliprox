@@ -43,7 +43,10 @@ RELEASE_NO_LTO="${RELEASE_NO_LTO:-1}"
 PROFILE_TARGET="${PROFILE_TARGET:-}"
 
 HEAP_BASE="$OUTPUT_DIR/tuliprox-${MODE}.heaptrack"
-HEAP_OUTPUT="${HEAP_BASE}.zst"
+# heaptrack picks the compression based on the build; newer releases emit
+# .zst, older ones fall back to .gz. Resolve the real path after the run.
+HEAP_OUTPUT_ZST="${HEAP_BASE}.zst"
+HEAP_OUTPUT_GZ="${HEAP_BASE}.gz"
 
 case "$MODE" in
     debug)
@@ -109,4 +112,12 @@ if [[ -n "$PROFILE_TARGET" ]]; then
 fi
 
 heaptrack -o "$HEAP_BASE" -- "$BIN_PATH" -H "$SETTINGS_DIR" "${TARGET_ARGS[@]}"
+if [[ -f "$HEAP_OUTPUT_ZST" ]]; then
+    HEAP_OUTPUT="$HEAP_OUTPUT_ZST"
+elif [[ -f "$HEAP_OUTPUT_GZ" ]]; then
+    HEAP_OUTPUT="$HEAP_OUTPUT_GZ"
+else
+    echo "heaptrack did not produce ${HEAP_OUTPUT_ZST} or ${HEAP_OUTPUT_GZ}" >&2
+    exit 1
+fi
 echo "Profile written to $HEAP_OUTPUT"

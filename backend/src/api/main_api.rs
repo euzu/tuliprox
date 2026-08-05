@@ -58,7 +58,7 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
-use tower_http::compression::predicate::{DefaultPredicate, Predicate};
+use tower_http::compression::predicate::{DefaultPredicate, Predicate, SizeAbove};
 use tower_http::services::ServeDir;
 
 const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
@@ -478,21 +478,15 @@ fn allow_response_compression(
             }
         }
     }
-    // Skip compression for small responses where overhead exceeds benefit.
-    if let Some(content_length) = headers.get(axum::http::header::CONTENT_LENGTH) {
-        if let Ok(len_str) = content_length.to_str() {
-            if let Ok(len) = len_str.parse::<u64>() {
-                if len < 1024 {
-                    return false;
-                }
-            }
-        }
-    }
+    // Body-aware 1 KiB cutoff lives on `SizeAbove` in the outer predicate
+    // chain. This closure only handles the content-type and extension checks.
     crate::api::api_utils::should_compress_response_extensions(extensions)
 }
 
 fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl Predicate> {
-    let predicate = DefaultPredicate::new().and(allow_response_compression);
+    let predicate = DefaultPredicate::new()
+        .and(SizeAbove::new(1024))
+        .and(allow_response_compression);
     tower_http::compression::CompressionLayer::new()
         .br(false)
         .deflate(true)

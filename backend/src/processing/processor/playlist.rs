@@ -1616,12 +1616,17 @@ async fn finalize_prepared_target(
             // `(Result, Vec<TuliproxError>)`, not `Result` directly. We must
             // surface tempdir / write / merge failures — the user opted in to
             // disk spilling, and silently falling back to the in-memory path
-            // can OOM on large feeds.
+            // can OOM on large feeds. When the spill itself fails we skip the
+            // persist step entirely: continuing with `merged_epg = None` would
+            // overwrite the existing on-disk EPG with nothing and discard the
+            // previously persisted artifact on a transient error.
             match spill_epg_to_disk(new_epg) {
                 Ok(epg) => epg,
                 Err(err) => {
                     errors.push(err);
-                    None
+                    step.stop("EPG spill failed; skipping persist to preserve existing EPG");
+                    log_memory_snapshot(format!("target '{}' after_persist", target.name).as_str());
+                    return (Ok(()), errors);
                 }
             }
         } else {
@@ -3311,6 +3316,17 @@ mod disk_epg_wireup_tests {
                  priority override is broken",
                 ch.id,
             );
+            // `add_channel_with_programmes` on the disk-merge path must
+            // preserve the lower-priority source's single programme per
+            // channel — `upsert_channel` would silently drop them.
+            assert_eq!(
+                ch.programmes.len(),
+                1,
+                "channel {:?} lost programmes through the disk-merge path",
+                ch.id
+            );
+            let prog = &ch.programmes[0];
+            assert!(prog.title.is_none() || prog.title.as_deref() != Some("title-7"));
         }
     }
 

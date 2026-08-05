@@ -255,12 +255,12 @@ impl TVGuide {
     ///
     /// # Examples
     ///
-    /// ``
+    /// ```
     /// let (found, matched) = find_best_fuzzy_match(&mut id_cache, &tag);
     /// if found {
     ///     println!("Best match: {:?}", matched);
     /// }
-    /// ``
+    /// ```
     fn find_best_fuzzy_match(id_cache: &mut EpgIdCache, tag: &XmlTag) -> (bool, Option<Arc<str>>) {
         let match_threshold = id_cache.smart_match_config.match_threshold;
         let best_match_threshold = id_cache.smart_match_config.best_match_threshold;
@@ -322,13 +322,13 @@ impl TVGuide {
     ///
     /// # Examples
     ///
-    /// ``
+    /// ```
     /// let mut id_cache = EpgIdCache::default();
     /// let epg_source = PersistedEpgSource { file_path: Path::new("guide.xml.gz"), priority: 0 };
     /// if let Some(epg) = process_epg_file(&mut id_cache, &epg_source) {
     ///     assert!(!epg.children.is_empty());
     /// }
-    /// ``
+    /// ```
     async fn process_epg_file(
         id_cache: &mut EpgIdCache,
         epg_source: &PersistedEpgSource,
@@ -615,6 +615,12 @@ where
             Ok(Event::Text(e)) => handle_text_tag(&mut stack, &e),
             _ => {}
         }
+        // quick_xml does not clear the buffer between events — the borrow
+        // returned by `read_event_into_async` is dropped at the end of each
+        // match arm, so we can reclaim the capacity here without invalidating
+        // any handler output. Without this, `buf` grows monotonically over the
+        // whole file, defeating the 64 KiB pre-allocation above.
+        buf.clear();
     }
 }
 
@@ -944,7 +950,9 @@ impl EpgMergeAccumulator {
                 },
                 acc.channel,
             ));
-            flush_batch(&mut updater, &mut batch, &mut written)?;
+            if batch.len() >= EPG_DISK_BATCH_SIZE {
+                flush_batch(&mut updater, &mut batch, &mut written)?;
+            }
         }
         flush_batch(&mut updater, &mut batch, &mut written)?;
         updater.commit()?;
@@ -990,8 +998,12 @@ fn flush_batch(
 /// — lower numbers win. Sorted iteration over the tree therefore yields channels in
 /// the right order for the multi-way merge downstream.
 ///
-/// Custom Ord because `Arc<str>` compares by pointer identity, but we want
-/// value-based ordering. Same key type serialises through `rmp_serde` as a record.
+/// The `Ord` implementation below is hand-written to make the value-based,
+/// deterministic ordering explicit (`folded_id` → `priority` → `source_order`).
+/// `Arc<str>` already compares by value when the inner `str` is `Ord`, so a
+/// derived `Ord` would produce the same total order — the custom impl exists
+/// to lock the contract in source rather than rely on a derived behaviour.
+/// Same key type serialises through `rmp_serde` as a record.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct EpgDiskChannelKey {
     #[serde(with = "arc_str_serde")]
@@ -1000,9 +1012,11 @@ pub(crate) struct EpgDiskChannelKey {
     pub source_order: u32,
 }
 
-// Custom `Ord` required: `#[derive(Ord)]` would use `Arc::cmp`, which is
-// pointer identity. We need value-based ordering on the folded id so the
-// sorted iteration in `merge_epg_trees` is deterministic across runs.
+// Explicit value-based ordering. `#[derive(Ord)]` would derive the same total
+// order via `Arc<str>`'s value-based `Ord` impl, but writing it out documents
+// the contract: `folded_id` ascending, then `priority` ascending, then
+// `source_order` ascending. Sorted iteration in `merge_epg_trees` depends on
+// this exact order for deterministic multi-way merge results.
 impl Ord for EpgDiskChannelKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.folded_id
@@ -1093,8 +1107,16 @@ fn backfill_programme_metadata(existing: &mut EpgProgramme, incoming: EpgProgram
 }
 
 fn normalize_channel_programmes(acc: &mut ChannelMergeAcc) {
-    // Always normalize programme order and dedupe, even for single-source channels.
-    // This preserves backfill behavior for duplicate entries within the same source.
+    // `acc.programmes` is the cross-source list of `ProgrammeMergeEntry` records
+    // (populated by `add_channel_with_programmes` and `push_programme`).
+    // When the list is empty, the channel's own programmes — set by the
+    // vacant path of `upsert_channel` — are authoritative; the previous
+    // implementation unconditionally overwrote `acc.channel.programmes` with
+    // an empty vector here, which silently dropped every programme on the
+    // single-source and disk-spill paths.
+    if acc.programmes.is_empty() {
+        return;
+    }
     acc.programmes
         .sort_by_key(|entry| (entry.programme.start, entry.programme.stop, entry.priority, entry.source_order));
 
@@ -1196,7 +1218,11 @@ pub(crate) fn merge_epg_trees(sources: Vec<DiskEpgSource>) -> io::Result<Option<
             .map_err(|e| io::Error::other(format!("open temp EPG tree at {}: {e}", source.path.display())))?;
         for entry in query.iter() {
             let (key, channel) = entry.map_err(|e| io::Error::other(format!("read temp EPG entry: {e}")))?;
-            accumulator.upsert_channel(key.priority, key.source_order as usize, false, channel);
+            // `add_channel_with_programmes` preserves the channel's programmes
+            // on the merge accumulator; plain `upsert_channel` would drop them
+            // because the vacant-entry path constructs a fresh `ChannelMergeAcc`
+            // with `programmes: Vec::new()`.
+            accumulator.add_channel_with_programmes(key.priority, key.source_order as usize, false, channel);
         }
         // `source` drops at the end of this iteration, which removes the
         // temp file. The query's mmap/buffer is closed first because `query`
@@ -1261,9 +1287,9 @@ mod tests {
     ///
     /// # Examples
     ///
-    /// ``
+    /// ```
     /// parse_normalize().unwrap();
-    /// ``
+    /// ```
     fn parse_normalize() {
         let epg_normalize_dto = EpgSmartMatchConfigDto { ..Default::default() };
         let epg_normalize = EpgSmartMatchConfig::from(epg_normalize_dto);
@@ -1906,10 +1932,10 @@ mod tests {
     ///
     /// # Examples
     ///
-    /// ``
+    /// ```
     /// normalize();
     /// // This will assert that various channel names are normalized as expected.
-    /// ``
+    /// ```
     fn normalize() {
         let mut epg_smart_cfg_dto = EpgSmartMatchConfigDto {
             enabled: true,
@@ -1941,10 +1967,10 @@ mod tests {
     ///
     /// # Examples
     ///
-    /// ``
+    /// ```
     /// test_metaphone();
     /// // Output will show the Metaphone encodings for different channel name variants.
-    /// ``
+    /// ```
     fn test_metaphone() {
         let metaphone = Metaphone::default();
         let mut epg_smart_cfg_dto = EpgSmartMatchConfigDto {
@@ -2022,21 +2048,40 @@ mod tests {
     /// regression to `Vec::new()` without breaking any visible behaviour.
     #[test]
     fn parse_tvguide_handles_giant_programme_description() {
-        use crate::processing::parser::xmltv::parse_tvguide;
+        use crate::processing::parser::xmltv::{EPG_TAG_DESC, EPG_TAG_PROGRAMME, parse_tvguide};
 
         run_async_test(async {
             // 200 KiB of text content — well beyond the 64 KiB preallocation.
             let big_text = "x".repeat(200 * 1024);
+            // `channel` attribute is required for the parser to fire the
+            // callback on a <programme> tag (see `handle_tag_end`).
             let xml = format!(
-                r#"<?xml version="1.0"?><tv><programme><title>t</title><desc>{big_text}</desc></programme></tv>"#
+                r#"<?xml version="1.0"?><tv><programme channel="c1"><title>t</title><desc>{big_text}</desc></programme></tv>"#
             );
-            let mut seen_desc = false;
-            parse_tvguide(xml.as_bytes(), &mut |_tag| {
-                // presence is enough — the value side is what we care about.
-                seen_desc = true;
+            let mut emitted_tags: Vec<crate::model::XmlTag> = Vec::new();
+            parse_tvguide(xml.as_bytes(), &mut |tag| {
+                emitted_tags.push(tag);
             })
             .await;
-            assert!(seen_desc, "parser emitted no tags at all");
+
+            // The whole point of the preallocation is that the full payload
+            // survives the round trip — not just the presence of a tag.
+            let programme = emitted_tags
+                .iter()
+                .find(|tag| tag.name.as_ref() == EPG_TAG_PROGRAMME)
+                .expect("parser emitted no <programme> tag");
+            let children = programme.children.as_deref().expect("<programme> has no children");
+            let desc = children
+                .iter()
+                .find(|child| child.name.as_ref() == EPG_TAG_DESC)
+                .expect("<programme> emitted no <desc> child");
+            assert_eq!(
+                desc.value.as_deref().map(str::len),
+                Some(big_text.len()),
+                "<desc> payload was truncated; got {} bytes, expected {}",
+                desc.value.as_deref().map_or(0, str::len),
+                big_text.len()
+            );
         });
     }
 
@@ -2144,6 +2189,19 @@ mod tests {
             assert_eq!(left.id, right.id, "channel order must match");
             // Source 1 had priority 3 (lower = wins) so its title should win.
             assert_eq!(left.title, right.title, "priority winner's title must propagate");
+            // `add_channel_with_programmes` is used on the disk-merge path so
+            // per-channel programmes survive the round trip; verify the count
+            // matches the in-memory reference and the values round-trip.
+            assert_eq!(
+                left.programmes.len(),
+                right.programmes.len(),
+                "programme counts must match for channel {}",
+                left.id
+            );
+            for (lp, rp) in left.programmes.iter().zip(right.programmes.iter()) {
+                assert_eq!(lp.start, rp.start, "programme start must match");
+                assert_eq!(lp.stop, rp.stop, "programme stop must match");
+            }
         }
     }
 }
