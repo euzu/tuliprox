@@ -126,14 +126,14 @@ pub fn generate_provider_playlist_uuid(key: &str, provider_id: &str, item_type: 
     let mut hasher = blake3::Hasher::new();
     hasher.update(key.as_bytes());
     hasher.update(provider_id.as_bytes());
-    hasher.update(item_type.to_string().as_bytes());
+    hasher.update(item_type.as_str().as_bytes());
     UUIDType(hasher.finalize().into())
 }
 
 pub fn generate_local_playlist_uuid(key: &str, item_type: PlaylistItemType, url: &str) -> UUIDType {
     let mut hasher = blake3::Hasher::new();
     hasher.update(key.as_bytes());
-    hasher.update(item_type.to_string().as_bytes());
+    hasher.update(item_type.as_str().as_bytes());
 
     if let Some(url_path) = url_path_and_more(url) {
         hasher.update(url_path.as_bytes());
@@ -665,5 +665,35 @@ mod tests {
         let base = hash_string("base");
         let alias = create_alias_uuid(&base, "mapping");
         assert_ne!(base, alias);
+    }
+
+    /// Swapping `to_string()` for `as_str()` in the UUID hashers must not change a
+    /// single byte — every persisted playlist UUID depends on it. Guards against a
+    /// future `Display` impl that stops delegating to `as_str()`.
+    #[test]
+    fn item_type_label_is_hash_stable_against_display() {
+        for item_type in [
+            PlaylistItemType::Live,
+            PlaylistItemType::LiveHls,
+            PlaylistItemType::Video,
+            PlaylistItemType::LocalVideo,
+            PlaylistItemType::LocalSeries,
+            PlaylistItemType::LocalSeriesInfo,
+            PlaylistItemType::Series,
+            PlaylistItemType::SeriesInfo,
+            PlaylistItemType::Catchup,
+        ] {
+            assert_eq!(item_type.as_str(), item_type.to_string(), "{item_type:?}");
+
+            let mut expected = blake3::Hasher::new();
+            expected.update(b"key");
+            expected.update(b"provider");
+            expected.update(item_type.to_string().as_bytes());
+            assert_eq!(
+                generate_provider_playlist_uuid("key", "provider", item_type),
+                UUIDType(expected.finalize().into()),
+                "{item_type:?}"
+            );
+        }
     }
 }
