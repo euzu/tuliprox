@@ -401,7 +401,10 @@ fn handle_socket_protocol_msg(
                     | ProtocolMessage::DownloadsRequest
                     | ProtocolMessage::ActiveProviderCountRequest(_)
                     | ProtocolMessage::StatusRequest(_)
-                    | ProtocolMessage::UserAction(_) => {}
+                    | ProtocolMessage::UserAction(_)
+                    | ProtocolMessage::RecordingSnapshotRequest
+                    | ProtocolMessage::RecordingSnapshotResponse { .. }
+                    | ProtocolMessage::RecordingDeltaResponse { .. } => {}
                 }
             }
             Err(err) => error!("Failed to decode websocket message: {err}"),

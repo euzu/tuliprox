@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use shared::model::{DiskAlert, MsgKind, SourceStats, InputStats};
+use shared::model::{DiskAlert, InputStats, MsgKind, SourceStats};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchChanges {
@@ -28,6 +28,25 @@ impl ProcessingStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordingLifecycleMessage {
+    pub event: MsgKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub programme_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_end: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum MessageContent {
    Info(String),
@@ -35,6 +54,7 @@ pub enum MessageContent {
    Watch(WatchChanges),
    ProcessingStats(ProcessingStats),
    DiskAlert(DiskAlert),
+   RecordingLifecycle(RecordingLifecycleMessage),
 }
 
 impl MessageContent {
@@ -59,6 +79,7 @@ impl MessageContent {
                 }
             }
             Self::DiskAlert(_) => MsgKind::DiskAlert,
+            Self::RecordingLifecycle(recording) => recording.event,
         }
     }
 }
@@ -78,6 +99,8 @@ pub struct TemplateContext<'a> {
     pub processing: Option<ProcessingStats>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk: Option<&'a DiskAlert>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recording: Option<&'a RecordingLifecycleMessage>,
     // Flattened stats for first input convenience
     #[serde(flatten)]
     pub flat_stats: Option<InputStats>,

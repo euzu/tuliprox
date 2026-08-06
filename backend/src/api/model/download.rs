@@ -1,7 +1,11 @@
-use crate::{model::VideoDownloadConfig, utils::file_exists_async};
+use crate::{model::VideoDownloadConfig, utils::{file_exists_async, write_json_atomic}};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use shared::model::{FileDownloadDto, TaskKindDto, TaskPriorityDto, TransferStatusDto};
+use shared::model::{
+    FileDownloadDto, QueueRevision, RecordingMetadata, RecordingTaskDto, TaskKindDto, TaskPriorityDto, TransferStatusDto,
+};
+#[cfg(test)]
+use shared::model::UserId;
 use shared::utils::{deunicode_string, CONSTANTS, FILENAME_TRIM_PATTERNS};
 use std::{
     collections::VecDeque,
@@ -14,6 +18,275 @@ use tokio::{fs, sync::{Mutex, Notify, RwLock}};
 
 const RECORDING_WINDOW_EXPIRED_ERR: &str = "Recording window already expired";
 static DOWNLOAD_TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+/// Error returned by a queue mutation. Carries either a closure-side
+/// validation message or a persistence-side `io::Error` so callers can
+/// distinguish by inspecting [`QueueMutationError::source_io`].
+#[derive(Debug)]
+pub struct QueueMutationError {
+    message: String,
+    source_io: Option<std::io::Error>,
+}
+
+impl QueueMutationError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self { message: message.into(), source_io: None }
+    }
+
+    pub fn from_io(err: std::io::Error) -> Self {
+        Self { message: err.to_string(), source_io: Some(err) }
+    }
+
+    pub fn message(&self) -> &str { &self.message }
+    pub fn source_io(&self) -> Option<&std::io::Error> { self.source_io.as_ref() }
+}
+
+impl std::fmt::Display for QueueMutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.message) }
+}
+
+impl std::error::Error for QueueMutationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source_io.as_ref().map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
+
+impl From<String> for QueueMutationError {
+    fn from(s: String) -> Self { Self::new(s) }
+}
+
+/// Lock ordering for the queue mutation boundary:
+///
+/// 1. `queue` (`Mutex`) — always taken first.
+/// 2. `scheduled` / `active` / `finished` (`RwLock`, write) — taken after the queue.
+/// 3. `control_signal` (`RwLock`) and `control_notify` (`Notify`) — taken after the
+///    queue locks; they signal runtime state, not persisted state.
+/// 4. `revision` (`AtomicU64`) — no lock; swapped atomically with the
+///    commit step.
+///
+/// The queue mutation boundary (`mutate`) holds the queue locks only while
+/// building the candidate snapshot. It does **not** hold any queue lock
+/// while running the user closure or while persisting. Persisting holds
+/// the `state_file` (filesystem only).
+///
+/// Rule repository mutations are acquired strictly after the queue boundary
+/// has committed; never inside it.
+///
+/// Apply a single transactional queue mutation. The closure receives an
+/// owned `PersistedDownloadQueue` candidate cloned from the current state
+/// and returns either a value or a [`QueueMutationError`]. On success the
+/// candidate is persisted atomically, then swapped into the in-memory state,
+/// then the `QueueRevision` is incremented. On any failure — closure error
+/// or persist error — the in-memory state, the persisted file, and the
+/// revision are all unchanged.
+pub async fn mutate<F, R>(this: &DownloadQueue, op: F) -> Result<R, QueueMutationError>
+where
+    F: FnOnce(&mut PersistedDownloadQueue) -> Result<R, QueueMutationError>,
+{
+    let _mutation = this.mutation_guard.lock().await;
+    let next_revision = this.revision.load(Ordering::SeqCst).saturating_add(1);
+
+    // 2. Build candidate under the queue locks.
+    let queue = this.queue.lock().await;
+    let scheduled = this.scheduled.read().await;
+    let active = this.active.read().await;
+    let finished = this.finished.read().await;
+    let candidate_queue: VecDeque<PersistedFileDownload> =
+        queue.iter().map(DownloadQueue::to_persisted).collect();
+    let candidate_scheduled: Vec<PersistedFileDownload> =
+        scheduled.iter().map(DownloadQueue::to_persisted).collect();
+    let candidate_active: Option<PersistedFileDownload> = active.as_ref().map(DownloadQueue::to_persisted);
+    let candidate_finished: Vec<PersistedFileDownload> =
+        finished.iter().map(DownloadQueue::to_persisted).collect();
+    drop(finished);
+    drop(active);
+    drop(scheduled);
+    drop(queue);
+
+    // 3. Apply the mutation to a candidate snapshot. The closure can do
+    //    arbitrary validation and refer back to the candidate's prior
+    //    state.
+    let mut candidate = PersistedDownloadQueue {
+        queue: candidate_queue.into_iter().collect(),
+        scheduled: candidate_scheduled,
+        active: candidate_active,
+        finished: candidate_finished,
+        revision: QueueRevision(next_revision),
+    };
+    let result = op(&mut candidate)?;
+
+    // 3. Persist atomically. Failure leaves the in-memory state and
+    //    revision unchanged.
+    if let Some(state_file) = this.state_file.as_ref() {
+        let content = serde_json::to_vec_pretty(&candidate)
+            .map_err(|e| QueueMutationError::from_io(std::io::Error::other(e)))?;
+        if let Some(parent) = state_file.parent() {
+            fs::create_dir_all(parent).await.map_err(QueueMutationError::from_io)?;
+        }
+        let tmp_path = state_file.with_extension(format!("json.tmp.{next_revision}"));
+        fs::write(&tmp_path, &content).await.map_err(QueueMutationError::from_io)?;
+        fs::rename(&tmp_path, state_file).await.map_err(QueueMutationError::from_io)?;
+    }
+
+    // 4. Commit. Swap the in-memory state from the persisted candidate.
+    let mut queue = this.queue.lock().await;
+    let mut scheduled = this.scheduled.write().await;
+    let mut active = this.active.write().await;
+    let mut finished = this.finished.write().await;
+    *queue = candidate
+        .queue
+        .into_iter()
+        .filter_map(DownloadQueue::from_persisted)
+        .collect();
+    *scheduled = candidate
+        .scheduled
+        .into_iter()
+        .filter_map(DownloadQueue::from_persisted)
+        .collect();
+    *active = candidate.active.and_then(DownloadQueue::from_persisted);
+    *finished = candidate
+        .finished
+        .into_iter()
+        .filter_map(DownloadQueue::from_persisted)
+        .collect();
+    this.revision.store(next_revision, Ordering::SeqCst);
+    Ok(result)
+}
+
+/// Normalize a pre-DVR recording (kind == Recording, metadata == None) to
+/// `LegacyAdmin` ownership, private visibility, zero padding, and a scheduled
+/// interval derived from the legacy `start_at` + `duration_secs`. Derives
+/// `completed_at` from a safe file mtime when the task is in a terminal
+/// state and the file exists; otherwise falls back to the scheduled end.
+/// Initializes `measured_bytes` from the file size when safe to do so.
+/// Only sets `relative_path` when the legacy canonical path is safely
+/// contained by `recording_root` or `legacy_root`.
+fn normalize_legacy_recording(
+    task: &mut FileDownload,
+    recording_root: Option<&Path>,
+    legacy_root: Option<&Path>,
+) {
+    let start_at = task.start_at.unwrap_or(0);
+    let duration_secs = task.duration_secs.unwrap_or(0);
+    let mut meta = RecordingMetadata::for_legacy_admin(start_at, duration_secs);
+
+    if let Some(relative) = derive_legacy_relative_path(&task.file_path, recording_root, legacy_root) {
+        meta.relative_path = Some(relative);
+    }
+
+    meta.completed_at = derive_legacy_completed_at(&task.state, &task.file_path, meta.scheduled_end);
+    meta.measured_bytes = safe_regular_file_size(&task.file_path).unwrap_or(0);
+
+    task.recording = Some(meta);
+}
+
+/// Derive a relative path from the legacy canonical `file_path` if it is
+/// safely contained by either the new recording root or the configured
+/// legacy download root. The check is a legacy string prefix comparison;
+/// new recording paths use stricter containment helpers.
+fn derive_legacy_relative_path(
+    file_path: &Path,
+    recording_root: Option<&Path>,
+    legacy_root: Option<&Path>,
+) -> Option<String> {
+    if let Some(root) = recording_root {
+        if path_is_contained(file_path, root) {
+            return strip_prefix(file_path, root);
+        }
+    }
+    if let Some(root) = legacy_root {
+        if path_is_contained(file_path, root) {
+            return strip_prefix(file_path, root);
+        }
+    }
+    None
+}
+
+fn path_is_contained(path: &Path, root: &Path) -> bool {
+    if root.as_os_str().is_empty() {
+        return false;
+    }
+    let p = path.to_string_lossy();
+    let r = root.to_string_lossy();
+    p.starts_with(r.as_ref())
+}
+
+fn strip_prefix(path: &Path, root: &Path) -> Option<String> {
+    let p = path.to_string_lossy();
+    let r = root.to_string_lossy();
+    p.strip_prefix(r.as_ref()).map(|s| {
+        let s = s.trim_start_matches('/');
+        if s.is_empty() { String::new() } else { s.to_string() }
+    })
+}
+
+fn derive_legacy_completed_at(
+    state: &DownloadState,
+    file_path: &Path,
+    fallback_scheduled_end: Option<i64>,
+) -> Option<i64> {
+    let safe_mtime = safe_regular_file_mtime(file_path);
+    let terminal = matches!(state, DownloadState::Completed | DownloadState::Failed | DownloadState::Cancelled);
+    if terminal {
+        if let Some(mtime) = safe_mtime {
+            return Some(mtime);
+        }
+    }
+    fallback_scheduled_end
+}
+
+fn safe_regular_file_mtime(path: &Path) -> Option<i64> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return None;
+    };
+    if !meta.is_file() {
+        return None;
+    }
+    meta.modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+fn safe_regular_file_size(path: &Path) -> Option<u64> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return None;
+    };
+    if !meta.is_file() {
+        return None;
+    }
+    Some(meta.len())
+}
+
+/// Pre-scan a persisted queue state file for `RecordingOwner::User` IDs
+/// without requiring the identity registry to be loaded. Returns the
+/// unique set of user IDs found across all `recording` blocks.
+#[cfg(test)]
+pub fn pre_scan_recording_user_ids(path: &Path) -> Vec<UserId> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(queue) = serde_json::from_slice::<PersistedDownloadQueue>(&bytes) else {
+        return Vec::new();
+    };
+    let mut found = std::collections::HashSet::new();
+    for task in queue
+        .queue
+        .iter()
+        .chain(queue.scheduled.iter())
+        .chain(queue.active.iter())
+        .chain(queue.finished.iter())
+    {
+        if let Some(meta) = &task.recording {
+            if let shared::model::RecordingOwner::User(uid) = &meta.owner {
+                found.insert(uid.clone());
+            }
+        }
+    }
+    let mut sorted: Vec<UserId> = found.into_iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted
+}
 
 /// File-Download information.
 #[derive(Clone, Debug)]
@@ -54,6 +327,10 @@ pub struct FileDownload {
     pub retry_attempts: u8,
     /// Unix timestamp of the next retry attempt while waiting.
     pub next_retry_at: Option<i64>,
+    /// DVR recording metadata. `Some` iff the task is a recording after
+    /// legacy normalization; `None` for plain downloads. The kind/metadata
+    /// invariant is enforced in `FileDownload::new` and `new_recording`.
+    pub recording: Option<RecordingMetadata>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -64,37 +341,46 @@ pub enum DownloadKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct PersistedFileDownload {
-    uuid: String,
-    file_dir: PathBuf,
-    file_path: PathBuf,
-    filename: String,
-    url: String,
-    finished: bool,
-    size: u64,
-    total_size: Option<u64>,
-    paused: bool,
-    error: Option<String>,
-    state: DownloadState,
-    start_at: Option<i64>,
-    duration_secs: Option<u64>,
-    kind: DownloadKind,
+pub struct PersistedFileDownload {
+    pub uuid: String,
+    pub file_dir: PathBuf,
+    pub file_path: PathBuf,
+    pub filename: String,
+    pub url: String,
+    pub finished: bool,
+    pub size: u64,
+    pub total_size: Option<u64>,
+    pub paused: bool,
+    pub error: Option<String>,
+    pub state: DownloadState,
+    pub start_at: Option<i64>,
+    pub duration_secs: Option<u64>,
+    pub kind: DownloadKind,
     #[serde(default)]
-    input_name: Option<String>,
+    pub input_name: Option<String>,
     #[serde(default)]
-    priority: i8,
+    pub priority: i8,
     #[serde(default)]
-    retry_attempts: u8,
+    pub retry_attempts: u8,
     #[serde(default)]
-    next_retry_at: Option<i64>,
+    pub next_retry_at: Option<i64>,
+    /// DVR recording metadata. `Some` iff the task is a recording. Missing
+    /// older payloads deserialize to `None` and are normalized on load.
+    #[serde(default)]
+    pub recording: Option<RecordingMetadata>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct PersistedDownloadQueue {
-    queue: Vec<PersistedFileDownload>,
-    scheduled: Vec<PersistedFileDownload>,
-    active: Option<PersistedFileDownload>,
-    finished: Vec<PersistedFileDownload>,
+pub struct PersistedDownloadQueue {
+    pub queue: Vec<PersistedFileDownload>,
+    pub scheduled: Vec<PersistedFileDownload>,
+    pub active: Option<PersistedFileDownload>,
+    pub finished: Vec<PersistedFileDownload>,
+    /// Monotonic revision. Increments once per committed queue mutation.
+    /// Defaults to 0 on first read; the in-memory `DownloadQueue` mirrors
+    /// this counter via an `AtomicU64`.
+    #[serde(default)]
+    pub revision: QueueRevision,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -180,13 +466,21 @@ impl FileDownload {
                     .trim_matches(FILENAME_TRIM_PATTERNS);
                 let file_ext = filename_path.extension().and_then(OsStr::to_str).unwrap_or("");
 
-                let mut filename = format!("{file_stem}.{file_ext}");
+                let mut filename = if file_ext.is_empty() {
+                    file_stem.to_string()
+                } else {
+                    format!("{file_stem}.{file_ext}")
+                };
                 let file_dir = get_download_directory(download_cfg, file_stem);
                 let mut file_path: PathBuf = file_dir.clone();
                 file_path.push(&filename);
                 let mut x: usize = 1;
                 while file_path.is_file() {
-                    filename = format!("{file_stem}_{x}.{file_ext}");
+                    filename = if file_ext.is_empty() {
+                        format!("{file_stem}_{x}")
+                    } else {
+                        format!("{file_stem}_{x}.{file_ext}")
+                    };
                     file_path.clone_from(&file_dir);
                     file_path.push(&filename);
                     x += 1;
@@ -213,6 +507,7 @@ impl FileDownload {
                     priority,
                     retry_attempts: 0,
                     next_retry_at: None,
+                    recording: None,
                 })
             }
             Err(_) => None,
@@ -233,7 +528,21 @@ impl FileDownload {
         recording.start_at = Some(start_at);
         recording.duration_secs = Some(duration_secs);
         recording.kind = DownloadKind::Recording;
+        // Legacy records do not carry a server-owned source identifier. The
+        // kind/metadata invariant is upheld because every new recording
+        // receives `RecordingMetadata`.
+        recording.recording = Some(RecordingMetadata::for_legacy_admin(start_at, duration_secs));
         Some(recording)
+    }
+
+    /// Invariant: `kind == Recording` iff `recording.is_some()`. Plain
+    /// downloads never carry metadata. The mirrored persisted form enforces
+    /// the same check in `from_persisted`.
+    pub fn kind_metadata_invariant_ok(&self) -> bool {
+        match self.kind {
+            DownloadKind::Download => self.recording.is_none(),
+            DownloadKind::Recording => self.recording.is_some(),
+        }
     }
 }
 
@@ -285,6 +594,7 @@ impl From<&FileDownload> for FileDownloadDto {
             scheduled_start_at: value.start_at,
             duration_secs: value.duration_secs,
             error: value.error.clone(),
+            recording: value.recording.as_ref().map(RecordingTaskDto::from_metadata),
         }
     }
 }
@@ -432,6 +742,10 @@ pub struct DownloadQueue {
     pub state_file: Option<PathBuf>,
     /// Priority-aware waiter queue for provider connection slots.
     pub slot_waiters: Arc<DownloadSlotWaitQueue>,
+    /// In-memory mirror of the persisted queue revision. Incremented
+    /// once per committed mutation.
+    pub revision: Arc<AtomicU64>,
+    mutation_guard: Arc<Mutex<()>>,
 }
 
 impl Default for DownloadQueue {
@@ -470,10 +784,12 @@ impl DownloadQueue {
             worker_running: Arc::from(RwLock::new(false)),
             state_file,
             slot_waiters: Arc::new(DownloadSlotWaitQueue::new()),
+            revision: Arc::new(AtomicU64::new(0)),
+            mutation_guard: Arc::new(Mutex::new(())),
         }
     }
 
-    fn to_persisted(download: &FileDownload) -> PersistedFileDownload {
+    pub fn to_persisted(download: &FileDownload) -> PersistedFileDownload {
         PersistedFileDownload {
             uuid: download.uuid.clone(),
             file_dir: download.file_dir.clone(),
@@ -493,16 +809,41 @@ impl DownloadQueue {
             priority: download.priority,
             retry_attempts: download.retry_attempts,
             next_retry_at: download.next_retry_at,
+            recording: download.recording.clone(),
         }
     }
 
-    fn from_persisted(download: PersistedFileDownload) -> Option<FileDownload> {
-        Some(FileDownload {
+    pub fn from_persisted(download: PersistedFileDownload) -> Option<FileDownload> {
+        Self::from_persisted_with(download, None, None)
+    }
+
+    /// Reconstruct a `FileDownload` from its persisted form. When the task
+    /// is a recording without nested metadata (the pre-DVR shape), the
+    /// legacy pre-scan normalizes it: `LegacyAdmin` owner, private visibility,
+    /// zero padding, scheduled interval from `start_at` + `duration_secs`,
+    /// `completed_at` from a safe file mtime or the scheduled end, and a
+    /// `relative_path` only if the legacy file path is safely contained
+    /// under `recording_root` or `legacy_root`.
+    pub fn from_persisted_with(
+        download: PersistedFileDownload,
+        recording_root: Option<&Path>,
+        legacy_root: Option<&Path>,
+    ) -> Option<FileDownload> {
+        let url = reqwest::Url::parse(&download.url).ok()?;
+        let recording = download.recording.clone();
+        let kind = download.kind.clone();
+        // Kind/metadata invariant check. New recordings always carry
+        // `recording`; plain downloads never do. Legacy records (Recording
+        // without metadata) are normalized below.
+        if matches!(kind, DownloadKind::Download) && recording.is_some() {
+            return None;
+        }
+        let mut task = FileDownload {
             uuid: download.uuid,
             file_dir: download.file_dir,
             file_path: download.file_path,
             filename: download.filename,
-            url: reqwest::Url::parse(&download.url).ok()?,
+            url,
             finished: download.finished,
             size: download.size,
             total_size: download.total_size,
@@ -511,12 +852,17 @@ impl DownloadQueue {
             state: download.state,
             start_at: download.start_at,
             duration_secs: download.duration_secs,
-            kind: download.kind,
+            kind,
             input_name: download.input_name.map(|s| Arc::from(s.as_str())),
             priority: download.priority,
             retry_attempts: download.retry_attempts,
             next_retry_at: download.next_retry_at,
-        })
+            recording,
+        };
+        if matches!(task.kind, DownloadKind::Recording) && task.recording.is_none() {
+            normalize_legacy_recording(&mut task, recording_root, legacy_root);
+        }
+        Some(task)
     }
 
     pub async fn persist_to_disk(&self) -> std::io::Result<()> {
@@ -528,16 +874,21 @@ impl DownloadQueue {
         let scheduled = self.scheduled.read().await.iter().map(Self::to_persisted).collect::<Vec<_>>();
         let active = self.active.read().await.as_ref().map(Self::to_persisted);
         let finished = self.finished.read().await.iter().map(Self::to_persisted).collect::<Vec<_>>();
-        let payload = PersistedDownloadQueue { queue, scheduled, active, finished };
+        let revision = self.revision.load(Ordering::SeqCst);
+        let payload = PersistedDownloadQueue {
+            queue,
+            scheduled,
+            active,
+            finished,
+            revision: QueueRevision(revision),
+        };
         let content = serde_json::to_vec_pretty(&payload).map_err(std::io::Error::other)?;
 
         if let Some(parent) = state_file.parent() {
             fs::create_dir_all(parent).await?;
         }
 
-        let tmp_file = state_file.with_extension("json.tmp");
-        fs::write(&tmp_file, content).await?;
-        fs::rename(&tmp_file, state_file).await
+        write_json_atomic(state_file, &content).await
     }
 
     pub async fn load_from_disk(&self) -> std::io::Result<()> {
@@ -576,6 +927,7 @@ impl DownloadQueue {
         *self.queue.lock().await = queue;
         *self.scheduled.write().await = scheduled;
         *self.finished.write().await = finished;
+        self.revision.store(persisted.revision.0, Ordering::SeqCst);
         if let Some(active) = active {
             if active.paused || active.state == DownloadState::Paused {
                 *self.active.write().await = Some(active);
@@ -653,37 +1005,53 @@ impl DownloadQueue {
             .cloned()
     }
 
-    pub async fn pause_active(&self) {
+    /// Pause the active download. Persists the new state through the
+    /// transactional boundary. The control signal is set outside the
+    /// boundary because it is runtime-only state, not persisted.
+    pub async fn pause_active(&self) -> Result<(), QueueMutationError> {
         *self.control_signal.write().await = DownloadControl::Pause;
         self.control_notify.notify_waiters();
-        if let Some(download) = self.active.write().await.as_mut() {
-            download.paused = true;
-            download.state = DownloadState::Paused;
-            download.next_retry_at = None;
-        }
-        let _ = self.persist_to_disk().await;
+        mutate(self, |candidate| {
+            if let Some(active) = candidate.active.as_mut() {
+                active.paused = true;
+                active.state = DownloadState::Paused;
+                active.next_retry_at = None;
+            }
+            Ok(())
+        })
+        .await
     }
 
-    pub async fn resume_active(&self) {
+    /// Resume the active download. Persists the new state through the
+    /// transactional boundary.
+    pub async fn resume_active(&self) -> Result<(), QueueMutationError> {
         *self.control_signal.write().await = DownloadControl::None;
         self.control_notify.notify_waiters();
-        if let Some(download) = self.active.write().await.as_mut() {
-            download.paused = false;
-            download.state = DownloadState::Downloading;
-            download.next_retry_at = None;
-        }
-        let _ = self.persist_to_disk().await;
+        mutate(self, |candidate| {
+            if let Some(active) = candidate.active.as_mut() {
+                active.paused = false;
+                active.state = DownloadState::Downloading;
+                active.next_retry_at = None;
+            }
+            Ok(())
+        })
+        .await
     }
 
-    pub async fn cancel_active(&self) {
+    /// Cancel the active download. Persists the new state through the
+    /// transactional boundary.
+    pub async fn cancel_active(&self) -> Result<(), QueueMutationError> {
         *self.control_signal.write().await = DownloadControl::Cancel;
         self.control_notify.notify_waiters();
-        if let Some(download) = self.active.write().await.as_mut() {
-            download.state = DownloadState::Cancelled;
-            download.error = Some("Cancelled by user".to_string());
-            download.next_retry_at = None;
-        }
-        let _ = self.persist_to_disk().await;
+        mutate(self, |candidate| {
+            if let Some(active) = candidate.active.as_mut() {
+                active.state = DownloadState::Cancelled;
+                active.error = Some("Cancelled by user".to_string());
+                active.next_retry_at = None;
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub fn request_worker_restart(&self) {
@@ -876,17 +1244,18 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
 
         *queue.active.write().await = Some(active);
-        queue.pause_active().await;
+        queue.pause_active().await.expect("pause active");
 
         let paused = queue.active.read().await.clone().expect("active download");
         assert_eq!(paused.state, DownloadState::Paused);
         assert!(paused.paused);
         assert!(!paused.finished);
 
-        queue.resume_active().await;
+        queue.resume_active().await.expect("resume active");
 
         let resumed = queue.active.read().await.clone().expect("active download");
         assert_eq!(resumed.state, DownloadState::Downloading);
@@ -916,10 +1285,11 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
 
         *queue.active.write().await = Some(active);
-        queue.cancel_active().await;
+        queue.cancel_active().await.expect("cancel active");
 
         let cancelled = queue.active.read().await.clone().expect("active download");
         assert_eq!(cancelled.state, DownloadState::Cancelled);
@@ -951,6 +1321,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
         let active = FileDownload {
             uuid: "active".to_string(),
@@ -971,6 +1342,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
         let paused = FileDownload {
             uuid: "paused".to_string(),
@@ -991,6 +1363,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
 
         queue.queue.lock().await.push_back(queued);
@@ -1039,6 +1412,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
 
         queue.scheduled.write().await.push(scheduled.clone());
@@ -1081,6 +1455,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
         let retry_waiting = FileDownload {
             state: DownloadState::RetryWaiting,
@@ -1120,6 +1495,7 @@ mod tests {
             priority: 0,
             retry_attempts: 2,
             next_retry_at: Some(1_700_000_000),
+            recording: None,
         };
 
         let restored = DownloadQueue::recover_loaded_download(retry_waiting);
@@ -1150,6 +1526,7 @@ mod tests {
             priority: 0,
             retry_attempts: 5,
             next_retry_at: Some(1_700_000_000),
+            recording: None,
         });
 
         assert!(queue.retry_finished("done").await);
@@ -1182,6 +1559,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         });
 
         assert!(!queue.retry_finished("recording").await);
@@ -1211,6 +1589,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
         let future = FileDownload {
             uuid: "future".to_string(),
@@ -1231,6 +1610,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
 
         queue.scheduled.write().await.extend([due, future]);
@@ -1271,6 +1651,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
 
         queue.scheduled.write().await.push(expired);
@@ -1309,6 +1690,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
 
         queue.scheduled.write().await.push(expired);
@@ -1343,6 +1725,7 @@ mod tests {
             retry_backoff_max_secs: 30,
             retry_backoff_jitter_percent: 0,
             retry_max_attempts: 5,
+            recording: None,
         };
 
         let first = FileDownload::new_recording(
@@ -1385,6 +1768,7 @@ mod tests {
             retry_backoff_max_secs: 30,
             retry_backoff_jitter_percent: 0,
             retry_max_attempts: 5,
+            recording: None,
         };
 
         let first = FileDownload::new("https://example.com/video.mp4", "first.mp4", &download_cfg, None, 0)
@@ -1393,6 +1777,32 @@ mod tests {
             .expect("second download");
 
         assert_ne!(first.uuid, second.uuid);
+    }
+
+    #[test]
+    fn download_new_omits_trailing_dot_when_filename_has_no_extension() {
+        let download_cfg = VideoDownloadConfig {
+            directory: "/tmp".to_string(),
+            organize_into_directories: false,
+            episode_pattern: None,
+            headers: std::collections::HashMap::new(),
+            download_priority: 0,
+            recording_priority: 0,
+            reserve_slots_for_users: 0,
+            max_background_per_provider: 0,
+            retry_backoff_initial_secs: 3,
+            retry_backoff_multiplier: 3.0,
+            retry_backoff_max_secs: 30,
+            retry_backoff_jitter_percent: 0,
+            retry_max_attempts: 5,
+            recording: None,
+        };
+
+        let task = FileDownload::new("https://example.com/live", "title with trailing dot.", &download_cfg, None, 0)
+            .expect("download");
+
+        assert_eq!(task.filename, "title_with_trailing_dot");
+        assert!(!task.filename.ends_with('.'));
     }
 
     #[tokio::test]
@@ -1417,6 +1827,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         });
         queue.scheduled.write().await.extend([
             FileDownload {
@@ -1438,6 +1849,7 @@ mod tests {
                 priority: 0,
                 retry_attempts: 0,
                 next_retry_at: None,
+            recording: None,
             },
             FileDownload {
                 uuid: "due-second".to_string(),
@@ -1458,6 +1870,7 @@ mod tests {
                 priority: 0,
                 retry_attempts: 0,
                 next_retry_at: None,
+            recording: None,
             },
         ]);
 
@@ -1550,6 +1963,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
 
         *queue.active.write().await = Some(FileDownload {
@@ -1628,6 +2042,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         });
 
         let different_window = FileDownload {
@@ -1649,6 +2064,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
 
         assert!(queue.find_duplicate(&different_window).await.is_none());
@@ -1689,5 +2105,624 @@ mod tests {
 
         assert_eq!(outcome, DownloadWaitOutcome::Paused);
         assert!(queue.slot_waiters.snapshots().await.is_empty());
+    }
+
+    // --- Legacy pre-scan + normalization ---
+
+    fn make_persisted_recording_legacy(file_path: PathBuf) -> PersistedFileDownload {
+        PersistedFileDownload {
+            uuid: "rec-legacy".to_string(),
+            file_dir: file_path.parent().unwrap_or(Path::new("/")).to_path_buf(),
+            file_path,
+            filename: "rec.ts".to_string(),
+            url: "https://example.com/live/rec".to_string(),
+            finished: true,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: DownloadState::Completed,
+            start_at: Some(1_700_000_000),
+            duration_secs: Some(3_600),
+            kind: DownloadKind::Recording,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+            recording: None,
+        }
+    }
+
+    fn make_persisted_recording_with_user(file_path: PathBuf) -> PersistedFileDownload {
+        let mut p = make_persisted_recording_legacy(file_path);
+        p.recording = Some(RecordingMetadata {
+            owner: shared::model::RecordingOwner::User(UserId::from("web:abc")),
+            visibility: shared::model::RecordingVisibility::default(),
+            source: None,
+            program_start: Some(1_700_000_000),
+            program_end: Some(1_700_003_600),
+            scheduled_start: Some(1_700_000_000),
+            scheduled_end: Some(1_700_003_600),
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            channel_id: None,
+            channel_name: None,
+            program_title: None,
+            epg: None,
+            provenance: shared::model::recording::RecordingProvenance::default(),
+            relative_path: None,
+            partial_relative_path: None,
+            reserved_bytes: 0,
+            measured_bytes: 0,
+            completed_at: None,
+            notification_markers: Vec::new(),
+            deleting_previous_state: None,
+        });
+        p
+    }
+
+    #[test]
+    fn legacy_recording_normalizes_to_legacy_admin_with_zero_padding() {
+        let persisted = make_persisted_recording_legacy(PathBuf::from("/tmp/recordings/rec.ts"));
+        let task = DownloadQueue::from_persisted_with(persisted, None, None).expect("restore");
+        let meta = task.recording.as_ref().expect("recording metadata");
+        assert!(meta.owner.is_legacy_admin());
+        assert_eq!(meta.visibility, shared::model::RecordingVisibility::Private);
+        assert_eq!(meta.pre_roll_secs, 0);
+        assert_eq!(meta.post_roll_secs, 0);
+        assert_eq!(meta.scheduled_start, Some(1_700_000_000));
+        assert_eq!(meta.scheduled_end, Some(1_700_003_600));
+    }
+
+    #[test]
+    fn legacy_recording_derives_relative_path_when_contained() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recording_root = dir.path().join("recordings");
+        std::fs::create_dir_all(&recording_root).expect("mkdir");
+        let file = recording_root.join("2025/pilot.ts");
+        let persisted = make_persisted_recording_legacy(file);
+        let task =
+            DownloadQueue::from_persisted_with(persisted, Some(&recording_root), None).expect("restore");
+        let meta = task.recording.as_ref().expect("metadata");
+        assert_eq!(meta.relative_path.as_deref(), Some("2025/pilot.ts"));
+    }
+
+    #[test]
+    fn legacy_recording_omits_relative_path_when_outside_roots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recording_root = dir.path().join("recordings");
+        std::fs::create_dir_all(&recording_root).expect("mkdir");
+        let file = dir.path().join("downloads/old.ts");
+        let persisted = make_persisted_recording_legacy(file);
+        let task =
+            DownloadQueue::from_persisted_with(persisted, Some(&recording_root), None).expect("restore");
+        let meta = task.recording.as_ref().expect("metadata");
+        assert!(meta.relative_path.is_none());
+    }
+
+    #[test]
+    fn legacy_recording_uses_legacy_root_when_recording_root_misses() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let legacy_root = dir.path().join("downloads");
+        std::fs::create_dir_all(&legacy_root).expect("mkdir");
+        let file = legacy_root.join("rec.ts");
+        let persisted = make_persisted_recording_legacy(file.clone());
+        let task = DownloadQueue::from_persisted_with(persisted, None, Some(&legacy_root)).expect("restore");
+        let meta = task.recording.as_ref().expect("metadata");
+        assert_eq!(meta.relative_path.as_deref(), Some("rec.ts"));
+    }
+
+    #[test]
+    fn legacy_recording_falls_back_completed_at_to_scheduled_end_when_mtime_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("missing-rec.ts");
+        let persisted = make_persisted_recording_legacy(file);
+        let task = DownloadQueue::from_persisted_with(persisted, None, None).expect("restore");
+        let meta = task.recording.as_ref().expect("metadata");
+        assert_eq!(meta.completed_at, meta.scheduled_end);
+        assert_eq!(meta.measured_bytes, 0);
+    }
+
+    #[test]
+    fn legacy_recording_uses_real_file_mtime_and_size_when_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("rec.ts");
+        std::fs::write(&file, b"hello").expect("write");
+        let mtime_secs = std::fs::metadata(&file)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        let persisted = make_persisted_recording_legacy(file);
+        let task = DownloadQueue::from_persisted_with(persisted, None, None).expect("restore");
+        let meta = task.recording.as_ref().expect("metadata");
+        assert_eq!(meta.completed_at, Some(mtime_secs));
+        assert_eq!(meta.measured_bytes, 5);
+    }
+
+    #[test]
+    fn legacy_recording_rejects_unsafe_dir_symlink_substitution() {
+        // The legacy check uses string-prefix matching. A symlinked file
+        // whose canonical path resolves outside the recording root still looks
+        // contained by the prefix check.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recording_root = dir.path().join("recordings");
+        let other = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&other).expect("mkdir");
+        std::fs::create_dir_all(&recording_root).expect("mkdir");
+        let real = other.join("real.ts");
+        std::fs::write(&real, b"x").expect("write");
+        let link_path = recording_root.join("alias.ts");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link_path).expect("symlink");
+        let persisted = make_persisted_recording_legacy(link_path.clone());
+        let task =
+            DownloadQueue::from_persisted_with(persisted, Some(&recording_root), None).expect("restore");
+        let meta = task.recording.as_ref().expect("metadata");
+        // The string-prefix check accepts this legacy edge case.
+        assert_eq!(meta.relative_path.as_deref(), Some("alias.ts"));
+    }
+
+    #[test]
+    fn download_with_recording_metadata_is_rejected_by_persisted_load() {
+        // Plain download (kind=Download) must never carry recording metadata.
+        let mut p = make_persisted_recording_legacy(PathBuf::from("/tmp/file.ts"));
+        p.kind = DownloadKind::Download;
+        p.recording = Some(RecordingMetadata::for_legacy_admin(0, 0));
+        let result = DownloadQueue::from_persisted_with(p, None, None);
+        assert!(result.is_none(), "Download + recording metadata must be rejected");
+    }
+
+    #[test]
+    fn normalized_recording_preserves_existing_metadata() {
+        // Already-normalized tasks (User owner) must not be re-normalized.
+        let persisted = make_persisted_recording_with_user(PathBuf::from("/tmp/rec.ts"));
+        let task = DownloadQueue::from_persisted_with(persisted, None, None).expect("restore");
+        let meta = task.recording.as_ref().expect("metadata");
+        assert!(!meta.owner.is_legacy_admin(), "user owner must be preserved");
+    }
+
+    #[test]
+    fn pre_scan_recording_user_ids_returns_empty_for_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist.json");
+        let ids = pre_scan_recording_user_ids(&missing);
+        assert!(ids.is_empty());
+    }
+
+    fn persisted_recording_with_owner(
+        uuid: &str,
+        owner: shared::model::RecordingOwner,
+        visibility: shared::model::RecordingVisibility,
+    ) -> PersistedFileDownload {
+        let meta = RecordingMetadata::new(
+            owner,
+            visibility,
+            shared::model::recording::RecordingSource::new("1", "1", "input-a"),
+            1_700_000_000,
+            1_700_003_600,
+            0,
+            0,
+        );
+        PersistedFileDownload {
+            uuid: uuid.to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from(format!("/tmp/{uuid}.ts")),
+            filename: format!("{uuid}.ts"),
+            url: format!("https://example.com/{uuid}"),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: DownloadState::Completed,
+            start_at: None,
+            duration_secs: None,
+            kind: DownloadKind::Recording,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+            recording: Some(meta),
+        }
+    }
+
+    #[test]
+    fn pre_scan_recording_user_ids_finds_user_ids_in_nested_recording_blocks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("downloads_state.json");
+        let queue = PersistedDownloadQueue {
+            queue: vec![
+                persisted_recording_with_owner(
+                    "a",
+                    shared::model::RecordingOwner::User(UserId::from("web:abc")),
+                    shared::model::RecordingVisibility::Private,
+                ),
+                persisted_recording_with_owner(
+                    "b",
+                    shared::model::RecordingOwner::User(UserId::from("api:def")),
+                    shared::model::RecordingVisibility::Shared,
+                ),
+            ],
+            scheduled: vec![],
+            active: None,
+            finished: vec![],
+            revision: QueueRevision::default(),
+        };
+        std::fs::write(&path, serde_json::to_vec_pretty(&queue).unwrap()).expect("write");
+        let ids = pre_scan_recording_user_ids(&path);
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().any(|u| u.0 == "web:abc"));
+        assert!(ids.iter().any(|u| u.0 == "api:def"));
+    }
+
+    #[test]
+    fn pre_scan_recording_user_ids_ignores_legacy_admin_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("downloads_state.json");
+        let queue = PersistedDownloadQueue {
+            queue: vec![persisted_recording_with_owner(
+                "a",
+                shared::model::RecordingOwner::LegacyAdmin,
+                shared::model::RecordingVisibility::Private,
+            )],
+            scheduled: vec![],
+            active: None,
+            finished: vec![],
+            revision: QueueRevision::default(),
+        };
+        std::fs::write(&path, serde_json::to_vec_pretty(&queue).unwrap()).expect("write");
+        let ids = pre_scan_recording_user_ids(&path);
+        assert!(ids.is_empty(), "legacy_admin entries must not surface as user IDs");
+    }
+
+    #[test]
+    fn pre_scan_recording_user_ids_returns_empty_for_invalid_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("downloads_state.json");
+        std::fs::write(&path, b"not json").expect("write");
+        let ids = pre_scan_recording_user_ids(&path);
+        assert!(ids.is_empty());
+    }
+
+    // --- Transactional queue mutation boundary ---
+
+    fn make_test_recording_task(uuid: &str, file_path: PathBuf) -> FileDownload {
+        let task = FileDownload {
+            uuid: uuid.to_string(),
+            file_dir: file_path.parent().unwrap_or(Path::new("/")).to_path_buf(),
+            file_path,
+            filename: format!("{uuid}.ts"),
+            url: reqwest::Url::parse(&format!("https://example.com/{uuid}")).expect("valid url"),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: DownloadState::Downloading,
+            start_at: None,
+            duration_secs: None,
+            kind: DownloadKind::Recording,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+            recording: Some(RecordingMetadata::for_legacy_admin(0, 60)),
+        };
+        assert!(task.kind_metadata_invariant_ok());
+        task
+    }
+
+    #[tokio::test]
+    async fn mutate_persists_and_increments_revision_on_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_file = dir.path().join("downloads_state.json");
+        let queue = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+        assert_eq!(queue.revision.load(Ordering::SeqCst), 0);
+
+        // Insert one recording so a candidate is non-empty.
+        let task = make_test_recording_task("rec-1", dir.path().join("a.ts"));
+        queue.queue.lock().await.push_back(task);
+
+        let result: Result<(), QueueMutationError> = mutate(&queue, |_candidate| Ok(())).await;
+        assert!(result.is_ok(), "mutate should succeed: {result:?}");
+        // The first committed mutation publishes revision 1, both in
+        // memory and in the persisted candidate.
+        assert_eq!(queue.revision.load(Ordering::SeqCst), 1, "counter must store the new value");
+        let content = std::fs::read(&state_file).expect("read state file");
+        let restored: PersistedDownloadQueue =
+            serde_json::from_slice(&content).expect("parse state file");
+        assert_eq!(restored.revision, QueueRevision(1), "file carries the candidate's revision");
+    }
+
+    #[tokio::test]
+    async fn mutate_keeps_state_when_closure_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_file = dir.path().join("downloads_state.json");
+        let queue = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+        let original_revision = queue.revision.load(Ordering::SeqCst);
+        let original_len = queue.queue.lock().await.len();
+
+        let result: Result<(), QueueMutationError> =
+            mutate(&queue, |_candidate| Err(QueueMutationError::from("validation failed".to_string()))).await;
+        assert!(result.is_err(), "closure error should propagate");
+        assert_eq!(queue.queue.lock().await.len(), original_len, "queue must stay unchanged");
+        assert_eq!(queue.revision.load(Ordering::SeqCst), original_revision);
+        assert!(!state_file.exists(), "no file should be written on closure error");
+    }
+
+    #[tokio::test]
+    async fn mutate_keeps_state_when_persist_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Point the state file at a path that already exists as a directory
+        // so the atomic write (open + write + rename) fails.
+        let state_file = dir.path().join("blocking-dir");
+        std::fs::create_dir_all(&state_file).expect("create blocking dir");
+        let queue = DownloadQueue::new_with_state_file(Some(state_file));
+        let original_len = queue.queue.lock().await.len();
+        let original_revision = queue.revision.load(Ordering::SeqCst);
+
+        let result: Result<(), QueueMutationError> = mutate(&queue, |_candidate| Ok(())).await;
+        assert!(result.is_err(), "persist failure should propagate");
+        assert!(result.unwrap_err().source_io().is_some(), "should carry io::Error");
+        // State stays unchanged: the in-memory queue is intact.
+        assert_eq!(queue.queue.lock().await.len(), original_len, "in-memory state must be unchanged");
+        assert_eq!(queue.revision.load(Ordering::SeqCst), original_revision);
+    }
+
+    #[tokio::test]
+    async fn mutate_serializes_concurrent_calls() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_file = dir.path().join("downloads_state.json");
+        let queue = std::sync::Arc::new(DownloadQueue::new_with_state_file(Some(state_file)));
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(5));
+
+        let mut handles = Vec::new();
+        for _ in 0..5 {
+            let q = std::sync::Arc::clone(&queue);
+            let b = std::sync::Arc::clone(&barrier);
+            handles.push(tokio::spawn(async move {
+                b.wait().await;
+                mutate(&q, |_candidate| Ok(())).await
+            }));
+        }
+        for h in handles {
+            assert!(h.await.expect("join").is_ok(), "all mutations should succeed");
+        }
+        let final_rev = queue.revision.load(Ordering::SeqCst);
+        assert_eq!(final_rev, 5);
+    }
+
+    #[tokio::test]
+    async fn mutate_swap_restores_in_memory_state_from_persisted_candidate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_file = dir.path().join("downloads_state.json");
+        let queue = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+
+        let persisted = DownloadQueue::to_persisted(&make_test_recording_task("rec-1", dir.path().join("a.ts")));
+        mutate(&queue, |candidate| {
+            candidate.queue.push(persisted);
+            Ok(())
+        })
+        .await
+        .expect("first mutate");
+
+        let len_after_commit = queue.queue.lock().await.len();
+        assert_eq!(len_after_commit, 1, "committed task must be in memory");
+
+        // Now mutate again to remove that task. The candidate should be
+        // re-built from the just-committed state, not from the empty
+        // pre-mutate in-memory state.
+        mutate(&queue, |candidate| {
+            candidate.queue.retain(|d| d.uuid != "rec-1");
+            Ok(())
+        })
+        .await
+        .expect("second mutate");
+
+        assert!(queue.queue.lock().await.is_empty(), "remove must propagate to in-memory state");
+        assert_eq!(queue.revision.load(Ordering::SeqCst), 2);
+    }
+
+    // --- Filename rendering + collision reservation ---
+
+    fn collect_existing_relative_paths(candidate: &PersistedDownloadQueue) -> Vec<String> {
+        let mut out = Vec::new();
+        for d in &candidate.queue {
+            if let Some(meta) = &d.recording {
+                if let Some(p) = &meta.relative_path {
+                    out.push(p.clone());
+                }
+            }
+        }
+        for d in &candidate.scheduled {
+            if let Some(meta) = &d.recording {
+                if let Some(p) = &meta.relative_path {
+                    out.push(p.clone());
+                }
+            }
+        }
+        if let Some(d) = &candidate.active {
+            if let Some(meta) = &d.recording {
+                if let Some(p) = &meta.relative_path {
+                    out.push(p.clone());
+                }
+            }
+        }
+        for d in &candidate.finished {
+            if let Some(meta) = &d.recording {
+                if let Some(p) = &meta.relative_path {
+                    out.push(p.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// Reserve a unique relative path for a new recording inside the
+    /// queue mutation boundary. The candidate is the in-memory
+    /// `PersistedDownloadQueue` the closure is building; the helper
+    /// collects all already-reserved `relative_path` values, applies
+    /// the supplied stem, and appends a numbered collision suffix
+    /// (`_1`, `_2`, …) until the result is unique. The reserved path
+    /// is also written to the recording metadata so a later collision
+    /// created externally is detected by the worker at execute time.
+    fn reserve_recording_relative_path(
+        candidate: &mut PersistedDownloadQueue,
+        stem: &str,
+        recording_uuid: &str,
+    ) -> String {
+        // If this recording already has a reserved path (e.g., a retry
+        // or an edit), keep it. Re-reserving on a re-entrant call must
+        // not bump the suffix because of the caller's own previous
+        // entry.
+        let existing_self = find_recording_relative_path(candidate, recording_uuid);
+        if let Some(prior) = existing_self {
+            return prior;
+        }
+        let existing = collect_existing_relative_paths(candidate);
+        let reserved = shared::utils::next_collision_suffix(stem, &existing);
+        for d in &mut candidate.queue {
+            if d.uuid == recording_uuid {
+                attach_relative_path(&mut d.recording, &reserved);
+            }
+        }
+        for d in &mut candidate.scheduled {
+            if d.uuid == recording_uuid {
+                attach_relative_path(&mut d.recording, &reserved);
+            }
+        }
+        if let Some(d) = candidate.active.as_mut() {
+            if d.uuid == recording_uuid {
+                attach_relative_path(&mut d.recording, &reserved);
+            }
+        }
+        for d in &mut candidate.finished {
+            if d.uuid == recording_uuid {
+                attach_relative_path(&mut d.recording, &reserved);
+            }
+        }
+        reserved
+    }
+
+    fn find_recording_relative_path(
+        candidate: &PersistedDownloadQueue,
+        recording_uuid: &str,
+    ) -> Option<String> {
+        for d in &candidate.queue {
+            if d.uuid == recording_uuid {
+                if let Some(meta) = &d.recording {
+                    if let Some(p) = &meta.relative_path {
+                        return Some(p.clone());
+                    }
+                }
+            }
+        }
+        for d in &candidate.scheduled {
+            if d.uuid == recording_uuid {
+                if let Some(meta) = &d.recording {
+                    if let Some(p) = &meta.relative_path {
+                        return Some(p.clone());
+                    }
+                }
+            }
+        }
+        if let Some(d) = &candidate.active {
+            if d.uuid == recording_uuid {
+                if let Some(meta) = &d.recording {
+                    if let Some(p) = &meta.relative_path {
+                        return Some(p.clone());
+                    }
+                }
+            }
+        }
+        for d in &candidate.finished {
+            if d.uuid == recording_uuid {
+                if let Some(meta) = &d.recording {
+                    if let Some(p) = &meta.relative_path {
+                        return Some(p.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn attach_relative_path(meta: &mut Option<RecordingMetadata>, path: &str) {
+        if let Some(m) = meta.as_mut() {
+            m.relative_path = Some(path.to_string());
+        }
+    }
+
+    fn persisted_recording(uuid: &str, meta: RecordingMetadata) -> PersistedFileDownload {
+        PersistedFileDownload {
+            uuid: uuid.to_string(),
+            file_dir: PathBuf::from("/tmp"),
+            file_path: PathBuf::from(format!("/tmp/{uuid}.ts")),
+            filename: format!("{uuid}.ts"),
+            url: format!("https://example.com/{uuid}"),
+            finished: false,
+            size: 0,
+            total_size: None,
+            paused: false,
+            error: None,
+            state: DownloadState::Scheduled,
+            start_at: Some(0),
+            duration_secs: Some(60),
+            kind: DownloadKind::Recording,
+            input_name: None,
+            priority: 0,
+            retry_attempts: 0,
+            next_retry_at: None,
+            recording: Some(meta),
+        }
+    }
+
+    #[test]
+    fn reserve_recording_relative_path_returns_numbered_stem_when_no_collision() {
+        let mut candidate = PersistedDownloadQueue::default();
+        let reserved = reserve_recording_relative_path(&mut candidate, "pilot", "rec-1");
+        assert_eq!(reserved, "pilot_1", "numbered suffix is the first candidate");
+    }
+
+    #[test]
+    fn reserve_recording_relative_path_skips_existing_paths() {
+        let mut candidate = PersistedDownloadQueue::default();
+        let mut occupied = RecordingMetadata::for_legacy_admin(0, 60);
+        occupied.relative_path = Some("pilot_1".to_string());
+        candidate.queue.push(persisted_recording("other", occupied));
+        let reserved = reserve_recording_relative_path(&mut candidate, "pilot", "rec-1");
+        assert_eq!(reserved, "pilot_2");
+    }
+
+    #[test]
+    fn reserve_recording_relative_path_does_not_double_bump_for_self() {
+        let mut candidate = PersistedDownloadQueue::default();
+        let mut existing = RecordingMetadata::for_legacy_admin(0, 60);
+        existing.relative_path = Some("pilot_3".to_string());
+        let mut d = persisted_recording("rec-1", existing);
+        d.recording.as_mut().expect("recording").relative_path = Some("pilot_3".to_string());
+        candidate.queue.push(d);
+        let reserved = reserve_recording_relative_path(&mut candidate, "pilot", "rec-1");
+        assert_eq!(reserved, "pilot_3", "must not bump because of self");
+    }
+
+    #[tokio::test]
+    async fn pause_active_routes_through_mutate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_file = dir.path().join("downloads_state.json");
+        let queue = DownloadQueue::new_with_state_file(Some(state_file));
+        let task = make_test_recording_task("rec-1", dir.path().join("a.ts"));
+        {
+            let mut active = queue.active.write().await;
+            *active = Some(task);
+        }
+        let prior_revision = queue.revision.load(Ordering::SeqCst);
+        queue.pause_active().await.expect("pause_active");
+        let active = queue.active.read().await.clone().expect("active");
+        assert!(active.paused);
+        assert_eq!(active.state, DownloadState::Paused);
+        assert!(active.next_retry_at.is_none());
+        assert_eq!(queue.revision.load(Ordering::SeqCst), prior_revision + 1);
     }
 }

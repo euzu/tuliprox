@@ -321,6 +321,7 @@ pub fn LibraryConfigView() -> Html {
                                 LibraryContentType::Auto => translate.t(LABEL_AUTO),
                                 LibraryContentType::Movie => translate.t(LABEL_MOVIE),
                                 LibraryContentType::Series => translate.t(LABEL_SERIES),
+                                LibraryContentType::Recording => "recording".to_string(),
                             })}</span>
                     </li>
                 }

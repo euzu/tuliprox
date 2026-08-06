@@ -757,6 +757,7 @@ mod tests {
                 scheduled_start_at: None,
                 duration_secs: None,
                 error: None,
+                recording: None,
             }))
         ));
     }

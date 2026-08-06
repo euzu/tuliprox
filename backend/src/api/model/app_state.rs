@@ -6,7 +6,8 @@ use crate::{
         model::provider_dns_manager::exec_provider_dns,
         model::{
             metadata_update_manager::MetadataUpdateManager,
-            qos_aggregation_manager::exec_qos_aggregation, ActiveProviderManager, ActiveUserManager,
+            qos_aggregation_manager::exec_qos_aggregation, recording_rule_scheduler::spawn_recording_rule_scheduler,
+            ActiveProviderManager, ActiveUserManager,
             ConnectionManager, DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, PlaylistStorage,
             PlaylistStorageState, SharedStreamManager, UpdateGuard,
         },
@@ -237,6 +238,7 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     }
     if changes.flags.contains(UpdateChangesFlags::Downloads) {
         spawn_download_services(app_state, &app_state.cancel_tokens.load().downloads);
+        spawn_recording_rule_scheduler(app_state, &app_state.cancel_tokens.load().downloads);
         let config = app_state.app_config.config.load();
         if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()).cloned() {
             let app_state = Arc::clone(app_state);
@@ -1029,6 +1031,7 @@ mod tests {
             retry_backoff_max_secs: 60,
             retry_backoff_jitter_percent: 5,
             retry_max_attempts: 5,
+            recording: None,
         };
         let changed = VideoDownloadConfig {
             retry_backoff_multiplier: 3.0,
@@ -1054,6 +1057,7 @@ mod tests {
             retry_backoff_max_secs: 60,
             retry_backoff_jitter_percent: 5,
             retry_max_attempts: 5,
+            recording: None,
         };
 
         assert!(!video_download_changed(&base, &base.clone()));

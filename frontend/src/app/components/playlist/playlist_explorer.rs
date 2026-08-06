@@ -1,13 +1,18 @@
 use crate::{
     app::{
-        components::{menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, Chip, IconButton, NoContent, Panel, Search},
+        components::{
+            menu_item::MenuItem,
+            popup_menu::PopupMenu,
+            recording::{PaddingBounds, RecordingForm, RecordingFormPrefill},
+            AppIcon, Chip, IconButton, NoContent, Panel, Search,
+        },
         context::{ConfigContext, PlaylistExplorerContext},
     },
     hooks::use_service_context,
     html_if,
     i18n::use_translation,
     model::{BusyStatus, DialogAction, DialogActions, DialogResult, EventMessage},
-    services::DialogService,
+    services::{CreateRecordingTaskRequest, DialogService, RecordingService, RecordingSourceInput},
 };
 use shared::{
     error::TuliproxError,
@@ -111,38 +116,6 @@ fn build_download_filename(title: &str, url: &str) -> String {
     }
 }
 
-fn default_record_start_value() -> String { chrono::Local::now().format("%Y-%m-%dT%H:%M").to_string() }
-
-fn parse_record_start_value(start_value: &str) -> Option<i64> {
-    use chrono::TimeZone;
-
-    let start_value = start_value.trim();
-    let naive = ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"]
-        .into_iter()
-        .find_map(|format| chrono::NaiveDateTime::parse_from_str(start_value, format).ok())?;
-    chrono::Local.from_local_datetime(&naive).earliest().map(|dt| dt.timestamp())
-}
-
-fn parse_record_duration_minutes(duration_value: &str) -> Option<u64> {
-    let minutes = duration_value.trim().parse::<u64>().ok()?;
-    (minutes > 0).then_some(minutes)
-}
-
-fn build_record_filename(title: &str, start_at: &str) -> String {
-    let sanitized = title
-        .chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => c,
-            _ => '_',
-        })
-        .collect::<String>()
-        .trim_matches('_')
-        .to_string();
-    let base = if sanitized.is_empty() { "recording".to_string() } else { sanitized };
-    let time_part = start_at.replace([':', 'T'], "-");
-    format!("{base}_{time_part}.ts")
-}
-
 fn parse_optional_priority_input(priority_value: Option<String>) -> Result<Option<i8>, String> {
     let Some(raw) = priority_value.as_deref() else {
         return Ok(None);
@@ -163,108 +136,14 @@ fn can_show_download_action(can_write_downloads: bool, selected_channel: Option<
     can_write_downloads && selected_channel.is_some_and(|item| item.cluster != XtreamCluster::Live && item.downloadable)
 }
 
-fn can_show_record_action(can_write_downloads: bool, selected_channel: Option<&ChannelSelection>) -> bool {
-    can_write_downloads && selected_channel.is_some_and(|item| item.cluster == XtreamCluster::Live)
+fn can_show_record_action(can_write_recordings: bool, selected_channel: Option<&ChannelSelection>) -> bool {
+    can_write_recordings && selected_channel.is_some_and(|item| item.cluster == XtreamCluster::Live)
 }
 
 enum ExplorerLevel {
     Categories,
     Group(Rc<UiPlaylistGroup>),
     SeriesInfo(Rc<UiPlaylistGroup>, Rc<UiPlaylistItem>, Option<Box<SeriesStreamProperties>>),
-}
-
-#[derive(Properties, Clone, PartialEq)]
-struct RecordDialogContentProps {
-    start_value: Rc<RefCell<String>>,
-    duration_value: Rc<RefCell<String>>,
-    priority_value: Rc<RefCell<String>>,
-    start_label: String,
-    duration_label: String,
-    priority_label: String,
-    selected_title: String,
-}
-
-#[component]
-fn RecordDialogContent(props: &RecordDialogContentProps) -> Html {
-    let start_state = use_state(|| props.start_value.borrow().clone());
-    let duration_state = use_state(|| props.duration_value.borrow().clone());
-    let priority_state = use_state(|| props.priority_value.borrow().clone());
-
-    let on_start_input = {
-        let start_state = start_state.clone();
-        let start_value = Rc::clone(&props.start_value);
-        Callback::from(move |event: InputEvent| {
-            let input: HtmlInputElement = event.target_unchecked_into();
-            let value = input.value();
-            *start_value.borrow_mut() = value.clone();
-            start_state.set(value);
-        })
-    };
-
-    let on_duration_input = {
-        let duration_state = duration_state.clone();
-        let duration_value = Rc::clone(&props.duration_value);
-        Callback::from(move |event: InputEvent| {
-            let input: HtmlInputElement = event.target_unchecked_into();
-            let value = input.value();
-            *duration_value.borrow_mut() = value.clone();
-            duration_state.set(value);
-        })
-    };
-
-    let on_priority_input = {
-        let priority_state = priority_state.clone();
-        let priority_value = Rc::clone(&props.priority_value);
-        Callback::from(move |event: InputEvent| {
-            let input: HtmlInputElement = event.target_unchecked_into();
-            let value = input.value();
-            *priority_value.borrow_mut() = value.clone();
-            priority_state.set(value);
-        })
-    };
-
-    html! {
-        <div class="tp__record-dialog">
-            <div class="tp__input">
-                <label class="tp__label">{props.start_label.clone()}</label>
-                <div class="tp__input-wrapper">
-                    <input
-                        type="datetime-local"
-                        value={(*start_state).clone()}
-                        oninput={on_start_input}
-                    />
-                </div>
-            </div>
-            <div class="tp__input">
-                <label class="tp__label">{props.duration_label.clone()}{" (min)"}</label>
-                <div class="tp__input-wrapper">
-                    <input
-                        type="number"
-                        min="1"
-                        step="1"
-                        value={(*duration_state).clone()}
-                        oninput={on_duration_input}
-                    />
-                </div>
-            </div>
-            <div class="tp__input">
-                <label class="tp__label">{props.priority_label.clone()}</label>
-                <div class="tp__input-wrapper">
-                    <input
-                        type="number"
-                        min="-128"
-                        max="127"
-                        step="1"
-                        value={(*priority_state).clone()}
-                        oninput={on_priority_input}
-                    />
-                </div>
-            </div>
-            <div class="tp__field-explanation">
-                {props.selected_title.clone()}
-            </div>
-        </div>
-    }
 }
 
 #[component]
@@ -275,18 +154,29 @@ pub fn PlaylistExplorer() -> Html {
     let translate = use_translation();
     let service_ctx = use_service_context();
     let can_write_downloads = service_ctx.auth.has_permission(Permission::DownloadWrite);
+    let can_write_recordings = service_ctx.auth.has_permission(Permission::RecordingWrite);
+    let is_admin_role = service_ctx.auth.is_admin();
     let default_download_priority = config_ctx
         .config
         .as_ref()
         .and_then(|cfg| cfg.config.video.as_ref())
         .and_then(|video| video.download.as_ref())
         .map(|download| download.download_priority);
-    let default_recording_priority = config_ctx
-        .config
-        .as_ref()
-        .and_then(|cfg| cfg.config.video.as_ref())
-        .and_then(|video| video.download.as_ref())
-        .map(|download| download.recording_priority);
+    let recording_padding = {
+        let rec = config_ctx
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.config.video.as_ref())
+            .and_then(|video| video.download.as_ref())
+            .and_then(|video| video.recording.as_ref());
+        PaddingBounds {
+            default_pre_roll_secs: rec.and_then(|c| c.default_pre_roll_secs).unwrap_or(0),
+            max_pre_roll_secs: rec.map(|c| c.max_pre_roll_secs).unwrap_or(900),
+            default_post_roll_secs: rec.and_then(|c| c.default_post_roll_secs).unwrap_or(0),
+            max_post_roll_secs: rec.map(|c| c.max_post_roll_secs).unwrap_or(1800),
+        }
+    };
+    let recording_padding = Rc::new(recording_padding);
     let current_item = use_state(|| ExplorerLevel::Categories);
     let playlist = use_state(|| (*context.playlist).clone());
     let selected_channel = use_state(|| None::<ChannelSelection>);
@@ -672,7 +562,7 @@ pub fn PlaylistExplorer() -> Html {
                         }
                     }
                     ExplorerAction::Record => {
-                        if !can_queue_downloads {
+                        if !can_write_recordings {
                             popup_is_open_state.set(false);
                             return;
                         }
@@ -681,16 +571,54 @@ pub fn PlaylistExplorer() -> Html {
                             let services = services.clone();
                             let translate_clone = translate_clone.clone();
                             let playlist_request = (*playlist_ctx.playlist_request).clone();
-                            let default_recording_priority = default_recording_priority;
                             let selected = dto.clone();
+                            let padding = Rc::clone(&recording_padding);
+                            let target_id_owned: Option<String> = match playlist_request.as_ref() {
+                                Some(PlaylistRequest::Target(t)) => Some(t.to_string()),
+                                _ => None,
+                            };
                             spawn_local(async move {
-                                let default_start_value = default_record_start_value();
-                                let start_value = Rc::new(RefCell::new(default_start_value.clone()));
-                                let duration_value = Rc::new(RefCell::new("90".to_string()));
-                                let priority_value = Rc::new(RefCell::new(
-                                    default_recording_priority
-                                        .map_or_else(String::new, |priority| priority.to_string()),
-                                ));
+                                let target_id = match target_id_owned {
+                                    Some(t) => t,
+                                    None => {
+                                        services.toastr.error(translate_clone.t("MESSAGES.RECORDING.NO_TARGET"));
+                                        return;
+                                    }
+                                };
+                                let source = RecordingSourceInput {
+                                    target_id,
+                                    virtual_id: selected.virtual_id.to_string(),
+                                    cluster: selected.cluster,
+                                    input_name: selected.input_name.clone(),
+                                };
+                                let now = chrono::Utc::now().timestamp();
+                                let program_end = now + 90 * 60;
+                                let prefill = RecordingFormPrefill::new(
+                                    source,
+                                    selected.title.clone(),
+                                    now,
+                                    program_end,
+                                    (*padding).clone(),
+                                )
+                                .with_channel_name(selected.title.clone());
+                                let request_slot: Rc<RefCell<Option<CreateRecordingTaskRequest>>> =
+                                    Rc::new(RefCell::new(None));
+                                let on_submit = {
+                                    let request_slot = Rc::clone(&request_slot);
+                                    Callback::from(move |request: CreateRecordingTaskRequest| {
+                                        *request_slot.borrow_mut() = Some(request);
+                                    })
+                                };
+                                let on_cancel = Callback::from(|_| {});
+                                let body = html! {
+                                    <RecordingForm
+                                        prefill={prefill}
+                                        has_recording_write={can_write_recordings}
+                                        is_admin_role={is_admin_role}
+                                        on_submit={on_submit}
+                                        on_cancel={on_cancel}
+                                    />
+                                };
                                 let actions = DialogActions {
                                     left: Some(vec![DialogAction::new(
                                         "cancel",
@@ -707,84 +635,24 @@ pub fn PlaylistExplorer() -> Html {
                                         Some("primary".to_string()),
                                     )],
                                 };
-                                let result = dialog
-                                    .content(
-                                        html! {
-                                            <RecordDialogContent
-                                                start_value={Rc::clone(&start_value)}
-                                                duration_value={Rc::clone(&duration_value)}
-                                                priority_value={Rc::clone(&priority_value)}
-                                                start_label={translate_clone.t("LABEL.START")}
-                                                duration_label={translate_clone.t("LABEL.DURATION")}
-                                                priority_label={translate_clone.t("LABEL.PRIORITY")}
-                                                selected_title={selected.title.clone()}
-                                            />
-                                        },
-                                        Some(actions),
-                                        false,
-                                    )
-                                    .await;
-
-                                if result == DialogResult::Ok {
-                                    let start_value = start_value.borrow().clone();
-                                    let duration_value = duration_value.borrow().clone();
-                                    let priority =
-                                        match parse_optional_priority_input(Some(priority_value.borrow().clone())) {
-                                            Ok(priority) => priority,
-                                            Err(err) => {
-                                                services.toastr.error(err);
-                                                return;
-                                            }
-                                        };
-                                    let start_ts = parse_record_start_value(&start_value);
-                                    let duration_mins = parse_record_duration_minutes(&duration_value);
-
-                                    match (start_ts, duration_mins) {
-                                        (Some(start_at), Some(minutes)) => {
-                                            let filename = build_record_filename(&selected.title, &start_value);
-                                            let input_name = normalize_input_name(&selected.input_name);
-                                            let resolved_url = if let Some(playlist_request) = playlist_request.clone()
-                                            {
-                                                let request = PlaylistUrlResolveRequest::Provider {
-                                                    playlist_request,
-                                                    url: selected.url.clone(),
-                                                };
-                                                services
-                                                    .playlist
-                                                    .resolve_url(request)
-                                                    .await
-                                                    .unwrap_or(selected.url.clone())
-                                            } else {
-                                                selected.url.clone()
-                                            };
-                                            match services
-                                                .downloads
-                                                .queue_recording(
-                                                    resolved_url,
-                                                    filename,
-                                                    start_at,
-                                                    minutes.saturating_mul(60),
-                                                    input_name,
-                                                    priority,
-                                                )
-                                                .await
-                                            {
-                                                Ok(_) => {
-                                                    services.toastr.success(
-                                                        translate_clone.t("MESSAGES.DOWNLOAD.RECORDING_QUEUED"),
-                                                    );
-                                                }
-                                                Err(_) => {
-                                                    services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL"));
-                                                }
-                                            }
-                                        }
-                                        (None, _) => services
-                                            .toastr
-                                            .error(translate_clone.t("MESSAGES.DOWNLOAD.INVALID_RECORD_START")),
-                                        (_, None) => services
-                                            .toastr
-                                            .error(translate_clone.t("MESSAGES.DOWNLOAD.INVALID_RECORD_DURATION")),
+                                let result = dialog.content(body, Some(actions), false).await;
+                                if result != DialogResult::Ok {
+                                    return;
+                                }
+                                let request = match request_slot.borrow_mut().take() {
+                                    Some(r) => r,
+                                    None => {
+                                        services.toastr.error(translate_clone.t("MESSAGES.RECORDING.NO_REQUEST"));
+                                        return;
+                                    }
+                                };
+                                let recording_svc = RecordingService::new();
+                                match recording_svc.create_task(request).await {
+                                    Ok(_) => {
+                                        services.toastr.success(translate_clone.t("MESSAGES.RECORDING.QUEUED"));
+                                    }
+                                    Err(err) => {
+                                        services.toastr.error(err.to_string());
                                     }
                                 }
                             });
@@ -1172,7 +1040,7 @@ pub fn PlaylistExplorer() -> Html {
             }
             <MenuItem icon="Clipboard" name={ExplorerAction::CopyLinkProviderUrl.to_string()} label={translate.t("LABEL.COPY_LINK_PROVIDER_URL")} onclick={&handle_menu_click}></MenuItem>
             { html_if!(
-                can_show_record_action(can_write_downloads, selected_channel.as_ref()),
+                can_show_record_action(can_write_recordings, selected_channel.as_ref()),
                 {
                 <MenuItem icon="Record" name={ExplorerAction::Record.to_string()} label={translate.t("LABEL.RECORD")} onclick={&handle_menu_click}></MenuItem>
             })}
@@ -1190,7 +1058,7 @@ pub fn PlaylistExplorer() -> Html {
 mod tests {
     use super::{
         build_download_filename, can_show_download_action, can_show_record_action, normalize_input_name,
-        parse_optional_priority_input, parse_record_duration_minutes, parse_record_start_value, ChannelSelection,
+        parse_optional_priority_input, ChannelSelection,
     };
     use shared::model::{VirtualId, XtreamCluster};
 
@@ -1263,21 +1131,6 @@ mod tests {
         assert!(!can_show_download_action(true, Some(&series_container)));
         assert!(can_show_download_action(true, Some(&episode)));
         assert!(!can_show_record_action(true, Some(&vod)));
-    }
-
-    #[test]
-    fn parse_record_duration_minutes_rejects_zero_and_invalid_values() {
-        assert_eq!(parse_record_duration_minutes("0"), None);
-        assert_eq!(parse_record_duration_minutes("abc"), None);
-        assert_eq!(parse_record_duration_minutes("15"), Some(15));
-    }
-
-    #[test]
-    fn parse_record_start_value_accepts_default_format() {
-        let default_value = super::default_record_start_value();
-        assert!(parse_record_start_value(&default_value).is_some());
-        assert!(parse_record_start_value("2026-04-03T12:34:00").is_some());
-        assert!(parse_record_start_value("not-a-date").is_none());
     }
 
     #[test]

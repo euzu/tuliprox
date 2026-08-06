@@ -54,6 +54,7 @@ async fn render_template(app_config: &Arc<AppConfig>, http_client: &reqwest::Cli
         watch: None,
         processing: None,
         disk: None,
+        recording: None,
         flat_stats: None,
     };
 
@@ -81,6 +82,15 @@ async fn render_template(app_config: &Arc<AppConfig>, http_client: &reqwest::Cli
         MessageContent::DiskAlert(alert) => {
             template_context.disk = Some(alert);
         }
+        MessageContent::RecordingLifecycle(recording) => {
+            template_context.recording = Some(recording);
+            template_context.message = Some(match recording.event {
+                MsgKind::RecordingStarted => "Recording started",
+                MsgKind::RecordingCompleted => "Recording completed",
+                MsgKind::RecordingFailed => "Recording failed",
+                _ => "Recording lifecycle event",
+            });
+        }
     }
 
     match template {
@@ -105,6 +115,22 @@ fn default_text_for(content: &MessageContent) -> String {
         MessageContent::Watch(w) => serde_json::to_string(w).unwrap_or_default(),
         MessageContent::ProcessingStats(ps) => serde_json::to_string(ps).unwrap_or_default(),
         MessageContent::DiskAlert(alert) => default_disk_alert_text(alert),
+        MessageContent::RecordingLifecycle(recording) => default_recording_lifecycle_text(recording),
+    }
+}
+
+fn default_recording_lifecycle_text(recording: &crate::model::RecordingLifecycleMessage) -> String {
+    let label = match recording.event {
+        MsgKind::RecordingStarted => "Recording started",
+        MsgKind::RecordingCompleted => "Recording completed",
+        MsgKind::RecordingFailed => "Recording failed",
+        _ => "Recording lifecycle event",
+    };
+    let title = recording.programme_title.as_deref().unwrap_or("Untitled");
+    let channel = recording.channel.as_deref().unwrap_or("unknown channel");
+    match recording.failure_reason.as_deref() {
+        Some(reason) => format!("{label}: {title} on {channel} ({reason})"),
+        None => format!("{label}: {title} on {channel}"),
     }
 }
 
@@ -192,6 +218,7 @@ async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
                      serialized
                  }
                  MessageContent::DiskAlert(alert) => default_disk_alert_text(alert),
+                 MessageContent::RecordingLifecycle(recording) => default_recording_lifecycle_text(recording),
             }
         };
 

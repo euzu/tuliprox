@@ -25,6 +25,7 @@ use crate::{
             ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState, HlsProvisioningState,
             HlsProxyManager, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
             UpdateGuard, exec_qos_aggregation,
+            recording_rule_scheduler::spawn_recording_rule_scheduler,
         },
         panel_api::sync_panel_api_exp_dates_on_boot,
         tasks::{exec_interner_prune, exec_scheduler, exec_xtream_expiry_sync},
@@ -113,6 +114,7 @@ async fn recover_persisted_downloads_state_for_startup(downloads: &DownloadQueue
 
 async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &crate::model::VideoDownloadConfig) {
     spawn_download_services(app_state.as_ref(), &app_state.cancel_tokens.load().downloads);
+    spawn_recording_rule_scheduler(app_state, &app_state.cancel_tokens.load().downloads);
     if let Err(err) = resume_download_worker_if_needed(app_state.as_ref(), download_cfg).await {
         error!("Failed to resume persisted downloads during startup; continuing with downloads paused: {err}");
     }

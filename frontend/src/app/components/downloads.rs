@@ -632,6 +632,7 @@ mod tests {
             scheduled_start_at: None,
             duration_secs: None,
             error: None,
+            recording: None,
         }
     }
 
@@ -815,6 +816,7 @@ mod tests {
             scheduled_start_at: None,
             duration_secs: Some(60),
             error: Some("Cancelled by user".to_string()),
+            recording: None,
         };
 
         let can_retry = dto.kind == TaskKindDto::Download
@@ -838,6 +840,7 @@ mod tests {
             scheduled_start_at: None,
             duration_secs: Some(60),
             error: Some("Cancelled by user".to_string()),
+            recording: None,
         };
 
         let actions = download_action_availability(true, &dto);

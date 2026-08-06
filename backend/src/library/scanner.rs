@@ -85,6 +85,12 @@ impl MediaGrouper {
                             metadata: Box::new(metadata),
                         });
                 }
+                // Recordings are routed to a dedicated DVR section
+                // by the recording catalog projection. The scanner
+                // passes them through
+                // unchanged; the frontend reads the dedicated
+                // catalog.
+                MediaClassification::Recording { .. } => {}
             }
         }
 

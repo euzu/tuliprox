@@ -19,6 +19,8 @@ mod playlist_stream;
 mod provider_dns_repository;
 mod stream_history;
 mod qos_snapshot_repository;
+pub mod identity_registry;
+pub mod recording_rule_repository;
 pub mod stalker_repository;
 pub mod stalker_generation_repository;
 

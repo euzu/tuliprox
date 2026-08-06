@@ -1,9 +1,9 @@
 use crate::{
     model::{
         EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_DESC,
-        EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW, EPG_TAG_PROGRAMME, EPG_TAG_TITLE, EPG_TAG_TV,
-        Epg, EpgSmartMatchConfig, IcsDummyPolicy, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
-        TVGuide, XmlTag, XmlTagIcon,
+        EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW, EPG_TAG_PREVIOUSLY_SHOWN, EPG_TAG_PROGRAMME,
+        EPG_TAG_TITLE, EPG_TAG_TV, Epg, EpgSmartMatchConfig, IcsDummyPolicy, IcsEpgSourceConfig, PersistedEpgSource,
+        PersistedEpgSourceKind, TVGuide, XmlTag, XmlTagIcon,
     },
     processing::{parser::ics, processor::EpgIdCache},
     repository::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy},
@@ -210,6 +210,7 @@ impl TVGuide {
         let mut categories = Vec::new();
         let mut is_live = false;
         let mut is_new = false;
+        let mut previously_shown = false;
         if let Some(children) = tag.children.as_ref() {
             for child in children {
                 match child.name.as_ref() {
@@ -229,6 +230,7 @@ impl TVGuide {
                     }
                     EPG_TAG_LIVE => is_live = true,
                     EPG_TAG_NEW => is_new = true,
+                    EPG_TAG_PREVIOUSLY_SHOWN => previously_shown = true,
                     _ => {}
                 }
             }
@@ -240,6 +242,7 @@ impl TVGuide {
         programme.categories = categories;
         programme.is_live = is_live;
         programme.is_new = is_new;
+        programme.previously_shown = previously_shown;
         Some(programme)
     }
 
