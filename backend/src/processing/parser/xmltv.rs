@@ -1,32 +1,27 @@
 use crate::{
     model::{
+        EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_DESC,
+        EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW, EPG_TAG_PROGRAMME, EPG_TAG_TITLE, EPG_TAG_TV,
         Epg, EpgSmartMatchConfig, IcsDummyPolicy, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
-        TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY,
-        EPG_TAG_CHANNEL, EPG_TAG_DESC, EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW,
-        EPG_TAG_PROGRAMME, EPG_TAG_TITLE, EPG_TAG_TV,
+        TVGuide, XmlTag, XmlTagIcon,
     },
-    processing::{
-        parser::ics,
-        processor::EpgIdCache,
-    },
+    processing::{parser::ics, processor::EpgIdCache},
     repository::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy},
     utils::{
-        arc_str_serde, async_file_reader, compressed_file_reader_async::CompressedFileReaderAsync,
-        parse_xmltv_time, with_folded_epg_id,
+        arc_str_serde, async_file_reader, compressed_file_reader_async::CompressedFileReaderAsync, parse_xmltv_time,
+        with_folded_epg_id,
     },
 };
 use log::error;
 use quick_xml::events::{BytesStart, BytesText, Event};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use shared::{
     concat_string,
     model::{EpgCategory, EpgChannel, EpgNamePrefix, EpgProgramme},
-    utils::{deunicode_string, Internable, CONSTANTS},
+    utils::{CONSTANTS, Internable, deunicode_string},
 };
 use std::{
     borrow::Cow,
-    cmp::min,
     collections::{HashMap, HashSet},
     io,
     path::PathBuf,
@@ -93,22 +88,47 @@ fn combine(join: &str, left: &str, right: &str) -> String {
     combined
 }
 
+fn strip_markers(input: &str, markers: &[String]) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0;
+    while cursor < input.len() {
+        let left_is_boundary = cursor == 0 || !input.as_bytes()[cursor - 1].is_ascii_alphanumeric();
+        let matched_end = left_is_boundary
+            .then(|| {
+                markers.iter().filter(|marker| !marker.is_empty()).find_map(|marker| {
+                    let end = cursor + marker.len();
+                    (end <= input.len()
+                        && input[cursor..end].eq_ignore_ascii_case(marker)
+                        && (end == input.len() || !input.as_bytes()[end].is_ascii_alphanumeric()))
+                    .then_some(end)
+                })
+            })
+            .flatten();
+        if let Some(end) = matched_end {
+            cursor = end;
+        } else {
+            let next = input[cursor..].chars().next().expect("cursor is within the string");
+            output.push(next);
+            cursor += next.len_utf8();
+        }
+    }
+    output
+}
+
 /// # Panics
 pub fn normalize_channel_name(name: &str, normalize_config: &EpgSmartMatchConfig) -> String {
     let normalized = deunicode_string(name.trim()).to_lowercase();
     let (channel_name, suffix) = name_prefix(&normalized, normalize_config);
-    // Remove all non-alphanumeric characters (except dashes and underscores).
-    let cleaned_name = normalize_config.normalize_regex.replace_all(channel_name, "");
-    // Remove terms like resolution
-    let cleaned_name = normalize_config.strip.iter().fold(cleaned_name.to_string(), |acc, term| acc.replace(term, ""));
-    match suffix {
-        None => cleaned_name,
+    let stripped_name = strip_markers(channel_name, &normalize_config.strip);
+    let reconstructed = match suffix {
+        None => stripped_name,
         Some(sfx) => match &normalize_config.name_prefix {
-            EpgNamePrefix::Ignore => cleaned_name,
-            EpgNamePrefix::Suffix(sep) => combine(sep, &cleaned_name, sfx),
-            EpgNamePrefix::Prefix(sep) => combine(sep, sfx, &cleaned_name),
+            EpgNamePrefix::Ignore => stripped_name,
+            EpgNamePrefix::Suffix(separator) => combine(separator, &stripped_name, sfx),
+            EpgNamePrefix::Prefix(separator) => combine(separator, sfx, &stripped_name),
         },
-    }
+    };
+    normalize_config.normalize_regex.replace_all(&reconstructed, "").into_owned()
 }
 
 impl TVGuide {
@@ -148,26 +168,6 @@ impl TVGuide {
                 }
             }
         }
-    }
-
-    fn try_fuzzy_matching(id_cache: &mut EpgIdCache, epg_id: &Arc<str>, tag: &XmlTag, fuzzy_matching: bool) -> bool {
-        let mut matched =
-            tag.normalized_epg_ids.as_ref().is_some_and(|ids| id_cache.match_with_normalized(epg_id, ids));
-        if !matched && fuzzy_matching {
-            let (fuzzy_matched, matched_normalized_name) = Self::find_best_fuzzy_match(id_cache, tag);
-            if fuzzy_matched {
-                if let Some(key) = matched_normalized_name {
-                    id_cache.normalized.entry(key).and_modify(|entry| {
-                        entry.replace(epg_id.clone());
-                        // Inline fold (mirrors `EpgIdCache::insert_channel_epg_id`); a
-                        // `&mut self` call would break the disjoint field capture here.
-                        with_folded_epg_id(epg_id, |folded| id_cache.channel_epg_id.insert(folded.intern()));
-                        matched = true;
-                    });
-                }
-            }
-        }
-        matched
     }
 
     fn channel_display_name(tag: &XmlTag) -> Option<Arc<str>> {
@@ -243,78 +243,6 @@ impl TVGuide {
         Some(programme)
     }
 
-    /// Finds the best fuzzy match for a channel's normalized EPG ID using phonetic encoding and Jaro-Winkler similarity.
-    ///
-    /// Iterates over the tag's normalized EPG IDs, computes their phonetic codes, and searches for candidates in the phonetics map.
-    /// For each candidate, calculates the Jaro-Winkler similarity score and tracks the best match above the configured threshold.
-    /// Returns a tuple indicating whether a suitable match was found and the matched normalized EPG ID if available.
-    ///
-    /// # Returns
-    ///
-    /// A tuple where the first element is `true` if a match above the threshold was found, and the second element is the matched normalized EPG ID.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let (found, matched) = find_best_fuzzy_match(&mut id_cache, &tag);
-    /// if found {
-    ///     println!("Best match: {:?}", matched);
-    /// }
-    /// ```
-    fn find_best_fuzzy_match(id_cache: &mut EpgIdCache, tag: &XmlTag) -> (bool, Option<Arc<str>>) {
-        let match_threshold = id_cache.smart_match_config.match_threshold;
-        let best_match_threshold = id_cache.smart_match_config.best_match_threshold;
-
-        let Some(normalized_epg_ids) = tag.normalized_epg_ids.as_ref() else {
-            return (false, None);
-        };
-
-        // 1) Precalculation: (tag_normalized, tag_code)
-        let pre: Vec<(Arc<str>, Arc<str>)> =
-            normalized_epg_ids.iter().map(|tn| (tn.clone(), id_cache.phonetic(tn))).collect();
-
-        // 2) Early exit if match >= best_match_threshold
-        for (tag_normalized, tag_code) in &pre {
-            if let Some(candidates) = id_cache.phonetics.get(tag_code) {
-                if let Some(good_enough) = candidates.par_iter().find_any(|norm_key| {
-                    let jw = strsim::jaro_winkler(norm_key, tag_normalized);
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let score = min(100, (jw * 100.0).round() as u16);
-                    score >= best_match_threshold
-                }) {
-                    return (true, Some(good_enough.clone()));
-                }
-            }
-        }
-
-        // 3) No full match: find best match with match_threshold
-        let best = pre
-            .par_iter()
-            .filter_map(|(tag_normalized, tag_code)| {
-                id_cache.phonetics.get(tag_code).map(|candidates| {
-                    candidates
-                        .par_iter()
-                        .map(|norm_key| {
-                            let jw = strsim::jaro_winkler(norm_key, tag_normalized);
-                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                            let score = min(100, (jw * 100.0).round() as u16);
-                            (score, norm_key)
-                        })
-                        .reduce_with(|a, b| if a.0 >= b.0 { a } else { b })
-                })
-            })
-            .flatten()
-            .reduce_with(|a, b| if a.0 >= b.0 { a } else { b });
-
-        if let Some((score, best_key)) = best {
-            if score >= match_threshold {
-                return (true, Some(Arc::clone(best_key)));
-            }
-        }
-
-        (false, None)
-    }
-
     /// Parses and filters a compressed EPG XML file, extracting relevant channel and program tags based on smart and fuzzy matching criteria.
     ///
     /// Returns an `Epg` containing filtered tags and TV attributes if any matching channels are found; otherwise, returns `None`.
@@ -346,7 +274,6 @@ impl TVGuide {
                 let mut source_processed: HashSet<Arc<str>> = HashSet::with_capacity(5000);
                 let mut accepted_channels = 0usize;
                 let smart_match = id_cache.smart_match_config.enabled;
-                let fuzzy_matching = smart_match && id_cache.smart_match_config.fuzzy_matching;
                 let mut filter_tags = |mut tag: XmlTag| {
                     match tag.name.as_ref() {
                         EPG_TAG_CHANNEL => {
@@ -357,11 +284,29 @@ impl TVGuide {
                             }
 
                             Self::prepare_tag(id_cache, &mut tag, smart_match);
+                            if smart_match {
+                                id_cache.register_guide_names(
+                                    &tag_epg_id,
+                                    tag.children.iter().flatten().filter_map(|child| {
+                                        (child.name.as_ref() == EPG_TAG_DISPLAY_NAME)
+                                            .then_some(child.value.as_ref())
+                                            .flatten()
+                                    }),
+                                );
+                            }
                             // Case-insensitive (ASCII) membership: fold the guide id for the
                             // lookup only; `tag_epg_id` keeps its original case for output.
                             let add_channel = if smart_match {
-                                id_cache.contains_channel_epg_id(&tag_epg_id)
-                                    || Self::try_fuzzy_matching(id_cache, &tag_epg_id, &tag, fuzzy_matching)
+                                let direct_match = id_cache.contains_channel_epg_id(&tag_epg_id);
+                                let normalized_match = tag.normalized_epg_ids.as_ref().is_some_and(|candidates| {
+                                    id_cache.match_epg_channel_candidates(
+                                        &tag_epg_id,
+                                        candidates,
+                                        epg_source.priority,
+                                        source_order,
+                                    )
+                                });
+                                direct_match || normalized_match
                             } else {
                                 id_cache.contains_channel_epg_id(&tag_epg_id)
                             };
@@ -432,8 +377,14 @@ impl TVGuide {
         let normalized_candidates = id_cache.normalize_candidates(candidates);
 
         let add_channel = if id_cache.smart_match_enabled {
-            id_cache.contains_channel_epg_id(channel_id)
-                || id_cache.match_epg_channel_candidates(channel_id, &normalized_candidates)
+            let direct_match = id_cache.contains_channel_epg_id(channel_id);
+            let normalized_match = id_cache.match_epg_channel_candidates(
+                channel_id,
+                &normalized_candidates,
+                epg_source.priority,
+                source_order,
+            );
+            direct_match || normalized_match
         } else {
             id_cache.contains_channel_epg_id(channel_id)
         };
@@ -515,6 +466,11 @@ impl TVGuide {
                 }
             }
         }
+        let available_epg_ids = accumulator.channel_ids_with_programmes();
+        id_cache.finalize_matches(&available_epg_ids);
+        let selected_epg_ids = id_cache.selected_epg_ids(&available_epg_ids);
+        let retained_epg_ids = accumulator.retain_channels(&selected_epg_ids);
+        id_cache.replace_processed_epg_ids(retained_epg_ids);
         accumulator.finish_epg_with_icon_overrides()
     }
 }
@@ -729,6 +685,20 @@ pub(crate) struct EpgMergeAccumulator {
 
 impl EpgMergeAccumulator {
     pub(crate) fn new() -> Self { Self::default() }
+
+    fn channel_ids_with_programmes(&self) -> HashSet<Arc<str>> {
+        self.channels
+            .iter()
+            .filter(|(id, channel)| !channel.programmes.is_empty() || self.dummy_policies.contains_key(*id))
+            .map(|(id, _)| Arc::clone(id))
+            .collect()
+    }
+
+    fn retain_channels(&mut self, selected_epg_ids: &HashSet<Arc<str>>) -> HashSet<Arc<str>> {
+        self.channels.retain(|id, _| selected_epg_ids.contains(id));
+        self.dummy_policies.retain(|id, _| selected_epg_ids.contains(id));
+        self.channels.keys().cloned().collect()
+    }
 
     pub(crate) fn set_attributes_if_preferred(
         &mut self,
@@ -971,12 +941,7 @@ impl EpgMergeAccumulator {
             path.display()
         );
 
-        let source = DiskEpgSource::new(
-            path,
-            attributes.map(|a| a.attributes),
-            source_priority,
-            source_order,
-        );
+        let source = DiskEpgSource::new(path, attributes.map(|a| a.attributes), source_priority, source_order);
         // DiskEpgSource now owns the path; disarm the guard so its Drop does
         // not double-remove the file. `mem::forget` would also work, but
         // `take()` keeps the guard in scope and is auditable.
@@ -1240,7 +1205,11 @@ pub(crate) fn merge_epg_trees(sources: Vec<DiskEpgSource>) -> io::Result<Option<
     let mut accumulator = EpgMergeAccumulator::new();
     for source in sources {
         if let Some(attrs) = &source.attributes {
-            accumulator.set_attributes_if_preferred(source.source_priority, source.source_order as usize, Some(attrs.clone()));
+            accumulator.set_attributes_if_preferred(
+                source.source_priority,
+                source.source_order as usize,
+                Some(attrs.clone()),
+            );
         }
         let mut query = BPlusTreeQuery::<EpgDiskChannelKey, EpgChannel>::try_new(&source.path)
             .map_err(|e| io::Error::other(format!("open temp EPG tree at {}: {e}", source.path.display())))?;
@@ -1267,8 +1236,8 @@ mod tests {
             TVGuide,
         },
         processing::parser::xmltv::{
-            flatten_tvguide, merge_epg_channels_by_priority, merge_epg_channels_by_priority_with_dummy_policies,
-            normalize_channel_name, EpgDummyPolicySource, EpgMergeAccumulator,
+            EpgDummyPolicySource, EpgMergeAccumulator, flatten_tvguide, merge_epg_channels_by_priority,
+            merge_epg_channels_by_priority_with_dummy_policies, normalize_channel_name,
         },
         utils::FileLockManager,
     };
@@ -1323,6 +1292,30 @@ mod tests {
         let epg_normalize = EpgSmartMatchConfig::from(epg_normalize_dto);
         let normalized = normalize_channel_name("Love Nature", &epg_normalize);
         assert_eq!(normalized, "lovenature".to_string());
+    }
+
+    #[test]
+    fn normalization_keeps_country_suffixes_consistent() {
+        let mut dto = EpgSmartMatchConfigDto {
+            enabled: true,
+            name_prefix: EpgNamePrefix::Suffix(".".to_string()),
+            ..Default::default()
+        };
+        dto.prepare().expect("valid smart-match config");
+        let config = EpgSmartMatchConfig::from(dto);
+
+        assert_eq!(normalize_channel_name("FR: TF1 FHD", &config), "tf1.fr");
+        assert_eq!(normalize_channel_name("TF1.fr", &config), "tf1.fr");
+    }
+
+    #[test]
+    fn normalization_strips_quality_markers_without_corrupting_names() {
+        let mut dto = EpgSmartMatchConfigDto { enabled: true, ..Default::default() };
+        dto.prepare().expect("valid smart-match config");
+        let config = EpgSmartMatchConfig::from(dto);
+
+        assert_eq!(normalize_channel_name("RMC Story H265 50FPS", &config), "rmcstory");
+        assert_eq!(normalize_channel_name("Ashdod TV HD", &config), "ashdodtv");
     }
 
     fn epg_channel(id: &str, title: Option<&str>, icon: Option<&str>, programmes: Vec<EpgProgramme>) -> EpgChannel {
@@ -1451,19 +1444,13 @@ mod tests {
             programme
         };
         let merged = merge_epg_channels_by_priority(vec![
-            (
-                0,
-                vec![epg_channel("demo.channel", None, None, vec![high_programme_with_categories])],
-            ),
+            (0, vec![epg_channel("demo.channel", None, None, vec![high_programme_with_categories])]),
             (10, vec![epg_channel("demo.channel", None, None, vec![low_programme_extra])]),
         ]);
 
         assert_eq!(merged.len(), 1);
         let programme = &merged[0].programmes[0];
-        assert_eq!(
-            programme.categories,
-            vec![EpgCategory { value: "Drama".intern(), lang: None }],
-        );
+        assert_eq!(programme.categories, vec![EpgCategory { value: "Drama".intern(), lang: None }],);
         assert!(programme.is_live);
         assert!(programme.is_new);
     }
@@ -1661,8 +1648,8 @@ mod tests {
             .expect("write XMLTV fixture");
 
             let file_locks = Arc::new(FileLockManager::new());
-            let guide = TVGuide::new(vec![xmltv_source(epg_path.clone(), 0, false)])
-                .with_file_locks(Arc::clone(&file_locks));
+            let guide =
+                TVGuide::new(vec![xmltv_source(epg_path.clone(), 0, false)]).with_file_locks(Arc::clone(&file_locks));
             let mut id_cache = EpgIdCache::new(None);
             id_cache.insert_channel_epg_id("demo.channel");
             let write_guard = file_locks.write_lock(&epg_path).await;
@@ -1921,10 +1908,9 @@ mod tests {
         let source_order_winner =
             merge(vec![dummy_policy_source(0, 2, "Later source"), dummy_policy_source(0, 1, "Earlier source")]);
         assert!(!source_order_winner.programmes.is_empty());
-        assert!(source_order_winner
-            .programmes
-            .iter()
-            .all(|programme| programme.title.as_deref() == Some("Earlier source")));
+        assert!(
+            source_order_winner.programmes.iter().all(|programme| programme.title.as_deref() == Some("Earlier source"))
+        );
     }
 
     #[ignore = "requires a local XMLTV fixture under /tmp"]
@@ -2166,7 +2152,7 @@ mod tests {
     /// optimisation is built on sand.
     #[test]
     fn disk_path_matches_in_memory_finish() {
-        use super::{merge_epg_trees, EpgMergeAccumulator};
+        use super::{EpgMergeAccumulator, merge_epg_trees};
 
         // Build one source by appending one programme per channel through the
         // accumulator's primary entry point. `add_channel_with_programmes` is
@@ -2180,7 +2166,11 @@ mod tests {
             for i in channels {
                 let id: Arc<str> = format!("ch-{i:04}").into();
                 let priority = if source == 0 { 5 } else { 3 }; // source 1 wins
-                let (start, stop) = if source == 0 { (i64::from(i), i64::from(i + 1)) } else { (100 + i64::from(i), 101 + i64::from(i)) };
+                let (start, stop) = if source == 0 {
+                    (i64::from(i), i64::from(i + 1))
+                } else {
+                    (100 + i64::from(i), 101 + i64::from(i))
+                };
                 acc.add_channel_with_programmes(
                     i16::try_from(priority).unwrap_or(0),
                     source,
