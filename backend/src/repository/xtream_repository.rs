@@ -11,7 +11,11 @@ use crate::repository::bplustree::{
 };
 use crate::repository::open_playlist_reader;
 use crate::repository::playlist_scratch::PlaylistScratch;
-use crate::repository::storage::{ensure_input_storage_path, ensure_target_storage_subpath, get_file_path_for_db_index, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path};
+use crate::repository::storage::{
+    ensure_input_storage_path, ensure_target_storage_subpath, get_file_path_for_db_index,
+    get_input_storage_path, get_target_id_mapping_file, get_target_storage_path,
+    XtreamRefreshGenerationGuard,
+};
 use crate::repository::storage_const;
 use crate::repository::target_id_mapping::VirtualIdRecord;
 use crate::repository::xtream_playlist_iterator::XtreamPlaylistJsonIterator;
@@ -841,6 +845,7 @@ struct XtreamRefreshLease(Arc<XtreamRefreshLeaseInner>);
 struct XtreamRefreshLeaseInner {
     paths: XtreamRefreshPaths,
     database_artifacts: BPlusTreeStagingArtifacts,
+    _generation_guard: XtreamRefreshGenerationGuard,
 }
 
 impl XtreamRefreshLease {
@@ -855,7 +860,26 @@ impl XtreamRefreshLease {
                 paths.generation
             ))
         })?;
-        Ok(Self(Arc::new(XtreamRefreshLeaseInner { paths, database_artifacts })))
+        let storage_path = paths.staging_database.parent().ok_or_else(|| {
+            TuliproxError::RepositoryXtream(format!(
+                "Xtream staging database has no storage directory: {}",
+                paths.staging_database.display()
+            ))
+        })?;
+        let generation_guard = XtreamRefreshGenerationGuard::acquire(storage_path, paths.generation).map_err(
+            |error| {
+                TuliproxError::RepositoryXtream(format!(
+                    "Failed to acquire Xtream refresh generation guard {} in {}: {error}",
+                    paths.generation,
+                    storage_path.display()
+                ))
+            },
+        )?;
+        Ok(Self(Arc::new(XtreamRefreshLeaseInner {
+            paths,
+            database_artifacts,
+            _generation_guard: generation_guard,
+        })))
     }
 
     fn paths(&self) -> &XtreamRefreshPaths { &self.0.paths }
@@ -1851,10 +1875,12 @@ mod tests {
     };
     use crate::repository::{
         bplustree::common::{ensure_distinct_sidecar_lock_domains, sidecar_lock_path},
-        build_input_storage_path, get_file_path_for_db_index, BPlusTreeQuery, BPlusTreeUpdate,
+        build_input_storage_path, cleanup_orphaned_staging_artifacts, get_file_path_for_db_index,
+        refresh_generation_guard_path, BPlusTreeQuery, BPlusTreeUpdate,
     };
     use crate::utils::{request::DynReader, FileLockManager};
     use arc_swap::{ArcSwap, ArcSwapOption};
+    use fs2::FileExt;
     use shared::model::{
         CatchupProperties, ConfigPaths, InputType, LiveStreamProperties, SeriesStreamProperties, StreamProperties,
         VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
@@ -2440,6 +2466,7 @@ mod tests {
     fn refresh_lease_defers_cleanup_until_last_worker_clone_drops() {
         let dir = tempdir().expect("temp dir should be created");
         let paths = fixed_refresh_paths(dir.path(), 13);
+        let guard_path = refresh_generation_guard_path(dir.path(), paths.generation);
         let parent_lease = XtreamRefreshLease::new(paths.clone()).expect("refresh lease should be valid");
         let worker_lease = parent_lease.clone();
         fs::write(&paths.staging_database, b"staging").expect("staging fixture should be written");
@@ -2448,10 +2475,48 @@ mod tests {
         drop(parent_lease);
         assert!(paths.staging_database.exists());
         assert!(paths.staging_categories.exists());
+        assert!(guard_path.exists());
 
         drop(worker_lease);
         assert!(!paths.staging_database.exists());
         assert!(!paths.staging_categories.exists());
+        assert!(!guard_path.exists());
+    }
+
+    #[test]
+    fn active_refresh_between_btree_batches_survives_orphan_cleanup() {
+        let dir = tempdir().expect("temp dir should be created");
+        let paths = fixed_refresh_paths(dir.path(), 14);
+        let guard_path = refresh_generation_guard_path(dir.path(), paths.generation);
+        let lease = XtreamRefreshLease::new(paths.clone()).expect("refresh lease should be valid");
+        let sidecar = sidecar_lock_path(&paths.staging_database);
+        fs::write(&paths.staging_database, b"staging").expect("staging fixture should be written");
+        fs::write(&paths.staging_categories, b"categories").expect("category fixture should be written");
+        fs::write(&sidecar, b"").expect("sidecar fixture should be written");
+
+        let between_batch_probe = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&sidecar)
+            .expect("open staging sidecar");
+        between_batch_probe
+            .try_lock_exclusive()
+            .expect("staging sidecar should be unlocked between batches");
+        fs2::FileExt::unlock(&between_batch_probe).expect("release between-batch probe");
+        drop(between_batch_probe);
+
+        cleanup_orphaned_staging_artifacts(dir.path(), Duration::ZERO);
+
+        assert!(paths.staging_database.exists());
+        assert!(paths.staging_categories.exists());
+        assert!(sidecar.exists());
+        assert!(guard_path.exists());
+
+        drop(lease);
+        assert!(!paths.staging_database.exists());
+        assert!(!paths.staging_categories.exists());
+        assert!(!sidecar.exists());
+        assert!(!guard_path.exists());
     }
 
     #[test]
