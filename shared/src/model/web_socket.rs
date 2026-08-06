@@ -1,7 +1,7 @@
 use crate::model::{
     user_command::UserCommand, ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse,
-    LibraryScanProgressEvent, PermissionSet, PlaylistUpdateProgressEvent, PlaylistUpdateState, StatusCheck,
-    StreamMeterEntry, SystemInfo,
+    FileDownloadDto, LibraryScanProgressEvent, PermissionSet, PlaylistUpdateProgressEvent, PlaylistUpdateState,
+    QueueRevision, StatusCheck, StreamMeterEntry, SystemInfo,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -100,6 +100,12 @@ pub enum ProtocolMessage {
     StreamMeterBatchResponse(Vec<StreamMeterEntry>),
     DownloadsResponse(DownloadsResponse),
     DownloadsDeltaResponse(DownloadsDelta),
+    // Recording-scoped snapshot + delta. The frontend requests a
+    // snapshot on connect (or after a revision gap) and receives
+    // filtered snapshots/deltas per session.
+    RecordingSnapshotRequest,
+    RecordingSnapshotResponse { revision: QueueRevision, tasks: Vec<FileDownloadDto> },
+    RecordingDeltaResponse { revision: QueueRevision, tasks: Vec<FileDownloadDto> },
 }
 
 impl ProtocolMessage {

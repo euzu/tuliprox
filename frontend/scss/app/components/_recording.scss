@@ -1,0 +1,58 @@
+.tp__recording-form {
+  display: flex;
+  flex-flow: column;
+  gap: var(--gap-default);
+  padding: var(--padding-default);
+  min-width: 18rem;
+
+  &__program {
+    display: flex;
+    flex-flow: column;
+    gap: var(--gap-small);
+  }
+
+  &__row {
+    display: flex;
+    flex-flow: row;
+    gap: var(--gap-default);
+    align-items: center;
+
+  }
+
+  .tp__input {
+    flex-flow: row !important;
+  }
+
+  &__visibility {
+    display: flex;
+    flex-flow: row;
+    gap: var(--gap-default);
+    align-items: center;
+  }
+
+  &__filename {
+    display: flex;
+    flex-flow: row;
+    gap: var(--gap-default);
+    align-items: center;
+  }
+
+  &__heading {
+    font-weight: bold;
+    font-size: var(--font-size-lg);
+  }
+
+  &__error {
+    color: var(--error-color);
+    font-size: var(--font-size-sm);
+  }
+
+  .tp__label {
+    font-weight: bold;
+    color: var(--text-color);
+  }
+
+  .tp__value {
+    color: var(--modest-text-color);
+  }
+}

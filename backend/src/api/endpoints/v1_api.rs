@@ -3,7 +3,7 @@ use crate::{
         api_utils::{internal_server_error, json_or_bin_response, try_unwrap_body},
         endpoints::{
             download_api, extract_accept_header::ExtractAcceptHeader, library_api::library_api_register,
-            rbac_api::rbac_api_register,
+            rbac_api::rbac_api_register, recording_media_api::recording_media_api_register,
             user_api::user_api_register, v1_api_config::v1_api_config_register,
             v1_api_config::v1_api_config_register_with_permissions, v1_api_playlist::{
                 v1_api_playlist_register_public,
@@ -27,6 +27,7 @@ use shared::{
 };
 use std::{collections::BTreeMap, sync::Arc};
 use crate::api::endpoints::rbac_api::rbac_api_register_unprotected;
+use crate::api::endpoints::recording_api::recording_api_register;
 
 pub const API_V1_PATH: &str = "api/v1";
 
@@ -160,7 +161,9 @@ pub fn v1_api_register(
             .merge(v1_api_user_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(v1_api_playlist_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(library_api_register(axum::routing::Router::new(), Some(app_state)))
-            .merge(rbac_api_register(Arc::clone(app_state)));
+            .merge(rbac_api_register(Arc::clone(app_state)))
+            .merge(recording_api_register(axum::routing::Router::new()))
+            .merge(recording_media_api_register(axum::routing::Router::new()));
     } else {
         router = router
             .merge(system_read)
@@ -171,7 +174,9 @@ pub fn v1_api_register(
             .merge(v1_api_user_register(axum::routing::Router::new()))
             .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))
             .merge(library_api_register(axum::routing::Router::new(), None))
-            .merge(rbac_api_register_unprotected(Arc::clone(app_state)));
+            .merge(rbac_api_register_unprotected(Arc::clone(app_state)))
+            .merge(recording_api_register(axum::routing::Router::new()))
+            .merge(recording_media_api_register(axum::routing::Router::new()));
     }
 
     let config = app_state.app_config.config.load();

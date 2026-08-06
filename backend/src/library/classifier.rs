@@ -10,6 +10,14 @@ pub enum MediaClassification {
     Movie {
         metadata: PttMetadata
     },
+    /// DVR recording. Recordings are routed to a dedicated DVR
+    /// section rather than the movie/series catalog. The
+    /// `file_name` is the canonical file name; the `display_title`
+    /// is the parsed title for the catalog UI.
+    Recording {
+        file_name: String,
+        display_title: String,
+    },
     Series {
         key: SeriesKey,
         episode: u32,
@@ -41,7 +49,21 @@ impl MediaClassifier {
         let file_name = &file.file_name;
         let ptt_metadata = ptt_parse_title(file_name);
 
+        // Exclude recordings from movie/series classifiers and
+        // global user-independent target caches. Recordings are
+        // not fed through the classifier at all — they have their
+        // own catalog projection.
+        if file.content_type == LibraryContentType::Recording {
+            return Self::classify_as_recording(file, &ptt_metadata);
+        }
+
         match file.content_type {
+            LibraryContentType::Recording => {
+                // Early-returned above; explicit arm for type-checker
+                // exhaustiveness (the if-return is preserved to avoid
+                // a second pass through the match).
+                Self::classify_as_recording(file, &ptt_metadata)
+            }
             LibraryContentType::Auto => {
                 // Auto-detection based on filename patterns
                 Self::classify_as_series_or_movie(ptt_metadata)
@@ -89,6 +111,23 @@ impl MediaClassifier {
             Self::make_series(*episode, *season, ptt_metadata)
         } else {
             MediaClassification::Movie { metadata: ptt_metadata }
+        }
+    }
+
+    /// Classifier for `LibraryContentType::Recording`. Recordings
+    /// are not fed through the movie/series classifier and not
+    /// registered as global user-independent target caches. The
+    /// frontend route instead reads the recording catalog
+    /// projection (T19) directly. The minimum here: produce a stable
+    /// `Recording` classification that the existing library machinery
+    /// can route to a dedicated DVR section.
+    fn classify_as_recording(
+        file: &ScannedMediaFile,
+        ptt_metadata: &PttMetadata,
+    ) -> MediaClassification {
+        MediaClassification::Recording {
+            file_name: file.file_name.clone(),
+            display_title: ptt_metadata.title.clone(),
         }
     }
 
@@ -148,6 +187,7 @@ mod tests {
             MediaClassification::Movie { .. } => {
                 panic!("Expected Series classification");
             }
+            MediaClassification::Recording { .. } => panic!("Expected Series classification"),
             MediaClassification::Series { key, episode, season, metadata, .. } => {
                 assert_eq!(key.title, "Breaking Bad");
                 assert_eq!(episode, 1);
@@ -168,6 +208,7 @@ mod tests {
                 assert_eq!(metadata.year, Some(1999));
                 assert_eq!(metadata.extension, Some("mkv".to_string()));
             }
+            MediaClassification::Recording { .. } => panic!("Expected Movie classification"),
             MediaClassification::Series { .. } => {
                 panic!("Expected Movie classification");
             }
@@ -185,6 +226,7 @@ mod tests {
                 assert_eq!(metadata.year, None);
                 assert_eq!(metadata.extension, Some("mkv".to_string()));
             }
+            MediaClassification::Recording { .. } => panic!("Expected Movie classification"),
             MediaClassification::Series { .. } => {
                 panic!("Expected Movie classification");
             }
@@ -210,7 +252,9 @@ mod tests {
                 assert_eq!(season, 2);
                 assert_eq!(episode, 5);
             }
-            MediaClassification::Movie { .. } => panic!("Expected Series classification"),
+            MediaClassification::Movie { .. } | MediaClassification::Recording { .. } => {
+                panic!("Expected Series classification");
+            }
         }
         // Counter should record next episode after the parsed one (key is lowercased)
         assert_eq!(counters[&("breaking bad".to_string(), 2)], 6);
@@ -259,15 +303,15 @@ mod tests {
         // ShowA and ShowB each start at episode 1 independently
         match ca1 {
             MediaClassification::Series { episode, .. } => assert_eq!(episode, 1),
-            MediaClassification::Movie { .. } => panic!("Expected Series"),
+            MediaClassification::Movie { .. } | MediaClassification::Recording { .. } => panic!("Expected Series"),
         }
         match cb1 {
             MediaClassification::Series { episode, .. } => assert_eq!(episode, 1),
-            MediaClassification::Movie { .. } => panic!("Expected Series"),
+            MediaClassification::Movie { .. } | MediaClassification::Recording { .. } => panic!("Expected Series"),
         }
         match ca2 {
             MediaClassification::Series { episode, .. } => assert_eq!(episode, 2),
-            MediaClassification::Movie { .. } => panic!("Expected Series"),
+            MediaClassification::Movie { .. } | MediaClassification::Recording { .. } => panic!("Expected Series"),
         }
     }
 

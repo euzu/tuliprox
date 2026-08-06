@@ -32,7 +32,10 @@ use crate::{
         },
         processor::re_resolve_stalker_url,
     },
-    repository::{m3u_get_item_for_stream_id, xtream_get_item_for_stream_id},
+    repository::{
+        iter_raw_m3u_target_playlist, iter_raw_xtream_target_playlist, m3u_get_item_for_stream_id,
+        xtream_get_item_for_stream_id,
+    },
     utils::{
         epg::get_input_raw_epg_file_path,
         file_exists_async,
@@ -52,6 +55,7 @@ use shared::{
     utils::{concat_path_leading_slash, deobfuscate_text, sanitize_sensitive_info, Internable},
 };
 use std::{path::Path, str::FromStr, sync::Arc};
+use tokio_stream::StreamExt;
 use url::Url;
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
@@ -145,6 +149,74 @@ fn build_playlist_webplayer_url(
         cluster.as_stream_type(),
         virtual_id
     )
+}
+
+pub(in crate::api) fn build_webplayer_recording_url(
+    app_config: &crate::model::AppConfig,
+    target_id: u16,
+    virtual_id: u32,
+    cluster: XtreamCluster,
+) -> Option<String> {
+    let access_token = create_access_token(&app_config.access_token_secret, 30);
+    let config = app_config.config.load();
+    let server_name = config
+        .web_ui
+        .as_ref()
+        .and_then(|web_ui| web_ui.player_server.as_ref())
+        .map_or("default", |server_name| server_name.as_str());
+    let server_info = app_config.get_server_info(server_name)?;
+    Some(build_playlist_webplayer_url(
+        &server_info.get_base_url(),
+        &access_token,
+        target_id,
+        virtual_id,
+        cluster,
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::api) struct ResolvedRecordingSource {
+    pub virtual_id: u32,
+    pub input_name: String,
+}
+
+pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
+    app_config: &crate::model::AppConfig,
+    target_id: u16,
+    epg_channel_id: &str,
+) -> Option<ResolvedRecordingSource> {
+    let target = app_config.get_target_by_id(target_id)?;
+    let mut resolved = None;
+    if target.has_output(TargetType::Xtream) {
+        let mut items = iter_raw_xtream_target_playlist(app_config, &target, XtreamCluster::Live).await?;
+        while let Some(entry) = items.next().await {
+            let Ok(item) = entry else { continue };
+            if item.epg_channel_id.as_deref() == Some(epg_channel_id) {
+                let candidate = ResolvedRecordingSource {
+                    virtual_id: item.virtual_id,
+                    input_name: item.input_name.to_string(),
+                };
+                if resolved.replace(candidate).is_some() {
+                    return None;
+                }
+            }
+        }
+    } else if target.has_output(TargetType::M3u) {
+        let mut items = iter_raw_m3u_target_playlist(app_config, &target, Some(XtreamCluster::Live)).await?;
+        while let Some(entry) = items.next().await {
+            let Ok(item) = entry else { continue };
+            if item.epg_channel_id.as_deref() == Some(epg_channel_id) {
+                let candidate = ResolvedRecordingSource {
+                    virtual_id: item.virtual_id,
+                    input_name: item.input_name.to_string(),
+                };
+                if resolved.replace(candidate).is_some() {
+                    return None;
+                }
+            }
+        }
+    }
+    resolved
 }
 
 #[cfg(test)]
@@ -507,19 +579,10 @@ fn playlist_webplayer(
     virtual_id: u32,
     cluster: XtreamCluster,
 ) -> impl axum::response::IntoResponse + Send {
-    let access_token = create_access_token(&app_state.app_config.access_token_secret, 30);
-    let config = app_state.app_config.config.load();
-    let server_name = config
-        .web_ui
-        .as_ref()
-        .and_then(|web_ui| web_ui.player_server.as_ref())
-        .map_or("default", |server_name| server_name.as_str());
-    let server_info = app_state.app_config.get_server_info(server_name);
-    let Some(server_info) = server_info else {
+    let Some(url) = build_webplayer_recording_url(&app_state.app_config, target_id, virtual_id, cluster) else {
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let base_url = server_info.get_base_url();
-    build_playlist_webplayer_url(&base_url, &access_token, target_id, virtual_id, cluster).into_response()
+    url.into_response()
 }
 
 async fn playlist_webplayer_stream(

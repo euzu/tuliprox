@@ -1055,6 +1055,7 @@
     "DOWNLOAD_STATE_SCHEDULED": "مجدول",
     "DOWNLOAD_STATE_WAITING_FOR_CAPACITY": "في انتظار السعة",
     "DURATION": "المدة",
+    "DURATION_MINUTES": "المدة (دقائق)",
     "EDIT": "تحرير",
     "EMPTY": "",
     "ENABLED": "مفعّل",
@@ -1429,6 +1430,7 @@
     "VOD_SOURCE": "مصدر VOD",
     "SERIES_SOURCE": "مصدر المسلسلات",
     "START": "بدء",
+    "START_TIME": "وقت البدء",
     "STAR_ON_GITHUB": "إذا أعجبك هذا المشروع، ضع نجمة ⭐ على GitHub",
     "STATS": "إحصائيات",
     "STATUS": "الحالة",
@@ -1698,6 +1700,12 @@
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "حدد EPG لعرض محتواه.",
       "SELECT_AN_EPG_HINT": "اختر مصدر EPG أعلاه لمعاينة دليل برنامجه."
+    },
+    "RECORDING": {
+      "NO_TARGET": "Select a target playlist before recording.",
+      "NO_REQUEST": "Complete the recording form before submitting.",
+      "QUEUED": "Recording queued.",
+      "PARTIAL_OPERATION": "Recording rule was only partially applied."
     },
     "RBAC": {
       "ADMIN_HINT": "المستخدم مسؤول — المجموعات الإضافية ليس لها تأثير.",

@@ -1,7 +1,7 @@
 use crate::create_bitset;
 
 create_bitset!(
-    u16,
+    u32,
     Permission,
     ConfigRead,
     ConfigWrite,
@@ -18,10 +18,20 @@ create_bitset!(
     EpgRead,
     EpgWrite,
     DownloadRead,
-    DownloadWrite
+    DownloadWrite,
+    RecordingRead,
+    RecordingWrite
 );
 
 pub const PERM_ALL: PermissionSet = PermissionSet::ALL;
+
+/// Bitmask for the legacy 16-bit permission set. A user with
+/// `permissions: 65535` in their old config (pre-Phase 2) carries only
+/// these bits; the new DVR permissions are not implicitly granted.
+/// This constant is exported for old-config deserialization tests and
+/// the "configured old numeric value 65535 limited to old
+/// permissions" rule.
+pub const LEGACY_OLD_PERMS: PermissionSet = PermissionSet(0x0000_FFFF);
 
 pub const PERMISSION_NAMES: &[(&str, Permission)] = &[
     ("config.read", Permission::ConfigRead),
@@ -40,6 +50,8 @@ pub const PERMISSION_NAMES: &[(&str, Permission)] = &[
     ("epg.write", Permission::EpgWrite),
     ("download.read", Permission::DownloadRead),
     ("download.write", Permission::DownloadWrite),
+    ("recording.read", Permission::RecordingRead),
+    ("recording.write", Permission::RecordingWrite),
 ];
 
 pub fn permission_from_name(name: &str) -> Option<Permission> {
@@ -112,22 +124,50 @@ mod tests {
         assert!(PERM_ALL.contains(Permission::EpgWrite));
         assert!(PERM_ALL.contains(Permission::DownloadRead));
         assert!(PERM_ALL.contains(Permission::DownloadWrite));
+        assert!(PERM_ALL.contains(Permission::RecordingRead));
+        assert!(PERM_ALL.contains(Permission::RecordingWrite));
     }
 
     #[test]
     fn test_perm_all_matches_defined_permissions_only() {
-        let expected_mask = if PermissionSet::VARIANT_COUNT == u16::BITS as usize {
-            u16::MAX
+        // All defined bits set; no trailing zeros and no overflow.
+        let expected_mask: u32 = if PermissionSet::VARIANT_COUNT == u32::BITS as usize {
+            u32::MAX
         } else {
-            ((1u32 << PermissionSet::VARIANT_COUNT) - 1) as u16
+            (1u32 << PermissionSet::VARIANT_COUNT) - 1
         };
         assert_eq!(PERM_ALL.0, expected_mask);
+    }
+
+    #[test]
+    fn test_legacy_old_perms_only_covers_pre_phase2_bits() {
+        // A config value of `65535` (the old u16 `PERM_ALL`) must
+        // not implicitly grant the new DVR permissions. `LEGACY_OLD_PERMS`
+        // sets only the first 16 bits.
+        assert_eq!(LEGACY_OLD_PERMS.0, 0xFFFF);
+        assert!(LEGACY_OLD_PERMS.contains(Permission::ConfigRead));
+        assert!(LEGACY_OLD_PERMS.contains(Permission::DownloadWrite));
+        assert!(!LEGACY_OLD_PERMS.contains(Permission::RecordingRead));
+        assert!(!LEGACY_OLD_PERMS.contains(Permission::RecordingWrite));
+    }
+
+    #[test]
+    fn test_old_numeric_config_value_65535_does_not_grant_recording_perms() {
+        // Simulate an old config: a u16 value of 65535 (all old perms
+        // granted) is deserialized into the new u32 storage. It must not
+        // include the new DVR bits.
+        let set: PermissionSet = serde_json::from_str("65535").expect("deserialize old PERM_ALL");
+        assert_eq!(set.0, 0xFFFF);
+        assert!(!set.contains(Permission::RecordingRead));
+        assert!(!set.contains(Permission::RecordingWrite));
     }
 
     #[test]
     fn test_permission_from_name() {
         assert_eq!(permission_from_name("config.read"), Some(Permission::ConfigRead));
         assert_eq!(permission_from_name("source.write"), Some(Permission::SourceWrite));
+        assert_eq!(permission_from_name("recording.read"), Some(Permission::RecordingRead));
+        assert_eq!(permission_from_name("recording.write"), Some(Permission::RecordingWrite));
         assert_eq!(permission_from_name("nonexistent"), None);
         assert_eq!(permission_from_name(""), None);
     }
@@ -136,6 +176,8 @@ mod tests {
     fn test_permission_to_name() {
         assert_eq!(permission_to_name(Permission::ConfigRead), Some("config.read"));
         assert_eq!(permission_to_name(Permission::EpgWrite), Some("epg.write"));
+        assert_eq!(permission_to_name(Permission::RecordingRead), Some("recording.read"));
+        assert_eq!(permission_to_name(Permission::RecordingWrite), Some("recording.write"));
     }
 
     #[test]
@@ -148,7 +190,7 @@ mod tests {
 
     #[test]
     fn test_permission_set_serde_roundtrip() {
-        let set = Permission::ConfigRead | Permission::SourceWrite;
+        let set = Permission::ConfigRead | Permission::SourceWrite | Permission::RecordingRead;
         let json = serde_json::to_string(&set).expect("serialize failed");
         let deserialized: PermissionSet = serde_json::from_str(&json).expect("deserialize failed");
         assert_eq!(set, deserialized);

@@ -1007,6 +1007,7 @@
     "DOWNLOAD_STATE_SCHEDULED": "Запланировано",
     "DOWNLOAD_STATE_WAITING_FOR_CAPACITY": "Ожидание свободных ресурсов",
     "DURATION": "Длительность",
+    "DURATION_MINUTES": "Длительность (мин.)",
     "EDIT": "Редактировать",
     "EMPTY": "",
     "ENABLED": "Включено",
@@ -1340,6 +1341,7 @@
     "VOD_SOURCE": "Источник VOD",
     "SERIES_SOURCE": "Источник сериалов",
     "START": "Старт",
+    "START_TIME": "Время начала",
     "STAR_ON_GITHUB": "Если вам нравится этот проект, поставьте нам звезду ⭐ на GitHub",
     "STATS": "Статистика",
     "STATUS": "Статус",
@@ -1599,6 +1601,12 @@
     },
     "EPG": {
       "SELECT_AN_EPG_TO_VIEW_CONTENT": "Выберите EPG для просмотра содержимого."
+    },
+    "RECORDING": {
+      "NO_TARGET": "Select a target playlist before recording.",
+      "NO_REQUEST": "Complete the recording form before submitting.",
+      "QUEUED": "Recording queued.",
+      "PARTIAL_OPERATION": "Recording rule was only partially applied."
     },
     "RBAC": {
       "ADMIN_HINT": "Пользователь является администратором — дополнительные группы не имеют эффекта.",
