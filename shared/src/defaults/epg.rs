@@ -42,6 +42,8 @@ pub fn is_default_ics_event_description(value: &String) -> bool { value == DEFAU
 pub fn default_ics_dummy_title() -> String { DEFAULT_ICS_DUMMY_TITLE.to_string() }
 pub fn is_default_ics_dummy_title(value: &String) -> bool { value == DEFAULT_ICS_DUMMY_TITLE }
 
+/// Preserves `.`, `_`, and `-` so normalized names remain comparable with common XMLTV IDs.
+/// The former `[^a-zA-Z0-9\-]` pattern remains valid only as an explicit legacy configuration.
 pub const DEFAULT_EPG_NORMALIZE_REGEX: &str = r"[^a-zA-Z0-9._\-]";
 
 pub fn default_epg_normalize_regex() -> Option<String> { Some(DEFAULT_EPG_NORMALIZE_REGEX.to_string()) }

@@ -688,6 +688,9 @@ For ICS sources, Tuliprox uses the generated virtual channel metadata:
 | `strip`                 | List   | *(quality tags)*   | Resolution, codec and frame-rate markers stripped as complete terms before matching.                                 |
 | `normalize_regex`       | String | `[^a-zA-Z0-9._\-]` | Default pattern preserving the separators commonly found in XMLTV channel IDs.                                       |
 
+When upgrading, an explicitly configured legacy pattern such as `[^a-zA-Z0-9\-]` remains unchanged and continues to
+remove periods and underscores. Remove that override or set `[^a-zA-Z0-9._\-]` to adopt the new default behavior.
+
 #### How Smart-Matching works
 
 If a stream is missing the `tvg-id`, Tuliprox performs the following steps:

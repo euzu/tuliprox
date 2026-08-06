@@ -133,6 +133,8 @@ impl EpgIdCache {
         with_folded_epg_id(id, |folded| self.channel_epg_id.contains(folded))
     }
 
+    pub(crate) fn needs_guide_names(&self, id: &str) -> bool { self.contains_channel_epg_id(id) }
+
     pub fn insert_processed_epg_id(&mut self, id: &str) {
         with_folded_epg_id(id, |folded| self.processed.insert(folded.intern()));
     }
@@ -162,12 +164,15 @@ impl EpgIdCache {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        let folded_id = with_folded_epg_id(epg_id, |folded| folded.intern());
         let normalized_names = names
             .into_iter()
             .map(|name| self.normalize(name.as_ref()).intern())
             .filter(|name| !name.is_empty())
             .collect::<Vec<_>>();
+        if normalized_names.is_empty() {
+            return;
+        }
+        let folded_id = with_folded_epg_id(epg_id, |folded| folded.intern());
         self.guide_names.entry(folded_id).or_default().extend(normalized_names);
     }
 
@@ -449,10 +454,10 @@ impl EpgIdCache {
         let mut best: Option<FuzzyCandidate> = None;
         let mut runner_up: Option<FuzzyCandidate> = None;
         for playlist_key in playlist_candidates {
+            let (_, playlist_country) = self.split_country(playlist_key);
             let Some(score) = guide_candidates
                 .iter()
                 .filter(|guide_key| {
-                    let (_, playlist_country) = self.split_country(playlist_key);
                     numeric_signature_matches(playlist_key, guide_key)
                         && countries_compatible(playlist_country, guide_country)
                         && self.normalized_countries_compatible(playlist_key, guide_key)
@@ -586,11 +591,18 @@ fn countries_compatible(left: Option<&str>, right: Option<&str>) -> bool {
 
 fn is_decorative_channel_name(name: &str) -> bool {
     let trimmed = name.trim();
-    trimmed
-        .chars()
-        .next()
-        .zip(trimmed.chars().next_back())
-        .is_some_and(|(first, last)| !first.is_alphanumeric() && !last.is_alphanumeric())
+    if trimmed.is_empty() {
+        return false;
+    }
+    if !trimmed.chars().any(char::is_alphanumeric) {
+        return true;
+    }
+    let separator = trimmed.chars().next().expect("trimmed name is not empty");
+    if separator.is_alphanumeric() {
+        return false;
+    }
+    trimmed.chars().take_while(|&character| character == separator).count() >= 2
+        && trimmed.chars().rev().take_while(|&character| character == separator).count() >= 2
 }
 
 fn candidate_prefix(value: &str) -> Option<u32> {
@@ -915,18 +927,29 @@ mod tests {
         xmltv: &str,
         channels: &[(&str, Option<&str>)],
     ) -> (Vec<Option<Arc<str>>>, Vec<crate::model::Epg>) {
+        run_xmltv_matches(xmltv, channels, true).await
+    }
+
+    async fn run_xmltv_matches(
+        xmltv: &str,
+        channels: &[(&str, Option<&str>)],
+        smart_matching: bool,
+    ) -> (Vec<Option<Arc<str>>>, Vec<crate::model::Epg>) {
         let dir = tempdir().unwrap();
         let epg_path = dir.path().join("smart-match.xml");
         fs::write(&epg_path, xmltv).unwrap();
 
-        let mut smart_dto = shared::model::EpgSmartMatchConfigDto {
-            enabled: true,
-            fuzzy_matching: true,
-            ..shared::model::EpgSmartMatchConfigDto::default()
-        };
-        smart_dto.prepare().expect("smart config");
+        let smart_match = smart_matching.then(|| {
+            let mut dto = shared::model::EpgSmartMatchConfigDto {
+                enabled: true,
+                fuzzy_matching: true,
+                ..shared::model::EpgSmartMatchConfigDto::default()
+            };
+            dto.prepare().expect("smart config");
+            EpgSmartMatchConfig::from(dto)
+        });
         let mut input = ConfigInput::from(ConfigInputDto::default());
-        input.epg = Some(EpgConfig { sources: vec![], smart_match: Some(EpgSmartMatchConfig::from(smart_dto)) });
+        input.epg = Some(EpgConfig { sources: vec![], smart_match });
         let groups = vec![PlaylistGroup {
             id: 1,
             title: "Live".intern(),
@@ -1057,6 +1080,18 @@ mod tests {
     }
 
     #[test]
+    fn guide_names_ignore_empty_normalized_values_and_unreferenced_ids() {
+        let mut cache = smart_cache(80, 95);
+        cache.insert_channel_epg_id("direct.fr");
+
+        assert!(cache.needs_guide_names("DIRECT.FR"));
+        assert!(!cache.needs_guide_names("unreferenced.fr"));
+        cache.register_guide_names("direct.fr", ["  "]);
+
+        assert_eq!(cache.channel_name_matches_epg_id("direct.fr", "Direct"), None);
+    }
+
+    #[test]
     fn smart_match_ignores_decorative_playlist_entries() {
         let mut cache = smart_cache(80, 95);
         let input = ConfigInput::from(ConfigInputDto::default());
@@ -1072,6 +1107,10 @@ mod tests {
         cache.collect_epg_id(&mut playlist);
 
         assert!(cache.normalized.is_empty());
+        assert!(super::is_decorative_channel_name("▬▬ Manga ▬▬"));
+        assert!(super::is_decorative_channel_name("----"));
+        assert!(!super::is_decorative_channel_name("|Channel|"));
+        assert!(!super::is_decorative_channel_name(""));
     }
 
     #[test]
@@ -1175,6 +1214,25 @@ mod tests {
             assert_eq!(epg[0].children.len(), 1);
             assert_eq!(epg[0].children[0].id.as_ref(), "tf1.fr");
             assert_eq!(epg[0].children[0].programmes.len(), 1);
+        });
+    }
+
+    #[test]
+    fn directly_referenced_empty_guides_are_retained_with_or_without_smart_matching() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async move {
+            let xmltv = r#"<tv>
+  <channel id="empty.fr"><display-name>Empty channel</display-name></channel>
+</tv>"#;
+            for smart_matching in [false, true] {
+                let (assigned_ids, epg) =
+                    run_xmltv_matches(xmltv, &[("Empty channel", Some("empty.fr"))], smart_matching).await;
+
+                assert_eq!(assigned_ids, vec![Some("empty.fr".intern())]);
+                assert_eq!(epg[0].children.len(), 1);
+                assert_eq!(epg[0].children[0].id.as_ref(), "empty.fr");
+                assert!(epg[0].children[0].programmes.is_empty());
+            }
         });
     }
 

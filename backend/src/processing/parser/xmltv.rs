@@ -97,9 +97,9 @@ fn strip_markers(input: &str, markers: &[String]) -> String {
             .then(|| {
                 markers.iter().filter(|marker| !marker.is_empty()).find_map(|marker| {
                     let end = cursor + marker.len();
-                    (end <= input.len()
-                        && input[cursor..end].eq_ignore_ascii_case(marker)
-                        && (end == input.len() || !input.as_bytes()[end].is_ascii_alphanumeric()))
+                    let candidate = input.get(cursor..end)?;
+                    (candidate.eq_ignore_ascii_case(marker)
+                        && input.as_bytes().get(end).is_none_or(|byte| !byte.is_ascii_alphanumeric()))
                     .then_some(end)
                 })
             })
@@ -284,7 +284,7 @@ impl TVGuide {
                             }
 
                             Self::prepare_tag(id_cache, &mut tag, smart_match);
-                            if smart_match {
+                            if smart_match && id_cache.needs_guide_names(&tag_epg_id) {
                                 id_cache.register_guide_names(
                                     &tag_epg_id,
                                     tag.children.iter().flatten().filter_map(|child| {
@@ -468,9 +468,10 @@ impl TVGuide {
         }
         let available_epg_ids = accumulator.channel_ids_with_programmes();
         id_cache.finalize_matches(&available_epg_ids);
-        let selected_epg_ids = id_cache.selected_epg_ids(&available_epg_ids);
+        let mut selected_epg_ids = id_cache.selected_epg_ids(&available_epg_ids);
+        selected_epg_ids.extend(id_cache.channel_epg_id.iter().cloned());
         let retained_epg_ids = accumulator.retain_channels(&selected_epg_ids);
-        id_cache.replace_processed_epg_ids(retained_epg_ids);
+        id_cache.replace_processed_epg_ids(retained_epg_ids.intersection(&available_epg_ids).cloned().collect());
         accumulator.finish_epg_with_icon_overrides()
     }
 }
@@ -1316,6 +1317,11 @@ mod tests {
 
         assert_eq!(normalize_channel_name("RMC Story H265 50FPS", &config), "rmcstory");
         assert_eq!(normalize_channel_name("Ashdod TV HD", &config), "ashdodtv");
+    }
+
+    #[test]
+    fn marker_stripping_skips_non_utf8_boundaries() {
+        assert_eq!(super::strip_markers("éclair", &["x".to_string()]), "éclair");
     }
 
     fn epg_channel(id: &str, title: Option<&str>, icon: Option<&str>, programmes: Vec<EpgProgramme>) -> EpgChannel {
