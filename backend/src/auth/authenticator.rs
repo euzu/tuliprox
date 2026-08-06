@@ -197,10 +197,15 @@ fn validate_request(
 
 /// Build a stable, recognizable rejection response. Refresh-required
 /// cases carry the `X-Token-Refresh: required` header so the
-/// frontend can branch on it.
+/// frontend can branch on it. `Forbidden` (a successful authentication
+/// that nonetheless cannot perform the action) maps to 403 so it does
+/// not collapse into the "you're not authenticated" 401 path.
 fn rejection_for(err: AuthError) -> axum::response::Response {
     use axum::http::StatusCode;
-    let status = StatusCode::UNAUTHORIZED;
+    let status = match &err {
+        AuthError::Forbidden => StatusCode::FORBIDDEN,
+        _ => StatusCode::UNAUTHORIZED,
+    };
     let mut builder = axum::http::Response::builder().status(status);
     if err.is_token_refresh_required() {
         builder = builder.header("X-Token-Refresh", "required");

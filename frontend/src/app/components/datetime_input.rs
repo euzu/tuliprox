@@ -16,7 +16,7 @@ pub(crate) fn parse_datetime_input_change(value: &str) -> Option<i64> {
     }
     chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M")
         .ok()
-        .and_then(|naive| chrono::Local.from_local_datetime(&naive).single())
+        .and_then(|naive| chrono::Local.from_local_datetime(&naive).latest())
         .map(|local| local.timestamp())
 }
 

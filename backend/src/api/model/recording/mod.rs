@@ -19,11 +19,10 @@ pub mod recording_worker;
 pub mod recording_worker_runner;
 pub mod recording_ws;
 
-pub use self::recording_service::*;
 pub use self::{
     recording_catalog_access::*, recording_conflict::*, recording_currently_airing::*, recording_deletion::*,
     recording_disk::*, recording_edit::*, recording_notification::*, recording_notification_adapter::*,
     recording_observability::*, recording_occurrence::*, recording_quota::*, recording_reconciliation::*,
     recording_retention::*, recording_rule_scheduler::*, recording_rule_service::*, recording_security::*,
-    recording_worker::*, recording_worker_runner::*, recording_ws::*,
+    recording_service::*, recording_worker::*, recording_worker_runner::*, recording_ws::*,
 };

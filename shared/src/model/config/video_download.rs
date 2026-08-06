@@ -52,9 +52,12 @@ fn is_default_recording_max_post_roll_secs(value: &u64) -> bool { *value == defa
 fn is_default_recording_fallback_bytes_per_minute(value: &u64) -> bool {
     *value == default_recording_fallback_bytes_per_minute()
 }
-fn is_zero_u64_opt(value: &Option<u64>) -> bool { value.is_none_or(|v| v == 0) }
-fn is_zero_u32_opt(value: &Option<u32>) -> bool { value.is_none_or(|v| v == 0) }
-fn is_zero_u8_opt(value: &Option<u8>) -> bool { value.is_none_or(|v| v == 0) }
+// `skip_serializing_if` predicates that distinguish "field absent" from
+// "field present with a zero value". An explicit `Some(0)` is a real
+// configuration choice and must round-trip; only `None` means "absent".
+fn is_zero_u64_opt(value: &Option<u64>) -> bool { value.is_none() }
+fn is_zero_u32_opt(value: &Option<u32>) -> bool { value.is_none() }
+fn is_zero_u8_opt(value: &Option<u8>) -> bool { value.is_none() }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -383,6 +386,13 @@ fn prepare_recording_config(recording: &mut RecordingConfigDto, download_dir: &s
             recording.timezone = None;
         } else if trimmed != tz {
             recording.timezone = Some(trimmed.to_string());
+        }
+    }
+    if let Some(tz) = recording.timezone.as_ref() {
+        if tz.parse::<chrono_tz::Tz>().is_err() {
+            // Surface a warning before the strict validator below turns
+            // this into a hard error, so the operator sees both signals.
+            log::warn!("recording.timezone '{tz}' is not a valid IANA timezone");
         }
     }
     if recording.timezone.is_none() {

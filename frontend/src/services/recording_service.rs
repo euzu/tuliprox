@@ -188,6 +188,7 @@ impl RecordingError {
         match code {
             "recording_unknown_owner" | "recording_invalid_template" => Self::TokenRefreshRequired,
             "recording_invalid_source" => Self::InvalidSource,
+            "recording_invalid_path" => Self::InvalidPath,
             "recording_shared_not_administrator" => Self::SharedCreationNotAdministrator,
             "recording_forbidden" => Self::Forbidden,
             "recording_invalid_state" => Self::InvalidState,
@@ -395,10 +396,29 @@ fn network(e: Error) -> RecordingError {
     // show a connection error. Do NOT collapse it into
     // `TokenRefreshRequired` — the auth layer is the source of
     // truth for that decision.
+    if let Some(code) = extract_error_code(&e) {
+        return RecordingError::from_code(&code);
+    }
     match e {
         Error::RequestError => RecordingError::Network("request error".into()),
         other => RecordingError::Network(other.to_string()),
     }
+}
+
+/// Try to pull a stable backend error code (e.g. `recording_forbidden`,
+/// `recording_quota_exceeded`) out of the `Error` payload. The
+/// `request` crate embeds the response body on non-2xx replies; for
+/// our endpoints the body is JSON of shape `{"error": "<code>"}`.
+fn extract_error_code(e: &Error) -> Option<String> {
+    let body = e.to_string();
+    let start = body.find("\"error\"")?;
+    let after = body.get(start..)?;
+    let colon = after.find(':')?;
+    let rest = after.get(colon + 1..)?;
+    let quote1 = rest.find('"')?;
+    let rest = rest.get(quote1 + 1..)?;
+    let quote2 = rest.find('"')?;
+    rest.get(..quote2).map(|s| s.to_string())
 }
 
 impl Default for RecordingService {

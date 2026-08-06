@@ -81,16 +81,20 @@ pub struct PaddingBounds {
 /// `DownloadState` variants is reduced to a string here.
 pub fn state_is_editable(state_label: &str) -> bool { EDITABLE_STATES.contains(&state_label) }
 
-/// Pure: validate the patch's interval and padding bounds.
+/// Pure: validate the merged interval (patch overlaid on current) and
+/// the patch's padding bounds. Validation runs against the merged
+/// `program_start`/`program_end` so a patch that only sets `end`
+/// still has to produce a valid interval against the stored `start`.
 pub fn validate_patch(
     patch: &EditPatch,
+    current: &RecordingMetadata,
     bounds: PaddingBounds,
 ) -> Result<(), EditError> {
-    if let Some(start) = patch.program_start {
-        if let Some(end) = patch.program_end {
-            if end <= start {
-                return Err(EditError::InvalidInterval);
-            }
+    let merged_start = patch.program_start.or(current.program_start);
+    let merged_end = patch.program_end.or(current.program_end);
+    if let (Some(start), Some(end)) = (merged_start, merged_end) {
+        if end <= start {
+            return Err(EditError::InvalidInterval);
         }
     }
     if let Some(pre) = patch.pre_roll_secs {
@@ -189,14 +193,15 @@ pub fn edit_error_code(err: &EditError) -> &'static str {
     }
 }
 
-/// The visibility is not part of the editable surface, but a helper
-/// that the boundary calls to assert the caller did not change it
-/// via a forged payload. Returns the unchanged visibility.
+/// The visibility is not part of the editable surface. The boundary calls
+/// this helper to assert the caller did not change it via a forged
+/// payload — `requested` is ignored and the current visibility is always
+/// returned. Callers must not surface `requested` back to the caller.
 pub fn visibility_unchanged(
     current_visibility: RecordingVisibility,
-    requested: Option<RecordingVisibility>,
+    _requested: Option<RecordingVisibility>,
 ) -> RecordingVisibility {
-    requested.unwrap_or(current_visibility)
+    current_visibility
 }
 
 #[cfg(test)]
@@ -217,28 +222,46 @@ mod tests {
         assert!(!state_is_editable("Deleting(Completed)"));
     }
 
+    fn current_meta() -> RecordingMetadata {
+        // Baseline current metadata: program 100..500, no padding.
+        // Tests overlay a patch on top of this and assert the merged
+        // interval is validated.
+        let mut m = RecordingMetadata::for_legacy_admin(100, 400);
+        m.pre_roll_secs = 0;
+        m.post_roll_secs = 0;
+        m
+    }
+
     #[test]
     fn validate_patch_rejects_inverted_interval() {
         let patch = EditPatch { program_start: Some(200), program_end: Some(100), ..Default::default() };
-        assert_eq!(validate_patch(&patch, bounds()), Err(EditError::InvalidInterval));
+        assert_eq!(validate_patch(&patch, &current_meta(), bounds()), Err(EditError::InvalidInterval));
+    }
+
+    #[test]
+    fn validate_patch_rejects_merged_inverted_interval() {
+        // Patch only sets end; current start is 100. Setting end to 50
+        // produces an inverted merged interval that must be rejected.
+        let patch = EditPatch { program_end: Some(50), ..Default::default() };
+        assert_eq!(validate_patch(&patch, &current_meta(), bounds()), Err(EditError::InvalidInterval));
     }
 
     #[test]
     fn validate_patch_rejects_pre_roll_above_max() {
         let patch = EditPatch { pre_roll_secs: Some(901), ..Default::default() };
-        assert_eq!(validate_patch(&patch, bounds()), Err(EditError::PaddingLimitExceeded));
+        assert_eq!(validate_patch(&patch, &current_meta(), bounds()), Err(EditError::PaddingLimitExceeded));
     }
 
     #[test]
     fn validate_patch_rejects_post_roll_above_max() {
         let patch = EditPatch { post_roll_secs: Some(1801), ..Default::default() };
-        assert_eq!(validate_patch(&patch, bounds()), Err(EditError::PaddingLimitExceeded));
+        assert_eq!(validate_patch(&patch, &current_meta(), bounds()), Err(EditError::PaddingLimitExceeded));
     }
 
     #[test]
     fn validate_patch_accepts_padded_extensions() {
         let patch = EditPatch { program_end: Some(1_000), post_roll_secs: Some(1_800), ..Default::default() };
-        assert!(validate_patch(&patch, bounds()).is_ok());
+        assert!(validate_patch(&patch, &current_meta(), bounds()).is_ok());
     }
 
     #[test]

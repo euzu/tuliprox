@@ -19,6 +19,33 @@ use tokio::{fs, sync::{Mutex, Notify, RwLock}};
 const RECORDING_WINDOW_EXPIRED_ERR: &str = "Recording window already expired";
 static DOWNLOAD_TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Reason a persisted entry cannot be converted back to its in-memory
+/// form during the commit step. Surfaced to the caller so a corrupt
+/// persisted file fails closed instead of silently dropping entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersistedError {
+    /// The persisted URL could not be parsed.
+    InvalidUrl(String),
+    /// A plain download claimed a recording metadata block, or a
+    /// recording was missing its metadata in a way that the legacy
+    /// normalizer cannot repair.
+    KindMetadataInvariant { uuid: String },
+}
+
+impl std::fmt::Display for PersistedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidUrl(s) => write!(f, "persisted url is invalid: {s}"),
+            Self::KindMetadataInvariant { uuid } => write!(
+                f,
+                "persisted task {uuid} violates the kind/metadata invariant"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PersistedError {}
+
 /// Error returned by a queue mutation. Carries either a closure-side
 /// validation message or a persistence-side `io::Error` so callers can
 /// distinguish by inspecting [`QueueMutationError::source_io`].
@@ -128,27 +155,51 @@ where
         fs::rename(&tmp_path, state_file).await.map_err(QueueMutationError::from_io)?;
     }
 
-    // 4. Commit. Swap the in-memory state from the persisted candidate.
-    let mut queue = this.queue.lock().await;
-    let mut scheduled = this.scheduled.write().await;
-    let mut active = this.active.write().await;
-    let mut finished = this.finished.write().await;
-    *queue = candidate
-        .queue
-        .into_iter()
-        .filter_map(DownloadQueue::from_persisted)
-        .collect();
-    *scheduled = candidate
-        .scheduled
-        .into_iter()
-        .filter_map(DownloadQueue::from_persisted)
-        .collect();
-    *active = candidate.active.and_then(DownloadQueue::from_persisted);
-    *finished = candidate
-        .finished
-        .into_iter()
-        .filter_map(DownloadQueue::from_persisted)
-        .collect();
+    // 4. Validate every persisted entry into its in-memory form before
+    // swapping. A single corrupt entry (invalid URL, kind/metadata
+    // invariant violation) must abort the commit so the persisted file
+    // and the in-memory state stay identical. Without this, a bad URL
+    // would be silently dropped from memory while the file still
+    // listed it, desyncing the two.
+    let mut queue: VecDeque<FileDownload> = VecDeque::with_capacity(candidate.queue.len());
+    for p in candidate.queue {
+        queue.push_back(
+            DownloadQueue::from_persisted(p)
+                .map_err(|e| QueueMutationError::new(format!("persisted queue entry invalid: {e}")))?,
+        );
+    }
+    let mut scheduled: Vec<FileDownload> = Vec::with_capacity(candidate.scheduled.len());
+    for p in candidate.scheduled {
+        scheduled.push(
+            DownloadQueue::from_persisted(p)
+                .map_err(|e| QueueMutationError::new(format!("persisted scheduled entry invalid: {e}")))?,
+        );
+    }
+    let active = match candidate.active {
+        Some(p) => Some(
+            DownloadQueue::from_persisted(p)
+                .map_err(|e| QueueMutationError::new(format!("persisted active entry invalid: {e}")))?,
+        ),
+        None => None,
+    };
+    let mut finished: Vec<FileDownload> = Vec::with_capacity(candidate.finished.len());
+    for p in candidate.finished {
+        finished.push(
+            DownloadQueue::from_persisted(p)
+                .map_err(|e| QueueMutationError::new(format!("persisted finished entry invalid: {e}")))?,
+        );
+    }
+
+    // 5. Commit. Swap the validated in-memory state from the persisted
+    // candidate.
+    let mut queue_lock = this.queue.lock().await;
+    let mut scheduled_lock = this.scheduled.write().await;
+    let mut active_lock = this.active.write().await;
+    let mut finished_lock = this.finished.write().await;
+    *queue_lock = queue;
+    *scheduled_lock = scheduled;
+    *active_lock = active;
+    *finished_lock = finished;
     this.revision.store(next_revision, Ordering::SeqCst);
     Ok(result)
 }
@@ -208,16 +259,27 @@ fn path_is_contained(path: &Path, root: &Path) -> bool {
     }
     let p = path.to_string_lossy();
     let r = root.to_string_lossy();
-    p.starts_with(r.as_ref())
+    let prefix = r.as_ref();
+    if !p.starts_with(prefix) {
+        return false;
+    }
+    // Require a path-separator boundary immediately after the root prefix
+    // so siblings like `/data/records` do not match root `/data/rec`.
+    p.as_bytes().get(prefix.len()).copied() == Some(b'/')
+        || prefix.ends_with('/')
+        || p.len() == prefix.len()
 }
 
 fn strip_prefix(path: &Path, root: &Path) -> Option<String> {
+    if !path_is_contained(path, root) {
+        return None;
+    }
     let p = path.to_string_lossy();
     let r = root.to_string_lossy();
-    p.strip_prefix(r.as_ref()).map(|s| {
-        let s = s.trim_start_matches('/');
-        if s.is_empty() { String::new() } else { s.to_string() }
-    })
+    let prefix = r.as_ref();
+    let remainder = p.get(prefix.len()..).unwrap_or("");
+    let remainder = remainder.trim_start_matches('/');
+    Some(if remainder.is_empty() { String::new() } else { remainder.to_string() })
 }
 
 fn derive_legacy_completed_at(
@@ -813,7 +875,7 @@ impl DownloadQueue {
         }
     }
 
-    pub fn from_persisted(download: PersistedFileDownload) -> Option<FileDownload> {
+    pub fn from_persisted(download: PersistedFileDownload) -> Result<FileDownload, PersistedError> {
         Self::from_persisted_with(download, None, None)
     }
 
@@ -828,15 +890,17 @@ impl DownloadQueue {
         download: PersistedFileDownload,
         recording_root: Option<&Path>,
         legacy_root: Option<&Path>,
-    ) -> Option<FileDownload> {
-        let url = reqwest::Url::parse(&download.url).ok()?;
+    ) -> Result<FileDownload, PersistedError> {
+        let url = reqwest::Url::parse(&download.url).map_err(|e| PersistedError::InvalidUrl(e.to_string()))?;
         let recording = download.recording.clone();
         let kind = download.kind.clone();
         // Kind/metadata invariant check. New recordings always carry
         // `recording`; plain downloads never do. Legacy records (Recording
         // without metadata) are normalized below.
         if matches!(kind, DownloadKind::Download) && recording.is_some() {
-            return None;
+            return Err(PersistedError::KindMetadataInvariant {
+                uuid: download.uuid.clone(),
+            });
         }
         let mut task = FileDownload {
             uuid: download.uuid,
@@ -862,7 +926,7 @@ impl DownloadQueue {
         if matches!(task.kind, DownloadKind::Recording) && task.recording.is_none() {
             normalize_legacy_recording(&mut task, recording_root, legacy_root);
         }
-        Some(task)
+        Ok(task)
     }
 
     pub async fn persist_to_disk(&self) -> std::io::Result<()> {
@@ -906,22 +970,25 @@ impl DownloadQueue {
         let queue = persisted
             .queue
             .into_iter()
-            .filter_map(Self::from_persisted)
+            .filter_map(|p| Self::from_persisted(p).ok())
             .map(Self::recover_loaded_download)
             .collect::<VecDeque<_>>();
         let now_ts = Utc::now().timestamp();
         let scheduled_loaded = persisted
             .scheduled
             .into_iter()
-            .filter_map(Self::from_persisted)
+            .filter_map(|p| Self::from_persisted(p).ok())
             .map(Self::recover_loaded_download)
             .collect::<Vec<_>>();
         let (scheduled, missed_scheduled): (Vec<_>, Vec<_>) = scheduled_loaded
             .into_iter()
             .partition(|download| !Self::recording_start_missed_window(download, now_ts));
-        let active = persisted.active.and_then(Self::from_persisted).map(Self::recover_loaded_download);
+        let active = persisted
+            .active
+            .and_then(|p| Self::from_persisted(p).ok())
+            .map(Self::recover_loaded_download);
         let mut finished =
-            persisted.finished.into_iter().filter_map(Self::from_persisted).collect::<Vec<_>>();
+            persisted.finished.into_iter().filter_map(|p| Self::from_persisted(p).ok()).collect::<Vec<_>>();
         finished.extend(missed_scheduled.into_iter().map(Self::finalize_missed_recording));
 
         *self.queue.lock().await = queue;
@@ -2270,7 +2337,23 @@ mod tests {
         p.kind = DownloadKind::Download;
         p.recording = Some(RecordingMetadata::for_legacy_admin(0, 0));
         let result = DownloadQueue::from_persisted_with(p, None, None);
-        assert!(result.is_none(), "Download + recording metadata must be rejected");
+        assert!(result.is_err(), "Download + recording metadata must be rejected");
+        assert!(
+            matches!(result.unwrap_err(), PersistedError::KindMetadataInvariant { .. }),
+            "must surface the invariant violation, not a parse error"
+        );
+    }
+
+    #[test]
+    fn from_persisted_rejects_invalid_url() {
+        let mut p = make_persisted_recording_legacy(PathBuf::from("/tmp/file.ts"));
+        p.url = "not a url at all".to_string();
+        let result = DownloadQueue::from_persisted_with(p, None, None);
+        assert!(result.is_err(), "invalid url must surface as an error");
+        assert!(
+            matches!(result.unwrap_err(), PersistedError::InvalidUrl(_)),
+            "must surface the parse error, not an invariant violation"
+        );
     }
 
     #[test]

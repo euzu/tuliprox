@@ -13,7 +13,7 @@ use crate::auth::{
     authorize, authorize_orphan, RecordingAction, RecordingDecision, RecordingSubject, TerminalState,
 };
 use crate::api::model::recording_deletion::{
-    begin_deletion, execute_deletion, finalize_deletion,
+    begin_deletion, execute_deletion, finalize_deletion, rollback_deletion,
 };
 use crate::model::AppConfig;
 use shared::model::recording::{
@@ -377,7 +377,10 @@ impl RecordingService {
                     authorize(claims, &owner_id, RecordingAction::Cancel, &subject),
                     RecordingDecision::Allow
                 ) {
-                    let _ = self.downloads.cancel_active().await;
+                    if let Err(err) = self.downloads.cancel_active().await {
+                        log::error!("cancel_active failed for {uuid}: {err}");
+                        return Err(ServiceError::PersistenceFailed);
+                    }
                     return Ok(());
                 }
                 return Err(ServiceError::Forbidden);
@@ -457,6 +460,7 @@ impl RecordingService {
 
         let decision = {
             let recording = lookup_recording(&queue, uuid)
+                .await
                 .ok_or(ServiceError::UnknownRecording)?;
             let meta = recording
                 .recording
@@ -473,8 +477,20 @@ impl RecordingService {
             .await
             .map_err(|_| ServiceError::UnknownRecording)?;
         let recording = lookup_recording(&queue, uuid)
+            .await
             .ok_or(ServiceError::UnknownRecording)?;
-        let _ = execute_deletion(&recording, None).map_err(|e| ServiceError::IoError(e.to_string()))?;
+        if let Err(err) = execute_deletion(&recording, None).await {
+            // File removal failed: undo the deletion transition so the
+            // recording stays visible in its prior state instead of
+            // being silently lost when finalize_deletion runs.
+            let uuid_owned = uuid.to_string();
+            let _ = mutate(&self.downloads, |candidate| {
+                rollback_deletion(candidate, &uuid_owned);
+                Ok(())
+            })
+            .await;
+            return Err(ServiceError::IoError(err.to_string()));
+        }
         finalize_deletion(&queue, uuid)
             .await
             .map_err(|_| ServiceError::UnknownRecording)?;
@@ -493,6 +509,7 @@ impl RecordingService {
 
         let decision = {
             let recording = lookup_recording(&queue, uuid)
+                .await
                 .ok_or(ServiceError::UnknownRecording)?;
             let meta = recording
                 .recording
@@ -509,8 +526,17 @@ impl RecordingService {
             .await
             .map_err(|_| ServiceError::UnknownRecording)?;
         let recording = lookup_recording(&queue, uuid)
+            .await
             .ok_or(ServiceError::UnknownRecording)?;
-        let _ = execute_deletion(&recording, None).map_err(|e| ServiceError::IoError(e.to_string()))?;
+        if let Err(err) = execute_deletion(&recording, None).await {
+            let uuid_owned = uuid.to_string();
+            let _ = mutate(&self.downloads, |candidate| {
+                rollback_deletion(candidate, &uuid_owned);
+                Ok(())
+            })
+            .await;
+            return Err(ServiceError::IoError(err.to_string()));
+        }
         finalize_deletion(&queue, uuid)
             .await
             .map_err(|_| ServiceError::UnknownRecording)?;
@@ -529,28 +555,46 @@ impl RecordingService {
     }
 }
 
-/// Look up a recording in the queue by uuid.
-fn lookup_recording(queue: &Arc<crate::api::model::download::DownloadQueue>, uuid: &str) -> Option<FileDownload> {
-    if let Some(d) = queue.queue.try_lock().ok().and_then(|q| {
-        q.iter().find(|d| d.uuid == uuid).cloned()
-    }) {
+/// Look up a recording in the queue by uuid. Awaits each guard in turn so
+/// callers do not silently see `None` under transient lock contention.
+async fn lookup_recording(queue: &Arc<crate::api::model::download::DownloadQueue>, uuid: &str) -> Option<FileDownload> {
+    if let Some(d) = queue
+        .queue
+        .lock()
+        .await
+        .iter()
+        .find(|d| d.uuid == uuid)
+        .cloned()
+    {
         return Some(d);
     }
-    if let Some(d) = queue.scheduled.try_read().ok().and_then(|q| {
-        q.iter().find(|d| d.uuid == uuid).cloned()
-    }) {
+    if let Some(d) = queue
+        .scheduled
+        .read()
+        .await
+        .iter()
+        .find(|d| d.uuid == uuid)
+        .cloned()
+    {
         return Some(d);
     }
-    if let Some(d) = queue.active.try_read().ok().and_then(|q| {
-        q.as_ref().filter(|d| d.uuid == uuid).cloned()
-    }) {
+    if let Some(d) = queue
+        .active
+        .read()
+        .await
+        .as_ref()
+        .filter(|d| d.uuid == uuid)
+        .cloned()
+    {
         return Some(d);
     }
     queue
         .finished
-        .try_read()
-        .ok()
-        .and_then(|q| q.iter().find(|d| d.uuid == uuid).cloned())
+        .read()
+        .await
+        .iter()
+        .find(|d| d.uuid == uuid)
+        .cloned()
 }
 
 fn render_filename_preview(claims: &shared::model::Claims, input: &CreateRecordingInput) -> String {
@@ -751,8 +795,18 @@ fn is_future_rule_recording(task: &PersistedFileDownload, rule_id: &str, now_sec
 }
 
 fn validate_reserved_filename(filename: &str) -> Result<(), &'static str> {
+    use std::path::Component;
     let path = Path::new(filename);
-    if filename.is_empty() || path.is_absolute() || path.components().count() != 1 || filename.as_bytes().contains(&0) {
+    let single_normal_component = path
+        .components()
+        .next()
+        .is_some_and(|c| matches!(c, Component::Normal(_)))
+        && path.components().count() == 1;
+    if filename.is_empty()
+        || path.is_absolute()
+        || !single_normal_component
+        || filename.as_bytes().contains(&0)
+    {
         return Err("recording invalid path");
     }
     Ok(())
@@ -901,5 +955,13 @@ mod tests {
         assert_eq!(task.state, DownloadState::Cancelled);
         assert!(task.finished);
         assert_eq!(task.recording.as_ref().map(|meta| meta.reserved_bytes), Some(0));
+    }
+
+    #[test]
+    fn validate_reserved_filename_rejects_parent_and_curdir_components() {
+        assert!(validate_reserved_filename("..").is_err());
+        assert!(validate_reserved_filename(".").is_err());
+        assert!(validate_reserved_filename("a/..").is_err());
+        assert!(validate_reserved_filename("normal.ts").is_ok());
     }
 }

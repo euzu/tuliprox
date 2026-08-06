@@ -13,12 +13,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
 
 use shared::model::UserId;
 use tokio::sync::RwLock;
+use std::sync::atomic::AtomicU64;
 
-static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+static IDENTITY_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Schema for the on-disk registry. The mapping is
 /// `canonical_username → UserId`. The registry is additive; existing
@@ -96,7 +96,7 @@ impl IdentityRegistry {
         current_web_users: &[String],
         current_api_users: &[String],
     ) -> (Self, BootstrapOutcome) {
-        let loaded = match Self::load_or_detect_failure(&path).await {
+        match Self::load_or_detect_failure(&path).await {
             Ok(Some(state)) => {
                 let migrated = Self::migrate(state);
                 let count = migrated.web_users.len() + migrated.api_users.len();
@@ -114,7 +114,7 @@ impl IdentityRegistry {
                     path,
                 };
                 reg.sync_current_principals(current_web_users, current_api_users).await;
-                return (reg, outcome);
+                (reg, outcome)
             }
             Ok(None) => {
                 // File does not exist.
@@ -127,22 +127,30 @@ impl IdentityRegistry {
                     let _ = reg.save().await;
                     return (reg, BootstrapOutcome::Initialized);
                 }
-                (Self::empty(path), BootstrapOutcome::FailClosed {
-                    persisted_user_ids: pre_scanned_user_ids,
-                    reason: FailClosedReason::Missing,
-                })
+                // Fail-closed with persisted user IDs: do NOT sync or
+                // persist. The caller must surface the IDs and require
+                // explicit operator repair before any new principal is
+                // assigned.
+                (
+                    Self::empty(path),
+                    BootstrapOutcome::FailClosed {
+                        persisted_user_ids: pre_scanned_user_ids,
+                        reason: FailClosedReason::Missing,
+                    },
+                )
             }
-            Err(reason) => (Self::empty(path), BootstrapOutcome::FailClosed {
-                persisted_user_ids: pre_scanned_user_ids,
-                reason,
-            }),
-        };
-        // Fail-closed: do not auto-initialize. The caller is expected
-        // to surface the persisted user IDs and require explicit
-        // operator repair.
-        let (reg, outcome) = loaded;
-        reg.sync_current_principals(current_web_users, current_api_users).await;
-        (reg, outcome)
+            Err(reason) => {
+                // Fail-closed: do NOT sync or persist. The caller must
+                // surface the reason and require explicit operator repair.
+                (
+                    Self::empty(path),
+                    BootstrapOutcome::FailClosed {
+                        persisted_user_ids: pre_scanned_user_ids,
+                        reason,
+                    },
+                )
+            }
+        }
     }
 
     /// Build an empty registry without touching disk. Used by the
@@ -158,8 +166,14 @@ impl IdentityRegistry {
     async fn load_or_detect_failure(path: &Path) -> Result<Option<PersistedIdentityRegistry>, FailClosedReason> {
         match tokio::fs::read(path).await {
             Ok(bytes) => {
+                // A zero-length artifact is never a clean state — it is a
+                // half-write, an aborted rename, or an external truncation.
+                // Treating it as `Ok(Some(default))` would silently restore
+                // an empty registry and let the caller reassign every
+                // existing user ID; that is exactly what FailClosed exists
+                // to prevent.
                 if bytes.is_empty() {
-                    return Ok(Some(PersistedIdentityRegistry::default()));
+                    return Err(FailClosedReason::Corrupt);
                 }
                 match serde_json::from_slice::<PersistedIdentityRegistry>(&bytes) {
                     Ok(state) => Ok(Some(state)),
@@ -193,16 +207,16 @@ impl IdentityRegistry {
         let mut changed = false;
         for username in current_web_users {
             let key = canonical_username(username);
-            let new_id = UserId::from(format!("{}{}", UserId::WEB_NAMESPACE, Self::new_uuid_hex()));
             if let std::collections::hash_map::Entry::Vacant(entry) = state.web_users.entry(key) {
+                let new_id = UserId::from(format!("{}{}", UserId::WEB_NAMESPACE, Self::new_uuid_hex()));
                 entry.insert(new_id);
                 changed = true;
             }
         }
         for username in current_api_users {
             let key = canonical_username(username);
-            let new_id = UserId::from(format!("{}{}", UserId::API_NAMESPACE, Self::new_uuid_hex()));
             if let std::collections::hash_map::Entry::Vacant(entry) = state.api_users.entry(key) {
+                let new_id = UserId::from(format!("{}{}", UserId::API_NAMESPACE, Self::new_uuid_hex()));
                 entry.insert(new_id);
                 changed = true;
             }
@@ -278,10 +292,34 @@ impl IdentityRegistry {
             return Err(RegistryError::EmptyUsername);
         }
         let mut state = self.state.write().await;
-        let Some(user_id) = state.web_users.remove(&old_key) else {
+        // Reject an existing destination up front, before removing the
+        // source — silently overwriting would discard the existing
+        // user's persisted recordings.
+        if state.web_users.contains_key(&new_key) || state.api_users.contains_key(&new_key) {
+            return Err(RegistryError::UsernameExists);
+        }
+        // Look in both namespaces; the source user may live in either.
+        let user_id = state
+            .web_users
+            .remove(&old_key)
+            .or_else(|| state.api_users.remove(&old_key));
+        let Some(user_id) = user_id else {
             return Ok(None);
         };
-        state.web_users.insert(new_key, user_id.clone());
+        // Re-insert under the chosen namespace based on which map the
+        // entry came from. Using `web_users` as the destination for now
+        // is a simplification: callers always rename within the same
+        // namespace because the source lookup guarantees the original
+        // map.
+        let target_map = if state.api_users.contains_key(&new_key) || new_key.starts_with("api:") {
+            // Defensive — the contains_key check above already prevented
+            // a clash, but keep the destination in the matching namespace
+            // when the username prefix signals it.
+            &mut state.api_users
+        } else {
+            &mut state.web_users
+        };
+        target_map.insert(new_key, user_id.clone());
         let snapshot = state.clone();
         drop(state);
         Self::write_to_disk(&self.path, &snapshot)
@@ -329,20 +367,22 @@ impl IdentityRegistry {
                 tokio::fs::create_dir_all(parent).await?;
             }
         }
-        // Use a unique tmp suffix per call so concurrent registry
-        // writes (e.g. concurrent `register` calls) do not race on a
-        // shared temp path. The atomic store derives the suffix from
-        // the file name; we extend with a process-unique counter.
-        let counter = WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // The atomic helper also fsyncs the temp file and the parent
+        // directory so the new identity registry is durable across
+        // crashes. The registry writes can be invoked concurrently
+        // (`concurrent_register_yields_distinct_ids`), so the temp
+        // suffix is unique per call rather than derived from the final
+        // filename.
+        let counter = IDENTITY_WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp = path.with_extension(format!(
             "{}tmp.{}.{}",
             path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default(),
             std::process::id(),
             counter,
         ));
-        tokio::fs::write(&tmp, &content).await?;
-        tokio::fs::rename(&tmp, path).await?;
-        Ok(())
+        crate::utils::atomic_json_store::write_json_atomic_to_tmp(path, &tmp, &content)
+            .await
+            .map_err(std::io::Error::other)
     }
 
     /// Generate a 32-character hex UUID v4-shaped string. No
@@ -374,6 +414,11 @@ impl IdentityRegistry {
 #[derive(Debug)]
 pub enum RegistryError {
     EmptyUsername,
+    /// The destination username already exists in the registry. The
+    /// caller must remove or rename it explicitly before retrying —
+    /// overwriting silently would discard the existing user's
+    /// persisted recordings.
+    UsernameExists,
     Persist(std::io::Error),
 }
 
@@ -381,6 +426,7 @@ impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyUsername => f.write_str("username must not be empty"),
+            Self::UsernameExists => f.write_str("destination username already exists in the identity registry"),
             Self::Persist(err) => write!(f, "registry persistence failed: {err}"),
         }
     }

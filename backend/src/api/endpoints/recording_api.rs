@@ -49,6 +49,9 @@ pub async fn list_recording_tasks(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
+    if !claims.permissions.contains(Permission::RecordingRead) {
+        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
+    }
     let (revision, mut tasks) = recording_ws::recording_snapshot(&app_state.downloads, &claims);
     if let Some(owner) = params.owner.as_deref() {
         tasks.retain(|task| {
@@ -233,6 +236,7 @@ pub async fn delete_recording_task(
 
 /// POST /api/v1/recording/conflicts/preview
 pub async fn preview_recording_conflicts(
+    AuthClaims(_claims): AuthClaims,
     axum::extract::State(_): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(body): axum::extract::Json<PreviewConflictsBody>,
 ) -> Json<PreviewConflictsResponse> {
@@ -333,10 +337,13 @@ pub async fn get_recording_quota(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
+    if !claims.permissions.contains(Permission::RecordingRead) {
+        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
+    }
     let Some(subject_id) = claims.subject_id.as_ref() else {
         return error_response(StatusCode::UNAUTHORIZED, "recording_token_refresh_required");
     };
-    let tasks = all_recording_tasks(&app_state);
+    let tasks = all_recording_tasks(&app_state).await;
     let totals = recording_quota::compute_totals(&tasks);
     let config = app_state.app_config.config.load();
     let limits = quota_limits_from_config(config
@@ -418,20 +425,19 @@ fn quota_limits_from_config(config: Option<&crate::model::RecordingQuotaConfig>)
     }
 }
 
-fn all_recording_tasks(app_state: &AppState) -> Vec<FileDownload> {
+async fn all_recording_tasks(app_state: &AppState) -> Vec<FileDownload> {
     let mut tasks = Vec::new();
-    if let Ok(q) = app_state.downloads.queue.try_lock() {
-        tasks.extend(q.iter().filter(|d| d.recording.is_some()).cloned());
-    }
-    if let Ok(s) = app_state.downloads.scheduled.try_read() {
-        tasks.extend(s.iter().filter(|d| d.recording.is_some()).cloned());
-    }
-    if let Ok(a) = app_state.downloads.active.try_read() {
-        tasks.extend(a.iter().filter(|d| d.recording.is_some()).cloned());
-    }
-    if let Ok(f) = app_state.downloads.finished.try_read() {
-        tasks.extend(f.iter().filter(|d| d.recording.is_some()).cloned());
-    }
+    let q = app_state.downloads.queue.lock().await;
+    tasks.extend(q.iter().filter(|d| d.recording.is_some()).cloned());
+    drop(q);
+    let s = app_state.downloads.scheduled.read().await;
+    tasks.extend(s.iter().filter(|d| d.recording.is_some()).cloned());
+    drop(s);
+    let a = app_state.downloads.active.read().await;
+    tasks.extend(a.iter().filter(|d| d.recording.is_some()).cloned());
+    drop(a);
+    let f = app_state.downloads.finished.read().await;
+    tasks.extend(f.iter().filter(|d| d.recording.is_some()).cloned());
     tasks
 }
 
@@ -468,6 +474,9 @@ pub async fn list_recording_rules(
     State(app_state): State<Arc<AppState>>,
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
+    if !claims.permissions.contains(Permission::RecordingRead) {
+        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
+    }
     let Some(subject_id) = claims.subject_id.as_ref() else {
         return error_response(StatusCode::UNAUTHORIZED, "recording_token_refresh_required");
     };

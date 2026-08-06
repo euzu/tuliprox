@@ -46,15 +46,24 @@ pub struct LifecyclePayload {
 
 impl LifecyclePayload {
     /// Build the payload from the recording metadata and an optional failure
-    /// reason.
+    /// reason. The `output_filename` exposes only the file-name component
+    /// of `meta.relative_path` (when present), so a user-owned
+    /// notification template never embeds the owning user's identifier
+    /// — paths under a `users/<web:id>/...` layout would otherwise leak
+    /// the owner's `UserId` into global notifications.
     pub fn from_metadata(meta: &RecordingMetadata, failure_reason: Option<String>) -> Self {
+        let output_filename = meta
+            .relative_path
+            .as_deref()
+            .and_then(|p| std::path::Path::new(p).file_name().and_then(|s| s.to_str()))
+            .map(str::to_string);
         Self {
             programme_title: meta.program_title.clone(),
             channel: meta.channel_name.clone().or_else(|| meta.channel_id.clone()),
             effective_start: meta.scheduled_start,
             effective_end: meta.scheduled_end,
             visibility: Some(meta.visibility),
-            output_filename: meta.relative_path.clone(),
+            output_filename,
             failure_reason,
             task_id: None,
         }
@@ -182,7 +191,7 @@ mod tests {
         assert_eq!(get("programme_title").as_deref(), Some("Programme"));
         assert_eq!(get("channel").as_deref(), Some("Channel 1"));
         assert_eq!(get("visibility").as_deref(), Some("shared"));
-        assert_eq!(get("output_filename").as_deref(), Some("users/web:alice/Programme_2023-11-14_20-00.ts"));
+        assert_eq!(get("output_filename").as_deref(), Some("Programme_2023-11-14_20-00.ts"));
         assert!(get("failure_reason").is_none());
     }
 

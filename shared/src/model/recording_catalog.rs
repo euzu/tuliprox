@@ -44,8 +44,44 @@ pub struct CatalogKey(pub String);
 
 impl CatalogKey {
     /// Build a dedup key from a relative path. Same relative path means same
-    /// key.
-    pub fn from_relative_path(path: &str) -> Self { Self(path.to_string()) }
+    /// key. The input is canonicalized so equivalent producers — `./a/b.ts`
+    /// vs `a/b.ts`, `a//b.ts` vs `a/b.ts`, leading/trailing separators —
+    /// all deduplicate identically.
+    pub fn from_relative_path(path: &str) -> Self {
+        use std::path::{Component, Path};
+        let mut out = String::with_capacity(path.len());
+        let mut first = true;
+        for c in Path::new(path).components() {
+            match c {
+                Component::CurDir => continue,
+                Component::ParentDir => {
+                    // `..` inside a relative dedup key is suspicious — we
+                    // still produce a stable string so two producers that
+                    // emit the same traversal sequence agree, but consumers
+                    // that touch the filesystem should already be rejecting
+                    // any path containing `..` upstream.
+                    if !first {
+                        out.push('/');
+                    }
+                    out.push_str("..");
+                    first = false;
+                }
+                Component::Normal(seg) => {
+                    if !first {
+                        out.push('/');
+                    }
+                    let s = seg.to_string_lossy();
+                    out.push_str(&s);
+                    first = false;
+                }
+                Component::RootDir | Component::Prefix(_) => continue,
+            }
+        }
+        if out.is_empty() {
+            out.push('.');
+        }
+        Self(out)
+    }
 }
 
 impl RecordingCatalogEntry {
@@ -64,6 +100,22 @@ mod tests {
     fn dedup_key_uses_relative_path() {
         let key = CatalogKey::from_relative_path("users/web:alice/pilot.ts");
         assert_eq!(key.0, "users/web:alice/pilot.ts");
+    }
+
+    #[test]
+    fn dedup_key_canonicalizes_equivalent_inputs() {
+        // ./a/b.ts and a/b.ts must produce the same dedup key, otherwise
+        // two producers emitting the same logical path would surface as
+        // two distinct catalog entries.
+        assert_eq!(CatalogKey::from_relative_path("./a/b.ts"), CatalogKey::from_relative_path("a/b.ts"),);
+        // Duplicate separators collapse.
+        assert_eq!(CatalogKey::from_relative_path("a//b.ts"), CatalogKey::from_relative_path("a/b.ts"),);
+        // Leading separator is stripped so the same path from absolute and
+        // relative producers deduplicates.
+        assert_eq!(CatalogKey::from_relative_path("/a/b.ts"), CatalogKey::from_relative_path("a/b.ts"),);
+        // Empty / dot-only input collapses to a single dot.
+        assert_eq!(CatalogKey::from_relative_path("").0, ".");
+        assert_eq!(CatalogKey::from_relative_path(".").0, ".");
     }
 
     #[test]

@@ -21,10 +21,6 @@
 //! recording's owner, title, channel display name, filename, rule
 //! or task id. Logs and the response only carry the provider scope,
 //! anonymized interval, and severity.
-//!
-//! `dead_code` allowance below: the analyzer and the DTO are public so
-//! the HTTP handler can call them; the helper entry points are
-//! covered by tests, the rest of the surface is the privacy contract.
 
 
 /// A demand point: a recording (the candidate or another scheduled /
@@ -214,11 +210,12 @@ pub fn preview_conflict(
         .collect();
     let segments = build_demand_segments(candidate, &higher);
     let severity = classify(candidate, &segments, capacity);
-    // Anonymize: keep only the candidate's own start/end so the
-    // overlap segments never leak another recording's id or
-    // interval. The segment peak_demand is also anonymized; the
-    // candidate is the only demand contributor whose interval
-    // matters for the preview.
+    // Anonymize: the returned segments carry peak_demand and the
+    // boundaries of the overlap window only. Each segment's boundaries
+    // are derived from the higher-priority recordings' padded intervals
+    // (clipped to the candidate window) so they are sufficient for a
+    // capacity preview without leaking the other recordings' titles,
+    // channels, or absolute intervals.
     let overlap: Vec<DemandSegment> = segments
         .into_iter()
         .filter(|s| s.peak_demand > 0)

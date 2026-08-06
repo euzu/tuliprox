@@ -11,10 +11,9 @@
 
 #![cfg(unix)]
 
-use std::fs;
 use std::io;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
+use tokio::fs;
 
 /// Visibility for a recording directory layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,10 +95,10 @@ pub fn validate_relative_path(path: &Path) -> Result<(), RecordingPathError> {
 }
 
 /// Validate that a relative path stays inside a canonicalized root.
-pub fn assert_within_root(rel: &Path, root: &Path) -> Result<(), RecordingPathError> {
+pub async fn assert_within_root(rel: &Path, root: &Path) -> Result<(), RecordingPathError> {
     let joined = root.join(rel);
-    let canonical_root = fs::canonicalize(root).map_err(RecordingPathError::from)?;
-    let canonical_joined = fs::canonicalize(&joined).map_err(RecordingPathError::from)?;
+    let canonical_root = fs::canonicalize(root).await.map_err(RecordingPathError::from)?;
+    let canonical_joined = fs::canonicalize(&joined).await.map_err(RecordingPathError::from)?;
     if !canonical_joined.starts_with(&canonical_root) {
         return Err(RecordingPathError::NotWithinRoot);
     }
@@ -110,15 +109,15 @@ pub fn assert_within_root(rel: &Path, root: &Path) -> Result<(), RecordingPathEr
 /// any path that exists at the location, including symlinks, directories,
 /// and regular files. The caller can inspect the metadata to choose
 /// the matching policy. Returns `None` only for missing entries.
-pub fn no_follow_existing(path: &Path) -> Option<fs::Metadata> {
-    fs::symlink_metadata(path).ok()
+pub async fn no_follow_existing(path: &Path) -> Option<std::fs::Metadata> {
+    fs::symlink_metadata(path).await.ok()
 }
 
 /// Inspect a path without following symlinks. Returns `Some(metadata)` only
 /// for regular files; directories, symlinks, sockets, devices, and
 /// missing entries all return `None`.
-pub fn no_follow_regular_file(path: &Path) -> Option<fs::Metadata> {
-    let meta = fs::symlink_metadata(path).ok()?;
+pub async fn no_follow_regular_file(path: &Path) -> Option<std::fs::Metadata> {
+    let meta = fs::symlink_metadata(path).await.ok()?;
     if !meta.is_file() {
         return None;
     }
@@ -128,12 +127,13 @@ pub fn no_follow_regular_file(path: &Path) -> Option<fs::Metadata> {
 /// Open a new partial file with no-clobber, no-follow semantics suitable
 /// for ffmpeg to write into. The call uses `O_CREAT | O_EXCL | O_NOFOLLOW`
 /// so a pre-existing file or symlinked path is rejected.
-pub fn open_partial_no_clobber(path: &Path) -> Result<fs::File, RecordingPathError> {
+pub async fn open_partial_no_clobber(path: &Path) -> Result<tokio::fs::File, RecordingPathError> {
     let file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
+        .open(path)
+        .await?;
     Ok(file)
 }
 
@@ -144,19 +144,19 @@ pub fn open_partial_no_clobber(path: &Path) -> Result<fs::File, RecordingPathErr
 /// the partial is missing, `fs::rename` returns `NotFound` so the
 /// caller can surface a visible failure rather than silently producing
 /// an empty final file.
-pub fn finalize_no_replace(partial: &Path, final_path: &Path) -> Result<(), RecordingPathError> {
-    if no_follow_existing(final_path).is_some() {
+pub async fn finalize_no_replace(partial: &Path, final_path: &Path) -> Result<(), RecordingPathError> {
+    if no_follow_existing(final_path).await.is_some() {
         return Err(RecordingPathError::AlreadyExists);
     }
-    fs::rename(partial, final_path)?;
+    fs::rename(partial, final_path).await?;
     Ok(())
 }
 
 /// Unlink a file at the given path. Missing files are treated as
 /// success so the call is idempotent; the operator's intent (file
 /// gone) is satisfied either way.
-pub fn safe_unlink(path: &Path) -> Result<(), RecordingPathError> {
-    match fs::remove_file(path) {
+pub async fn safe_unlink(path: &Path) -> Result<(), RecordingPathError> {
+    match fs::remove_file(path).await {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err.into()),
@@ -169,17 +169,24 @@ pub fn safe_unlink(path: &Path) -> Result<(), RecordingPathError> {
 /// Removal stops on the first non-empty, non-existent, or
 /// permission-denied directory. Other I/O errors propagate but do not
 /// undo any successful removal.
-pub fn clean_empty_parents(path: &Path, root: &Path) -> Result<(), RecordingPathError> {
-    let canonical_root = fs::canonicalize(root).ok();
+pub async fn clean_empty_parents(path: &Path, root: &Path) -> Result<(), RecordingPathError> {
+    let canonical_root = fs::canonicalize(root).await.ok();
     let mut current: Option<&Path> = Some(path);
     while let Some(dir) = current {
-        let stop_here = canonical_root
-            .as_ref()
-            .is_some_and(|r| fs::canonicalize(dir).is_ok_and(|c| c == *r));
+        let dir_for_check = dir;
+        let mut stop_here = false;
+        if let Some(r) = canonical_root.as_ref() {
+            if fs::canonicalize(dir_for_check)
+                .await
+                .is_ok_and(|c| c == *r)
+            {
+                stop_here = true;
+            }
+        }
         if stop_here {
             break;
         }
-        match fs::remove_dir(dir) {
+        match fs::remove_dir(dir).await {
             Ok(()) => current = dir.parent(),
             Err(err) if err.kind() == io::ErrorKind::NotFound => current = dir.parent(),
             Err(err) if err.kind() == io::ErrorKind::DirectoryNotEmpty => break,
@@ -201,14 +208,29 @@ pub fn resolve_recording_dir(
     rel: &Path,
 ) -> Result<PathBuf, RecordingPathError> {
     validate_relative_path(rel)?;
-    if owner_id.contains('\0') || owner_id.is_empty() {
-        return Err(RecordingPathError::InvalidComponent);
-    }
+    validate_owner_id(owner_id)?;
     let base = match visibility {
         RecordingVisibility::Private => recording_root.join("users").join(owner_id),
         RecordingVisibility::Shared => recording_root.join("shared"),
     };
     Ok(base.join(rel))
+}
+
+/// Validate that an `owner_id` can be safely used as a single path
+/// component. Rejects empty strings, NUL bytes, path separators, and
+/// the traversal components `.` and `..` so the resulting layout can
+/// never escape the configured recording root.
+fn validate_owner_id(owner_id: &str) -> Result<(), RecordingPathError> {
+    use std::path::Component;
+    if owner_id.is_empty() || owner_id.contains('\0') {
+        return Err(RecordingPathError::InvalidComponent);
+    }
+    let path = std::path::Path::new(owner_id);
+    let components: Vec<_> = path.components().collect();
+    if components.len() != 1 || !matches!(components.first(), Some(Component::Normal(_))) {
+        return Err(RecordingPathError::InvalidComponent);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -252,146 +274,146 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn no_follow_regular_file_returns_none_for_missing_path() {
+    #[tokio::test]
+    async fn no_follow_regular_file_returns_none_for_missing_path() {
         let dir = TempDir::new().expect("tempdir");
         let missing = dir.path().join("does-not-exist.ts");
-        assert!(no_follow_regular_file(&missing).is_none());
+        assert!(no_follow_regular_file(&missing).await.is_none());
     }
 
-    #[test]
-    fn no_follow_regular_file_rejects_symlink() {
+    #[tokio::test]
+    async fn no_follow_regular_file_rejects_symlink() {
         let dir = TempDir::new().expect("tempdir");
         let real = dir.path().join("real.ts");
-        std::fs::write(&real, b"hello").expect("write");
+        tokio::fs::write(&real, b"hello").await.expect("write");
         let link_path = dir.path().join("link.ts");
         symlink(&real, &link_path).expect("symlink");
         // `symlink_metadata` returns the link itself; the type is
         // not a regular file. The helper must not follow.
-        assert!(no_follow_regular_file(&link_path).is_none());
+        assert!(no_follow_regular_file(&link_path).await.is_none());
     }
 
-    #[test]
-    fn no_follow_regular_file_rejects_directory() {
+    #[tokio::test]
+    async fn no_follow_regular_file_rejects_directory() {
         let dir = TempDir::new().expect("tempdir");
-        assert!(no_follow_regular_file(dir.path()).is_none(), "directory must not pass as regular file");
+        assert!(no_follow_regular_file(dir.path()).await.is_none(), "directory must not pass as regular file");
     }
 
-    #[test]
-    fn open_partial_no_clobber_succeeds_for_fresh_path() {
+    #[tokio::test]
+    async fn open_partial_no_clobber_succeeds_for_fresh_path() {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("rec.partial.ts");
-        let _file = open_partial_no_clobber(&path).expect("create");
+        let _file = open_partial_no_clobber(&path).await.expect("create");
         assert!(path.exists());
     }
 
-    #[test]
-    fn open_partial_no_clobber_fails_when_file_exists() {
+    #[tokio::test]
+    async fn open_partial_no_clobber_fails_when_file_exists() {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("rec.partial.ts");
-        std::fs::write(&path, b"already here").expect("write");
-        let result = open_partial_no_clobber(&path);
+        tokio::fs::write(&path, b"already here").await.expect("write");
+        let result = open_partial_no_clobber(&path).await;
         assert!(result.is_err(), "open must fail on existing file");
         assert!(matches!(result.unwrap_err(), RecordingPathError::Io(err) if err.kind() == io::ErrorKind::AlreadyExists));
     }
 
-    #[test]
-    fn open_partial_no_clobber_fails_when_path_is_symlink() {
+    #[tokio::test]
+    async fn open_partial_no_clobber_fails_when_path_is_symlink() {
         let dir = TempDir::new().expect("tempdir");
         let real = dir.path().join("real");
-        std::fs::write(&real, b"data").expect("write");
+        tokio::fs::write(&real, b"data").await.expect("write");
         let link_path = dir.path().join("link");
         symlink(&real, &link_path).expect("symlink");
-        let result = open_partial_no_clobber(&link_path);
+        let result = open_partial_no_clobber(&link_path).await;
         assert!(result.is_err(), "open must fail on symlink target");
     }
 
-    #[test]
-    fn finalize_no_replace_succeeds_for_missing_final() {
+    #[tokio::test]
+    async fn finalize_no_replace_succeeds_for_missing_final() {
         let dir = TempDir::new().expect("tempdir");
         let partial = dir.path().join("rec.partial.ts");
         let final_path = dir.path().join("rec.ts");
-        std::fs::write(&partial, b"recorded").expect("write partial");
-        finalize_no_replace(&partial, &final_path).expect("finalize");
+        tokio::fs::write(&partial, b"recorded").await.expect("write partial");
+        finalize_no_replace(&partial, &final_path).await.expect("finalize");
         assert!(!partial.exists(), "partial must be gone after rename");
-        assert_eq!(std::fs::read(&final_path).expect("read"), b"recorded");
+        assert_eq!(tokio::fs::read(&final_path).await.expect("read"), b"recorded");
     }
 
-    #[test]
-    fn finalize_no_replace_refuses_when_final_already_exists() {
+    #[tokio::test]
+    async fn finalize_no_replace_refuses_when_final_already_exists() {
         let dir = TempDir::new().expect("tempdir");
         let partial = dir.path().join("rec.partial.ts");
         let final_path = dir.path().join("rec.ts");
-        std::fs::write(&partial, b"new").expect("write partial");
-        std::fs::write(&final_path, b"existing").expect("write final");
-        let result = finalize_no_replace(&partial, &final_path);
+        tokio::fs::write(&partial, b"new").await.expect("write partial");
+        tokio::fs::write(&final_path, b"existing").await.expect("write final");
+        let result = finalize_no_replace(&partial, &final_path).await;
         assert!(matches!(result.unwrap_err(), RecordingPathError::AlreadyExists));
         assert!(partial.exists(), "partial must remain when finalize is refused");
-        assert_eq!(std::fs::read(&final_path).expect("read"), b"existing");
+        assert_eq!(tokio::fs::read(&final_path).await.expect("read"), b"existing");
     }
 
-    #[test]
-    fn finalize_no_replace_refuses_when_final_is_symlink() {
+    #[tokio::test]
+    async fn finalize_no_replace_refuses_when_final_is_symlink() {
         // An externally created symlink at the final path counts
         // as a collision. The helper must refuse to clobber it.
         let dir = TempDir::new().expect("tempdir");
         let partial = dir.path().join("rec.partial.ts");
         let real = dir.path().join("attacker-target");
         let final_path = dir.path().join("rec.ts");
-        std::fs::write(&partial, b"new").expect("write partial");
-        std::fs::write(&real, b"data").expect("write attacker target");
+        tokio::fs::write(&partial, b"new").await.expect("write partial");
+        tokio::fs::write(&real, b"data").await.expect("write attacker target");
         symlink(&real, &final_path).expect("symlink final");
-        let result = finalize_no_replace(&partial, &final_path);
+        let result = finalize_no_replace(&partial, &final_path).await;
         assert!(matches!(result.unwrap_err(), RecordingPathError::AlreadyExists));
     }
 
-    #[test]
-    fn safe_unlink_is_idempotent_for_missing_file() {
+    #[tokio::test]
+    async fn safe_unlink_is_idempotent_for_missing_file() {
         let dir = TempDir::new().expect("tempdir");
         let missing = dir.path().join("missing.ts");
-        safe_unlink(&missing).expect("missing is success");
+        safe_unlink(&missing).await.expect("missing is success");
     }
 
-    #[test]
-    fn safe_unlink_removes_existing_file() {
+    #[tokio::test]
+    async fn safe_unlink_removes_existing_file() {
         let dir = TempDir::new().expect("tempdir");
         let path = dir.path().join("rec.ts");
-        std::fs::write(&path, b"x").expect("write");
-        safe_unlink(&path).expect("unlink");
+        tokio::fs::write(&path, b"x").await.expect("write");
+        safe_unlink(&path).await.expect("unlink");
         assert!(!path.exists());
     }
 
-    #[test]
-    fn safe_unlink_refuses_directories() {
+    #[tokio::test]
+    async fn safe_unlink_refuses_directories() {
         let dir = TempDir::new().expect("tempdir");
-        let result = safe_unlink(dir.path());
+        let result = safe_unlink(dir.path()).await;
         assert!(result.is_err(), "must not unlink a directory");
     }
 
-    #[test]
-    fn clean_empty_parents_removes_empty_subdirs_but_stops_at_root() {
+    #[tokio::test]
+    async fn clean_empty_parents_removes_empty_subdirs_but_stops_at_root() {
         let dir = TempDir::new().expect("tempdir");
         let nested = dir.path().join("a").join("b").join("c");
-        std::fs::create_dir_all(&nested).expect("mkdir");
+        tokio::fs::create_dir_all(&nested).await.expect("mkdir");
         let leaf = nested.join("leaf.ts");
-        std::fs::write(&leaf, b"x").expect("write");
-        std::fs::remove_file(&leaf).expect("remove leaf");
+        tokio::fs::write(&leaf, b"x").await.expect("write");
+        tokio::fs::remove_file(&leaf).await.expect("remove leaf");
         // The walk starts at `path.parent()` (i.e. `<root>/a/b`); `c` is
         // never cleaned because it is the path itself. We assert the
         // empty intermediates are gone and the root remains.
-        clean_empty_parents(&nested, dir.path()).expect("clean");
+        clean_empty_parents(&nested, dir.path()).await.expect("clean");
         assert!(!dir.path().join("a").join("b").exists(), "empty b/ must be removed");
         assert!(!dir.path().join("a").exists(), "empty a/ must be removed");
         assert!(dir.path().exists(), "root must remain");
     }
 
-    #[test]
-    fn clean_empty_parents_stops_at_non_empty_directory() {
+    #[tokio::test]
+    async fn clean_empty_parents_stops_at_non_empty_directory() {
         let dir = TempDir::new().expect("tempdir");
         let nested = dir.path().join("a").join("b");
-        std::fs::create_dir_all(&nested).expect("mkdir");
-        std::fs::write(nested.join("sibling.ts"), b"keep").expect("write");
-        clean_empty_parents(&nested.join("empty"), dir.path()).expect("clean");
+        tokio::fs::create_dir_all(&nested).await.expect("mkdir");
+        tokio::fs::write(nested.join("sibling.ts"), b"keep").await.expect("write");
+        clean_empty_parents(&nested.join("empty"), dir.path()).await.expect("clean");
         // The non-empty `a/` must remain because it still has `b/`.
         assert!(dir.path().join("a").exists(), "non-empty parent must remain");
     }

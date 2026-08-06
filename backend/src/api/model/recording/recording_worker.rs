@@ -126,6 +126,14 @@ async fn recording_resume_or_retry_is_unsupported(download: &FileDownload) -> bo
         .is_ok_and(|metadata| metadata.len() > 0)
 }
 
+/// Remove the partial file from a non-terminal exit so the recording does
+/// not leak half-written output on disk. Best-effort: missing file or
+/// permission errors are swallowed because the next attempt's `-y` flag
+/// will overwrite any survivor anyway.
+async fn cleanup_partial(partial_path: &Path) {
+    let _ = tokio::fs::remove_file(partial_path).await;
+}
+
 pub fn recording_start_missed_window(download: &FileDownload, now_ts: i64) -> bool {
     download
         .start_at
@@ -189,19 +197,26 @@ async fn run_recording_with_binary(
                 } else {
                     std::future::pending::<()>().await;
                 }
-            } => return RecordingExecutionResult::Preempted,
+            } => {
+                cleanup_partial(&partial_path).await;
+                return RecordingExecutionResult::Preempted;
+            }
             () = control_notify.notified() => {
-                match *control_signal.read().await {
-                    DownloadControl::Pause => return RecordingExecutionResult::Paused,
-                    DownloadControl::Cancel => return RecordingExecutionResult::Cancelled,
-                    DownloadControl::Restart => return RecordingExecutionResult::Preempted,
-                    DownloadControl::None => {}
+                let result = match *control_signal.read().await {
+                    DownloadControl::Pause => Some(RecordingExecutionResult::Paused),
+                    DownloadControl::Cancel => Some(RecordingExecutionResult::Cancelled),
+                    DownloadControl::Restart => Some(RecordingExecutionResult::Preempted),
+                    DownloadControl::None => None,
+                };
+                if let Some(result) = result {
+                    cleanup_partial(&partial_path).await;
+                    return result;
                 }
             }
             output = &mut wait_future => {
                 match output {
                     Ok(output) if output.status.success() => {
-                        return match crate::utils::finalize_no_replace(&partial_path, &download.file_path) {
+                        return match crate::utils::finalize_no_replace(&partial_path, &download.file_path).await {
                             Ok(()) => RecordingExecutionResult::Completed,
                             Err(err) => RecordingExecutionResult::Failed(format!("Failed to finalize recording: {err}")),
                         };
@@ -258,11 +273,11 @@ pub enum RecoveryDecision {
 /// Inspect a recording's current filesystem state and return the recovery
 /// decision the startup loop should apply. The function is pure: it does
 /// not mutate the queue or open files.
-pub fn recovery_decision_for(final_path: &Path, partial: &Path) -> RecoveryDecision {
-    if crate::utils::no_follow_regular_file(final_path).is_some() {
+pub async fn recovery_decision_for(final_path: &Path, partial: &Path) -> RecoveryDecision {
+    if crate::utils::no_follow_regular_file(final_path).await.is_some() {
         return RecoveryDecision::Completed;
     }
-    if crate::utils::no_follow_regular_file(partial).is_some() {
+    if crate::utils::no_follow_regular_file(partial).await.is_some() {
         return RecoveryDecision::FailedPartialKept;
     }
     RecoveryDecision::FailedNoFile
@@ -550,37 +565,37 @@ mod tests {
         assert_eq!(partial, PathBuf::from("/var/recordings/show.2024.s01.ts.partial"));
     }
 
-    #[test]
-    fn recovery_decision_for_completed_when_final_file_exists() {
+    #[tokio::test]
+    async fn recovery_decision_for_completed_when_final_file_exists() {
         let dir = tempfile::tempdir().expect("tempdir");
         let final_path = dir.path().join("rec.ts");
-        std::fs::write(&final_path, b"recorded").expect("write final");
+        tokio::fs::write(&final_path, b"recorded").await.expect("write final");
         let partial = dir.path().join("rec.ts.partial");
-        let decision = recovery_decision_for(&final_path, &partial);
+        let decision = recovery_decision_for(&final_path, &partial).await;
         assert_eq!(decision, RecoveryDecision::Completed);
     }
 
-    #[test]
-    fn recovery_decision_for_failed_when_only_partial_exists() {
+    #[tokio::test]
+    async fn recovery_decision_for_failed_when_only_partial_exists() {
         let dir = tempfile::tempdir().expect("tempdir");
         let final_path = dir.path().join("rec.ts");
         let partial = dir.path().join("rec.ts.partial");
-        std::fs::write(&partial, b"partial bytes").expect("write partial");
-        let decision = recovery_decision_for(&final_path, &partial);
+        tokio::fs::write(&partial, b"partial bytes").await.expect("write partial");
+        let decision = recovery_decision_for(&final_path, &partial).await;
         assert_eq!(decision, RecoveryDecision::FailedPartialKept);
     }
 
-    #[test]
-    fn recovery_decision_for_failed_when_no_file_exists() {
+    #[tokio::test]
+    async fn recovery_decision_for_failed_when_no_file_exists() {
         let dir = tempfile::tempdir().expect("tempdir");
         let final_path = dir.path().join("rec.ts");
         let partial = dir.path().join("rec.ts.partial");
-        let decision = recovery_decision_for(&final_path, &partial);
+        let decision = recovery_decision_for(&final_path, &partial).await;
         assert_eq!(decision, RecoveryDecision::FailedNoFile);
     }
 
-    #[test]
-    fn recovery_decision_for_treats_symlinked_final_as_completed() {
+    #[tokio::test]
+    async fn recovery_decision_for_treats_symlinked_final_as_completed() {
         // The no-follow check returns None for symlinks; the helper
         // therefore treats the symlink as "not present" and falls through
         // to the partial check. The startup recovery in
@@ -590,10 +605,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let real = dir.path().join("real.ts");
         let link_path = dir.path().join("rec.ts");
-        std::fs::write(&real, b"data").expect("write real");
+        tokio::fs::write(&real, b"data").await.expect("write real");
         std::os::unix::fs::symlink(&real, &link_path).expect("symlink");
         let partial = dir.path().join("rec.ts.partial");
-        let decision = recovery_decision_for(&link_path, &partial);
+        let decision = recovery_decision_for(&link_path, &partial).await;
         assert_eq!(decision, RecoveryDecision::FailedNoFile);
     }
 }

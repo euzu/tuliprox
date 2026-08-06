@@ -137,6 +137,34 @@ pub async fn write_json_atomic(final_path: &Path, content: &[u8]) -> std::io::Re
         .map_err(std::io::Error::from)
 }
 
+/// Atomic write with a caller-supplied temp file path. Use this when
+/// concurrent writers need disjoint temp names — the caller is
+/// responsible for producing a unique path per call.
+pub async fn write_json_atomic_to_tmp(
+    final_path: &Path,
+    tmp: &Path,
+    content: &[u8],
+) -> Result<(), AtomicWriteError> {
+    write_json_atomic_with_ops_to_tmp(final_path, tmp, content, &RealAtomicWriteOps).await
+}
+
+/// Generic variant of [`write_json_atomic_to_tmp`] with caller-supplied
+/// filesystem ops.
+pub async fn write_json_atomic_with_ops_to_tmp<O: AtomicWriteOps>(
+    final_path: &Path,
+    tmp: &Path,
+    content: &[u8],
+    ops: &O,
+) -> Result<(), AtomicWriteError> {
+    ops.write_temp(tmp, content).await?;
+    ops.sync_file(tmp).await?;
+    ops.rename(tmp, final_path).await?;
+    if let Some(parent) = final_path.parent() {
+        ops.sync_parent(parent).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -150,12 +150,13 @@ pub async fn begin_deletion(queue: &DownloadQueue, uuid: &str) -> Result<(), Del
         // (the canonical "removing" marker) plus
         // `recording.deleting_previous_state = Some(prior)` so startup
         // recovery can restore the prior state if the file is still
-        // present.
+        // present. Measured/reserved bytes are kept as-is so quota
+        // accounting survives a failed or interrupted deletion; they are
+        // released when the task is removed in `finalize_deletion`.
         let mut new_meta = meta;
         new_meta.deleting_previous_state = Some(prior);
-        new_meta.measured_bytes = 0;
-        new_meta.reserved_bytes = 0;
         apply_meta(candidate, bucket, idx, new_meta);
+        set_task_state(candidate, bucket, idx, DownloadState::Cancelled);
         Ok(())
     })
     .await
@@ -203,6 +204,70 @@ fn apply_meta(
     }
 }
 
+/// Set the persisted `state` on a task in the given bucket. Companion to
+/// `apply_meta` — the deletion transition needs both the recording
+/// metadata flag (`deleting_previous_state`) and the canonical task
+/// state (`Cancelled`) to land atomically.
+fn set_task_state(
+    candidate: &mut PersistedDownloadQueue,
+    bucket: &'static str,
+    idx: usize,
+    state: DownloadState,
+) {
+    match bucket {
+        "queue" => {
+            if let Some(d) = candidate.queue.get_mut(idx) {
+                d.state = state;
+            }
+        }
+        "scheduled" => {
+            if let Some(d) = candidate.scheduled.get_mut(idx) {
+                d.state = state;
+            }
+        }
+        "active" => {
+            if let Some(d) = candidate.active.as_mut() {
+                d.state = state;
+            }
+        }
+        "finished" => {
+            if let Some(d) = candidate.finished.get_mut(idx) {
+                d.state = state;
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Roll back a `begin_deletion` transition after `execute_deletion`
+/// fails to remove the file. Restores the persisted task state from
+/// `deleting_previous_state` and clears the flag so the recording
+/// reverts to its pre-deletion state. Best-effort: missing or already
+/// finalized tasks are silently left alone.
+pub fn rollback_deletion(candidate: &mut PersistedDownloadQueue, uuid: &str) {
+    let Some((bucket, idx)) = locate(candidate, uuid) else { return };
+    let task = match bucket {
+        "queue" => candidate.queue.get_mut(idx),
+        "scheduled" => candidate.scheduled.get_mut(idx),
+        "active" => candidate.active.as_mut(),
+        "finished" => candidate.finished.get_mut(idx),
+        _ => None,
+    };
+    let Some(task) = task else { return };
+    let Some(meta) = task.recording.as_mut() else { return };
+    let prior = meta.deleting_previous_state.take();
+    task.state = match prior {
+        Some(DeletionPreviousState::Completed) => DownloadState::Completed,
+        Some(DeletionPreviousState::Failed) => DownloadState::Failed,
+        Some(DeletionPreviousState::Cancelled) => DownloadState::Cancelled,
+        // No recorded prior state (the begin step never ran, or the
+        // recording was already terminal) — fall back to the natural
+        // non-terminal state. The scheduler will not reissue a delete
+        // for a recording it never observed as Deleting.
+        None => DownloadState::Scheduled,
+    };
+}
+
 /// Resolve the file path to unlink for a recording. Only the
 /// state-owned file is removed. Terminal `Completed` → final; `Failed`/
 /// `Cancelled` → partial (a failed/cancelled recording never reached
@@ -224,14 +289,14 @@ pub fn file_path_for_deletion(
 /// Unlink the recorded file. Missing files count as
 /// success. Returns the path that was unlinked, or `None` if no
 /// physical file was present.
-pub fn execute_deletion(download: &FileDownload, recording_root: Option<&Path>) -> Result<Option<PathBuf>, DeletionError> {
+pub async fn execute_deletion(download: &FileDownload, recording_root: Option<&Path>) -> Result<Option<PathBuf>, DeletionError> {
     let Some(path) = file_path_for_deletion(download, recording_root) else {
         return Ok(None);
     };
-    if no_follow_existing(&path).is_none() {
+    if no_follow_existing(&path).await.is_none() {
         return Ok(None);
     }
-    safe_unlink(&path).map_err(std::io::Error::from).map_err(DeletionError::DeleteFailed)?;
+    safe_unlink(&path).await.map_err(std::io::Error::from).map_err(DeletionError::DeleteFailed)?;
     Ok(Some(path))
 }
 
@@ -288,7 +353,7 @@ pub enum RecoveryAction {
 
 /// Inspect a task that is in `Deleting` state and decide what the
 /// startup recovery should do.
-pub fn recovery_action_for(
+pub async fn recovery_action_for(
     download: &FileDownload,
     recording_root: Option<&Path>,
 ) -> RecoveryAction {
@@ -297,7 +362,7 @@ pub fn recovery_action_for(
     let Some(path) = file_path_for_deletion(download, recording_root) else {
         return RecoveryAction::FinishDeletion;
     };
-    if no_follow_existing(&path).is_none() {
+    if no_follow_existing(&path).await.is_none() {
         return RecoveryAction::FinishDeletion;
     }
     // The file is still present. If the metadata-derived path is outside
@@ -417,16 +482,20 @@ mod tests {
     #[test]
     fn prior_terminal_state_accepts_completed_failed_cancelled_only() {
         let p = make_persisted_recording("r", DownloadState::Completed, None);
-        let task = crate::api::model::download::DownloadQueue::from_persisted_with(p, None, None).unwrap();
+        let task = crate::api::model::download::DownloadQueue::from_persisted_with(p, None, None)
+            .expect("test fixture must be valid");
         assert_eq!(prior_terminal_state(&task), Some(DeletionPreviousState::Completed));
         let p = make_persisted_recording("r", DownloadState::Failed, None);
-        let task = crate::api::model::download::DownloadQueue::from_persisted_with(p, None, None).unwrap();
+        let task = crate::api::model::download::DownloadQueue::from_persisted_with(p, None, None)
+            .expect("test fixture must be valid");
         assert_eq!(prior_terminal_state(&task), Some(DeletionPreviousState::Failed));
         let p = make_persisted_recording("r", DownloadState::Cancelled, None);
-        let task = crate::api::model::download::DownloadQueue::from_persisted_with(p, None, None).unwrap();
+        let task = crate::api::model::download::DownloadQueue::from_persisted_with(p, None, None)
+            .expect("test fixture must be valid");
         assert_eq!(prior_terminal_state(&task), Some(DeletionPreviousState::Cancelled));
         let p = make_persisted_recording("r", DownloadState::Downloading, None);
-        let task = crate::api::model::download::DownloadQueue::from_persisted_with(p, None, None).unwrap();
+        let task = crate::api::model::download::DownloadQueue::from_persisted_with(p, None, None)
+            .expect("test fixture must be valid");
         assert_eq!(prior_terminal_state(&task), None);
     }
 
@@ -440,72 +509,72 @@ mod tests {
         assert_eq!(path, PathBuf::from("/tmp/r.ts.partial"));
     }
 
-    #[test]
-    fn execute_deletion_unlinks_existing_file_and_returns_path() {
+    #[tokio::test]
+    async fn execute_deletion_unlinks_existing_file_and_returns_path() {
         let dir = TempDir::new().expect("tempdir");
         let final_path = dir.path().join("r.ts");
-        std::fs::write(&final_path, b"data").expect("write");
+        tokio::fs::write(&final_path, b"data").await.expect("write");
         let mut task = finished_with_state("r", DownloadState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = final_path.clone();
-        let deleted = execute_deletion(&task, None).expect("delete").expect("some path");
+        let deleted = execute_deletion(&task, None).await.expect("delete").expect("some path");
         assert_eq!(deleted, final_path);
         assert!(!final_path.exists());
     }
 
-    #[test]
-    fn execute_deletion_is_idempotent_for_missing_file() {
+    #[tokio::test]
+    async fn execute_deletion_is_idempotent_for_missing_file() {
         let dir = TempDir::new().expect("tempdir");
         let mut task = finished_with_state("r", DownloadState::Completed, None);
         task.file_path = dir.path().join("does-not-exist.ts");
-        let result = execute_deletion(&task, None).expect("ok");
+        let result = execute_deletion(&task, None).await.expect("ok");
         assert!(result.is_none(), "missing file must report no path");
     }
 
-    #[test]
-    fn recovery_action_for_finish_when_file_missing() {
+    #[tokio::test]
+    async fn recovery_action_for_finish_when_file_missing() {
         let dir = TempDir::new().expect("tempdir");
         let mut task = finished_with_state("r", DownloadState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = dir.path().join("missing.ts");
         assert_eq!(
-            recovery_action_for(&task, Some(dir.path())),
+            recovery_action_for(&task, Some(dir.path())).await,
             RecoveryAction::FinishDeletion
         );
     }
 
-    #[test]
-    fn recovery_action_for_restore_when_regular_file_present() {
+    #[tokio::test]
+    async fn recovery_action_for_restore_when_regular_file_present() {
         let dir = TempDir::new().expect("tempdir");
         let final_path = dir.path().join("r.ts");
-        std::fs::write(&final_path, b"data").expect("write");
+        tokio::fs::write(&final_path, b"data").await.expect("write");
         let mut task = finished_with_state("r", DownloadState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = final_path;
         assert_eq!(
-            recovery_action_for(&task, Some(dir.path())),
+            recovery_action_for(&task, Some(dir.path())).await,
             RecoveryAction::RestorePrevious
         );
     }
 
-    #[test]
-    fn recovery_action_for_unsafe_when_path_outside_root() {
+    #[tokio::test]
+    async fn recovery_action_for_unsafe_when_path_outside_root() {
         let dir = TempDir::new().expect("tempdir");
         let outside = dir.path().join("..").join("outside.ts");
         let outside = outside.canonicalize().unwrap_or(outside);
-        std::fs::write(&outside, b"data").expect("write");
+        tokio::fs::write(&outside, b"data").await.expect("write");
         let mut task = finished_with_state("r", DownloadState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = outside;
         assert_eq!(
-            recovery_action_for(&task, Some(dir.path())),
+            recovery_action_for(&task, Some(dir.path())).await,
             RecoveryAction::UnsafeRestore
         );
     }
 
-    #[test]
-    fn recovery_action_for_not_deleting_when_marker_absent() {
+    #[tokio::test]
+    async fn recovery_action_for_not_deleting_when_marker_absent() {
         let dir = TempDir::new().expect("tempdir");
         let mut task = finished_with_state("r", DownloadState::Completed, None);
         task.file_path = dir.path().join("r.ts");
         assert_eq!(
-            recovery_action_for(&task, Some(dir.path())),
+            recovery_action_for(&task, Some(dir.path())).await,
             RecoveryAction::NotDeleting
         );
     }

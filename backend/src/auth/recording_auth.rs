@@ -292,10 +292,6 @@ pub fn authorize(
     if is_legacy && !is_admin(claims) {
         return RecordingDecision::Deny(DenyReason::LegacyAdminReserved);
     }
-    if is_legacy && !is_admin(claims) {
-        // Re-checked for symmetry with the policy wording.
-        return RecordingDecision::Deny(DenyReason::LegacyAdminReserved);
-    }
     if is_legacy && action_requires_owner(action) {
         // Even an admin cannot impersonate a LegacyAdmin owner.
         return RecordingDecision::Deny(DenyReason::LegacyAdminReserved);

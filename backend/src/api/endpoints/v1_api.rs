@@ -174,9 +174,12 @@ pub fn v1_api_register(
             .merge(v1_api_user_register(axum::routing::Router::new()))
             .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))
             .merge(library_api_register(axum::routing::Router::new(), None))
-            .merge(rbac_api_register_unprotected(Arc::clone(app_state)))
-            .merge(recording_api_register(axum::routing::Router::new()))
-            .merge(recording_media_api_register(axum::routing::Router::new()));
+            .merge(rbac_api_register_unprotected(Arc::clone(app_state)));
+        // Recording endpoints are not exposed in no-auth mode: they
+        // require an authenticated principal for ownership and
+        // permission checks, and exposing them here would let anyone
+        // enqueue recordings or read other users' task lists. The
+        // media route is gated the same way.
     }
 
     let config = app_state.app_config.config.load();

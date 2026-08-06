@@ -93,8 +93,9 @@ impl RuleBody {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
             Self::NewEpisode { series_id, title_pattern, .. } => {
-                if series_id.as_deref().is_none_or(str::is_empty) && title_pattern.as_deref().is_none_or(str::is_empty)
-                {
+                let series_id_blank = series_id.as_deref().is_none_or(|s| s.trim().is_empty());
+                let title_blank = title_pattern.as_deref().is_none_or(|s| s.trim().is_empty());
+                if series_id_blank && title_blank {
                     return Err("recording_rule_invalid_match");
                 }
                 Ok(())

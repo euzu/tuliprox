@@ -327,6 +327,11 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                             programme.is_new = true;
                         }
                     }
+                    EPG_TAG_PREVIOUSLY_SHOWN => {
+                        if let Some(programme) = &mut current_programme {
+                            programme.is_new = false;
+                        }
+                    }
                     _ => {}
                 }
             }

@@ -122,11 +122,12 @@ fn parse_range(header_value: &str, total: u64) -> Option<RangeSpec> {
     let start = parts.next()?.trim();
     let end = parts.next()?.trim();
     if start.is_empty() {
-        // Suffix: `bytes=-N`
+        // Suffix: `bytes=-N`. An oversized N (n > total) is allowed here
+        // and clamped to `total` inside `RangeSpec::resolve` so the
+        // client receives the full representation rather than a hard
+        // error. Zero is handled in `resolve` so that the parser
+        // remains a structural check only.
         let n: u64 = end.parse().ok()?;
-        if n > total {
-            return None;
-        }
         Some(RangeSpec::Suffix(n))
     } else {
         let s: u64 = start.parse().ok()?;
@@ -174,13 +175,14 @@ fn access_error_to_response(err: &CatalogAccessError) -> Response {
 
 /// Find the recording, authorize the open, and resolve the on-disk
 /// path. Every step is a security boundary; no step logs the path.
-fn resolve_for_open(
+async fn resolve_for_open(
     app_state: &AppState,
     claims: &Claims,
     uuid: &str,
 ) -> Result<ResolvedMedia, Box<Response>> {
     let queue: &DownloadQueue = &app_state.downloads;
     let recording = recording_catalog_access::lookup_recording(queue, uuid)
+        .await
         .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::NotFound)))?;
     let meta = recording
         .recording
@@ -206,6 +208,7 @@ fn resolve_for_open(
         Path::new(relative),
         true, // existence/type is re-checked below with no_follow_regular_file
     )
+    .await
     .map_err(|e| Box::new(access_error_to_response(&e)))?;
     let config = app_state.app_config.config.load();
     let recording_root = config
@@ -240,6 +243,7 @@ fn resolve_for_open(
     // no directory) — revalidate the relative path and file type at
     // open time.
     let file_meta = no_follow_regular_file(&abs_path)
+        .await
         .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::NotFound)))?;
     Ok(ResolvedMedia {
         abs_path,
@@ -255,7 +259,7 @@ pub async fn playback_recording(
     AxumPath(uuid): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
-    match resolve_for_open(&app_state, &claims.0, &uuid) {
+    match resolve_for_open(&app_state, &claims.0, &uuid).await {
         Ok(resolved) => serve_range(&app_state, &resolved, &headers, false).await,
         Err(response) => *response,
     }
@@ -269,7 +273,7 @@ pub async fn download_recording(
     AxumPath(uuid): AxumPath<String>,
     headers: HeaderMap,
 ) -> Response {
-    match resolve_for_open(&app_state, &claims.0, &uuid) {
+    match resolve_for_open(&app_state, &claims.0, &uuid).await {
         Ok(resolved) => serve_range(&app_state, &resolved, &headers, true).await,
         Err(response) => *response,
     }
@@ -338,7 +342,7 @@ async fn serve_range(
         };
         // Race rule: re-validate the file is still a regular
         // file after the policy gate approved the open.
-        if no_follow_regular_file(&resolved.abs_path).is_none() {
+        if no_follow_regular_file(&resolved.abs_path).await.is_none() {
             return access_error_to_response(&CatalogAccessError::NotFound);
         }
         let mut seeked = file;
@@ -356,14 +360,18 @@ async fn serve_range(
         build_response(StatusCode::PARTIAL_CONTENT, hdrs, Body::from_stream(stream))
     } else {
         // No Range header → full body. The file was already
-        // re-validated at open time in `resolve_for_open`.
+        // re-validated at open time in `resolve_for_open`. The byte
+        // limit mirrors the range path: it caps the stream at the
+        // advertised Content-Length so a concurrent append or symlink
+        // swap cannot overshoot the response.
         let Ok(file) = tokio::fs::File::open(&resolved.abs_path).await else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        if no_follow_regular_file(&resolved.abs_path).is_none() {
+        if no_follow_regular_file(&resolved.abs_path).await.is_none() {
             return access_error_to_response(&CatalogAccessError::NotFound);
         }
-        let stream = ReaderStream::new(file);
+        let limited = file.take(total);
+        let stream = ReaderStream::new(limited);
         let mut hdrs = base_headers.clone();
         hdrs.push((header::CONTENT_LENGTH, total.to_string()));
         build_response(StatusCode::OK, hdrs, Body::from_stream(stream))

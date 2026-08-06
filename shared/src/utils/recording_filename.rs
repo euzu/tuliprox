@@ -72,11 +72,18 @@ impl RecordingFilenameContext {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecordingFilenameError {
     Empty,
-    TooLong { bytes: usize },
+    TooLong {
+        bytes: usize,
+    },
     UnknownPlaceholder(String),
     UnmatchedOpenBrace,
     UnmatchedCloseBrace,
     NoPlaceholder,
+    /// Template contains a literal path separator (`/` or `\`). Path
+    /// separators must never reach the rendered stem — they would
+    /// escape the recording directory or collide with the partial-file
+    /// suffix machinery.
+    PathSeparator(char),
     TimeOutOfRange(String),
 }
 
@@ -93,6 +100,9 @@ impl fmt::Display for RecordingFilenameError {
             Self::UnmatchedOpenBrace => f.write_str("recording filename template has an unmatched '{'"),
             Self::UnmatchedCloseBrace => f.write_str("recording filename template has an unmatched '}'"),
             Self::NoPlaceholder => f.write_str("recording filename template must contain at least one placeholder"),
+            Self::PathSeparator(sep) => {
+                write!(f, "recording filename template contains path separator '{sep}'")
+            }
             Self::TimeOutOfRange(what) => {
                 write!(f, "recording timestamp {what} is out of range for the configured timezone")
             }
@@ -131,6 +141,12 @@ pub fn validate_recording_template(template: &str) -> Result<(), RecordingFilena
             }
         } else if bytes[i] == b'}' {
             return Err(RecordingFilenameError::UnmatchedCloseBrace);
+        } else if bytes[i] == b'/' || bytes[i] == b'\\' {
+            // Reject literal path separators. Sanitizing instead would
+            // collapse templates that the operator intended to be
+            // separate (e.g. `{channel}/{program_title}`) into a single
+            // filename component; failing closed is the safer default.
+            return Err(RecordingFilenameError::PathSeparator(bytes[i] as char));
         } else {
             i += 1;
         }

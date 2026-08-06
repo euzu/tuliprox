@@ -170,7 +170,7 @@ pub fn authorize_catalog_entry(
 /// Authorize a file-open (playback, range, download) against a
 /// queue-resident task. Re-validates the path AND the `Deleting`
 /// state to close the deletion/playback race.
-pub fn authorize_open(
+pub async fn authorize_open(
     queue: &DownloadQueue,
     claims: &Claims,
     subject_id: &UserId,
@@ -183,6 +183,7 @@ pub fn authorize_open(
         return Err(CatalogAccessError::MissingPermission);
     }
     let recording = lookup_recording(queue, uuid)
+        .await
         .ok_or(CatalogAccessError::NotFound)?;
     let meta = recording
         .recording
@@ -237,33 +238,46 @@ fn recording_meta_stub(
     RecordingMetadata::new(owner, visibility, shared::model::recording::RecordingSource::new("", "", ""), 0, 0, 0, 0)
 }
 
-/// Look up a recording task by uuid. Returns `None` if not found or
-/// if any of the queue's try-locks fail.
-pub fn lookup_recording(
+/// Look up a recording task by uuid. Awaits each guard in turn so
+/// callers do not silently see `None` under transient lock contention.
+pub async fn lookup_recording(
     queue: &DownloadQueue,
     uuid: &str,
 ) -> Option<crate::api::model::FileDownload> {
-    if let Ok(q) = queue.queue.try_lock() {
-        if let Some(t) = q.iter().find(|d| d.uuid == uuid) {
+    if let Some(t) = queue
+        .queue
+        .lock()
+        .await
+        .iter()
+        .find(|d| d.uuid == uuid)
+        .cloned()
+    {
+        return Some(t);
+    }
+    if let Some(t) = queue
+        .scheduled
+        .read()
+        .await
+        .iter()
+        .find(|d| d.uuid == uuid)
+        .cloned()
+    {
+        return Some(t);
+    }
+    if let Some(t) = queue.active.read().await.as_ref() {
+        if t.uuid == uuid {
             return Some(t.clone());
         }
     }
-    if let Ok(s) = queue.scheduled.try_read() {
-        if let Some(t) = s.iter().find(|d| d.uuid == uuid) {
-            return Some(t.clone());
-        }
-    }
-    if let Ok(a) = queue.active.try_read() {
-        if let Some(t) = a.as_ref() {
-            if t.uuid == uuid {
-                return Some(t.clone());
-            }
-        }
-    }
-    if let Ok(f) = queue.finished.try_read() {
-        if let Some(t) = f.iter().find(|d| d.uuid == uuid) {
-            return Some(t.clone());
-        }
+    if let Some(t) = queue
+        .finished
+        .read()
+        .await
+        .iter()
+        .find(|d| d.uuid == uuid)
+        .cloned()
+    {
+        return Some(t);
     }
     None
 }

@@ -345,12 +345,35 @@ pub fn RecordingForm(props: &RecordingFormProps) -> Html {
         use_effect_with(
             (*pre_state, *post_state, *shared_state, *start_state, *duration_minutes_state),
             move |(pre, post, shared, start, duration_minutes)| {
+                let emit_empty = || {
+                    // Sentinel request: `program_start == 0 && program_end == 0`
+                    // signals "no valid submission yet" so the parent
+                    // can disable the action button without falling
+                    // back to the previous good request.
+                    on_submit.emit(CreateRecordingTaskRequest {
+                        source: prefill.source.clone(),
+                        program_title: prefill.program_title.clone(),
+                        program_start: 0,
+                        program_end: 0,
+                        pre_roll_secs: 0,
+                        post_roll_secs: 0,
+                        visibility: if *shared { "shared".to_string() } else { "private".to_string() },
+                        channel_id: None,
+                        channel_name: None,
+                        epg: None,
+                    });
+                };
                 if *duration_minutes < 1 {
+                    emit_empty();
                     return;
                 }
-                if validate_padding(*pre, *post, &prefill.padding).is_ok() {
-                    let request = build_request(&prefill, *pre, *post, *shared, Some(*start), Some(*duration_minutes));
-                    on_submit.emit(request);
+                match validate_padding(*pre, *post, &prefill.padding) {
+                    Ok(()) => {
+                        let request =
+                            build_request(&prefill, *pre, *post, *shared, Some(*start), Some(*duration_minutes));
+                        on_submit.emit(request);
+                    }
+                    Err(_) => emit_empty(),
                 }
             },
         );

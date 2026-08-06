@@ -85,7 +85,7 @@ pub fn would_exceed(
     limits: &QuotaLimits,
 ) -> AdmissionOutcome {
     let Some(limit) = limit_for_pool(pool, limits) else {
-        return AdmissionOutcome::Unlimited { used_after: used + delta };
+        return AdmissionOutcome::Unlimited { used_after: used.saturating_add(delta) };
     };
     let would_be = used.saturating_add(delta);
     if would_be > limit {

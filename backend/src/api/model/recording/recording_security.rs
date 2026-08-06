@@ -100,16 +100,19 @@ pub fn revalidate_after_measurement(
 /// claims. The function rejects traversal sequences (`..`,
 /// absolute paths, NULs).
 pub fn validate_relative_path_for_open(relative_path: &str) -> Result<(), RecordingErrorCode> {
-    if relative_path.is_empty() {
+    use std::path::{Component, Path};
+    if relative_path.is_empty() || relative_path.contains('\0') {
         return Err(RecordingErrorCode::UnsafePath);
     }
-    if relative_path.contains("..") {
+    let path = Path::new(relative_path);
+    if path.is_absolute() {
         return Err(RecordingErrorCode::UnsafePath);
     }
-    if relative_path.starts_with('/') {
-        return Err(RecordingErrorCode::UnsafePath);
-    }
-    if relative_path.contains('\0') {
+    // Only `Component::Normal` segments are accepted — `..` and `.` and any
+    // root/prefix components are rejected. Names like `ep..1` are valid
+    // because the dot is part of the segment, not a parent-dir component.
+    let components: Vec<_> = path.components().collect();
+    if components.is_empty() || !components.iter().all(|c| matches!(c, Component::Normal(_))) {
         return Err(RecordingErrorCode::UnsafePath);
     }
     Ok(())

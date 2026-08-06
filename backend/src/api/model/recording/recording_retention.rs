@@ -39,10 +39,40 @@ pub enum RetentionOwner {
 /// Stable channel key. The stable channel ID is preferred; the
 /// normalized channel name is the fallback. A `None` stable id
 /// falls back to the normalized name.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Equality and hashing use only the discriminant field that
+/// uniquely identifies the channel: when `stable` is `Some`, two
+/// keys with the same id collapse regardless of `name_fallback`
+/// variations (so a rename or republish under a different display
+/// name still groups together). When `stable` is `None`,
+/// `name_fallback` is the discriminator.
+#[derive(Debug, Clone)]
 pub struct ChannelKey {
     pub stable: Option<String>,
     pub name_fallback: String,
+}
+
+impl PartialEq for ChannelKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.stable, &other.stable) {
+            (Some(a), Some(b)) => a == b,
+            _ => self.stable.is_none() && other.stable.is_none() && self.name_fallback == other.name_fallback,
+        }
+    }
+}
+
+impl Eq for ChannelKey {}
+
+impl std::hash::Hash for ChannelKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        if let Some(s) = &self.stable {
+            std::hash::Hash::hash(&1u8, state);
+            std::hash::Hash::hash(s, state);
+        } else {
+            std::hash::Hash::hash(&0u8, state);
+            std::hash::Hash::hash(&self.name_fallback, state);
+        }
+    }
 }
 
 impl ChannelKey {

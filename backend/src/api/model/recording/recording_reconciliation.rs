@@ -134,15 +134,23 @@ pub fn reconcile(
     }
 
     // Materialized task without Scheduled tombstone:
-    // add the missing Scheduled tombstone.
+    // add the missing Scheduled tombstone. When the task is already
+    // terminal and the tombstone is still Scheduled, the canonical
+    // UpdateTombstone is emitted here (rule 4).
     for task in tasks {
         let Some(rule_id) = task.rule_id.as_deref() else { continue };
         let Some(key) = task.occurrence_key.as_deref() else { continue };
         let entry = tombs.get(&(rule_id.to_string(), key.to_string()));
         if let Some(t) = entry {
             if matches!(t.kind, TombstoneKind::Scheduled) {
-                // Already in sync. The task's terminal state may
-                // require an UpdateTombstone (rule 4 below).
+                if task.terminal {
+                    actions.push(ReconcileAction::UpdateTombstone {
+                        rule_id: rule_id.to_string(),
+                        occurrence_key: key.to_string(),
+                        new_kind: TombstoneKind::Completed,
+                    });
+                }
+                // Already in sync (or now updated); nothing more to do.
                 continue;
             }
             // The tombstone is terminal; the task still exists. If
@@ -151,27 +159,12 @@ pub fn reconcile(
             // update path.
             if task.active {
                 actions.push(ReconcileAction::ConflictingIntent { uuid: task.uuid.clone(), intent: t.kind });
-                continue;
             }
         } else {
             actions.push(ReconcileAction::AddScheduledTombstone {
                 rule_id: rule_id.to_string(),
                 occurrence_key: key.to_string(),
             });
-        }
-
-        // Terminal task with Scheduled tombstone: update tombstone
-        // to Completed.
-        if task.terminal {
-            if let Some(t) = entry {
-                if matches!(t.kind, TombstoneKind::Scheduled) {
-                    actions.push(ReconcileAction::UpdateTombstone {
-                        rule_id: rule_id.to_string(),
-                        occurrence_key: key.to_string(),
-                        new_kind: TombstoneKind::Completed,
-                    });
-                }
-            }
         }
     }
 
@@ -215,16 +208,14 @@ pub fn reconcile(
             continue;
         };
         match t.kind {
-            TombstoneKind::Scheduled => {
-                // Task is present and tombstone is Scheduled —
-                // covered by the loop above.
-                if task.terminal {
-                    actions.push(ReconcileAction::UpdateTombstone {
-                        rule_id: t.rule_id.clone(),
-                        occurrence_key: t.occurrence_key.clone(),
-                        new_kind: TombstoneKind::Completed,
-                    });
-                }
+            TombstoneKind::Scheduled | TombstoneKind::Completed => {
+                // Scheduled: already covered by the first loop — when a task
+                // with a Scheduled tombstone is seen as terminal, an
+                // UpdateTombstone is pushed there. Doing it again here
+                // would emit a duplicate action for the same
+                // (rule_id, occurrence_key).
+                // Completed: suppression is authoritative; the task being
+                // present is fine — it just must not be re-created.
             }
             TombstoneKind::Cancelled => {
                 if task.active {
@@ -239,11 +230,6 @@ pub fn reconcile(
                     // intent.
                     actions.push(ReconcileAction::Finalize { uuid: task.uuid.clone() });
                 }
-            }
-            TombstoneKind::Completed => {
-                // Suppression is authoritative; the task being
-                // present is fine — it just must not be re-created.
-                // No action.
             }
         }
     }

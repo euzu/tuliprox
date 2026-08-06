@@ -776,38 +776,71 @@ async fn mark_active_recording_notification(
     active: &RwLock<Option<FileDownload>>,
     event: LifecycleEvent,
     failure_reason: Option<String>,
-) -> Option<MessageContent> {
+) -> RecordingNotificationPlan {
     let mut active = active.write().await;
-    mark_recording_notification(active.as_mut()?, event, failure_reason)
+    match active.as_mut() {
+        Some(fd) => mark_recording_notification(fd, event, failure_reason),
+        None => RecordingNotificationPlan::empty(),
+    }
 }
 
 fn mark_recording_notification(
     download: &mut FileDownload,
     event: LifecycleEvent,
     failure_reason: Option<String>,
-) -> Option<MessageContent> {
-    let meta = download.recording.as_mut()?;
+) -> RecordingNotificationPlan {
+    let Some(meta) = download.recording.as_mut() else {
+        return RecordingNotificationPlan::empty();
+    };
     let is_admin_owner = match &meta.owner {
         shared::model::recording::RecordingOwner::LegacyAdmin => true,
         shared::model::recording::RecordingOwner::User(owner) => owner.is_builtin_admin(),
     };
     match decide(meta, event, chrono::Utc::now().timestamp(), is_admin_owner, failure_reason) {
         DispatchDecision::PersistAndDeliver { payload, kind, attempted_at } => {
-            meta.notification_markers.push(build_marker(kind, attempted_at));
-            Some(MessageContent::RecordingLifecycle(message_for(event, &payload)))
+            meta.notification_markers.push(build_marker(kind.clone(), attempted_at));
+            RecordingNotificationPlan {
+                message: Some(MessageContent::RecordingLifecycle(message_for(event, &payload))),
+                marker_kind: Some(kind),
+            }
         }
-        DispatchDecision::AlreadyDelivered { .. } | DispatchDecision::Suppressed { .. } => None,
+        DispatchDecision::AlreadyDelivered { .. } | DispatchDecision::Suppressed { .. } => RecordingNotificationPlan::empty(),
+    }
+}
+
+/// Result of `mark_recording_notification`. `marker_kind` is set when a
+/// marker was added to the in-memory recording; the caller uses it to roll
+/// the marker back if the subsequent persist fails.
+struct RecordingNotificationPlan {
+    message: Option<MessageContent>,
+    marker_kind: Option<shared::model::recording::NotificationMarkerKind>,
+}
+
+impl RecordingNotificationPlan {
+    fn empty() -> Self {
+        Self { message: None, marker_kind: None }
+    }
+}
+
+/// Remove the most recent marker of the given kind from a recording.
+/// Best-effort: no-op when there is no recording metadata or no matching
+/// marker.
+fn rollback_last_recording_marker(fd: &mut FileDownload, kind: shared::model::recording::NotificationMarkerKind) {
+    if let Some(meta) = fd.recording.as_mut() {
+        if let Some(idx) = meta.notification_markers.iter().rposition(|m| m.kind == kind) {
+            meta.notification_markers.remove(idx);
+        }
     }
 }
 
 fn spawn_recording_notification_after_persist(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
-    message: Option<MessageContent>,
+    plan: RecordingNotificationPlan,
     persist_result: &std::io::Result<()>,
 ) {
     if persist_result.is_ok() {
-        if let Some(message) = message {
+        if let Some(message) = plan.message {
             let app_config = Arc::clone(app_config);
             let client = client.clone();
             tokio::spawn(async move {
@@ -815,6 +848,10 @@ fn spawn_recording_notification_after_persist(
             });
         }
     }
+    // If persist failed, the caller is responsible for rolling the marker
+    // back from the in-memory state. The marker is in `plan.marker_kind` and
+    // the relevant `FileDownload` is the most recently pushed entry in
+    // `dq.finished`.
 }
 
 async fn requeue_active_download_for_retry(download_queue: &DownloadQueue) {
@@ -1022,14 +1059,21 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 }
                             };
 
-                            let start_notification = mark_active_recording_notification(
+                            let mut start_notification = mark_active_recording_notification(
                                 &dq.active,
                                 LifecycleEvent::Started,
                                 None,
                             )
                             .await;
-                            if start_notification.is_some() {
+                            if start_notification.message.is_some() {
                                 let start_persist_result = dq.persist_to_disk().await;
+                                if start_persist_result.is_err() {
+                                    if let Some(kind) = start_notification.marker_kind.take() {
+                                        if let Some(fd) = dq.active.write().await.as_mut() {
+                                            rollback_last_recording_marker(fd, kind);
+                                        }
+                                    }
+                                }
                                 spawn_recording_notification_after_persist(
                                     &app_config,
                                     &client,
@@ -1099,7 +1143,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                             {
                                 DownloadExecutionResult::Completed => {
                                     connection_manager.release_provider_handle(provider_handle).await;
-                                    let mut notification = None;
+                                    let mut notification = RecordingNotificationPlan::empty();
                                     if let Some(fd) = &mut *dq.active.write().await {
                                         let measured_bytes = tokio::fs::metadata(&fd.file_path).await.map_or(fd.size, |metadata| metadata.len());
                                         fd.finished = true;
@@ -1116,6 +1160,14 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         dq.finished.write().await.push(fd.clone());
                                     }
                                     let persist_result = dq.persist_to_disk().await;
+                                    if persist_result.is_err() {
+                                        if let Some(kind) = notification.marker_kind.take() {
+                                            let mut finished = dq.finished.write().await;
+                                            if let Some(last) = finished.last_mut() {
+                                                rollback_last_recording_marker(last, kind);
+                                            }
+                                        }
+                                    }
                                     spawn_recording_notification_after_persist(
                                         &app_config,
                                         &client,
@@ -1196,7 +1248,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         }
                                     };
                                     let Some((retry_delay_secs, _next_retry_at, retry_attempts)) = retry_plan else {
-                                        let mut notification = None;
+                                        let mut notification = RecordingNotificationPlan::empty();
                                         if let Some(fd) = &mut *dq.active.write().await {
                                             fd.finished = true;
                                             fd.paused = false;
@@ -1211,6 +1263,14 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                             dq.finished.write().await.push(fd.clone());
                                         }
                                         let persist_result = dq.persist_to_disk().await;
+                                        if persist_result.is_err() {
+                                            if let Some(kind) = notification.marker_kind.take() {
+                                                let mut finished = dq.finished.write().await;
+                                                if let Some(last) = finished.last_mut() {
+                                                    rollback_last_recording_marker(last, kind);
+                                                }
+                                            }
+                                        }
                                         spawn_recording_notification_after_persist(
                                             &app_config,
                                             &client,
@@ -1301,7 +1361,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 DownloadExecutionResult::Failed(err) => {
                                     connection_manager.release_provider_handle(provider_handle).await;
                                     warn!("Download failed permanently: {err}");
-                                    let mut notification = None;
+                                    let mut notification = RecordingNotificationPlan::empty();
                                     if let Some(fd) = &mut *dq.active.write().await {
                                         fd.finished = true;
                                         fd.paused = false;
@@ -1312,6 +1372,14 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         dq.finished.write().await.push(fd.clone());
                                     }
                                     let persist_result = dq.persist_to_disk().await;
+                                    if persist_result.is_err() {
+                                        if let Some(kind) = notification.marker_kind.take() {
+                                            let mut finished = dq.finished.write().await;
+                                            if let Some(last) = finished.last_mut() {
+                                                rollback_last_recording_marker(last, kind);
+                                            }
+                                        }
+                                    }
                                     spawn_recording_notification_after_persist(
                                         &app_config,
                                         &client,
@@ -1762,7 +1830,7 @@ mod tests {
     use super::{
         active_download_snapshot, mark_recording_notification, parse_content_range_total, pause_download,
         preemption_reason_for, recording_deadline_reached, requeue_active_download_for_capacity_wait,
-        requeue_active_download_for_retry, resume_download,
+        requeue_active_download_for_retry, resume_download, rollback_last_recording_marker,
         retryable_transport_error_message, set_active_download_state, should_exit_worker_after_preempt, DownloadActionRequest,
         DOWNLOAD_PREEMPTED_REASON, RECORDING_PREEMPTED_REASON,
     };
@@ -1838,8 +1906,8 @@ mod tests {
         let first = mark_recording_notification(&mut download, LifecycleEvent::Completed, None);
         let duplicate = mark_recording_notification(&mut download, LifecycleEvent::Completed, None);
 
-        assert!(matches!(first, Some(MessageContent::RecordingLifecycle(_))));
-        assert!(duplicate.is_none());
+        assert!(matches!(first.message, Some(MessageContent::RecordingLifecycle(_))));
+        assert!(duplicate.message.is_none());
         assert_eq!(
             download
                 .recording
@@ -1860,7 +1928,7 @@ mod tests {
 
         let message = mark_recording_notification(&mut download, LifecycleEvent::Completed, None);
 
-        assert!(message.is_none());
+        assert!(message.message.is_none());
         assert_eq!(
             download
                 .recording
@@ -1868,6 +1936,30 @@ mod tests {
                 .map_or(0, |metadata| metadata.notification_markers.len()),
             0
         );
+    }
+
+    #[test]
+    fn rollback_last_recording_marker_removes_most_recent_matching_kind() {
+        let mut download = make_download(DownloadKind::Recording, DownloadState::Completed, Some(1_000), Some(60));
+        attach_recording(&mut download, RecordingOwner::LegacyAdmin, RecordingVisibility::Shared);
+
+        // Two distinct marker kinds end up in the same metadata after a
+        // successful Completed followed by a Failed on the same task — this
+        // mirrors what would happen in production across two persist rounds.
+        let first = mark_recording_notification(&mut download, LifecycleEvent::Completed, None);
+        let second = mark_recording_notification(&mut download, LifecycleEvent::Failed, Some("ffmpeg exited".to_string()));
+        assert!(first.marker_kind.is_some());
+        assert!(second.marker_kind.is_some());
+
+        let kind = second.marker_kind.unwrap();
+        rollback_last_recording_marker(&mut download, kind);
+
+        let markers = &download.recording.as_ref().unwrap().notification_markers;
+        assert_eq!(markers.len(), 1, "only the Completed marker should remain");
+        assert!(matches!(
+            markers[0].kind,
+            shared::model::recording::NotificationMarkerKind::Completed
+        ));
     }
 
     #[test]
