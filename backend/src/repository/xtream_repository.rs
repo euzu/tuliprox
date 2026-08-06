@@ -1346,7 +1346,7 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
 }
 
 fn publish_staged_file_same_directory(staging: &Path, published: &Path) -> io::Result<()> {
-    use crate::repository::bplustree::common::{parent_or_dot, require_same_parent_directory};
+    use crate::repository::bplustree::common::require_same_parent_directory;
     require_same_parent_directory(staging, published)?;
     let staging_path = tempfile::TempPath::try_from_path(staging).map_err(|error| {
         io::Error::new(
@@ -1354,8 +1354,23 @@ fn publish_staged_file_same_directory(staging: &Path, published: &Path) -> io::R
             format!("failed to prepare staging file {} for publication: {error}", staging.display()),
         )
     })?;
+    publish_staged_file_platform(staging_path, published)
+}
+
+#[cfg(not(windows))]
+fn publish_staged_file_platform(staging_path: tempfile::TempPath, published: &Path) -> io::Result<()> {
+    publish_staged_file_with_parent_sync(staging_path, published, sync_published_file_parent)
+}
+
+#[cfg(not(windows))]
+fn publish_staged_file_with_parent_sync(
+    staging_path: tempfile::TempPath,
+    published: &Path,
+    sync_parent: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    use crate::repository::bplustree::common::parent_or_dot;
     staging_path.persist(published).map_err(io::Error::from)?;
-    sync_published_file_parent(published).map_err(|error| {
+    sync_parent(published).map_err(|error| {
         io::Error::new(
             error.kind(),
             format!(
@@ -1367,18 +1382,69 @@ fn publish_staged_file_same_directory(staging: &Path, published: &Path) -> io::R
     })
 }
 
+#[cfg(windows)]
+fn publish_staged_file_platform(mut staging_path: tempfile::TempPath, published: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    fn encode_path(path: &Path) -> io::Result<Vec<u16>> {
+        let mut encoded = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if encoded.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Windows path contains an embedded NUL: {}", path.display()),
+            ));
+        }
+        encoded.push(0);
+        Ok(encoded)
+    }
+
+    let staging_encoded = encode_path(staging_path.as_ref())?;
+    let published_encoded = encode_path(published)?;
+
+    // SAFETY: both buffers are live, immutable, and NUL-terminated for the
+    // duration of the call. The same-directory check above ensures that the
+    // operation cannot degrade into a cross-volume copy.
+    let result = unsafe {
+        MoveFileExW(
+            staging_encoded.as_ptr(),
+            published_encoded.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if result == 0 {
+        let error = io::Error::last_os_error();
+        return Err(io::Error::new(
+            error.kind(),
+            format!(
+                "failed to atomically publish staging file {} as {} with a Windows write-through rename: {error}",
+                staging_path.display(),
+                published.display()
+            ),
+        ));
+    }
+
+    // MoveFileExW consumed the source path. Prevent TempPath from issuing a
+    // redundant delete for a path that no longer exists.
+    staging_path.disable_cleanup(true);
+    Ok(())
+}
+
 #[cfg(unix)]
 fn sync_published_file_parent(path: &Path) -> io::Result<()> {
     File::open(crate::repository::bplustree::common::parent_or_dot(path))?.sync_all()
 }
 
-/// Windows (NTFS) and other non-Unix targets open directories as files for
-/// `sync_all`, just as Unix does. The durability barrier is required after
-/// every rename so a power loss cannot leave the directory entry pointing at
-/// the pre-rename file.
-#[cfg(not(unix))]
-fn sync_published_file_parent(path: &Path) -> io::Result<()> {
-    File::open(crate::repository::bplustree::common::parent_or_dot(path))?.sync_all()
+/// There is no supported directory durability barrier for other targets.
+/// Callers report this only after the atomic rename has completed.
+#[cfg(all(not(unix), not(windows)))]
+fn sync_published_file_parent(_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "parent-directory synchronization is unsupported on this platform",
+    ))
 }
 
 /// Owns the staging category file plus its `flock`, so the lock is released
@@ -2539,6 +2605,61 @@ mod tests {
 
         publish_staged_file_same_directory(&staging, &published).expect("category publish should succeed");
 
+        assert_eq!(fs::read(&published).expect("published categories should be readable"), b"new");
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn category_publish_creates_missing_same_directory_file() {
+        let dir = tempdir().expect("temp dir should be created");
+        let published = dir.path().join("cat_live.json");
+        let staging = dir.path().join("cat_live.refresh-fixed.json");
+        fs::write(&staging, b"new").expect("staging fixture should be written");
+
+        publish_staged_file_same_directory(&staging, &published).expect("category publish should succeed");
+
+        assert_eq!(fs::read(&published).expect("published categories should be readable"), b"new");
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn category_publish_rejects_different_parent_before_replace() {
+        let dir = tempdir().expect("temp dir should be created");
+        let staging_dir = dir.path().join("staging");
+        let published_dir = dir.path().join("published");
+        fs::create_dir_all(&staging_dir).expect("staging directory should be created");
+        fs::create_dir_all(&published_dir).expect("published directory should be created");
+        let staging = staging_dir.join("cat_live.refresh-fixed.json");
+        let published = published_dir.join("cat_live.json");
+        fs::write(&staging, b"new").expect("staging fixture should be written");
+        fs::write(&published, b"old").expect("published fixture should be written");
+
+        let error = publish_staged_file_same_directory(&staging, &published)
+            .expect_err("cross-directory category publication should fail");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(fs::read(&staging).expect("staging fixture should remain"), b"new");
+        assert_eq!(fs::read(&published).expect("published fixture should remain"), b"old");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn category_publish_reports_post_rename_barrier_failure_truthfully() {
+        let dir = tempdir().expect("temp dir should be created");
+        let published = dir.path().join("cat_live.json");
+        let staging = dir.path().join("cat_live.refresh-fixed.json");
+        fs::write(&published, b"old").expect("published fixture should be written");
+        fs::write(&staging, b"new").expect("staging fixture should be written");
+        let staging_path = tempfile::TempPath::try_from_path(&staging)
+            .expect("staging fixture should become an owned temporary path");
+
+        let error = super::publish_staged_file_with_parent_sync(staging_path, &published, |_| {
+            Err(io::Error::other("injected parent synchronization failure"))
+        })
+        .expect_err("post-rename synchronization failure should be reported");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("was published, but its parent directory"));
         assert_eq!(fs::read(&published).expect("published categories should be readable"), b"new");
         assert!(!staging.exists());
     }
