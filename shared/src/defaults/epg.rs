@@ -42,7 +42,9 @@ pub fn is_default_ics_event_description(value: &String) -> bool { value == DEFAU
 pub fn default_ics_dummy_title() -> String { DEFAULT_ICS_DUMMY_TITLE.to_string() }
 pub fn is_default_ics_dummy_title(value: &String) -> bool { value == DEFAULT_ICS_DUMMY_TITLE }
 
-pub const DEFAULT_EPG_NORMALIZE_REGEX: &str = r"[^a-zA-Z0-9\-]";
+/// Preserves `.`, `_`, and `-` so normalized names remain comparable with common XMLTV IDs.
+/// The former `[^a-zA-Z0-9\-]` pattern remains valid only as an explicit legacy configuration.
+pub const DEFAULT_EPG_NORMALIZE_REGEX: &str = r"[^a-zA-Z0-9._\-]";
 
 pub fn default_epg_normalize_regex() -> Option<String> { Some(DEFAULT_EPG_NORMALIZE_REGEX.to_string()) }
 pub fn is_default_epg_normalize_regex(v: &Option<String>) -> bool {
@@ -52,7 +54,10 @@ pub fn is_default_epg_normalize_regex(v: &Option<String>) -> bool {
     }
 }
 
-pub const DEFAULT_EPG_STRIP: &[&str] = &["3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw", "full hd"];
+pub const DEFAULT_EPG_STRIP: &[&str] = &[
+    "3840p", "2160p", "1080p", "720p", "576p", "uhd", "fhd", "full hd", "hd", "sd", "4k", "h265", "h264", "hevc",
+    "50fps", "60fps", "plus", "raw",
+];
 pub const DEFAULT_EPG_NAME_PREFIX_SEPARATOR: &[char] = &[':', '|', '-'];
 
 pub fn default_epg_strip() -> Option<Vec<String>> {
