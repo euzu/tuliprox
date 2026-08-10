@@ -1798,12 +1798,6 @@ impl ActiveUserManager {
         connection_data.streams.iter().any(|stream| stream.session_token.as_deref() == Some(session_token))
     }
 
-    fn session_has_active_stream(connection_data: &UserConnectionData, session_token: &str) -> bool {
-        connection_data
-            .streams
-            .iter()
-            .any(|stream| !stream.preserved && stream.session_token.as_deref() == Some(session_token))
-    }
 
     fn clear_session_counted_without_stream(connection_data: &mut UserConnectionData, session_token: &str) {
         if Self::session_has_stream(connection_data, session_token) {
@@ -1889,9 +1883,12 @@ impl ActiveUserManager {
             return self.check_connection_admission(username, connection_data);
         };
 
-        // Existing counted session or session with an active stream: entitled to its slot.
+        // Existing counted session or any stream row for this token (including soft-preserved
+        // HLS/Catchup between segments): entitled to its slot. #807 switched this to
+        // active-only stream checks, so every LiveHls segment gap returned Exhausted
+        // and kick-evicted/terminated the same session (retry storm since v3.3.79).
         if connection_data.sessions[session_index].lifecycle.is_counted()
-            || Self::session_has_active_stream(connection_data, session_token)
+            || Self::session_has_stream(connection_data, session_token)
         {
             return ConnectionAdmission {
                 permission: UserConnectionPermission::Allowed,
@@ -1899,22 +1896,14 @@ impl ActiveUserManager {
             };
         }
 
-        // Existing uncounted session without a stream: check for a preserved stream.
-        // Preserved streams hold no counted slot — `effective_counts_for_admission`
-        // virtually counts them so strategies still treat them as evictable. Return
-        // Exhausted (without committing a new slot) so the eviction path clears the
-        // preserved row before reactivation.
-        let has_preserved =
-            connection_data.streams.iter().any(|s| s.session_token.as_deref() == Some(session_token) && s.preserved);
-
+        // Uncounted session with no stream row: run normal admission.
+        // Same-token soft-preserve is handled above via `session_has_stream` (3.3.78 semantics).
+        // Do not return Exhausted for own preserved rows — that forced self-eviction on HLS gaps.
         let admission = self.check_connection_admission_with_counts(
             username,
             connection_data,
             connection_data.effective_counts_for_admission(Some(session_token)),
         );
-        if has_preserved {
-            return ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: admission.kind };
-        }
         if admission.permission == UserConnectionPermission::Allowed {
             let session = &mut connection_data.sessions[session_index];
             Self::update_session_admission(session, admission.permission, admission.kind);
@@ -8252,7 +8241,7 @@ mod tests {
             )
             .await;
 
-        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(admission.kind, Some(ConnectionKind::Normal));
         let connections = manager.connections.read().await;
         let connection_data = connections.by_key.get(&user.username).expect("user connection data");
@@ -8289,7 +8278,7 @@ mod tests {
                 session_token,
             )
             .await;
-        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         {
             let connections = manager.connections.read().await;
             let connection_data = connections.by_key.get(&user.username).expect("user connection data");
@@ -8344,7 +8333,7 @@ mod tests {
                 session_token,
             )
             .await;
-        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         {
             let connections = manager.connections.read().await;
             let connection_data = connections.by_key.get(&user.username).expect("user connection data");
@@ -8403,7 +8392,7 @@ mod tests {
                     session_token,
                 )
                 .await;
-            assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+            assert_eq!(admission.permission, UserConnectionPermission::Allowed);
 
             let counter_changed = manager
                 .release_session_streams_and_counted_reservation(&user.username, session_token)
@@ -8449,7 +8438,7 @@ mod tests {
                 session_token,
             )
             .await;
-        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(manager.active_users_and_connections().await, (0, 0));
 
         let connections = manager.connections.read().await;
