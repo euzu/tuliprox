@@ -570,7 +570,11 @@ impl SharedStreamState {
                     }
 
                     chunk = source_stream.next() => {
-                        idle.as_mut().reset(Instant::now() + idle_timeout);
+                        // Only successful chunks count as liveness; resetting on Err would let an
+                        // error-spinning source dodge the idle timeout forever
+                        if matches!(chunk, Some(Ok(_))) {
+                            idle.as_mut().reset(Instant::now() + idle_timeout);
+                        }
                         match chunk {
                             Some(Ok(data)) => {
                                 let chunk_len = data.len();
