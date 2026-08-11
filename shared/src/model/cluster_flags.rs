@@ -31,7 +31,7 @@ impl ClusterFlags {
 
     pub fn has_full_flags(&self) -> bool { self.is_all() }
 
-    fn from_items<I, S>(items: I) -> Result<Self, &'static str>
+    fn from_items<I, S>(items: I) -> Result<Self, String>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
@@ -43,7 +43,7 @@ impl ClusterFlags {
                 "live" => result.set(ClusterFlags::Live, true),
                 "vod" => result.set(ClusterFlags::Vod, true),
                 "series" => result.set(ClusterFlags::Series, true),
-                _ => return Err("Invalid flag {item}, allowed are live, vod, series"),
+                invalid => return Err(format!("Invalid flag {invalid}, allowed are live, vod, series")),
             }
         }
 
@@ -73,7 +73,7 @@ impl fmt::Display for ClusterFlags {
 }
 
 impl TryFrom<&str> for ClusterFlags {
-    type Error = &'static str;
+    type Error = String;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         let input = value.trim().trim_matches(|c| ['[', ']', '(', ')'].contains(&c));
@@ -86,7 +86,7 @@ impl TryFrom<&str> for ClusterFlags {
 }
 
 impl TryFrom<Vec<String>> for ClusterFlags {
-    type Error = &'static str;
+    type Error = String;
 
     fn try_from(value: Vec<String>) -> Result<Self, Self::Error> { ClusterFlags::from_items(value) }
 }
