@@ -17,6 +17,10 @@ pub struct SelectProps {
     pub options: Rc<Vec<DropDownOption>>,
     #[prop_or_default]
     pub multi_select: bool,
+    #[prop_or_default]
+    pub required: bool,
+    #[prop_or_default]
+    pub error: Option<String>,
 }
 
 #[component]
@@ -46,7 +50,13 @@ pub fn Select(props: &SelectProps) -> Html {
     };
 
     html! {
-        <div class={classes!("tp__select", props.class.clone())}>
+        <div class={classes!(
+            "tp__select",
+            props.required.then_some("tp__input--required"),
+            props.error.as_ref().map(|_| "tp__input--error"),
+            props.class.clone())}
+            aria-required={props.required.then(|| "true".to_string())}
+            aria-invalid={props.error.as_ref().map(|_| "true".to_string())}>
             <div class="tp__select-wrapper" onclick={handle_click_button}>
                 <div class="tp__select__selected">
                     {(*selected_options).clone()}
@@ -59,6 +69,9 @@ pub fn Select(props: &SelectProps) -> Html {
                      icon={props.icon.as_ref().map_or_else(|| "Popup".to_owned(), |i|i.to_string())}
                      on_select={props.on_select.clone()} />
             </div>
+            { props.error.as_ref().map_or_else(Html::default, |error| html! {
+                <span class="tp__input-error" role="alert">{ error.clone() }</span>
+            }) }
         </div>
     }
 }

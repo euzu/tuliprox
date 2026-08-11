@@ -42,6 +42,21 @@
     font-weight: bold;
     font-size: var(--font-size-norm);
   }
+
+  &--required label::after {
+    content: " *";
+    color: var(--error-color, #d9534f);
+  }
+
+  &--error .tp__input-wrapper {
+    border-color: var(--error-color, #d9534f);
+  }
+}
+
+.tp__input-error {
+  color: var(--error-color, #d9534f);
+  font-size: var(--font-size-norm);
+  padding-left: 2px;
 }
 
 textarea,
