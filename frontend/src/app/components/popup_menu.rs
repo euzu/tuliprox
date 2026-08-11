@@ -79,7 +79,8 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
             let handler = if *is_open {
                 let handler = Closure::wrap(Box::new(move |event: MouseEvent| {
                     if let Some(popup) = popup_ref.cast::<HtmlElement>() {
-                        if let Some(target) = event.target().and_then(|t| t.dyn_into::<HtmlElement>().ok()) {
+                        // Cast to Node so clicks on SVG elements outside the popup also close it
+                        if let Some(target) = event.target().and_then(|t| t.dyn_into::<web_sys::Node>().ok()) {
                             if !popup.contains(Some(&target)) {
                                 on_close.emit(());
                             }
