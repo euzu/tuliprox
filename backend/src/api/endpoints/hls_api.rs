@@ -7521,14 +7521,17 @@ async fn hls_api_stream(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
     let api_proxy_user = create_api_proxy_user(&app_state);
-    let (user, target) = if params.username == api_proxy_user.username && params.password == api_proxy_user.password {
+    let (user, target) = if params.username == api_proxy_user.username
+        && crate::auth::constant_time_eq(params.password.as_bytes(), api_proxy_user.password.as_bytes())
+    {
         let Some(target) = app_state.app_config.get_target_by_id(params.target_id) else {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         };
         (Arc::new(api_proxy_user), target)
     } else {
         let Some((user, target)) = app_state.app_config.get_target_for_user(&params.username, &params.password) else {
-            return axum::http::StatusCode::BAD_REQUEST.into_response();
+            // Credential failure is an auth error, not a malformed request
+            return app_state.app_config.get_auth_error_status().into_response();
         };
         if target.id != params.target_id {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
