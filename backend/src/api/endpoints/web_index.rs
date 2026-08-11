@@ -365,6 +365,9 @@ pub fn index_register_with_path(web_dir_path: &Path, web_ui_path: &str) -> axum:
                 if path.starts_with(&path_prefix) {
                     path = path[path_prefix.len()..].to_string();
                 }
+                if path.is_empty() {
+                    path = "/".to_string();
+                }
 
                 let mut builder = axum::http::Uri::builder();
                 if let Some(scheme) = req.uri().scheme() {
@@ -373,10 +376,22 @@ pub fn index_register_with_path(web_dir_path: &Path, web_ui_path: &str) -> axum:
                 if let Some(authority) = req.uri().authority() {
                     builder = builder.authority(authority.clone());
                 }
-                let new_uri = builder.path_and_query(path).build().unwrap();
-
-                let new_req =
-                    axum::http::Request::builder().method(req.method()).uri(new_uri).body(req.into_body()).unwrap();
+                // A malformed rewritten path must not panic the connection task; serve the original request instead
+                let new_req = match builder.path_and_query(path).build() {
+                    Ok(new_uri) => {
+                        match axum::http::Request::builder().method(req.method()).uri(new_uri).body(req.into_body()) {
+                            Ok(new_req) => new_req,
+                            Err(err) => {
+                                log::warn!("Failed to rebuild web ui fallback request: {err}");
+                                return serve_dir.call(axum::http::Request::new(axum::body::Body::empty()));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!("Failed to rebuild web ui fallback uri: {err}");
+                        return serve_dir.call(axum::http::Request::new(axum::body::Body::empty()));
+                    }
+                };
 
                 serve_dir.call(new_req)
             }
