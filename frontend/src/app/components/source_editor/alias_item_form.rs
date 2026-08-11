@@ -192,6 +192,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                     password,
                     providers: (!providers.is_empty()).then_some(providers.clone()),
                 };
+                let no_exp_date_msg = translate.t("MESSAGES.SOURCE_EDITOR.NO_EXPIRATION_DATE_RETURNED");
 
                 spawn_local(async move {
                     let current_snapshot = || {
@@ -210,7 +211,7 @@ pub fn AliasItemForm(props: &AliasItemFormProps) -> Html {
                                     if let Some(exp_date) = login_info.exp_date {
                                         form_state.dispatch(AliasFormAction::ExpDate(Some(exp_date)));
                                     } else {
-                                        services.toastr.warning("No expiration date returned by provider");
+                                        services.toastr.warning(no_exp_date_msg);
                                     }
                                 }
                             }
