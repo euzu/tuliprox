@@ -5,8 +5,8 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Arc;
 use chrono;
-use regex::Regex;
 use serde::Deserialize;
+use shared::model::{FieldFilter, SearchFieldKind};
 use shared::utils::Internable;
 use crate::model::{StreamHistoryRecord};
 use crate::repository::{
@@ -137,60 +137,32 @@ const STRING_FIELDS: &[&str] = &[
     "shared",
 ];
 
-enum FilterValue {
-    Exact(String),
-    Regex(Regex),
-    NumericExact(u64),
-}
-
 pub(crate) struct CompiledFilter {
-    fields: Vec<(String, FilterValue)>,
+    inner: FieldFilter,
 }
 
 impl CompiledFilter {
+    pub(crate) fn empty() -> Self { Self { inner: FieldFilter::default() } }
+
     pub(crate) fn compile(raw: &HashMap<String, String>) -> Result<Self, String> {
-        let mut fields = Vec::with_capacity(raw.len());
-        for (key, value) in raw {
-            if !STRING_FIELDS.contains(&key.as_str()) && !NUMERIC_FIELDS.contains(&key.as_str()) {
-                return Err(format!("Unknown filter field: '{key}'"));
-            }
-            let filter_value = if NUMERIC_FIELDS.contains(&key.as_str()) {
-                let n = value.parse::<u64>().map_err(|_| {
-                    format!("Filter '{key}' expects a numeric value, got '{value}'")
-                })?;
-                FilterValue::NumericExact(n)
-            } else if let Some(pattern) = value.strip_prefix('~') {
-                let re = Regex::new(pattern).map_err(|e| {
-                    format!("Invalid regex for filter '{key}': {e}")
-                })?;
-                FilterValue::Regex(re)
+        FieldFilter::compile(raw, |key| {
+            if NUMERIC_FIELDS.contains(&key) {
+                Some(SearchFieldKind::Numeric)
+            } else if STRING_FIELDS.contains(&key) {
+                Some(SearchFieldKind::Text)
             } else {
-                FilterValue::Exact(value.clone())
-            };
-            fields.push((key.clone(), filter_value));
-        }
-        Ok(Self { fields })
+                None
+            }
+        })
+        .map(|inner| Self { inner })
     }
 
     pub(crate) fn matches(&self, record: &StreamHistoryRecord) -> bool {
-        self.fields.iter().all(|(key, value)| {
-            match get_record_field(record, key) {
-                RecordFieldValue::String(Some(s)) => match value {
-                    FilterValue::Exact(v) => s.eq_ignore_ascii_case(v),
-                    FilterValue::Regex(re) => re.is_match(s),
-                    FilterValue::NumericExact(_) => false,
-                },
-                RecordFieldValue::ArcStr(Some(s)) => match value {
-                    FilterValue::Exact(v) => s.as_ref().eq_ignore_ascii_case(v),
-                    FilterValue::Regex(re) => re.is_match(s.as_ref()),
-                    FilterValue::NumericExact(_) => false,
-                },
-                RecordFieldValue::String(None) | RecordFieldValue::ArcStr(None) => false,
-                RecordFieldValue::U64(n) => match value {
-                    FilterValue::NumericExact(v) => n == *v,
-                    _ => false,
-                },
-            }
+        self.inner.matches(|key, value| match get_record_field(record, key) {
+            RecordFieldValue::String(Some(s)) => value.matches_text(s),
+            RecordFieldValue::ArcStr(Some(s)) => value.matches_text(s.as_ref()),
+            RecordFieldValue::String(None) | RecordFieldValue::ArcStr(None) => false,
+            RecordFieldValue::U64(n) => value.matches_numeric(n),
         })
     }
 }
@@ -453,7 +425,7 @@ async fn run_stream_history_viewer(input: &str) -> Result<(), String> {
     let time_range = resolve_time_range(&query)?;
     let filters = match query.filter.as_ref() {
         Some(raw) => CompiledFilter::compile(raw)?,
-        None => CompiledFilter { fields: Vec::new() },
+        None => CompiledFilter::empty(),
     };
 
     let dir = query.path.as_deref().unwrap_or("data/stream_history");
