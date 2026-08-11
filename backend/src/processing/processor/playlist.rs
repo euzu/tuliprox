@@ -1595,6 +1595,18 @@ async fn finalize_prepared_target(
         step.tick("playlist merge");
         log_memory_snapshot(format!("target '{}' after_playlist_merge", target.name).as_str());
 
+        if let Some(dedup_config) = target.options.as_ref().and_then(|options| options.deduplicate.as_ref()) {
+            let removed = crate::processing::processor::deduplicate::deduplicate_playlist(
+                dedup_config,
+                &mut flat_new_playlist,
+            );
+            if removed > 0 {
+                info!("Deduplicated {removed} channels for target {}", target.name);
+            }
+            step.tick("playlist dedup");
+            log_memory_snapshot(format!("target '{}' after_playlist_dedup", target.name).as_str());
+        }
+
         if sort_playlist(target, &mut flat_new_playlist) {
             step.tick("playlist sort");
             log_memory_snapshot(format!("target '{}' after_playlist_sort", target.name).as_str());

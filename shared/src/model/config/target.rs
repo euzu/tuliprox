@@ -59,6 +59,34 @@ impl EpgOutputOptions {
     pub const fn is_empty(&self) -> bool { !self.lowercase_ids && !self.lowercase_xmltv_display_names }
 }
 
+#[derive(Debug, Copy, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeduplicateMatchBy {
+    #[default]
+    Caption,
+    Name,
+    Title,
+}
+
+#[derive(Debug, Copy, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeduplicateKeep {
+    #[default]
+    BestQuality,
+    First,
+}
+
+/// Quality-aware duplicate removal: channels with the same normalized match
+/// value (quality tokens stripped) collapse to a single entry.
+#[derive(Debug, Copy, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeduplicateConfig {
+    #[serde(default)]
+    pub match_by: DeduplicateMatchBy,
+    #[serde(default)]
+    pub keep: DeduplicateKeep,
+}
+
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigTargetOptions {
@@ -72,6 +100,8 @@ pub struct ConfigTargetOptions {
     pub share_live_streams: ConfigTargetShareLiveStreams,
     #[serde(default, skip_serializing_if = "is_false")]
     pub remove_duplicates: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deduplicate: Option<DeduplicateConfig>,
     #[serde(default, skip_serializing_if = "EpgOutputOptions::is_empty")]
     pub epg_output: EpgOutputOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +113,7 @@ impl ConfigTargetOptions {
         !self.ignore_logo
             && self.share_live_streams.is_empty()
             && !self.remove_duplicates
+            && self.deduplicate.is_none()
             && self.epg_output.is_empty()
             && (self.force_redirect.is_none()
                 || self.force_redirect.is_some_and(|f| f.has_full_flags() || f.is_empty()))
