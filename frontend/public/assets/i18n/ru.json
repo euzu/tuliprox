@@ -1098,6 +1098,7 @@
     "LIVE_STREAM_WITHOUT_EXTENSION": "Без расширения",
     "DISABLE_HLS_STREAMING": "Принудительный MPEG-TS",
     "LOG": "Лог",
+    "LOADING": "Загрузка…",
     "LOGIN": "Вход",
     "LOGOUT": "Выход",
     "LOGO_OVERRIDE": "Замена логотипа",

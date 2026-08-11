@@ -44,8 +44,9 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
         connections: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.connections))]),
     });
 
+    let loading_label = translate.t("LABEL.LOADING");
     let (mem, cpu, net, disk) = status_ctx.system_info.as_ref().map_or_else(
-        || ("n/a".to_string(), "n/a".to_string(), "n/a".to_string(), "n/a".to_string()),
+        || (loading_label.clone(), loading_label.clone(), loading_label.clone(), loading_label.clone()),
         |system| {
             let disk = if system.disk_total_bytes > 0 {
                 format!(
@@ -93,7 +94,7 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
 
     let render_streams_embedded = || {
         let cache = status_ctx.status.as_ref().map_or_else(
-            || "n/a".to_string(),
+            || loading_label.clone(),
             |status| status.cache.as_ref().map_or_else(|| "n/a".to_string(), |c| c.clone()),
         );
 
@@ -171,7 +172,7 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
         };
 
         let (cache, users, connections) = status_ctx.status.as_ref().map_or_else(
-            || ("n/a".to_string(), "n/a".to_string(), "n/a".to_string()),
+            || (loading_label.clone(), loading_label.clone(), loading_label.clone()),
             |status| {
                 (
                     status.cache.as_ref().map_or_else(|| "n/a".to_string(), |c| c.clone()),

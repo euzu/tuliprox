@@ -1151,6 +1151,7 @@
     "LIVE_STREAM_WITHOUT_EXTENSION": "بدون امتداد",
     "DISABLE_HLS_STREAMING": "إجبار MPEG-TS",
     "LOG": "سجل",
+    "LOADING": "جارٍ التحميل…",
     "LOGIN": "تسجيل الدخول",
     "LOGOUT": "تسجيل الخروج",
     "LOGO_OVERRIDE": "تجاوز الشعار",

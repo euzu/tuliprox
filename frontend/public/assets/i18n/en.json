@@ -1156,6 +1156,7 @@
     "LIVE_STREAM_WITHOUT_EXTENSION": "Without ext.",
     "DISABLE_HLS_STREAMING": "Force MPEG-TS",
     "LOG": "Log",
+    "LOADING": "Loading…",
     "LOGIN": "Login",
     "LOGOUT": "Logout",
     "LOGO_OVERRIDE": "logo Override",
