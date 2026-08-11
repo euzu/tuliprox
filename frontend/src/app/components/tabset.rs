@@ -54,6 +54,31 @@ pub fn TabSet(props: &TabSetProps) -> Html {
         })
     };
 
+    // Arrow/Home/End keyboard navigation over the tablist
+    let handle_header_keydown = {
+        let tabs = props.tabs.clone();
+        let active_tab = active_tab.clone();
+        let handle_tab_click = handle_tab_click.clone();
+        Callback::from(move |event: KeyboardEvent| {
+            let count = tabs.len();
+            if count == 0 {
+                return;
+            }
+            let current = tabs.iter().position(|t| t.id == *active_tab).unwrap_or(0);
+            let next = match event.key().as_str() {
+                "ArrowRight" | "ArrowDown" => Some((current + 1) % count),
+                "ArrowLeft" | "ArrowUp" => Some((current + count - 1) % count),
+                "Home" => Some(0),
+                "End" => Some(count - 1),
+                _ => None,
+            };
+            if let Some(idx) = next {
+                event.prevent_default();
+                handle_tab_click.emit(tabs[idx].id.clone());
+            }
+        })
+    };
+
     let render_tab_buttons = {
         let tabs = props.tabs.clone();
         let active_tab_id = (*active_tab).clone();
@@ -64,7 +89,7 @@ pub fn TabSet(props: &TabSetProps) -> Html {
             let click_handler = handle_click.clone();
 
             html! {
-                <div key={tab.id.clone()} class={classes!(
+                <div key={tab.id.clone()} role="presentation" class={classes!(
                     "tp__tab-set__tab",
                     if is_active { tab.active_class.as_ref().map_or("tp__tab-set__tab--active".to_string(), |s| s.clone())
                     } else {  tab.inactive_class.as_ref().map_or_else(String::new, |s| s.clone())  }
@@ -102,7 +127,7 @@ pub fn TabSet(props: &TabSetProps) -> Html {
         };
 
         html! {
-            <div class="tp__tab-set__header">
+            <div class="tp__tab-set__header" role="tablist" tabindex="0" onkeydown={handle_header_keydown.clone()}>
                 for tab in tabs.iter() {
                     { render_tab_button(tab) }
                 }
