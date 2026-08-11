@@ -37,10 +37,18 @@ async fn fetch_combined_ips(
     config: &IpCheckConfig,
     url: &str,
 ) -> (Option<String>, Option<String>) {
-    let response = client.get(url).send().await.ok();
-    let text = match response {
-        Some(r) => r.text().await.ok(),
-        None => None,
+    let text = match client.get(url).send().await {
+        Ok(response) => match response.text().await {
+            Ok(body) => Some(body),
+            Err(err) => {
+                log::warn!("IP check: failed to read response body from {url}: {err}");
+                None
+            }
+        },
+        Err(err) => {
+            log::warn!("IP check: request to {url} failed: {err}");
+            None
+        }
     };
 
     if let Some(body) = text {
