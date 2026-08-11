@@ -349,9 +349,17 @@ async fn save_config_api_proxy_config(
         ..base
     };
 
+    // Full-config validation: catches duplicate server names, duplicate usernames/tokens
+    // and users referencing missing servers, which per-row validate() cannot see
+    let mut updated_api_proxy_dto = ApiProxyConfigDto::from(&updated_api_proxy);
+    if let Err(err) = updated_api_proxy_dto.prepare() {
+        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()})))
+            .into_response();
+    }
+
     if let Some(err) = intern_save_config_api_proxy(
         &backup_dir,
-        &ApiProxyConfigDto::from(&updated_api_proxy),
+        &updated_api_proxy_dto,
         &api_proxy_file_path,
     )
         .await
