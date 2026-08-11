@@ -1450,6 +1450,7 @@
     "HEALTH_PROVIDERS": "سعة المزود",
     "HEALTH_CONNECTED": "متصل",
     "HEALTH_DISCONNECTED": "غير متصل",
+    "IDLE": "خامل",
     "HEALTH_PROVIDERS_OK": "جميعها سليمة",
     "HEALTH_PROVIDERS_NONE": "لا مزودين نشطين",
     "STREAM": "بث",

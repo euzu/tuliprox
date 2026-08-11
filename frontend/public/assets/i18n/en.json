@@ -1457,6 +1457,7 @@
     "HEALTH_PROVIDERS": "Provider capacity",
     "HEALTH_CONNECTED": "Connected",
     "HEALTH_DISCONNECTED": "Disconnected",
+    "IDLE": "Idle",
     "HEALTH_PROVIDERS_OK": "All healthy",
     "HEALTH_PROVIDERS_NONE": "No active providers",
     "STREAM": "Stream",

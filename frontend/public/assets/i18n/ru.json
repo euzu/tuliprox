@@ -1361,6 +1361,7 @@
     "HEALTH_PROVIDERS": "Состояние провайдеров",
     "HEALTH_CONNECTED": "Подключено",
     "HEALTH_DISCONNECTED": "Отключено",
+    "IDLE": "Ожидание",
     "HEALTH_PROVIDERS_OK": "Все провайдеры работают",
     "HEALTH_PROVIDERS_NONE": "Нет активных провайдеров",
     "STREAM": "Поток",
