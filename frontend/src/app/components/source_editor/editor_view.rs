@@ -27,7 +27,9 @@ use std::{
     rc::Rc,
 };
 use wasm_bindgen::{prelude::Closure, JsCast};
-use web_sys::{window, Element, Event, HtmlElement, KeyboardEvent, MouseEvent, TouchEvent, WheelEvent};
+use web_sys::{
+    window, BeforeUnloadEvent, Element, Event, HtmlElement, KeyboardEvent, MouseEvent, TouchEvent, WheelEvent,
+};
 use yew::{platform::spawn_local, prelude::*};
 
 const PENDING_LINE: &str = "pending-line";
@@ -552,6 +554,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     let editor_state_ref = use_mut_ref(EditorState::default);
     let initialized_from_playlist = use_state(|| false);
     let is_local_mode = props.on_sources_change.is_some();
+    // Tracks unsaved editor changes for the beforeunload guard
+    let is_dirty = use_state(|| false);
     // Delete mode toggle
     let delete_mode = use_state(|| false);
     let cursor_grabbing = use_state(|| false);
@@ -615,7 +619,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let on_sources_change = props.on_sources_change.clone();
         let editor_state_ref = editor_state_ref.clone();
         let config_ctx = config_ctx.clone();
+        let is_dirty = is_dirty.clone();
         Callback::from(move |_| {
+            is_dirty.set(true);
             if let Some(on_sources_change) = on_sources_change.as_ref() {
                 let base_sources = config_ctx.config.as_ref().map(|c| c.sources.clone()).unwrap_or_default();
                 let editor_state = editor_state_ref.borrow();
@@ -624,6 +630,30 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             }
         })
     };
+
+    // Warn before the browser unloads while the editor holds unsaved changes.
+    {
+        let dirty = *is_dirty && !is_local_mode;
+        use_effect_with(dirty, move |&dirty| {
+            let closure = Closure::<dyn FnMut(BeforeUnloadEvent)>::wrap(Box::new(move |event: BeforeUnloadEvent| {
+                event.prevent_default();
+                event.set_return_value("");
+            }));
+            if dirty {
+                if let Some(win) = window() {
+                    let _ = win.add_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
+                }
+            }
+            move || {
+                if dirty {
+                    if let Some(win) = window() {
+                        let _ =
+                            win.remove_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
+                    }
+                }
+            }
+        });
+    }
 
     {
         let playlists = playlist_ctx.clone();
@@ -1104,6 +1134,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let services = services.clone();
         let translate = translate.clone();
+        let is_dirty = is_dirty.clone();
         Callback::from(move |_| {
             let base_sources = config_ctx.config.as_ref().map(|c| c.sources.clone()).unwrap_or_default();
             let editor_state = editor_state_ref.borrow();
@@ -1119,9 +1150,13 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
 
             let services = services.clone();
             let translate = translate.clone();
+            let is_dirty = is_dirty.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 match services.config.save_sources(sources_config).await {
-                    Ok(()) => services.toastr.success(translate.t("MESSAGES.SAVE.SOURCES_CONFIG.SUCCESS")),
+                    Ok(()) => {
+                        is_dirty.set(false);
+                        services.toastr.success(translate.t("MESSAGES.SAVE.SOURCES_CONFIG.SUCCESS"));
+                    }
                     Err(err) => services.toastr.error(err.to_string()),
                 }
             });
