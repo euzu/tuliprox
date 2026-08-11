@@ -17,11 +17,13 @@ use crate::{
     hooks::use_service_context,
     html_if,
     i18n::use_translation,
+    model::DialogResult,
+    services::DialogService,
 };
 use cron::Schedule;
 use shared::model::{ScheduleConfigDto, ScheduleTaskType, SchedulesConfigDto};
 use std::{rc::Rc, str::FromStr};
-use yew::prelude::*;
+use yew::{platform::spawn_local, prelude::*};
 
 const LABEL_SCHEDULE: &str = "LABEL.SCHEDULE";
 const LABEL_TARGETS: &str = "LABEL.TARGETS";
@@ -43,6 +45,7 @@ pub fn SchedulesConfigView() -> Html {
     let services_ctx = use_service_context();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
+    let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let selected_targets = use_state(|| None::<Vec<String>>);
     let selected_schedule = use_state(|| None::<String>);
     let selected_type = use_state(|| ScheduleTaskType::PlaylistUpdate);
@@ -203,20 +206,30 @@ pub fn SchedulesConfigView() -> Html {
 
     let handle_remove = {
         let form_state = form_state.clone();
+        let dialog = dialog.clone();
+        let translator = translate.clone();
         Callback::from(move |target_index: usize| {
-            if let Some(schedules) = form_state.data().schedules.as_ref() {
-                let new_schedules: Vec<ScheduleConfigDto> = schedules
-                    .iter()
-                    .enumerate()
-                    .filter(|(idx, _)| *idx != target_index)
-                    .map(|(_, schedule)| schedule.clone())
-                    .collect();
-                if new_schedules.is_empty() {
-                    form_state.dispatch(SchedulesConfigFormAction::Schedules(None));
-                } else {
-                    form_state.dispatch(SchedulesConfigFormAction::Schedules(Some(new_schedules)));
+            let form_state = form_state.clone();
+            let dialog = dialog.clone();
+            let translator = translator.clone();
+            spawn_local(async move {
+                if dialog.confirm(&translator.t("MESSAGES.CONFIRM_DELETE")).await != DialogResult::Ok {
+                    return;
                 }
-            }
+                if let Some(schedules) = form_state.data().schedules.as_ref() {
+                    let new_schedules: Vec<ScheduleConfigDto> = schedules
+                        .iter()
+                        .enumerate()
+                        .filter(|(idx, _)| *idx != target_index)
+                        .map(|(_, schedule)| schedule.clone())
+                        .collect();
+                    if new_schedules.is_empty() {
+                        form_state.dispatch(SchedulesConfigFormAction::Schedules(None));
+                    } else {
+                        form_state.dispatch(SchedulesConfigFormAction::Schedules(Some(new_schedules)));
+                    }
+                }
+            });
         })
     };
 
