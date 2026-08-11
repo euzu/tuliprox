@@ -1,5 +1,6 @@
 use crate::{
     app::components::{AppIcon, DropDownIconButton, DropDownOption, DropDownSelection, IconButton},
+    hooks::{is_text_input_focused, use_key_down},
     html_if,
     i18n::use_translation,
 };
@@ -37,6 +38,19 @@ pub fn Search(props: &SearchProps) -> Html {
     let input_ref = use_node_ref();
     let invalid_search = use_state(|| false);
     let regex_active = use_state(|| RegexState::Inactive);
+
+    // Global '/' shortcut focuses the search input
+    {
+        let input = input_ref.clone();
+        use_key_down((), move |event: &KeyboardEvent| {
+            if event.key() == "/" && !is_text_input_focused(event) {
+                if let Some(input) = input.cast::<HtmlInputElement>() {
+                    event.prevent_default();
+                    let _ = input.focus();
+                }
+            }
+        });
+    }
 
     let handle_regex_click = {
         let regex_active = regex_active.clone();
