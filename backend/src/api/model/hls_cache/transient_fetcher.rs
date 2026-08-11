@@ -801,10 +801,17 @@ impl Drop for HlsTransientOriginIoGuard {
         let session = Arc::clone(&self.session);
         let origin_io = self.origin_io.clone();
         let started_generation = self.started_generation;
+        // Decrement the origin work count synchronously when the lock is free so an
+        // immediate retry is not rejected by the admission check (active_origin_work_count > 0)
+        // while the spawned cleanup is still pending
+        let pre_finished = session.try_write().map(|mut guard| guard.finish_origin_work(started_generation)).ok();
         tokio::spawn(async move {
-            let generation_valid = {
-                let mut session = session.write().await;
-                session.finish_origin_work(started_generation)
+            let generation_valid = match pre_finished {
+                Some(valid) => valid,
+                None => {
+                    let mut session = session.write().await;
+                    session.finish_origin_work(started_generation)
+                }
             };
             let refresh_reservation = if generation_valid {
                 session.read().await.should_refresh_origin_reservation(
