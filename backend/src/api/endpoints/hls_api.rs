@@ -127,6 +127,9 @@ use url::Url;
 
 const HLS_TEMPORARY_RESOURCE_RETRY_AFTER_SECS: u64 = 1;
 const HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS: u64 = HLS_TEMPORARY_RESOURCE_RETRY_AFTER_SECS * 1_000;
+/// Poll interval while waiting for a canonical manifest commit. Lower values
+/// reduce time-to-first-manifest at the cost of more wakeups per waiting client.
+const HLS_MANIFEST_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 use crate::api::model::MAX_MANUAL_REDIRECTS;
 
@@ -6855,7 +6858,7 @@ async fn try_hls_cached_manifest_response(
             return None;
         }
         let remaining = options.wait_timeout.saturating_sub(started_at.elapsed());
-        tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
+        tokio::time::sleep(remaining.min(HLS_MANIFEST_WAIT_POLL_INTERVAL)).await;
     }
 }
 
