@@ -10,7 +10,7 @@ use crate::{
     config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_list_option,
     edit_field_number, edit_field_number_i8, edit_field_number_u16, edit_field_text, edit_field_text_option,
     generate_form_reducer,
-    hooks::use_service_context,
+    hooks::{use_clipboard_copy, use_service_context},
     html_if,
     i18n::use_translation,
 };
@@ -321,6 +321,21 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
             None
         }
     });
+    let copy_to_clipboard = use_clipboard_copy();
+    let handle_copy_credentials = {
+        let form_state = form_state.clone();
+        let copy_to_clipboard = copy_to_clipboard.clone();
+        Callback::from(move |_: String| {
+            let data = form_state.data();
+            let text = format!(
+                "username: {} password: {} token: {}",
+                data.username,
+                data.password,
+                data.token.as_ref().map_or_else(String::new, ToString::to_string)
+            );
+            copy_to_clipboard.emit(text);
+        })
+    };
     html! {
         <div class="tp__proxy-user-credentials-form tp__form-page">
           <div class="tp__proxy-user-credentials-form__body tp__form-page__body">
@@ -404,6 +419,10 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 icon="Cancel"
                 title={ translate.t("LABEL.CANCEL")}
                 onclick={handle_cancel}></TextButton>
+             <TextButton class="secondary" name="copy_credentials"
+                icon="Clipboard"
+                title={ translate.t("LABEL.COPY_CREDENTIALS")}
+                onclick={handle_copy_credentials}></TextButton>
              { html_if!(service_ctx.auth.has_permission(Permission::UserWrite), {
                  <TextButton class="primary" name="save_user"
                     icon="Save"
