@@ -90,6 +90,37 @@ fn render_filter(filter: &Filter, pretty: bool, level: usize, do_indent: bool, p
                 </span>
             </>
         },
+        Filter::StringComparison(field, op, value) => html! {
+            <>
+               { indent(level, do_indent && pretty) }
+                <span class="comparison">
+                    <span class="field">{format!("{}", field)}</span>
+                    {format!(" {} ", op)}
+                    <span class="regex">{format!("\"{}\"", value)}</span>
+                </span>
+            </>
+        },
+        Filter::NumericComparison(field, op, value) => html! {
+            <>
+               { indent(level, do_indent && pretty) }
+                <span class="comparison">
+                    <span class="field">{format!("{}", field)}</span>
+                    {format!(" {} ", op)}
+                    <span class="enum">{value.to_string()}</span>
+                </span>
+            </>
+        },
+        Filter::SetComparison(field, values) => html! {
+            <>
+               { indent(level, do_indent && pretty) }
+                <span class="comparison">
+                    <span class="field">{format!("{}", field)}</span>
+                    {" IN ["}
+                    <span class="regex">{values.iter().map(|v| format!("\"{v}\"")).collect::<Vec<_>>().join(", ")}</span>
+                    {"]"}
+                </span>
+            </>
+        },
         Filter::UnaryExpression(op, inner) => {
             html! {
                 <>

@@ -31,16 +31,24 @@ impl PartialEq for CompiledRegex {
 #[derive(Parser)]
 #[grammar_inline = r#"
 WHITESPACE = _{ " " | "\t" | "\r" | "\n"}
-field = { ^"group" | ^"title" | ^"name" | ^"genre" | ^"url" | ^"input" | ^"caption"}
+field = { ^"group" | ^"title" | ^"name" | ^"genre" | ^"url" | ^"input" | ^"caption" | ^"epgid"}
+numeric_field = { ^"chno" }
 and = { ^"and" }
 or = { ^"or" }
 not = { ^"not" }
 regexp = @{ "\"" ~ ( "\\\"" | (!"\"" ~ ANY) )* ~ "\"" }
+number = @{ ASCII_DIGIT+ }
 type_value = { ^"live" | ^"vod" | ^"movie" | ^"series" }
 type_comparison = { ^"type" ~ "=" ~ type_value }
 field_comparison_value = _{ regexp }
 field_comparison = { field ~ "~" ~ field_comparison_value }
-comparison = { field_comparison | type_comparison }
+str_op = { "!=" | "=" | ^"contains" | ^"startswith" }
+string_comparison = { field ~ str_op ~ regexp }
+num_op = { ">=" | "<=" | "!=" | ">" | "<" | "=" }
+numeric_comparison = { numeric_field ~ num_op ~ number }
+set_values = { regexp ~ ("," ~ regexp)* }
+set_comparison = { field ~ ^"in" ~ "[" ~ set_values ~ "]" }
+comparison = { field_comparison | type_comparison | numeric_comparison | set_comparison | string_comparison }
 bool_op = { and | or }
 expr_group = { "(" ~ expr ~ ")" }
 basic_expr = _{ comparison | expr_group }
@@ -57,6 +65,48 @@ struct FilterParser;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum UnaryOperator {
     Not,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum StringOperator {
+    Eq,
+    NotEq,
+    Contains,
+    StartsWith,
+}
+
+impl std::fmt::Display for StringOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match *self {
+            Self::Eq => "=",
+            Self::NotEq => "!=",
+            Self::Contains => "CONTAINS",
+            Self::StartsWith => "STARTSWITH",
+        })
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NumericOperator {
+    Eq,
+    NotEq,
+    Greater,
+    GreaterOrEqual,
+    Less,
+    LessOrEqual,
+}
+
+impl std::fmt::Display for NumericOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match *self {
+            Self::Eq => "=",
+            Self::NotEq => "!=",
+            Self::Greater => ">",
+            Self::GreaterOrEqual => ">=",
+            Self::Less => "<",
+            Self::LessOrEqual => "<=",
+        })
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -88,6 +138,9 @@ pub enum Filter {
     Group(Box<Filter>),
     FieldComparison(ItemField, CompiledRegex),
     TypeComparison(ItemField, PlaylistItemType),
+    StringComparison(ItemField, StringOperator, String),
+    NumericComparison(ItemField, NumericOperator, u32),
+    SetComparison(ItemField, Vec<String>),
     UnaryExpression(UnaryOperator, Box<Filter>),
     BinaryExpression(Box<Filter>, BinaryOperator, Box<Filter>),
 }
@@ -114,6 +167,20 @@ fn get_caption<'a>(provider: &'a ValueProvider<'_>, rewc: &CompiledRegex) -> (bo
         }
     }
     (false, Cow::Borrowed(""))
+}
+
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.as_bytes().windows(needle.len()).any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+fn starts_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack.len() >= needle.len() && haystack.as_bytes()[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())
 }
 
 impl Filter {
@@ -155,6 +222,42 @@ impl Filter {
                     }
                 }
                 is_match
+            }
+            Self::StringComparison(field, op, value) => {
+                // Missing values (e.g. absent epgid) are matched as empty strings.
+                let actual = provider.get_filter_value(*field).unwrap_or(Cow::Borrowed(""));
+                let is_match = match op {
+                    StringOperator::Eq => actual.eq_ignore_ascii_case(value),
+                    StringOperator::NotEq => !actual.eq_ignore_ascii_case(value),
+                    StringOperator::Contains => contains_ignore_ascii_case(&actual, value),
+                    StringOperator::StartsWith => starts_with_ignore_ascii_case(&actual, value),
+                };
+                if log_enabled!(Level::Trace) {
+                    if is_match {
+                        trace!("Match found: {field} {op} \"{value}\" => '{actual}'");
+                    } else {
+                        trace!("Match failed: {field} {op} \"{value}\" => '{actual}'");
+                    }
+                }
+                is_match
+            }
+            Self::NumericComparison(field, op, value) => {
+                let actual = match field {
+                    ItemField::Chno => provider.pli.header.chno,
+                    _ => return false,
+                };
+                match op {
+                    NumericOperator::Eq => actual == *value,
+                    NumericOperator::NotEq => actual != *value,
+                    NumericOperator::Greater => actual > *value,
+                    NumericOperator::GreaterOrEqual => actual >= *value,
+                    NumericOperator::Less => actual < *value,
+                    NumericOperator::LessOrEqual => actual <= *value,
+                }
+            }
+            Self::SetComparison(field, values) => {
+                let actual = provider.get_filter_value(*field).unwrap_or(Cow::Borrowed(""));
+                values.iter().any(|value| actual.eq_ignore_ascii_case(value))
             }
             Self::Group(expr) => expr.filter(provider),
             Self::UnaryExpression(op, expr) => match op {
@@ -200,6 +303,17 @@ impl std::fmt::Display for Filter {
             }
             Self::Group(stmt) => {
                 write!(f, "({stmt})")
+            }
+            Self::StringComparison(field, op, value) => {
+                write!(f, "{field} {op} \"{}\"", value.replace('"', "\\\""))
+            }
+            Self::NumericComparison(field, op, value) => {
+                write!(f, "{field} {op} {value}")
+            }
+            Self::SetComparison(field, values) => {
+                let rendered =
+                    values.iter().map(|v| format!("\"{}\"", v.replace('"', "\\\""))).collect::<Vec<_>>().join(", ");
+                write!(f, "{field} IN [{rendered}]")
             }
             Self::UnaryExpression(op, expr) => {
                 let flt = match op {
@@ -256,6 +370,89 @@ fn get_parser_field_comparison(
         },
         Err(err) => Err(err),
     }
+}
+
+fn get_parser_string_value(expr: &Pair<Rule>, templates: Option<&[PatternTemplate]>) -> Result<String, TuliproxError> {
+    if expr.as_rule() == Rule::regexp {
+        let full_str = expr.as_str();
+        let parsed_text = &full_str[1..full_str.len() - 1];
+        let resolved = apply_templates_to_pattern_single(parsed_text, templates)?;
+        return Ok(resolved.replace("\\\"", "\""));
+    }
+    Err(TuliproxError::FilterParse(format!("expected string literal: {}", expr.as_str())))
+}
+
+fn get_parser_string_operator(expr: &Pair<Rule>) -> Result<StringOperator, TuliproxError> {
+    let text = expr.as_str();
+    if text == "=" {
+        Ok(StringOperator::Eq)
+    } else if text == "!=" {
+        Ok(StringOperator::NotEq)
+    } else if text.eq_ignore_ascii_case("contains") {
+        Ok(StringOperator::Contains)
+    } else if text.eq_ignore_ascii_case("startswith") {
+        Ok(StringOperator::StartsWith)
+    } else {
+        Err(TuliproxError::FilterParse(format!("unknown string operator: {text}")))
+    }
+}
+
+fn get_parser_numeric_operator(expr: &Pair<Rule>) -> Result<NumericOperator, TuliproxError> {
+    match expr.as_str() {
+        "=" => Ok(NumericOperator::Eq),
+        "!=" => Ok(NumericOperator::NotEq),
+        ">" => Ok(NumericOperator::Greater),
+        ">=" => Ok(NumericOperator::GreaterOrEqual),
+        "<" => Ok(NumericOperator::Less),
+        "<=" => Ok(NumericOperator::LessOrEqual),
+        other => Err(TuliproxError::FilterParse(format!("unknown numeric operator: {other}"))),
+    }
+}
+
+fn get_parser_string_comparison(
+    expr: Pair<Rule>,
+    templates: Option<&[PatternTemplate]>,
+) -> Result<Filter, TuliproxError> {
+    let mut expr_inner = expr.into_inner();
+    let field = get_parser_item_field(&expr_inner.next().unwrap())?;
+    let op = get_parser_string_operator(&expr_inner.next().unwrap())?;
+    let value = get_parser_string_value(&expr_inner.next().unwrap(), templates)?;
+    Ok(Filter::StringComparison(field, op, value))
+}
+
+fn get_parser_numeric_comparison(expr: Pair<Rule>) -> Result<Filter, TuliproxError> {
+    let mut expr_inner = expr.into_inner();
+    let field_pair = expr_inner.next().unwrap();
+    let field_text = field_pair.as_str();
+    let field = if field_text.eq_ignore_ascii_case("chno") {
+        ItemField::Chno
+    } else {
+        return Err(TuliproxError::FilterParse(format!("unknown numeric field: {field_text}")));
+    };
+    let op = get_parser_numeric_operator(&expr_inner.next().unwrap())?;
+    let value_pair = expr_inner.next().unwrap();
+    let value = value_pair
+        .as_str()
+        .parse::<u32>()
+        .map_err(|_| TuliproxError::FilterParse(format!("invalid number: {}", value_pair.as_str())))?;
+    Ok(Filter::NumericComparison(field, op, value))
+}
+
+fn get_parser_set_comparison(
+    expr: Pair<Rule>,
+    templates: Option<&[PatternTemplate]>,
+) -> Result<Filter, TuliproxError> {
+    let mut expr_inner = expr.into_inner();
+    let field = get_parser_item_field(&expr_inner.next().unwrap())?;
+    let values_pair = expr_inner.next().unwrap();
+    let mut values = Vec::new();
+    for value in values_pair.into_inner() {
+        values.push(get_parser_string_value(&value, templates)?);
+    }
+    if values.is_empty() {
+        return Err(TuliproxError::FilterParse("empty value list in IN comparison".to_string()));
+    }
+    Ok(Filter::SetComparison(field, values))
 }
 
 fn get_filter_item_type(text_item_type: &str) -> Option<PlaylistItemType> {
@@ -333,6 +530,18 @@ fn get_parser_expression(
                     Err(err) => errors.push(err.to_string()),
                 }
             }
+            Rule::string_comparison => match get_parser_string_comparison(pair, templates) {
+                Ok(comp) => handle_expr!(bop, uop, stmts, comp),
+                Err(err) => errors.push(err.to_string()),
+            },
+            Rule::numeric_comparison => match get_parser_numeric_comparison(pair) {
+                Ok(comp) => handle_expr!(bop, uop, stmts, comp),
+                Err(err) => errors.push(err.to_string()),
+            },
+            Rule::set_comparison => match get_parser_set_comparison(pair, templates) {
+                Ok(comp) => handle_expr!(bop, uop, stmts, comp),
+                Err(err) => errors.push(err.to_string()),
+            },
             Rule::comparison | Rule::expr => {
                 let expr = get_parser_expression(pair, templates, errors)?;
                 handle_expr!(bop, uop, stmts, expr)
@@ -678,6 +887,52 @@ mod tests {
         assert_filter_round_trip(
             r#"Group ~ "d" AND ((Name ~ "e" AND NOT ((Name ~ "c" OR Name ~ "f"))) OR (Name ~ "a" OR Name ~ "b")) AND (Type = movie)"#,
         );
+    }
+
+    #[test]
+    fn test_filter_string_ops_round_trip() {
+        assert_filter_round_trip(
+            r#"Group = "Sports" AND Title != "News" OR Name CONTAINS "HD" AND Caption STARTSWITH "DE:""#,
+        );
+    }
+
+    #[test]
+    fn test_filter_numeric_round_trip() {
+        assert_filter_round_trip(r#"Chno >= 100 AND Chno < 200 OR NOT Chno = 7"#);
+    }
+
+    #[test]
+    fn test_filter_set_round_trip() {
+        assert_filter_round_trip(r#"Group IN ["Sports", "News"] AND NOT (Name IN ["A"])"#);
+    }
+
+    #[test]
+    fn test_filter_string_ops_eval() {
+        let flt = r#"Group = "sports" AND Name CONTAINS "hd" AND NOT (Name STARTSWITH "x")"#;
+        let filter = get_filter(flt, None).expect("filter parses");
+        let matching = create_mock_pli("Channel HD", "Sports");
+        assert!(filter.filter(&ValueProvider { pli: &matching, match_as_ascii: false }));
+        let other = create_mock_pli("Channel", "Sports");
+        assert!(!filter.filter(&ValueProvider { pli: &other, match_as_ascii: false }));
+    }
+
+    #[test]
+    fn test_filter_set_eval() {
+        let filter = get_filter(r#"Group IN ["Sports", "News"]"#, None).expect("filter parses");
+        let matching = create_mock_pli("A", "news");
+        assert!(filter.filter(&ValueProvider { pli: &matching, match_as_ascii: false }));
+        let other = create_mock_pli("B", "Movies");
+        assert!(!filter.filter(&ValueProvider { pli: &other, match_as_ascii: false }));
+    }
+
+    #[test]
+    fn test_filter_chno_eval() {
+        let filter = get_filter("Chno >= 10 AND Chno <= 20", None).expect("filter parses");
+        let mut pli = create_mock_pli("A", "G");
+        pli.header.chno = 15;
+        assert!(filter.filter(&ValueProvider { pli: &pli, match_as_ascii: false }));
+        pli.header.chno = 5;
+        assert!(!filter.filter(&ValueProvider { pli: &pli, match_as_ascii: false }));
     }
 
     #[test]

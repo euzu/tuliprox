@@ -1232,7 +1232,13 @@ Tuliprox supports the following filter expression types:
 * Use `AND` / `OR` for boolean combinations
 * Type Comparison: `Type = vod` or `Type = live` or `Type = series`
 * Regular expression comparison: `([fieldanme]) ~ "regexp"` <br>
-  The `[fieldanme]` can be `Group`, `Title`, `Name`, `Caption`, `Url`, `Genre`, `Input` or `Type`.
+  The `[fieldanme]` can be `Group`, `Title`, `Name`, `Caption`, `Url`, `Genre`, `Input`, `EpgId` or `Type`.
+* String comparison (case-insensitive, no regex needed):
+  * Exact: `Group = "Sports"` / negated: `Group != "Sports"`
+  * Substring: `Title CONTAINS "HD"`
+  * Prefix: `Caption STARTSWITH "DE:"`
+* Set membership (case-insensitive exact match against a list): `Group IN ["Sports", "News"]`
+* Numeric comparison on the channel number: `Chno = 5`, `Chno != 5`, `Chno > 100`, `Chno >= 100`, `Chno < 200`, `Chno <= 200`
 * Filters don't have operator precedence, so please use parentheses
 * You can apply Morgan’s Law `NOT (A) AND NOT (B)`is the same as `NOT( A OR B)`
 

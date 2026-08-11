@@ -130,6 +130,8 @@ pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
                 $(ItemField::$variant => Arc::clone(&header.$prop),)+
                 ItemField::Genre => get_genre!(header).unwrap_or_else(|| "".intern()),
                 ItemField::Type => header.item_type.interned_label(),
+                ItemField::EpgId => header.epg_channel_id.clone().unwrap_or_else(|| "".intern()),
+                ItemField::Chno => header.chno.to_string().intern(),
                 ItemField::Caption => {
                     if header.title.is_empty() {
                         Arc::clone(&header.name)
@@ -158,6 +160,11 @@ pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: &str) ->
                     header.title = value.intern();
                     header.name = header.title.clone();
                 }
+                ItemField::EpgId => header.epg_channel_id = Some(value.intern()),
+                ItemField::Chno => match value.parse::<u32>() {
+                    Ok(chno) => header.chno = chno,
+                    Err(_) => return false,
+                },
                 ItemField::Type => {}
             }
         };
@@ -175,6 +182,9 @@ pub struct ValueProvider<'a> {
 impl ValueProvider<'_> {
     pub(crate) fn get_filter_value(&self, field: ItemField) -> Option<Cow<'_, str>> {
         let header = &self.pli.header;
+        if field == ItemField::Chno {
+            return Some(Cow::Owned(header.chno.to_string()));
+        }
         let value = match field {
             ItemField::Group => header.group.as_ref(),
             ItemField::Name => header.name.as_ref(),
@@ -187,6 +197,8 @@ impl ValueProvider<'_> {
             ItemField::Url => header.url.as_ref(),
             ItemField::Input => header.input_name.as_ref(),
             ItemField::Type => header.item_type.as_str(),
+            ItemField::EpgId => header.epg_channel_id.as_deref()?,
+            ItemField::Chno => unreachable!("handled above"),
             ItemField::Caption => {
                 if header.title.is_empty() {
                     header.name.as_ref()
