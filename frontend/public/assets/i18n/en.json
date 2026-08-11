@@ -1750,6 +1750,7 @@
     },
     "PLAYLIST_UPDATE": {
       "FAIL": "Playlist update failed!",
+      "NO_TARGETS": "No playlists configured. Create sources and targets in the source editor first.",
       "FAIL_FINISH": "Playlist update failed!",
       "PARTIAL_FINISH": "Playlist update is incomplete and will continue from its saved checkpoint.",
       "SUCCESS": "Successfully started playlist update!",
