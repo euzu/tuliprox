@@ -30,6 +30,7 @@ const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url
 const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
 const DOWNLOAD_ITEM: &str = "download_item";
 const RECORD_ITEM: &str = "record_item";
+const TP_EXPLORER_SEARCH_FIELDS_KEY: &str = "tp-explorer-search-fields";
 
 #[derive(Clone)]
 struct ChannelSelection {
@@ -297,12 +298,36 @@ pub fn PlaylistExplorer() -> Html {
     let current_item = use_state(|| ExplorerLevel::Categories);
     let playlist = use_state(|| (*context.playlist).clone());
     let search_fields = use_memo((), |_| {
+        let persisted: Vec<String> = crate::utils::get_local_storage_item(TP_EXPLORER_SEARCH_FIELDS_KEY)
+            .map(|value| value.split(',').filter(|id| !id.is_empty()).map(str::to_string).collect())
+            .unwrap_or_default();
+        let is_selected = |id: &str| persisted.iter().any(|p| p == id);
         vec![
-            DropDownOption::new(shared::model::SEARCH_FIELD_GROUP, html! { translate.t("LABEL.GROUP") }, false),
-            DropDownOption::new(shared::model::SEARCH_FIELD_TITLE, html! { translate.t("LABEL.TITLE") }, false),
-            DropDownOption::new(shared::model::SEARCH_FIELD_NAME, html! { translate.t("LABEL.NAME") }, false),
-            DropDownOption::new(shared::model::SEARCH_FIELD_URL, html! { translate.t("LABEL.URL") }, false),
+            DropDownOption::new(
+                shared::model::SEARCH_FIELD_GROUP,
+                html! { translate.t("LABEL.GROUP") },
+                is_selected(shared::model::SEARCH_FIELD_GROUP),
+            ),
+            DropDownOption::new(
+                shared::model::SEARCH_FIELD_TITLE,
+                html! { translate.t("LABEL.TITLE") },
+                is_selected(shared::model::SEARCH_FIELD_TITLE),
+            ),
+            DropDownOption::new(
+                shared::model::SEARCH_FIELD_NAME,
+                html! { translate.t("LABEL.NAME") },
+                is_selected(shared::model::SEARCH_FIELD_NAME),
+            ),
+            DropDownOption::new(
+                shared::model::SEARCH_FIELD_URL,
+                html! { translate.t("LABEL.URL") },
+                is_selected(shared::model::SEARCH_FIELD_URL),
+            ),
         ]
+    });
+    let handle_search_fields_change = Callback::from(move |fields: Option<Rc<Vec<String>>>| {
+        let value = fields.as_ref().map(|f| f.join(",")).unwrap_or_default();
+        crate::utils::set_local_storage_item(TP_EXPLORER_SEARCH_FIELDS_KEY, &value);
     });
     let selected_channel = use_state(|| None::<ChannelSelection>);
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
@@ -1144,7 +1169,7 @@ pub fn PlaylistExplorer() -> Html {
                   }
                 </div>
                 <div class="tp__playlist-explorer__header-toolbar-search">
-                  <Search onsearch={handle_search} options={search_fields.clone()}/>
+                  <Search onsearch={handle_search} options={search_fields.clone()} on_fields_change={handle_search_fields_change}/>
                 </div>
             </div>
         </div>
