@@ -174,13 +174,13 @@ impl From<&ProxyUserCredentials> for ProxyUserCredentialsDto {
 impl ProxyUserCredentials {
     pub fn matches_token(&self, token: &str) -> bool {
         if let Some(tkn) = &self.token {
-            return tkn.eq(token);
+            return crate::auth::constant_time_eq(tkn.as_bytes(), token.as_bytes());
         }
         false
     }
 
     pub fn matches(&self, username: &str, password: &str) -> bool {
-        self.username.eq(username) && self.password.eq(password)
+        self.username.eq(username) && crate::auth::constant_time_eq(self.password.as_bytes(), password.as_bytes())
     }
 
     #[inline]

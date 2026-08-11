@@ -74,7 +74,7 @@ async fn token(
                     }
                 }
                 if let Some(credentials) = app_state.app_config.get_user_credentials(username) {
-                    if credentials.password == password {
+                    if crate::auth::constant_time_eq(credentials.password.as_bytes(), password.as_bytes()) {
                         if !api_user_can_access_web_ui(credentials.ui_enabled) {
                             req.zeroize();
                             return axum::http::StatusCode::FORBIDDEN.into_response();
