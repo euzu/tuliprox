@@ -1,8 +1,11 @@
 use crate::{
-    app::components::{
-        convert_bool_to_chip_style, make_translated_header_callback, menu_item::MenuItem, popup_menu::PopupMenu,
-        AppIcon, Chip, FilterView, PlaylistMappings, PlaylistProcessing, RevealContent, Table, TableDefinition,
-        TargetOptions, TargetOutput, TargetRename, TargetSort, TargetWatch, ToggleSwitch,
+    app::{
+        components::{
+            convert_bool_to_chip_style, make_translated_header_callback, menu_item::MenuItem, popup_menu::PopupMenu,
+            AppIcon, Chip, FilterView, PlaylistMappings, PlaylistProcessing, RevealContent, Table, TableDefinition,
+            TargetOptions, TargetOutput, TargetRename, TargetSort, TargetWatch, ToggleSwitch,
+        },
+        ConfigContext,
     },
     hooks::use_service_context,
     html_if,
@@ -42,6 +45,7 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
     let translate = use_translation();
     let services = use_service_context();
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
+    let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
     let selected_dto = use_state(|| None::<Rc<ConfigTargetDto>>);
@@ -138,6 +142,7 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
         let translate = translate.clone();
         let services_ctx = services.clone();
         let selected_dto = selected_dto.clone();
+        let config_ctx = config_ctx.clone();
         Callback::from(move |(name, _): (String, _)| {
             if let Ok(action) = TargetTableAction::from_str(&name) {
                 match action {
@@ -158,10 +163,29 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                     TargetTableAction::Delete => {
                         let confirm = confirm.clone();
                         let translator = translate.clone();
+                        let services_ctx = services_ctx.clone();
+                        let config_ctx = config_ctx.clone();
+                        let target_name = selected_dto.as_ref().map_or_else(String::new, |d| d.name.to_string());
                         spawn_local(async move {
                             let result = confirm.confirm(&translator.t("MESSAGES.CONFIRM_DELETE")).await;
-                            if result == DialogResult::Ok {
-                                // TODO edit
+                            if result != DialogResult::Ok {
+                                return;
+                            }
+                            let Some(app_config) = config_ctx.config.as_ref() else {
+                                return;
+                            };
+                            let mut sources = app_config.sources.clone();
+                            for source in sources.sources.iter_mut() {
+                                source.targets.retain(|t| t.name != target_name);
+                            }
+                            match services_ctx.config.save_sources(sources).await {
+                                Ok(()) => {
+                                    services_ctx
+                                        .toastr
+                                        .success(translator.t("MESSAGES.SAVE.SOURCES_CONFIG.SUCCESS"));
+                                    let _ = services_ctx.config.get_server_config().await;
+                                }
+                                Err(err) => services_ctx.toastr.error(err.to_string()),
                             }
                         });
                     }
