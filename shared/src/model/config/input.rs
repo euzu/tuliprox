@@ -1271,7 +1271,15 @@ impl Default for ProviderDnsDto {
 
 impl ProviderDnsDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        self.refresh_secs = self.refresh_secs.max(10);
+        if self.refresh_secs == 0 {
+            self.refresh_secs = default_provider_dns_refresh_secs();
+        } else if self.refresh_secs < 10 {
+            // Explicit low values are honored for fast failover, but flagged
+            warn!(
+                "Provider dns refresh_secs={} is below the recommended minimum of 10s; this increases resolver load",
+                self.refresh_secs
+            );
+        }
         if self.max_addrs == Some(0) {
             return Err(TuliproxError::ConfigInput("Provider dns max_addrs must be >= 1 when set".to_string()));
         }
