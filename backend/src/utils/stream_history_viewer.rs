@@ -36,22 +36,27 @@ pub(crate) fn parse_date_or_datetime(input: &str) -> Result<u64, String> {
     if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
         let dt = date.and_hms_opt(0, 0, 0)
             .ok_or_else(|| format!("Invalid date: '{trimmed}'"))?;
-        return Ok(dt.and_utc().timestamp().cast_unsigned());
+        return to_unsigned_ts(dt.and_utc().timestamp(), trimmed);
     }
 
     // Try datetime without seconds: YYYY-MM-DD HH:MM
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M") {
-        return Ok(dt.and_utc().timestamp().cast_unsigned());
+        return to_unsigned_ts(dt.and_utc().timestamp(), trimmed);
     }
 
     // Try datetime with seconds: YYYY-MM-DD HH:MM:SS
     if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
-        return Ok(dt.and_utc().timestamp().cast_unsigned());
+        return to_unsigned_ts(dt.and_utc().timestamp(), trimmed);
     }
 
     Err(format!(
         "Invalid date format: '{trimmed}'. Expected: YYYY-MM-DD, YYYY-MM-DD HH:MM, or YYYY-MM-DD HH:MM:SS"
     ))
+}
+
+// cast_unsigned would wrap pre-1970 dates into huge values and invert query ranges
+fn to_unsigned_ts(ts: i64, input: &str) -> Result<u64, String> {
+    u64::try_from(ts).map_err(|_| format!("Date must not be before 1970: '{input}'"))
 }
 
 /// Returns true if input is a date-only format (no time component)
@@ -87,7 +92,7 @@ pub(crate) fn resolve_time_range(query: &StreamHistoryQuery) -> Result<TimeRange
                     .date()
                     .and_hms_opt(0, 0, 0)
                     .ok_or_else(|| format!("Invalid date for timestamp: {parsed}"))?;
-                naive.and_utc().timestamp().cast_unsigned()
+                to_unsigned_ts(naive.and_utc().timestamp(), date)?
             };
             Ok((day_start, day_start + SECS_PER_DAY - 1))
         }
