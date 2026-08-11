@@ -1,6 +1,9 @@
 use crate::{
     app::{
-        components::{menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, Chip, IconButton, NoContent, Panel, Search},
+        components::{
+            menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, Chip, DropDownOption, IconButton, NoContent, Panel,
+            Search,
+        },
         context::{ConfigContext, PlaylistExplorerContext},
     },
     hooks::{use_clipboard_copy, use_service_context},
@@ -293,6 +296,14 @@ pub fn PlaylistExplorer() -> Html {
         .map(|download| download.recording_priority);
     let current_item = use_state(|| ExplorerLevel::Categories);
     let playlist = use_state(|| (*context.playlist).clone());
+    let search_fields = use_memo((), |_| {
+        vec![
+            DropDownOption::new(shared::model::SEARCH_FIELD_GROUP, html! { translate.t("LABEL.GROUP") }, false),
+            DropDownOption::new(shared::model::SEARCH_FIELD_TITLE, html! { translate.t("LABEL.TITLE") }, false),
+            DropDownOption::new(shared::model::SEARCH_FIELD_NAME, html! { translate.t("LABEL.NAME") }, false),
+            DropDownOption::new(shared::model::SEARCH_FIELD_URL, html! { translate.t("LABEL.URL") }, false),
+        ]
+    });
     let selected_channel = use_state(|| None::<ChannelSelection>);
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
@@ -1133,7 +1144,7 @@ pub fn PlaylistExplorer() -> Html {
                   }
                 </div>
                 <div class="tp__playlist-explorer__header-toolbar-search">
-                  <Search onsearch={handle_search}/>
+                  <Search onsearch={handle_search} options={search_fields.clone()}/>
                 </div>
             </div>
         </div>
