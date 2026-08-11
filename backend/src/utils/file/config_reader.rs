@@ -434,7 +434,14 @@ pub async fn read_app_config_dto(
         mapping.mappings.templates = None;
     }
 
-    let api_proxy = read_api_proxy_file(api_proxy_file, resolve_env).unwrap_or(None);
+    let api_proxy = match read_api_proxy_file(api_proxy_file, resolve_env) {
+        Ok(api_proxy) => api_proxy,
+        Err(err) => {
+            // Surface the fault instead of silently returning a config without api_proxy
+            log::warn!("Failed to read api-proxy config '{api_proxy_file}': {err}");
+            None
+        }
+    };
 
     Ok(AppConfigDto {
         config,
