@@ -842,6 +842,11 @@ pub fn PlaylistExplorer() -> Html {
             .collect::<Html>()
     };
 
+    let render_cluster_panel = |cluster: XtreamCluster, list: Option<&Vec<Rc<UiPlaylistGroup>>>| match list {
+        Some(list) if !list.is_empty() => render_cluster(cluster, list),
+        _ => html! { <NoContent text={translate.t("LABEL.NO_CONTENT")} /> },
+    };
+
     let render_categories = || {
         if playlist.is_none() {
             html! {
@@ -862,29 +867,17 @@ pub fn PlaylistExplorer() -> Html {
                 <div class="tp__playlist-explorer__categories-content">
                     <Panel class="tp__full-width" value={XtreamCluster::Live.intern()} active={active_cluster.clone()}>
                         <div class="tp__playlist-explorer__categories-list">
-                            { playlist.as_ref()
-                                .and_then(|response| response.live.as_ref())
-                                .map(|list| render_cluster(XtreamCluster::Live, list))
-                                .unwrap_or_default()
-                            }
+                            { render_cluster_panel(XtreamCluster::Live, playlist.as_ref().and_then(|response| response.live.as_ref())) }
                             </div>
                     </Panel>
                     <Panel class="tp__full-width" value={XtreamCluster::Video.intern()} active={active_cluster.clone()}>
                         <div class="tp__playlist-explorer__categories-list">
-                            { playlist.as_ref()
-                                .and_then(|response| response.vod.as_ref())
-                                .map(|list| render_cluster(XtreamCluster::Video, list))
-                                .unwrap_or_default()
-                            }
+                            { render_cluster_panel(XtreamCluster::Video, playlist.as_ref().and_then(|response| response.vod.as_ref())) }
                             </div>
                     </Panel>
                     <Panel class="tp__full-width" value={XtreamCluster::Series.intern()} active={active_cluster}>
                         <div class="tp__playlist-explorer__categories-list">
-                            { playlist.as_ref()
-                                .and_then(|response| response.series.as_ref())
-                                .map(|list| render_cluster(XtreamCluster::Series, list))
-                                .unwrap_or_default()
-                            }
+                            { render_cluster_panel(XtreamCluster::Series, playlist.as_ref().and_then(|response| response.series.as_ref())) }
                         </div>
                     </Panel>
                 </div>
@@ -1011,7 +1004,11 @@ pub fn PlaylistExplorer() -> Html {
             <div class="tp__playlist-explorer__group">
               <div class={format!("tp__playlist-explorer__group-list tp__playlist-explorer__group-list-{}", group.xtream_cluster.to_string().to_lowercase())}>
               {
-                  group.channels.iter().map(render_channel).collect::<Html>()
+                  if group.channels.is_empty() {
+                      html! { <NoContent text={translate.t("LABEL.NO_CONTENT")} /> }
+                  } else {
+                      group.channels.iter().map(render_channel).collect::<Html>()
+                  }
               }
               </div>
             </div>
