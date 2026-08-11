@@ -1239,6 +1239,9 @@ Tuliprox supports the following filter expression types:
   * Prefix: `Caption STARTSWITH "DE:"`
 * Set membership (case-insensitive exact match against a list): `Group IN ["Sports", "News"]`
 * Numeric comparison on the channel number: `Chno = 5`, `Chno != 5`, `Chno > 100`, `Chno >= 100`, `Chno < 200`, `Chno <= 200`
+* Numeric comparison on the detected quality tier: `Quality >= 3` <br>
+  The tier is derived from quality tokens in the caption: `5` = 4K/UHD/2160p, `4` = QHD/1440p, `3` = FHD/1080p,
+  `2` = HD/720p, `1` = SD/480p/576p, `0` = no recognized quality token.
 * Filters don't have operator precedence, so please use parentheses
 * You can apply Morgan’s Law `NOT (A) AND NOT (B)`is the same as `NOT( A OR B)`
 
@@ -1352,7 +1355,7 @@ Each sort rule supports the following entries:
 | Parameter  | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                    |
 |:-----------|:-------|:--------:|:--------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `target`   | Enum   |   Yes    |         | Defines whether the rule sorts `group` or `channel` entries. This changes whether Tuliprox reorders category containers or items within those categories.                                                        |
-| `field`    | String |   Yes    |         | Sort field. For `channel`: `title`, `name`, `caption`, or `url`. For `group`: `group`. This determines which final-state value Tuliprox uses for ordering.                                                       |
+| `field`    | String |   Yes    |         | Sort field. For `channel`: `title`, `name`, `caption`, `url`, or `quality` (detected quality tier, best used with `order: desc`). For `group`: `group`. This determines which final-state value Tuliprox uses for ordering.  |
 | `filter`   | String |   Yes    |         | Filter expression defining which entries the rule applies to. This makes it possible to sort only selected subsets of the playlist instead of the entire target uniformly.                                       |
 | `order`    | Enum   |   Yes    |         | `asc`, `desc`, or `none`. `none` preserves source order for matched entries and is useful when provider order should remain untouched.                                                                           |
 | `natural`  | Bool   |    No    | `false` | Natural sort: numbers embedded in values compare numerically instead of lexicographically, so `Channel 2` sorts before `Channel 10`. Applies to the rule's value and sequence capture comparisons.               |

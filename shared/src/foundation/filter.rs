@@ -32,7 +32,7 @@ impl PartialEq for CompiledRegex {
 #[grammar_inline = r#"
 WHITESPACE = _{ " " | "\t" | "\r" | "\n"}
 field = { ^"group" | ^"title" | ^"name" | ^"genre" | ^"url" | ^"input" | ^"caption" | ^"epgid"}
-numeric_field = { ^"chno" }
+numeric_field = { ^"chno" | ^"quality" }
 and = { ^"and" }
 or = { ^"or" }
 not = { ^"not" }
@@ -244,6 +244,7 @@ impl Filter {
             Self::NumericComparison(field, op, value) => {
                 let actual = match field {
                     ItemField::Chno => provider.pli.header.chno,
+                    ItemField::Quality => u32::from(provider.quality_rank()),
                     _ => return false,
                 };
                 match op {
@@ -426,6 +427,8 @@ fn get_parser_numeric_comparison(expr: Pair<Rule>) -> Result<Filter, TuliproxErr
     let field_text = field_pair.as_str();
     let field = if field_text.eq_ignore_ascii_case("chno") {
         ItemField::Chno
+    } else if field_text.eq_ignore_ascii_case("quality") {
+        ItemField::Quality
     } else {
         return Err(TuliproxError::FilterParse(format!("unknown numeric field: {field_text}")));
     };
@@ -933,6 +936,21 @@ mod tests {
         assert!(filter.filter(&ValueProvider { pli: &pli, match_as_ascii: false }));
         pli.header.chno = 5;
         assert!(!filter.filter(&ValueProvider { pli: &pli, match_as_ascii: false }));
+    }
+
+    #[test]
+    fn test_filter_quality_round_trip_and_eval() {
+        assert_filter_round_trip(r#"Quality >= 3 AND NOT Quality = 5"#);
+
+        let filter = get_filter("Quality >= 3", None).expect("filter parses");
+        let mut fhd = create_mock_pli("X", "G");
+        fhd.header.title = "News FHD".into();
+        assert!(filter.filter(&ValueProvider { pli: &fhd, match_as_ascii: false }));
+        let mut hd = create_mock_pli("X", "G");
+        hd.header.title = "News HD".into();
+        assert!(!filter.filter(&ValueProvider { pli: &hd, match_as_ascii: false }));
+        let unknown = create_mock_pli("News", "G");
+        assert!(!filter.filter(&ValueProvider { pli: &unknown, match_as_ascii: false }));
     }
 
     #[test]

@@ -1,34 +1,12 @@
 use shared::model::{DeduplicateConfig, DeduplicateKeep, DeduplicateMatchBy, PlaylistGroup, PlaylistItem, XtreamCluster};
+use shared::utils::{quality_rank, quality_tokens, token_quality};
 use std::collections::HashMap;
-
-/// Quality tiers recognized inside channel captions, best first.
-fn token_quality(token: &str) -> Option<u8> {
-    const TIERS: &[(&[&str], u8)] = &[
-        (&["4K", "UHD", "2160P"], 5),
-        (&["QHD", "1440P"], 4),
-        (&["FHD", "1080P"], 3),
-        (&["HD", "720P"], 2),
-        (&["SD", "480P", "576P"], 1),
-    ];
-    TIERS
-        .iter()
-        .find_map(|(tokens, rank)| tokens.iter().any(|t| token.eq_ignore_ascii_case(t)).then_some(*rank))
-}
-
-fn value_tokens(value: &str) -> impl Iterator<Item = &str> {
-    value.split(|c: char| !c.is_alphanumeric()).filter(|token| !token.is_empty())
-}
-
-/// Best quality tier found in `value`; 0 when no known token is present.
-pub(in crate::processing::processor) fn quality_rank(value: &str) -> u8 {
-    value_tokens(value).filter_map(token_quality).max().unwrap_or(0)
-}
 
 /// Lowercased token join with quality tokens removed, so "News HD" and
 /// "NEWS [FHD]" produce the same key.
 fn normalized_dedup_key(value: &str) -> String {
     let mut key = String::with_capacity(value.len());
-    for token in value_tokens(value) {
+    for token in quality_tokens(value) {
         if token_quality(token).is_some() {
             continue;
         }
