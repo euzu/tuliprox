@@ -157,6 +157,25 @@ impl HlsManifestFetchFailureSignal {
     }
 }
 
+/// Failure backoff schedule; overridable via TULIPROX_HLS_REFRESH_BACKOFF_MS ("first,second,later").
+fn refresh_failure_backoff_schedule() -> [u64; 3] {
+    static SCHEDULE: std::sync::LazyLock<[u64; 3]> = std::sync::LazyLock::new(|| {
+        let default = [FIRST_FAILURE_BACKOFF_MS, SECOND_FAILURE_BACKOFF_MS, LATER_FAILURE_BACKOFF_MS];
+        std::env::var("TULIPROX_HLS_REFRESH_BACKOFF_MS")
+            .ok()
+            .and_then(|value| {
+                let parts: Vec<u64> =
+                    value.split(',').map(str::trim).map(str::parse).collect::<Result<_, _>>().ok()?;
+                match parts.as_slice() {
+                    [first, second, later] => Some([*first, *second, *later]),
+                    _ => None,
+                }
+            })
+            .unwrap_or(default)
+    });
+    *SCHEDULE
+}
+
 /// Debounce and singleflight state for one live HLS origin manifest.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct OriginRefreshState {
@@ -218,10 +237,11 @@ impl OriginRefreshState {
     }
 
     fn next_failure_backoff_ms(&self) -> u64 {
+        let [first, second, later] = refresh_failure_backoff_schedule();
         match self.consecutive_failures {
-            0 => FIRST_FAILURE_BACKOFF_MS,
-            1 => SECOND_FAILURE_BACKOFF_MS,
-            _ => LATER_FAILURE_BACKOFF_MS,
+            0 => first,
+            1 => second,
+            _ => later,
         }
     }
 }
