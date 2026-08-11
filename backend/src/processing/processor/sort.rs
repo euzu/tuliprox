@@ -13,6 +13,57 @@ fn apply_sort_order(order: SortOrder, ordering: Ordering) -> Ordering {
     }
 }
 
+fn trim_leading_zeros(digits: &[u8]) -> &[u8] {
+    let start = digits.iter().position(|b| *b != b'0').unwrap_or(digits.len() - 1);
+    &digits[start..]
+}
+
+/// Compare strings with embedded ascii integers numerically ("Chan 2" < "Chan 10").
+fn natural_cmp(left: &str, right: &str) -> Ordering {
+    let l = left.as_bytes();
+    let r = right.as_bytes();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < l.len() && j < r.len() {
+        if l[i].is_ascii_digit() && r[j].is_ascii_digit() {
+            let li = i;
+            while i < l.len() && l[i].is_ascii_digit() {
+                i += 1;
+            }
+            let rj = j;
+            while j < r.len() && r[j].is_ascii_digit() {
+                j += 1;
+            }
+            let ls = trim_leading_zeros(&l[li..i]);
+            let rs = trim_leading_zeros(&r[rj..j]);
+            let ord = ls.len().cmp(&rs.len()).then_with(|| ls.cmp(rs));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            // equal numeric value: fewer leading zeros first for determinism
+            let ord = (i - li).cmp(&(j - rj));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        } else {
+            let ord = l[i].cmp(&r[j]);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            i += 1;
+            j += 1;
+        }
+    }
+    (l.len() - i).cmp(&(r.len() - j))
+}
+
+fn compare_values(natural: bool, left: &str, right: &str) -> Ordering {
+    if natural {
+        natural_cmp(left, right)
+    } else {
+        left.cmp(right)
+    }
+}
+
 fn parse_capture_group_rank(name: &str) -> Option<u32> {
     let suffix = name.strip_prefix('c')?;
     if suffix.is_empty() || !suffix.bytes().all(|c| c.is_ascii_digit()) {
@@ -95,7 +146,7 @@ fn evaluate_sequence(plan: &SequencePlan, value: &str) -> SequenceMatch {
     SequenceMatch::Unmatched
 }
 
-fn compare_sequence_match(a: &SequenceMatch, b: &SequenceMatch, order: SortOrder) -> Ordering {
+fn compare_sequence_match(a: &SequenceMatch, b: &SequenceMatch, order: SortOrder, natural: bool) -> Ordering {
     match (a, b) {
         (
             SequenceMatch::Matched { sequence_idx: idx_a, captures: captures_a },
@@ -110,7 +161,7 @@ fn compare_sequence_match(a: &SequenceMatch, b: &SequenceMatch, order: SortOrder
             let capture_count = captures_a.len().max(captures_b.len());
             for index in 0..capture_count {
                 let ord = match (captures_a.get(index), captures_b.get(index)) {
-                    (Some(Some(v1)), Some(Some(v2))) => v1.cmp(v2),
+                    (Some(Some(v1)), Some(Some(v2))) => compare_values(natural, v1, v2),
                     (Some(Some(_)), Some(None) | None) => Ordering::Greater,
                     (Some(None) | None, Some(Some(_))) => Ordering::Less,
                     _ => Ordering::Equal,
@@ -142,11 +193,13 @@ fn compare_rule_entries(rule: &PreparedRule, left: &RuleCacheEntry, right: &Rule
         (Some(value_left), Some(value_right)) => {
             if rule.sequence_plan.is_some() {
                 match (&left.sequence_match, &right.sequence_match) {
-                    (Some(seq_left), Some(seq_right)) => compare_sequence_match(seq_left, seq_right, rule.rule.order),
+                    (Some(seq_left), Some(seq_right)) => {
+                        compare_sequence_match(seq_left, seq_right, rule.rule.order, rule.rule.natural)
+                    }
                     _ => Ordering::Equal,
                 }
             } else {
-                apply_sort_order(rule.rule.order, value_left.cmp(value_right))
+                apply_sort_order(rule.rule.order, compare_values(rule.rule.natural, value_left, value_right))
             }
         }
     }
@@ -239,7 +292,7 @@ fn playlist_comparator(
         let plan = SequencePlan::new(sequence);
         let left = evaluate_sequence(&plan, value_a);
         let right = evaluate_sequence(&plan, value_b);
-        compare_sequence_match(&left, &right, order)
+        compare_sequence_match(&left, &right, order, false)
     } else {
         apply_sort_order(order, value_a.cmp(value_b))
     }
@@ -270,7 +323,7 @@ fn compare_cached_rule_entries(
         let left = &cache[left_idx];
         let right = &cache[right_idx];
         if let (Some(va), Some(vb)) = (&left.value, &right.value) {
-            let fallback = apply_sort_order(rule.rule.order, va.cmp(vb));
+            let fallback = apply_sort_order(rule.rule.order, compare_values(rule.rule.natural, va, vb));
             if fallback != Ordering::Equal {
                 return fallback;
             }
@@ -419,6 +472,7 @@ mod tests {
             target: SortTarget::Channel,
             field: ItemField::Caption,
             order: SortOrder::Asc,
+            natural: false,
             sequence: Some(vec![
                 shared::model::REGEX_CACHE.get_or_compile(r"(?P<c1>.*?)\bUHD\b").unwrap(),
                 shared::model::REGEX_CACHE.get_or_compile(r"(?P<c1>.*?)\bFHD\b").unwrap(),
@@ -503,6 +557,7 @@ mod tests {
             target: SortTarget::Channel,
             field: ItemField::Caption,
             order: SortOrder::Asc,
+            natural: false,
             sequence: Some(vec![
                 shared::model::REGEX_CACHE.get_or_compile(r"^US\| EAST.*?\[\bUHD\b\](?P<c1>.*)").unwrap(),
                 shared::model::REGEX_CACHE.get_or_compile(r"^US\| EAST.*?\[\bFHD\b\](?P<c1>.*)").unwrap(),
@@ -603,6 +658,7 @@ mod tests {
             target: SortTarget::Channel,
             field: ItemField::Caption,
             order: SortOrder::Desc,
+            natural: false,
             sequence: Some(vec![shared::model::REGEX_CACHE.get_or_compile(r"^A-(?P<c1>\d+)$").unwrap()]),
             filter: Filter::default(),
         };
@@ -636,6 +692,7 @@ mod tests {
             target: SortTarget::Channel,
             field: ItemField::Caption,
             order: SortOrder::Asc,
+            natural: false,
             // Both values match the same sequence item and produce equal sequence priority.
             sequence: Some(vec![shared::model::REGEX_CACHE.get_or_compile(r"^A-\d+-.$").unwrap()]),
             filter: Filter::default(),
@@ -644,6 +701,7 @@ mod tests {
             target: SortTarget::Channel,
             field: ItemField::Caption,
             order: SortOrder::Desc,
+            natural: false,
             sequence: None,
             filter: Filter::default(),
         };
@@ -677,6 +735,7 @@ mod tests {
             target: SortTarget::Group,
             field: ItemField::Caption,
             order: SortOrder::Asc,
+            natural: false,
             // Both groups match the same sequence item and produce equal sequence priority.
             sequence: Some(vec![shared::model::REGEX_CACHE.get_or_compile(r"^A-\d+-.$").unwrap()]),
             filter: Filter::default(),
@@ -719,6 +778,7 @@ mod tests {
             target: SortTarget::Group,
             field: ItemField::Caption,
             order: SortOrder::Asc,
+            natural: false,
             // Both groups have the same sequence/rule priority and same caption value.
             sequence: Some(vec![shared::model::REGEX_CACHE.get_or_compile(r"^Same Caption$").unwrap()]),
             filter: Filter::default(),
@@ -751,6 +811,7 @@ mod tests {
             target: SortTarget::Channel,
             field: ItemField::Caption,
             order: SortOrder::None,
+            natural: false,
             sequence: Some(vec![
                 shared::model::REGEX_CACHE.get_or_compile(r"^UHD$").unwrap(),
                 shared::model::REGEX_CACHE.get_or_compile(r"^FHD$").unwrap(),
@@ -795,6 +856,7 @@ mod tests {
             target: SortTarget::Group,
             field: ItemField::Caption,
             order: SortOrder::None,
+            natural: false,
             sequence: Some(vec![
                 shared::model::REGEX_CACHE.get_or_compile(r"^UHD$").unwrap(),
                 shared::model::REGEX_CACHE.get_or_compile(r"^FHD$").unwrap(),
@@ -829,6 +891,7 @@ mod tests {
             target: SortTarget::Channel,
             field: ItemField::Caption,
             order: SortOrder::None,
+            natural: false,
             sequence: Some(vec![]),
             filter: Filter::default(),
         };
@@ -839,5 +902,48 @@ mod tests {
         let sorted = groups[0].channels.iter().map(|pli| pli.header.title.clone()).collect::<Vec<_>>();
         let expected = vec!["B", "A"].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
         assert_eq!(expected, sorted);
+    }
+
+    #[test]
+    fn test_natural_sort_orders_embedded_numbers_numerically() {
+        let channels: Vec<PlaylistItem> = vec!["Chan 10", "Chan 2", "Chan 1", "Chan 002"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, title)| PlaylistItem {
+                header: PlaylistItemHeader {
+                    title: title.to_string().into(),
+                    source_ordinal: u32::try_from(i + 1).unwrap(),
+                    ..Default::default()
+                },
+            })
+            .collect();
+
+        let channel_sort = ConfigSortRule {
+            target: SortTarget::Channel,
+            field: ItemField::Caption,
+            order: SortOrder::Asc,
+            natural: true,
+            sequence: None,
+            filter: Filter::default(),
+        };
+
+        let mut groups = vec![make_group(1, "G1", channels)];
+        sort_channels_in_groups(groups.as_mut_slice(), &[channel_sort], false);
+
+        let sorted = groups[0].channels.iter().map(|pli| pli.header.title.clone()).collect::<Vec<_>>();
+        let expected =
+            vec!["Chan 1", "Chan 2", "Chan 002", "Chan 10"].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
+        assert_eq!(expected, sorted);
+    }
+
+    #[test]
+    fn test_natural_cmp_basics() {
+        assert_eq!(natural_cmp("Chan 2", "Chan 10"), Ordering::Less);
+        assert_eq!(natural_cmp("Chan 10", "Chan 2"), Ordering::Greater);
+        assert_eq!(natural_cmp("Chan 2", "Chan 2"), Ordering::Equal);
+        assert_eq!(natural_cmp("Chan 2", "Chan 02"), Ordering::Less);
+        assert_eq!(natural_cmp("abc", "abd"), Ordering::Less);
+        assert_eq!(natural_cmp("abc", "abc def"), Ordering::Less);
+        assert_eq!(natural_cmp("00", "0"), Ordering::Greater);
     }
 }

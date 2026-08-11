@@ -1355,10 +1355,15 @@ Each sort rule supports the following entries:
 | `field`    | String |   Yes    |         | Sort field. For `channel`: `title`, `name`, `caption`, or `url`. For `group`: `group`. This determines which final-state value Tuliprox uses for ordering.                                                       |
 | `filter`   | String |   Yes    |         | Filter expression defining which entries the rule applies to. This makes it possible to sort only selected subsets of the playlist instead of the entire target uniformly.                                       |
 | `order`    | Enum   |   Yes    |         | `asc`, `desc`, or `none`. `none` preserves source order for matched entries and is useful when provider order should remain untouched.                                                                           |
+| `natural`  | Bool   |    No    | `false` | Natural sort: numbers embedded in values compare numerically instead of lexicographically, so `Channel 2` sorts before `Channel 10`. Applies to the rule's value and sequence capture comparisons.               |
 | `sequence` | List   |    No    |         | Ordered regex list used for index-based sorting. When present, Tuliprox prioritizes regex sequence position over `order`, enabling explicit semantic ordering such as quality tiers or curated group precedence. |
 
 > **Note:** Sort rules must be written with the configured `processing_order` in mind,
 > because sorting operates on the transformed state that exists at that point in the pipeline.
+>
+> **Multi-field sorting:** rules are applied in the order they are declared. When a rule compares
+> equal, the next rule decides — so a `channel` rule on `group` followed by one on `caption`
+> produces group-then-caption ordering.
 
 #### Sort Example
 
