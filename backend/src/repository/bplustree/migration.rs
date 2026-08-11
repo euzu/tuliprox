@@ -474,16 +474,18 @@ pub fn migrate_bplustree_databases_with_marker(
 fn marker_file_name() -> String { format!("{MARKER_FILE_GUARD_PREFIX}{STORAGE_VERSION}") }
 
 //
-// The user database has gone through six serialization schemas (MessagePack,
+// The user database has gone through seven serialization schemas (MessagePack,
 // positional/sequence encoding via rmp_serde):
 //
 //   V1 (Deprecated) – original format, 13 fields, no epg_request_timeshift
 //   V2              – 14 fields, added epg_request_timeshift
 //   V3              – 15 fields, added priority
 //   V4              – 17 fields, added soft_connections and soft_priority
-//   V5 (current)    – 18 fields, added output_clusters
+//   V5              – 18 fields, added output_clusters
+//   V6              – 19 fields, added network_access
+//   V7 (current)    – 20 fields, added hide_adult
 //
-// On first startup after an upgrade the file is still in V1 or V2 format.
+// On first startup after an upgrade the file is still in an older format.
 // `migrate_user_db_schema` detects this, converts every record in-place, and
 // writes a merge-guard marker so that config-driven user merges cannot
 // overwrite the freshly migrated data.
@@ -757,6 +759,69 @@ impl StoredApiUserV6 {
     fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v5(&StoredApiUserV5::from_v1(v1)) }
 }
 
+// V7 mirror — same layout as user_repository::StoredProxyUserCredentials.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredApiUserV7 {
+    pub target: String,
+    pub username: String,
+    pub password: String,
+    pub token: Option<String>,
+    pub proxy: ProxyType,
+    pub server: Option<String>,
+    pub epg_timeshift: Option<String>,
+    pub epg_request_timeshift: Option<String>,
+    pub created_at: Option<i64>,
+    pub exp_date: Option<i64>,
+    pub max_connections: Option<u32>,
+    pub status: Option<ProxyUserStatus>,
+    pub output_clusters: ClusterFlags,
+    pub ui_enabled: bool,
+    pub hide_adult: bool,
+    pub comment: Option<String>,
+    pub priority: Option<i8>,
+    pub soft_connections: Option<u16>,
+    pub soft_priority: Option<i8>,
+    pub network_access: Option<NetworkAccessDto>,
+}
+
+impl StoredApiUserV7 {
+    fn from_v6(v6: &StoredApiUserV6) -> Self {
+        Self {
+            target: v6.target.clone(),
+            username: v6.username.clone(),
+            password: v6.password.clone(),
+            token: v6.token.clone(),
+            proxy: v6.proxy,
+            server: v6.server.clone(),
+            epg_timeshift: v6.epg_timeshift.clone(),
+            epg_request_timeshift: v6.epg_request_timeshift.clone(),
+            created_at: v6.created_at,
+            exp_date: v6.exp_date,
+            max_connections: v6.max_connections,
+            status: v6.status,
+            output_clusters: v6.output_clusters,
+            ui_enabled: v6.ui_enabled,
+            hide_adult: false,
+            comment: v6.comment.clone(),
+            priority: v6.priority,
+            soft_connections: v6.soft_connections,
+            soft_priority: v6.soft_priority,
+            network_access: v6.network_access.clone(),
+        }
+    }
+
+    fn from_v5(v5: &StoredApiUserV5) -> Self { Self::from_v6(&StoredApiUserV6::from_v5(v5)) }
+
+    fn from_v4(v4: &StoredApiUserV4) -> Self { Self::from_v6(&StoredApiUserV6::from_v4(v4)) }
+
+    fn from_v3(v3: &StoredApiUserV3) -> Self { Self::from_v6(&StoredApiUserV6::from_v3(v3)) }
+
+    fn from_v2(v2: &StoredApiUserV2) -> Self { Self::from_v6(&StoredApiUserV6::from_v2(v2)) }
+
+    fn from_v1(v1: &StoredApiUserV1) -> Self { Self::from_v6(&StoredApiUserV6::from_v1(v1)) }
+}
+
 fn create_user_db_merge_guard(merge_guard_path: &Path) -> io::Result<()> {
     if !merge_guard_path.exists() {
         std::fs::write(merge_guard_path, b"")?;
@@ -773,9 +838,9 @@ fn migrate_legacy_user_schema<SourceV, Map>(
 ) -> io::Result<bool>
 where
     SourceV: serde::Serialize + for<'de> serde::Deserialize<'de> + Clone,
-    Map: FnMut(SourceV) -> StoredApiUserV6,
+    Map: FnMut(SourceV) -> StoredApiUserV7,
 {
-    if super::v3::migration::migrate_v2_typed_map::<String, SourceV, StoredApiUserV6, _>(db_path, map).is_err()
+    if super::v3::migration::migrate_v2_typed_map::<String, SourceV, StoredApiUserV7, _>(db_path, map).is_err()
     {
         return Ok(false);
     }
@@ -790,26 +855,26 @@ fn migrate_current_user_schema<SourceV, Map>(
 ) -> io::Result<bool>
 where
     SourceV: for<'de> serde::Deserialize<'de>,
-    Map: Fn(&SourceV) -> StoredApiUserV6,
+    Map: Fn(&SourceV) -> StoredApiUserV7,
 {
     let Ok(tree) = BPlusTree::<String, SourceV>::load(db_path) else {
         return Ok(false);
     };
-    let mut v6_tree = BPlusTree::new();
+    let mut v7_tree = BPlusTree::new();
     for (key, user) in &tree {
-        v6_tree.insert(key.clone(), map(user));
+        v7_tree.insert(key.clone(), map(user));
     }
-    v6_tree.store(db_path)?;
+    v7_tree.store(db_path)?;
     create_user_db_merge_guard(merge_guard_path)?;
     Ok(true)
 }
 
-/// Migrates the user database file from V1-V5 schema to V6 (current) in
+/// Migrates the user database file from V1-V6 schema to V7 (current) in
 /// place and creates a merge-guard file so config-driven merges are skipped
 /// until the operator explicitly removes it.
 ///
 /// Returns `true` when a migration was performed, `false` when the file was
-/// already in V6 format or did not exist.
+/// already in V7 format or did not exist.
 fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result<bool> {
     if !db_path.exists() {
         return Ok(false);
@@ -818,31 +883,36 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
     let storage_version = super::v3::migration::storage_version(db_path)?
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "user database is not a B+Tree"))?;
     if storage_version <= 2 {
-        if super::v3::migration::migrate_v2_typed::<String, StoredApiUserV6>(db_path).is_ok() {
+        if super::v3::migration::migrate_v2_typed::<String, StoredApiUserV7>(db_path).is_ok() {
             return Ok(false);
         }
+        if migrate_legacy_user_schema::<StoredApiUserV6, _>(db_path, merge_guard_path, |user| {
+            StoredApiUserV7::from_v6(&user)
+        })? {
+            return Ok(true);
+        }
         if migrate_legacy_user_schema::<StoredApiUserV5, _>(db_path, merge_guard_path, |user| {
-            StoredApiUserV6::from_v5(&user)
+            StoredApiUserV7::from_v5(&user)
         })? {
             return Ok(true);
         }
         if migrate_legacy_user_schema::<StoredApiUserV4, _>(db_path, merge_guard_path, |user| {
-            StoredApiUserV6::from_v4(&user)
+            StoredApiUserV7::from_v4(&user)
         })? {
             return Ok(true);
         }
         if migrate_legacy_user_schema::<StoredApiUserV3, _>(db_path, merge_guard_path, |user| {
-            StoredApiUserV6::from_v3(&user)
+            StoredApiUserV7::from_v3(&user)
         })? {
             return Ok(true);
         }
         if migrate_legacy_user_schema::<StoredApiUserV2, _>(db_path, merge_guard_path, |user| {
-            StoredApiUserV6::from_v2(&user)
+            StoredApiUserV7::from_v2(&user)
         })? {
             return Ok(true);
         }
         if migrate_legacy_user_schema::<StoredApiUserV1, _>(db_path, merge_guard_path, |user| {
-            StoredApiUserV6::from_v1(&user)
+            StoredApiUserV7::from_v1(&user)
         })? {
             return Ok(true);
         }
@@ -858,22 +928,25 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
         ));
     }
 
-    if BPlusTree::<String, StoredApiUserV6>::load(db_path).is_ok() {
+    if BPlusTree::<String, StoredApiUserV7>::load(db_path).is_ok() {
         return Ok(false);
     }
-    if migrate_current_user_schema::<StoredApiUserV5, _>(db_path, merge_guard_path, StoredApiUserV6::from_v5)? {
+    if migrate_current_user_schema::<StoredApiUserV6, _>(db_path, merge_guard_path, StoredApiUserV7::from_v6)? {
         return Ok(true);
     }
-    if migrate_current_user_schema::<StoredApiUserV4, _>(db_path, merge_guard_path, StoredApiUserV6::from_v4)? {
+    if migrate_current_user_schema::<StoredApiUserV5, _>(db_path, merge_guard_path, StoredApiUserV7::from_v5)? {
         return Ok(true);
     }
-    if migrate_current_user_schema::<StoredApiUserV3, _>(db_path, merge_guard_path, StoredApiUserV6::from_v3)? {
+    if migrate_current_user_schema::<StoredApiUserV4, _>(db_path, merge_guard_path, StoredApiUserV7::from_v4)? {
         return Ok(true);
     }
-    if migrate_current_user_schema::<StoredApiUserV2, _>(db_path, merge_guard_path, StoredApiUserV6::from_v2)? {
+    if migrate_current_user_schema::<StoredApiUserV3, _>(db_path, merge_guard_path, StoredApiUserV7::from_v3)? {
         return Ok(true);
     }
-    if migrate_current_user_schema::<StoredApiUserV1, _>(db_path, merge_guard_path, StoredApiUserV6::from_v1)? {
+    if migrate_current_user_schema::<StoredApiUserV2, _>(db_path, merge_guard_path, StoredApiUserV7::from_v2)? {
+        return Ok(true);
+    }
+    if migrate_current_user_schema::<StoredApiUserV1, _>(db_path, merge_guard_path, StoredApiUserV7::from_v1)? {
         return Ok(true);
     }
 
@@ -1308,7 +1381,7 @@ mod tests {
     }
 
     #[test]
-    fn user_db_schema_migration_v2_to_v6_creates_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v2_to_v7_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
@@ -1341,13 +1414,14 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
-        let user = v6_tree
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
             .query(&"alice".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "alice missing after migration"))?;
         assert_eq!(user.username, "alice");
         assert_eq!(user.epg_request_timeshift.as_deref(), Some("2"));
         assert_eq!(user.output_clusters, ClusterFlags::all());
+        assert!(!user.hide_adult);
         assert_eq!(user.priority, None);
         assert_eq!(user.soft_connections, None);
         assert_eq!(user.soft_priority, None);
@@ -1357,7 +1431,7 @@ mod tests {
     }
 
     #[test]
-    fn user_db_schema_migration_v3_to_v6_creates_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v3_to_v7_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
@@ -1390,11 +1464,12 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
-        let user = v6_tree
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
             .query(&"bob".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "bob missing after migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::all());
+        assert!(!user.hide_adult);
         assert_eq!(user.priority, Some(5));
         assert_eq!(user.soft_connections, None);
         assert_eq!(user.soft_priority, None);
@@ -1404,7 +1479,7 @@ mod tests {
     }
 
     #[test]
-    fn user_db_schema_migration_v4_to_v6_creates_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v4_to_v7_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
@@ -1439,11 +1514,12 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
-        let user = v6_tree
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
             .query(&"carol".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "carol missing after migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::all());
+        assert!(!user.hide_adult);
         assert_eq!(user.soft_connections, Some(2));
         assert_eq!(user.soft_priority, Some(-4));
         assert_eq!(user.network_access, None);
@@ -1452,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn user_db_schema_migration_v5_to_v6_creates_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v5_to_v7_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
@@ -1488,11 +1564,12 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
-        let user = v6_tree
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
             .query(&"dave".to_string())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "dave missing after v6 migration"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "dave missing after v7 migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
+        assert!(!user.hide_adult);
         assert_eq!(user.priority, Some(5));
         assert_eq!(user.soft_connections, Some(2));
         assert_eq!(user.soft_priority, Some(-4));
@@ -1502,13 +1579,12 @@ mod tests {
     }
 
     #[test]
-    fn user_db_schema_v6_is_detected_without_writing_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v6_to_v7_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
 
-        let mut v6_tree: super::super::v2::BPlusTree<String, StoredApiUserV6> =
-            super::super::v2::BPlusTree::new();
+        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
         v6_tree.insert(
             "erin".to_string(),
             StoredApiUserV6 {
@@ -1540,14 +1616,75 @@ mod tests {
         assert!(!merge_guard_path.exists());
 
         let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
+        assert!(migrated);
+        assert!(merge_guard_path.exists());
+
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
+            .query(&"erin".to_string())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "erin missing after v7 migration"))?;
+        assert_eq!(user.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
+        assert!(!user.hide_adult);
+        assert_eq!(user.priority, Some(5));
+        assert_eq!(user.soft_connections, Some(2));
+        assert_eq!(user.soft_priority, Some(-4));
+        assert_eq!(
+            user.network_access.as_ref().and_then(|value| value.allowed_countries.as_ref()),
+            Some(&vec!["DE".to_string()])
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn user_db_schema_v7_is_detected_without_writing_merge_guard() -> io::Result<()> {
+        let temp = tempdir()?;
+        let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
+        let merge_guard_path = user_db_merge_guard_path(temp.path());
+
+        let mut v7_tree: super::super::v2::BPlusTree<String, StoredApiUserV7> =
+            super::super::v2::BPlusTree::new();
+        v7_tree.insert(
+            "frank".to_string(),
+            StoredApiUserV7 {
+                target: "channels".to_string(),
+                username: "frank".to_string(),
+                password: "secret".to_string(),
+                token: None,
+                proxy: ProxyType::Reverse(None),
+                server: None,
+                epg_timeshift: None,
+                epg_request_timeshift: None,
+                created_at: None,
+                exp_date: None,
+                max_connections: Some(1),
+                status: Some(ProxyUserStatus::Active),
+                output_clusters: ClusterFlags::Live | ClusterFlags::Vod,
+                ui_enabled: true,
+                hide_adult: true,
+                comment: None,
+                priority: Some(5),
+                soft_connections: Some(2),
+                soft_priority: Some(-4),
+                network_access: Some(NetworkAccessDto {
+                    allowed_countries: Some(vec!["DE".to_string()]),
+                    allowed_networks: Some(vec!["192.168.0.0/16".to_string()]),
+                }),
+            },
+        );
+        let _ = v7_tree.store(&db_path)?;
+        assert!(!merge_guard_path.exists());
+
+        let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
         assert!(!migrated);
         assert!(!merge_guard_path.exists());
 
-        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
-        let user = v6_tree
-            .query(&"erin".to_string())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "erin missing after v6 detection"))?;
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
+            .query(&"frank".to_string())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "frank missing after v7 detection"))?;
         assert_eq!(user.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
+        assert!(user.hide_adult);
         assert_eq!(user.priority, Some(5));
         assert_eq!(user.soft_connections, Some(2));
         assert_eq!(user.soft_priority, Some(-4));

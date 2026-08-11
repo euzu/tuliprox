@@ -4609,6 +4609,7 @@ mod tests {
             status: None,
             output_clusters: shared::model::ClusterFlags::all(),
             ui_enabled: true,
+            hide_adult: false,
             comment: None,
             priority: 0,
             soft_connections,

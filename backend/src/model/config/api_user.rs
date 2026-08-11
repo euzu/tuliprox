@@ -107,6 +107,7 @@ pub struct ProxyUserCredentials {
     pub status: Option<ProxyUserStatus>,
     pub output_clusters: ClusterFlags,
     pub ui_enabled: bool,
+    pub hide_adult: bool,
     pub comment: Option<String>,
     pub priority: i8,
     pub soft_connections: u16,
@@ -132,6 +133,7 @@ impl From<&ProxyUserCredentialsDto> for ProxyUserCredentials {
             status: dto.status,
             output_clusters: dto.output_clusters.unwrap_or_else(ClusterFlags::all),
             ui_enabled: dto.ui_enabled,
+            hide_adult: dto.hide_adult,
             comment: dto.comment.clone(),
             priority: dto.priority,
             soft_connections: dto.soft_connections,
@@ -162,6 +164,7 @@ impl From<&ProxyUserCredentials> for ProxyUserCredentialsDto {
             status: instance.status,
             output_clusters: if instance.output_clusters.is_all() { None } else { Some(instance.output_clusters) },
             ui_enabled: instance.ui_enabled,
+            hide_adult: instance.hide_adult,
             comment: instance.comment.clone(),
             priority: instance.priority,
             soft_connections: instance.soft_connections,
@@ -237,6 +240,48 @@ impl ProxyUserCredentials {
         self.output_clusters.has_cluster(item_type)
     }
 
+    /// True when the group/category name looks like Adult / 18+ / XXX content.
+    ///
+    /// Matching is case-insensitive on the group name (BitTV-style
+    /// `18+ (Adult)`, `18+ (для взрослых)`, `XXX`, …). Title-only channels in
+    /// non-adult groups are not filtered.
+    pub fn is_adult_group(group: &str) -> bool {
+        let lower = group.to_lowercase();
+        lower.contains("18+")
+            || lower.contains("xxx")
+            || lower.contains("adult")
+            || lower.contains("для взрослых")
+            || lower.contains("porn")
+            || lower.contains("erotic")
+            || lower.contains("nsfw")
+    }
+
+    /// Whether this user may see playlist items / categories from `group`.
+    #[inline]
+    pub fn allows_group(&self, group: &str) -> bool {
+        !self.hide_adult || !Self::is_adult_group(group)
+    }
+
+    /// Whether this user may see an Xtream/M3U item (group name + optional `is_adult` props).
+    #[inline]
+    pub fn allows_playlist_item(&self, group: &str, props: Option<&shared::model::StreamProperties>) -> bool {
+        if !self.hide_adult {
+            return true;
+        }
+        if Self::is_adult_group(group) {
+            return false;
+        }
+        !Self::stream_props_marked_adult(props)
+    }
+
+    pub(crate) fn stream_props_marked_adult(props: Option<&shared::model::StreamProperties>) -> bool {
+        match props {
+            Some(shared::model::StreamProperties::Live(live)) => live.is_adult != 0,
+            Some(shared::model::StreamProperties::Video(video)) => video.is_adult != 0,
+            _ => false,
+        }
+    }
+
     pub async fn connection_permission(&self, app_state: &AppState) -> UserConnectionPermission {
         let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
         if (self.max_connections > 0 || self.soft_connections > 0) && config.user_access_control {
@@ -294,5 +339,46 @@ impl TargetUser {
             .iter()
             .find(|c| c.matches_token(token))
             .map(|credentials| (Arc::clone(credentials), self.target.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProxyUserCredentials;
+
+    #[test]
+    fn adult_group_matcher_covers_bittv_style_names() {
+        assert!(ProxyUserCredentials::is_adult_group("18+ (Adult)"));
+        assert!(ProxyUserCredentials::is_adult_group("18+ (для взрослых)"));
+        assert!(ProxyUserCredentials::is_adult_group("XXX"));
+        assert!(ProxyUserCredentials::is_adult_group("Adult Movies"));
+        assert!(!ProxyUserCredentials::is_adult_group("Общие"));
+        assert!(!ProxyUserCredentials::is_adult_group("News"));
+    }
+
+    #[test]
+    fn allows_group_respects_hide_adult_flag() {
+        let mut user = ProxyUserCredentials::default();
+        assert!(user.allows_group("18+ (Adult)"));
+        user.hide_adult = true;
+        assert!(!user.allows_group("18+ (Adult)"));
+        assert!(user.allows_group("Sports"));
+    }
+
+    #[test]
+    fn allows_playlist_item_honors_xtream_is_adult_flag() {
+        use shared::model::{LiveStreamProperties, StreamProperties};
+
+        let mut user = ProxyUserCredentials::default();
+        user.hide_adult = true;
+        let adult = StreamProperties::Live(Box::new(LiveStreamProperties {
+            is_adult: 1,
+            ..LiveStreamProperties::default()
+        }));
+        let clean = StreamProperties::Live(Box::new(LiveStreamProperties::default()));
+        assert!(!user.allows_playlist_item("News", Some(&adult)));
+        assert!(user.allows_playlist_item("News", Some(&clean)));
+        assert!(user.allows_playlist_item("News", None));
+        assert!(!user.allows_playlist_item("XXX", Some(&clean)));
     }
 }
