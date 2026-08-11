@@ -202,8 +202,11 @@ pub async fn get_xmltv(
                 }
             }
 
-            let _ = cleanup_unlisted_epg_files(&ctx.config.file_locks, &stored_file_paths, "_epg.xml").await;
-            let _ = cleanup_unlisted_epg_files(&ctx.config.file_locks, &stored_file_paths, "_epg.ics").await;
+            for suffix in ["_epg.xml", "_epg.ics"] {
+                if let Err(err) = cleanup_unlisted_epg_files(&ctx.config.file_locks, &stored_file_paths, suffix).await {
+                    warn!("Failed to clean up stale {suffix} files: {err}");
+                }
+            }
 
             if file_paths.is_empty() {
                 (None, errors)
