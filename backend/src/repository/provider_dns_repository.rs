@@ -79,13 +79,26 @@ pub async fn persist_dns_resolved_store(path: &Path, store: &DnsResolvedStore) -
     if let Err(err) = fs::rename(&tmp_path, path).await {
         #[cfg(windows)]
         {
-            if fs::remove_file(path).await.is_ok() && fs::rename(&tmp_path, path).await.is_ok() {
-                debug!(
-                    "Persisted DNS resolved store to '{}' (providers={})",
-                    path.display(),
-                    store.providers.len()
-                );
-                return Ok(());
+            // Windows cannot rename over an existing file; retry after removing the target
+            if fs::remove_file(path).await.is_ok() {
+                match fs::rename(&tmp_path, path).await {
+                    Ok(()) => {
+                        debug!(
+                            "Persisted DNS resolved store to '{}' (providers={})",
+                            path.display(),
+                            store.providers.len()
+                        );
+                        return Ok(());
+                    }
+                    Err(retry_err) => {
+                        // Target is already deleted; keep the temp file as the only surviving copy
+                        return Err(format!(
+                            "rename temp file '{}' -> '{}' failed after removing target: {retry_err}; temp file kept",
+                            tmp_path.display(),
+                            path.display()
+                        ));
+                    }
+                }
             }
         }
         let _ = fs::remove_file(&tmp_path).await;
