@@ -48,17 +48,13 @@ async fn token(
                     if verify_password(hash, password.as_bytes()) {
                         let pwd_version = WebAuthConfig::pwd_version_from_hash(hash);
                         let permissions = web_auth.resolve_permissions(username);
-                        let is_admin = web_auth
+                        let user_entry = web_auth
                             .t_users
                             .as_ref()
-                            .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(username)))
-                            .is_some_and(|user| user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin")));
-                        let user_groups = web_auth
-                            .t_users
-                            .as_ref()
-                            .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(username)))
-                            .map(|user| user.groups.clone())
-                            .unwrap_or_default();
+                            .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(username)));
+                        let is_admin =
+                            user_entry.is_some_and(|user| user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin")));
+                        let user_groups = user_entry.map(|user| user.groups.clone()).unwrap_or_default();
                         debug!(
                             "Web login success candidate: username='{username}', groups={user_groups:?}, is_admin={is_admin}, permissions={permissions}",
                         );
