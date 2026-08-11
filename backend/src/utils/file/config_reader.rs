@@ -699,8 +699,9 @@ pub fn read_api_proxy_file(
         match maybe_api_proxy {
             Ok(mut api_proxy_dto) => {
                 if resolve_env {
+                    // A recoverable error keeps the last good config alive during hot reload
                     if let Err(err) = api_proxy_dto.prepare() {
-                        exit!("can't read api-proxy-config file: {err}");
+                        return Err(TuliproxError::Config(format!("can't read api-proxy-config file: {err}")));
                     }
                 }
                 Ok(Some(api_proxy_dto))
