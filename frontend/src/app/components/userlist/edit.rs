@@ -47,9 +47,14 @@ fn upsert_user(
 pub fn UserEdit() -> Html {
     let translate = use_translation();
     let services_ctx = use_service_context();
-    let userlist_ctx = use_context::<UserlistContext>().expect("Userlist context not found");
-    let playlist_ctx = use_context::<PlaylistContext>().expect("Playlist context not found");
-    let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
+    let userlist = use_context::<UserlistContext>();
+    let playlist = use_context::<PlaylistContext>();
+    let config = use_context::<ConfigContext>();
+    // Render a fallback instead of panicking when a provider is missing
+    let (Some(userlist_ctx), Some(playlist_ctx), Some(config_ctx)) = (userlist, playlist, config) else {
+        log::error!("UserEdit rendered without required context providers");
+        return html! {};
+    };
 
     let targets = use_memo(playlist_ctx.clone(), |playlist_ctx| match playlist_ctx.sources.as_ref() {
         None => vec![],

@@ -268,10 +268,15 @@ fn RecordDialogContent(props: &RecordDialogContentProps) -> Html {
 
 #[component]
 pub fn PlaylistExplorer() -> Html {
-    let context = use_context::<PlaylistExplorerContext>().expect("PlaylistExplorer context not found");
-    let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
-    let dialog = use_context::<DialogService>().expect("Dialog service not found");
+    let explorer_ctx = use_context::<PlaylistExplorerContext>();
+    let cfg_ctx = use_context::<ConfigContext>();
+    let dialog_ctx = use_context::<DialogService>();
     let translate = use_translation();
+    // Render a fallback instead of panicking when a provider is missing
+    let (Some(context), Some(config_ctx), Some(dialog)) = (explorer_ctx, cfg_ctx, dialog_ctx) else {
+        log::error!("PlaylistExplorer rendered without required context providers");
+        return html! { <NoContent text={translate.t("LABEL.NO_CONTENT")} /> };
+    };
     let service_ctx = use_service_context();
     let can_write_downloads = service_ctx.auth.has_permission(Permission::DownloadWrite);
     let default_download_priority = config_ctx

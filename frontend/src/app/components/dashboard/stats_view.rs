@@ -27,7 +27,11 @@ pub struct StatsViewProps {
 #[component]
 pub fn StatsView(props: &StatsViewProps) -> Html {
     let translate = use_translation();
-    let status_ctx = use_context::<StatusContext>().expect("Status context not found");
+    // Render a fallback instead of panicking when the provider is missing
+    let Some(status_ctx) = use_context::<StatusContext>() else {
+        log::error!("StatsView rendered without StatusContext provider");
+        return html! {};
+    };
     let history = use_metrics_history();
     let sparkline_data = use_memo(history.clone(), |history| StatsSparklineData {
         memory: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.memory))]),
