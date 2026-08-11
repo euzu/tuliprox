@@ -143,6 +143,11 @@ impl RetryPolicy {
     }
 
     pub(crate) fn attempt_count(&self) -> usize { self.delays_ms.len() }
+
+    /// Samples a uniform jitter in `0..=jitter_max_ms` (0 when jitter is disabled).
+    pub(crate) fn sample_jitter_ms(&self) -> u64 {
+        if self.jitter_max_ms == 0 { 0 } else { fastrand::u64(0..=self.jitter_max_ms) }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -738,11 +743,7 @@ async fn fetch_hls_origin_manifest_initial_global_policy(
                     OriginManifestFetchError::RetryableStatus(_, retry_after_ms) => *retry_after_ms,
                     _ => None,
                 };
-                let jitter_ms = if retry_after_ms.is_some() || context.retry_policy.jitter_max_ms == 0 {
-                    0
-                } else {
-                    fastrand::u64(0..=context.retry_policy.jitter_max_ms)
-                };
+                let jitter_ms = if retry_after_ms.is_some() { 0 } else { context.retry_policy.sample_jitter_ms() };
                 let delay_ms = next_retry_delay_ms(&context.retry_policy, attempt_index, retry_after_ms, jitter_ms);
                 log_manifest_retry_scheduled(
                     context,
@@ -814,11 +815,7 @@ where
         let delay_ms = if attempt_index > 0 && next_attempt_is_full_plan {
             0
         } else {
-            let jitter = if context.retry_policy.jitter_max_ms == 0 {
-                0
-            } else {
-                fastrand::u64(0..=context.retry_policy.jitter_max_ms)
-            };
+            let jitter = context.retry_policy.sample_jitter_ms();
             context.retry_policy.delay_for_attempt_ms(attempt_index, jitter).unwrap_or_default()
         };
         let acceptance_deadline = current_acceptance_deadline(context).await;
@@ -3133,8 +3130,7 @@ pub(crate) async fn refresh_from_live_hls_entrypoint_with_retries(
 
     for attempt_index in 0..attempts {
         let delay_ms = retry_after_delay_ms.take().unwrap_or_else(|| {
-            let jitter =
-                if retry_policy.jitter_max_ms == 0 { 0 } else { fastrand::u64(0..=retry_policy.jitter_max_ms) };
+            let jitter = retry_policy.sample_jitter_ms();
             retry_policy.delay_for_attempt_ms(attempt_index, jitter).unwrap_or_default()
         });
         if delay_ms > 0 {
