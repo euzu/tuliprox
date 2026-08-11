@@ -51,7 +51,9 @@ pub fn Login() -> Html {
     let handle_login = {
         let authenticator = authenticate.clone();
         Callback::from(move |_: String| {
-            authenticator.run();
+            if !authenticator.loading {
+                authenticator.run();
+            }
         })
     };
 
@@ -61,7 +63,9 @@ pub fn Login() -> Html {
             if e.key() == "Enter" {
                 e.prevent_default();
                 e.stop_propagation();
-                authenticator.run();
+                if !authenticator.loading {
+                    authenticator.run();
+                }
             }
         })
     };
@@ -104,8 +108,10 @@ pub fn Login() -> Html {
                     <Input placeholder={translation.t("LABEL.USERNAME")} input_ref={username_ref} name="username" autocomplete={true} onkeydown={handle_key_down.clone()} icon="User"/>
                     <Input placeholder={translation.t("LABEL.PASSWORD")} input_ref={password_ref} name="password" hidden={true}  autocomplete={false} onkeydown={handle_key_down} icon="Lock"/>
                     <div class="tp__login-view__form-action">
-                        <TextButton class="primary" name="login" title={ translation.t("LABEL.LOGIN")} onclick={handle_login}></TextButton>
-                        <span class={if *auth_success { "tp__hidden" }  else { "tp__error-text" }}>{ translation.t("MESSAGES.LOGIN.FAILED") }</span>
+                        <TextButton class="primary" name="login" disabled={authenticate.loading} title={ translation.t("LABEL.LOGIN")} onclick={handle_login}></TextButton>
+                        <span role="alert" aria-live="assertive" class={if *auth_success { "tp__hidden" }  else { "tp__error-text" }}>
+                            { if *auth_success { Html::default() } else { html!{ translation.t("MESSAGES.LOGIN.FAILED") } } }
+                        </span>
                     </div>
                 </div>
             </form>
