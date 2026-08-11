@@ -761,11 +761,13 @@ pub fn EpgView() -> Html {
     };
 
     let row_height = use_memo((), move |_| {
-        let doc = window().unwrap().document().unwrap();
-        let root = doc.document_element().unwrap(); // <html>
-        let style = window().unwrap().get_computed_style(&root).unwrap().unwrap();
-
-        let row_height = style.get_property_value("--epg-row-height").unwrap_or_else(|_| String::new()); // fallback if not set
+        let row_height = window()
+            .and_then(|win| {
+                let root = win.document()?.document_element()?;
+                win.get_computed_style(&root).ok().flatten()
+            })
+            .and_then(|style| style.get_property_value("--epg-row-height").ok())
+            .unwrap_or_default();
 
         row_height.trim_end_matches("px").parse::<usize>().unwrap_or(60).max(1)
     });
@@ -807,7 +809,9 @@ pub fn EpgView() -> Html {
 
                     *debounce_handle_clone.borrow_mut() = Some(handle);
                 }) as Box<dyn FnMut(_)>);
-                div.add_event_listener_with_callback("scroll", onscroll.as_ref().unchecked_ref()).unwrap();
+                if let Err(err) = div.add_event_listener_with_callback("scroll", onscroll.as_ref().unchecked_ref()) {
+                    log::error!("Failed to register EPG scroll listener: {err:?}");
+                }
                 *onscroll_handle_clone.borrow_mut() = Some(onscroll);
             }
             move || {
