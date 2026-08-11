@@ -31,9 +31,9 @@ pub fn parse_duration_seconds(value: &str, require_unit: bool) -> Option<u64> {
     let number = number_part.parse::<u64>().ok()?;
     match unit_part {
         "s" => Some(number),
-        "m" => Some(number.saturating_mul(60)),
-        "h" => Some(number.saturating_mul(60 * 60)),
-        "d" => Some(number.saturating_mul(24 * 60 * 60)),
+        "m" => number.checked_mul(60),
+        "h" => number.checked_mul(60 * 60),
+        "d" => number.checked_mul(24 * 60 * 60),
         _ => None,
     }
 }
