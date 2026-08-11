@@ -1,19 +1,12 @@
 //! Secure recording-path and file-operation helpers.
 //!
-//! Linux-only: uses `openat2`/`unlinkat`-equivalent semantics via the
-//! `O_NOFOLLOW`/`O_EXCL` open flags and atomic rename. The strict
-//! `openat2` with `RESOLVE_BENEATH`/`RESOLVE_NO_SYMLINKS` is not
-//! portable; this module
-//! implements the same security properties using the more portable
-//! open-flag equivalents plus `symlink_metadata` for no-follow inspection.
-//! A future task can swap `safe_unlink`/`finalize_no_replace` for direct
-//! `openat2` calls without changing callers.
-
-#![cfg(unix)]
+//! Prefer no-follow inspection (`symlink_metadata`) and no-clobber creates.
+//! On Unix, partial opens also use `O_NOFOLLOW`. A future task can swap
+//! `safe_unlink`/`finalize_no_replace` for direct `openat2` calls without
+//! changing callers.
 
 use std::fs;
 use std::io;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 
 /// Visibility for a recording directory layout.
@@ -125,16 +118,18 @@ pub fn no_follow_regular_file(path: &Path) -> Option<fs::Metadata> {
     Some(meta)
 }
 
-/// Open a new partial file with no-clobber, no-follow semantics suitable
-/// for ffmpeg to write into. The call uses `O_CREAT | O_EXCL | O_NOFOLLOW`
-/// so a pre-existing file or symlinked path is rejected.
+/// Open a new partial file with no-clobber semantics suitable for ffmpeg
+/// to write into. Uses `create_new` so a pre-existing path is rejected.
+/// On Unix, also sets `O_NOFOLLOW` so a symlinked path is rejected.
 pub fn open_partial_no_clobber(path: &Path) -> Result<fs::File, RecordingPathError> {
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    Ok(file)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    Ok(options.open(path)?)
 }
 
 /// Finalize a partial file to its final path. The final path must not
@@ -214,8 +209,10 @@ pub fn resolve_recording_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn validate_relative_path_accepts_simple_path() {
@@ -229,8 +226,12 @@ mod tests {
 
     #[test]
     fn validate_relative_path_rejects_absolute() {
+        #[cfg(unix)]
+        let absolute = Path::new("/etc/passwd");
+        #[cfg(windows)]
+        let absolute = Path::new(r"C:\Windows\System32\drivers\etc\hosts");
         assert!(matches!(
-            validate_relative_path(Path::new("/etc/passwd")).unwrap_err(),
+            validate_relative_path(absolute).unwrap_err(),
             RecordingPathError::Absolute
         ));
     }
@@ -259,6 +260,7 @@ mod tests {
         assert!(no_follow_regular_file(&missing).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn no_follow_regular_file_rejects_symlink() {
         let dir = TempDir::new().expect("tempdir");
@@ -295,6 +297,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), RecordingPathError::Io(err) if err.kind() == io::ErrorKind::AlreadyExists));
     }
 
+    #[cfg(unix)]
     #[test]
     fn open_partial_no_clobber_fails_when_path_is_symlink() {
         let dir = TempDir::new().expect("tempdir");
@@ -330,6 +333,7 @@ mod tests {
         assert_eq!(std::fs::read(&final_path).expect("read"), b"existing");
     }
 
+    #[cfg(unix)]
     #[test]
     fn finalize_no_replace_refuses_when_final_is_symlink() {
         // An externally created symlink at the final path counts

@@ -302,9 +302,14 @@ pub fn recovery_action_for(
     }
     // The file is still present. If the metadata-derived path is outside
     // the recording root, treat as unsafe; otherwise restore the
-    // previous state.
+    // previous state. Compare canonical paths so `..` components cannot
+    // syntactically look like they remain under the root.
     if let Some(root) = recording_root {
-        if !path.starts_with(root) {
+        let outside_root = match (std::fs::canonicalize(&path), std::fs::canonicalize(root)) {
+            (Ok(canon_path), Ok(canon_root)) => !canon_path.starts_with(&canon_root),
+            _ => !path.starts_with(root),
+        };
+        if outside_root {
             return RecoveryAction::UnsafeRestore;
         }
     }
@@ -488,9 +493,10 @@ mod tests {
     #[test]
     fn recovery_action_for_unsafe_when_path_outside_root() {
         let dir = TempDir::new().expect("tempdir");
-        let outside = dir.path().join("..").join("outside.ts");
-        let outside = outside.canonicalize().unwrap_or(outside);
+        let outside_dir = TempDir::new().expect("outside tempdir");
+        let outside = outside_dir.path().join("outside.ts");
         std::fs::write(&outside, b"data").expect("write");
+        let outside = outside.canonicalize().expect("canonicalize outside path");
         let mut task = finished_with_state("r", DownloadState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = outside;
         assert_eq!(

@@ -140,13 +140,13 @@ pub fn free_bytes_for(path: &Path) -> Option<u64> {
         let mut total_bytes: u64 = 0;
         let mut total_free_bytes: u64 = 0;
         // SAFETY: `wide` is a NUL-terminated UTF-16 path; the three output
-        // pointers are valid mutable u64 references.
+        // pointers alias ULARGE_INTEGER (= u64), matching `sys_usage`.
         let ok = unsafe {
             winapi::um::fileapi::GetDiskFreeSpaceExW(
                 wide.as_ptr(),
-                &mut free_bytes_available,
-                &mut total_bytes,
-                &mut total_free_bytes,
+                (&raw mut free_bytes_available).cast(),
+                (&raw mut total_bytes).cast(),
+                (&raw mut total_free_bytes).cast(),
             )
         };
         if ok == 0 {
