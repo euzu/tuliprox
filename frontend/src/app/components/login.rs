@@ -101,7 +101,7 @@ pub fn Login() -> Html {
             <div class="tp__login-view__message">{translation.t("MESSAGES.LOGIN.MESSAGE")}</div>
             <form>
                 <div class="tp__login-view__form">
-                    <Input placeholder={translation.t("LABEL.USERNAME")} input_ref={username_ref} name="username" autocomplete={true} icon="User"/>
+                    <Input placeholder={translation.t("LABEL.USERNAME")} input_ref={username_ref} name="username" autocomplete={true} onkeydown={handle_key_down.clone()} icon="User"/>
                     <Input placeholder={translation.t("LABEL.PASSWORD")} input_ref={password_ref} name="password" hidden={true}  autocomplete={false} onkeydown={handle_key_down} icon="Lock"/>
                     <div class="tp__login-view__form-action">
                         <TextButton class="primary" name="login" title={ translation.t("LABEL.LOGIN")} onclick={handle_login}></TextButton>
