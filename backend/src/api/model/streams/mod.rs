@@ -15,6 +15,7 @@ mod throttled_stream;
 
 pub use self::persist_pipe_stream::*;
 pub(crate) use self::transport_stream_buffer::*;
+pub(in crate::api) use self::buffered_stream::MAX_BUFFER_BYTES;
 pub(in crate::api) use self::{
     active_client_stream::*, custom_video_stream::*, metering_stream::*, provider_stream::*,
     provider_stream_factory::*, provisioning_stream::*, shared_stream_manager::*,

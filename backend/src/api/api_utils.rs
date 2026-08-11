@@ -729,6 +729,7 @@ pub struct StreamOptions {
     pub stream_retry: bool,
     pub buffer_enabled: bool,
     pub buffer_size: usize,
+    pub buffer_max_bytes: usize,
     pub pipe_provider_stream: bool,
 }
 
@@ -774,20 +775,26 @@ pub struct ForceStreamRequestContext<'a> {
 ///
 /// Returns a `StreamOptions` instance with the resolved configuration.
 pub(in crate::api) fn get_stream_options(app_state: &Arc<AppState>) -> StreamOptions {
-    let (stream_retry, buffer_enabled, buffer_size) = app_state
+    let (stream_retry, buffer_enabled, buffer_size, buffer_max_bytes) = app_state
         .app_config
         .config
         .load()
         .reverse_proxy
         .as_ref()
         .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
-        .map_or((true, false, 0), |stream| {
-            let (buffer_enabled, buffer_size) =
-                stream.buffer.as_ref().map_or((false, 0), |buffer| (buffer.enabled, buffer.size));
-            (stream.retry, buffer_enabled, buffer_size)
+        .map_or((true, false, 0, crate::api::model::MAX_BUFFER_BYTES), |stream| {
+            let (buffer_enabled, buffer_size, buffer_max_bytes) = stream.buffer.as_ref().map_or(
+                (false, 0, crate::api::model::MAX_BUFFER_BYTES),
+                |buffer| {
+                    let max_bytes = usize::try_from(buffer.max_bytes_mb.saturating_mul(1024 * 1024))
+                        .unwrap_or(crate::api::model::MAX_BUFFER_BYTES);
+                    (buffer.enabled, buffer.size, max_bytes)
+                },
+            );
+            (stream.retry, buffer_enabled, buffer_size, buffer_max_bytes)
         });
     let pipe_provider_stream = !stream_retry && !buffer_enabled;
-    StreamOptions { stream_retry, buffer_enabled, buffer_size, pipe_provider_stream }
+    StreamOptions { stream_retry, buffer_enabled, buffer_size, buffer_max_bytes, pipe_provider_stream }
 }
 
 /// Metadata capturing which grace strategy was chosen and the original connection kind,

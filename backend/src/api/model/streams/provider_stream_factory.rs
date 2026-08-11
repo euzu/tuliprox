@@ -84,6 +84,7 @@ pub struct ProviderStreamFactoryOptions {
     item_type: PlaylistItemType,
     flags: ProviderStreamFactoryFlagsSet,
     buffer_size: usize,
+    buffer_max_bytes: usize,
     url: Url,
     headers: HeaderMap,
     default_user_agent: Option<axum::http::header::HeaderValue>,
@@ -138,6 +139,7 @@ impl ProviderStreamFactoryOptions {
             content_representation,
         } = request;
         let buffer_size = if stream_options.buffer_enabled { stream_options.buffer_size } else { 0 };
+        let buffer_max_bytes = stream_options.buffer_max_bytes;
         let user_agent = req_headers
             .get(axum::http::header::USER_AGENT)
             .and_then(|value| value.to_str().ok())
@@ -194,6 +196,7 @@ impl ProviderStreamFactoryOptions {
             addr: *addr,
             flags,
             buffer_size,
+            buffer_max_bytes,
             reconnect_flag: CancellationToken::new(),
             url,
             headers,
@@ -230,6 +233,9 @@ impl ProviderStreamFactoryOptions {
 
     #[inline]
     pub(crate) fn get_buffer_size(&self) -> usize { self.buffer_size }
+
+    #[inline]
+    pub(crate) fn get_buffer_max_bytes(&self) -> usize { self.buffer_max_bytes }
 
     #[inline]
     pub fn get_reconnect_flag_clone(&self) -> CancellationToken { self.reconnect_flag.clone() }
@@ -1061,6 +1067,7 @@ pub async fn create_provider_stream(
                 BufferedStream::new(
                     stream,
                     stream_options.get_buffer_size(),
+                    stream_options.get_buffer_max_bytes(),
                     stream_options.get_reconnect_flag_clone(),
                     stream_options.get_url_as_str(),
                 )
@@ -1271,7 +1278,7 @@ mod tests {
         session_headers: Option<&HashMap<String, String>>,
     ) -> ProviderStreamFactoryOptions {
         let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: false, buffer_size: 0, pipe_provider_stream: false };
+            StreamOptions { stream_retry: true, buffer_enabled: false, buffer_size: 0, buffer_max_bytes: 0, pipe_provider_stream: false };
         ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr: "127.0.0.1:8080".parse().unwrap(),
             item_type: PlaylistItemType::Catchup,
@@ -1477,7 +1484,7 @@ mod tests {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let stream_url = Url::parse("http://example.com/stream").unwrap();
         let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, pipe_provider_stream: false };
+            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, buffer_max_bytes: 0, pipe_provider_stream: false };
         let disabled_headers = None;
 
         // Case 1: VOD, no initial range requested
@@ -1576,7 +1583,7 @@ mod tests {
         let stream_url = Url::parse("http://example.com/segment.ts").unwrap();
         let req_headers = HeaderMap::new();
         let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, pipe_provider_stream: false };
+            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, buffer_max_bytes: 0, pipe_provider_stream: false };
 
         let hls_options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
@@ -1626,7 +1633,7 @@ mod tests {
         let stream_url = Url::parse("http://example.com/shared.ts").unwrap();
         let req_headers = HeaderMap::new();
         let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, pipe_provider_stream: false };
+            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, buffer_max_bytes: 0, pipe_provider_stream: false };
 
         let shared_options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
@@ -1658,7 +1665,7 @@ mod tests {
         let stream_url = Url::parse("http://example.com/stream").unwrap();
         let req_headers = HeaderMap::new();
         let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, pipe_provider_stream: false };
+            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, buffer_max_bytes: 0, pipe_provider_stream: false };
 
         let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
@@ -1732,7 +1739,7 @@ mod tests {
         let mut session_headers = HashMap::new();
         session_headers.insert(String::from("cookie"), String::from("sid=abc; pref=1"));
         let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, pipe_provider_stream: false };
+            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, buffer_max_bytes: 0, pipe_provider_stream: false };
 
         let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,

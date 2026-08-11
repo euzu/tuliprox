@@ -8,6 +8,7 @@ use crate::model::macros;
 pub struct StreamBufferConfig {
     pub enabled: bool,
     pub size: usize,
+    pub max_bytes_mb: u64,
 }
 
 macros::from_impl!(StreamBufferConfig);
@@ -16,6 +17,7 @@ impl From<&StreamBufferConfigDto> for StreamBufferConfig {
         Self {
             enabled: dto.enabled,
             size: dto.size,
+            max_bytes_mb: dto.max_bytes_mb,
         }
     }
 }
@@ -25,6 +27,7 @@ impl From<&StreamBufferConfig> for StreamBufferConfigDto {
         Self {
             enabled: dto.enabled,
             size: dto.size,
+            max_bytes_mb: dto.max_bytes_mb,
         }
     }
 }

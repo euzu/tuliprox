@@ -2961,7 +2961,7 @@ mod tests {
         let (tracked_provider, tracker) = track_provider_stream(gated_provider);
         let producer_cancel = CancellationToken::new();
         let buffered_provider =
-            BufferedStream::new(tracked_provider, 1, producer_cancel.clone(), "controlled-test-stream").boxed();
+            BufferedStream::new(tracked_provider, 1, 0, producer_cancel.clone(), "controlled-test-stream").boxed();
         let direct = create_test_active_direct_stream(TestDirectStreamParams {
             app_state: &app_state,
             username: "series-closed-consumer-user",
