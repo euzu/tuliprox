@@ -346,14 +346,15 @@ where
                     Err(_) => return Ok(Some(s.into())),
                 };
 
+                // Plain strings can accidentally be valid Base64; fall back to the raw value instead of dropping it.
                 let decompressed = match lz4_flex::decompress_size_prepended(&compressed) {
                     Ok(bytes) => bytes,
-                    Err(_) => return Ok(None),
+                    Err(_) => return Ok(Some(s.into())),
                 };
 
                 match String::from_utf8(decompressed) {
                     Ok(text) => Ok(Some(text.into())),
-                    Err(_) => Ok(None),
+                    Err(_) => Ok(Some(s.into())),
                 }
             }
         }
