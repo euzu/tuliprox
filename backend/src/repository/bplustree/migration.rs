@@ -1381,7 +1381,7 @@ mod tests {
     }
 
     #[test]
-    fn user_db_schema_migration_v2_to_v6_creates_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v2_to_v7_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
@@ -1414,13 +1414,14 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
-        let user = v6_tree
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
             .query(&"alice".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "alice missing after migration"))?;
         assert_eq!(user.username, "alice");
         assert_eq!(user.epg_request_timeshift.as_deref(), Some("2"));
         assert_eq!(user.output_clusters, ClusterFlags::all());
+        assert!(!user.hide_adult);
         assert_eq!(user.priority, None);
         assert_eq!(user.soft_connections, None);
         assert_eq!(user.soft_priority, None);
@@ -1430,7 +1431,7 @@ mod tests {
     }
 
     #[test]
-    fn user_db_schema_migration_v3_to_v6_creates_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v3_to_v7_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
@@ -1463,11 +1464,12 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
-        let user = v6_tree
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
             .query(&"bob".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "bob missing after migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::all());
+        assert!(!user.hide_adult);
         assert_eq!(user.priority, Some(5));
         assert_eq!(user.soft_connections, None);
         assert_eq!(user.soft_priority, None);
@@ -1477,7 +1479,7 @@ mod tests {
     }
 
     #[test]
-    fn user_db_schema_migration_v4_to_v6_creates_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v4_to_v7_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
@@ -1512,11 +1514,12 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
-        let user = v6_tree
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
             .query(&"carol".to_string())
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "carol missing after migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::all());
+        assert!(!user.hide_adult);
         assert_eq!(user.soft_connections, Some(2));
         assert_eq!(user.soft_priority, Some(-4));
         assert_eq!(user.network_access, None);
@@ -1525,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn user_db_schema_migration_v5_to_v6_creates_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v5_to_v7_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
@@ -1561,11 +1564,12 @@ mod tests {
         assert!(migrated);
         assert!(merge_guard_path.exists());
 
-        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
-        let user = v6_tree
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
             .query(&"dave".to_string())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "dave missing after v6 migration"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "dave missing after v7 migration"))?;
         assert_eq!(user.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
+        assert!(!user.hide_adult);
         assert_eq!(user.priority, Some(5));
         assert_eq!(user.soft_connections, Some(2));
         assert_eq!(user.soft_priority, Some(-4));
@@ -1575,13 +1579,12 @@ mod tests {
     }
 
     #[test]
-    fn user_db_schema_v6_is_detected_without_writing_merge_guard() -> io::Result<()> {
+    fn user_db_schema_migration_v6_to_v7_creates_merge_guard() -> io::Result<()> {
         let temp = tempdir()?;
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
 
-        let mut v6_tree: super::super::v2::BPlusTree<String, StoredApiUserV6> =
-            super::super::v2::BPlusTree::new();
+        let mut v6_tree: BPlusTree<String, StoredApiUserV6> = BPlusTree::new();
         v6_tree.insert(
             "erin".to_string(),
             StoredApiUserV6 {
@@ -1613,14 +1616,75 @@ mod tests {
         assert!(!merge_guard_path.exists());
 
         let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
+        assert!(migrated);
+        assert!(merge_guard_path.exists());
+
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
+            .query(&"erin".to_string())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "erin missing after v7 migration"))?;
+        assert_eq!(user.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
+        assert!(!user.hide_adult);
+        assert_eq!(user.priority, Some(5));
+        assert_eq!(user.soft_connections, Some(2));
+        assert_eq!(user.soft_priority, Some(-4));
+        assert_eq!(
+            user.network_access.as_ref().and_then(|value| value.allowed_countries.as_ref()),
+            Some(&vec!["DE".to_string()])
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn user_db_schema_v7_is_detected_without_writing_merge_guard() -> io::Result<()> {
+        let temp = tempdir()?;
+        let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
+        let merge_guard_path = user_db_merge_guard_path(temp.path());
+
+        let mut v7_tree: super::super::v2::BPlusTree<String, StoredApiUserV7> =
+            super::super::v2::BPlusTree::new();
+        v7_tree.insert(
+            "frank".to_string(),
+            StoredApiUserV7 {
+                target: "channels".to_string(),
+                username: "frank".to_string(),
+                password: "secret".to_string(),
+                token: None,
+                proxy: ProxyType::Reverse(None),
+                server: None,
+                epg_timeshift: None,
+                epg_request_timeshift: None,
+                created_at: None,
+                exp_date: None,
+                max_connections: Some(1),
+                status: Some(ProxyUserStatus::Active),
+                output_clusters: ClusterFlags::Live | ClusterFlags::Vod,
+                ui_enabled: true,
+                hide_adult: true,
+                comment: None,
+                priority: Some(5),
+                soft_connections: Some(2),
+                soft_priority: Some(-4),
+                network_access: Some(NetworkAccessDto {
+                    allowed_countries: Some(vec!["DE".to_string()]),
+                    allowed_networks: Some(vec!["192.168.0.0/16".to_string()]),
+                }),
+            },
+        );
+        let _ = v7_tree.store(&db_path)?;
+        assert!(!merge_guard_path.exists());
+
+        let migrated = migrate_user_db_schema(&db_path, &merge_guard_path)?;
         assert!(!migrated);
         assert!(!merge_guard_path.exists());
 
-        let v6_tree = BPlusTree::<String, StoredApiUserV6>::load(&db_path)?;
-        let user = v6_tree
-            .query(&"erin".to_string())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "erin missing after v6 detection"))?;
+        let v7_tree = BPlusTree::<String, StoredApiUserV7>::load(&db_path)?;
+        let user = v7_tree
+            .query(&"frank".to_string())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "frank missing after v7 detection"))?;
         assert_eq!(user.output_clusters, ClusterFlags::Live | ClusterFlags::Vod);
+        assert!(user.hide_adult);
         assert_eq!(user.priority, Some(5));
         assert_eq!(user.soft_connections, Some(2));
         assert_eq!(user.soft_priority, Some(-4));

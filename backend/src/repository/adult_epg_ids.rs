@@ -21,7 +21,7 @@ use shared::model::{M3uPlaylistItem, StreamProperties, XtreamCluster, XtreamPlay
 use std::{
     collections::HashSet,
     fs,
-    hash::{Hash, Hasher},
+    hash::{BuildHasher, Hash, Hasher},
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
 };
@@ -150,12 +150,12 @@ async fn collect_adult_epg_ids_from_memory(app_state: &AppState, target_name: &s
     }
     let mut ids = HashSet::new();
     if let Some(m3u) = storage.m3u.as_ref() {
-        for (_, item) in m3u.iter() {
+        for (_, item) in m3u {
             collect_from_m3u_item(item, &mut ids);
         }
     }
     if let Some(xtream) = storage.xtream.as_ref() {
-        for (_, item) in xtream.live.iter() {
+        for (_, item) in &xtream.live {
             collect_from_xtream_item(item, &mut ids);
         }
     }
@@ -205,7 +205,10 @@ pub async fn adult_epg_id_blocklist(app_state: &AppState, target: &ConfigTarget)
 }
 
 #[inline]
-pub fn epg_channel_hidden_by_adult_blocklist(blocklist: &HashSet<Arc<str>>, channel_id: &Arc<str>) -> bool {
+pub fn epg_channel_hidden_by_adult_blocklist<S: BuildHasher>(
+    blocklist: &HashSet<Arc<str>, S>,
+    channel_id: &Arc<str>,
+) -> bool {
     if blocklist.is_empty() {
         return false;
     }
