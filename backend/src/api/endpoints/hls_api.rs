@@ -65,7 +65,8 @@ use crate::{
             HlsOriginResourceFetchError, HlsOriginSource, HlsOriginSourceKind, HlsOriginWorkClass,
             HlsMasterBandwidth, HlsMasterBandwidthSelection,
             HlsPanelProvisioningRedirectPaths, HlsPlaybackFamilyKey, HlsProvisioningStatus, HlsQosMeterInit,
-            HlsQosRuntimeConfig, HlsResourceServeFailure, HlsResourceServeOutcome, HlsSegmentFile, HlsSession,
+            HlsQosRuntimeConfig, HlsResourceFetchAttempt, HlsResourceServeFailure, HlsResourceServeOutcome,
+            HlsSegmentFile, HlsSession,
             HlsSessionHandle, HlsSessionKey, HlsSessionMode, HlsSessionStoreOutcome, HlsTerminalSegmentPath,
             HlsRuntimeCustomTailOutcome, HlsRuntimeCustomTailReason, HlsRuntimeCustomTailRequest,
             HlsTransientCacheCommitContext,
@@ -74,7 +75,8 @@ use crate::{
             HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard, LiveHlsOriginEntry, OriginRefreshRequest,
             OriginSegmentKey, ProviderAllocation, ProviderConfig as RuntimeProviderConfig, ProviderHandle,
             ProxySessionId, RetryPolicy, SegmentCacheKey, SegmentCacheStatus, SegmentDemandFetchOutcome,
-            SegmentFetchContext, SegmentFetchPolicy, StreamMeterHandle, TransientObjectUnavailableState,
+            SegmentFetchContext, SegmentFetchPolicy, StreamMeterHandle, TransientObjectCacheKey,
+            TransientObjectUnavailableState,
             TransientResourceFile, TransientResourceRef, TransportStreamBuffer, UserSession,
             HlsSingleVariantMasterPlaylist, trigger_origin_refresh_sync,
             HLS_ACCESS_LEASE_ID_PLACEHOLDER, HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH,
@@ -1629,19 +1631,45 @@ async fn fetch_transient_origin_response_with_provider_io(
         log_identity,
     };
     let runtime_prepare_error = Arc::new(tokio::sync::Mutex::new(None));
-    let app_state_for_prepare = Arc::clone(request.app_state);
-    let session_for_prepare = Arc::clone(request.session);
-    let access_context_for_prepare = request.access_context.clone();
-    let fingerprint_for_prepare = request.fingerprint.clone();
-    let headers_for_prepare = request.headers.clone();
-    let runtime_prepare_error_for_prepare = Arc::clone(&runtime_prepare_error);
-    let result = fetch_hls_transient_origin_response_with_attempt_prepare(fetch_request, move |_attempt| {
-        let app_state = Arc::clone(&app_state_for_prepare);
-        let session = Arc::clone(&session_for_prepare);
-        let access_context = access_context_for_prepare.clone();
-        let fingerprint = fingerprint_for_prepare.clone();
-        let headers = headers_for_prepare.clone();
-        let runtime_prepare_error = Arc::clone(&runtime_prepare_error_for_prepare);
+    let prepare_attempt = hls_transient_origin_prepare_closure(
+        request.app_state,
+        request.session,
+        &request.access_context,
+        request.fingerprint,
+        request.headers,
+        &runtime_prepare_error,
+    );
+    let result = fetch_hls_transient_origin_response_with_attempt_prepare(fetch_request, prepare_attempt).await;
+    let runtime_prepare_error = *runtime_prepare_error.lock().await;
+    HlsTransientOriginFetchResult { result, runtime_prepare_error }
+}
+
+/// Builds the shared per-attempt prepare closure for transient origin fetches.
+/// Runtime acquire failures are captured in `runtime_prepare_error` and mapped
+/// to a provider-unavailable fetch error so the retry loop can proceed uniformly.
+fn hls_transient_origin_prepare_closure(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    access_context: &HlsAccessContext,
+    fingerprint: &Fingerprint,
+    headers: &HeaderMap,
+    runtime_prepare_error: &Arc<tokio::sync::Mutex<Option<HlsOriginRuntimeAcquireError>>>,
+) -> impl FnMut(
+    HlsResourceFetchAttempt,
+) -> futures::future::BoxFuture<'static, Result<Option<HlsTransientOriginIoGuard>, HlsOriginResourceFetchError>> {
+    let app_state = Arc::clone(app_state);
+    let session = Arc::clone(session);
+    let access_context = access_context.clone();
+    let fingerprint = fingerprint.clone();
+    let headers = headers.clone();
+    let runtime_prepare_error = Arc::clone(runtime_prepare_error);
+    move |_attempt| {
+        let app_state = Arc::clone(&app_state);
+        let session = Arc::clone(&session);
+        let access_context = access_context.clone();
+        let fingerprint = fingerprint.clone();
+        let headers = headers.clone();
+        let runtime_prepare_error = Arc::clone(&runtime_prepare_error);
         async move {
             match prepare_hls_transient_origin_io_for_authorized_resource_work(
                 &app_state,
@@ -1661,10 +1689,7 @@ async fn fetch_transient_origin_response_with_provider_io(
             }
         }
         .boxed()
-    })
-    .await;
-    let runtime_prepare_error = *runtime_prepare_error.lock().await;
-    HlsTransientOriginFetchResult { result, runtime_prepare_error }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2554,44 +2579,18 @@ async fn fetch_and_cache_transient_origin_response(
             cache_duration_ms: context.cache_duration_ms,
         },
     };
-    let app_state_for_prepare = Arc::clone(context.app_state);
-    let session_for_prepare = Arc::clone(context.session);
-    let access_context = context.access_context.clone();
-    let fingerprint_for_prepare = context.fingerprint.clone();
-    let headers_for_prepare = context.headers.clone();
     let runtime_prepare_error = Arc::new(tokio::sync::Mutex::new(None));
-    let runtime_prepare_error_for_prepare = Arc::clone(&runtime_prepare_error);
+    let prepare_attempt = hls_transient_origin_prepare_closure(
+        context.app_state,
+        context.session,
+        context.access_context,
+        context.fingerprint,
+        context.headers,
+        &runtime_prepare_error,
+    );
     let final_failure = match fetch_and_commit_hls_transient_origin_response_with_attempt_prepare(
         cache_fetch_request,
-        move |_attempt| {
-            let app_state = Arc::clone(&app_state_for_prepare);
-            let session = Arc::clone(&session_for_prepare);
-            let access_context = access_context.clone();
-            let fingerprint = fingerprint_for_prepare.clone();
-            let headers = headers_for_prepare.clone();
-            let runtime_prepare_error = Arc::clone(&runtime_prepare_error_for_prepare);
-            async move {
-                match prepare_hls_transient_origin_io_for_authorized_resource_work(
-                    &app_state,
-                    &session,
-                    &access_context,
-                    &fingerprint,
-                    &headers,
-                    current_time_millis(),
-                )
-                .await
-                {
-                    Ok(guard) => Ok(guard),
-                    Err(err) => {
-                        *runtime_prepare_error.lock().await = Some(err);
-                        Err(HlsOriginResourceFetchError::ProviderUnavailable(
-                            HlsBoundAccountAcquireErrorKind::Unavailable,
-                        ))
-                    }
-                }
-            }
-            .boxed()
-        },
+        prepare_attempt,
     )
     .await
     {
