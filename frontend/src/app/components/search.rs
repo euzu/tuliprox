@@ -1,6 +1,7 @@
 use crate::{
     app::components::{AppIcon, DropDownIconButton, DropDownOption, DropDownSelection, IconButton},
     html_if,
+    i18n::use_translation,
 };
 use gloo_timers::callback::Timeout;
 use shared::model::SearchRequest;
@@ -31,6 +32,7 @@ pub struct SearchProps {
 
 #[component]
 pub fn Search(props: &SearchProps) -> Html {
+    let translate = use_translation();
     let search_fields = use_state(|| None::<Rc<Vec<String>>>);
     let input_ref = use_node_ref();
     let invalid_search = use_state(|| false);
@@ -139,13 +141,19 @@ pub fn Search(props: &SearchProps) -> Html {
                 <input ref={input_ref.clone()} type="text"
                     name="search"
                     autocomplete={"on"}
+                    placeholder={translate.t("LABEL.SEARCH")}
+                    aria-label={translate.t("LABEL.SEARCH")}
+                    aria-invalid={(*invalid_search || matches!(*regex_active, RegexState::Invalid)).to_string()}
                     onkeydown={handle_key_down}
                     />
                 <IconButton class={match *regex_active {
                     RegexState::Active => "option-active",
                     RegexState::Invalid => "option-invalid",
                     RegexState::Inactive => ""}}
-                 name="regex" icon="Regexp" onclick={handle_regex_click} />
+                 name="regex" icon="Regexp"
+                 hint={translate.t("LABEL.REGEXP")}
+                 aria_label={translate.t("LABEL.REGEXP")}
+                 onclick={handle_regex_click} />
                 {
                   html_if!(
                     props.options.is_some(),
