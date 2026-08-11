@@ -168,6 +168,7 @@ async fn save_playlist_bouquet(
                 }
                 Err(err) => {
                     error!("Saving bouquet for {username} failed: {err}");
+                    return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
                 }
             }
         }
