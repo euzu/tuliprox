@@ -1,5 +1,6 @@
 use crate::{model::VideoDownloadConfig, utils::file_exists_async};
 use chrono::Utc;
+use log::error;
 use serde::{Deserialize, Serialize};
 use shared::model::{FileDownloadDto, TaskKindDto, TaskPriorityDto, TransferStatusDto};
 use shared::utils::{deunicode_string, CONSTANTS, FILENAME_TRIM_PATTERNS};
@@ -520,6 +521,15 @@ impl DownloadQueue {
     }
 
     pub async fn persist_to_disk(&self) -> std::io::Result<()> {
+        let result = self.try_persist_to_disk().await;
+        // Callers discard the result; log here so persistence failures are never silent
+        if let Err(err) = &result {
+            error!("Failed to persist download queue: {err}");
+        }
+        result
+    }
+
+    async fn try_persist_to_disk(&self) -> std::io::Result<()> {
         let Some(state_file) = self.state_file.as_ref() else {
             return Ok(());
         };
