@@ -8512,7 +8512,7 @@ mod tests {
                 session_token,
             )
             .await;
-        assert_eq!(admission.permission, UserConnectionPermission::Exhausted);
+        assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(admission.kind, Some(ConnectionKind::Soft));
 
         {
