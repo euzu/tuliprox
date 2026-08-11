@@ -974,7 +974,8 @@ pub fn PlaylistExplorer() -> Html {
             virtual_id: chan.id,
             cluster: XtreamCluster::Series,
             downloadable: true,
-            url: String::new(), // TODO provider url
+            // Falls back to the episode fetch path in the menu handler when empty
+            url: chan.direct_source.to_string(),
             title: chan.title.to_string(),
             input_name: String::new(),
         };
