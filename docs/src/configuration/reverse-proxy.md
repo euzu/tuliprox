@@ -278,6 +278,7 @@ reverse_proxy:
 | `max_concurrent_segment_fetches_global` | Int | `64` | Maximum concurrent future segment fetches across all HLS sessions. |
 | `origin_manifest_timeout_ms` | Milliseconds | `3000` | Timeout for future Origin manifest fetches. |
 | `origin_segment_timeout_ms` | Milliseconds | `10000` | Timeout for future Origin segment fetches. |
+| `initial_manifest_wait_timeout_secs` | Seconds | `90` | How long a client may wait for the initial manifest decision (session bootstrap window). Lower values fail unhealthy sessions faster; higher values tolerate slow providers. |
 | `session_idle_timeout` | Seconds | `300` | Idle timeout before a future HLS cache session may be collected. |
 | `segment_repair.max_level` | String | `off` | Maximum repair level allowed by the codec-aware MPEG-TS segment repair policy (`off`, `low`, `medium`, `high`). |
 | `segment_repair.apply_to_first_segments` | Int | `1` | Number of visible TS objects checked per access-lease activation. |

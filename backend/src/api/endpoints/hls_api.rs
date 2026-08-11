@@ -608,8 +608,8 @@ fn hls_access_lease_ttl_ms(app_state: &Arc<AppState>) -> u64 { app_state.hls_pro
 
 fn duration_to_millis_saturating(duration: Duration) -> u64 { u64::try_from(duration.as_millis()).unwrap_or(u64::MAX) }
 
-fn hls_pending_bootstrap_window_ms() -> u64 {
-    duration_to_millis_saturating(hls_initial_manifest_decision_wait_timeout())
+fn hls_pending_bootstrap_window_ms(app_state: &Arc<AppState>) -> u64 {
+    duration_to_millis_saturating(hls_initial_manifest_decision_wait_timeout(app_state))
 }
 
 async fn hls_access_lease_timing_for_session(
@@ -2454,7 +2454,7 @@ async fn hls_manifest_access_context_and_state(
             now_ms,
             None,
             Some(HlsAccessLeasePendingDeadline::Bootstrap {
-                deadline_ms: now_ms.saturating_add(hls_pending_bootstrap_window_ms()),
+                deadline_ms: now_ms.saturating_add(hls_pending_bootstrap_window_ms(app_state)),
             }),
             hls_access_lease_ttl_ms(app_state),
         )
@@ -4493,7 +4493,7 @@ async fn create_hls_cache_entry_master_playlist_response(
         origin_source.stream_ref.clone(),
         virtual_id,
         now_ms,
-        hls_pending_bootstrap_window_ms(),
+        hls_pending_bootstrap_window_ms(app_state),
     )
     .with_known_bitrate_bps(known_bitrate_bps)
     .with_archive_playback(
@@ -6006,7 +6006,7 @@ async fn try_hls_cache_canonical_manifest_response(
         }
     };
     let manifest_boundary_rendered_at_ms = handoff_previous_rendered_at_ms.unwrap_or(previous_manifest_rendered_at_ms);
-    let wait_timeout = hls_manifest_wait_timeout_for_requirement(&session, manifest_commit_requirement).await;
+    let wait_timeout = hls_manifest_wait_timeout_for_requirement(app_state, &session, manifest_commit_requirement).await;
     let cached_manifest_options = hls_cached_manifest_options_for_requirement(
         wait_timeout,
         manifest_commit_requirement,
@@ -6280,15 +6280,22 @@ async fn try_hls_cache_canonical_manifest_response(
     )
 }
 
-fn hls_initial_manifest_decision_wait_timeout() -> Duration { Duration::from_secs(90) }
+fn hls_initial_manifest_decision_wait_timeout(app_state: &Arc<AppState>) -> Duration {
+    Duration::from_secs(app_state.hls_proxy.initial_manifest_wait_timeout_secs())
+}
 
 async fn hls_manifest_wait_timeout_for_requirement(
+    app_state: &Arc<AppState>,
     session: &HlsSessionHandle,
     requirement: HlsManifestCommitRequirement,
 ) -> Duration {
     match requirement {
-        HlsManifestCommitRequirement::FreshCommitRequired { .. } => hls_initial_manifest_decision_wait_timeout(),
-        HlsManifestCommitRequirement::CommittedManifestAllowed => hls_initial_manifest_wait_timeout(session).await,
+        HlsManifestCommitRequirement::FreshCommitRequired { .. } => {
+            hls_initial_manifest_decision_wait_timeout(app_state)
+        }
+        HlsManifestCommitRequirement::CommittedManifestAllowed => {
+            hls_initial_manifest_wait_timeout(app_state, session).await
+        }
     }
 }
 
@@ -6304,7 +6311,7 @@ async fn touch_initial_manifest_access_lease_window(
         return;
     }
     let wait_timeout_ms = duration_to_millis_saturating(wait_timeout);
-    let deadline_ms = now_ms.saturating_add(wait_timeout_ms.max(hls_pending_bootstrap_window_ms()));
+    let deadline_ms = now_ms.saturating_add(wait_timeout_ms.max(hls_pending_bootstrap_window_ms(app_state)));
     let touch = app_state
         .hls_proxy
         .touch_manifest_access_lease(
@@ -6330,13 +6337,13 @@ async fn touch_initial_manifest_access_lease_window(
     );
 }
 
-async fn hls_initial_manifest_wait_timeout(session: &HlsSessionHandle) -> Duration {
+async fn hls_initial_manifest_wait_timeout(app_state: &Arc<AppState>, session: &HlsSessionHandle) -> Duration {
     let session = session.read().await;
     if matches!(
         session.account_binding_protection(current_time_millis()),
         HlsAccountBindingProtection::NoMediaYet | HlsAccountBindingProtection::Expired
     ) {
-        hls_initial_manifest_decision_wait_timeout()
+        hls_initial_manifest_decision_wait_timeout(app_state)
     } else {
         Duration::ZERO
     }
@@ -9427,8 +9434,31 @@ mod tests {
     }
 
     #[test]
-    fn hls_initial_manifest_decision_wait_timeout_is_ninety_seconds() {
-        assert_eq!(super::hls_initial_manifest_decision_wait_timeout(), Duration::from_secs(90));
+    fn hls_custom_video_manifest_uses_twelve_endlist_segments_for_non_provisioning() {
+        let user = hls_custom_video_test_user();
+        let manifest = build_hls_custom_video_manifest_body(
+            "https://example.test/iptv/",
+            &user,
+            CustomVideoStreamType::UserConnectionsExhausted,
+            42_000,
+            None,
+        );
+
+        assert!(manifest.contains("#EXT-X-TARGETDURATION:10"));
+        assert!(manifest.contains("#EXT-X-MEDIA-SEQUENCE:0"));
+        assert!(manifest.contains("#EXT-X-ENDLIST"));
+        assert!(manifest.contains("https://example.test/iptv/cvs/hls/viewer/secret/user_connections_exhausted.ts"));
+        assert_eq!(manifest.matches("#EXTINF:10.0,").count(), 12);
+        assert_eq!(
+            manifest.matches("https://example.test/iptv/cvs/hls/viewer/secret/user_connections_exhausted.ts").count(),
+            12
+        );
+    }
+
+    #[test]
+    fn hls_initial_manifest_decision_wait_timeout_defaults_to_ninety_seconds() {
+        let app_state = test_app_state();
+        assert_eq!(super::hls_initial_manifest_decision_wait_timeout(&app_state), Duration::from_secs(90));
     }
 
     #[tokio::test]
@@ -16588,7 +16618,7 @@ mod tests {
                     now_ms,
                     None,
                     Some(super::HlsAccessLeasePendingDeadline::Bootstrap {
-                        deadline_ms: now_ms.saturating_add(super::hls_pending_bootstrap_window_ms()),
+                        deadline_ms: now_ms.saturating_add(super::hls_pending_bootstrap_window_ms(&app_state)),
                     }),
                     super::hls_access_lease_ttl_ms(&app_state),
                 )

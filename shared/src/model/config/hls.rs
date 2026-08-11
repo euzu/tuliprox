@@ -1,7 +1,8 @@
 use crate::{
     defaults::{
         default_hls_cache_bytes, default_hls_cache_bytes_per_session, default_hls_cache_duration,
-        default_hls_corrupt_segment_watchdog_max_parallel_jobs, default_hls_max_concurrent_segment_fetches_global,
+        default_hls_corrupt_segment_watchdog_max_parallel_jobs, default_hls_initial_manifest_wait_timeout_secs,
+        default_hls_max_concurrent_segment_fetches_global,
         default_hls_max_concurrent_segment_fetches_per_session, default_hls_max_segments_prefetch,
         default_hls_origin_manifest_timeout_ms, default_hls_origin_segment_timeout_ms,
         default_hls_segment_repair_apply_to_first_segments, default_hls_segment_repair_high_size_increase_percent,
@@ -192,6 +193,9 @@ pub struct HlsCacheConfigDto {
     pub origin_manifest_timeout_ms: u64,
     #[serde(default = "default_hls_origin_segment_timeout_ms")]
     pub origin_segment_timeout_ms: u64,
+    /// How long a client may wait for the initial manifest decision before the session bootstraps time out.
+    #[serde(default = "default_hls_initial_manifest_wait_timeout_secs")]
+    pub initial_manifest_wait_timeout_secs: u64,
     #[serde(default = "default_hls_session_idle_timeout")]
     pub session_idle_timeout: u64,
     #[serde(default, skip_serializing_if = "HlsManifestRecoveryBurstConfigDto::is_empty")]
@@ -213,6 +217,7 @@ impl Default for HlsCacheConfigDto {
             max_concurrent_segment_fetches_global: default_hls_max_concurrent_segment_fetches_global(),
             origin_manifest_timeout_ms: default_hls_origin_manifest_timeout_ms(),
             origin_segment_timeout_ms: default_hls_origin_segment_timeout_ms(),
+            initial_manifest_wait_timeout_secs: default_hls_initial_manifest_wait_timeout_secs(),
             session_idle_timeout: default_hls_session_idle_timeout(),
             manifest_recovery_burst: HlsManifestRecoveryBurstConfigDto::default(),
             segment_repair: HlsSegmentRepairConfigDto::default(),
@@ -265,6 +270,7 @@ impl HlsCacheConfigDto {
         Self::ensure_min_usize("max_concurrent_segment_fetches_global", self.max_concurrent_segment_fetches_global, 1)?;
         Self::ensure_min_u64("origin_manifest_timeout_ms", self.origin_manifest_timeout_ms, 1)?;
         Self::ensure_min_u64("origin_segment_timeout_ms", self.origin_segment_timeout_ms, 1)?;
+        Self::ensure_min_u64("initial_manifest_wait_timeout_secs", self.initial_manifest_wait_timeout_secs, 1)?;
         Self::ensure_min_u64("session_idle_timeout", self.session_idle_timeout, 1)?;
         if self.segment_repair.apply_to_first_segments > 6 {
             return Err(TuliproxError::ConfigReverseProxy(

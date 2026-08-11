@@ -20,6 +20,7 @@ pub const fn default_hls_max_concurrent_segment_fetches_per_session() -> usize {
 pub const fn default_hls_max_concurrent_segment_fetches_global() -> usize { 64 }
 pub const fn default_hls_origin_manifest_timeout_ms() -> u64 { 3_000 }
 pub const fn default_hls_origin_segment_timeout_ms() -> u64 { 10_000 }
+pub const fn default_hls_initial_manifest_wait_timeout_secs() -> u64 { 90 }
 pub const fn default_hls_session_idle_timeout() -> u64 { 300 }
 pub const fn default_hls_segment_repair_apply_to_first_segments() -> u8 { 1 }
 pub const fn default_hls_segment_repair_max_parallel_repairs() -> usize { 1 }
