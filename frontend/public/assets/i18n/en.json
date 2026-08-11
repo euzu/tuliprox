@@ -1698,7 +1698,8 @@
       "SUCCESS": "Successfully started library update!"
     },
     "LOGIN": {
-      "MESSAGE": "Enter Your Credentials"
+      "MESSAGE": "Enter Your Credentials",
+      "FAILED": "Failed to login"
     },
     "SESSION": {
       "EXPIRED": "Your session has expired. Please log in again."
