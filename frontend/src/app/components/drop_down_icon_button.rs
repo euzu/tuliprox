@@ -80,18 +80,20 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
         let onselect = props.on_select.clone();
         let set_is_open = popup_is_open.clone();
         Callback::from(move |(id, _event): (String, MouseEvent)| {
-            if selections.current().contains(&id) {
-                selections.remove(&id);
-            } else {
-                selections.insert(id.clone());
-            }
             let selected_options = if multi_select {
+                if selections.current().contains(&id) {
+                    selections.remove(&id);
+                } else {
+                    selections.insert(id.clone());
+                }
                 if selections.current().is_empty() {
                     DropDownSelection::Empty
                 } else {
                     DropDownSelection::Multi(selections.current().iter().map(Clone::clone).collect::<Vec<_>>())
                 }
             } else {
+                // Single-select replaces the previous selection instead of toggling
+                selections.set(HashSet::from([id.clone()]));
                 DropDownSelection::Single(id.clone())
             };
             onselect.emit((name.clone(), selected_options));
