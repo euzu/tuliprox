@@ -600,14 +600,32 @@ fn unresolved_template_placeholders(input: &str) -> Vec<String> {
     placeholders.into_iter().collect()
 }
 
-pub fn get_filter(filter_text: &str, templates: Option<&[PatternTemplate]>) -> Result<Filter, TuliproxError> {
-    let source = apply_templates_to_pattern_single(filter_text, templates)?;
+/// 1-based line/column of a filter syntax error, when the parser can locate it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilterParsePosition {
+    pub line: usize,
+    pub column: usize,
+}
+
+/// Like [`get_filter`], but reports the syntax-error position when available
+/// (semantic errors such as invalid regex values have no position).
+pub fn get_filter_detailed(
+    filter_text: &str,
+    templates: Option<&[PatternTemplate]>,
+) -> Result<Filter, (TuliproxError, Option<FilterParsePosition>)> {
+    let source = match apply_templates_to_pattern_single(filter_text, templates) {
+        Ok(source) => source,
+        Err(err) => return Err((err, None)),
+    };
     let unresolved_placeholders = unresolved_template_placeholders(&source);
     if !unresolved_placeholders.is_empty() {
-        return Err(TuliproxError::FilterParse(format!(
-            "Unknown template placeholder(s) in filter: {}",
-            unresolved_placeholders.join(", ")
-        )));
+        return Err((
+            TuliproxError::FilterParse(format!(
+                "Unknown template placeholder(s) in filter: {}",
+                unresolved_placeholders.join(", ")
+            )),
+            None,
+        ));
     }
 
     match FilterParser::parse(Rule::main, &source) {
@@ -657,13 +675,29 @@ pub fn get_filter(filter_text: &str, templates: Option<&[PatternTemplate]>) -> R
 
             if !errors.is_empty() {
                 errors.push(format!("Unable to parse filter: {filter_text}"));
-                return Err(TuliproxError::FilterParse(errors.join("\n")));
+                return Err((TuliproxError::FilterParse(errors.join("\n")), None));
             }
 
-            result.map_or_else(|| Err(TuliproxError::FilterParse(format!("Unable to parse filter: {filter_text}"))), Ok)
+            result.map_or_else(
+                || Err((TuliproxError::FilterParse(format!("Unable to parse filter: {filter_text}")), None)),
+                Ok,
+            )
         }
-        Err(err) => Err(TuliproxError::FilterParse(format!("{err}"))),
+        Err(err) => {
+            let (line, column) = match err.line_col {
+                pest::error::LineColLocation::Pos((line, column))
+                | pest::error::LineColLocation::Span((line, column), _) => (line, column),
+            };
+            Err((
+                TuliproxError::FilterParse(format!("{err}")),
+                Some(FilterParsePosition { line, column }),
+            ))
+        }
     }
+}
+
+pub fn get_filter(filter_text: &str, templates: Option<&[PatternTemplate]>) -> Result<Filter, TuliproxError> {
+    get_filter_detailed(filter_text, templates).map_err(|(err, _)| err)
 }
 
 fn build_dependency_graph(templates: &Vec<PatternTemplate>) -> Result<DirectedGraph<String>, TuliproxError> {

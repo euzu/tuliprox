@@ -281,7 +281,8 @@ Notes:
 - `target` is the numeric target id (same id the playlist explorer uses).
 - `filter` supports the full filter DSL including `!TEMPLATE!` references from your configured templates.
 - Optional `limit` caps the sample lists (default 25, max 50); optional `match_as_ascii` mirrors the target option.
-- An invalid filter expression returns HTTP 422 with the parser error message.
+- An invalid filter expression returns HTTP 422 with `{"error": "...", "line": n, "column": n}`; `line`/`column`
+  are `null` for semantic errors without a source position (e.g. an invalid regex value).
 - The preview reads the target's already-processed playlist; it never contacts providers or triggers an update.
 
 ## Available `/api/v1` Endpoints

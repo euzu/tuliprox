@@ -47,7 +47,7 @@ use log::{debug, error};
 use serde_json::json;
 use shared::{
     error::TuliproxError,
-    foundation::{get_filter, Filter, ValueProvider},
+    foundation::{get_filter_detailed, Filter, ValueProvider},
     model::{
         permission::Permission, stalker::StalkerStreamKind, EpgChannel, InputType, OperationRunAccepted,
         PlaylistEpgRequest, PlaylistItem, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType, TargetType,
@@ -813,12 +813,16 @@ async fn playlist_filter_preview(
 ) -> impl IntoResponse + Send {
     let filter = {
         let sources = app_state.app_config.sources.load();
-        match get_filter(&req.filter, sources.templates.as_deref()) {
+        match get_filter_detailed(&req.filter, sources.templates.as_deref()) {
             Ok(filter) => filter,
-            Err(err) => {
+            Err((err, position)) => {
                 return (
                     axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    axum::Json(json!({"error": err.to_string()})),
+                    axum::Json(json!({
+                        "error": err.to_string(),
+                        "line": position.map(|p| p.line),
+                        "column": position.map(|p| p.column),
+                    })),
                 )
                     .into_response()
             }
