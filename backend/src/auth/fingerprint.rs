@@ -72,9 +72,9 @@ impl Fingerprint {
             }
         }
 
-        let client_ip = real_ip.as_ref()
-            .map(ToString::to_string)
-            .or(forwarded_for.as_ref().map(ToString::to_string))
+        let client_ip = real_ip
+            // X-Forwarded-For may be a comma-separated chain; the first entry is the client
+            .or_else(|| forwarded_for.and_then(|list| list.split(',').next().map(|ip| ip.trim().to_string())))
             .unwrap_or_else(|| addr.ip().to_string());
 
         let ua = user_agent.unwrap_or_else(String::new);
