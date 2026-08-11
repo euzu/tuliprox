@@ -80,15 +80,10 @@ impl ApiProxyServerInfoDto {
         if self.timezone.is_empty() {
             self.timezone = "UTC".to_string();
         }
+        self.message = self.message.trim().to_string();
         if self.message.is_empty() {
             self.message = "Welcome to tuliprox".to_string();
         }
-        if let Some(path) = &self.path {
-            if path.trim().is_empty() {
-                self.path = None;
-            }
-        }
-
         if let Some(path) = &self.path {
             let trimmed_path = path.trim();
             if trimmed_path.is_empty() {
