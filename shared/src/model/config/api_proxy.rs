@@ -165,6 +165,13 @@ impl ApiProxyConfigDto {
             self.prepare_server_config(&mut errors);
         }
         self.prepare_target_user(&mut errors);
+        // A success or redirect code here would make auth failures look like valid responses
+        if !(400..=599).contains(&self.auth_error_status) {
+            errors.push(format!(
+                "auth_error_status must be a client or server error code (400-599), got {}",
+                self.auth_error_status
+            ));
+        }
         if errors.is_empty() {
             Ok(())
         } else {
