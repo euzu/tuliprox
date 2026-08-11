@@ -1,12 +1,13 @@
 use shared::model::{DeduplicateConfig, DeduplicateKeep, DeduplicateMatchBy, PlaylistGroup, PlaylistItem, XtreamCluster};
-use shared::utils::{quality_rank, quality_tokens, token_quality};
+use shared::utils::{deunicode_string, quality_rank, quality_tokens, token_quality};
 use std::collections::HashMap;
 
 /// Lowercased token join with quality tokens removed, so "News HD" and
 /// "NEWS [FHD]" produce the same key.
-fn normalized_dedup_key(value: &str) -> String {
+fn normalized_dedup_key(value: &str, match_as_ascii: bool) -> String {
+    let value = if match_as_ascii { deunicode_string(value) } else { std::borrow::Cow::Borrowed(value) };
     let mut key = String::with_capacity(value.len());
-    for token in quality_tokens(value) {
+    for token in quality_tokens(&value) {
         if token_quality(token).is_some() {
             continue;
         }
@@ -21,19 +22,7 @@ fn normalized_dedup_key(value: &str) -> String {
 }
 
 fn match_value(config: &DeduplicateConfig, item: &PlaylistItem) -> String {
-    let header = &item.header;
-    let value = match config.match_by {
-        DeduplicateMatchBy::Caption => {
-            if header.title.is_empty() {
-                header.name.as_ref()
-            } else {
-                header.title.as_ref()
-            }
-        }
-        DeduplicateMatchBy::Name => header.name.as_ref(),
-        DeduplicateMatchBy::Title => header.title.as_ref(),
-    };
-    normalized_dedup_key(value)
+    normalized_dedup_key(raw_match_value(config, item), config.match_as_ascii)
 }
 
 fn raw_match_value<'a>(config: &DeduplicateConfig, item: &'a PlaylistItem) -> &'a str {
@@ -137,7 +126,7 @@ mod tests {
             vec![make_item("News HD"), make_item("News [FHD]"), make_item("News"), make_item("Sports HD")],
         )];
         let config =
-            DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::BestQuality };
+            DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::BestQuality, match_as_ascii: false };
         let removed = deduplicate_playlist(&config, &mut playlist);
         assert_eq!(removed, 2);
         let titles: Vec<_> = playlist[0].channels.iter().map(|c| c.header.title.to_string()).collect();
@@ -148,7 +137,7 @@ mod tests {
     fn dedup_keep_first_preserves_playlist_order_winner() {
         let mut playlist =
             vec![make_group("G", vec![make_item("News HD"), make_item("News [FHD]")])];
-        let config = DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::First };
+        let config = DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::First, match_as_ascii: false };
         let removed = deduplicate_playlist(&config, &mut playlist);
         assert_eq!(removed, 1);
         assert_eq!(playlist[0].channels[0].header.title.as_ref(), "News HD");
@@ -161,10 +150,28 @@ mod tests {
             make_group("B", vec![make_item("News FHD")]),
         ];
         let config =
-            DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::BestQuality };
+            DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::BestQuality, match_as_ascii: false };
         let removed = deduplicate_playlist(&config, &mut playlist);
         assert_eq!(removed, 1);
         assert_eq!(playlist.len(), 1);
         assert_eq!(playlist[0].title.as_ref(), "B");
+    }
+
+    #[test]
+    fn dedup_match_as_ascii_collapses_accented_names() {
+        let mut playlist =
+            vec![make_group("G", vec![make_item("Café HD"), make_item("Cafe FHD")])];
+        let config =
+            DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::BestQuality, match_as_ascii: true };
+        let removed = deduplicate_playlist(&config, &mut playlist);
+        assert_eq!(removed, 1);
+        assert_eq!(playlist[0].channels[0].header.title.as_ref(), "Cafe FHD");
+
+        // without the flag the accented name stays distinct
+        let mut playlist =
+            vec![make_group("G", vec![make_item("Café HD"), make_item("Cafe FHD")])];
+        let config =
+            DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::BestQuality, match_as_ascii: false };
+        assert_eq!(deduplicate_playlist(&config, &mut playlist), 0);
     }
 }

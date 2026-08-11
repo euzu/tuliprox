@@ -85,6 +85,9 @@ pub struct DeduplicateConfig {
     pub match_by: DeduplicateMatchBy,
     #[serde(default)]
     pub keep: DeduplicateKeep,
+    /// Normalize accented characters in match keys ("Café HD" matches "Cafe FHD").
+    #[serde(default)]
+    pub match_as_ascii: bool,
 }
 
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]

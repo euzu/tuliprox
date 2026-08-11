@@ -1443,6 +1443,10 @@ targets:
         hls: true
         mpeg_ts: true
       remove_duplicates: false
+      deduplicate:
+        match_by: caption
+        keep: best_quality
+        match_as_ascii: false
 ```
 
 #### Target Option Parameters
@@ -1453,7 +1457,7 @@ targets:
 | `share_live_streams.hls`                   | Bool | No       | `false` | Enables HLS live sharing for the new HLS cache proxy path. This is a configuration switch for the HLS cache feature and is independent from MPEG-TS stream sharing.                                                                            |
 | `share_live_streams.mpeg_ts`               | Bool | No       | `false` | Allows Tuliprox to share MPEG-TS live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel.             |
 | `remove_duplicates`                        | Bool | No       | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output.                                                                                                |
-| `deduplicate`                              | Map  | No       | -       | Quality-aware duplicate removal. Channels whose match value is identical after stripping quality tokens (`4K`, `UHD`, `2160p`, `QHD`, `1440p`, `FHD`, `1080p`, `HD`, `720p`, `SD`, `480p`, `576p`) collapse to a single entry. Sub-keys: `match_by` (`caption` (default), `name`, `title`) and `keep` (`best_quality` (default) keeps the highest quality tier, `first` keeps the first occurrence). Matching is per cluster across all groups; ties keep the first occurrence. |
+| `deduplicate`                              | Map  | No       | -       | Quality-aware duplicate removal. Channels whose match value is identical after stripping quality tokens (`4K`, `UHD`, `2160p`, `QHD`, `1440p`, `FHD`, `1080p`, `HD`, `720p`, `SD`, `480p`, `576p`) collapse to a single entry. Sub-keys: `match_by` (`caption` (default), `name`, `title`), `keep` (`best_quality` (default) keeps the highest quality tier, `first` keeps the first occurrence) and `match_as_ascii` (default `false`, normalizes accented characters in match keys so `Café HD` matches `Cafe FHD`). Matching is per cluster across all groups; ties keep the first occurrence. |
 | `epg_output.lowercase_ids`                 | Bool | No       | `false` | Canonicalizes visible technical EPG IDs with ASCII lowercase across M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV channel/programme references, and EPG API responses. Changing this option requires a full target refresh.                     |
 | `epg_output.lowercase_xmltv_display_names` | Bool | No       | `false` | Applies Unicode lowercase exclusively to XMLTV `<display-name>` values during serialization. Playlist names, Xtream names, programme titles, and programme descriptions remain unchanged; persisted target data does not require rebuilding.   |
 | `force_redirect`                           | Bool | No       | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model.                                                                 |
@@ -1469,6 +1473,30 @@ targets:
 > regardless of the number of connected clients.
 > If the reverse-proxy buffer size is increased above `1024`, memory usage increases accordingly.
 > Example: with a buffer size of `2048`, each shared channel consumes at least **24 MB**.
+
+#### Quality-Aware Deduplication Example
+
+Keep only the best-quality copy of every channel, collapsing entries like `News HD`, `News FHD`, and `NEWS [4K]`
+into the single `NEWS [4K]` entry:
+
+```yaml
+targets:
+  - name: clean_target
+    filter: 'Group ~ ".*"'
+    options:
+      deduplicate:
+        match_by: caption      # caption (default) | name | title
+        keep: best_quality     # best_quality (default) | first
+        match_as_ascii: false  # true: "Café HD" matches "Cafe FHD"
+    output:
+      - type: m3u
+```
+
+* Matching compares the selected field with quality tokens stripped and remaining words lowercased,
+  so unrelated channels never collapse.
+* `keep: first` keeps the first occurrence in playlist order instead of the highest quality tier
+  (useful when provider ordering already encodes your preference).
+* Deduplication runs after group merging and before sorting; groups left empty are removed.
 
 #### EPG Output Normalization
 
