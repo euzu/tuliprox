@@ -780,6 +780,7 @@ pub fn EpgView() -> Html {
         use_effect_with((), move |_| {
             let debounce_handle: Rc<RefCell<Option<Timeout>>> = Rc::new(RefCell::new(None));
             let onscroll_handle: OnScrollHandle = Rc::new(RefCell::new(None));
+            let cleanup_container_ref = container_ref.clone();
             if let Some(div) = container_ref.cast::<HtmlElement>() {
                 let visible_range = visible_range.clone();
                 // Store debounce timer in Rc<RefCell>
@@ -819,6 +820,11 @@ pub fn EpgView() -> Html {
                     prev.cancel();
                 }
                 if let Some(onscroll) = onscroll_handle.borrow_mut().take() {
+                    // Detach before dropping the closure so a live element cannot invoke a destroyed callback
+                    if let Some(div) = cleanup_container_ref.cast::<HtmlElement>() {
+                        let _ = div
+                            .remove_event_listener_with_callback("scroll", onscroll.as_ref().unchecked_ref());
+                    }
                     drop(onscroll);
                 }
             }
