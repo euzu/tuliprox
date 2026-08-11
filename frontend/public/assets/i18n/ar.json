@@ -1637,6 +1637,7 @@
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "الحافظة غير مدعومة.\nمتصفحك أو السياق الحالي لا يسمح بالوصول إلى الحافظة.\nيرجى استخدام HTTPS أو localhost.",
+    "COPIED_TO_CLIPBOARD": "تم النسخ إلى الحافظة.",
     "CONFIG_CHANGED": "تم تغيير التكوين على الخادم.",
     "CONFIRM_DELETE": "هل تريد حقًا حذفه؟",
     "CONFIRM_SOURCES_SAVE": "هل تريد حقًا الحفظ؟",

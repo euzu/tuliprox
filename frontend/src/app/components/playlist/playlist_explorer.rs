@@ -3,7 +3,7 @@ use crate::{
         components::{menu_item::MenuItem, popup_menu::PopupMenu, AppIcon, Chip, IconButton, NoContent, Panel, Search},
         context::{ConfigContext, PlaylistExplorerContext},
     },
-    hooks::use_service_context,
+    hooks::{use_clipboard_copy, use_service_context},
     html_if,
     i18n::use_translation,
     model::{BusyStatus, DialogAction, DialogActions, DialogResult, EventMessage},
@@ -21,7 +21,6 @@ use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc, str::FromSt
 use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 use yew::{platform::spawn_local, prelude::*};
-use yew_hooks::use_clipboard;
 
 const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
 const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
@@ -292,7 +291,7 @@ pub fn PlaylistExplorer() -> Html {
     let selected_channel = use_state(|| None::<ChannelSelection>);
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
-    let clipboard = use_clipboard();
+    let copy_to_clipboard = use_clipboard_copy();
     let cluster_visible = use_state(|| XtreamCluster::Live);
 
     let handle_cluster_change = {
@@ -406,23 +405,6 @@ pub fn PlaylistExplorer() -> Html {
             || {}
         });
     }
-
-    let copy_to_clipboard: Callback<String> = {
-        let clipboard = clipboard.clone();
-        let dialog = dialog.clone();
-        Callback::from(move |text: String| {
-            if *clipboard.is_supported {
-                clipboard.write_text(text);
-            } else {
-                let dlg = dialog.clone();
-                spawn_local(async move {
-                    let _result = dlg
-                        .content(html! {<input value={text} readonly={true} class="tp__copy-input"/>}, None, false)
-                        .await;
-                });
-            }
-        })
-    };
 
     let handle_menu_click = {
         let services = service_ctx.clone();

@@ -8,7 +8,7 @@ use crate::{
         context::{target_users_to_api_proxy_users, TargetUser},
         ConfigContext, TargetUserList,
     },
-    hooks::use_service_context,
+    hooks::{use_clipboard_copy, use_service_context},
     html_if,
     i18n::use_translation,
     model::DialogResult,
@@ -21,7 +21,6 @@ use shared::{
 };
 use std::{cmp::Ordering, collections::HashSet, fmt::Display, rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
-use yew_hooks::use_clipboard;
 
 const HEADERS: [&str; 19] = [
     "LABEL.EMPTY",
@@ -114,7 +113,7 @@ pub struct UserTableProps {
 #[component]
 pub fn UserTable(props: &UserTableProps) -> Html {
     let translate = use_translation();
-    let clipboard = use_clipboard();
+    let copy_to_clipboard = use_clipboard_copy();
     let service_ctx = use_service_context();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
@@ -276,8 +275,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         let services = service_ctx.clone();
         let selected_dto = selected_dto.clone();
         let ul_context = userlist_context.clone();
-        let clipboard = clipboard.clone();
-        let dialog = dialog.clone();
+        let copy_to_clipboard = copy_to_clipboard.clone();
         Callback::from(move |(name, e): (String, MouseEvent)| {
             e.prevent_default();
             e.stop_propagation();
@@ -355,21 +353,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                                 dto.credentials.password,
                                 dto.credentials.token.as_ref().map_or_else(String::new, |t| t.to_string())
                             );
-
-                            if *clipboard.is_supported {
-                                clipboard.write_text(text);
-                            } else {
-                                let dlg = dialog.clone();
-                                spawn_local(async move {
-                                    let _result = dlg
-                                        .content(
-                                            html! {<input value={text} readonly={true} class="tp__copy-input"/>},
-                                            None,
-                                            false,
-                                        )
-                                        .await;
-                                });
-                            }
+                            copy_to_clipboard.emit(text);
                         }
                     }
                 }

@@ -15,10 +15,9 @@ use crate::{
         components::{menu_item::MenuItem, popup_menu::PopupMenu, NoContent},
         ConfigContext,
     },
-    hooks::use_service_context,
+    hooks::{use_clipboard_copy, use_service_context},
     i18n::use_translation,
     model::EventMessage,
-    services::DialogService,
 };
 use gloo_timers::callback::Interval;
 pub use helpers::get_stream_info_config;
@@ -32,7 +31,6 @@ use shared::{
 };
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
-use yew_hooks::use_clipboard;
 
 const KICK: &str = "kick";
 const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
@@ -90,8 +88,7 @@ where
 pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
     let translate = use_translation();
     let service_ctx = use_service_context();
-    let dialog = use_context::<DialogService>().expect("Dialog service not found");
-    let clipboard = use_clipboard();
+    let copy_to_clipboard = use_clipboard_copy();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
@@ -205,23 +202,6 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                 set_selected_dto.set(Some(dto));
                 set_anchor_ref.set(Some(streams));
                 set_is_open.set(true);
-            }
-        })
-    };
-
-    let copy_to_clipboard: Callback<String> = {
-        let clipboard = clipboard.clone();
-        let dialog = dialog.clone();
-        Callback::from(move |text: String| {
-            if *clipboard.is_supported {
-                clipboard.write_text(text);
-            } else {
-                let dlg = dialog.clone();
-                spawn_local(async move {
-                    let _ = dlg
-                        .content(html! {<input value={text} readonly={true} class="tp__copy-input"/>}, None, false)
-                        .await;
-                });
             }
         })
     };
