@@ -1,14 +1,14 @@
 use crate::{
     app::{
         components::{
-            config::HasFormData, select::Select, selection_first_owned, selection_parse_first,
+            config::HasFormData, input::Input, select::Select, selection_first_owned, selection_parse_first,
             userlist::proxy_type_input::ProxyTypeInput, ClusterFlagsInput, ClusterFlagsInputMode, DropDownOption,
             DropDownSelection, Tag, TextButton, UserStatus,
         },
         TargetUser,
     },
     config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_list_option,
-    edit_field_number, edit_field_number_i8, edit_field_number_u16, edit_field_text, edit_field_text_option,
+    edit_field_number, edit_field_number_i8, edit_field_number_u16, edit_field_text_option,
     generate_form_reducer,
     hooks::{use_clipboard_copy, use_service_context},
     html_if,
@@ -28,6 +28,17 @@ use yew::prelude::*;
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 1;
 const DEFAULT_EXPIRATION_DAYS: i64 = 365;
+
+#[derive(Clone, PartialEq, Default)]
+struct UserFormFieldErrors {
+    username: Option<String>,
+    password: Option<String>,
+    target: Option<String>,
+}
+
+impl UserFormFieldErrors {
+    fn has_errors(&self) -> bool { self.username.is_some() || self.password.is_some() || self.target.is_some() }
+}
 
 fn normalize_country_entry(input: &str) -> Result<String, &'static str> {
     let normalized = input.trim().to_ascii_uppercase();
@@ -135,6 +146,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     let update = use_state(|| false);
     let allowed_countries = use_state(Vec::<Rc<Tag>>::new);
     let allowed_networks = use_state(Vec::<Rc<Tag>>::new);
+    let field_errors = use_state(UserFormFieldErrors::default);
 
     let form_state: UseReducerHandle<UserFormState> =
         use_reducer(|| UserFormState { form: ProxyUserCredentialsDto::default(), modified: false });
@@ -243,8 +255,29 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         let is_update = update.clone();
         let countries = allowed_countries.clone();
         let networks = allowed_networks.clone();
+        let field_errors = field_errors.clone();
         Callback::from(move |_| {
             let nothing_to_save = || services.toastr.warning(translate_clone.t("MESSAGES.SAVE.USER.NOTHING_TO_SAVE"));
+            // Inline field validation before the save flow
+            let mut errors = UserFormFieldErrors::default();
+            if (*target).is_none() {
+                errors.target = Some(translate_clone.t("MESSAGES.SAVE.USER.TARGET_NOT_SELECTED"));
+            }
+            {
+                let data = user.data();
+                if data.username.trim().is_empty() {
+                    errors.username = Some(translate_clone.t("MESSAGES.VALIDATION.REQUIRED"));
+                }
+                if data.password.trim().is_empty() {
+                    errors.password = Some(translate_clone.t("MESSAGES.VALIDATION.REQUIRED"));
+                }
+            }
+            let has_errors = errors.has_errors();
+            field_errors.set(errors);
+            if has_errors {
+                services.toastr.error(translate_clone.t("MESSAGES.SAVE.USER.FAIL"));
+                return;
+            }
             if let Some(target_name) = (*target).as_ref().cloned() {
                 let original_target = original.as_ref().map(|u| u.target.clone()).unwrap_or_default();
                 let target_changed = target_name != original_target;
@@ -345,6 +378,8 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                         <div class="tp__proxy-user-credentials-form__playlist-target">
                                 <Select name="target"
                                 multi_select={false}
+                                required={true}
+                                error={field_errors.target.clone()}
                                 on_select={Callback::from(move |(_, selections): (String, DropDownSelection)| {
                                   let target = selection_first_owned(selections);
                                     set_selected_target.set(target);
@@ -377,10 +412,43 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
             { if *update {
                   config_field_custom!(translate.t("LABEL.USERNAME"), form_state.data().username.clone())
                 } else {
-                  edit_field_text!(form_state, translate.t("LABEL.USERNAME"), username, UserFormAction::Username)
+                  html! {
+                    <div class="tp__form-field tp__form-field__text">
+                        <Input
+                            label={translate.t("LABEL.USERNAME")}
+                            name="username"
+                            autocomplete={true}
+                            required={true}
+                            error={field_errors.username.clone()}
+                            value={form_state.data().username.to_string()}
+                            on_change={{
+                                let form_state = form_state.clone();
+                                Callback::from(move |value: String| form_state.dispatch(UserFormAction::Username(value)))
+                            }}
+                        />
+                    </div>
+                  }
                }
             }
-            { edit_field_text!(form_state, translate.t("LABEL.PASSWORD"), password, UserFormAction::Password, true) }
+            {
+                html! {
+                    <div class="tp__form-field tp__form-field__text">
+                        <Input
+                            label={translate.t("LABEL.PASSWORD")}
+                            name="password"
+                            hidden={true}
+                            autocomplete={false}
+                            required={true}
+                            error={field_errors.password.clone()}
+                            value={form_state.data().password.to_string()}
+                            on_change={{
+                                let form_state = form_state.clone();
+                                Callback::from(move |value: String| form_state.dispatch(UserFormAction::Password(value)))
+                            }}
+                        />
+                    </div>
+                }
+            }
             { edit_field_text_option!(form_state,  translate.t("LABEL.TOKEN"), token, UserFormAction::Token, true) }
             { config_field_child!(translate.t("LABEL.PROXY"), "PROXY_USER_CREDENTIALS.PROXY", {
                html! {

@@ -1786,6 +1786,7 @@
     ,
     "VALIDATION": {
       "NETWORK_ACCESS_COUNTRIES": "أدخل رمز بلد واحد بتنسيق ISO المؤلف من حرفين لكل إدخال، مثل DE.",
+      "REQUIRED": "هذا الحقل مطلوب.",
       "NETWORK_ACCESS_NETWORKS": "أدخل CIDR واحد لكل إدخال، مثل 192.168.0.0/16 أو 2001:db8::/32."
     }
   },

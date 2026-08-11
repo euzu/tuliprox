@@ -1812,7 +1812,8 @@
     ,
     "VALIDATION": {
       "NETWORK_ACCESS_COUNTRIES": "Enter one 2-letter ISO country code per entry, for example DE.",
-      "NETWORK_ACCESS_NETWORKS": "Enter one CIDR per entry, for example 192.168.0.0/16 or 2001:db8::/32."
+      "NETWORK_ACCESS_NETWORKS": "Enter one CIDR per entry, for example 192.168.0.0/16 or 2001:db8::/32.",
+      "REQUIRED": "This field is required."
     }
   },
   "SETUP": {
