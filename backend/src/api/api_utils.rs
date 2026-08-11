@@ -6255,6 +6255,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
         });
         let addr: SocketAddr = "127.0.0.1:55220".parse().unwrap_or_else(|_| unreachable!());
@@ -6341,6 +6342,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
         });
         let addr: SocketAddr = "127.0.0.1:55221".parse().unwrap_or_else(|_| unreachable!());
@@ -6412,6 +6414,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
         });
         let addr: SocketAddr = "127.0.0.1:55230".parse().unwrap_or_else(|_| unreachable!());
@@ -6486,6 +6489,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
         let addr: SocketAddr = "127.0.0.1:55231".parse().unwrap_or_else(|_| unreachable!());
@@ -6560,6 +6564,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
         });
         let addr: SocketAddr = "127.0.0.1:55222".parse().unwrap_or_else(|_| unreachable!());
@@ -6612,6 +6617,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
         let addr: SocketAddr = "127.0.0.1:55223".parse().unwrap_or_else(|_| unreachable!());
@@ -6656,6 +6662,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
         let addr: SocketAddr = "127.0.0.1:55224".parse().unwrap_or_else(|_| unreachable!());
@@ -6734,6 +6741,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         };
         let mut app_cfg = create_test_app_config();
@@ -6839,6 +6847,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: None,
         };
         let mut app_cfg = create_test_app_config();
@@ -6959,6 +6968,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: None,
         });
 
@@ -6982,6 +6992,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![]),
         });
 
@@ -7004,6 +7015,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![
                 AdmissionStrategy::EvictUserSameIpOldest,
                 AdmissionStrategy::GraceHoldStream,
@@ -7105,6 +7117,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest]),
         });
 
@@ -7204,6 +7217,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![
                 AdmissionStrategy::GraceHoldStream,
                 AdmissionStrategy::EvictUserSameIpOldest,
@@ -7300,6 +7314,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
 
@@ -7353,6 +7368,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
 
@@ -7413,6 +7429,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(strategies_for_config),
         });
 
@@ -7511,6 +7528,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
 
@@ -7569,6 +7587,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::GraceInstantStream]),
         });
 
@@ -7663,6 +7682,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest]),
         });
 
@@ -7855,6 +7875,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
         });
 
@@ -7951,6 +7972,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
         });
 
@@ -8075,6 +8097,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
         });
 
@@ -8199,6 +8222,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
         });
 
@@ -9102,6 +9126,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![
                 AdmissionStrategy::EvictUserSameIpOldest,
                 AdmissionStrategy::EvictUserSameIpLatest,
@@ -9385,6 +9410,7 @@ mod tests {
                     throttle_str: None,
                     throttle_kbps: 0,
                     shared_burst_buffer_mb: 1,
+                    shared_subscriber_idle_timeout_secs: 300,
                     admission_strategies: Some(vec![
                         AdmissionStrategy::EvictUserSameIpOldest,
                         AdmissionStrategy::EvictUserSameIpLatest,

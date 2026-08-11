@@ -2,9 +2,10 @@ use crate::{
     defaults::{
         default_as_true, default_catchup_session_ttl_secs, default_grace_period_millis,
         default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_shared_burst_buffer_mb,
-        default_stream_buffer_max_bytes_mb, is_default_catchup_session_ttl_secs, is_default_grace_period_millis,
+        default_shared_subscriber_idle_timeout_secs, default_stream_buffer_max_bytes_mb,
+        is_default_catchup_session_ttl_secs, is_default_grace_period_millis,
         is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb,
-        is_default_stream_buffer_max_bytes_mb, is_false, is_true,
+        is_default_shared_subscriber_idle_timeout_secs, is_default_stream_buffer_max_bytes_mb, is_false, is_true,
     },
     error::TuliproxError,
     utils::{is_blank_optional_string, parse_to_kbps},
@@ -134,6 +135,12 @@ pub struct StreamConfigDto {
     pub throttle_kbps: u64,
     #[serde(default = "default_shared_burst_buffer_mb", skip_serializing_if = "is_default_shared_burst_buffer_mb")]
     pub shared_burst_buffer_mb: u64,
+    /// Idle timeout in seconds after which a shared-stream subscriber that consumed no data is dropped.
+    #[serde(
+        default = "default_shared_subscriber_idle_timeout_secs",
+        skip_serializing_if = "is_default_shared_subscriber_idle_timeout_secs"
+    )]
+    pub shared_subscriber_idle_timeout_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_strategies: Option<Vec<AdmissionStrategy>>,
 }
@@ -149,6 +156,7 @@ impl Default for StreamConfigDto {
             grace_period_timeout_secs: default_grace_period_timeout_secs(),
             throttle_kbps: 0,
             shared_burst_buffer_mb: default_shared_burst_buffer_mb(),
+            shared_subscriber_idle_timeout_secs: default_shared_subscriber_idle_timeout_secs(),
             grace_period_hold_stream: true,
             hls_session_ttl_secs: default_hls_session_ttl_secs(),
             catchup_session_ttl_secs: default_catchup_session_ttl_secs(),
@@ -167,6 +175,7 @@ impl StreamConfigDto {
             && self.grace_period_timeout_secs == default_grace_period_timeout_secs()
             && self.throttle_kbps == 0
             && self.shared_burst_buffer_mb == default_shared_burst_buffer_mb()
+            && self.shared_subscriber_idle_timeout_secs == default_shared_subscriber_idle_timeout_secs()
             && self.grace_period_hold_stream
             && self.hls_session_ttl_secs == default_hls_session_ttl_secs()
             && self.catchup_session_ttl_secs == default_catchup_session_ttl_secs()
@@ -199,6 +208,12 @@ impl StreamConfigDto {
             return Err(TuliproxError::ConfigStream(format!(
                 "`shared_burst_buffer_mb` must be at least {MIN_SHARED_BURST_BUFFER_MB} MB"
             )));
+        }
+
+        if self.shared_subscriber_idle_timeout_secs == 0 {
+            return Err(TuliproxError::ConfigStream(
+                "`shared_subscriber_idle_timeout_secs` must be at least 1 second".to_string(),
+            ));
         }
 
         if let Some(strategies) = &self.admission_strategies {

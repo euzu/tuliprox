@@ -124,6 +124,7 @@ reverse_proxy:
 | `metrics_enabled` | Bool | `false` | **Monitoring:** If active, Tuliprox samples the live bandwidth (in kbps) and transferred bytes for every active reverse-proxied stream and pushes them via WebSockets to the Web UI. It adds a tiny bit of CPU overhead but is invaluable for debugging buffering issues. |
 | `grace_period_millis` | Int | `2000` | The exact time window in ms where a temporary over-allocation is allowed (see notes on [The VLC Seek Problem](#the-vlc-seek-problem--grace-periods) for details). |
 | `grace_period_timeout_secs` | Int | `4` | A hard timeout limit for overlapping "ghost sessions" to expire. |
+| `shared_subscriber_idle_timeout_secs` | Int | `300` | How long a subscriber of a shared (multi-client) stream may consume no data before it is dropped. Lower values reclaim slots from stalled clients faster; higher values tolerate longer player pauses. |
 | `grace_period_hold_stream` | Bool | `true` | Tuliprox artificially holds back video data to the client, waiting for grace check to finish, so it doesn't trigger provider prematurely. |
 | `hls_session_ttl_secs` | Int | `15` | Keeps virtual provider slot open between HLS segment (`.ts`) requests to prevent provider bans for "Account Hopping". |
 | `catchup_session_ttl_secs` | Int | `45` | Same session-holding principle applied to Archive/Catchup TV. See notes on section [Session TTLs for HLS & Catchup](#session-ttls-for-hls-m3u8--catchup) for details. |

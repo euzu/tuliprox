@@ -2544,6 +2544,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
 
