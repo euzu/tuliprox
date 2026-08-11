@@ -27,7 +27,12 @@ pub fn parse_duration_seconds(value: &str, require_unit: bool) -> Option<u64> {
         return None;
     }
 
-    let (number_part, unit_part) = value.split_at(value.len() - 1);
+    // split_at panics on non-char boundaries; a multi-byte trailing char is never a valid unit
+    let split_pos = value.len() - 1;
+    if !value.is_char_boundary(split_pos) {
+        return None;
+    }
+    let (number_part, unit_part) = value.split_at(split_pos);
     let number = number_part.parse::<u64>().ok()?;
     match unit_part {
         "s" => Some(number),
