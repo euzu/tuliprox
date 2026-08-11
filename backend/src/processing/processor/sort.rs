@@ -1,6 +1,7 @@
 use crate::model::{ConfigSortRule, ConfigTarget};
 use shared::foundation::ValueProvider;
 use shared::model::{PlaylistGroup, SortOrder, SortTarget};
+use shared::utils::natural_cmp;
 use std::cmp::Ordering;
 use std::sync::Arc;
 use crate::utils::normalized_source_ordinal;
@@ -11,49 +12,6 @@ fn apply_sort_order(order: SortOrder, ordering: Ordering) -> Ordering {
         (SortOrder::Asc, o) => o,
         (SortOrder::Desc, o) => o.reverse(),
     }
-}
-
-fn trim_leading_zeros(digits: &[u8]) -> &[u8] {
-    let start = digits.iter().position(|b| *b != b'0').unwrap_or(digits.len() - 1);
-    &digits[start..]
-}
-
-/// Compare strings with embedded ascii integers numerically ("Chan 2" < "Chan 10").
-fn natural_cmp(left: &str, right: &str) -> Ordering {
-    let l = left.as_bytes();
-    let r = right.as_bytes();
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < l.len() && j < r.len() {
-        if l[i].is_ascii_digit() && r[j].is_ascii_digit() {
-            let li = i;
-            while i < l.len() && l[i].is_ascii_digit() {
-                i += 1;
-            }
-            let rj = j;
-            while j < r.len() && r[j].is_ascii_digit() {
-                j += 1;
-            }
-            let ls = trim_leading_zeros(&l[li..i]);
-            let rs = trim_leading_zeros(&r[rj..j]);
-            let ord = ls.len().cmp(&rs.len()).then_with(|| ls.cmp(rs));
-            if ord != Ordering::Equal {
-                return ord;
-            }
-            // equal numeric value: fewer leading zeros first for determinism
-            let ord = (i - li).cmp(&(j - rj));
-            if ord != Ordering::Equal {
-                return ord;
-            }
-        } else {
-            let ord = l[i].cmp(&r[j]);
-            if ord != Ordering::Equal {
-                return ord;
-            }
-            i += 1;
-            j += 1;
-        }
-    }
-    (l.len() - i).cmp(&(r.len() - j))
 }
 
 fn compare_values(natural: bool, left: &str, right: &str) -> Ordering {
@@ -934,16 +892,5 @@ mod tests {
         let expected =
             vec!["Chan 1", "Chan 2", "Chan 002", "Chan 10"].into_iter().map(Into::into).collect::<Vec<Arc<str>>>();
         assert_eq!(expected, sorted);
-    }
-
-    #[test]
-    fn test_natural_cmp_basics() {
-        assert_eq!(natural_cmp("Chan 2", "Chan 10"), Ordering::Less);
-        assert_eq!(natural_cmp("Chan 10", "Chan 2"), Ordering::Greater);
-        assert_eq!(natural_cmp("Chan 2", "Chan 2"), Ordering::Equal);
-        assert_eq!(natural_cmp("Chan 2", "Chan 02"), Ordering::Less);
-        assert_eq!(natural_cmp("abc", "abd"), Ordering::Less);
-        assert_eq!(natural_cmp("abc", "abc def"), Ordering::Less);
-        assert_eq!(natural_cmp("00", "0"), Ordering::Greater);
     }
 }
