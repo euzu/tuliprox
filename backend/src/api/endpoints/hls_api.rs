@@ -123,9 +123,10 @@ use shared::{
 use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
 use url::Url;
 
-const MAX_MANUAL_REDIRECTS: usize = 10;
 const HLS_TEMPORARY_RESOURCE_RETRY_AFTER_SECS: u64 = 1;
 const HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS: u64 = HLS_TEMPORARY_RESOURCE_RETRY_AFTER_SECS * 1_000;
+
+use crate::api::model::MAX_MANUAL_REDIRECTS;
 
 /// Recover archive EPG reference from `m3u-catchup|...|archive|{start}|{duration}` session keys.
 ///
