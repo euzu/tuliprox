@@ -78,7 +78,7 @@ pub(crate) use self::{
     cluster_flags_input::*, collapse_panel::*, country::*, csv_table::*, custom_dialog::*, dashboard::*, date_input::*,
     date_input_action::*, downloads::DownloadsView, drop_down_icon_button::*, error_boundary::*, field_explanation::*,
     field_id::*, field_wrapper::*, filter::*, health_banner::*, hide_content::*, home::*, icon_button::*,
-    key_value_editor::*, language_picker::*, loading_screen::*, login::*, no_access::*, no_content::*, panel::*,
+    key_value_editor::*, language_picker::*, loading_indicator::*, loading_screen::*, login::*, no_access::*, no_content::*, panel::*,
     particle_flow_background::*, playlist::*, radio_button_group::*, rbac::*, reveal_content::*, role_based_content::*,
     search::*, select::*, select_helpers::*, setup::*, sidebar::*, source_editor::*, svg_icon::*, table::*, tabset::*,
     tag_list::*, text_button::*, textarea::*, theme_picker::*, title_card::*, toastr::*, toggle_switch::*, userlist::*,
