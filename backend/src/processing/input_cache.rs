@@ -74,11 +74,7 @@ pub fn is_cache_valid(status: &InputStatus, cluster: &str, cache_duration_second
             return false;
         }
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        if now > cluster_status.timestamp {
-             // check if age is within duration
-             // timestamp is creation time.
-             // wait, assuming timestamp is Last Update Time.
-             // now - timestamp < duration
+        if now >= cluster_status.timestamp {
              return now - cluster_status.timestamp < cache_duration_seconds;
         }
         // Timestamp in future? Invalid.
