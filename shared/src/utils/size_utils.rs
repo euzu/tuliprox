@@ -47,28 +47,31 @@ pub fn human_readable_byte_size(bytes: u64) -> String {
 }
 
 pub fn parse_to_kbps(input: &str) -> Result<u64, String> {
-    // Define unit conversion factors (in bits per second)
-    let units: &[(&str, u64)] = &[
-        ("KB/s", 8),                // Kilobytes per second to kbps
-        ("MB/s", 8000),             // Megabytes per second to kbps
-        ("KiB/s", 8 * 1024 / 1000), // Kibibytes per second to kbps
-        ("MiB/s", 8 * 1024),        // Mebibytes per second to kbps
-        ("kbps", 1),                // Kilobits per second (already in kbps)
-        ("Kbps", 1),                // Kilobits per second (already in kbps)
-        ("mbps", 1000),             // Megabits per second to kbps
-        ("Mbps", 1000),             // Megabits per second to kbps
-        ("Mibps", 1024),            // Mebibits per second to kbps
+    // Conversion factors to kbps as (numerator, denominator) to avoid integer truncation (e.g. KiB/s = 8.192 kbps)
+    let units: &[(&str, u64, u64)] = &[
+        ("KB/s", 8, 1),          // Kilobytes per second to kbps
+        ("MB/s", 8000, 1),       // Megabytes per second to kbps
+        ("KiB/s", 8192, 1000),   // Kibibytes per second to kbps
+        ("MiB/s", 8 * 1024, 1),  // Mebibytes per second to kbps
+        ("kbps", 1, 1),          // Kilobits per second (already in kbps)
+        ("Kbps", 1, 1),          // Kilobits per second (already in kbps)
+        ("mbps", 1000, 1),       // Megabits per second to kbps
+        ("Mbps", 1000, 1),       // Megabits per second to kbps
+        ("Mibps", 1024, 1),      // Mebibits per second to kbps
     ];
 
     let speed_str = input.trim();
     if speed_str.is_empty() {
         return Ok(0);
     }
-    for (unit, multiplier) in units {
+    for (unit, numerator, denominator) in units {
         if let Some(speed_unit) = speed_str.strip_suffix(unit) {
             let number_part = speed_unit.trim();
             let value = u64::from_str(number_part).map_err(|_| format!("Invalid speed: {number_part}"))?;
-            return value.checked_mul(*multiplier).ok_or_else(|| format!("Speed too large: {speed_str}"));
+            return value
+                .checked_mul(*numerator)
+                .map(|v| (v + denominator / 2) / denominator)
+                .ok_or_else(|| format!("Speed too large: {speed_str}"));
         }
     }
 
@@ -76,9 +79,9 @@ pub fn parse_to_kbps(input: &str) -> Result<u64, String> {
         .map_err(|_| format!("Invalid speed: {speed_str}, supported units are {}", join_unit_names(units)))
 }
 
-fn join_unit_names(units: &[(&str, u64)]) -> String {
+fn join_unit_names(units: &[(&str, u64, u64)]) -> String {
     let mut result = String::new();
-    for (idx, (unit, _)) in units.iter().enumerate() {
+    for (idx, (unit, _, _)) in units.iter().enumerate() {
         if idx > 0 {
             result.push(',');
         }
