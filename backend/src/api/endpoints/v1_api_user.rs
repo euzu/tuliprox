@@ -38,6 +38,21 @@ async fn save_config_api_proxy_user(
         ApiProxyConfig::default()
     };
 
+    if let Some(plan) = credential.plan.as_ref() {
+        if !api_proxy.plans.iter().any(|p| p.name == *plan) {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": format!("Unknown user plan {plan}")})),
+            )
+                .into_response();
+        }
+    }
+    let new_user = {
+        let mut user = ProxyUserCredentials::from(&credential);
+        user.resolve_plan(&api_proxy.plan_map());
+        Arc::new(user)
+    };
+
     // ---------- Search for existing Target and existing User ----------
     let mut existing_target_index: Option<usize> = None; // index of target (target_name), if present
     let mut existing_user_target_index: Option<usize> = None; // index of existing users target
@@ -99,11 +114,11 @@ async fn save_config_api_proxy_user(
 
         if user_target_idx == target_idx {
             // Update
-            api_proxy.user[user_target_idx].credentials[user_idx] = Arc::new(ProxyUserCredentials::from(&credential));
+            api_proxy.user[user_target_idx].credentials[user_idx] = Arc::clone(&new_user);
         } else {
             // Move: remove from old target and insert into new target
             api_proxy.user[user_target_idx].credentials.remove(user_idx);
-            api_proxy.user[target_idx].credentials.push(Arc::new(ProxyUserCredentials::from(&credential)));
+            api_proxy.user[target_idx].credentials.push(Arc::clone(&new_user));
             remove_empty_target = api_proxy.user[user_target_idx].credentials.is_empty();
         }
 
@@ -112,7 +127,7 @@ async fn save_config_api_proxy_user(
         }
     } else {
         // new user
-        api_proxy.user[target_idx].credentials.push(Arc::new(ProxyUserCredentials::from(&credential)));
+        api_proxy.user[target_idx].credentials.push(Arc::clone(&new_user));
     }
 
     let new_api_proxy = Arc::new(api_proxy);

@@ -18,7 +18,7 @@ use chrono::{Duration, Utc};
 use shared::{
     model::{
         permission::Permission, ApiProxyServerInfoDto, ClusterFlags, ConfigTargetDto, NetworkAccessDto, ProxyType,
-        ProxyUserCredentialsDto, ProxyUserStatus,
+        ProxyUserCredentialsDto, ProxyUserStatus, UserPlanDto,
     },
     utils::generate_random_string,
 };
@@ -126,6 +126,8 @@ generate_form_reducer!(
         EpgTimeshift => epg_timeshift: Option<String>,
         EpgRequestTimeshift => epg_request_timeshift: Option<String>,
         Comment => comment: Option<String>,
+        Plan => plan: Option<String>,
+        Filter => filter: Option<String>,
     }
 );
 
@@ -134,6 +136,8 @@ pub struct ProxyUserCredentialsFormProps {
     pub user: Option<Rc<TargetUser>>,
     pub targets: Rc<Vec<Rc<ConfigTargetDto>>>,
     pub server: Rc<Vec<ApiProxyServerInfoDto>>,
+    #[prop_or_default]
+    pub plans: Rc<Vec<UserPlanDto>>,
     pub on_save: Callback<(bool, String, ProxyUserCredentialsDto)>,
     pub on_cancel: Callback<()>,
 }
@@ -181,6 +185,20 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 selected: user_server.as_ref() == Some(&s.name),
             })
             .collect::<Vec<DropDownOption>>()
+    });
+
+    let plan_options = use_memo((props.plans.clone(), form_state.data().plan.clone()), |(plans, user_plan)| {
+        let mut options = vec![DropDownOption {
+            id: String::new(),
+            label: html! { "—" },
+            selected: user_plan.is_none(),
+        }];
+        options.extend(plans.iter().map(|p| DropDownOption {
+            id: p.name.clone(),
+            label: html! { p.name.clone() },
+            selected: user_plan.as_ref() == Some(&p.name),
+        }));
+        options
     });
 
     {
@@ -335,6 +353,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     let instance_status = form_state.clone();
     let instance_proxy = form_state.clone();
     let instance_server = form_state.clone();
+    let instance_plan = form_state.clone();
     let instance_output_clusters = form_state.clone();
     let country_services = service_ctx.clone();
     let country_translate = translate.clone();
@@ -469,6 +488,18 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                     options={server_list.clone()}
                 />
             }})}
+            { config_field_child!(translate.t("LABEL.PLAN"), "PROXY_USER_CREDENTIALS.PLAN", {
+               html! {
+                <Select name="plan"
+                    multi_select={false}
+                    on_select={Callback::from(move |(_, selections): (String, DropDownSelection)| {
+                        let plan = selection_first_owned(selections).filter(|value| !value.is_empty());
+                        instance_plan.dispatch(UserFormAction::Plan(plan));
+                    })}
+                    options={plan_options.clone()}
+                />
+            }})}
+            { edit_field_text_option!(form_state,  translate.t("LABEL.FILTER"), filter, UserFormAction::Filter) }
             { edit_field_date!(form_state,  translate.t("LABEL.EXP_DATE"), exp_date, UserFormAction::ExpDate) }
             { edit_field_number!(form_state,  translate.t("LABEL.MAX_CONNECTIONS"), max_connections, UserFormAction::MaxConnections) }
             { edit_field_number_u16!(form_state,  translate.t("LABEL.SOFT_CONNECTIONS"), soft_connections, UserFormAction::SoftConnections) }

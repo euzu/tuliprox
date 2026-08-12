@@ -69,6 +69,14 @@ pub fn UserEdit() -> Html {
         },
     });
 
+    let plans = use_memo(config_ctx.clone(), |config_ctx| match config_ctx.config.as_ref() {
+        None => vec![],
+        Some(app_config) => match app_config.api_proxy.as_ref() {
+            None => vec![],
+            Some(api_proxy) => api_proxy.plans.to_vec(),
+        },
+    });
+
     let handle_cancel = {
         let userlist_ctx = userlist_ctx.clone();
         Callback::from(move |_| {
@@ -143,7 +151,7 @@ pub fn UserEdit() -> Html {
         </div>
         <div class="tp__userlist-edit__body tp__list-create__body">
             <Card>
-               <ProxyUserCredentialsForm server={server.clone()} targets={targets.clone()} user={(*userlist_ctx.selected_user).clone()} on_save={handle_user_save} on_cancel={handle_cancel}/>
+               <ProxyUserCredentialsForm server={server.clone()} plans={plans.clone()} targets={targets.clone()} user={(*userlist_ctx.selected_user).clone()} on_save={handle_user_save} on_cancel={handle_cancel}/>
             </Card>
         </div>
       </div>
