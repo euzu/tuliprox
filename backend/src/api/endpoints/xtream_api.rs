@@ -1419,8 +1419,8 @@ async fn xtream_get_short_epg(
 }
 
 async fn xtream_player_api_handle_content_action(
-    config: &Config,
-    target_name: &str,
+    app_state: &Arc<AppState>,
+    target: &ConfigTarget,
     action: &str,
     category_id: Option<u32>,
     user: &ProxyUserCredentials,
@@ -1435,16 +1435,31 @@ async fn xtream_player_api_handle_content_action(
     if !user.allows_cluster(cluster) {
         return Some(api_utils::empty_json_list_response().into_response());
     }
-    if let Ok(file_path) = xtream_get_collection_path(config, target_name, collection) {
+    let config = app_state.app_config.config.load();
+    let target_name = target.name.as_str();
+    if let Ok(file_path) = xtream_get_collection_path(&config, target_name, collection) {
         match tokio::fs::read_to_string(&file_path).await {
             Ok(content) => {
                 let filter =
-                    user_get_bouquet_filter(config, &user.username, category_id, TargetType::Xtream, cluster).await;
+                    user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
 
                 match serde_json::from_str::<Vec<XtreamCategoryEntry>>(&content) {
                     Ok(mut categories) => {
                         if let Some(fltr) = filter {
                             categories.retain(|c| fltr.contains(&c.category_id));
+                        }
+                        // Hide categories fully filtered out by the user's content filter.
+                        if let Some(visible) = crate::api::endpoints::user_visibility::collect_visible_category_ids(
+                            &app_state.app_config,
+                            target,
+                            cluster,
+                            user,
+                        )
+                        .await
+                        {
+                            categories.retain(|c| {
+                                c.category_id.parse::<u32>().ok().is_some_and(|id| visible.contains(&id))
+                            });
                         }
                         return Some(axum::Json(categories).into_response());
                     }
@@ -1715,8 +1730,8 @@ async fn xtream_player_api(
     let category_id = api_req.category_id.trim().parse::<u32>().ok();
     // Handle general content actions
     if let Some(response) = xtream_player_api_handle_content_action(
-        &app_state.app_config.config.load(),
-        &target.name,
+        app_state,
+        &target,
         action,
         category_id,
         &user,

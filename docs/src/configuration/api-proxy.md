@@ -633,7 +633,9 @@ user:
 * Filters combine as `(plan filter) AND (user filter)` — a user filter can only narrow the plan.
 * Templates (`!NAME!`) are **not** available in api-proxy filters; write the expression inline.
 * Plan changes take effect on config reload for YAML users and on the next load for database users; running streams are not interrupted.
-* The content filter hides entries from playlists, category listings, and blocks direct stream access to filtered items. EPG data of hidden channels is not removed.
+* The content filter hides entries from playlists and stream lists, blocks direct stream access to filtered items,
+  hides categories whose content is fully filtered out from the Xtream category actions, and removes hidden channels
+  from the user's XMLTV output. The Web UI bouquet editor category list is not thinned.
 
 ---
 

@@ -11,6 +11,7 @@ pub(in crate::api) mod provider_resolve_api;
 mod rbac_api;
 mod stream_history_api;
 mod user_api;
+mod user_visibility;
 pub(in crate::api) mod v1_api;
 mod v1_api_config;
 mod v1_api_playlist;
