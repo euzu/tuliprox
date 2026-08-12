@@ -30,7 +30,7 @@ impl UserPlanTrialDto {
 
 /// Reusable capability tier referenced by users via `plan: <name>`.
 /// User-level values always override plan values; unset user values inherit.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct UserPlanDto {
     pub name: String,

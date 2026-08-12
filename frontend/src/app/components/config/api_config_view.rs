@@ -9,7 +9,8 @@ use crate::{
             input::Input,
             menu_item::MenuItem,
             popup_menu::PopupMenu,
-            AppIcon, Card, CustomDialog, NoContent, Table, TableDefinition, TextButton,
+            AppIcon, Card, CustomDialog, NoContent, Table, TableDefinition,
+            TextButton,
         },
         context::ConfigContext,
     },
@@ -21,7 +22,9 @@ use crate::{
 use shared::{
     concat_string,
     error::TuliproxError,
-    model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigApiDto, SortOrder},
+    model::{
+        ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigApiDto, SortOrder,
+    },
 };
 use std::{fmt::Display, rc::Rc, str::FromStr};
 use yew::prelude::*;

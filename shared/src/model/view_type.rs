@@ -8,6 +8,7 @@ const STATS: &str = "stats";
 const STREAMS: &str = "streams";
 const DOWNLOADS: &str = "downloads";
 const USERS: &str = "users";
+const PLANS: &str = "plans";
 const CONFIG: &str = "config";
 const PLAYLIST_UPDATE: &str = "playlist_update";
 const PLAYLIST_SETTINGS: &str = "playlist_settings";
@@ -26,6 +27,7 @@ pub enum ViewType {
     StreamHistory,
     Downloads,
     Users,
+    Plans,
     Config,
     SourceEditor,
     PlaylistUpdate,
@@ -45,6 +47,7 @@ impl ViewType {
             ViewType::StreamHistory => STREAM_HISTORY,
             ViewType::Downloads => DOWNLOADS,
             ViewType::Users => USERS,
+            ViewType::Plans => PLANS,
             ViewType::Config => CONFIG,
             ViewType::SourceEditor => SOURCE_EDITOR,
             ViewType::PlaylistUpdate => PLAYLIST_UPDATE,
@@ -67,6 +70,7 @@ impl FromStr for ViewType {
             STREAM_HISTORY => Ok(ViewType::StreamHistory),
             DOWNLOADS => Ok(ViewType::Downloads),
             USERS => Ok(ViewType::Users),
+            PLANS => Ok(ViewType::Plans),
             CONFIG => Ok(ViewType::Config),
             SOURCE_EDITOR => Ok(ViewType::SourceEditor),
             PLAYLIST_UPDATE => Ok(ViewType::PlaylistUpdate),

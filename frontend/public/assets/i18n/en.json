@@ -910,6 +910,7 @@
     "ADD_QUALITY_TO_FILENAME": "Quality",
     "USE_METADATA": "Use metadata",
     "ADD_SERVER": "Add Server",
+    "ADD_PLAN": "Add Plan",
     "ADD_STRIP_ENTRY": "Add Strip Entry",
     "ADD_TRAKT_CHART": "Add a Trakt chart",
     "ADD_TRAKT_LIST": "Add a Trakt list",
@@ -1289,6 +1290,8 @@
     "PERSIST": "Persist",
     "PLAYER_SERVER": "Player Server",
     "PLAN": "Plan",
+    "PLANS": "Plans",
+    "TRIAL": "Trial",
     "PLAYLIST": "Playlist",
     "PLAYLISTS": "Playlists",
     "PLAYLIST_BROWSER": "Playlist Browser",
@@ -1767,6 +1770,7 @@
       "API_PROXY_CONFIG": {
         "FAIL": "Failed to save the ApiProxy config!",
         "NON_UNIQUE_SERVER_NAME": "Server info name \"{name}\" already exists.",
+        "NON_UNIQUE_PLAN_NAME": "User plan name \"{name}\" already exists.",
         "SUCCESS": "ApiProxy config saved!"
       },
       "BOUQUET": {

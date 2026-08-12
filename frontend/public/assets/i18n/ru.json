@@ -1221,6 +1221,9 @@
     "PERSIST": "Сохранять",
     "PLAYER_SERVER": "Сервер плеера",
     "PLAN": "Тариф",
+    "PLANS": "Тарифы",
+    "TRIAL": "Пробный период",
+    "ADD_PLAN": "Добавить тариф",
     "PLAYLIST": "Плейлист",
     "PLAYLISTS": "Плейлисты",
     "PLAYLIST_BROWSER": "Браузер плейлистов",
@@ -1642,6 +1645,7 @@
       "API_PROXY_CONFIG": {
         "FAIL": "Не удалось сохранить конфигурацию ApiProxy!",
         "NON_UNIQUE_SERVER_NAME": "Имя информации о сервере \"{name}\" уже существует.",
+        "NON_UNIQUE_PLAN_NAME": "Имя тарифа \"{name}\" уже существует.",
         "SUCCESS": "Конфигурация ApiProxy сохранена!"
       },
       "BOUQUET": {

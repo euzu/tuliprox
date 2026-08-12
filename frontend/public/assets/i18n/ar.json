@@ -1282,6 +1282,9 @@
     "PERSIST": "استمرار",
     "PLAYER_SERVER": "خادم المشغل",
     "PLAN": "الخطة",
+    "PLANS": "الخطط",
+    "TRIAL": "فترة تجريبية",
+    "ADD_PLAN": "إضافة خطة",
     "PLAYLIST": "قائمة التشغيل",
     "PLAYLISTS": "قوائم التشغيل",
     "PLAYLIST_BROWSER": "متصفح قائمة التشغيل",
@@ -1741,6 +1744,7 @@
       "API_PROXY_CONFIG": {
         "FAIL": "فشل حفظ تكوين ApiProxy!",
         "NON_UNIQUE_SERVER_NAME": "اسم معلومات الخادم \"{name}\" موجود بالفعل.",
+        "NON_UNIQUE_PLAN_NAME": "اسم الخطة \"{name}\" موجود بالفعل.",
         "SUCCESS": "تم حفظ تكوين ApiProxy!"
       },
       "BOUQUET": {

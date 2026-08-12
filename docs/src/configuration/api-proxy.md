@@ -591,7 +591,7 @@ aired - that's controlled by your IPTV provider.
 ## 3. User Plans (`plans`)
 
 Plans are reusable capability tiers. Instead of repeating limits per user, define a plan once and reference it
-via the user's `plan` field.
+via the user's `plan` field. Plans can be managed in the Web UI (Config → API, edit mode) or directly in this file.
 
 ```yaml
 plans:
