@@ -3,7 +3,7 @@ use crate::{
     error::TuliproxError,
     foundation::get_filter,
     model::{ClusterFlags, ProxyType, ProxyUserCredentialsDto},
-    utils::is_blank_optional_string,
+    utils::{is_blank_optional_string, parse_duration_seconds},
 };
 use std::collections::HashSet;
 
@@ -11,6 +11,21 @@ use std::collections::HashSet;
 pub struct TargetUserDto {
     pub target: String,
     pub credentials: Vec<ProxyUserCredentialsDto>,
+}
+
+/// Trial settings for a plan: users created on the plan get an automatic
+/// expiry when they don't bring their own `exp_date`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UserPlanTrialDto {
+    /// Duration with unit, e.g. `24h`, `7d`.
+    pub duration: String,
+}
+
+impl UserPlanTrialDto {
+    pub fn duration_secs(&self) -> Option<u64> {
+        parse_duration_seconds(&self.duration, true).filter(|secs| *secs > 0)
+    }
 }
 
 /// Reusable capability tier referenced by users via `plan: <name>`.
@@ -30,6 +45,8 @@ pub struct UserPlanDto {
     /// Filter DSL expression restricting visible content for plan members.
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub filter: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial: Option<UserPlanTrialDto>,
     #[serde(default, skip_serializing_if = "is_blank_optional_string")]
     pub comment: Option<String>,
 }
@@ -50,6 +67,14 @@ impl UserPlanDto {
                     TuliproxError::ConfigApiProxy(format!("Invalid filter in user plan {}: {err}", self.name))
                 })?;
                 self.filter = Some(trimmed.to_string());
+            }
+        }
+        if let Some(trial) = &self.trial {
+            if trial.duration_secs().is_none() {
+                return Err(TuliproxError::ConfigApiProxy(format!(
+                    "Invalid trial duration '{}' in user plan {} (expected e.g. 24h, 7d)",
+                    trial.duration, self.name
+                )));
             }
         }
         Ok(())

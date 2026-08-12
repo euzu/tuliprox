@@ -8,6 +8,7 @@ use log::{debug, error};
 use shared::foundation::{get_filter, Filter};
 use shared::model::{
     ApiProxyConfigDto, ApiProxyServerInfoDto, ClusterFlags, ConfigPaths, ProxyType, TargetUserDto, UserPlanDto,
+    UserPlanTrialDto,
 };
 use std::cmp::PartialEq;
 use std::collections::HashMap;
@@ -80,8 +81,10 @@ pub struct UserPlan {
     pub max_connections: u32,
     pub soft_connections: u16,
     pub filter: Option<String>,
+    pub trial: Option<UserPlanTrialDto>,
     pub comment: Option<String>,
     pub t_filter: Option<Arc<Filter>>,
+    pub t_trial_duration_secs: Option<u64>,
 }
 
 macros::from_impl!(UserPlan);
@@ -103,8 +106,10 @@ impl From<&UserPlanDto> for UserPlan {
             max_connections: dto.max_connections,
             soft_connections: dto.soft_connections,
             filter: dto.filter.clone(),
+            trial: dto.trial.clone(),
             comment: dto.comment.clone(),
             t_filter,
+            t_trial_duration_secs: dto.trial.as_ref().and_then(UserPlanTrialDto::duration_secs),
         }
     }
 }
@@ -118,6 +123,7 @@ impl From<&UserPlan> for UserPlanDto {
             max_connections: instance.max_connections,
             soft_connections: instance.soft_connections,
             filter: instance.filter.clone(),
+            trial: instance.trial.clone(),
             comment: instance.comment.clone(),
         }
     }

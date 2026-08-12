@@ -47,6 +47,22 @@ async fn save_config_api_proxy_user(
                 .into_response();
         }
     }
+    // Trial plans: new users without an explicit expiry get the trial window.
+    if !is_update {
+        if let Some(plan) =
+            credential.plan.as_ref().and_then(|name| api_proxy.plans.iter().find(|p| p.name == *name))
+        {
+            if let Some(trial_secs) = plan.t_trial_duration_secs {
+                if credential.exp_date.is_none() {
+                    let expires = chrono::Utc::now().timestamp().saturating_add(i64::try_from(trial_secs).unwrap_or(i64::MAX));
+                    credential.exp_date = Some(expires);
+                }
+                if credential.status.is_none() {
+                    credential.status = Some(shared::model::ProxyUserStatus::Trial);
+                }
+            }
+        }
+    }
     let new_user = {
         let mut user = ProxyUserCredentials::from(&credential);
         user.resolve_plan(&api_proxy.plan_map());

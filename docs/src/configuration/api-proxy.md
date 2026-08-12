@@ -625,6 +625,7 @@ user:
 | `max_connections`  | Int    |    No    | `0`     | Concurrent stream limit for members whose own `max_connections` is `0`/unset. Enforcement still requires `user_access_control: true`.                                         |
 | `soft_connections` | Int    |    No    | `0`     | Soft connection allowance inherited the same way.                                                                                                                             |
 | `filter`           | String |    No    | `None`  | Filter DSL expression restricting the content visible to plan members (e.g. group allow/deny lists, `Quality <= 3` caps). AND-combined with a member's own `filter` if both exist. |
+| `trial.duration`   | String |    No    | `None`  | Trial window with unit (`24h`, `7d`). When a **new** user is created on this plan without an explicit `exp_date`, the expiry is set to now + duration and the status defaults to `Trial`. Enforcement of the expiry requires `user_access_control: true`. |
 | `comment`          | String |    No    | `None`  | Free-form description.                                                                                                                                                        |
 
 ### Resolution Rules
@@ -632,6 +633,8 @@ user:
 * Explicit user value > plan value > global default. "Unset" means `output_clusters` omitted or `max_connections`/`soft_connections` at `0`.
 * Filters combine as `(plan filter) AND (user filter)` — a user filter can only narrow the plan.
 * Templates (`!NAME!`) are **not** available in api-proxy filters; write the expression inline.
+* Trial windows apply only at user creation (Web UI/API); existing users and YAML-defined users are not modified.
+  After expiry the standard `exp_date` enforcement blocks the user; automatic downgrade to another plan is not supported.
 * Plan changes take effect on config reload for YAML users and on the next load for database users; running streams are not interrupted.
 * The content filter hides entries from playlists and stream lists, blocks direct stream access to filtered items,
   hides categories whose content is fully filtered out from the Xtream category actions, and removes hidden channels

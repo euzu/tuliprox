@@ -354,6 +354,8 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     let instance_proxy = form_state.clone();
     let instance_server = form_state.clone();
     let instance_plan = form_state.clone();
+    let plan_list = props.plans.clone();
+    let plan_is_update = update.clone();
     let instance_output_clusters = form_state.clone();
     let country_services = service_ctx.clone();
     let country_translate = translate.clone();
@@ -494,6 +496,19 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                     multi_select={false}
                     on_select={Callback::from(move |(_, selections): (String, DropDownSelection)| {
                         let plan = selection_first_owned(selections).filter(|value| !value.is_empty());
+                        // Trial plans: show the concrete trial expiry for new users right in the form.
+                        if !*plan_is_update {
+                            if let Some(trial_secs) = plan
+                                .as_ref()
+                                .and_then(|name| plan_list.iter().find(|p| &p.name == name))
+                                .and_then(|p| p.trial.as_ref())
+                                .and_then(shared::model::UserPlanTrialDto::duration_secs)
+                            {
+                                let expires = Utc::now().timestamp().saturating_add(i64::try_from(trial_secs).unwrap_or(i64::MAX));
+                                instance_plan.dispatch(UserFormAction::ExpDate(Some(expires)));
+                                instance_plan.dispatch(UserFormAction::Status(Some(ProxyUserStatus::Trial)));
+                            }
+                        }
                         instance_plan.dispatch(UserFormAction::Plan(plan));
                     })}
                     options={plan_options.clone()}
