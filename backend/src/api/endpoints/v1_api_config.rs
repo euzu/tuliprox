@@ -709,6 +709,7 @@ mod tests {
                 target: String::from("target-a"),
                 credentials: vec![],
             }],
+            plans: vec![],
             use_user_db: true,
             auth_error_status: 401,
         }

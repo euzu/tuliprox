@@ -1,6 +1,6 @@
 use crate::api::model::AppState;
 use crate::model::Config;
-use crate::model::{ApiProxyConfig, AppConfig, MediaToolCapabilities, SourcesConfig};
+use crate::model::{ApiProxyConfig, AppConfig, MediaToolCapabilities, SourcesConfig, UserPlan};
 use crate::repository::{
     csv_read_inputs, csv_write_inputs, get_api_user_db_path, is_csv_file, load_api_user,
 };
@@ -20,7 +20,7 @@ use shared::{
     foundation::prepare_templates,
     model::{
         ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType,
-        MsgKind, PatternTemplate, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
+        MsgKind, PatternTemplate, PlansConfigDto, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto, UserPlanDto,
     },
     utils::{CONSTANTS, PROVIDER_SCHEME_PREFIX},
     defaults::{generate_default_access_secret, generate_default_encrypt_secret, TEMPLATE_FILE},
@@ -113,6 +113,7 @@ pub async fn read_api_proxy_config(
     if let Some(api_proxy_dto) = read_api_proxy_file(api_proxy_file_path, resolve_env)? {
         let mut errors = vec![];
         let mut api_proxy: ApiProxyConfig = ApiProxyConfig::from(&api_proxy_dto);
+        apply_authoritative_plans(config, &mut api_proxy, resolve_env).await;
         api_proxy.migrate_api_user(config, &mut errors).await;
         if !errors.is_empty() {
             for error in errors {
@@ -725,7 +726,8 @@ pub async fn read_api_proxy(config: &AppConfig, resolve_env: bool) -> Option<Api
     match read_api_proxy_file(paths.api_proxy_file_path.as_str(), resolve_env) {
         Ok(Some(api_proxy_dto)) => {
             let mut errors = vec![];
-            let mut api_proxy: ApiProxyConfig = api_proxy_dto.into();
+            let mut api_proxy: ApiProxyConfig = ApiProxyConfig::from(&api_proxy_dto);
+            apply_authoritative_plans(config, &mut api_proxy, resolve_env).await;
             api_proxy.migrate_api_user(config, &mut errors).await;
             if !errors.is_empty() {
                 for error in errors {
@@ -848,6 +850,105 @@ pub async fn save_api_proxy(
     config: &ApiProxyConfigDto,
 ) -> Result<(), TuliproxError> {
     write_config_file(file_path, backup_dir, config, "api-proxy.yml").await
+}
+
+/// Path of the standalone plans file, sibling to api-proxy.yml.
+pub fn plans_file_path(api_proxy_file_path: &str) -> PathBuf {
+    let parent = Path::new(api_proxy_file_path).parent();
+    let candidates = ["plans.yml", "plans.yaml", "plan.yml", "plan.yaml"];
+    if let Some(dir) = parent {
+        for candidate in candidates {
+            let p = dir.join(candidate);
+            if p.exists() {
+                return p;
+            }
+        }
+        dir.join("plans.yml")
+    } else {
+        for candidate in candidates {
+            let p = PathBuf::from(candidate);
+            if p.exists() {
+                return p;
+            }
+        }
+        PathBuf::from("plans.yml")
+    }
+}
+
+pub fn read_plans_file(plans_file: &str, resolve_env: bool) -> Result<Option<PlansConfigDto>, TuliproxError> {
+    open_file(&PathBuf::from(plans_file)).map_or(Ok(None), |file| {
+        let parsed: Result<PlansConfigDto, _> = serde_saphyr::from_reader(config_file_reader(file, resolve_env));
+        match parsed {
+            Ok(mut dto) => {
+                if resolve_env {
+                    if let Err(err) = dto.prepare() {
+                        return Err(TuliproxError::Config(format!("can't read plans file: {err}")));
+                    }
+                }
+                Ok(Some(dto))
+            }
+            Err(err) => Err(TuliproxError::Config(format!("can't read plans file: {err}"))),
+        }
+    })
+}
+
+pub async fn save_plans(file_path: &str, backup_dir: &str, config: &PlansConfigDto) -> Result<(), TuliproxError> {
+    write_config_file(file_path, backup_dir, config, "plans.yml").await
+}
+
+/// Load plans from the standalone plans.yml onto the runtime api-proxy config
+/// and re-resolve users. Migrates legacy plans embedded in api-proxy.yml to
+/// plans.yml the first time it runs.
+async fn apply_authoritative_plans(config: &AppConfig, api_proxy: &mut ApiProxyConfig, resolve_env: bool) {
+    let plans_path = {
+        let paths = config.paths.load();
+        plans_file_path(paths.api_proxy_file_path.as_str())
+    };
+    let plans_path_str = plans_path.to_string_lossy().to_string();
+    match read_plans_file(&plans_path_str, resolve_env) {
+        Ok(Some(plans_dto)) => {
+            let plans = plans_dto.plans.iter().map(|plan| Arc::new(UserPlan::from(plan))).collect();
+            api_proxy.set_plans(plans);
+        }
+        Ok(None) => {
+            if let Some(legacy_plans) = read_legacy_api_proxy_plans(config, resolve_env) {
+                let migrated = PlansConfigDto { plans: legacy_plans.clone() };
+                let backup_dir = {
+                    let cfg = config.config.load();
+                    cfg.get_backup_dir().to_string()
+                };
+                match save_plans(&plans_path_str, &backup_dir, &migrated).await {
+                    Ok(()) => info!(
+                        "Migrated {} user plan(s) from api-proxy.yml to {plans_path_str}",
+                        migrated.plans.len()
+                    ),
+                    Err(err) => error!("Failed to migrate plans to {plans_path_str}: {err}"),
+                }
+                let plans = legacy_plans.iter().map(|plan| Arc::new(UserPlan::from(plan))).collect();
+                api_proxy.set_plans(plans);
+            }
+        }
+        Err(err) => error!("{err}"),
+    }
+}
+
+/// Read legacy plans still embedded in api-proxy.yml (pre plans.yml split).
+fn read_legacy_api_proxy_plans(config: &AppConfig, resolve_env: bool) -> Option<Vec<UserPlanDto>> {
+    #[derive(serde::Deserialize)]
+    struct LegacyApiProxyPlans {
+        #[serde(default)]
+        plans: Vec<UserPlanDto>,
+    }
+    let api_proxy_file = {
+        let paths = config.paths.load();
+        paths.api_proxy_file_path.clone()
+    };
+    let file = open_file(&PathBuf::from(api_proxy_file.as_str())).ok()?;
+    let parsed: Result<LegacyApiProxyPlans, _> = serde_saphyr::from_reader(config_file_reader(file, resolve_env));
+    match parsed {
+        Ok(dto) if !dto.plans.is_empty() => Some(dto.plans),
+        _ => None,
+    }
 }
 
 pub async fn save_main_config(

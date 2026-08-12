@@ -49,6 +49,12 @@ pub struct ProxyUserCredentialsDto {
     pub soft_priority: i8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_access: Option<NetworkAccessDto>,
+    /// Capability tier referencing a plan name from the api-proxy `plans` list.
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub plan: Option<String>,
+    /// Filter DSL restricting visible content; AND-combined with the plan filter.
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub filter: Option<String>,
 }
 
 impl ProxyUserCredentialsDto {
@@ -59,6 +65,12 @@ impl ProxyUserCredentialsDto {
             if na.is_empty() {
                 self.network_access = None;
             }
+        }
+        if let Some(filter) = &self.filter {
+            // Templates are not available in api-proxy; fail fast on syntax errors.
+            crate::foundation::get_filter(filter, None).map_err(|err| {
+                TuliproxError::ProxyUser(format!("Invalid filter for user {}: {err}", self.username))
+            })?;
         }
         Ok(())
     }
@@ -71,6 +83,14 @@ impl ProxyUserCredentialsDto {
             Some(tkn) => {
                 self.token = Some(tkn.trim().to_string());
             }
+        }
+        if let Some(plan) = &self.plan {
+            let trimmed = plan.trim();
+            self.plan = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
+        }
+        if let Some(filter) = &self.filter {
+            let trimmed = filter.trim();
+            self.filter = if trimmed.is_empty() { None } else { Some(trimmed.to_string()) };
         }
     }
 
@@ -135,6 +155,8 @@ impl Default for ProxyUserCredentialsDto {
             soft_connections: 0,
             soft_priority: default_user_priority(),
             network_access: None,
+            plan: None,
+            filter: None,
         }
     }
 }

@@ -4,9 +4,13 @@ use crate::utils;
 use crate::utils::file_exists_async;
 use arc_swap::access::Access;
 use arc_swap::ArcSwap;
-use log::debug;
-use shared::model::{ApiProxyConfigDto, ApiProxyServerInfoDto, ConfigPaths, TargetUserDto};
+use log::{debug, error};
+use shared::foundation::{get_filter, Filter};
+use shared::model::{
+    ApiProxyConfigDto, ApiProxyServerInfoDto, ClusterFlags, ConfigPaths, ProxyType, TargetUserDto, UserPlanDto,
+};
 use std::cmp::PartialEq;
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::sync::Arc;
 
@@ -68,9 +72,61 @@ impl ApiProxyServerInfo {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct UserPlan {
+    pub name: String,
+    pub output_clusters: Option<ClusterFlags>,
+    pub proxy: Option<ProxyType>,
+    pub max_connections: u32,
+    pub soft_connections: u16,
+    pub filter: Option<String>,
+    pub comment: Option<String>,
+    pub t_filter: Option<Arc<Filter>>,
+}
+
+macros::from_impl!(UserPlan);
+impl From<&UserPlanDto> for UserPlan {
+    fn from(dto: &UserPlanDto) -> Self {
+        // The DTO prepare() already validated the filter; a failure here means
+        // an unprepared DTO, so log and serve without the plan filter.
+        let t_filter = dto.filter.as_ref().and_then(|raw| match get_filter(raw, None) {
+            Ok(filter) => Some(Arc::new(filter)),
+            Err(err) => {
+                error!("Invalid filter in user plan {}: {err}", dto.name);
+                None
+            }
+        });
+        Self {
+            name: dto.name.clone(),
+            output_clusters: dto.output_clusters,
+            proxy: dto.proxy,
+            max_connections: dto.max_connections,
+            soft_connections: dto.soft_connections,
+            filter: dto.filter.clone(),
+            comment: dto.comment.clone(),
+            t_filter,
+        }
+    }
+}
+
+impl From<&UserPlan> for UserPlanDto {
+    fn from(instance: &UserPlan) -> Self {
+        Self {
+            name: instance.name.clone(),
+            output_clusters: instance.output_clusters,
+            proxy: instance.proxy,
+            max_connections: instance.max_connections,
+            soft_connections: instance.soft_connections,
+            filter: instance.filter.clone(),
+            comment: instance.comment.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ApiProxyConfig {
     pub server: Vec<ApiProxyServerInfo>,
+    pub plans: Vec<Arc<UserPlan>>,
     pub user: Vec<TargetUser>,
     pub use_user_db: bool,
     /// HTTP status code for auth failures. 0 means default (403).
@@ -80,9 +136,28 @@ pub struct ApiProxyConfig {
 macros::from_impl!(ApiProxyConfig);
 impl From<&ApiProxyConfigDto> for ApiProxyConfig {
     fn from(dto: &ApiProxyConfigDto) -> Self {
+        // Plans live in plans.yml now and are injected via `set_plans` after load.
+        let plan_map: HashMap<String, Arc<UserPlan>> = HashMap::new();
+        let user = dto
+            .user
+            .iter()
+            .map(|target_user| TargetUser {
+                target: target_user.target.clone(),
+                credentials: target_user
+                    .credentials
+                    .iter()
+                    .map(|credentials| {
+                        let mut user = ProxyUserCredentials::from(credentials);
+                        user.resolve_plan(&plan_map);
+                        Arc::new(user)
+                    })
+                    .collect(),
+            })
+            .collect();
         Self {
             server: dto.server.iter().map(ApiProxyServerInfo::from).collect(),
-            user: dto.user.iter().map(TargetUser::from).collect(),
+            plans: Vec::new(),
+            user,
             use_user_db: dto.use_user_db,
             auth_error_status: dto.auth_error_status,
         }
@@ -118,6 +193,32 @@ async fn api_proxy_file_would_change(api_proxy_file: &str, config: &ApiProxyConf
 }
 
 impl ApiProxyConfig {
+    pub fn plan_map(&self) -> HashMap<String, Arc<UserPlan>> {
+        self.plans.iter().map(|plan| (plan.name.clone(), Arc::clone(plan))).collect()
+    }
+
+    /// Replace the plan set (loaded from plans.yml) and re-resolve every user's
+    /// inherited capabilities and combined content filter.
+    pub fn set_plans(&mut self, plans: Vec<Arc<UserPlan>>) {
+        self.plans = plans;
+        let plan_map = self.plan_map();
+        for target_user in &mut self.user {
+            for credentials in &mut target_user.credentials {
+                Arc::make_mut(credentials).resolve_plan(&plan_map);
+            }
+        }
+    }
+
+    /// Re-resolve plan capabilities for users loaded outside the DTO path (user db).
+    pub fn resolve_target_users(&self, users: &mut [TargetUser]) {
+        let plan_map = self.plan_map();
+        for target_user in users {
+            for credentials in &mut target_user.credentials {
+                Arc::make_mut(credentials).resolve_plan(&plan_map);
+            }
+        }
+    }
+
     async fn backfill_output_clusters_to_file(&self, cfg: &AppConfig, errors: &mut Vec<String>) {
         if self.user.is_empty() {
             return;
@@ -166,6 +267,8 @@ impl ApiProxyConfig {
             }
             match load_api_user(cfg).await {
                 Ok(users) => {
+                    let mut users = users;
+                    self.resolve_target_users(&mut users);
                     self.user = users;
                 }
                 Err(err) => {
@@ -180,6 +283,8 @@ impl ApiProxyConfig {
                 // we can't have user defined in db file.
                 // we need to load them and save them into the config file
                 if let Ok(stored_users) = load_api_user(cfg).await {
+                    let mut stored_users = stored_users;
+                    self.resolve_target_users(&mut stored_users);
                     for stored_user in stored_users {
                         if let Some(target_user) = self.user.iter_mut().find(|t| t.target == stored_user.target) {
                             for stored_credential in &stored_user.credentials {

@@ -1,13 +1,15 @@
 use crate::api::model::AppState;
-use crate::model::{macros, Config};
+use crate::model::{macros, Config, UserPlan};
 use arc_swap::access::Access;
 use arc_swap::ArcSwap;
 use chrono::Local;
-use log::{debug, warn};
+use log::{debug, error, warn};
+use shared::foundation::{get_filter, BinaryOperator, Filter};
 use shared::model::{
     ClusterFlags, NetworkAccessDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, TargetUserDto,
     UserConnectionPermission, XtreamCluster,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use zeroize::Zeroize;
 
@@ -113,6 +115,20 @@ pub struct ProxyUserCredentials {
     pub soft_priority: i8,
     pub t_is_api_user: bool,
     pub network_access: Option<NetworkAccess>,
+    /// Capability tier name; resolved via `resolve_plan`.
+    pub plan: Option<String>,
+    /// Raw user-level content filter (DSL); AND-combined with the plan filter.
+    pub filter: Option<String>,
+    // Raw configured values (None/0 = inherit from plan). The sibling
+    // non-raw fields hold the resolved serving values after resolve_plan();
+    // persistence (YAML/DB) always writes the raw values so plan edits
+    // keep propagating to members.
+    pub raw_output_clusters: Option<ClusterFlags>,
+    pub raw_max_connections: u32,
+    pub raw_soft_connections: u16,
+    pub raw_proxy: Option<ProxyType>,
+    /// Compiled content filter (plan AND user), applied at serve time.
+    pub t_filter: Option<Arc<Filter>>,
 }
 
 macros::from_impl!(ProxyUserCredentials);
@@ -142,6 +158,13 @@ impl From<&ProxyUserCredentialsDto> for ProxyUserCredentials {
                 .as_ref()
                 .map(NetworkAccess::from)
                 .filter(|network_access| !network_access.is_empty()),
+            plan: dto.plan.clone(),
+            filter: dto.filter.clone(),
+            raw_output_clusters: dto.output_clusters,
+            raw_max_connections: dto.max_connections,
+            raw_soft_connections: dto.soft_connections,
+            raw_proxy: if dto.proxy == ProxyType::default() && dto.plan.is_some() { None } else { Some(dto.proxy) },
+            t_filter: None,
         }
     }
 }
@@ -152,26 +175,74 @@ impl From<&ProxyUserCredentials> for ProxyUserCredentialsDto {
             username: instance.username.clone(),
             password: instance.password.clone(),
             token: instance.token.clone(),
-            proxy: instance.proxy,
+            proxy: instance.raw_proxy.unwrap_or(instance.proxy),
             server: instance.server.clone(),
             epg_timeshift: instance.epg_timeshift.clone(),
             epg_request_timeshift: instance.epg_request_timeshift.clone(),
             created_at: instance.created_at,
             exp_date: instance.exp_date,
-            max_connections: instance.max_connections,
+            // Persist raw (pre-plan-resolution) values so plan edits keep propagating.
+            max_connections: instance.raw_max_connections,
             status: instance.status,
-            output_clusters: if instance.output_clusters.is_all() { None } else { Some(instance.output_clusters) },
+            output_clusters: instance.raw_output_clusters.filter(|flags| !flags.is_all()),
             ui_enabled: instance.ui_enabled,
             comment: instance.comment.clone(),
             priority: instance.priority,
-            soft_connections: instance.soft_connections,
+            soft_connections: instance.raw_soft_connections,
             soft_priority: instance.soft_priority,
             network_access: instance.network_access.as_ref().map(NetworkAccessDto::from),
+            plan: instance.plan.clone(),
+            filter: instance.filter.clone(),
         }
     }
 }
 
 impl ProxyUserCredentials {
+    /// Fill unset capability values from the referenced plan and compile the
+    /// combined content filter. Idempotent; call after any load/conversion.
+    pub fn resolve_plan(&mut self, plans: &HashMap<String, Arc<UserPlan>>) {
+        let plan = self.plan.as_ref().and_then(|name| plans.get(name));
+        if self.plan.is_some() && plan.is_none() {
+            warn!("Unknown user plan {:?} for user {}", self.plan, self.username);
+        }
+        self.output_clusters = self
+            .raw_output_clusters
+            .or_else(|| plan.and_then(|p| p.output_clusters))
+            .unwrap_or_else(ClusterFlags::all);
+        if let Some(plan_proxy) = plan.and_then(|p| p.proxy) {
+            self.proxy = self.raw_proxy.unwrap_or(plan_proxy);
+        }
+        self.max_connections = if self.raw_max_connections > 0 {
+            self.raw_max_connections
+        } else {
+            plan.map_or(0, |p| p.max_connections)
+        };
+        self.soft_connections = if self.raw_soft_connections > 0 {
+            self.raw_soft_connections
+        } else {
+            plan.map_or(0, |p| p.soft_connections)
+        };
+
+        let plan_filter = plan.and_then(|p| p.t_filter.as_ref().map(Arc::clone));
+        let user_filter = self.filter.as_ref().and_then(|raw| match get_filter(raw, None) {
+            Ok(filter) => Some(Arc::new(filter)),
+            Err(err) => {
+                error!("Ignoring invalid filter for user {}: {err}", self.username);
+                None
+            }
+        });
+        self.t_filter = match (plan_filter, user_filter) {
+            // Group both sides so OR expressions keep their intended precedence.
+            (Some(plan), Some(user)) => Some(Arc::new(Filter::BinaryExpression(
+                Box::new(Filter::Group(Box::new((*plan).clone()))),
+                BinaryOperator::And,
+                Box::new(Filter::Group(Box::new((*user).clone()))),
+            ))),
+            (Some(filter), None) | (None, Some(filter)) => Some(filter),
+            (None, None) => None,
+        };
+    }
+
     pub fn matches_token(&self, token: &str) -> bool {
         if let Some(tkn) = &self.token {
             return crate::auth::constant_time_eq(tkn.as_bytes(), token.as_bytes());
@@ -294,5 +365,50 @@ impl TargetUser {
             .iter()
             .find(|c| c.matches_token(token))
             .map(|credentials| (Arc::clone(credentials), self.target.as_str()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::model::UserPlanDto;
+
+    #[test]
+    fn test_resolve_plan_inherits_proxy() {
+        let plan_dto = UserPlanDto {
+            name: "reverse_plan".to_string(),
+            proxy: Some(ProxyType::Reverse(Some(ClusterFlags::Live))),
+            max_connections: 3,
+            ..Default::default()
+        };
+        let plan = Arc::new(UserPlan::from(&plan_dto));
+        let mut plans = HashMap::new();
+        plans.insert("reverse_plan".to_string(), plan);
+
+        // User with plan, default redirect proxy (inherited from plan)
+        let user_dto = ProxyUserCredentialsDto {
+            username: "alice".to_string(),
+            password: "123".to_string(),
+            plan: Some("reverse_plan".to_string()),
+            proxy: ProxyType::Redirect,
+            ..Default::default()
+        };
+        let mut user = ProxyUserCredentials::from(&user_dto);
+        assert_eq!(user.proxy, ProxyType::Redirect);
+        user.resolve_plan(&plans);
+        assert_eq!(user.proxy, ProxyType::Reverse(Some(ClusterFlags::Live)));
+        assert_eq!(user.max_connections, 3);
+
+        // User with explicit reverse proxy override
+        let user_dto2 = ProxyUserCredentialsDto {
+            username: "bob".to_string(),
+            password: "456".to_string(),
+            plan: Some("reverse_plan".to_string()),
+            proxy: ProxyType::Reverse(Some(ClusterFlags::Vod)),
+            ..Default::default()
+        };
+        let mut user2 = ProxyUserCredentials::from(&user_dto2);
+        user2.resolve_plan(&plans);
+        assert_eq!(user2.proxy, ProxyType::Reverse(Some(ClusterFlags::Vod)));
     }
 }

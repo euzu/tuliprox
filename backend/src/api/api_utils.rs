@@ -506,6 +506,13 @@ pub fn get_server_time() -> String {
     chrono::offset::Local::now().with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z").to_string()
 }
 
+static PROCESS_START: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
+
+/// Anchors the uptime clock; call once at process startup.
+pub fn init_uptime_clock() { let _ = *PROCESS_START; }
+
+pub fn get_uptime_secs() -> u64 { PROCESS_START.elapsed().as_secs() }
+
 pub fn get_build_time() -> Option<String> {
     BUILD_TIMESTAMP
         .to_string()
@@ -4600,6 +4607,13 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
         soft_priority: 0,
         t_is_api_user: true,
         network_access: None,
+        plan: None,
+        filter: None,
+        raw_output_clusters: None,
+        raw_max_connections: 0,
+        raw_soft_connections: 0,
+        raw_proxy: Some(ProxyType::Reverse(None)),
+        t_filter: None,
     }
 }
 
@@ -9836,6 +9850,13 @@ mod tests {
             soft_priority: 0,
             t_is_api_user: false,
             network_access,
+            plan: None,
+            filter: None,
+            raw_output_clusters: None,
+            raw_max_connections: 0,
+            raw_soft_connections: 0,
+            raw_proxy: Some(ProxyType::default()),
+            t_filter: None,
         }
     }
 

@@ -55,19 +55,23 @@ impl StoredProxyUserCredentials {
             epg_request_timeshift: proxy.epg_request_timeshift.clone(),
             created_at: proxy.created_at,
             exp_date: proxy.exp_date,
-            max_connections: if proxy.max_connections > 0 { Some(proxy.max_connections) } else { None },
+            // Persist raw (pre-plan-resolution) values; resolution re-runs on load.
+            max_connections: if proxy.raw_max_connections > 0 { Some(proxy.raw_max_connections) } else { None },
             status: proxy.status,
-            output_clusters: proxy.output_clusters,
+            output_clusters: proxy.raw_output_clusters.unwrap_or_else(ClusterFlags::all),
             ui_enabled: proxy.ui_enabled,
             comment: proxy.comment.clone(),
             priority: if proxy.priority != 0 { Some(proxy.priority) } else { None },
-            soft_connections: if proxy.soft_connections > 0 { Some(proxy.soft_connections) } else { None },
+            soft_connections: if proxy.raw_soft_connections > 0 { Some(proxy.raw_soft_connections) } else { None },
             soft_priority: if proxy.soft_priority != 0 { Some(proxy.soft_priority) } else { None },
             network_access: proxy.network_access.as_ref().map(Into::into),
         }
     }
 
     fn to(stored: &StoredProxyUserCredentials) -> ProxyUserCredentials {
+        let raw_output_clusters = if stored.output_clusters.is_all() { None } else { Some(stored.output_clusters) };
+        let raw_max_connections = stored.max_connections.unwrap_or_default();
+        let raw_soft_connections = stored.soft_connections.unwrap_or(0);
         ProxyUserCredentials {
             username: stored.username.clone(),
             password: stored.password.clone(),
@@ -78,16 +82,23 @@ impl StoredProxyUserCredentials {
             epg_request_timeshift: stored.epg_request_timeshift.clone(),
             created_at: stored.created_at,
             exp_date: stored.exp_date,
-            max_connections: stored.max_connections.unwrap_or_default(),
+            max_connections: raw_max_connections,
             status: stored.status,
             output_clusters: stored.output_clusters,
             ui_enabled: stored.ui_enabled,
             comment: stored.comment.clone(),
             priority: stored.priority.unwrap_or(0),
-            soft_connections: stored.soft_connections.unwrap_or(0),
+            soft_connections: raw_soft_connections,
             soft_priority: stored.soft_priority.unwrap_or(0),
             t_is_api_user: false,
             network_access: stored.network_access.as_ref().map(NetworkAccess::from),
+            plan: None,
+            filter: None,
+            raw_output_clusters,
+            raw_max_connections,
+            raw_soft_connections,
+            raw_proxy: if stored.plan.is_some() && stored.proxy == ProxyType::default() { None } else { Some(stored.proxy) },
+            t_filter: None,
         }
     }
 }
@@ -524,6 +535,13 @@ mod tests {
             soft_priority: 0,
             t_is_api_user: false,
             network_access: None,
+            plan: None,
+            filter: None,
+            raw_output_clusters: None,
+            raw_max_connections: 1,
+            raw_soft_connections: 0,
+            raw_proxy: Some(ProxyType::Reverse(None)),
+            t_filter: None,
         }
     }
 
