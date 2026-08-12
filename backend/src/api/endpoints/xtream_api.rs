@@ -307,11 +307,11 @@ async fn xtream_player_api_stream(
         .map_or(stream_ext, |input| override_live_hls_extension(stream_req.context, input, stream_ext));
     let is_hls_manifest_request = stream_ext == Some(HLS_EXT);
 
-    let output_allowed = if stream_req.context == ApiStreamContext::Timeshift {
+    let output_allowed = (if stream_req.context == ApiStreamContext::Timeshift {
         user.allows_cluster(XtreamCluster::Live)
     } else {
         user.allows_item_type(pli.item_type)
-    };
+    }) && (user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli)));
     if !output_allowed {
         if is_hls_manifest_request {
             return hls_custom_video_manifest_response(

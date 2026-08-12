@@ -243,6 +243,15 @@ impl ProxyUserCredentials {
         };
     }
 
+    /// True when the compiled content filter (plan AND user) permits this item.
+    /// Users without a filter see everything.
+    pub fn allows_content(&self, pli: &shared::model::PlaylistItem) -> bool {
+        self.t_filter.as_ref().is_none_or(|filter| {
+            let provider = shared::foundation::ValueProvider { pli, match_as_ascii: false };
+            filter.filter(&provider)
+        })
+    }
+
     pub fn matches_token(&self, token: &str) -> bool {
         if let Some(tkn) = &self.token {
             return crate::auth::constant_time_eq(tkn.as_bytes(), token.as_bytes());
