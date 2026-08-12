@@ -16,7 +16,7 @@ use std::io::Error;
 use std::path::{Path, PathBuf};
 use tokio::task;
 
-// V6 (current): added network_access. V1-V5 are migrated to V6 at startup
+// V7 (current): added plan and filter. V1-V6 are migrated to V7 at startup
 // by `bplustree::run_all_startup_migrations`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredProxyUserCredentials {
@@ -40,6 +40,10 @@ struct StoredProxyUserCredentials {
     pub soft_priority: Option<i8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_access: Option<shared::model::NetworkAccessDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
 }
 
 impl StoredProxyUserCredentials {
@@ -65,6 +69,8 @@ impl StoredProxyUserCredentials {
             soft_connections: if proxy.raw_soft_connections > 0 { Some(proxy.raw_soft_connections) } else { None },
             soft_priority: if proxy.soft_priority != 0 { Some(proxy.soft_priority) } else { None },
             network_access: proxy.network_access.as_ref().map(Into::into),
+            plan: proxy.plan.clone(),
+            filter: proxy.filter.clone(),
         }
     }
 
@@ -92,8 +98,8 @@ impl StoredProxyUserCredentials {
             soft_priority: stored.soft_priority.unwrap_or(0),
             t_is_api_user: false,
             network_access: stored.network_access.as_ref().map(NetworkAccess::from),
-            plan: None,
-            filter: None,
+            plan: stored.plan.clone(),
+            filter: stored.filter.clone(),
             raw_output_clusters,
             raw_max_connections,
             raw_soft_connections,
