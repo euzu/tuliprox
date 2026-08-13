@@ -2,11 +2,13 @@ use crate::model::{Config, ConfigInput};
 use crate::utils::request::DynReader;
 use shared::model::{
     CatchupAttribute, CatchupProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader,
-    PlaylistItemType, StreamProperties, XtreamCluster,
+    PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties,
+    SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, XtreamCluster,
 };
 use shared::utils::{extract_id_from_url, extract_numeric_id_from_url, Internable};
 use shared::defaults::{default_supported_video_extensions};
 use std::borrow::BorrowMut;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use indexmap::IndexMap;
@@ -126,6 +128,7 @@ enum M3uToken {
     TvgChno,
     GroupTitle,
     TvgId,
+    TvgType,
     TvgName,
     TvgLogo,
     TvgLogoSmall,
@@ -188,13 +191,15 @@ fn classify_token(t: &str) -> M3uToken {
                 classify_possible_id(bytes)
             }
         }
-        8 => {
+         8 => {
             if eq_ascii(bytes, b"tvg-chno") {
                 M3uToken::TvgChno
             } else if eq_ascii(bytes, b"tvg-name") {
                 M3uToken::TvgName
             } else if eq_ascii(bytes, b"tvg-logo") {
                 M3uToken::TvgLogo
+            } else if eq_ascii(bytes, b"tvg-type") {
+                M3uToken::TvgType
             } else {
                 classify_possible_id(bytes)
             }
@@ -261,6 +266,15 @@ fn classify_token(t: &str) -> M3uToken {
     }
 }
 
+fn parse_declared_type(value: &str) -> Option<(XtreamCluster, PlaylistItemType)> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "movie" | "vod" | "video" => Some((XtreamCluster::Video, PlaylistItemType::Video)),
+        "series" | "episode" => Some((XtreamCluster::Series, PlaylistItemType::Series)),
+        "live" => Some((XtreamCluster::Live, PlaylistItemType::Live)),
+        _ => None,
+    }
+}
+
 fn ensure_live_stream_properties(header: &mut PlaylistItemHeader) -> &mut LiveStreamProperties {
     if !matches!(header.additional_properties.as_ref(), Some(StreamProperties::Live(_))) {
         header.additional_properties = Some(StreamProperties::Live(Box::default()));
@@ -318,16 +332,13 @@ fn process_header_internal(
     url: String,
     default_catchup_correction: Option<&Arc<str>>,
 ) -> PlaylistItemHeader {
-    let url_types = if video_suffixes.iter().any(|suffix| url.ends_with(suffix)) {
-        // TODO find Series based on group or configured names
-        Some((XtreamCluster::Video, PlaylistItemType::Video))
-    } else {
-        None
-    };
+    let extension_type = video_suffixes.iter().any(|suffix| url.ends_with(suffix))
+        .then_some((XtreamCluster::Video, PlaylistItemType::Video));
 
     let mut plih = create_empty_playlistitem_header(input_name, url);
     let mut it = content.chars();
     let mut stack = String::with_capacity(64);
+    let mut declared_type = None;
     let is_extinf = token_till(&mut stack, &mut it, ':', false)
         .is_some_and(|off| stack[off..].eq_ignore_ascii_case("#EXTINF"));
     stack.clear();
@@ -358,6 +369,7 @@ fn process_header_internal(
                             }
                             M3uToken::TvgChno => plih.chno = stack[val_off..].parse::<u32>().unwrap_or(0),
                             M3uToken::GroupTitle => plih.group = stack[val_off..].intern(),
+                            M3uToken::TvgType => declared_type = parse_declared_type(&stack[val_off..]),
                             M3uToken::TvgId => plih.epg_channel_id = if stack.len() == val_off { None } else { Some(stack[val_off..].intern()) },
                             M3uToken::TvgName => plih.name = stack[val_off..].intern(),
                             M3uToken::TvgLogo => plih.logo = stack[val_off..].intern(),
@@ -411,9 +423,9 @@ fn process_header_internal(
         }
         apply_catchup_properties(&mut plih, catchup, default_catchup_correction);
     }
-    if let Some((url_cluster, url_item_type)) = url_types {
-        plih.xtream_cluster = url_cluster;
-        plih.item_type = url_item_type;
+    if let Some((cluster, item_type)) = declared_type.or(extension_type) {
+        plih.xtream_cluster = cluster;
+        plih.item_type = item_type;
     }
 
     {
@@ -474,6 +486,59 @@ fn parse_extvlcopt_user_agent(line: &str) -> Option<&str> {
     Some(value.trim())
 }
 
+fn stable_u32(text: &str) -> u32 {
+    let mut hash = 0x811c9dc5_u32;
+    for byte in text.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    if hash == 0 { 1 } else { hash }
+}
+
+fn parse_episode_code(title: &str) -> Option<(u32, u32)> {
+    let bytes = title.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'S' || bytes[i] == b's' {
+            let season_start = i + 1;
+            let mut season_end = season_start;
+            while season_end < bytes.len() && bytes[season_end].is_ascii_digit() {
+                season_end += 1;
+            }
+            if season_end > season_start
+                && season_end < bytes.len()
+                && (bytes[season_end] == b'E' || bytes[season_end] == b'e')
+            {
+                let episode_start = season_end + 1;
+                let mut episode_end = episode_start;
+                while episode_end < bytes.len() && bytes[episode_end].is_ascii_digit() {
+                    episode_end += 1;
+                }
+                if episode_end > episode_start {
+                    let season = title[season_start..season_end].parse::<u32>().ok()?;
+                    let episode = title[episode_start..episode_end].parse::<u32>().ok()?;
+                    return Some((season, episode));
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn series_numeric_id(item: &PlaylistItem) -> u32 {
+    item.header
+        .epg_channel_id
+        .as_deref()
+        .and_then(|id| id.parse::<u32>().ok())
+        .filter(|id| *id > 0)
+        .unwrap_or_else(|| stable_u32(&format!("{}:{}", item.header.input_name, item.header.parent_code)))
+}
+
+fn episode_numeric_id(item: &PlaylistItem) -> u32 {
+    stable_u32(&format!("{}:{}", item.header.input_name, item.header.url))
+}
+
 pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInput, lines: DynReader, mut visit: F) {
     let mut header: Option<String> = None;
     let mut group: Option<Arc<str>> = None;
@@ -528,7 +593,19 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
             header.upstream_user_agent = upstream_user_agent.take();
             header.source_ordinal = ord_counter;
             ord_counter += 1;
-            if header.group.is_empty() {
+            if header.xtream_cluster == XtreamCluster::Series {
+                let series_name = if header.group.is_empty() {
+                    get_title_group(&header.title)
+                } else {
+                    header.group.clone()
+                };
+                header.parent_code = series_name;
+                header.group = group_value
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(Internable::intern)
+                    .unwrap_or_else(|| "Series".intern());
+            } else if header.group.is_empty() {
                 if let Some(group_value) = group_value {
                     header.group = group_value;
                 } else {
@@ -540,10 +617,117 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
     }
 }
 
+fn build_series_info(items: Vec<PlaylistItem>) -> Option<PlaylistItem> {
+    let first = items.first()?;
+    let series_name = first.header.parent_code.clone();
+    let default_category = first.header.group.clone();
+    let series_id = series_numeric_id(first);
+    let source_ordinal = first.header.source_ordinal;
+    let logo = first.header.logo.clone();
+    let input_name = first.header.input_name.clone();
+
+    let mut episodes = Vec::with_capacity(items.len());
+    let mut season_counts: HashMap<u32, u32> = HashMap::new();
+
+    for item in items {
+        let Some((season, episode_num)) = parse_episode_code(&item.header.title) else {
+            continue;
+        };
+
+        *season_counts.entry(season).or_insert(0) += 1;
+        episodes.push(SeriesStreamDetailEpisodeProperties {
+            id: episode_numeric_id(&item),
+            episode_num,
+            season,
+            title: item.header.title.clone(),
+            container_extension: "".intern(),
+            custom_sid: None,
+            added: "".intern(),
+            direct_source: item.header.url.clone(),
+            tmdb: None,
+            release_date: "".intern(),
+            series_release_date: None,
+            plot: None,
+            crew: None,
+            duration_secs: 0,
+            duration: "".intern(),
+            movie_image: item.header.logo.clone(),
+            bitrate: 0,
+            rating: None,
+            video: None,
+            audio: None,
+        });
+    }
+
+    if episodes.is_empty() {
+        return None;
+    }
+
+    episodes.sort_by_key(|episode| (episode.season, episode.episode_num));
+
+    let mut seasons: Vec<SeriesStreamDetailSeasonProperties> = season_counts
+        .into_iter()
+        .map(|(season_number, episode_count)| SeriesStreamDetailSeasonProperties {
+            name: format!("Season {season_number}").intern(),
+            season_number,
+            episode_count,
+            overview: None,
+            air_date: None,
+            cover: Some(logo.clone()),
+            cover_tmdb: None,
+            cover_big: None,
+            duration: None,
+        })
+        .collect();
+    seasons.sort_by_key(|season| season.season_number);
+
+    let properties = SeriesStreamProperties {
+        name: series_name.clone(),
+        series_id,
+        cover: logo.clone(),
+        details: Some(SeriesStreamDetailProperties {
+            year: None,
+            seasons: Some(seasons),
+            episodes: Some(episodes),
+        }),
+        ..SeriesStreamProperties::default()
+    };
+
+    Some(PlaylistItem {
+        header: PlaylistItemHeader {
+            id: series_id.to_string().intern(),
+            name: series_name.clone(),
+            logo,
+            group: default_category,
+            title: series_name,
+            url: "".intern(),
+            item_type: PlaylistItemType::SeriesInfo,
+            xtream_cluster: XtreamCluster::Series,
+            additional_properties: Some(StreamProperties::Series(Box::new(properties))),
+            source_ordinal,
+            input_name,
+            ..PlaylistItemHeader::default()
+        },
+    })
+}
+
 pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> Vec<PlaylistGroup>
 {
     let mut group_map: IndexMap<CategoryKey, Vec<PlaylistItem>> = IndexMap::new();
+    let mut series_map: IndexMap<(Arc<str>, Arc<str>), Vec<PlaylistItem>> = IndexMap::new();
+
     consume_m3u(cfg, input, lines, |item| {
+        if item.header.xtream_cluster == XtreamCluster::Series {
+            let key = (
+                item.header.group.clone(),
+                shared::utils::deunicode_string(&item.header.parent_code)
+                    .to_lowercase()
+                    .intern(),
+            );
+            series_map.entry(key).or_default().push(item);
+            return;
+        }
+
         let key = {
             let header = &item.header;
             let normalized_group = shared::utils::deunicode_string(&header.group).to_lowercase().intern();
@@ -551,6 +735,18 @@ pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> V
         };
         group_map.entry(key).or_default().push(item);
     }).await;
+
+    for ((_category, _series_name), items) in series_map {
+        if let Some(series_info) = build_series_info(items) {
+            let normalized_group = shared::utils::deunicode_string(&series_info.header.group)
+                .to_lowercase()
+                .intern();
+            group_map
+                .entry((XtreamCluster::Series, normalized_group))
+                .or_default()
+                .push(series_info);
+        }
+    }
 
     let mut grp_id = 0;
     group_map.into_values().filter_map(|channels| {
@@ -571,10 +767,10 @@ mod test {
     use crate::model::{Config, ConfigInput};
     use crate::utils::request::DynReader;
     use shared::{
-        model::StreamProperties,
+        model::{PlaylistItemType, StreamProperties, XtreamCluster},
         utils::Internable,
     };
-    use crate::processing::parser::m3u::{classify_token, process_header, M3uToken};
+    use crate::processing::parser::m3u::{classify_token, parse_episode_code, parse_m3u, process_header, M3uToken};
     use tokio::io::AsyncWriteExt;
 
     fn make_reader(content: &str) -> DynReader {
@@ -621,6 +817,80 @@ mod test {
         assert!(matches!(classify_token("stream-id"), M3uToken::PossibleId));
         assert!(matches!(classify_token("id"), M3uToken::PossibleId));
         assert!(matches!(classify_token("foo"), M3uToken::Unknown));
+    }
+
+    #[test]
+    fn test_tvg_type_movie_without_extension_is_vod() {
+        let input = "movies".intern();
+        let video_suffixes = vec!["mp4".to_string(), "mkv".to_string()];
+        let url = "https://example.test/movie/user/pass/ea8c49de0be27dfa4f2ee47d8b10d4f7";
+        let line = r#"#EXTINF:0 tvg-type="movie" tvg-id="tt37619362" group-title="Movie VOD",Modern Movie (2025)"#;
+
+        let item = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(item.xtream_cluster, XtreamCluster::Video);
+        assert_eq!(item.item_type, PlaylistItemType::Video);
+    }
+
+    #[test]
+    fn test_tvg_type_series_without_extension_is_series() {
+        let input = "series".intern();
+        let video_suffixes = vec!["mp4".to_string(), "mkv".to_string()];
+        let url = "https://example.test/series/user/pass/1214b7c13c8e318d695a6f2a33ac580d";
+        let line = r#"#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="The Undeclared War",The Undeclared War S02E05"#;
+
+        let item = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(item.xtream_cluster, XtreamCluster::Series);
+        assert_eq!(item.item_type, PlaylistItemType::Series);
+    }
+
+    #[test]
+    fn test_explicit_series_beats_video_extension() {
+        let input = "series".intern();
+        let video_suffixes = vec!["mp4".to_string()];
+        let url = "https://example.test/series/user/pass/episode.mp4";
+        let line = r#"#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="The Undeclared War",The Undeclared War S02E05"#;
+
+        let item = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(item.xtream_cluster, XtreamCluster::Series);
+        assert_eq!(item.item_type, PlaylistItemType::Series);
+    }
+
+    #[test]
+    fn test_explicit_live_beats_video_extension() {
+        let input = "live".intern();
+        let video_suffixes = vec!["ts".to_string()];
+        let url = "https://example.test/live/user/pass/channel.ts";
+        let line = r#"#EXTINF:0 tvg-type="live" group-title="News",Channel"#;
+
+        let item = process_header(&input, &video_suffixes, line, url.to_string());
+        assert_eq!(item.xtream_cluster, XtreamCluster::Live);
+        assert_eq!(item.item_type, PlaylistItemType::Live);
+    }
+
+    #[test]
+    fn test_parse_episode_code() {
+        assert_eq!(parse_episode_code("Show S02E05 [1080p]"), Some((2, 5)));
+        assert_eq!(parse_episode_code("Show s8e2"), Some((8, 2)));
+        assert_eq!(parse_episode_code("Show without episode"), None);
+    }
+
+    #[tokio::test]
+    async fn test_series_keeps_name_separate_from_mappable_group() {
+        let content = r#"#EXTM3U
+#EXTINF:0 tvg-type="series" tvg-id="156988" tvg-logo="https://example.test/poster.jpg" group-title="The Undeclared War",The Undeclared War S02E05
+#EXTGRP:TV VOD
+https://example.test/series/user/pass/episodehash
+"#;
+
+        let groups = parse_m3u(&Config::default(), &test_input(), make_reader(content)).await;
+
+        assert_eq!(groups.len(), 1);
+        let series = &groups[0].channels[0];
+        assert_eq!(series.header.xtream_cluster, XtreamCluster::Series);
+        assert_eq!(series.header.item_type, PlaylistItemType::SeriesInfo);
+        assert_eq!(&*series.header.name, "The Undeclared War");
+        assert_eq!(&*series.header.group, "TV VOD"); // default; mapping.yml may replace @Group
+        assert_eq!(&*series.header.input_name, "input");
     }
 
     #[test]
