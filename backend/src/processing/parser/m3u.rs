@@ -891,6 +891,37 @@ https://example.test/series/user/pass/episodehash
         assert_eq!(&*series.header.name, "The Undeclared War");
         assert_eq!(&*series.header.group, "TV VOD"); // default; mapping.yml may replace @Group
         assert_eq!(&*series.header.input_name, "input");
+        assert!(series.header.additional_properties.as_ref().is_some_and(StreamProperties::has_details));
+    }
+
+    #[tokio::test]
+    async fn test_series_embeds_seasons_and_episodes_for_info_endpoint() {
+        let content = r#"#EXTM3U
+#EXTINF:0 tvg-type="series" tvg-id="156988" tvg-logo="https://example.test/poster.jpg" group-title="The Undeclared War",The Undeclared War S02E05
+#EXTGRP:TV VOD
+https://example.test/series/user/pass/episode-1
+#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="The Undeclared War",The Undeclared War S02E06
+#EXTGRP:TV VOD
+https://example.test/series/user/pass/episode-2
+#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="The Undeclared War",The Undeclared War S01E01
+#EXTGRP:TV VOD
+https://example.test/series/user/pass/episode-3
+"#;
+
+        let groups = parse_m3u(&Config::default(), &test_input(), make_reader(content)).await;
+
+        assert_eq!(groups.len(), 1);
+        let series = &groups[0].channels[0];
+        let Some(StreamProperties::Series(props)) = series.header.additional_properties.as_ref() else {
+            panic!("expected series properties");
+        };
+        let details = props.details.as_ref().expect("series details");
+        let episodes = details.episodes.as_ref().expect("episodes");
+        let seasons = details.seasons.as_ref().expect("seasons");
+        assert_eq!(episodes.len(), 3);
+        assert_eq!(seasons.len(), 2);
+        assert_eq!((episodes[0].season, episodes[0].episode_num), (1, 1));
+        assert_eq!(episodes[0].direct_source.as_ref(), "https://example.test/series/user/pass/episode-3");
     }
 
     #[test]

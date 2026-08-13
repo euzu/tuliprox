@@ -1251,8 +1251,9 @@ pub async fn xtream_get_stream_info_response(
 
     let input = app_state.app_config.get_input_by_name(&pli.input_name);
     let is_media_server = input.as_ref().is_some_and(|i| i.input_type.is_media_server());
-    // handle local items and media server
-    if pli.item_type.is_local() || is_media_server {
+    // handle local items, media server, and items with embedded details
+    // (e.g. M3U-synthesized SeriesInfo carrying seasons/episodes).
+    if pli.item_type.is_local() || is_media_server || pli.has_details() {
         let Some(xtream_output) = target.get_xtream_output() else {
             return empty_stream_info_response(cluster);
         };
