@@ -719,7 +719,9 @@ pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> V
     consume_m3u(cfg, input, lines, |item| {
         if item.header.xtream_cluster == XtreamCluster::Series {
             let key = (
-                item.header.group.clone(),
+                shared::utils::deunicode_string(&item.header.group)
+                    .to_lowercase()
+                    .intern(),
                 shared::utils::deunicode_string(&item.header.parent_code)
                     .to_lowercase()
                     .intern(),
@@ -824,7 +826,7 @@ mod test {
         let input = "movies".intern();
         let video_suffixes = vec!["mp4".to_string(), "mkv".to_string()];
         let url = "https://example.test/movie/user/pass/ea8c49de0be27dfa4f2ee47d8b10d4f7";
-        let line = r#"#EXTINF:0 tvg-type="movie" tvg-id="tt37619362" group-title="Movie VOD",Modern Movie (2025)"#;
+        let line = r#"#EXTINF:0 tvg-type="movie" tvg-id="tt37619362" group-title="Movie VOD",Example Movie Name (2025)"#;
 
         let item = process_header(&input, &video_suffixes, line, url.to_string());
         assert_eq!(item.xtream_cluster, XtreamCluster::Video);
@@ -836,7 +838,7 @@ mod test {
         let input = "series".intern();
         let video_suffixes = vec!["mp4".to_string(), "mkv".to_string()];
         let url = "https://example.test/series/user/pass/1214b7c13c8e318d695a6f2a33ac580d";
-        let line = r#"#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="The Undeclared War",The Undeclared War S02E05"#;
+        let line = r#"#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="Example Show Name",Example Show Name S02E05"#;
 
         let item = process_header(&input, &video_suffixes, line, url.to_string());
         assert_eq!(item.xtream_cluster, XtreamCluster::Series);
@@ -848,7 +850,7 @@ mod test {
         let input = "series".intern();
         let video_suffixes = vec!["mp4".to_string()];
         let url = "https://example.test/series/user/pass/episode.mp4";
-        let line = r#"#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="The Undeclared War",The Undeclared War S02E05"#;
+        let line = r#"#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="Example Show Name",Example Show Name S02E05"#;
 
         let item = process_header(&input, &video_suffixes, line, url.to_string());
         assert_eq!(item.xtream_cluster, XtreamCluster::Series);
@@ -877,7 +879,7 @@ mod test {
     #[tokio::test]
     async fn test_series_keeps_name_separate_from_mappable_group() {
         let content = r#"#EXTM3U
-#EXTINF:0 tvg-type="series" tvg-id="156988" tvg-logo="https://example.test/poster.jpg" group-title="The Undeclared War",The Undeclared War S02E05
+#EXTINF:0 tvg-type="series" tvg-id="156988" tvg-logo="https://example.test/poster.jpg" group-title="Example Show Name",Example Show Name S02E05
 #EXTGRP:TV VOD
 https://example.test/series/user/pass/episodehash
 "#;
@@ -888,7 +890,7 @@ https://example.test/series/user/pass/episodehash
         let series = &groups[0].channels[0];
         assert_eq!(series.header.xtream_cluster, XtreamCluster::Series);
         assert_eq!(series.header.item_type, PlaylistItemType::SeriesInfo);
-        assert_eq!(&*series.header.name, "The Undeclared War");
+        assert_eq!(&*series.header.name, "Example Show Name");
         assert_eq!(&*series.header.group, "TV VOD"); // default; mapping.yml may replace @Group
         assert_eq!(&*series.header.input_name, "input");
         assert!(series.header.additional_properties.as_ref().is_some_and(StreamProperties::has_details));
@@ -897,13 +899,13 @@ https://example.test/series/user/pass/episodehash
     #[tokio::test]
     async fn test_series_embeds_seasons_and_episodes_for_info_endpoint() {
         let content = r#"#EXTM3U
-#EXTINF:0 tvg-type="series" tvg-id="156988" tvg-logo="https://example.test/poster.jpg" group-title="The Undeclared War",The Undeclared War S02E05
+#EXTINF:0 tvg-type="series" tvg-id="156988" tvg-logo="https://example.test/poster.jpg" group-title="Example Show Name",Example Show Name S02E05
 #EXTGRP:TV VOD
 https://example.test/series/user/pass/episode-1
-#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="The Undeclared War",The Undeclared War S02E06
+#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="Example Show Name",Example Show Name S02E06
 #EXTGRP:TV VOD
 https://example.test/series/user/pass/episode-2
-#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="The Undeclared War",The Undeclared War S01E01
+#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="Example Show Name",Example Show Name S01E01
 #EXTGRP:TV VOD
 https://example.test/series/user/pass/episode-3
 "#;
@@ -922,6 +924,31 @@ https://example.test/series/user/pass/episode-3
         assert_eq!(seasons.len(), 2);
         assert_eq!((episodes[0].season, episodes[0].episode_num), (1, 1));
         assert_eq!(episodes[0].direct_source.as_ref(), "https://example.test/series/user/pass/episode-3");
+    }
+
+    #[tokio::test]
+    async fn test_series_groups_normalize_case_and_diacritics() {
+        let content = r#"#EXTM3U
+#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="Show",Show S02E05
+#EXTGRP:TV ÉPISODES
+https://example.test/series/user/pass/episode-1
+#EXTINF:0 tvg-type="series" tvg-id="156988" group-title="Show",Show S02E06
+#EXTGRP:tv episodes
+https://example.test/series/user/pass/episode-2
+"#;
+
+        let groups = parse_m3u(&Config::default(), &test_input(), make_reader(content)).await;
+
+        assert_eq!(groups.len(), 1);
+        let series = &groups[0].channels[0];
+        assert_eq!(series.header.xtream_cluster, XtreamCluster::Series);
+        assert_eq!(series.header.item_type, PlaylistItemType::SeriesInfo);
+        assert_eq!(&*series.header.name, "Show");
+        let Some(StreamProperties::Series(props)) = series.header.additional_properties.as_ref() else {
+            panic!("expected series properties");
+        };
+        let details = props.details.as_ref().expect("series details");
+        assert_eq!(details.episodes.as_ref().map(|e| e.len()), Some(2));
     }
 
     #[test]
