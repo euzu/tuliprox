@@ -1,6 +1,6 @@
 use crate::{
     app::components::{
-        use_metrics_history, Card, CollapsePanel, MetricsHistory, PlaylistProgressStatusCard, Sparkline,
+        use_metrics_history, Card, CollapsePanel, LogConsole, MetricsHistory, PlaylistProgressStatusCard, Sparkline,
         SparklineFormat, SparklineSeries, StatusCard, StatusContext, StreamsView,
     },
     i18n::use_translation,
@@ -49,17 +49,17 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
         connections: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.connections))]),
     });
 
+    let logs_expanded = use_state(|| false);
+    let on_logs_toggle = {
+        let logs_expanded = logs_expanded.clone();
+        Callback::from(move |expanded: bool| {
+            logs_expanded.set(expanded);
+        })
+    };
+
     let loading_label = translate.t("LABEL.LOADING");
     let (mem, cpu, net, disk, net_total) = status_ctx.system_info.as_ref().map_or_else(
-        || {
-            (
-                loading_label.clone(),
-                loading_label.clone(),
-                loading_label.clone(),
-                loading_label.clone(),
-                String::new(),
-            )
-        },
+        || (loading_label.clone(), loading_label.clone(), loading_label.clone(), loading_label.clone(), String::new()),
         |system| {
             let disk = if system.disk_total_bytes > 0 {
                 format!(
@@ -91,10 +91,8 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
             )
         },
     );
-    let uptime = status_ctx
-        .status
-        .as_ref()
-        .map_or_else(|| loading_label.clone(), |status| format_uptime(status.uptime_secs));
+    let uptime =
+        status_ctx.status.as_ref().map_or_else(|| loading_label.clone(), |status| format_uptime(status.uptime_secs));
 
     let render_system_stats = |cache| {
         html! {
@@ -145,6 +143,15 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                   <div class="tp__stats__body-group">
                      <StreamsView embedded={true} />
                   </div>
+                </div>
+            </CollapsePanel>
+            <CollapsePanel expanded={*logs_expanded} on_state_change={on_logs_toggle.clone()} title_content={Some(html! {
+                <div class="tp__stats__header">
+                 <h1>{ translate.t("LABEL.LOGS")}</h1>
+                </div>
+                })}>
+                <div class="tp__stats__body">
+                    <LogConsole active={*logs_expanded} />
                 </div>
             </CollapsePanel>
             </div>
@@ -209,14 +216,14 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
         let (stream_count, stream_footer) = status_ctx.status.as_ref().map_or_else(
             || (loading_label.clone(), String::new()),
             |status| {
-                let (live, video, series) =
-                    status.active_user_streams.iter().fold((0_usize, 0_usize, 0_usize), |(l, v, s), stream| {
-                        match stream.channel.cluster {
-                            XtreamCluster::Live => (l + 1, v, s),
-                            XtreamCluster::Video => (l, v + 1, s),
-                            XtreamCluster::Series => (l, v, s + 1),
-                        }
-                    });
+                let (live, video, series) = status.active_user_streams.iter().fold(
+                    (0_usize, 0_usize, 0_usize),
+                    |(l, v, s), stream| match stream.channel.cluster {
+                        XtreamCluster::Live => (l + 1, v, s),
+                        XtreamCluster::Video => (l, v + 1, s),
+                        XtreamCluster::Series => (l, v, s + 1),
+                    },
+                );
                 (
                     status.active_user_streams.len().to_string(),
                     format!(
@@ -250,6 +257,15 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                         footer={stream_footer} /></Card>
                     { render_active_provider_connections() }
                 </div>
+                <CollapsePanel expanded={*logs_expanded} on_state_change={on_logs_toggle.clone()} title_content={Some(html! {
+                    <div class="tp__stats__header">
+                     <h1>{ translate.t("LABEL.LOGS")}</h1>
+                    </div>
+                    })}>
+                    <div class="tp__stats__body">
+                        <LogConsole active={*logs_expanded} />
+                    </div>
+                </CollapsePanel>
             </div>
           </div>
         }

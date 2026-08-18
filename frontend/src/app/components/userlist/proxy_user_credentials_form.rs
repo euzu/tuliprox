@@ -8,8 +8,7 @@ use crate::{
         TargetUser,
     },
     config_field_child, config_field_custom, edit_field_bool, edit_field_date, edit_field_list_option,
-    edit_field_number, edit_field_number_i8, edit_field_number_u16, edit_field_text_option,
-    generate_form_reducer,
+    edit_field_number, edit_field_number_i8, edit_field_number_u16, edit_field_text_option, generate_form_reducer,
     hooks::{use_clipboard_copy, use_service_context},
     html_if,
     i18n::use_translation,
@@ -188,11 +187,8 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
     });
 
     let plan_options = use_memo((props.plans.clone(), form_state.data().plan.clone()), |(plans, user_plan)| {
-        let mut options = vec![DropDownOption {
-            id: String::new(),
-            label: html! { "—" },
-            selected: user_plan.is_none(),
-        }];
+        let mut options =
+            vec![DropDownOption { id: String::new(), label: html! { "—" }, selected: user_plan.is_none() }];
         options.extend(plans.iter().map(|p| DropDownOption {
             id: p.name.clone(),
             label: html! { p.name.clone() },

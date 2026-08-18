@@ -49,15 +49,15 @@ pub fn human_readable_byte_size(bytes: u64) -> String {
 pub fn parse_to_kbps(input: &str) -> Result<u64, String> {
     // Conversion factors to kbps as (numerator, denominator) to avoid integer truncation (e.g. KiB/s = 8.192 kbps)
     let units: &[(&str, u64, u64)] = &[
-        ("KB/s", 8, 1),          // Kilobytes per second to kbps
-        ("MB/s", 8000, 1),       // Megabytes per second to kbps
-        ("KiB/s", 8192, 1000),   // Kibibytes per second to kbps
-        ("MiB/s", 8 * 1024, 1),  // Mebibytes per second to kbps
-        ("kbps", 1, 1),          // Kilobits per second (already in kbps)
-        ("Kbps", 1, 1),          // Kilobits per second (already in kbps)
-        ("mbps", 1000, 1),       // Megabits per second to kbps
-        ("Mbps", 1000, 1),       // Megabits per second to kbps
-        ("Mibps", 1024, 1),      // Mebibits per second to kbps
+        ("KB/s", 8, 1),         // Kilobytes per second to kbps
+        ("MB/s", 8000, 1),      // Megabytes per second to kbps
+        ("KiB/s", 8192, 1000),  // Kibibytes per second to kbps
+        ("MiB/s", 8 * 1024, 1), // Mebibytes per second to kbps
+        ("kbps", 1, 1),         // Kilobits per second (already in kbps)
+        ("Kbps", 1, 1),         // Kilobits per second (already in kbps)
+        ("mbps", 1000, 1),      // Megabits per second to kbps
+        ("Mbps", 1000, 1),      // Megabits per second to kbps
+        ("Mibps", 1024, 1),     // Mebibits per second to kbps
     ];
 
     let speed_str = input.trim();

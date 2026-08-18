@@ -180,9 +180,7 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                             }
                             match services_ctx.config.save_sources(sources).await {
                                 Ok(()) => {
-                                    services_ctx
-                                        .toastr
-                                        .success(translator.t("MESSAGES.SAVE.SOURCES_CONFIG.SUCCESS"));
+                                    services_ctx.toastr.success(translator.t("MESSAGES.SAVE.SOURCES_CONFIG.SUCCESS"));
                                     let _ = services_ctx.config.get_server_config().await;
                                 }
                                 Err(err) => services_ctx.toastr.error(err.to_string()),

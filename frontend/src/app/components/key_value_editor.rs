@@ -1,5 +1,7 @@
-use crate::app::components::{chip::Chip, IconButton};
-use crate::i18n::use_translation;
+use crate::{
+    app::components::{chip::Chip, IconButton},
+    i18n::use_translation,
+};
 use std::{collections::HashMap, rc::Rc};
 use web_sys::HtmlInputElement;
 use yew::prelude::*;
@@ -30,8 +32,7 @@ pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
     let KeyValueEditorProps { label, entries, on_change, readonly, key_placeholder, value_placeholder } = props.clone();
     let translate = use_translation();
     // Empty placeholder props fall back to localized defaults
-    let key_placeholder =
-        if key_placeholder.is_empty() { translate.t("LABEL.ADD_KEY") } else { key_placeholder };
+    let key_placeholder = if key_placeholder.is_empty() { translate.t("LABEL.ADD_KEY") } else { key_placeholder };
     let value_placeholder =
         if value_placeholder.is_empty() { translate.t("LABEL.ADD_VALUE") } else { value_placeholder };
 

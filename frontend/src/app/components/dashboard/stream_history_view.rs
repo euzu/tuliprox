@@ -15,8 +15,7 @@ use shared::{
     defaults::default_page_size,
     model::{
         PagedResponseDto, QosSnapshotRecordDto, QosSnapshotWindowDto, SearchRequest, StreamHistoryEventType,
-        StreamHistoryPageRequestDto, StreamHistoryProviderSummaryDto, StreamHistoryRecordDto,
-        StreamHistorySearchField,
+        StreamHistoryPageRequestDto, StreamHistoryProviderSummaryDto, StreamHistoryRecordDto, StreamHistorySearchField,
     },
 };
 use std::rc::Rc;

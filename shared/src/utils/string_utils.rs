@@ -199,9 +199,7 @@ pub fn token_quality(token: &str) -> Option<u8> {
         (&["HD", "720P"], 2),
         (&["SD", "480P", "576P"], 1),
     ];
-    TIERS
-        .iter()
-        .find_map(|(tokens, rank)| tokens.iter().any(|t| token.eq_ignore_ascii_case(t)).then_some(*rank))
+    TIERS.iter().find_map(|(tokens, rank)| tokens.iter().any(|t| token.eq_ignore_ascii_case(t)).then_some(*rank))
 }
 
 pub fn quality_tokens(value: &str) -> impl Iterator<Item = &str> {
@@ -209,9 +207,7 @@ pub fn quality_tokens(value: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Best quality tier found in `value` (5=UHD/4K .. 1=SD); 0 when no known token is present.
-pub fn quality_rank(value: &str) -> u8 {
-    quality_tokens(value).filter_map(token_quality).max().unwrap_or(0)
-}
+pub fn quality_rank(value: &str) -> u8 { quality_tokens(value).filter_map(token_quality).max().unwrap_or(0) }
 
 // ------------------------------------------------------------
 // Generic string concatenation macro with optional capacity hint
@@ -245,8 +241,7 @@ mod test {
     use super::{clean_playlist_title, generate_random_string, natural_cmp, quality_rank};
     use crate as shared; // allow path-based macro call in tests
     use crate::utils::Capitalize;
-    use std::cmp::Ordering;
-    use std::collections::HashSet;
+    use std::{cmp::Ordering, collections::HashSet};
 
     #[test]
     fn test_natural_cmp_basics() {

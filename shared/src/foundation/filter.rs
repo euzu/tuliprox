@@ -469,10 +469,7 @@ fn get_parser_numeric_comparison(expr: Pair<Rule>) -> Result<Filter, TuliproxErr
     Ok(Filter::NumericComparison(field, op, value))
 }
 
-fn get_parser_set_comparison(
-    expr: Pair<Rule>,
-    templates: Option<&[PatternTemplate]>,
-) -> Result<Filter, TuliproxError> {
+fn get_parser_set_comparison(expr: Pair<Rule>, templates: Option<&[PatternTemplate]>) -> Result<Filter, TuliproxError> {
     let mut expr_inner = expr.into_inner();
     let field = get_parser_item_field(&expr_inner.next().unwrap())?;
     let values_pair = expr_inner.next().unwrap();
@@ -716,10 +713,7 @@ pub fn get_filter_detailed(
                 pest::error::LineColLocation::Pos((line, column))
                 | pest::error::LineColLocation::Span((line, column), _) => (line, column),
             };
-            Err((
-                TuliproxError::FilterParse(format!("{err}")),
-                Some(FilterParsePosition { line, column }),
-            ))
+            Err((TuliproxError::FilterParse(format!("{err}")), Some(FilterParsePosition { line, column })))
         }
     }
 }
@@ -962,9 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_numeric_round_trip() {
-        assert_filter_round_trip(r#"Chno >= 100 AND Chno < 200 OR NOT Chno = 7"#);
-    }
+    fn test_filter_numeric_round_trip() { assert_filter_round_trip(r#"Chno >= 100 AND Chno < 200 OR NOT Chno = 7"#); }
 
     #[test]
     fn test_filter_set_round_trip() {

@@ -3,8 +3,8 @@ use crate::{
         default_as_true, default_catchup_session_ttl_secs, default_grace_period_millis,
         default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_shared_burst_buffer_mb,
         default_shared_subscriber_idle_timeout_secs, default_stream_buffer_max_bytes_mb,
-        is_default_catchup_session_ttl_secs, is_default_grace_period_millis,
-        is_default_grace_period_timeout_secs, is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb,
+        is_default_catchup_session_ttl_secs, is_default_grace_period_millis, is_default_grace_period_timeout_secs,
+        is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb,
         is_default_shared_subscriber_idle_timeout_secs, is_default_stream_buffer_max_bytes_mb, is_false, is_true,
     },
     error::TuliproxError,
@@ -81,14 +81,15 @@ pub struct StreamBufferConfigDto {
     #[serde(default)]
     pub size: usize,
     /// Byte-level backpressure cap for the buffered provider stream, in MiB.
-    #[serde(default = "default_stream_buffer_max_bytes_mb", skip_serializing_if = "is_default_stream_buffer_max_bytes_mb")]
+    #[serde(
+        default = "default_stream_buffer_max_bytes_mb",
+        skip_serializing_if = "is_default_stream_buffer_max_bytes_mb"
+    )]
     pub max_bytes_mb: u64,
 }
 
 impl Default for StreamBufferConfigDto {
-    fn default() -> Self {
-        Self { enabled: false, size: 0, max_bytes_mb: default_stream_buffer_max_bytes_mb() }
-    }
+    fn default() -> Self { Self { enabled: false, size: 0, max_bytes_mb: default_stream_buffer_max_bytes_mb() } }
 }
 
 impl StreamBufferConfigDto {

@@ -68,9 +68,8 @@ impl ProxyUserCredentialsDto {
         }
         if let Some(filter) = &self.filter {
             // Templates are not available in api-proxy; fail fast on syntax errors.
-            crate::foundation::get_filter(filter, None).map_err(|err| {
-                TuliproxError::ProxyUser(format!("Invalid filter for user {}: {err}", self.username))
-            })?;
+            crate::foundation::get_filter(filter, None)
+                .map_err(|err| TuliproxError::ProxyUser(format!("Invalid filter for user {}: {err}", self.username)))?;
         }
         Ok(())
     }

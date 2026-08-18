@@ -822,8 +822,7 @@ pub fn EpgView() -> Html {
                 if let Some(onscroll) = onscroll_handle.borrow_mut().take() {
                     // Detach before dropping the closure so a live element cannot invoke a destroyed callback
                     if let Some(div) = cleanup_container_ref.cast::<HtmlElement>() {
-                        let _ = div
-                            .remove_event_listener_with_callback("scroll", onscroll.as_ref().unchecked_ref());
+                        let _ = div.remove_event_listener_with_callback("scroll", onscroll.as_ref().unchecked_ref());
                     }
                     drop(onscroll);
                 }

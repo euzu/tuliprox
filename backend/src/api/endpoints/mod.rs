@@ -6,6 +6,7 @@ pub(in crate::api) mod hdhomerun_api;
 pub(in crate::api) mod hls_api;
 mod hls_terminal_response;
 mod library_api;
+pub(in crate::api) mod log_ws_api;
 pub(in crate::api) mod m3u_api;
 pub(in crate::api) mod provider_resolve_api;
 mod rbac_api;

@@ -1,6 +1,6 @@
 use core::fmt;
-use std::str::FromStr;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -24,15 +24,11 @@ impl LogLevel {
         }
     }
 
-    pub fn matches(&self, filter: LogLevel) -> bool {
-        *self >= filter
-    }
+    pub fn matches(&self, filter: LogLevel) -> bool { *self >= filter }
 }
 
 impl fmt::Display for LogLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.as_str()) }
 }
 
 impl FromStr for LogLevel {
@@ -71,13 +67,13 @@ pub struct LogEntry {
 }
 
 impl LogEntry {
-    pub fn new(timestamp: impl Into<String>, level: LogLevel, target: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            timestamp: timestamp.into(),
-            level,
-            target: target.into(),
-            message: message.into(),
-        }
+    pub fn new(
+        timestamp: impl Into<String>,
+        level: LogLevel,
+        target: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self { timestamp: timestamp.into(), level, target: target.into(), message: message.into() }
     }
 }
 
@@ -103,9 +99,8 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(serde_json::from_str::<LogWsMessage>(&json).unwrap(), msg);
 
-        let history_msg = LogWsMessage::History(vec![
-            LogEntry::new("2026-08-17T21:30:00Z", LogLevel::Info, "server", "ready")
-        ]);
+        let history_msg =
+            LogWsMessage::History(vec![LogEntry::new("2026-08-17T21:30:00Z", LogLevel::Info, "server", "ready")]);
         let history_json = serde_json::to_string(&history_msg).unwrap();
         assert_eq!(serde_json::from_str::<LogWsMessage>(&history_json).unwrap(), history_msg);
     }
@@ -138,7 +133,8 @@ mod tests {
 
     #[test]
     fn test_log_entry_json_roundtrip() {
-        let entry = LogEntry::new("2026-08-17T21:30:00Z", LogLevel::Info, "backend::server", "Server started on port 8080");
+        let entry =
+            LogEntry::new("2026-08-17T21:30:00Z", LogLevel::Info, "backend::server", "Server started on port 8080");
         let json = serde_json::to_string(&entry).unwrap();
         let deserialized: LogEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(entry, deserialized);

@@ -23,9 +23,7 @@ pub struct UserPlanTrialDto {
 }
 
 impl UserPlanTrialDto {
-    pub fn duration_secs(&self) -> Option<u64> {
-        parse_duration_seconds(&self.duration, true).filter(|secs| *secs > 0)
-    }
+    pub fn duration_secs(&self) -> Option<u64> { parse_duration_seconds(&self.duration, true).filter(|secs| *secs > 0) }
 }
 
 /// Reusable capability tier referenced by users via `plan: <name>`.
@@ -259,20 +257,13 @@ mod tests {
         let deserialized: UserPlanDto = serde_json::from_str(&serialized).expect("should deserialize");
         assert_eq!(plan, deserialized);
 
-        let plan_redirect = UserPlanDto {
-            name: "redirect_plan".to_string(),
-            proxy: Some(ProxyType::Redirect),
-            ..Default::default()
-        };
+        let plan_redirect =
+            UserPlanDto { name: "redirect_plan".to_string(), proxy: Some(ProxyType::Redirect), ..Default::default() };
         let serialized_red = serde_json::to_string(&plan_redirect).expect("should serialize");
         let deserialized_red: UserPlanDto = serde_json::from_str(&serialized_red).expect("should deserialize");
         assert_eq!(plan_redirect, deserialized_red);
 
-        let plan_none = UserPlanDto {
-            name: "test_none".to_string(),
-            proxy: None,
-            ..Default::default()
-        };
+        let plan_none = UserPlanDto { name: "test_none".to_string(), proxy: None, ..Default::default() };
         let serialized_none = serde_json::to_string(&plan_none).expect("should serialize");
         assert!(!serialized_none.contains("\"proxy\""));
         let deserialized_none: UserPlanDto = serde_json::from_str(&serialized_none).expect("should deserialize");

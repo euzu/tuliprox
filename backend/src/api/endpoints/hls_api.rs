@@ -9447,8 +9447,8 @@ mod tests {
         assert!(manifest.is_none(), "non-provisioning custom video types have no static manifest body");
     }
 
-    #[test]
-    fn hls_initial_manifest_decision_wait_timeout_defaults_to_ninety_seconds() {
+    #[tokio::test]
+    async fn hls_initial_manifest_decision_wait_timeout_defaults_to_ninety_seconds() {
         let app_state = test_app_state();
         assert_eq!(super::hls_initial_manifest_decision_wait_timeout(&app_state), Duration::from_secs(90));
     }

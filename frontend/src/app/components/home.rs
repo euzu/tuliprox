@@ -1,10 +1,13 @@
 use crate::{
     app::{
         components::{
-            config::{ConfigView, PlansView}, loading_indicator::BusyIndicator, map_sources_to_playlist_rows, theme::Theme, AppIcon,
-            DashboardView, DownloadsView, EpgView, ErrorBoundary, HealthBanner, IconButton, LanguagePicker, NoAccess,
-            Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, RbacView,
-            Setup, Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView,
+            config::{ConfigView, PlansView},
+            loading_indicator::BusyIndicator,
+            map_sources_to_playlist_rows,
+            theme::Theme,
+            AppIcon, DashboardView, DownloadsView, EpgView, ErrorBoundary, HealthBanner, IconButton, LanguagePicker,
+            NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView,
+            RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView,
             UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},

@@ -1,8 +1,10 @@
 use crate::{
     app::components::{
-        input::Input, menu_item::MenuItem, popup_menu::PopupMenu, userlist::{ProxyTypeInput, ProxyTypeView},
-        AppIcon, Breadcrumbs, Card, CustomDialog, FieldWrapper, NoContent, Table,
-        TableDefinition, TextButton,
+        input::Input,
+        menu_item::MenuItem,
+        popup_menu::PopupMenu,
+        userlist::{ProxyTypeInput, ProxyTypeView},
+        AppIcon, Breadcrumbs, Card, CustomDialog, FieldWrapper, NoContent, Table, TableDefinition, TextButton,
     },
     hooks::use_service_context,
     i18n::use_translation,
@@ -32,7 +34,14 @@ enum PlanTableAction {
 }
 impl Display for PlanTableAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self { Self::Delete => "Delete", Self::Edit => "Edit" })
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Delete => "Delete",
+                Self::Edit => "Edit",
+            }
+        )
     }
 }
 impl FromStr for PlanTableAction {
@@ -67,9 +76,10 @@ fn build_default_plan(existing_plans: &[UserPlanDto]) -> UserPlanDto {
 }
 
 fn plan_name_exists(plans: &[UserPlanDto], plan_name: &str, ignore_index: Option<usize>) -> bool {
-    plans.iter().enumerate().any(|(idx, plan)| {
-        !ignore_index.is_some_and(|ignore_idx| idx == ignore_idx) && plan.name == plan_name
-    })
+    plans
+        .iter()
+        .enumerate()
+        .any(|(idx, plan)| !ignore_index.is_some_and(|ignore_idx| idx == ignore_idx) && plan.name == plan_name)
 }
 
 fn cluster_flags_label(flags: Option<ClusterFlags>) -> String {
@@ -314,10 +324,9 @@ pub fn PlansView() -> Html {
                 }
                 "NAME" => html! {&dto.name},
                 "CLUSTER" => html! {cluster_flags_label(dto.output_clusters)},
-                "PROXY" => dto
-                    .proxy
-                    .as_ref()
-                    .map_or_else(|| html! {}, |proxy| html! {<ProxyTypeView value={*proxy} />}),
+                "PROXY" => {
+                    dto.proxy.as_ref().map_or_else(|| html! {}, |proxy| html! {<ProxyTypeView value={*proxy} />})
+                }
                 "MAX_CONNECTIONS" => html! {dto.max_connections.to_string()},
                 "SOFT_CONNECTIONS" => html! {dto.soft_connections.to_string()},
                 "FILTER" => html! {dto.filter.clone().unwrap_or_default()},
