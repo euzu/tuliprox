@@ -70,6 +70,8 @@ pub(in crate::processing::processor) fn deduplicate_playlist(
     }
 
     let mut removed = 0;
+    // Only drop groups that deduplication emptied; groups that were already empty stay untouched.
+    let mut emptied_by_dedup = vec![false; playlist.len()];
     for (group_idx, group) in playlist.iter_mut().enumerate() {
         let cluster = group.xtream_cluster;
         let before = group.channels.len();
@@ -86,8 +88,14 @@ pub(in crate::processing::processor) fn deduplicate_playlist(
                 .is_none_or(|(_, winner_group, winner_channel)| *winner_group == group_idx && *winner_channel == idx)
         });
         removed += before - group.channels.len();
+        emptied_by_dedup[group_idx] = before > 0 && group.channels.is_empty();
     }
-    playlist.retain(|group| !group.channels.is_empty());
+    let mut group_idx = 0usize;
+    playlist.retain(|_| {
+        let keep = !emptied_by_dedup[group_idx];
+        group_idx += 1;
+        keep
+    });
     removed
 }
 
@@ -146,15 +154,21 @@ mod tests {
     #[test]
     fn dedup_ignores_empty_keys_and_drops_empty_groups() {
         let mut playlist = vec![
+            make_group("Empty", vec![]),
             make_group("A", vec![make_item("News HD")]),
-            make_group("B", vec![make_item("News FHD")]),
+            make_group("B", vec![make_item("News FHD"), make_item("")]),
         ];
         let config =
             DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::BestQuality, match_as_ascii: false };
         let removed = deduplicate_playlist(&config, &mut playlist);
         assert_eq!(removed, 1);
-        assert_eq!(playlist.len(), 1);
-        assert_eq!(playlist[0].title.as_ref(), "B");
+        // "A" was emptied by dedup and dropped, the already-empty group survives
+        assert_eq!(playlist.len(), 2);
+        assert_eq!(playlist[0].title.as_ref(), "Empty");
+        assert_eq!(playlist[1].title.as_ref(), "B");
+        // the empty-caption item has no dedup key and is retained
+        let titles: Vec<_> = playlist[1].channels.iter().map(|c| c.header.title.to_string()).collect();
+        assert_eq!(titles, vec!["News FHD", ""]);
     }
 
     #[test]

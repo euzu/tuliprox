@@ -498,15 +498,19 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                         let plan = selection_first_owned(selections).filter(|value| !value.is_empty());
                         // Trial plans: show the concrete trial expiry for new users right in the form.
                         if !*plan_is_update {
-                            if let Some(trial_secs) = plan
+                            let trial_secs = plan
                                 .as_ref()
                                 .and_then(|name| plan_list.iter().find(|p| &p.name == name))
                                 .and_then(|p| p.trial.as_ref())
-                                .and_then(shared::model::UserPlanTrialDto::duration_secs)
-                            {
+                                .and_then(shared::model::UserPlanTrialDto::duration_secs);
+                            if let Some(trial_secs) = trial_secs {
                                 let expires = Utc::now().timestamp().saturating_add(i64::try_from(trial_secs).unwrap_or(i64::MAX));
                                 instance_plan.dispatch(UserFormAction::ExpDate(Some(expires)));
                                 instance_plan.dispatch(UserFormAction::Status(Some(ProxyUserStatus::Trial)));
+                            } else if instance_plan.data().status == Some(ProxyUserStatus::Trial) {
+                                // Selected plan has no trial (or was cleared): drop the trial-derived fields
+                                instance_plan.dispatch(UserFormAction::ExpDate(None));
+                                instance_plan.dispatch(UserFormAction::Status(None));
                             }
                         }
                         instance_plan.dispatch(UserFormAction::Plan(plan));

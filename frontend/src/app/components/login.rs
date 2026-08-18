@@ -109,9 +109,7 @@ pub fn Login() -> Html {
                     <Input placeholder={translation.t("LABEL.PASSWORD")} input_ref={password_ref} name="password" hidden={true}  autocomplete={false} onkeydown={handle_key_down} icon="Lock"/>
                     <div class="tp__login-view__form-action">
                         <TextButton class="primary" name="login" disabled={authenticate.loading} title={ translation.t("LABEL.LOGIN")} onclick={handle_login}></TextButton>
-                        <span role="alert" aria-live="assertive" class={if *auth_success { "tp__hidden" }  else { "tp__error-text" }}>
-                            { if *auth_success { Html::default() } else { html!{ translation.t("MESSAGES.LOGIN.FAILED") } } }
-                        </span>
+                        <span role="alert" class={if *auth_success { "tp__hidden" }  else { "tp__error-text" }}>{ translation.t("MESSAGES.LOGIN.FAILED") }</span>
                     </div>
                 </div>
             </form>

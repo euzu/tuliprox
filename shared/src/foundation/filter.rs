@@ -183,6 +183,28 @@ fn starts_with_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
     haystack.len() >= needle.len() && haystack.as_bytes()[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())
 }
 
+fn string_operator_matches(actual: &str, op: StringOperator, value: &str) -> bool {
+    match op {
+        StringOperator::Eq => actual.eq_ignore_ascii_case(value),
+        StringOperator::NotEq => !actual.eq_ignore_ascii_case(value),
+        StringOperator::Contains => contains_ignore_ascii_case(actual, value),
+        StringOperator::StartsWith => starts_with_ignore_ascii_case(actual, value),
+    }
+}
+
+/// Caption matches against the title and falls back to the name, mirroring `get_caption`.
+fn string_caption_matches(provider: &ValueProvider<'_>, op: StringOperator, value: &str) -> bool {
+    let title = provider.get_filter_value(ItemField::Title).unwrap_or(Cow::Borrowed(""));
+    let name = provider.get_filter_value(ItemField::Name).unwrap_or(Cow::Borrowed(""));
+    match op {
+        // NotEq is the negation of Eq-on-either, not "either differs"
+        StringOperator::NotEq => !(title.eq_ignore_ascii_case(value) || name.eq_ignore_ascii_case(value)),
+        StringOperator::Eq | StringOperator::Contains | StringOperator::StartsWith => {
+            string_operator_matches(&title, op, value) || string_operator_matches(&name, op, value)
+        }
+    }
+}
+
 impl Filter {
     pub fn filter(&self, provider: &ValueProvider) -> bool {
         match self {
@@ -225,14 +247,14 @@ impl Filter {
             }
             Self::StringComparison(field, op, value) => {
                 // Missing values (e.g. absent epgid) are matched as empty strings.
-                let actual = provider.get_filter_value(*field).unwrap_or(Cow::Borrowed(""));
-                let is_match = match op {
-                    StringOperator::Eq => actual.eq_ignore_ascii_case(value),
-                    StringOperator::NotEq => !actual.eq_ignore_ascii_case(value),
-                    StringOperator::Contains => contains_ignore_ascii_case(&actual, value),
-                    StringOperator::StartsWith => starts_with_ignore_ascii_case(&actual, value),
+                let is_match = if *field == ItemField::Caption {
+                    string_caption_matches(provider, *op, value)
+                } else {
+                    let actual = provider.get_filter_value(*field).unwrap_or(Cow::Borrowed(""));
+                    string_operator_matches(&actual, *op, value)
                 };
                 if log_enabled!(Level::Trace) {
+                    let actual = provider.get_filter_value(*field).unwrap_or(Cow::Borrowed(""));
                     if is_match {
                         trace!("Match found: {field} {op} \"{value}\" => '{actual}'");
                     } else {
@@ -257,8 +279,14 @@ impl Filter {
                 }
             }
             Self::SetComparison(field, values) => {
-                let actual = provider.get_filter_value(*field).unwrap_or(Cow::Borrowed(""));
-                values.iter().any(|value| actual.eq_ignore_ascii_case(value))
+                if *field == ItemField::Caption {
+                    let title = provider.get_filter_value(ItemField::Title).unwrap_or(Cow::Borrowed(""));
+                    let name = provider.get_filter_value(ItemField::Name).unwrap_or(Cow::Borrowed(""));
+                    values.iter().any(|value| title.eq_ignore_ascii_case(value) || name.eq_ignore_ascii_case(value))
+                } else {
+                    let actual = provider.get_filter_value(*field).unwrap_or(Cow::Borrowed(""));
+                    values.iter().any(|value| actual.eq_ignore_ascii_case(value))
+                }
             }
             Self::Group(expr) => expr.filter(provider),
             Self::UnaryExpression(op, expr) => match op {
@@ -960,6 +988,32 @@ mod tests {
         assert!(filter.filter(&ValueProvider { pli: &matching, match_as_ascii: false }));
         let other = create_mock_pli("B", "Movies");
         assert!(!filter.filter(&ValueProvider { pli: &other, match_as_ascii: false }));
+    }
+
+    #[test]
+    fn test_filter_caption_string_ops_fall_back_to_name() {
+        // title and name differ; only the name matches
+        let mut pli = create_mock_pli("Channel HD", "Sports");
+        pli.header.title = "Some Title".into();
+        let provider = ValueProvider { pli: &pli, match_as_ascii: false };
+
+        let contains = get_filter(r#"Caption CONTAINS "hd""#, None).expect("filter parses");
+        assert!(contains.filter(&provider));
+
+        let starts = get_filter(r#"Caption STARTSWITH "channel""#, None).expect("filter parses");
+        assert!(starts.filter(&provider));
+
+        let eq = get_filter(r#"Caption = "channel hd""#, None).expect("filter parses");
+        assert!(eq.filter(&provider));
+        // NotEq is the negation of Eq-on-either
+        let not_eq = get_filter(r#"Caption != "channel hd""#, None).expect("filter parses");
+        assert!(!not_eq.filter(&provider));
+
+        let set = get_filter(r#"Caption IN ["Channel HD"]"#, None).expect("filter parses");
+        assert!(set.filter(&provider));
+
+        let no_match = get_filter(r#"Caption CONTAINS "missing""#, None).expect("filter parses");
+        assert!(!no_match.filter(&provider));
     }
 
     #[test]

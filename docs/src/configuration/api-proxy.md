@@ -132,7 +132,7 @@ in your `config.yml`. Without it, these fields are purely cosmetic!
 | `priority`              | Int (i8) |    No    | `0`        | Stream preemption priority. Priority range: `-128` to `127`, where `-128` has the highest priority. Negative numbers are explicitly allowed for top-tier access. (see [user priority](#user-priorities-priority) below)                                                                                                                                                                                                               |
 | `network_access`        | Block    |    No    | `None`     | Per-user network/country access restrictions. Uses OR logic — matching ANY `allowed_networks` (CIDR) OR ANY `allowed_countries` grants access. Requires GeoIP for country checks. Client IP from `X-Real-IP` / `X-Forwarded-For`. See [Network Access Restrictions](#network-access-restrictions) below.                                                                                                                              |
 | `plan`                  | String   |    No    | `None`     | Name of a [user plan](#3-user-plans-plans). Unset user values (`output_clusters`, `max_connections`, `soft_connections`) inherit from the plan; explicit user values always win. The plan's content `filter` is always applied.                                                                                                                                                                                                       |
-| `filter`                | String   |    No    | `None`     | Filter DSL expression restricting which content this user sees. AND-combined with the plan filter when both are set, so a user filter can only narrow a plan, never widen it.                                                                                                                                                                                                                                                          |
+| `filter`                | String   |    No    | `None`     | Filter DSL expression restricting which content this user sees. AND-combined with the plan filter when both are set, so a user filter can only narrow a plan, never widen it.                                                                                                                                                                                                                                                         |
 
 ---
 
@@ -618,25 +618,25 @@ user:
 
 ### Plan Parameters
 
-| Parameter          | Type   | Required | Default | Technical Impact & Background                                                                                                                                                 |
-|:-------------------|:-------|:--------:|:--------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `name`             | String |   Yes    |         | Unique plan identifier referenced by `user[].credentials[].plan`.                                                                                                             |
-| `output_clusters`  | List   |    No    | `None`  | Cluster tier (`live`, `vod`, `series`). Inherited by members that don't set their own `output_clusters`.                                                                      |
-| `max_connections`  | Int    |    No    | `0`     | Concurrent stream limit for members whose own `max_connections` is `0`/unset. Enforcement still requires `user_access_control: true`.                                         |
-| `soft_connections` | Int    |    No    | `0`     | Soft connection allowance inherited the same way.                                                                                                                             |
-| `filter`           | String |    No    | `None`  | Filter DSL expression restricting the content visible to plan members (e.g. group allow/deny lists, `Quality <= 3` caps). AND-combined with a member's own `filter` if both exist. |
+| Parameter          | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                                                             |
+|:-------------------|:-------|:--------:|:--------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `name`             | String |   Yes    |         | Unique plan identifier referenced by `user[].credentials[].plan`.                                                                                                                                                                                         |
+| `output_clusters`  | List   |    No    | `None`  | Cluster tier (`live`, `vod`, `series`). Inherited by members that don't set their own `output_clusters`.                                                                                                                                                  |
+| `max_connections`  | Int    |    No    | `0`     | Concurrent stream limit for members whose own `max_connections` is `0`/unset. Enforcement still requires `user_access_control: true`.                                                                                                                     |
+| `soft_connections` | Int    |    No    | `0`     | Soft connection allowance inherited the same way.                                                                                                                                                                                                         |
+| `filter`           | String |    No    | `None`  | Filter DSL expression restricting the content visible to plan members (e.g. group allow/deny lists, `Quality <= 3` caps). AND-combined with a member's own `filter` if both exist.                                                                        |
 | `trial.duration`   | String |    No    | `None`  | Trial window with unit (`24h`, `7d`). When a **new** user is created on this plan without an explicit `exp_date`, the expiry is set to now + duration and the status defaults to `Trial`. Enforcement of the expiry requires `user_access_control: true`. |
-| `comment`          | String |    No    | `None`  | Free-form description.                                                                                                                                                        |
+| `comment`          | String |    No    | `None`  | Free-form description.                                                                                                                                                                                                                                    |
 
 ### Resolution Rules
 
-* Explicit user value > plan value > global default. "Unset" means `output_clusters` omitted or `max_connections`/`soft_connections` at `0`.
-* Filters combine as `(plan filter) AND (user filter)` — a user filter can only narrow the plan.
-* Templates (`!NAME!`) are **not** available in api-proxy filters; write the expression inline.
-* Trial windows apply only at user creation (Web UI/API); existing users and YAML-defined users are not modified.
+- Explicit user value > plan value > global default. "Unset" means `output_clusters` omitted or `max_connections`/`soft_connections` at `0`.
+- Filters combine as `(plan filter) AND (user filter)` — a user filter can only narrow the plan.
+- Templates (`!NAME!`) are **not** available in api-proxy filters; write the expression inline.
+- Trial windows apply only at user creation (Web UI/API); existing users and YAML-defined users are not modified.
   After expiry the standard `exp_date` enforcement blocks the user; automatic downgrade to another plan is not supported.
-* Plan changes take effect on config reload for YAML users and on the next load for database users; running streams are not interrupted.
-* The content filter hides entries from playlists and stream lists, blocks direct stream access to filtered items,
+- Plan changes take effect on config reload for YAML users and on the next load for database users; running streams are not interrupted.
+- The content filter hides entries from playlists and stream lists, blocks direct stream access to filtered items,
   hides categories whose content is fully filtered out from the Xtream category actions, and removes hidden channels
   from the user's XMLTV output. The Web UI bouquet editor category list is not thinned.
 

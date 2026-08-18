@@ -9,6 +9,9 @@ pub struct PopupMenuProps {
     pub anchor_ref: Option<web_sys::Element>,
     #[prop_or_default]
     pub on_close: Callback<()>,
+    /// ARIA role of the option list, e.g. `listbox` for select-style popups.
+    #[prop_or_else(|| "menu".to_string())]
+    pub list_role: String,
     pub children: Children,
 }
 
@@ -164,7 +167,7 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
 
     let popup = html! {
         <div class={classes!("tp__popup-menu", (*style).clone())} ref={popup_ref}>
-            <ul role="menu">
+            <ul role={props.list_role.clone()}>
                 { for props.children.iter().map(|child| html! { <li role="none">{child.clone()}</li> }) }
             </ul>
         </div>

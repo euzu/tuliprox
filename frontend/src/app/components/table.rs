@@ -102,10 +102,6 @@ pub fn Table<T: PartialEq + Clone + 'static>(props: &TableProps<T>) -> Html {
                                  class={classes!(format!("tp__table__th--{}", col_index+1),
                                      if sortable { Some("tp__table__th--sortable") } else { None }
                                  )}
-                                 onclick={if sortable { Some(on_click_col) } else { None }}
-                                 onkeydown={if sortable { Some(on_key_col) } else { None }}
-                                 role={if sortable { Some("button") } else { None }}
-                                 tabindex={if sortable { Some("0") } else { None }}
                                  aria-sort={
                                      if let Some((c, order)) = &*sort_state {
                                          if *c == col_index {
@@ -118,10 +114,19 @@ pub fn Table<T: PartialEq + Clone + 'static>(props: &TableProps<T>) -> Html {
                                      } else { Some("none".to_string()) }
                                  }
                                >
-                                  <span class="tp__table-header">
-                                   {render_header_cell.emit(col_index)}
-                                   {icon_html}
-                                  </span>
+                                  // Sortable headers expose a real button so the <th> keeps its columnheader semantics
+                                  if sortable {
+                                      <button type="button" class="tp__table-header"
+                                          onclick={on_click_col} onkeydown={on_key_col}>
+                                       {render_header_cell.emit(col_index)}
+                                       {icon_html}
+                                      </button>
+                                  } else {
+                                      <span class="tp__table-header">
+                                       {render_header_cell.emit(col_index)}
+                                       {icon_html}
+                                      </span>
+                                  }
                                </th>
                             }
                         })

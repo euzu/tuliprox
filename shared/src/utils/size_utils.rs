@@ -115,6 +115,8 @@ mod tests {
         assert_eq!(parse_to_kbps("1KB/s").unwrap(), 8);
         assert_eq!(parse_to_kbps("1MB/s").unwrap(), 8000);
         assert_eq!(parse_to_kbps("1KiB/s").unwrap(), 8 * 1024 / 1000);
+        assert_eq!(parse_to_kbps("3KiB/s").unwrap(), 25); // 24.576 rounds up, truncation would give 24
+        assert_eq!(parse_to_kbps("8KiB/s").unwrap(), 66); // 65.536 rounds up, truncation would give 65
         assert_eq!(parse_to_kbps("1MiB/s").unwrap(), 8 * 1024);
         assert_eq!(parse_to_kbps("1kbps").unwrap(), 1);
         assert_eq!(parse_to_kbps("1mbps").unwrap(), 1000);

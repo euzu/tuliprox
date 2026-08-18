@@ -691,7 +691,7 @@ mod tests {
 
         dns.prepare().expect("dns prepare should succeed");
 
-        assert_eq!(dns.refresh_secs, 10);
+        assert_eq!(dns.refresh_secs, 1);
         assert_eq!(dns.schemes, Some(vec![DnsScheme::Http, DnsScheme::Https]));
         let overrides = dns.overrides.expect("overrides should exist");
         assert_eq!(overrides.len(), 1);

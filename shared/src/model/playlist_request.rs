@@ -133,7 +133,7 @@ fn filter_channels(
     mask: SearchFieldMask,
     matches: &dyn Fn(&str) -> bool,
 ) -> Option<Vec<Rc<UiPlaylistGroup>>> {
-    groups.as_ref().map(|gs| {
+    groups.map(|gs| {
         gs.iter()
             .filter_map(|group| {
                 if mask.group && matches(&group.title) {

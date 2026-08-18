@@ -75,7 +75,7 @@ use crate::{
             HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard, LiveHlsOriginEntry, OriginRefreshRequest,
             OriginSegmentKey, ProviderAllocation, ProviderConfig as RuntimeProviderConfig, ProviderHandle,
             ProxySessionId, RetryPolicy, SegmentCacheKey, SegmentCacheStatus, SegmentDemandFetchOutcome,
-            SegmentFetchContext, SegmentFetchPolicy, StreamMeterHandle, TransientObjectCacheKey,
+            SegmentFetchContext, SegmentFetchPolicy, StreamMeterHandle,
             TransientObjectUnavailableState,
             TransientResourceFile, TransientResourceRef, TransportStreamBuffer, UserSession,
             HlsSingleVariantMasterPlaylist, trigger_origin_refresh_sync,
@@ -9436,25 +9436,15 @@ mod tests {
     }
 
     #[test]
-    fn hls_custom_video_manifest_uses_twelve_endlist_segments_for_non_provisioning() {
+    fn hls_custom_video_manifest_body_is_none_for_non_provisioning() {
         let user = hls_custom_video_test_user();
         let manifest = build_hls_custom_video_manifest_body(
             "https://example.test/iptv/",
             &user,
             CustomVideoStreamType::UserConnectionsExhausted,
-            42_000,
-            None,
         );
 
-        assert!(manifest.contains("#EXT-X-TARGETDURATION:10"));
-        assert!(manifest.contains("#EXT-X-MEDIA-SEQUENCE:0"));
-        assert!(manifest.contains("#EXT-X-ENDLIST"));
-        assert!(manifest.contains("https://example.test/iptv/cvs/hls/viewer/secret/user_connections_exhausted.ts"));
-        assert_eq!(manifest.matches("#EXTINF:10.0,").count(), 12);
-        assert_eq!(
-            manifest.matches("https://example.test/iptv/cvs/hls/viewer/secret/user_connections_exhausted.ts").count(),
-            12
-        );
+        assert!(manifest.is_none(), "non-provisioning custom video types have no static manifest body");
     }
 
     #[test]

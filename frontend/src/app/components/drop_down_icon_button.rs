@@ -37,6 +37,14 @@ pub struct DropDownIconButtonProps {
     pub multi_select: bool,
     #[prop_or_default]
     pub button_ref: Option<NodeRef>,
+    #[prop_or_default]
+    pub aria_label: Option<String>,
+    #[prop_or_default]
+    pub aria_required: Option<bool>,
+    #[prop_or_default]
+    pub aria_invalid: Option<bool>,
+    #[prop_or_default]
+    pub aria_describedby: Option<String>,
 }
 
 #[component]
@@ -105,8 +113,15 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
 
     html! {
          <>
-         <IconButton button_ref={button_ref} class={props.class.clone()} name={props.name.clone()} icon={props.icon.clone()} onclick={handle_click} />
-         <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
+         <IconButton button_ref={button_ref} class={props.class.clone()} name={props.name.clone()} icon={props.icon.clone()} onclick={handle_click}
+            role="combobox"
+            aria_haspopup="listbox"
+            aria_expanded={Some(*popup_is_open)}
+            aria_label={props.aria_label.clone()}
+            aria_required={props.aria_required}
+            aria_invalid={props.aria_invalid}
+            aria_describedby={props.aria_describedby.clone()} />
+         <PopupMenu list_role="listbox" is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
             {
                 for props.options.iter().map(|o| {
                     let checkbox_id = o.id.clone();
@@ -116,7 +131,7 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
                         move |event| checkbox_handler.emit((id.clone(), event))
                     });
                     html! {
-                        <div class={classes!("tp__dropdown-icon-button__option", "tp__menu-item", if selections.current().contains(&o.id) {"checked"} else {"unchecked"})} onclick={option_click}>
+                        <div role="option" aria-selected={selections.current().contains(&o.id).to_string()} class={classes!("tp__dropdown-icon-button__option", "tp__menu-item", if selections.current().contains(&o.id) {"checked"} else {"unchecked"})} onclick={option_click}>
                             {
                                 html_if!(
                                     props.multi_select,

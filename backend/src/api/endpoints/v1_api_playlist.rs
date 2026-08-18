@@ -835,23 +835,57 @@ async fn playlist_filter_preview(
 
     let mut response = FilterPreviewResponse::default();
     if target.has_output(TargetType::Xtream) {
+        let mut any_cluster_read = false;
         for cluster in [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series] {
             if let Some(mut iterator) = iter_raw_xtream_target_playlist(&app_state.app_config, &target, cluster).await
             {
+                any_cluster_read = true;
                 while let Some(entry) = iterator.next().await {
-                    if let Ok(item) = entry {
-                        let pli = PlaylistItem::from(&item);
-                        response.observe(&pli, &filter, req.match_as_ascii, sample_limit);
+                    match entry {
+                        Ok(item) => {
+                            let pli = PlaylistItem::from(&item);
+                            response.observe(&pli, &filter, req.match_as_ascii, sample_limit);
+                        }
+                        Err(err) => {
+                            error!("Filter preview failed to read stored {cluster} playlist: {err}");
+                            return (
+                                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                                axum::Json(json!({"error": "Failed to read stored playlist"})),
+                            )
+                                .into_response();
+                        }
                     }
                 }
             }
         }
+        if !any_cluster_read {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(json!({"error": "Stored playlist is not available, update the playlist first"})),
+            )
+                .into_response();
+        }
     } else if target.has_output(TargetType::M3u) {
-        if let Some(mut iterator) = iter_raw_m3u_target_playlist(&app_state.app_config, &target, None).await {
-            while let Some(entry) = iterator.next().await {
-                if let Ok(item) = entry {
+        let Some(mut iterator) = iter_raw_m3u_target_playlist(&app_state.app_config, &target, None).await else {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(json!({"error": "Stored playlist is not available, update the playlist first"})),
+            )
+                .into_response();
+        };
+        while let Some(entry) = iterator.next().await {
+            match entry {
+                Ok(item) => {
                     let pli = PlaylistItem::from(&item);
                     response.observe(&pli, &filter, req.match_as_ascii, sample_limit);
+                }
+                Err(err) => {
+                    error!("Filter preview failed to read stored m3u playlist: {err}");
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(json!({"error": "Failed to read stored playlist"})),
+                    )
+                        .into_response();
                 }
             }
         }

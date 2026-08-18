@@ -39,7 +39,7 @@ impl ClusterFlags {
         let mut result = ClusterFlags::empty();
 
         for item in items {
-            match item.as_ref().trim() {
+            match item.as_ref().trim().to_lowercase().as_str() {
                 "live" => result.set(ClusterFlags::Live, true),
                 "vod" => result.set(ClusterFlags::Vod, true),
                 "series" => result.set(ClusterFlags::Series, true),

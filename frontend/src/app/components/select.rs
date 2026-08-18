@@ -26,6 +26,7 @@ pub struct SelectProps {
 #[component]
 pub fn Select(props: &SelectProps) -> Html {
     let button_ref = use_node_ref();
+    let error_id = props.error.as_ref().map(|_| format!("{}-select-error", props.name));
 
     let selected_options = use_state(Vec::new);
     {
@@ -54,9 +55,7 @@ pub fn Select(props: &SelectProps) -> Html {
             "tp__select",
             props.required.then_some("tp__input--required"),
             props.error.as_ref().map(|_| "tp__input--error"),
-            props.class.clone())}
-            aria-required={props.required.then(|| "true".to_string())}
-            aria-invalid={props.error.as_ref().map(|_| "true".to_string())}>
+            props.class.clone())}>
             <div class="tp__select-wrapper" onclick={handle_click_button}>
                 <div class="tp__select__selected">
                     {(*selected_options).clone()}
@@ -67,10 +66,14 @@ pub fn Select(props: &SelectProps) -> Html {
                      options={props.options.clone()}
                      name={props.name.clone()}
                      icon={props.icon.as_ref().map_or_else(|| "Popup".to_owned(), |i|i.to_string())}
+                     aria_label={props.name.clone()}
+                     aria_required={props.required.then_some(true)}
+                     aria_invalid={props.error.as_ref().map(|_| true)}
+                     aria_describedby={error_id.clone()}
                      on_select={props.on_select.clone()} />
             </div>
             { props.error.as_ref().map_or_else(Html::default, |error| html! {
-                <span class="tp__input-error" role="alert">{ error.clone() }</span>
+                <span id={error_id.clone()} class="tp__input-error" role="alert">{ error.clone() }</span>
             }) }
         </div>
     }

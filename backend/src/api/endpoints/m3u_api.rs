@@ -900,7 +900,9 @@ async fn m3u_api_resource(
         }
     };
 
-    if !user.allows_item_type(m3u_item.item_type) {
+    if !user.allows_item_type(m3u_item.item_type)
+        || !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&m3u_item)))
+    {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
 

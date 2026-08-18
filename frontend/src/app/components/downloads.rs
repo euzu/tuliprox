@@ -129,6 +129,7 @@ fn render_download_progress(download: &FileDownloadDto) -> Html {
     let bar = download.total_bytes.filter(|total| *total > 0).map(|total| {
         html! {
             <progress class="tp__downloads-table__progress-bar"
+                aria-label={text.clone()}
                 max={total.to_string()}
                 value={download.downloaded_bytes.to_string()} />
         }

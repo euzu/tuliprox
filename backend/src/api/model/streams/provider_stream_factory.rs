@@ -1480,6 +1480,34 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_stream_factory_options_propagate_buffer_max_bytes() {
+        let addr = "127.0.0.1:8080".parse().unwrap();
+        let stream_url = Url::parse("http://example.com/stream").unwrap();
+        let stream_options =
+            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, buffer_max_bytes: 4096, pipe_provider_stream: false };
+        let req_headers = HeaderMap::new();
+        let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
+            addr,
+            item_type: PlaylistItemType::Live,
+            share_stream: false,
+            stream_options: &stream_options,
+            stream_url: &stream_url,
+            req_headers: &req_headers,
+            input_headers: None,
+            session_headers: None,
+            disabled_headers: None,
+            default_user_agent: None,
+            username: None,
+            client_ip: None,
+            stream_channel: None,
+            connect_failure_stage: None,
+            content_representation: ProviderContentRepresentationMode::PreserveOrigin,
+        });
+        assert_eq!(options.get_buffer_max_bytes(), 4096);
+        assert_eq!(options.get_buffer_size(), 1024);
+    }
+
+    #[test]
     fn test_provider_stream_factory_options_range_logic() {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let stream_url = Url::parse("http://example.com/stream").unwrap();

@@ -9,6 +9,7 @@ mod info_doc_utils;
 mod ip_check;
 mod item_field;
 mod library_request;
+mod log;
 mod mapping;
 mod media_properties;
 mod messaging;
@@ -47,7 +48,7 @@ pub mod xtream_const;
 
 pub use self::{
     active_user_connection_change::*, auth::*, cluster_flags::*, config::*, download::*, epg::*, epg_request::*,
-    ip_check::*, item_field::*, library_request::*, mapping::*, media_properties::*, messaging::*, pagination::*,
+    ip_check::*, item_field::*, library_request::*, log::*, mapping::*, media_properties::*, messaging::*, pagination::*,
     playlist::*, playlist_categories::*, playlist_info_document::*, playlist_request::*, processing_order::*,
     progress::*, regex_cache::*, search_fields::*, search_request::*, short_epg::*, stalker::*, stalker_item::*, stats::*,
     status_check::*, stream_history::*, stream_history_record::*, stream_info::*, stream_meter::*,

@@ -1564,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_dns_prepare_normalizes_overrides_and_clamps_refresh() {
+    fn test_provider_dns_prepare_normalizes_overrides_and_preserves_low_refresh() {
         let mut dns = ProviderDnsDto {
             refresh_secs: 1,
             schemes: Some(vec![DnsScheme::Http, DnsScheme::Http, DnsScheme::Https]),
@@ -1580,7 +1580,8 @@ mod tests {
 
         dns.prepare().expect("dns prepare should succeed");
 
-        assert_eq!(dns.refresh_secs, 10);
+        // Explicit low values are honored (only warned about), not clamped.
+        assert_eq!(dns.refresh_secs, 1);
         assert_eq!(dns.schemes, Some(vec![DnsScheme::Http, DnsScheme::Https]));
         let overrides = dns.overrides.expect("overrides should exist");
         assert_eq!(overrides.len(), 1);

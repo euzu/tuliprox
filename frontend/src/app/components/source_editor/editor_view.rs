@@ -556,6 +556,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     let is_local_mode = props.on_sources_change.is_some();
     // Tracks unsaved editor changes for the beforeunload guard
     let is_dirty = use_state(|| false);
+    // Monotonic edit revision; a save only clears is_dirty when no edit happened while it was in flight
+    let edit_revision = use_mut_ref(|| 0u64);
     // Delete mode toggle
     let delete_mode = use_state(|| false);
     let cursor_grabbing = use_state(|| false);
@@ -620,7 +622,9 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let editor_state_ref = editor_state_ref.clone();
         let config_ctx = config_ctx.clone();
         let is_dirty = is_dirty.clone();
+        let edit_revision = edit_revision.clone();
         Callback::from(move |_| {
+            *edit_revision.borrow_mut() += 1;
             is_dirty.set(true);
             if let Some(on_sources_change) = on_sources_change.as_ref() {
                 let base_sources = config_ctx.config.as_ref().map(|c| c.sources.clone()).unwrap_or_default();
@@ -1135,6 +1139,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let services = services.clone();
         let translate = translate.clone();
         let is_dirty = is_dirty.clone();
+        let edit_revision = edit_revision.clone();
         Callback::from(move |_| {
             let base_sources = config_ctx.config.as_ref().map(|c| c.sources.clone()).unwrap_or_default();
             let editor_state = editor_state_ref.borrow();
@@ -1151,10 +1156,15 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             let services = services.clone();
             let translate = translate.clone();
             let is_dirty = is_dirty.clone();
+            let edit_revision = edit_revision.clone();
+            let saved_revision = *edit_revision.borrow();
             wasm_bindgen_futures::spawn_local(async move {
                 match services.config.save_sources(sources_config).await {
                     Ok(()) => {
-                        is_dirty.set(false);
+                        // Preserve the dirty flag if the editor changed while the save was in flight
+                        if *edit_revision.borrow() == saved_revision {
+                            is_dirty.set(false);
+                        }
                         services.toastr.success(translate.t("MESSAGES.SAVE.SOURCES_CONFIG.SUCCESS"));
                     }
                     Err(err) => services.toastr.error(err.to_string()),

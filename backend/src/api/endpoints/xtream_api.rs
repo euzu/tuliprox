@@ -33,7 +33,7 @@ use crate::{
         xtream::{self, create_vod_info_from_item},
     },
     model::{
-        xtream_mapping_option_from_target_options, Config, ConfigInput, ConfigInputFlags, ConfigTarget, InputSource,
+        xtream_mapping_option_from_target_options, ConfigInput, ConfigInputFlags, ConfigTarget, InputSource,
         ProxyUserCredentials,
     },
     repository::{
@@ -1019,7 +1019,9 @@ async fn xtream_player_api_resource(
         format!("Failed to read xtream item for stream id {req_virtual_id}")
     );
 
-    if !user.allows_item_type(pli.item_type) {
+    if !user.allows_item_type(pli.item_type)
+        || !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli)))
+    {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
 
@@ -1249,6 +1251,11 @@ pub async fn xtream_get_stream_info_response(
         return empty_stream_info_response(cluster);
     };
 
+    // Content filter: hidden items expose no metadata either
+    if !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli))) {
+        return empty_stream_info_response(cluster);
+    }
+
     let input = app_state.app_config.get_input_by_name(&pli.input_name);
     let is_media_server = input.as_ref().is_some_and(|i| i.input_type.is_media_server());
     // handle local items and media server
@@ -1345,6 +1352,10 @@ async fn xtream_get_short_epg(
         };
 
         if let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, app_state, target, None).await {
+            // Content filter: hidden items expose no EPG either
+            if !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli))) {
+                return axum::Json(json!(ShortEpgResultDto::default())).into_response();
+            }
             let config = &app_state.app_config.config.load();
             let has_archive = pli_supports_archive(app_state, &pli);
             if let (Some(epg_path), Some(channel_id)) = (

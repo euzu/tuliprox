@@ -20,6 +20,8 @@ pub enum ProxyUserPermissionDenyReason {
     Banned,
     ExpiredStatus,
     Inactive,
+    UnresolvedPlan,
+    InvalidFilter,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -129,6 +131,10 @@ pub struct ProxyUserCredentials {
     pub raw_proxy: Option<ProxyType>,
     /// Compiled content filter (plan AND user), applied at serve time.
     pub t_filter: Option<Arc<Filter>>,
+    /// True when `plan` references a plan that no longer exists; the user is denied.
+    pub t_has_unresolved_plan: bool,
+    /// True when the configured user filter failed to compile; the user is denied.
+    pub t_has_invalid_filter: bool,
 }
 
 macros::from_impl!(ProxyUserCredentials);
@@ -165,6 +171,8 @@ impl From<&ProxyUserCredentialsDto> for ProxyUserCredentials {
             raw_soft_connections: dto.soft_connections,
             raw_proxy: if dto.proxy == ProxyType::default() && dto.plan.is_some() { None } else { Some(dto.proxy) },
             t_filter: None,
+            t_has_unresolved_plan: false,
+            t_has_invalid_filter: false,
         }
     }
 }
@@ -202,8 +210,12 @@ impl ProxyUserCredentials {
     /// combined content filter. Idempotent; call after any load/conversion.
     pub fn resolve_plan(&mut self, plans: &HashMap<String, Arc<UserPlan>>) {
         let plan = self.plan.as_ref().and_then(|name| plans.get(name));
-        if self.plan.is_some() && plan.is_none() {
-            warn!("Unknown user plan {:?} for user {}", self.plan, self.username);
+        self.t_has_unresolved_plan = self.plan.is_some() && plan.is_none();
+        if self.t_has_unresolved_plan {
+            error!(
+                "Unknown user plan {:?} for user {}; access is denied until the plan exists or the reference is removed",
+                self.plan, self.username
+            );
         }
         self.output_clusters = self
             .raw_output_clusters
@@ -224,10 +236,15 @@ impl ProxyUserCredentials {
         };
 
         let plan_filter = plan.and_then(|p| p.t_filter.as_ref().map(Arc::clone));
+        self.t_has_invalid_filter = false;
         let user_filter = self.filter.as_ref().and_then(|raw| match get_filter(raw, None) {
             Ok(filter) => Some(Arc::new(filter)),
             Err(err) => {
-                error!("Ignoring invalid filter for user {}: {err}", self.username);
+                error!(
+                    "Invalid filter for user {}; access is denied until the filter is fixed or removed: {err}",
+                    self.username
+                );
+                self.t_has_invalid_filter = true;
                 None
             }
         });
@@ -274,6 +291,17 @@ impl ProxyUserCredentials {
     }
 
     pub fn permission_denied_reason(&self, app_state: &AppState) -> Option<ProxyUserPermissionDenyReason> {
+        // A plan reference that cannot be resolved must never fall back to
+        // default clusters, unlimited connections and no filter.
+        if self.t_has_unresolved_plan {
+            debug!("User access denied, unresolved plan {:?}: {}", self.plan, self.username);
+            return Some(ProxyUserPermissionDenyReason::UnresolvedPlan);
+        }
+        // A filter that fails to compile must deny instead of serving unfiltered content.
+        if self.t_has_invalid_filter {
+            debug!("User access denied, invalid filter: {}", self.username);
+            return Some(ProxyUserPermissionDenyReason::InvalidFilter);
+        }
         let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
         if config.user_access_control {
             if let Some(exp_date) = self.exp_date.as_ref() {

@@ -41,12 +41,20 @@ async fn fetch_combined_ips(
         Ok(response) => match response.text().await {
             Ok(body) => Some(body),
             Err(err) => {
-                log::warn!("IP check: failed to read response body from {url}: {err}");
+                log::warn!(
+                    "IP check: failed to read response body from {}: {}",
+                    sanitize_sensitive_info(url),
+                    sanitize_sensitive_info(&err.to_string())
+                );
                 None
             }
         },
         Err(err) => {
-            log::warn!("IP check: request to {url} failed: {err}");
+            log::warn!(
+                "IP check: request to {} failed: {}",
+                sanitize_sensitive_info(url),
+                sanitize_sensitive_info(&err.to_string())
+            );
             None
         }
     };

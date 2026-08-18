@@ -147,7 +147,7 @@ pub fn longest<'a>(a: &'a Arc<str>, b: &'a Arc<str>) -> &'a Arc<str> {
 }
 
 fn trim_leading_zeros(digits: &[u8]) -> &[u8] {
-    let start = digits.iter().position(|b| *b != b'0').unwrap_or(digits.len() - 1);
+    let start = digits.iter().position(|b| *b != b'0').unwrap_or(digits.len().saturating_sub(1));
     &digits[start..]
 }
 

@@ -513,6 +513,7 @@ mod tests {
                 max_concurrent_segment_fetches_global: 64,
                 origin_manifest_timeout_ms: 3_000,
                 origin_segment_timeout_ms: 10_000,
+                initial_manifest_wait_timeout_secs: 90,
                 session_idle_timeout: 300,
                 manifest_recovery_burst: HlsManifestRecoveryBurstConfig::default(),
                 segment_repair: HlsSegmentRepairConfig {

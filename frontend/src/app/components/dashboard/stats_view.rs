@@ -4,8 +4,9 @@ use crate::{
         SparklineFormat, SparklineSeries, StatusCard, StatusContext, StreamsView,
     },
     i18n::use_translation,
+    utils::format_uptime,
 };
-use shared::utils::human_readable_byte_size;
+use shared::{model::XtreamCluster, utils::human_readable_byte_size};
 use std::rc::Rc;
 use yew::prelude::*;
 
@@ -49,8 +50,16 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
     });
 
     let loading_label = translate.t("LABEL.LOADING");
-    let (mem, cpu, net, disk) = status_ctx.system_info.as_ref().map_or_else(
-        || (loading_label.clone(), loading_label.clone(), loading_label.clone(), loading_label.clone()),
+    let (mem, cpu, net, disk, net_total) = status_ctx.system_info.as_ref().map_or_else(
+        || {
+            (
+                loading_label.clone(),
+                loading_label.clone(),
+                loading_label.clone(),
+                loading_label.clone(),
+                String::new(),
+            )
+        },
         |system| {
             let disk = if system.disk_total_bytes > 0 {
                 format!(
@@ -74,9 +83,18 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                     human_readable_byte_size(system.net_tx_bytes_per_sec as u64),
                 ),
                 disk,
+                format!(
+                    "\u{2211} \u{2193} {} \u{2191} {}",
+                    human_readable_byte_size(system.net_rx_bytes_total),
+                    human_readable_byte_size(system.net_tx_bytes_total),
+                ),
             )
         },
     );
+    let uptime = status_ctx
+        .status
+        .as_ref()
+        .map_or_else(|| loading_label.clone(), |status| format_uptime(status.uptime_secs));
 
     let render_system_stats = |cache| {
         html! {
@@ -88,10 +106,12 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                    chart={Some(html! { <Sparkline class="tp__sparkline--memory" format={SparklineFormat::Percent}
                        series={sparkline_data.memory.clone()} /> })} /></Card>
                <Card class="tp__stats__system"><StatusCard icon="NetworkSpeed" title={translate.t("LABEL.NETWORK")} data={net.clone()}
+                   footer={net_total.clone()}
                    chart={Some(html! { <Sparkline class="tp__sparkline--network" format={SparklineFormat::BytesPerSec}
                        series={sparkline_data.network.clone()} /> })} /></Card>
                <Card class="tp__stats__system"><StatusCard icon="Cache" title={translate.t("LABEL.CACHE")} data={cache} /></Card>
                <Card class="tp__stats__system"><StatusCard icon="Storage" title={translate.t("LABEL.DISK")} data={disk.clone()} /></Card>
+               <Card class="tp__stats__system"><StatusCard icon="Clock" title={translate.t("LABEL.UPTIME")} data={uptime.clone()} /></Card>
             </div>
         }
     };
@@ -186,6 +206,29 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
             },
         );
 
+        let (stream_count, stream_footer) = status_ctx.status.as_ref().map_or_else(
+            || (loading_label.clone(), String::new()),
+            |status| {
+                let (live, video, series) =
+                    status.active_user_streams.iter().fold((0_usize, 0_usize, 0_usize), |(l, v, s), stream| {
+                        match stream.channel.cluster {
+                            XtreamCluster::Live => (l + 1, v, s),
+                            XtreamCluster::Video => (l, v + 1, s),
+                            XtreamCluster::Series => (l, v, s + 1),
+                        }
+                    });
+                (
+                    status.active_user_streams.len().to_string(),
+                    format!(
+                        "{} {live} \u{b7} {} {video} \u{b7} {} {series}",
+                        translate.t("LABEL.LIVE"),
+                        translate.t("LABEL.VOD"),
+                        translate.t("LABEL.SERIES"),
+                    ),
+                )
+            },
+        );
+
         html! {
           <div class="tp__stats">
             <div class="tp__stats__header">
@@ -203,6 +246,8 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                     <Card><StatusCard title={translate.t("LABEL.ACTIVE_USER_CONNECTIONS")} data={connections}
                         chart={Some(html! { <Sparkline class="tp__sparkline--connections" format={SparklineFormat::Count}
                             series={sparkline_data.connections.clone()} /> })} /></Card>
+                    <Card><StatusCard icon="PlayArrow" title={translate.t("LABEL.ACTIVE_STREAMS")} data={stream_count}
+                        footer={stream_footer} /></Card>
                     { render_active_provider_connections() }
                 </div>
             </div>

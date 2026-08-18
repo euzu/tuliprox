@@ -148,6 +148,7 @@ const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 
 #[tokio::main]
 async fn main() {
+    api::api_utils::init_uptime_clock();
     let args = Args::parse();
 
     db_viewer(&args.db_viewer_args());

@@ -54,9 +54,29 @@ impl std::fmt::Display for DnsResolvedStoreLoadError {
 pub async fn load_dns_resolved_store_from_path(path: &Path) -> Result<Option<DnsResolvedStore>, DnsResolvedStoreLoadError> {
     match fs::read_to_string(path).await {
         Ok(data) => serde_json::from_str(&data).map(Some).map_err(DnsResolvedStoreLoadError::Parse),
-        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) if err.kind() == ErrorKind::NotFound => recover_dns_resolved_store_from_tmp(path).await,
         Err(err) => Err(DnsResolvedStoreLoadError::Read(err)),
     }
+}
+
+/// A crashed Windows rename retry can leave only the `.json.tmp` copy behind;
+/// recover it so the previously valid DNS store is not lost.
+async fn recover_dns_resolved_store_from_tmp(path: &Path) -> Result<Option<DnsResolvedStore>, DnsResolvedStoreLoadError> {
+    let tmp_path = path.with_extension("json.tmp");
+    let data = match fs::read_to_string(&tmp_path).await {
+        Ok(data) => data,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(DnsResolvedStoreLoadError::Read(err)),
+    };
+    let store: DnsResolvedStore = serde_json::from_str(&data).map_err(DnsResolvedStoreLoadError::Parse)?;
+    match fs::rename(&tmp_path, path).await {
+        Ok(()) => info!("Recovered DNS resolved store from '{}'", tmp_path.display()),
+        Err(err) => warn!(
+            "Recovered DNS resolved store from '{}' but could not move it into place: {err}",
+            tmp_path.display()
+        ),
+    }
+    Ok(Some(store))
 }
 
 pub async fn persist_dns_resolved_store(path: &Path, store: &DnsResolvedStore) -> Result<(), String> {
@@ -80,33 +100,45 @@ pub async fn persist_dns_resolved_store(path: &Path, store: &DnsResolvedStore) -
         #[cfg(windows)]
         {
             // Windows cannot rename over an existing file; retry after removing the target
-            if fs::remove_file(path).await.is_ok() {
-                match fs::rename(&tmp_path, path).await {
-                    Ok(()) => {
-                        debug!(
-                            "Persisted DNS resolved store to '{}' (providers={})",
-                            path.display(),
-                            store.providers.len()
-                        );
-                        return Ok(());
-                    }
-                    Err(retry_err) => {
-                        // Target is already deleted; keep the temp file as the only surviving copy
-                        return Err(format!(
-                            "rename temp file '{}' -> '{}' failed after removing target: {retry_err}; temp file kept",
-                            tmp_path.display(),
-                            path.display()
-                        ));
-                    }
+            match fs::remove_file(path).await {
+                // NotFound: target vanished in the meantime, the retry can proceed
+                Ok(()) => {}
+                Err(remove_err) if remove_err.kind() == ErrorKind::NotFound => {}
+                Err(remove_err) => {
+                    // Keep the temp file: the target may be unusable, tmp is the fresh copy
+                    return Err(format!(
+                        "rename temp file '{}' -> '{}' failed: {err}; remove target failed: {remove_err}; temp file kept",
+                        tmp_path.display(),
+                        path.display()
+                    ));
                 }
             }
+            return match fs::rename(&tmp_path, path).await {
+                Ok(()) => {
+                    debug!(
+                        "Persisted DNS resolved store to '{}' (providers={})",
+                        path.display(),
+                        store.providers.len()
+                    );
+                    Ok(())
+                }
+                // Target is already deleted; keep the temp file as the only surviving copy
+                Err(retry_err) => Err(format!(
+                    "rename temp file '{}' -> '{}' failed after removing target: {retry_err}; temp file kept",
+                    tmp_path.display(),
+                    path.display()
+                )),
+            };
         }
-        let _ = fs::remove_file(&tmp_path).await;
-        return Err(format!(
-            "rename temp file '{}' -> '{}' failed: {err}",
-            tmp_path.display(),
-            path.display()
-        ));
+        #[cfg(not(windows))]
+        {
+            let _ = fs::remove_file(&tmp_path).await;
+            return Err(format!(
+                "rename temp file '{}' -> '{}' failed: {err}",
+                tmp_path.display(),
+                path.display()
+            ));
+        }
     }
 
     debug!(

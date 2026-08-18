@@ -482,7 +482,11 @@ pub fn ConfigView() -> Html {
         let can_save = (*edit_mode || setup_mode)
             && services_ctx.auth.has_any_permissions(Permission::ConfigWrite | Permission::SourceWrite);
         use_key_down(can_save, move |event: &web_sys::KeyboardEvent| {
-            if can_save && event.key().eq_ignore_ascii_case("s") && (event.ctrl_key() || event.meta_key()) {
+            if can_save
+                && !event.repeat()
+                && event.key().eq_ignore_ascii_case("s")
+                && (event.ctrl_key() || event.meta_key())
+            {
                 event.prevent_default();
                 handle_save_config.emit(String::new());
             }

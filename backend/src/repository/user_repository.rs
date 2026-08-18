@@ -105,6 +105,8 @@ impl StoredProxyUserCredentials {
             raw_soft_connections,
             raw_proxy: if stored.plan.is_some() && stored.proxy == ProxyType::default() { None } else { Some(stored.proxy) },
             t_filter: None,
+            t_has_unresolved_plan: false,
+            t_has_invalid_filter: false,
         }
     }
 }
@@ -548,6 +550,8 @@ mod tests {
             raw_soft_connections: 0,
             raw_proxy: Some(ProxyType::Reverse(None)),
             t_filter: None,
+            t_has_unresolved_plan: false,
+            t_has_invalid_filter: false,
         }
     }
 
@@ -563,8 +567,11 @@ mod tests {
                 Arc::new({
                     let mut c = make_test_credential("Test4", ProxyUserStatus::Expired);
                     c.output_clusters = ClusterFlags::Live | ClusterFlags::Vod;
+                    // keep raw values in sync: the serializer persists the raw fields
+                    c.raw_output_clusters = Some(ClusterFlags::Live | ClusterFlags::Vod);
                     c.priority = -10;
                     c.soft_connections = 2;
+                    c.raw_soft_connections = 2;
                     c.soft_priority = -3;
                     c.network_access = Some(crate::model::NetworkAccess {
                         allowed_countries: vec!["DE".to_string(), "AT".to_string()],
