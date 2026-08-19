@@ -1597,7 +1597,7 @@ async fn finalize_prepared_target(
 
         if let Some(dedup_config) = target.options.as_ref().and_then(|options| options.deduplicate.as_ref()) {
             let removed = crate::processing::processor::deduplicate::deduplicate_playlist(
-                dedup_config,
+                *dedup_config,
                 &mut flat_new_playlist,
             );
             if removed > 0 {

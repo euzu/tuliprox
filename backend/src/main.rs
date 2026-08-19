@@ -3,6 +3,7 @@
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::return_self_not_must_use)]
 #![allow(clippy::missing_errors_doc)]
+#![allow(clippy::large_futures)]
 
 // #[cfg(target_os = "linux")]
 // #[global_allocator]

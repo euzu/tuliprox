@@ -166,7 +166,7 @@ fn parse_refresh_failure_backoff_schedule(value: &str) -> Option<[u64; 3]> {
     }
 }
 
-/// Failure backoff schedule; overridable via TULIPROX_HLS_REFRESH_BACKOFF_MS ("first,second,later").
+/// Failure backoff schedule; overridable via `TULIPROX_HLS_REFRESH_BACKOFF_MS` ("first,second,later").
 fn refresh_failure_backoff_schedule() -> [u64; 3] {
     static SCHEDULE: std::sync::LazyLock<[u64; 3]> = std::sync::LazyLock::new(|| {
         let default = [FIRST_FAILURE_BACKOFF_MS, SECOND_FAILURE_BACKOFF_MS, LATER_FAILURE_BACKOFF_MS];

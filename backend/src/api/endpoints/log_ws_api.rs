@@ -46,6 +46,51 @@ fn check_token_auth(token: &str, secret_key: Option<&[u8]>) -> bool {
     }
 }
 
+async fn wait_for_socket_auth(socket: &mut WebSocket, secret_key: Option<&[u8]>) -> bool {
+    let auth_timeout = tokio::time::sleep(tokio::time::Duration::from_secs(10));
+    tokio::pin!(auth_timeout);
+
+    loop {
+        tokio::select! {
+            () = &mut auth_timeout => {
+                let _ = socket.send(Message::Close(Some(CloseFrame {
+                    code: WsCloseCode::Protocol.code(),
+                    reason: "Auth timeout".into(),
+                }))).await;
+                return false;
+            }
+            msg = socket.recv() => {
+                let Some(Ok(msg)) = msg else {
+                    return false;
+                };
+                match msg {
+                    Message::Text(text) => {
+                        if let Ok(LogWsMessage::Auth(token)) = serde_json::from_str::<LogWsMessage>(&text) {
+                            if check_token_auth(&token, secret_key) {
+                                let auth_ok = serde_json::to_string(&LogWsMessage::Authorized).unwrap_or_default();
+                                let _ = socket.send(Message::Text(auth_ok.into())).await;
+                                return true;
+                            }
+                            let auth_fail = serde_json::to_string(&LogWsMessage::Unauthorized).unwrap_or_default();
+                            let _ = socket.send(Message::Text(auth_fail.into())).await;
+                            let _ = socket.send(Message::Close(Some(CloseFrame {
+                                code: 1008, // Policy Violation
+                                reason: "Unauthorized".into(),
+                            }))).await;
+                            return false;
+                        }
+                    }
+                    Message::Ping(p) => {
+                        let _ = socket.send(Message::Pong(p)).await;
+                    }
+                    Message::Close(_) => return false,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 async fn handle_socket(
     mut socket: WebSocket,
     app_state: Arc<AppState>,
@@ -64,58 +109,15 @@ async fn handle_socket(
         }
     }
 
-    if !is_authorized {
-        // Wait for auth message with a 10-second timeout
-        let auth_timeout = tokio::time::sleep(tokio::time::Duration::from_secs(10));
-        tokio::pin!(auth_timeout);
-
-        loop {
-            tokio::select! {
-                () = &mut auth_timeout => {
-                    let _ = socket.send(Message::Close(Some(CloseFrame {
-                        code: WsCloseCode::Protocol.code(),
-                        reason: "Auth timeout".into(),
-                    }))).await;
-                    return;
-                }
-                msg = socket.recv() => {
-                    let Some(Ok(msg)) = msg else {
-                        return;
-                    };
-                    match msg {
-                        Message::Text(text) => {
-                            if let Ok(LogWsMessage::Auth(token)) = serde_json::from_str::<LogWsMessage>(&text) {
-                                if check_token_auth(&token, secret_key.as_deref()) {
-                                    let auth_ok = serde_json::to_string(&LogWsMessage::Authorized).unwrap_or_default();
-                                    let _ = socket.send(Message::Text(auth_ok.into())).await;
-                                    break;
-                                } else {
-                                    let auth_fail = serde_json::to_string(&LogWsMessage::Unauthorized).unwrap_or_default();
-                                    let _ = socket.send(Message::Text(auth_fail.into())).await;
-                                    let _ = socket.send(Message::Close(Some(CloseFrame {
-                                        code: 1008, // Policy Violation
-                                        reason: "Unauthorized".into(),
-                                    }))).await;
-                                    return;
-                                }
-                            }
-                        }
-                        Message::Ping(p) => {
-                            let _ = socket.send(Message::Pong(p)).await;
-                        }
-                        Message::Close(_) => return,
-                        _ => {}
-                    }
-                }
-            }
-        }
+    if !is_authorized && !wait_for_socket_auth(&mut socket, secret_key.as_deref()).await {
+        return;
     }
 
     // Send history
     let history = get_log_history();
     let filtered_history: Vec<_> = history
         .into_iter()
-        .filter(|e| min_level.map_or(true, |lvl| e.level.matches(lvl)))
+        .filter(|e| min_level.is_none_or(|lvl| e.level.matches(lvl)))
         .collect();
 
     if let Ok(history_json) = serde_json::to_string(&LogWsMessage::History(filtered_history)) {
@@ -131,7 +133,7 @@ async fn handle_socket(
             broadcast_res = rx.recv() => {
                 match broadcast_res {
                     Ok(entry) => {
-                        if min_level.map_or(true, |lvl| entry.level.matches(lvl)) {
+                        if min_level.is_none_or(|lvl| entry.level.matches(lvl)) {
                             if let Ok(entry_json) = serde_json::to_string(&LogWsMessage::Entry(entry)) {
                                 if socket.send(Message::Text(entry_json.into())).await.is_err() {
                                     break;
@@ -153,13 +155,8 @@ async fn handle_socket(
                 };
                 match msg {
                     Ok(Message::Text(text)) => {
-                        if let Ok(ws_msg) = serde_json::from_str::<LogWsMessage>(&text) {
-                            match ws_msg {
-                                LogWsMessage::Filter { min_level: new_level } => {
-                                    min_level = new_level;
-                                }
-                                _ => {}
-                            }
+                        if let Ok(LogWsMessage::Filter { min_level: new_level }) = serde_json::from_str::<LogWsMessage>(&text) {
+                            min_level = new_level;
                         }
                     }
                     Ok(Message::Ping(payload)) => {
@@ -167,8 +164,7 @@ async fn handle_socket(
                             break;
                         }
                     }
-                    Ok(Message::Close(_)) => break,
-                    Err(_) => break,
+                    Ok(Message::Close(_)) | Err(_) => break,
                     _ => {}
                 }
             }

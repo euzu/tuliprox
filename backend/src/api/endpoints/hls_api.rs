@@ -1637,7 +1637,7 @@ async fn fetch_transient_origin_response_with_provider_io(
     let prepare_attempt = hls_transient_origin_prepare_closure(
         request.app_state,
         request.session,
-        &request.access_context,
+        request.access_context,
         request.fingerprint,
         request.headers,
         &runtime_prepare_error,

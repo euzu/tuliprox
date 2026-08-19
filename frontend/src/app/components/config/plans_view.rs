@@ -79,7 +79,7 @@ fn plan_name_exists(plans: &[UserPlanDto], plan_name: &str, ignore_index: Option
     plans
         .iter()
         .enumerate()
-        .any(|(idx, plan)| !ignore_index.is_some_and(|ignore_idx| idx == ignore_idx) && plan.name == plan_name)
+        .any(|(idx, plan)| ignore_index.is_none_or(|ignore_idx| idx != ignore_idx) && plan.name == plan_name)
 }
 
 fn cluster_flags_label(flags: Option<ClusterFlags>) -> String {

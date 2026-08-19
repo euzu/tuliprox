@@ -21,11 +21,11 @@ fn normalized_dedup_key(value: &str, match_as_ascii: bool) -> String {
     key
 }
 
-fn match_value(config: &DeduplicateConfig, item: &PlaylistItem) -> String {
+fn match_value(config: DeduplicateConfig, item: &PlaylistItem) -> String {
     normalized_dedup_key(raw_match_value(config, item), config.match_as_ascii)
 }
 
-fn raw_match_value<'a>(config: &DeduplicateConfig, item: &'a PlaylistItem) -> &'a str {
+fn raw_match_value(config: DeduplicateConfig, item: &PlaylistItem) -> &str {
     let header = &item.header;
     match config.match_by {
         DeduplicateMatchBy::Caption => {
@@ -44,7 +44,7 @@ fn raw_match_value<'a>(config: &DeduplicateConfig, item: &'a PlaylistItem) -> &'
 /// Returns the number of removed channels. Empty match keys are never
 /// deduplicated; ties keep the first occurrence in playlist order.
 pub(in crate::processing::processor) fn deduplicate_playlist(
-    config: &DeduplicateConfig,
+    config: DeduplicateConfig,
     playlist: &mut Vec<PlaylistGroup>,
 ) -> usize {
     // winner per key: (quality rank, group index, channel index)
@@ -135,7 +135,7 @@ mod tests {
         )];
         let config =
             DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::BestQuality, match_as_ascii: false };
-        let removed = deduplicate_playlist(&config, &mut playlist);
+        let removed = deduplicate_playlist(config, &mut playlist);
         assert_eq!(removed, 2);
         let titles: Vec<_> = playlist[0].channels.iter().map(|c| c.header.title.to_string()).collect();
         assert_eq!(titles, vec!["News [FHD]", "Sports HD"]);
@@ -146,7 +146,7 @@ mod tests {
         let mut playlist =
             vec![make_group("G", vec![make_item("News HD"), make_item("News [FHD]")])];
         let config = DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::First, match_as_ascii: false };
-        let removed = deduplicate_playlist(&config, &mut playlist);
+        let removed = deduplicate_playlist(config, &mut playlist);
         assert_eq!(removed, 1);
         assert_eq!(playlist[0].channels[0].header.title.as_ref(), "News HD");
     }
@@ -160,7 +160,7 @@ mod tests {
         ];
         let config =
             DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::BestQuality, match_as_ascii: false };
-        let removed = deduplicate_playlist(&config, &mut playlist);
+        let removed = deduplicate_playlist(config, &mut playlist);
         assert_eq!(removed, 1);
         // "A" was emptied by dedup and dropped, the already-empty group survives
         assert_eq!(playlist.len(), 2);
@@ -177,7 +177,7 @@ mod tests {
             vec![make_group("G", vec![make_item("Café HD"), make_item("Cafe FHD")])];
         let config =
             DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::BestQuality, match_as_ascii: true };
-        let removed = deduplicate_playlist(&config, &mut playlist);
+        let removed = deduplicate_playlist(config, &mut playlist);
         assert_eq!(removed, 1);
         assert_eq!(playlist[0].channels[0].header.title.as_ref(), "Cafe FHD");
 
@@ -186,6 +186,6 @@ mod tests {
             vec![make_group("G", vec![make_item("Café HD"), make_item("Cafe FHD")])];
         let config =
             DeduplicateConfig { match_by: DeduplicateMatchBy::Caption, keep: DeduplicateKeep::BestQuality, match_as_ascii: false };
-        assert_eq!(deduplicate_playlist(&config, &mut playlist), 0);
+        assert_eq!(deduplicate_playlist(config, &mut playlist), 0);
     }
 }

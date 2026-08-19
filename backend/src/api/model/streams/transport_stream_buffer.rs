@@ -43,7 +43,7 @@ const SYNC_BYTE: u8 = 0x47;
 const PACKET_COUNT: usize = 7; // Reduced from 250 to 7 (1316 bytes) to prevent latency/timeout on low-bitrate streams
 const MAX_PACKET_COUNT: usize = 250;
 
-/// Packets per emitted chunk; overridable via TULIPROX_TS_CHUNK_PACKETS (1-250).
+/// Packets per emitted chunk; overridable via `TULIPROX_TS_CHUNK_PACKETS` (1-250).
 /// Larger chunks raise throughput, smaller chunks lower latency on low-bitrate streams.
 fn ts_chunk_packet_count() -> usize {
     static PACKET_COUNT_OVERRIDE: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {

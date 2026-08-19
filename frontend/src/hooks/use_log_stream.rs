@@ -107,7 +107,10 @@ pub fn use_log_stream(options: UseLogStreamOptions) -> UseLogStreamHandle {
 
             let is_alive = Rc::new(Cell::new(true));
 
-            let connect_fn: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+            type ConnectFn = Rc<dyn Fn()>;
+            type ConnectFnCell = Rc<RefCell<Option<ConnectFn>>>;
+
+            let connect_fn: ConnectFnCell = Rc::new(RefCell::new(None));
             let connect_fn_clone = connect_fn.clone();
 
             let do_connect = {

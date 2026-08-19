@@ -2204,7 +2204,13 @@ pub(super) async fn sha256_file(path: &Path) -> io::Result<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    Ok(hex)
 }
 
 pub(super) fn ffmpeg_identity_version() -> String { "system".to_string() }

@@ -97,6 +97,7 @@ impl From<&NetworkAccess> for NetworkAccessDto {
 }
 
 #[derive(Debug, Clone, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ProxyUserCredentials {
     pub username: String,
     pub password: String,

@@ -806,12 +806,11 @@ impl Drop for HlsTransientOriginIoGuard {
         // while the spawned cleanup is still pending
         let pre_finished = session.try_write().map(|mut guard| guard.finish_origin_work(started_generation)).ok();
         tokio::spawn(async move {
-            let generation_valid = match pre_finished {
-                Some(valid) => valid,
-                None => {
-                    let mut session = session.write().await;
-                    session.finish_origin_work(started_generation)
-                }
+            let generation_valid = if let Some(valid) = pre_finished {
+                valid
+            } else {
+                let mut session = session.write().await;
+                session.finish_origin_work(started_generation)
             };
             let refresh_reservation = if generation_valid {
                 session.read().await.should_refresh_origin_reservation(

@@ -479,6 +479,7 @@ async fn preserve_csv_metadata(file_path: &Path, tmp_path: &Path) -> Result<(), 
     copy_csv_acl(file_path, tmp_path).await
 }
 
+#[allow(clippy::unused_async)]
 async fn copy_csv_acl(source: &Path, target: &Path) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
