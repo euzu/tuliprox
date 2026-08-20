@@ -1,16 +1,14 @@
-use crate::utils::LRUResourceCache;
 use crate::{
     api::{
         endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
-        model::active_user_manager::ConnectionAdmission,
-        model::provider_dns_manager::exec_provider_dns,
         model::{
-            metadata_update_manager::MetadataUpdateManager,
-            qos_aggregation_manager::exec_qos_aggregation, recording_rule_scheduler::spawn_recording_rule_scheduler,
-            ActiveProviderManager, ActiveUserManager,
+            active_user_manager::ConnectionAdmission, metadata_update_manager::MetadataUpdateManager,
+            provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation,
+            recording_rule_scheduler::spawn_recording_rule_scheduler, ActiveProviderManager, ActiveUserManager,
             ConnectionManager, DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, PlaylistStorage,
             PlaylistStorageState, SharedStreamManager, UpdateGuard,
         },
+        tasks::{exec_config_watch, exec_scheduler},
     },
     model::{
         AppConfig, Config, ConfigProvider, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig,
@@ -20,14 +18,16 @@ use crate::{
     utils::{
         reload_logger,
         request::{create_client, create_client_with_redirect, PublicIpResolver},
-        GeoIp,
+        GeoIp, LRUResourceCache,
     },
 };
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, info};
 use reqwest::Client;
 use shared::{
-    create_bitset, error::TuliproxError, model::{UserConnectionPermission, VideoDownloadConfigDto},
+    create_bitset,
+    error::TuliproxError,
+    model::{UserConnectionPermission, VideoDownloadConfigDto, WebAuthConfigDto},
     utils::small_vecs_equal_unordered,
 };
 use std::{
@@ -36,12 +36,12 @@ use std::{
     sync::{atomic::AtomicI8, Arc},
     time::Duration,
 };
-use tokio::sync::mpsc;
-use tokio::sync::RwLock;
-use tokio::task;
+use tokio::{
+    sync::{mpsc, RwLock},
+    task,
+};
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use crate::api::tasks::{exec_config_watch, exec_scheduler};
 
 macro_rules! cancel_service {
     ($field: ident, $flag:expr, $changes:expr, $cancel_tokens:expr) => {
@@ -76,7 +76,18 @@ struct TargetChanges {
     target: Arc<ConfigTarget>,
 }
 
-create_bitset!(u8, UpdateChangesFlags, Scheduler, Hdhomerun, FileWatch, Geoip, ProviderDns, Metadata, QosAggregation, Downloads);
+create_bitset!(
+    u8,
+    UpdateChangesFlags,
+    Scheduler,
+    Hdhomerun,
+    FileWatch,
+    Geoip,
+    ProviderDns,
+    Metadata,
+    QosAggregation,
+    Downloads
+);
 
 pub(in crate::api) struct UpdateChanges {
     flags: UpdateChangesFlagsSet,
@@ -224,13 +235,8 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     }
     if changes.flags.contains(UpdateChangesFlags::QosAggregation) {
         exec_qos_aggregation(app_state, &app_state.cancel_tokens.load().qos_aggregation);
-        let history_cfg = app_state
-            .app_config
-            .config
-            .load()
-            .reverse_proxy
-            .as_ref()
-            .and_then(|rp| rp.stream_history.clone());
+        let history_cfg =
+            app_state.app_config.config.load().reverse_proxy.as_ref().and_then(|rp| rp.stream_history.clone());
         let connection_manager = Arc::clone(&app_state.connection_manager);
         tokio::spawn(async move {
             connection_manager.reload_history_writer(history_cfg.as_ref()).await;
@@ -311,9 +317,7 @@ pub fn create_public_http_client_no_redirect(app_config: &AppConfig) -> Result<C
     if config.connect_timeout_secs > 0 {
         builder = builder.connect_timeout(Duration::from_secs(u64::from(config.connect_timeout_secs)));
     }
-    builder
-        .build()
-        .map_err(|err| TuliproxError::Config(format!("Failed to create public-only HTTP client: {err}")))
+    builder.build().map_err(|err| TuliproxError::Config(format!("Failed to create public-only HTTP client: {err}")))
 }
 
 fn build_http_client_with_fallback(
@@ -478,13 +482,8 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
     let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
     let loaded_config = app_config.config.load();
     let active_users = Arc::new(ActiveUserManager::new(&loaded_config, &geoip, &event_manager));
-    let connection_manager = Arc::new(ConnectionManager::new(
-        &active_users,
-        &active_provider,
-        &shared_stream_manager,
-        &event_manager,
-        None,
-    ));
+    let connection_manager =
+        Arc::new(ConnectionManager::new(&active_users, &active_provider, &shared_stream_manager, &event_manager, None));
     let tokens = CancelTokens::default();
     let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
     let (manual_update_sender, _) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
@@ -520,7 +519,15 @@ pub(crate) fn create_test_app_state(config: Config) -> Arc<AppState> {
 
 impl AppState {
     pub(in crate::api::model) async fn set_config(&self, config: Config) -> Result<UpdateChanges, TuliproxError> {
-        let old_storage_dir = self.app_config.config.load().storage_dir.clone();
+        let current_config = self.app_config.config.load();
+        let current_web_auth =
+            current_config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).map(WebAuthConfigDto::from);
+        let new_web_auth = config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).map(WebAuthConfigDto::from);
+        if current_web_auth != new_web_auth {
+            return Err(TuliproxError::ConfigWebUi("web auth changes require a server restart".to_string()));
+        }
+        let old_storage_dir = current_config.storage_dir.clone();
+        drop(current_config);
         let changes = self.detect_changes_for_config(&config);
         let config_log_level = config.log.as_ref().and_then(|log| log.log_level.clone());
         config.update_runtime();
@@ -681,7 +688,10 @@ impl AppState {
         );
 
         let mut changes = UpdateChanges { flags: UpdateChangesFlagsSet::new(), targets: None };
-        changes.set_flag_if(changed_schedules || changed_library_enabled || geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Scheduler);
+        changes.set_flag_if(
+            changed_schedules || changed_library_enabled || geoip_enabled != geoip_enabled_old,
+            UpdateChangesFlags::Scheduler,
+        );
         changes.set_flag_if(changed_hdhomerun, UpdateChangesFlags::Hdhomerun);
         changes.set_flag_if(changed_file_watch, UpdateChangesFlags::FileWatch);
         changes.set_flag_if(geoip_enabled != geoip_enabled_old, UpdateChangesFlags::Geoip);
@@ -771,9 +781,7 @@ impl AppState {
     }
 
     pub fn get_encrypt_secret(&self) -> [u8; 16] {
-        self.app_config
-            .get_reverse_proxy_rewrite_secret()
-            .unwrap_or(self.app_config.encrypt_secret)
+        self.app_config.get_reverse_proxy_rewrite_secret().unwrap_or(self.app_config.encrypt_secret)
     }
 }
 
@@ -840,10 +848,7 @@ fn schedules_changed(a: &[ScheduleConfig], b: &[ScheduleConfig]) -> bool {
 
     for schedule in a {
         let Some(found_idx) = b.iter().enumerate().find_map(|(idx, candidate)| {
-            if used[idx]
-                || candidate.schedule != schedule.schedule
-                || candidate.task_type != schedule.task_type
-            {
+            if used[idx] || candidate.schedule != schedule.schedule || candidate.task_type != schedule.task_type {
                 return None;
             }
             let targets_match = match (schedule.targets.as_ref(), candidate.targets.as_ref()) {
@@ -932,8 +937,63 @@ mod tests {
         should_use_manual_redirects_for_env_vars, video_download_changed,
     };
     use crate::model::{Config, ScheduleConfig, VideoDownloadConfig};
-    use shared::model::{QosAggregationConfigDto, ReverseProxyConfigDto, ScheduleTaskType, StreamHistoryConfigDto};
+    use shared::model::{
+        QosAggregationConfigDto, ReverseProxyConfigDto, ScheduleTaskType, StreamHistoryConfigDto, WebAuthConfigDto,
+        WebUiConfigDto,
+    };
     use std::{collections::HashMap, sync::Arc};
+
+    fn config_with_web_auth(secret: &str) -> Config {
+        let web_ui = WebUiConfigDto {
+            auth: Some(WebAuthConfigDto {
+                enabled: true,
+                issuer: "test".to_string(),
+                secret: secret.to_string(),
+                ..WebAuthConfigDto::default()
+            }),
+            ..WebUiConfigDto::default()
+        };
+        Config { web_ui: Some((&web_ui).into()), ..Config::default() }
+    }
+
+    #[tokio::test]
+    async fn config_reload_rejects_enabling_web_auth_before_swap() {
+        let state = super::create_test_app_state(Config::default());
+
+        let result = state.set_config(config_with_web_auth("secret")).await;
+
+        assert!(matches!(result, Err(shared::error::TuliproxError::ConfigWebUi(_))));
+        assert!(state.app_config.config.load().web_ui.is_none());
+    }
+
+    #[tokio::test]
+    async fn config_reload_rejects_web_auth_secret_change_before_swap() {
+        let state = super::create_test_app_state(config_with_web_auth("old-secret"));
+
+        let result = state.set_config(config_with_web_auth("new-secret")).await;
+
+        assert!(matches!(result, Err(shared::error::TuliproxError::ConfigWebUi(_))));
+        assert_eq!(
+            state
+                .app_config
+                .config
+                .load()
+                .web_ui
+                .as_ref()
+                .and_then(|web_ui| web_ui.auth.as_ref())
+                .map(|auth| auth.secret.as_str()),
+            Some("old-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn config_reload_allows_unrelated_change() {
+        let state = super::create_test_app_state(Config::default());
+        let config = Config { default_user_agent: Some("changed".to_string()), ..Config::default() };
+
+        assert!(state.set_config(config).await.is_ok());
+        assert_eq!(state.app_config.config.load().default_user_agent.as_deref(), Some("changed"));
+    }
 
     #[test]
     fn should_use_manual_redirect_for_proxy_only_http_or_https() {
@@ -1033,10 +1093,7 @@ mod tests {
             retry_max_attempts: 5,
             recording: None,
         };
-        let changed = VideoDownloadConfig {
-            retry_backoff_multiplier: 3.0,
-            ..base.clone()
-        };
+        let changed = VideoDownloadConfig { retry_backoff_multiplier: 3.0, ..base.clone() };
 
         assert!(video_download_changed(&base, &changed));
     }
@@ -1073,7 +1130,11 @@ mod tests {
                     stream_history_retention_days: 7,
                     stream_history_directory: "/tmp/history".to_string(),
                 }),
-                qos_aggregation: Some(QosAggregationConfigDto { enabled: true, interval_secs: 60, ..Default::default() }),
+                qos_aggregation: Some(QosAggregationConfigDto {
+                    enabled: true,
+                    interval_secs: 60,
+                    ..Default::default()
+                }),
                 ..Default::default()
             })),
             ..Config::default()

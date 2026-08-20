@@ -290,11 +290,40 @@ This is a compact operator-oriented overview of the `/api/v1` REST API groups cu
 | `PATCH`  | `/api/v1/recording/tasks/{id}`                       | Edit an upcoming DVR recording                                        |
 | `POST`   | `/api/v1/recording/tasks/{id}/cancel`                | Cancel an active, queued, or scheduled DVR recording                  |
 | `DELETE` | `/api/v1/recording/tasks/{id}`                       | Delete a finished DVR recording through the safe deletion lifecycle   |
+| `POST`   | `/api/v1/recording/conflicts/preview`                | Advisory conflict preview (severity, optional provider scope, overlap segments) |
 | `GET`    | `/api/v1/recording/quota`                            | Read the caller's private quota and shared DVR usage                  |
 | `GET`    | `/api/v1/recording/rules`                            | List visible recurring recording rules                                |
 | `POST`   | `/api/v1/recording/rules`                            | Create a weekly recurring recording rule                              |
 | `PATCH`  | `/api/v1/recording/rules/{id}`                       | Edit a recurring recording rule                                       |
-| `DELETE` | `/api/v1/recording/rules/{id}?future=retain cancel`  | Delete a recurring recording rule                                     |
+| `DELETE` | `/api/v1/recording/rules/{id}?future=retain\|cancel` | Delete a recurring recording rule                                     |
+
+#### DVR WebSocket protocol
+
+The DVR layer ships its own scoped protocol messages on the same WebSocket connection as the rest of the
+backend. The frontend sends `ProtocolMessage::RecordingSnapshotRequest` to subscribe and receives:
+
+* `ProtocolMessage::RecordingSnapshotResponse { revision, tasks }` — the full filtered task list for the
+  caller's session, sent on connect and after every mutation the session is permitted to see.
+* `ProtocolMessage::RecordingDeltaResponse { revision, tasks }` — a smaller diff when only a few tasks
+  changed.
+
+The frontend never polls. After a successful `POST /api/v1/recording/tasks` it relies on the next
+`RecordingSnapshotResponse` to update its view. Rule lists are refreshed by hooking into
+`EventMessage::RecordingSnapshot` and re-calling `GET /api/v1/recording/rules`; a dedicated
+`RecordingRulesChanged` event is a planned follow-up but not currently shipped.
+
+#### DVR conflict preview
+
+`POST /api/v1/recording/conflicts/preview` is **advisory only** — the response carries a severity bucket
+(`none` / `soft` / `hard`) plus optional provider scope and overlap segments, but the server does not
+reject the create call based on it. The frontend renders the preview as a hint next to the recording
+form's scheduled interval, never as a hard block.
+
+#### `POST /api/v1/file/record` (deprecated)
+
+The legacy `POST /api/v1/file/record` endpoint is admin-gated and **scheduled for removal in the next
+major version**. It returns `recording_forbidden` for non-admin principals. New code should call
+`POST /api/v1/recording/tasks` with a `CreateRecordingTaskBody` payload.
 
 ### Playlist and web-player helpers
 
@@ -374,3 +403,7 @@ With Web UI authentication enabled, many endpoints require matching permissions 
 - `recording.write`
 
 If a request is rejected, verify the logged-in Web UI user's RBAC group assignments first.
+
+> **See also:** the full [DVR Operator Reference](./operator/dvr.md) for the authorization matrix, identity-registry
+> bootstrap, token refresh, recurring-rule matching + DST, cross-store reconciliation, at-most-once notification
+> protocol, and the migration checklist.

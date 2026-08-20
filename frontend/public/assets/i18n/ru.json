@@ -477,8 +477,7 @@
       },
       "STAGED_CLUSTERS": "Кластеры, которые этот промежуточный ввод переопределяет для подключенного ввода провайдера.",
       "STAGED_PERSIST": "Необязательный путь к файлу для сохранения или повторного использования загруженного промежуточного плейлиста.",
-      "URL": "URL источника для этого ввода."
-    ,
+      "URL": "URL источника для этого ввода.",
       "SERIES_SOURCE": "Селектор источника для кластера Series, когда включен промежуточный ввод (`default`, `staged`, `input`, `skip`).",
       "VOD_SOURCE": "Селектор источника для кластера VOD, когда включен промежуточный ввод (`default`, `staged`, `input`, `skip`)."
     },
@@ -1510,17 +1509,17 @@
     "LANDING_PAGE": "Лендинг",
     "VIEW_TYPE_DASHBOARD": "Дашборд",
     "VIEW_TYPE_STATS": "Статистика",
-    "VIEW_TYPE_STREAMS":  "Потоки",
+    "VIEW_TYPE_STREAMS": "Потоки",
     "VIEW_TYPE_STREAM_HISTORY": "История потоков",
-    "VIEW_TYPE_DOWNLOADS":  "Загрузки",
+    "VIEW_TYPE_DOWNLOADS": "Загрузки",
     "VIEW_TYPE_USERS": "Пользователи API",
-    "VIEW_TYPE_CONFIG":  "Конфигурация",
+    "VIEW_TYPE_CONFIG": "Конфигурация",
     "VIEW_TYPE_SOURCE_EDITOR": "Источники",
-    "VIEW_TYPE_PLAYLIST_UPDATE":  "Обновление плейлиста",
+    "VIEW_TYPE_PLAYLIST_UPDATE": "Обновление плейлиста",
     "VIEW_TYPE_PLAYLIST_SETTINGS": "Настройки плейлиста",
-    "VIEW_TYPE_PLAYLIST_EXPLORER":  "Браузер плейлистов",
+    "VIEW_TYPE_PLAYLIST_EXPLORER": "Браузер плейлистов",
     "VIEW_TYPE_PLAYLIST_EPG": "EPG плейлиста",
-    "VIEW_TYPE_RBAC":  "Пользователи WebUI",
+    "VIEW_TYPE_RBAC": "Пользователи WebUI",
     "ADMISSION_STRATEGIES": "Стратегии доступа",
     "RUNTIME_CONFIG_REPORT": "Отчет о конфигурации выполнения",
     "RUNTIME_CONFIG_REPORT_FORMAT": "Формат отчета о конфигурации выполнения",
@@ -1542,7 +1541,17 @@
     "PREVIOUS_PAGE": "Предыдущая страница",
     "PAGE": "Страница",
     "PAGES": "Страницы",
-    "NO_CONTENT": "Нет контента"
+    "NO_CONTENT": "Нет контента",
+    "RECORDING_EDIT_TITLE": "Edit recording",
+    "RECORDING_RULE_COLUMN_VISIBILITY": "Visibility",
+    "RECORDING_RULE_EXCLUDE_REPEAT": "Skip reruns",
+    "RECORDING_RULE_EXCLUDE_REPEAT_OFF": "Skip reruns (off)",
+    "RECORDING_RULE_EXCLUDE_REPEAT_ON": "Skip reruns (on)",
+    "RECORDING_RULE_KIND": "Rule type",
+    "RECORDING_RULE_KIND_NEW_EPISODE": "New episodes",
+    "RECORDING_RULE_KIND_WEEKLY": "Weekly timeslot",
+    "RECORDING_RULE_SERIES_ID": "Series ID (EPG)",
+    "RECORDING_RULE_TITLE_PATTERN": "Title pattern (optional)"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Буфер обмена не поддерживается.\nВаш браузер или текущий контекст не позволяют доступ к буферу обмена.\nПожалуйста, используйте HTTPS или localhost.",
@@ -1606,7 +1615,10 @@
       "NO_TARGET": "Select a target playlist before recording.",
       "NO_REQUEST": "Complete the recording form before submitting.",
       "QUEUED": "Recording queued.",
-      "PARTIAL_OPERATION": "Recording rule was only partially applied."
+      "PARTIAL_OPERATION": "Recording rule was only partially applied.",
+      "NO_TASK_SELECTED": "Select a recording to edit from the library.",
+      "TASK_NOT_FOUND": "Recording not found. It may have been deleted.",
+      "NO_INPUT": "Select an input before saving."
     },
     "RBAC": {
       "ADMIN_HINT": "Пользователь является администратором — дополнительные группы не имеют эффекта.",
@@ -1680,8 +1692,7 @@
       "URL_USERNAME_AND_PASSWORD_MANDATORY": "URL, имя пользователя и пароль обязательны!"
     },
     "TARGET_NOT_EXISTS": "Цель не существует",
-    "USER_DELETED": "Пользователь успешно удален"
-  ,
+    "USER_DELETED": "Пользователь успешно удален",
     "VALIDATION": {
       "NETWORK_ACCESS_COUNTRIES": "Введите один 2-буквенный ISO код страны на запись, например DE.",
       "NETWORK_ACCESS_NETWORKS": "Введите один CIDR на запись, например 192.168.0.0/16 или 2001:db8::/32."

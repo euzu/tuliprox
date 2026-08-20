@@ -1,16 +1,25 @@
-use std::sync::Arc;
-use chrono::{Local, Duration};
-use jsonwebtoken::{Algorithm, DecodingKey, encode, decode, EncodingKey, Header, Validation, TokenData};
+use crate::{
+    api::{api_utils::get_username_from_auth_header, model::AppState},
+    auth::AuthBearer,
+    model::WebAuthConfig,
+};
+use chrono::{Duration, Local};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation};
 use log::warn;
-use crate::api::api_utils::get_username_from_auth_header;
-use crate::model::WebAuthConfig;
-use crate::api::model::AppState;
-use crate::auth::AuthBearer;
-use shared::error::to_io_error;
-use shared::model::permission::{permission_to_name, Permission, PermissionSet, PERM_ALL};
-use shared::model::{Claims, ROLE_ADMIN, ROLE_API_USER, UserId, CURRENT_PERMISSION_SCHEMA_VERSION};
+use shared::{
+    error::to_io_error,
+    model::{
+        permission::{permission_to_name, Permission, PermissionSet, PERM_ALL},
+        Claims, UserId, CURRENT_PERMISSION_SCHEMA_VERSION, ROLE_ADMIN, ROLE_API_USER,
+    },
+};
+use std::sync::Arc;
 
-pub fn create_jwt_admin(web_auth_config: &WebAuthConfig, username: &str, pwd_version: u32) -> Result<String, std::io::Error> {
+pub fn create_jwt_admin(
+    web_auth_config: &WebAuthConfig,
+    username: &str,
+    pwd_version: u32,
+) -> Result<String, std::io::Error> {
     create_jwt(
         web_auth_config,
         username,
@@ -68,7 +77,7 @@ fn create_jwt(
     let iat = now.timestamp();
     let duration = web_auth_config.token_ttl_mins;
     let exp = if duration > 0 {
-       (now + Duration::minutes(i64::from(duration))).timestamp()
+        (now + Duration::minutes(i64::from(duration))).timestamp()
     } else {
         (now + Duration::days(365 * 100)).timestamp() // 100 years
     };
@@ -85,12 +94,14 @@ fn create_jwt(
     };
     match encode(&header, &claims, &EncodingKey::from_secret(web_auth_config.secret.as_bytes())) {
         Ok(jwt) => Ok(jwt),
-        Err(err) => Err(to_io_error(err))
+        Err(err) => Err(to_io_error(err)),
     }
 }
 
 pub(crate) fn verify_token(token: &str, secret_key: &[u8]) -> Option<TokenData<Claims>> {
-    if let Ok(token_data) = decode::<Claims>(token, &DecodingKey::from_secret(secret_key), &Validation::new(Algorithm::HS256)) {
+    if let Ok(token_data) =
+        decode::<Claims>(token, &DecodingKey::from_secret(secret_key), &Validation::new(Algorithm::HS256))
+    {
         return Some(token_data);
     }
     None
@@ -104,13 +115,9 @@ fn has_role(token_data: Option<TokenData<Claims>>, role: &str) -> bool {
     }
 }
 
-pub fn is_admin(token_data: Option<TokenData<Claims>>) -> bool {
-    has_role(token_data, ROLE_ADMIN)
-}
+pub fn is_admin(token_data: Option<TokenData<Claims>>) -> bool { has_role(token_data, ROLE_ADMIN) }
 
-pub fn is_api_user(token_data: Option<TokenData<Claims>>) -> bool {
-    has_role(token_data, ROLE_API_USER)
-}
+pub fn is_api_user(token_data: Option<TokenData<Claims>>) -> bool { has_role(token_data, ROLE_API_USER) }
 
 pub fn verify_token_admin(bearer: &str, secret_key: &[u8]) -> bool {
     has_role(verify_token(bearer, secret_key), ROLE_ADMIN)
@@ -145,9 +152,7 @@ impl AuthError {
     /// `true` when the frontend should request a fresh token before
     /// retrying the request. Stale-schema and missing-subject both
     /// qualify; a re-auth round-trip is required.
-    pub fn is_token_refresh_required(self) -> bool {
-        matches!(self, Self::StaleSchema | Self::MissingSubject)
-    }
+    pub fn is_token_refresh_required(self) -> bool { matches!(self, Self::StaleSchema | Self::MissingSubject) }
 }
 
 impl std::fmt::Display for AuthError {
@@ -167,11 +172,11 @@ impl std::fmt::Display for AuthError {
 /// version, and [`AuthError::MissingSubject`] when the
 /// `subject_id` is `None`. A token that passes both checks is fit
 /// for downstream permission and authorization checks.
-fn validate_token_version(token_data: &TokenData<Claims>) -> Result<(), AuthError> {
-    if token_data.claims.permission_schema_version < CURRENT_PERMISSION_SCHEMA_VERSION {
+pub(crate) fn validate_token_claims(claims: &Claims) -> Result<(), AuthError> {
+    if claims.permission_schema_version < CURRENT_PERMISSION_SCHEMA_VERSION {
         return Err(AuthError::StaleSchema);
     }
-    if token_data.claims.subject_id.is_none() {
+    if claims.subject_id.is_none() {
         return Err(AuthError::MissingSubject);
     }
     Ok(())
@@ -188,7 +193,7 @@ fn validate_request(
     };
     let secret_key = web_auth_config.secret.as_ref();
     let token_data = verify_token(token, secret_key).ok_or(AuthError::InvalidToken)?;
-    validate_token_version(&token_data)?;
+    validate_token_claims(&token_data.claims)?;
     if !verify_fn(token, secret_key) {
         return Err(AuthError::Forbidden);
     }
@@ -264,16 +269,13 @@ pub async fn require_permission_inner(
     let Some(token_data) = verify_token(&token, web_auth_config.secret.as_bytes()) else {
         return rejection_for(AuthError::InvalidToken);
     };
-    if let Err(err) = validate_token_version(&token_data) {
+    if let Err(err) = validate_token_claims(&token_data.claims) {
         return rejection_for(err);
     }
 
     if !token_data.claims.permissions.contains(permission) {
         let denied_permission = permission_to_name(permission).unwrap_or("unknown");
-        warn!(
-            "User '{}' denied permission '{denied_permission}'",
-            token_data.claims.username
-        );
+        warn!("User '{}' denied permission '{denied_permission}'", token_data.claims.username);
         return rejection_for(AuthError::Forbidden);
     }
 
@@ -284,8 +286,9 @@ pub async fn require_permission_inner(
 mod tests {
     use super::*;
     use crate::model::WebAuthConfig;
-    use shared::model::permission::Permission;
-    use shared::model::{Claims, CURRENT_PERMISSION_SCHEMA_VERSION, ROLE_ADMIN, ROLE_API_USER, UserId};
+    use shared::model::{
+        permission::Permission, Claims, UserId, CURRENT_PERMISSION_SCHEMA_VERSION, ROLE_ADMIN, ROLE_API_USER,
+    };
 
     fn test_web_auth_config() -> WebAuthConfig {
         WebAuthConfig {
@@ -318,13 +321,8 @@ mod tests {
     #[test]
     fn web_user_jwt_carries_web_namespaced_subject_id() {
         let cfg = test_web_auth_config();
-        let jwt = create_jwt_web_user(
-            &cfg,
-            "alice",
-            Permission::ConfigRead | Permission::RecordingRead,
-            0,
-        )
-        .expect("web jwt");
+        let jwt =
+            create_jwt_web_user(&cfg, "alice", Permission::ConfigRead | Permission::RecordingRead, 0).expect("web jwt");
         let data = verify_token(&jwt, cfg.secret.as_bytes()).expect("verify");
         assert_eq!(data.claims.username, "alice");
         assert_eq!(data.claims.subject_id, Some(UserId::from("web:alice")));
@@ -352,7 +350,7 @@ mod tests {
         let jwt = create_jwt_admin(&cfg, "any", 0).expect("admin jwt");
         let mut data = verify_token(&jwt, cfg.secret.as_bytes()).expect("verify");
         data.claims.permission_schema_version = 0; // stale
-        let err = validate_token_version(&data).unwrap_err();
+        let err = validate_token_claims(&data.claims).unwrap_err();
         assert!(matches!(err, AuthError::StaleSchema));
         assert!(err.is_token_refresh_required());
     }
@@ -366,7 +364,7 @@ mod tests {
         let jwt = create_jwt_admin(&cfg, "any", 0).expect("admin jwt");
         let mut data = verify_token(&jwt, cfg.secret.as_bytes()).expect("verify");
         data.claims.subject_id = None;
-        let err = validate_token_version(&data).unwrap_err();
+        let err = validate_token_claims(&data.claims).unwrap_err();
         assert!(matches!(err, AuthError::MissingSubject));
         assert!(err.is_token_refresh_required());
     }

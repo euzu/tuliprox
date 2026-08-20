@@ -123,11 +123,23 @@ pub struct RecordingSource {
     pub target_id: String,
     pub virtual_id: String,
     pub input_name: String,
+    #[serde(default)]
+    pub cluster: super::XtreamCluster,
 }
 
 impl RecordingSource {
     pub fn new(target_id: impl Into<String>, virtual_id: impl Into<String>, input_name: impl Into<String>) -> Self {
-        Self { target_id: target_id.into(), virtual_id: virtual_id.into(), input_name: input_name.into() }
+        Self {
+            target_id: target_id.into(),
+            virtual_id: virtual_id.into(),
+            input_name: input_name.into(),
+            cluster: super::XtreamCluster::Live,
+        }
+    }
+
+    pub fn with_cluster(mut self, cluster: super::XtreamCluster) -> Self {
+        self.cluster = cluster;
+        self
     }
 }
 
@@ -333,6 +345,15 @@ impl fmt::Display for QueueRevision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_recording_source_defaults_to_live_cluster() {
+        let source: RecordingSource =
+            serde_json::from_str(r#"{"target_id":"target","virtual_id":"42","input_name":"input-a"}"#)
+                .expect("deserialize legacy source");
+
+        assert_eq!(source.cluster, super::super::XtreamCluster::Live);
+    }
 
     #[test]
     fn new_metadata_carries_full_intervals_and_source() {

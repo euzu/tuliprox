@@ -27,6 +27,7 @@ pub struct ProtocolHandlerMemory {
     pub token: Option<String>,
     pub permissions: PermissionSet,
     pub role: UserRole,
+    pub subject_id: Option<String>,
     pub stream_meter_subscribed: bool,
 }
 
@@ -104,8 +105,18 @@ pub enum ProtocolMessage {
     // snapshot on connect (or after a revision gap) and receives
     // filtered snapshots/deltas per session.
     RecordingSnapshotRequest,
-    RecordingSnapshotResponse { revision: QueueRevision, tasks: Vec<FileDownloadDto> },
-    RecordingDeltaResponse { revision: QueueRevision, tasks: Vec<FileDownloadDto> },
+    RecordingSnapshotResponse {
+        revision: QueueRevision,
+        tasks: Vec<FileDownloadDto>,
+    },
+    RecordingDeltaResponse {
+        revision: QueueRevision,
+        tasks: Vec<FileDownloadDto>,
+    },
+    /// Notification that the rule repository changed. The frontend
+    /// re-fetches `/api/v1/recording/rules` on receipt. No payload
+    /// — the rule list is small and the GET is cheap.
+    RecordingRulesChanged,
 }
 
 impl ProtocolMessage {

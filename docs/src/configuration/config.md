@@ -703,6 +703,64 @@ The DVR runtime keeps durable state under `storage_dir`:
 Live recordings use a partial-file lifecycle. The worker writes to `<filename>.partial` and renames it to the final
 path only after ffmpeg exits successfully and the final path is still free.
 
+> **See also:** the full [DVR Operator Reference](../operator/dvr.md) — configuration reference, directory layout,
+> filename placeholders, lifecycle / restart, quota charge-by-state, disk admission, safe deletion, authorization
+> matrix, identity-registry bootstrap, token refresh, deprecated `/file/record`, REST + WebSocket surface, conflict
+> preview, recurring-rule matching + DST + reconciliation, at-most-once notification protocol, migration checklist,
+> and the 32-scenario acceptance sweep.
+
+#### 6.1.1 Filename placeholders
+
+The filename template supports these placeholders (filename only — **never** the directory):
+
+| Placeholder         | Resolves to                                                       |
+|---------------------|-------------------------------------------------------------------|
+| `{channel}`         | Channel name                                                      |
+| `{program_title}`   | Programme title (sanitized)                                       |
+| `{start_time}`      | UTC `YYYY-MM-DDTHH-MM`                                            |
+| `{end_time}`        | UTC `YYYY-MM-DDTHH-MM`                                            |
+| `{episode}`         | Episode identifier extracted by `episode_pattern`                 |
+| `{owner}`           | The owner principal id (`user:<id>` or `legacy:admin`)            |
+
+> **Security:** `{owner}` is allowed **only** in the filename template, never in directory templates.
+> Directory templates are resolved against the caller's identity, so the directory part is intrinsically owner-scoped.
+
+#### 6.1.2 Authorization matrix
+
+The DVR layer runs an additional authorization pass on top of `recording.read` / `recording.write`.
+
+| Visibility | Owner                  | Admin (`builtin:admin`) | Foreign user | Notes                                     |
+|------------|------------------------|-------------------------|--------------|-------------------------------------------|
+| `private`  | read + write + delete  | read + write + delete   | —            | Foreign reads return 404                 |
+| `shared`   | —                      | read + write + delete   | read         | Only admins create shared recordings      |
+| `legacy`   | — (orphan)             | read + write + delete   | —            | Created by the deprecated `/file/record`  |
+
+#### 6.1.3 Identity bootstrap
+
+If the `users` table is empty on first boot:
+
+1. Tuliprox reads `TULIPROX_BOOTSTRAP_ADMIN` from the environment.
+2. The built-in `builtin:admin` role is assigned to that user.
+3. The bootstrap admin must use `POST /api/v1/auth/login` to obtain a JWT.
+4. From that point on, the admin creates additional users via `POST /api/v1/users`.
+5. If `TULIPROX_BOOTSTRAP_ADMIN` is unset and the table is empty, the server **fails closed** at boot.
+6. The bootstrap admin cannot be deleted while it is the sole `builtin:admin` member.
+
+#### 6.1.4 Token refresh on schema bump
+
+When the JWT schema version is bumped (a new field is added), existing tokens are rejected with
+`401 Unauthorized` and an `X-Token-Refresh: required` response header. The frontend automatically calls
+`POST /api/v1/auth/refresh` to mint a new token. The wire code is `recording_token_refresh_required` so the
+toastr surfaces a stable, translatable message. Operators upgrading across a schema-bump release do not need
+to do anything manually.
+
+#### 6.1.5 Deprecated `/file/record`
+
+`POST /api/v1/file/record` is the legacy recording endpoint. It is still functional and admin-gated, but
+returns a `recording_forbidden` error for non-admin principals and is **scheduled for removal in the next
+major version**. New code should use `POST /api/v1/recording/tasks` with a `CreateRecordingTaskBody` payload
+(see [REST API cookbook](../rest-api-cookbook.md#downloads-and-recordings)).
+
 > **Note:** The named capture group `(?P<episode>...)` is **mandatory** for this to function correctly.
 >
 > *Example:* `.*(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2}).*`

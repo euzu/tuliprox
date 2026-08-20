@@ -88,6 +88,14 @@ impl ApiStreamContext {
     const MOVIE: &'static str = "movie";
     const SERIES: &'static str = "series";
     const TIMESHIFT: &'static str = "timeshift";
+
+    pub(in crate::api) const fn cluster(self) -> XtreamCluster {
+        match self {
+            Self::LiveAlt | Self::Live | Self::Timeshift => XtreamCluster::Live,
+            Self::Movie => XtreamCluster::Video,
+            Self::Series => XtreamCluster::Series,
+        }
+    }
 }
 
 impl Display for ApiStreamContext {
@@ -827,6 +835,10 @@ fn override_live_hls_extension<'a>(
     }
 }
 
+fn recording_input_matches(expected_input: Option<&ConfigInput>, actual_input_name: &str) -> bool {
+    expected_input.is_none_or(|input| input.name.as_ref() == actual_input_name)
+}
+
 #[allow(clippy::too_many_lines)]
 // Used by webui
 pub(in crate::api) async fn xtream_player_api_stream_with_token(
@@ -836,11 +848,28 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
     target_id: u16,
     stream_req: ApiStreamRequest<'_>,
 ) -> impl IntoResponse + Send {
+    let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    };
+    xtream_player_api_stream_with_resolved_target(fingerprint, req_headers, app_state, target, None, stream_req)
+        .await
+        .into_response()
+}
+
+#[allow(clippy::too_many_lines)]
+pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
+    fingerprint: &Fingerprint,
+    req_headers: &HeaderMap,
+    app_state: &Arc<AppState>,
+    target: Arc<ConfigTarget>,
+    expected_input: Option<Arc<ConfigInput>>,
+    stream_req: ApiStreamRequest<'_>,
+) -> impl IntoResponse + Send {
     if stream_req.access_token && !verify_access_token(stream_req.password, &app_state.app_config.access_token_secret) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
-    if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
+    {
         let target_name = &target.name;
         if !target.has_output(TargetType::Xtream) {
             debug!("Target has no xtream output {target_name}");
@@ -849,12 +878,15 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
         let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
         let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
         let mut pli = try_result_bad_request!(
-            xtream_get_item_for_stream_id(req_virtual_id, app_state, &target, None).await,
+            xtream_get_item_for_stream_id(req_virtual_id, app_state, &target, Some(stream_req.context.cluster())).await,
             true,
             format!("Failed to read xtream item for stream id {req_virtual_id}")
         );
         let virtual_id = pli.virtual_id;
-        let input_option = app_state.app_config.get_input_by_name(&pli.input_name);
+        if !recording_input_matches(expected_input.as_deref(), pli.input_name.as_ref()) {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        }
+        let input_option = expected_input.or_else(|| app_state.app_config.get_input_by_name(&pli.input_name));
         let stream_ext = input_option
             .as_deref()
             .map_or(stream_ext, |input| override_live_hls_extension(stream_req.context, input, stream_ext));
@@ -985,8 +1017,6 @@ pub(in crate::api) async fn xtream_player_api_stream_with_token(
         )
         .await
         .into_response()
-    } else {
-        axum::http::StatusCode::BAD_REQUEST.into_response()
     }
 }
 
@@ -1893,7 +1923,7 @@ pub fn xtream_api_register() -> axum::Router<Arc<AppState>> {
 mod tests {
     use super::{
         empty_stream_info_response, get_xtream_player_api_stream_url, resolve_m3u_xtream_timeshift,
-        is_hls_playback_request, override_live_hls_extension, resolve_xtream_playback_extension,
+        is_hls_playback_request, override_live_hls_extension, recording_input_matches, resolve_xtream_playback_extension,
         xtream_get_short_epg, xtream_player_api_stream, xtream_player_api_stream_with_token, ApiStreamContext,
         ApiStreamRequest, XtreamApiTimeShiftRequest,
     };
@@ -1925,6 +1955,14 @@ mod tests {
     };
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[test]
+    fn recording_input_must_match_canonical_playlist_item_input() {
+        let expected = ConfigInput { name: "input-a".intern(), ..Default::default() };
+        assert!(recording_input_matches(Some(&expected), "input-a"));
+        assert!(!recording_input_matches(Some(&expected), "input-b"));
+        assert!(recording_input_matches(None, "input-b"));
+    }
 
     #[test]
     fn live_hls_override_is_scoped_to_enabled_xtream_live_requests() {

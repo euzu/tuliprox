@@ -503,8 +503,7 @@
       },
       "STAGED_CLUSTERS": "المجموعات التي يتجاوزها هذا الإدخال المُرحّل في إدخال المزود المتصل.",
       "STAGED_PERSIST": "مسار ملف اختياري يُستخدم لحفظ قائمة التشغيل المُرحّلة التي تم تنزيلها أو إعادة استخدامها.",
-      "URL": "عنوان URL المصدر لهذا الإدخال."
-    ,
+      "URL": "عنوان URL المصدر لهذا الإدخال.",
       "SERIES_SOURCE": "محدد المصدر لمجموعة المسلسلات عند تفعيل الإدخال المُرحّل (`default`، `staged`، `input`، `skip`).",
       "VOD_SOURCE": "محدد المصدر لمجموعة الفيديو حسب الطلب عند تفعيل الإدخال المُرحّل (`default`، `staged`، `input`، `skip`)."
     },
@@ -1628,7 +1627,17 @@
     "PREVIOUS_PAGE": "الصفحة السابقة",
     "PAGE": "صفحة",
     "PAGES": "صفحات",
-    "NO_CONTENT": "لا يوجد محتوى"
+    "NO_CONTENT": "لا يوجد محتوى",
+    "RECORDING_EDIT_TITLE": "Edit recording",
+    "RECORDING_RULE_COLUMN_VISIBILITY": "Visibility",
+    "RECORDING_RULE_EXCLUDE_REPEAT": "Skip reruns",
+    "RECORDING_RULE_EXCLUDE_REPEAT_OFF": "Skip reruns (off)",
+    "RECORDING_RULE_EXCLUDE_REPEAT_ON": "Skip reruns (on)",
+    "RECORDING_RULE_KIND": "Rule type",
+    "RECORDING_RULE_KIND_NEW_EPISODE": "New episodes",
+    "RECORDING_RULE_KIND_WEEKLY": "Weekly timeslot",
+    "RECORDING_RULE_SERIES_ID": "Series ID (EPG)",
+    "RECORDING_RULE_TITLE_PATTERN": "Title pattern (optional)"
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "الحافظة غير مدعومة.\nمتصفحك أو السياق الحالي لا يسمح بالوصول إلى الحافظة.\nيرجى استخدام HTTPS أو localhost.",
@@ -1705,7 +1714,10 @@
       "NO_TARGET": "Select a target playlist before recording.",
       "NO_REQUEST": "Complete the recording form before submitting.",
       "QUEUED": "Recording queued.",
-      "PARTIAL_OPERATION": "Recording rule was only partially applied."
+      "PARTIAL_OPERATION": "Recording rule was only partially applied.",
+      "NO_TASK_SELECTED": "Select a recording to edit from the library.",
+      "TASK_NOT_FOUND": "Recording not found. It may have been deleted.",
+      "NO_INPUT": "Select an input before saving."
     },
     "RBAC": {
       "ADMIN_HINT": "المستخدم مسؤول — المجموعات الإضافية ليس لها تأثير.",
@@ -1779,8 +1791,7 @@
       "URL_USERNAME_AND_PASSWORD_MANDATORY": "URL واسم المستخدم وكلمة المرور مطلوبة!"
     },
     "TARGET_NOT_EXISTS": "الهدف غير موجود",
-    "USER_DELETED": "تم حذف المستخدم بنجاح"
-    ,
+    "USER_DELETED": "تم حذف المستخدم بنجاح",
     "VALIDATION": {
       "NETWORK_ACCESS_COUNTRIES": "أدخل رمز بلد واحد بتنسيق ISO المؤلف من حرفين لكل إدخال، مثل DE.",
       "NETWORK_ACCESS_NETWORKS": "أدخل CIDR واحد لكل إدخال، مثل 192.168.0.0/16 أو 2001:db8::/32."

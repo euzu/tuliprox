@@ -13,33 +13,58 @@
 //! step below catches the actual disappearance (404).
 //!
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-use axum::body::Body;
-use axum::extract::{FromRequestParts, Path as AxumPath, State};
-use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::RequestPartsExt;
-use axum::routing::get;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-use tokio_util::io::ReaderStream;
-
-use shared::model::Claims;
-use crate::api::model::recording_catalog_access::{
-    self, CatalogAccessError,
+use crate::{
+    api::model::{
+        recording_catalog_access::{self, CatalogAccessError},
+        AppState, DownloadQueue,
+    },
+    auth::{validate_token_claims, verify_token, AuthBearer, AuthError},
+    utils::{no_follow_regular_file, resolve_recording_dir, RecordingPathError, RecordingVisibility as PathVisibility},
 };
-use crate::api::model::AppState;
-use crate::api::model::DownloadQueue;
-use crate::auth::{verify_token, AuthBearer};
-use crate::utils::{no_follow_regular_file, resolve_recording_dir, RecordingPathError, RecordingVisibility as PathVisibility};
+use axum::{
+    body::Body,
+    extract::{FromRequestParts, Path as AxumPath, State},
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+    RequestPartsExt,
+};
+use shared::model::{Claims, UserId, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, ROLE_ADMIN, TOKEN_NO_AUTH};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio_util::io::ReaderStream;
 
 /// `AuthClaims` extracts the authenticated `Claims` from a bearer
 /// token. The recording policy gate (T13) needs the full `Claims`,
 /// not just a permission bit, because the visibility/private-owner
 /// check runs against `subject_id` and `roles`.
+#[derive(Debug)]
 pub struct AuthClaims(pub Claims);
+
+fn builtin_admin_claims() -> Claims {
+    Claims {
+        username: "admin".to_string(),
+        iss: "tuliprox".to_string(),
+        iat: 0,
+        exp: i64::MAX,
+        roles: vec![ROLE_ADMIN.to_string()],
+        permissions: PERM_ALL,
+        pwd_version: 0,
+        subject_id: Some(UserId::builtin_admin()),
+        permission_schema_version: CURRENT_PERMISSION_SCHEMA_VERSION,
+    }
+}
+
+fn auth_claims_rejection(error: AuthError) -> Response {
+    let mut response = (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+    if error.is_token_refresh_required() {
+        response.headers_mut().insert("X-Token-Refresh", header::HeaderValue::from_static("required"));
+    }
+    response
+}
 
 impl FromRequestParts<Arc<AppState>> for AuthClaims {
     type Rejection = Response;
@@ -49,15 +74,19 @@ impl FromRequestParts<Arc<AppState>> for AuthClaims {
         state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let app_state = state.clone();
-        let AuthBearer(token) = parts.extract::<AuthBearer>().await
-            .map_err(|(code, msg)| (code, msg).into_response())?;
+        let AuthBearer(token) =
+            parts.extract::<AuthBearer>().await.map_err(|(_, msg)| (StatusCode::UNAUTHORIZED, msg).into_response())?;
         let config = app_state.app_config.config.load();
-        let Some(web_auth) = config.web_ui.as_ref().and_then(|w| w.auth.as_ref()) else {
-            return Err((StatusCode::UNAUTHORIZED, "auth not configured").into_response());
-        };
-        let token_data = verify_token(&token, web_auth.secret.as_bytes())
-            .ok_or_else(|| (StatusCode::UNAUTHORIZED, "invalid token").into_response())?;
-        Ok(Self(token_data.claims))
+        match config.web_ui.as_ref().and_then(|w| w.auth.as_ref()).filter(|auth| auth.enabled) {
+            Some(web_auth) => {
+                let token_data = verify_token(&token, web_auth.secret.as_bytes())
+                    .ok_or_else(|| auth_claims_rejection(AuthError::InvalidToken))?;
+                validate_token_claims(&token_data.claims).map_err(auth_claims_rejection)?;
+                Ok(Self(token_data.claims))
+            }
+            None if token == TOKEN_NO_AUTH => Ok(Self(builtin_admin_claims())),
+            None => Err((StatusCode::UNAUTHORIZED, "invalid token").into_response()),
+        }
     }
 }
 
@@ -151,15 +180,8 @@ fn access_error_to_response(err: &CatalogAccessError) -> Response {
     let code = err.code();
     if matches!(err, CatalogAccessError::TokenRefreshRequired) {
         // T12 contract: stale schema → 401 + X-Token-Refresh.
-        let mut resp = (
-            StatusCode::UNAUTHORIZED,
-            axum::Json(serde_json::json!({"error": code})),
-        )
-            .into_response();
-        resp.headers_mut().insert(
-            "X-Token-Refresh",
-            header::HeaderValue::from_static("required"),
-        );
+        let mut resp = (StatusCode::UNAUTHORIZED, axum::Json(serde_json::json!({"error": code}))).into_response();
+        resp.headers_mut().insert("X-Token-Refresh", header::HeaderValue::from_static("required"));
         return resp;
     }
     let status = match err {
@@ -175,11 +197,7 @@ fn access_error_to_response(err: &CatalogAccessError) -> Response {
 
 /// Find the recording, authorize the open, and resolve the on-disk
 /// path. Every step is a security boundary; no step logs the path.
-async fn resolve_for_open(
-    app_state: &AppState,
-    claims: &Claims,
-    uuid: &str,
-) -> Result<ResolvedMedia, Box<Response>> {
+async fn resolve_for_open(app_state: &AppState, claims: &Claims, uuid: &str) -> Result<ResolvedMedia, Box<Response>> {
     let queue: &DownloadQueue = &app_state.downloads;
     let recording = recording_catalog_access::lookup_recording(queue, uuid)
         .await
@@ -236,19 +254,14 @@ async fn resolve_for_open(
         &owner_dir,
         Path::new(relative),
     )
-    .map_err(|_e: RecordingPathError| {
-        Box::new(access_error_to_response(&CatalogAccessError::InvalidPath))
-    })?;
+    .map_err(|_e: RecordingPathError| Box::new(access_error_to_response(&CatalogAccessError::InvalidPath)))?;
     // Re-validate the on-disk file is a regular file (no symlink,
     // no directory) — revalidate the relative path and file type at
     // open time.
     let file_meta = no_follow_regular_file(&abs_path)
         .await
         .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::NotFound)))?;
-    Ok(ResolvedMedia {
-        abs_path,
-        size: file_meta.len(),
-    })
+    Ok(ResolvedMedia { abs_path, size: file_meta.len() })
 }
 
 /// `GET /library/recording/playback/{uuid}` — supports HTTP Range
@@ -283,10 +296,7 @@ pub async fn download_recording(
 /// thumbnail generation lands with the dedicated scanner in a later
 /// release. Returning 404 (not 501) so legacy clients do not retry
 /// forever.
-pub async fn thumbnail_recording(
-    _claims: AuthClaims,
-    AxumPath(_uuid): AxumPath<String>,
-) -> Response {
+pub async fn thumbnail_recording(_claims: AuthClaims, AxumPath(_uuid): AxumPath<String>) -> Response {
     StatusCode::NOT_FOUND.into_response()
 }
 
@@ -297,44 +307,23 @@ async fn serve_range(
     attachment: bool,
 ) -> Response {
     let total = resolved.size;
-    let range_header = headers
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok());
-    let filename = resolved
-        .abs_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("recording");
+    let range_header = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    let filename = resolved.abs_path.file_name().and_then(|s| s.to_str()).unwrap_or("recording");
     let mut base_headers = vec![
         (header::CONTENT_TYPE, "application/octet-stream".to_string()),
         (header::ACCEPT_RANGES, "bytes".to_string()),
     ];
     if attachment {
-        base_headers.push((
-            header::CONTENT_DISPOSITION,
-            format!("attachment; filename=\"{filename}\""),
-        ));
+        base_headers.push((header::CONTENT_DISPOSITION, format!("attachment; filename=\"{filename}\"")));
     }
     if let Some(rh) = range_header {
         let Some(spec) = parse_range(rh, total) else {
             // RFC 7233 §4.4: 416 with `Content-Range: bytes */<total>`.
-            return (
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                [(
-                    header::CONTENT_RANGE,
-                    format!("bytes */{total}"),
-                )],
-            )
+            return (StatusCode::RANGE_NOT_SATISFIABLE, [(header::CONTENT_RANGE, format!("bytes */{total}"))])
                 .into_response();
         };
         let Some((start, length)) = spec.resolve(total) else {
-            return (
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                [(
-                    header::CONTENT_RANGE,
-                    format!("bytes */{total}"),
-                )],
-            )
+            return (StatusCode::RANGE_NOT_SATISFIABLE, [(header::CONTENT_RANGE, format!("bytes */{total}"))])
                 .into_response();
         };
         let Ok(file) = tokio::fs::File::open(&resolved.abs_path).await else {
@@ -352,10 +341,7 @@ async fn serve_range(
         let limited = seeked.take(length);
         let stream = ReaderStream::new(limited);
         let mut hdrs = base_headers.clone();
-        hdrs.push((
-            header::CONTENT_RANGE,
-            format!("bytes {start}-{}/{total}", start + length - 1),
-        ));
+        hdrs.push((header::CONTENT_RANGE, format!("bytes {start}-{}/{total}", start + length - 1)));
         hdrs.push((header::CONTENT_LENGTH, length.to_string()));
         build_response(StatusCode::PARTIAL_CONTENT, hdrs, Body::from_stream(stream))
     } else {
@@ -399,9 +385,7 @@ fn build_response(status: StatusCode, headers: Vec<(header::HeaderName, String)>
 /// handler. The recording policy gate
 /// (`recording_catalog_access::authorize_open`) is the second gate
 /// that enforces ownership and visibility.
-pub fn recording_media_api_register(
-    router: axum::Router<Arc<AppState>>,
-) -> axum::Router<Arc<AppState>> {
+pub fn recording_media_api_register(router: axum::Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
     router
         .route("/library/recording/playback/{uuid}", get(playback_recording))
         .route("/library/recording/download/{uuid}", get(download_recording))
@@ -411,6 +395,102 @@ pub fn recording_media_api_register(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{api::model::create_test_app_state, auth::create_jwt_admin, model::Config};
+    use axum::http::Request;
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    use shared::model::{Permission, UserId, WebUiConfigDto, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, ROLE_ADMIN, TOKEN_NO_AUTH};
+
+    fn config_with_web_auth(enabled: bool, secret: &str) -> Config {
+        let web_ui = WebUiConfigDto {
+            auth: Some(shared::model::WebAuthConfigDto {
+                enabled,
+                issuer: "test".to_string(),
+                secret: secret.to_string(),
+                ..shared::model::WebAuthConfigDto::default()
+            }),
+            ..shared::model::WebUiConfigDto::default()
+        };
+        Config { web_ui: Some((&web_ui).into()), ..Config::default() }
+    }
+
+    async fn extract_auth_claims(state: &Arc<AppState>, authorization: Option<&str>) -> Result<AuthClaims, Response> {
+        let mut builder = Request::builder();
+        if let Some(value) = authorization {
+            builder = builder.header(header::AUTHORIZATION, value);
+        }
+        let request = builder.body(()).expect("request");
+        let (mut parts, ()) = request.into_parts();
+        AuthClaims::from_request_parts(&mut parts, state).await
+    }
+
+    #[tokio::test]
+    async fn auth_claims_accepts_only_dummy_bearer_without_web_auth() {
+        let state = create_test_app_state(Config::default());
+        let AuthClaims(claims) =
+            extract_auth_claims(&state, Some(&format!("Bearer {TOKEN_NO_AUTH}"))).await.expect("builtin claims");
+
+        assert_eq!(claims.subject_id, Some(UserId::builtin_admin()));
+        assert_eq!(claims.roles, vec![ROLE_ADMIN]);
+        assert_eq!(claims.permissions, PERM_ALL);
+        assert_eq!(claims.permission_schema_version, CURRENT_PERMISSION_SCHEMA_VERSION);
+        assert!(claims.permissions.contains(Permission::RecordingWrite));
+
+        for authorization in [None, Some("Basic authorized"), Some("Bearer wrong")] {
+            let response = extract_auth_claims(&state, authorization).await.expect_err("rejected");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!response.headers().contains_key("X-Token-Refresh"));
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_claims_accepts_dummy_bearer_with_web_auth_disabled() {
+        let state = create_test_app_state(config_with_web_auth(false, "unused"));
+
+        let AuthClaims(claims) =
+            extract_auth_claims(&state, Some(&format!("Bearer {TOKEN_NO_AUTH}"))).await.expect("builtin claims");
+
+        assert_eq!(claims.subject_id, Some(UserId::builtin_admin()));
+        assert_eq!(claims.permissions, PERM_ALL);
+    }
+
+    #[tokio::test]
+    async fn auth_claims_rejects_dummy_bearer_with_web_auth_enabled() {
+        let state = create_test_app_state(config_with_web_auth(true, "secret"));
+
+        let response =
+            extract_auth_claims(&state, Some(&format!("Bearer {TOKEN_NO_AUTH}"))).await.expect_err("dummy rejected");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!response.headers().contains_key("X-Token-Refresh"));
+    }
+
+    #[tokio::test]
+    async fn auth_claims_enabled_jwt_truth_table() {
+        let config = config_with_web_auth(true, "secret");
+        let web_auth = config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).expect("web auth").clone();
+        let state = create_test_app_state(config);
+        let valid = create_jwt_admin(&web_auth, "admin", 0).expect("jwt");
+
+        let AuthClaims(claims) =
+            extract_auth_claims(&state, Some(&format!("Bearer {valid}"))).await.expect("valid claims");
+        assert_eq!(claims.subject_id, Some(UserId::builtin_admin()));
+
+        let mut stale_claims = builtin_admin_claims();
+        stale_claims.permission_schema_version = 0;
+        let mut missing_subject = builtin_admin_claims();
+        missing_subject.subject_id = None;
+        for claims in [stale_claims, missing_subject] {
+            let token =
+                encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(b"secret")).expect("jwt");
+            let response =
+                extract_auth_claims(&state, Some(&format!("Bearer {token}"))).await.expect_err("refresh required");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                response.headers().get("X-Token-Refresh").and_then(|value| value.to_str().ok()),
+                Some("required")
+            );
+        }
+    }
 
     #[test]
     fn parse_range_closed_with_both_bounds() {

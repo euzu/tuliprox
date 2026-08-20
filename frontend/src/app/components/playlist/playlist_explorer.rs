@@ -3,7 +3,7 @@ use crate::{
         components::{
             menu_item::MenuItem,
             popup_menu::PopupMenu,
-            recording::{PaddingBounds, RecordingForm, RecordingFormPrefill},
+            recording::{target_name_for_id, PaddingBounds, RecordingForm, RecordingFormPrefill},
             AppIcon, Chip, IconButton, NoContent, Panel, Search,
         },
         context::{ConfigContext, PlaylistExplorerContext},
@@ -323,6 +323,7 @@ pub fn PlaylistExplorer() -> Html {
         let translate_clone = translate.clone();
         let can_queue_downloads = can_write_downloads;
         let copy_to_clipboard = copy_to_clipboard.clone();
+        let config = config_ctx.config.clone();
         Callback::from(move |(name, _): (String, _)| {
             if let Ok(action) = ExplorerAction::from_str(&name) {
                 match action {
@@ -573,20 +574,22 @@ pub fn PlaylistExplorer() -> Html {
                             let playlist_request = (*playlist_ctx.playlist_request).clone();
                             let selected = dto.clone();
                             let padding = Rc::clone(&recording_padding);
-                            let target_id_owned: Option<String> = match playlist_request.as_ref() {
-                                Some(PlaylistRequest::Target(t)) => Some(t.to_string()),
+                            let target_name = match playlist_request.as_ref() {
+                                Some(PlaylistRequest::Target(target_id)) => config.as_ref().and_then(|app_config| {
+                                    target_name_for_id(&app_config.sources, *target_id, Some(&selected.input_name))
+                                }),
                                 _ => None,
                             };
                             spawn_local(async move {
-                                let target_id = match target_id_owned {
-                                    Some(t) => t,
+                                let target_name = match target_name {
+                                    Some(name) => name,
                                     None => {
                                         services.toastr.error(translate_clone.t("MESSAGES.RECORDING.NO_TARGET"));
                                         return;
                                     }
                                 };
                                 let source = RecordingSourceInput {
-                                    target_id,
+                                    target_id: target_name,
                                     virtual_id: selected.virtual_id.to_string(),
                                     cluster: selected.cluster,
                                     input_name: selected.input_name.clone(),

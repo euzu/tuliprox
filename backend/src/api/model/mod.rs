@@ -5,7 +5,7 @@ mod app_state;
 mod byte_range;
 mod connection_manager;
 mod download;
-mod event_manager;
+pub mod event_manager;
 mod hls_cache;
 mod hls_provisioning;
 mod metadata_update_manager;

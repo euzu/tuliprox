@@ -84,11 +84,12 @@ impl From<String> for QueueMutationError {
 
 /// Lock ordering for the queue mutation boundary:
 ///
-/// 1. `queue` (`Mutex`) — always taken first.
-/// 2. `scheduled` / `active` / `finished` (`RwLock`, write) — taken after the queue.
-/// 3. `control_signal` (`RwLock`) and `control_notify` (`Notify`) — taken after the
+/// 1. `mutation_guard` (`Mutex`) — outermost for persisted mutations and ordered control publication.
+/// 2. `queue` (`Mutex`) — always taken before persisted state locks.
+/// 3. `scheduled` / `active` / `finished` (`RwLock`, write) — taken after the queue.
+/// 4. `control_signal` (`RwLock`) and `control_notify` (`Notify`) — taken after the
 ///    queue locks; they signal runtime state, not persisted state.
-/// 4. `revision` (`AtomicU64`) — no lock; swapped atomically with the
+/// 5. `revision` (`AtomicU64`) — no lock; swapped atomically with the
 ///    commit step.
 ///
 /// The queue mutation boundary (`mutate`) holds the queue locks only while
@@ -110,43 +111,94 @@ pub async fn mutate<F, R>(this: &DownloadQueue, op: F) -> Result<R, QueueMutatio
 where
     F: FnOnce(&mut PersistedDownloadQueue) -> Result<R, QueueMutationError>,
 {
+    match mutate_optional(this, |candidate| op(candidate).map(Some)).await? {
+        Some(result) => Ok(result),
+        None => Err(QueueMutationError::new("mutation unexpectedly skipped")),
+    }
+}
+
+pub(in crate::api) async fn mutate_optional<F, R>(
+    this: &DownloadQueue,
+    op: F,
+) -> Result<Option<R>, QueueMutationError>
+where
+    F: FnOnce(&mut PersistedDownloadQueue) -> Result<Option<R>, QueueMutationError>,
+{
     let _mutation = this.mutation_guard.lock().await;
+    mutate_optional_locked(this, op).await
+}
+
+async fn mutate_optional_locked<F, R>(
+    this: &DownloadQueue,
+    op: F,
+) -> Result<Option<R>, QueueMutationError>
+where
+    F: FnOnce(&mut PersistedDownloadQueue) -> Result<Option<R>, QueueMutationError>,
+{
     let next_revision = this.revision.load(Ordering::SeqCst).saturating_add(1);
 
     // 2. Build candidate under the queue locks.
-    let queue = this.queue.lock().await;
-    let scheduled = this.scheduled.read().await;
-    let active = this.active.read().await;
-    let finished = this.finished.read().await;
-    let candidate_queue: VecDeque<PersistedFileDownload> =
-        queue.iter().map(DownloadQueue::to_persisted).collect();
-    let candidate_scheduled: Vec<PersistedFileDownload> =
-        scheduled.iter().map(DownloadQueue::to_persisted).collect();
-    let candidate_active: Option<PersistedFileDownload> = active.as_ref().map(DownloadQueue::to_persisted);
-    let candidate_finished: Vec<PersistedFileDownload> =
-        finished.iter().map(DownloadQueue::to_persisted).collect();
-    drop(finished);
-    drop(active);
-    drop(scheduled);
-    drop(queue);
+    let mut candidate = this.snapshot_current(QueueRevision(next_revision)).await;
 
     // 3. Apply the mutation to a candidate snapshot. The closure can do
     //    arbitrary validation and refer back to the candidate's prior
     //    state.
-    let mut candidate = PersistedDownloadQueue {
-        queue: candidate_queue.into_iter().collect(),
+    let Some(result) = op(&mut candidate)? else {
+        return Ok(None);
+    };
+
+    let content = this
+        .state_file
+        .as_ref()
+        .map(|_| serde_json::to_vec_pretty(&candidate))
+        .transpose()
+        .map_err(|err| QueueMutationError::from_io(std::io::Error::other(err)))?;
+
+    let PersistedDownloadQueue {
+        queue: candidate_queue,
         scheduled: candidate_scheduled,
         active: candidate_active,
         finished: candidate_finished,
-        revision: QueueRevision(next_revision),
-    };
-    let result = op(&mut candidate)?;
+        revision: _,
+    } = candidate;
 
-    // 3. Persist atomically. Failure leaves the in-memory state and
-    //    revision unchanged.
-    if let Some(state_file) = this.state_file.as_ref() {
-        let content = serde_json::to_vec_pretty(&candidate)
-            .map_err(|e| QueueMutationError::from_io(std::io::Error::other(e)))?;
+    // 4. Validate every persisted entry into its in-memory form before
+    // swapping. A single corrupt entry (invalid URL, kind/metadata
+    // invariant violation) must abort the commit so the persisted file
+    // and the in-memory state stay identical. Without this, a bad URL
+    // would be silently dropped from memory while the file still
+    // listed it, desyncing the two.
+    let mut queue: VecDeque<FileDownload> = VecDeque::with_capacity(candidate_queue.len());
+    for p in candidate_queue {
+        queue.push_back(
+            DownloadQueue::from_persisted(p)
+                .map_err(|e| QueueMutationError::new(format!("persisted queue entry invalid: {e}")))?,
+        );
+    }
+    let mut scheduled: Vec<FileDownload> = Vec::with_capacity(candidate_scheduled.len());
+    for p in candidate_scheduled {
+        scheduled.push(
+            DownloadQueue::from_persisted(p)
+                .map_err(|e| QueueMutationError::new(format!("persisted scheduled entry invalid: {e}")))?,
+        );
+    }
+    let active = match candidate_active {
+        Some(p) => Some(
+            DownloadQueue::from_persisted(p)
+                .map_err(|e| QueueMutationError::new(format!("persisted active entry invalid: {e}")))?,
+        ),
+        None => None,
+    };
+    let mut finished: Vec<FileDownload> = Vec::with_capacity(candidate_finished.len());
+    for p in candidate_finished {
+        finished.push(
+            DownloadQueue::from_persisted(p)
+                .map_err(|e| QueueMutationError::new(format!("persisted finished entry invalid: {e}")))?,
+        );
+    }
+
+    // 5. Persist only after the complete candidate has been validated.
+    if let (Some(state_file), Some(content)) = (this.state_file.as_ref(), content) {
         if let Some(parent) = state_file.parent() {
             fs::create_dir_all(parent).await.map_err(QueueMutationError::from_io)?;
         }
@@ -155,42 +207,7 @@ where
         fs::rename(&tmp_path, state_file).await.map_err(QueueMutationError::from_io)?;
     }
 
-    // 4. Validate every persisted entry into its in-memory form before
-    // swapping. A single corrupt entry (invalid URL, kind/metadata
-    // invariant violation) must abort the commit so the persisted file
-    // and the in-memory state stay identical. Without this, a bad URL
-    // would be silently dropped from memory while the file still
-    // listed it, desyncing the two.
-    let mut queue: VecDeque<FileDownload> = VecDeque::with_capacity(candidate.queue.len());
-    for p in candidate.queue {
-        queue.push_back(
-            DownloadQueue::from_persisted(p)
-                .map_err(|e| QueueMutationError::new(format!("persisted queue entry invalid: {e}")))?,
-        );
-    }
-    let mut scheduled: Vec<FileDownload> = Vec::with_capacity(candidate.scheduled.len());
-    for p in candidate.scheduled {
-        scheduled.push(
-            DownloadQueue::from_persisted(p)
-                .map_err(|e| QueueMutationError::new(format!("persisted scheduled entry invalid: {e}")))?,
-        );
-    }
-    let active = match candidate.active {
-        Some(p) => Some(
-            DownloadQueue::from_persisted(p)
-                .map_err(|e| QueueMutationError::new(format!("persisted active entry invalid: {e}")))?,
-        ),
-        None => None,
-    };
-    let mut finished: Vec<FileDownload> = Vec::with_capacity(candidate.finished.len());
-    for p in candidate.finished {
-        finished.push(
-            DownloadQueue::from_persisted(p)
-                .map_err(|e| QueueMutationError::new(format!("persisted finished entry invalid: {e}")))?,
-        );
-    }
-
-    // 5. Commit. Swap the validated in-memory state from the persisted
+    // 6. Commit. Swap the validated in-memory state from the persisted
     // candidate.
     let mut queue_lock = this.queue.lock().await;
     let mut scheduled_lock = this.scheduled.write().await;
@@ -201,7 +218,7 @@ where
     *active_lock = active;
     *finished_lock = finished;
     this.revision.store(next_revision, Ordering::SeqCst);
-    Ok(result)
+    Ok(Some(result))
 }
 
 /// Normalize a pre-DVR recording (kind == Recording, metadata == None) to
@@ -815,6 +832,71 @@ impl Default for DownloadQueue {
 }
 
 impl DownloadQueue {
+    pub(in crate::api) async fn mutate_optional_and_clear_control<F, R>(
+        &self,
+        expected: DownloadControl,
+        op: F,
+    ) -> Result<Option<R>, QueueMutationError>
+    where
+        F: FnOnce(&mut PersistedDownloadQueue) -> Result<Option<R>, QueueMutationError>,
+    {
+        let _mutation = self.mutation_guard.lock().await;
+        let result = mutate_optional_locked(self, op).await?;
+        if result.is_some() {
+            let mut control = self.control_signal.write().await;
+            if *control == expected {
+                *control = DownloadControl::None;
+            }
+        }
+        Ok(result)
+    }
+
+    async fn snapshot_current(&self, revision: QueueRevision) -> PersistedDownloadQueue {
+        let queue = self.queue.lock().await;
+        let scheduled = self.scheduled.read().await;
+        let active = self.active.read().await;
+        let finished = self.finished.read().await;
+
+        PersistedDownloadQueue {
+            queue: queue.iter().map(Self::to_persisted).collect(),
+            scheduled: scheduled.iter().map(Self::to_persisted).collect(),
+            active: active.as_ref().map(Self::to_persisted),
+            finished: finished.iter().map(Self::to_persisted).collect(),
+            revision,
+        }
+    }
+
+    pub async fn committed_snapshot(&self) -> (QueueRevision, Vec<FileDownload>) {
+        let _mutation = self.mutation_guard.lock().await;
+        let revision = QueueRevision(self.revision.load(Ordering::SeqCst));
+        let queue = self.queue.lock().await;
+        let scheduled = self.scheduled.read().await;
+        let active = self.active.read().await;
+        let finished = self.finished.read().await;
+        let mut tasks = Vec::with_capacity(
+            queue.len() + scheduled.len() + finished.len() + usize::from(active.is_some()),
+        );
+        tasks.extend(queue.iter().cloned());
+        tasks.extend(scheduled.iter().cloned());
+        tasks.extend(active.iter().cloned());
+        tasks.extend(finished.iter().cloned());
+        (revision, tasks)
+    }
+
+    pub async fn committed_download_snapshot(
+        &self,
+    ) -> (Vec<FileDownload>, Option<FileDownload>, Vec<FileDownload>) {
+        let _mutation = self.mutation_guard.lock().await;
+        let queue = self.queue.lock().await;
+        let scheduled = self.scheduled.read().await;
+        let active = self.active.read().await;
+        let finished = self.finished.read().await;
+        let mut queued = Vec::with_capacity(queue.len() + scheduled.len());
+        queued.extend(queue.iter().cloned());
+        queued.extend(scheduled.iter().cloned());
+        (queued, active.clone(), finished.clone())
+    }
+
     fn finalize_missed_recording(mut download: FileDownload) -> FileDownload {
         download.finished = true;
         download.paused = false;
@@ -1073,52 +1155,124 @@ impl DownloadQueue {
     }
 
     /// Pause the active download. Persists the new state through the
-    /// transactional boundary. The control signal is set outside the
-    /// boundary because it is runtime-only state, not persisted.
-    pub async fn pause_active(&self) -> Result<(), QueueMutationError> {
+    /// transactional boundary. The runtime-only control signal is published
+    /// after the commit while the mutation guard still preserves ordering.
+    pub async fn pause_active(&self, uuid: &str) -> Result<bool, QueueMutationError> {
+        let _mutation = self.mutation_guard.lock().await;
+        let changed = mutate_optional_locked(self, |candidate| {
+            let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
+                return Ok(None);
+            };
+            active.paused = true;
+            active.state = DownloadState::Paused;
+            active.next_retry_at = None;
+            Ok(Some(true))
+        })
+        .await?
+        .unwrap_or(false);
+        if !changed {
+            return Ok(false);
+        }
         *self.control_signal.write().await = DownloadControl::Pause;
         self.control_notify.notify_waiters();
-        mutate(self, |candidate| {
-            if let Some(active) = candidate.active.as_mut() {
-                active.paused = true;
-                active.state = DownloadState::Paused;
-                active.next_retry_at = None;
-            }
-            Ok(())
-        })
-        .await
+        Ok(true)
     }
 
     /// Resume the active download. Persists the new state through the
     /// transactional boundary.
-    pub async fn resume_active(&self) -> Result<(), QueueMutationError> {
+    pub async fn resume_active(&self, uuid: &str) -> Result<bool, QueueMutationError> {
+        let _mutation = self.mutation_guard.lock().await;
+        let changed = mutate_optional_locked(self, |candidate| {
+            let Some(active) = candidate
+                .active
+                .as_mut()
+                .filter(|active| active.uuid == uuid && active.paused)
+            else {
+                return Ok(None);
+            };
+            active.paused = false;
+            active.state = DownloadState::Downloading;
+            active.next_retry_at = None;
+            Ok(Some(true))
+        })
+        .await?
+        .unwrap_or(false);
+        if !changed {
+            return Ok(false);
+        }
         *self.control_signal.write().await = DownloadControl::None;
         self.control_notify.notify_waiters();
-        mutate(self, |candidate| {
-            if let Some(active) = candidate.active.as_mut() {
-                active.paused = false;
-                active.state = DownloadState::Downloading;
-                active.next_retry_at = None;
-            }
-            Ok(())
-        })
-        .await
+        Ok(true)
     }
 
     /// Cancel the active download. Persists the new state through the
     /// transactional boundary.
-    pub async fn cancel_active(&self) -> Result<(), QueueMutationError> {
+    pub async fn cancel_active_matching(&self, uuid: &str) -> Result<bool, QueueMutationError> {
+        let _mutation = self.mutation_guard.lock().await;
+        let changed = mutate_optional_locked(self, |candidate| {
+            let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
+                return Ok(None);
+            };
+            active.state = DownloadState::Cancelled;
+            active.error = Some("Cancelled by user".to_string());
+            active.next_retry_at = None;
+            Ok(Some(true))
+        })
+        .await?
+        .unwrap_or(false);
+        if !changed {
+            return Ok(false);
+        }
         *self.control_signal.write().await = DownloadControl::Cancel;
         self.control_notify.notify_waiters();
-        mutate(self, |candidate| {
-            if let Some(active) = candidate.active.as_mut() {
+        Ok(true)
+    }
+
+    pub async fn cancel_active(&self) -> Result<bool, QueueMutationError> {
+        let Some(uuid) = self.active.read().await.as_ref().map(|active| active.uuid.clone()) else {
+            return Ok(false);
+        };
+        self.cancel_active_matching(&uuid).await
+    }
+
+    pub(in crate::api) async fn cancel_requested(&self, uuid: &str) -> Result<Option<bool>, QueueMutationError> {
+        let _mutation = self.mutation_guard.lock().await;
+        let was_paused = mutate_optional_locked(self, |candidate| {
+            let Some(active) = candidate.active.as_ref().filter(|active| active.uuid == uuid) else {
+                return Ok(None);
+            };
+            let was_paused = active.paused;
+            if was_paused {
+                let Some(mut cancelled) = candidate.active.take() else {
+                    return Ok(None);
+                };
+                cancelled.finished = true;
+                cancelled.paused = false;
+                cancelled.next_retry_at = None;
+                cancelled.error.get_or_insert_with(|| "Cancelled by user".to_string());
+                cancelled.state = DownloadState::Cancelled;
+                candidate.finished.push(cancelled);
+                if !candidate.queue.is_empty() {
+                    candidate.active = Some(candidate.queue.remove(0));
+                }
+            } else if let Some(active) = candidate.active.as_mut() {
                 active.state = DownloadState::Cancelled;
                 active.error = Some("Cancelled by user".to_string());
                 active.next_retry_at = None;
             }
-            Ok(())
+            Ok(Some(was_paused))
         })
-        .await
+        .await?;
+
+        if let Some(was_paused) = was_paused {
+            *self.control_signal.write().await = if was_paused {
+                DownloadControl::None
+            } else {
+                DownloadControl::Cancel
+            };
+            self.control_notify.notify_waiters();
+        }
+        Ok(was_paused)
     }
 
     pub fn request_worker_restart(&self) {
@@ -1135,48 +1289,51 @@ impl DownloadQueue {
         });
     }
 
-    pub async fn remove_from_queue(&self, uuid: &str) -> bool {
-        let mut queue = self.queue.lock().await;
-        let initial_len = queue.len();
-        queue.retain(|d| d.uuid != uuid);
-        let removed = queue.len() < initial_len;
-        drop(queue);
-        if !removed {
-            let mut scheduled = self.scheduled.write().await;
-            let initial_len = scheduled.len();
-            scheduled.retain(|d| d.uuid != uuid);
-            let scheduled_removed = scheduled.len() < initial_len;
-            drop(scheduled);
-            if scheduled_removed {
-                let _ = self.persist_to_disk().await;
-                return true;
+    pub async fn remove_from_queue(&self, uuid: &str) -> Result<bool, QueueMutationError> {
+        Ok(mutate_optional(self, |candidate| {
+            let queue_len = candidate.queue.len();
+            candidate.queue.retain(|download| download.uuid != uuid);
+            if candidate.queue.len() != queue_len {
+                return Ok(Some(true));
             }
-        }
-        if removed {
-            let _ = self.persist_to_disk().await;
-        }
-        removed
+            let scheduled_len = candidate.scheduled.len();
+            candidate.scheduled.retain(|download| download.uuid != uuid);
+            Ok((candidate.scheduled.len() != scheduled_len).then_some(true))
+        })
+        .await?
+        .unwrap_or(false))
     }
 
-    pub async fn remove_finished(&self, uuid: &str) -> bool {
-        let mut finished = self.finished.write().await;
-        let initial_len = finished.len();
-        finished.retain(|d| d.uuid != uuid);
-        let removed = finished.len() < initial_len;
-        drop(finished);
-        if removed {
-            let _ = self.persist_to_disk().await;
-        }
-        removed
+    pub async fn remove_finished(&self, uuid: &str) -> Result<bool, QueueMutationError> {
+        Ok(mutate_optional(self, |candidate| {
+            let initial_len = candidate.finished.len();
+            candidate.finished.retain(|download| download.uuid != uuid);
+            Ok((candidate.finished.len() != initial_len).then_some(true))
+        })
+        .await?
+        .unwrap_or(false))
     }
 
-    pub async fn retry_finished(&self, uuid: &str) -> bool {
-        let mut finished = self.finished.write().await;
-        if let Some(pos) = finished.iter().position(|d| d.uuid == uuid) {
-            let mut download = finished.remove(pos);
+    pub async fn remove(&self, uuid: &str) -> Result<bool, QueueMutationError> {
+        Ok(mutate_optional(self, |candidate| {
+            let original_len = candidate.queue.len() + candidate.scheduled.len() + candidate.finished.len();
+            candidate.queue.retain(|download| download.uuid != uuid);
+            candidate.scheduled.retain(|download| download.uuid != uuid);
+            candidate.finished.retain(|download| download.uuid != uuid);
+            let current_len = candidate.queue.len() + candidate.scheduled.len() + candidate.finished.len();
+            Ok((current_len != original_len).then_some(true))
+        })
+        .await?
+        .unwrap_or(false))
+    }
+
+    pub async fn retry_finished(&self, uuid: &str) -> Result<bool, QueueMutationError> {
+        Ok(mutate_optional(self, |candidate| {
+            if let Some(pos) = candidate.finished.iter().position(|download| download.uuid == uuid) {
+                let mut download = candidate.finished.remove(pos);
             if download.kind == DownloadKind::Recording {
-                finished.insert(pos, download);
-                return false;
+                    candidate.finished.insert(pos, download);
+                    return Ok(None);
             }
             download.finished = false;
             download.size = 0;
@@ -1185,69 +1342,72 @@ impl DownloadQueue {
             download.state = DownloadState::Queued;
             download.retry_attempts = 0;
             download.next_retry_at = None;
-            drop(finished);
-            self.queue.lock().await.push_back(download);
-            let _ = self.persist_to_disk().await;
-            true
-        } else {
-            false
-        }
+                candidate.queue.push(download);
+                Ok(Some(true))
+            } else {
+                Ok(None)
+            }
+        })
+        .await?
+        .unwrap_or(false))
     }
 
     pub async fn promote_due_scheduled(&self, now_ts: i64) -> usize {
-        let mut scheduled = self.scheduled.write().await;
-        if scheduled.is_empty() {
-            return 0;
-        }
+        let result = mutate_optional(self, |candidate| {
+            let mut due_downloads = Vec::new();
+            let mut missed_recordings = Vec::new();
+            candidate.scheduled.retain(|download| {
+                let is_missed = download.kind == DownloadKind::Recording
+                    && download
+                        .start_at
+                        .zip(download.duration_secs)
+                        .is_some_and(|(start_at, duration_secs)| {
+                            now_ts
+                                >= start_at.saturating_add(
+                                    i64::try_from(duration_secs).unwrap_or(i64::MAX),
+                                )
+                        });
+                if is_missed {
+                    let mut missed = download.clone();
+                    missed.finished = true;
+                    missed.paused = false;
+                    missed.state = DownloadState::Failed;
+                    missed.error = Some(RECORDING_WINDOW_EXPIRED_ERR.to_string());
+                    missed_recordings.push(missed);
+                    return false;
+                }
+                let is_due = download.start_at.is_some_and(|start_at| start_at <= now_ts);
+                if is_due {
+                    let mut queued = download.clone();
+                    queued.state = DownloadState::Queued;
+                    queued.paused = false;
+                    queued.finished = false;
+                    queued.error = None;
+                    queued.size = 0;
+                    queued.total_size = None;
+                    queued.retry_attempts = 0;
+                    queued.next_retry_at = None;
+                    due_downloads.push(queued);
+                }
+                !is_due
+            });
 
-        let mut due_downloads = Vec::new();
-        let mut missed_recordings = Vec::new();
-        scheduled.retain(|download| {
-            let is_missed = Self::recording_start_missed_window(download, now_ts);
-            if is_missed {
-                missed_recordings.push(Self::finalize_missed_recording(download.clone()));
-                return false;
+            if due_downloads.is_empty() && missed_recordings.is_empty() {
+                return Ok(None);
             }
-            let is_due = download.start_at.is_some_and(|start_at| start_at <= now_ts);
-            if is_due {
-                let mut queued = download.clone();
-                queued.state = DownloadState::Queued;
-                queued.paused = false;
-                queued.finished = false;
-                queued.error = None;
-                queued.size = 0;
-                queued.total_size = None;
-                queued.retry_attempts = 0;
-                queued.next_retry_at = None;
-                due_downloads.push(queued);
-            }
-            !is_due
-        });
-        drop(scheduled);
 
-        let had_missed_recordings = !missed_recordings.is_empty();
-        let missed_count = missed_recordings.len();
-        if had_missed_recordings {
-            self.finished.write().await.extend(missed_recordings);
+            let due_count = due_downloads.len();
+            let missed_count = missed_recordings.len();
+            candidate.finished.extend(missed_recordings);
+            candidate.queue.splice(0..0, due_downloads);
+            Ok(Some(if due_count == 0 { missed_count } else { due_count }))
+        })
+        .await;
+
+        match result {
+            Ok(Some(promoted)) => promoted,
+            Ok(None) | Err(_) => 0,
         }
-
-        if due_downloads.is_empty() {
-            if had_missed_recordings {
-                let _ = self.persist_to_disk().await;
-                return missed_count;
-            }
-            return 0;
-        }
-
-        let due_count = due_downloads.len();
-        let mut queue = self.queue.lock().await;
-        for download in due_downloads.into_iter().rev() {
-            queue.push_front(download);
-        }
-        drop(queue);
-
-        let _ = self.persist_to_disk().await;
-        due_count
     }
 
     pub async fn promote_due_scheduled_now(&self) -> usize { self.promote_due_scheduled(Utc::now().timestamp()).await }
@@ -1315,14 +1475,14 @@ mod tests {
         };
 
         *queue.active.write().await = Some(active);
-        queue.pause_active().await.expect("pause active");
+        queue.pause_active("id").await.expect("pause active");
 
         let paused = queue.active.read().await.clone().expect("active download");
         assert_eq!(paused.state, DownloadState::Paused);
         assert!(paused.paused);
         assert!(!paused.finished);
 
-        queue.resume_active().await.expect("resume active");
+        queue.resume_active("id").await.expect("resume active");
 
         let resumed = queue.active.read().await.clone().expect("active download");
         assert_eq!(resumed.state, DownloadState::Downloading);
@@ -1596,7 +1756,7 @@ mod tests {
             recording: None,
         });
 
-        assert!(queue.retry_finished("done").await);
+        assert!(queue.retry_finished("done").await.expect("retry finished"));
         let queued = queue.queue.lock().await.front().cloned().expect("queued download");
         assert_eq!(queued.state, DownloadState::Queued);
         assert_eq!(queued.retry_attempts, 0);
@@ -1629,7 +1789,7 @@ mod tests {
             recording: None,
         });
 
-        assert!(!queue.retry_finished("recording").await);
+        assert!(!queue.retry_finished("recording").await.expect("reject recording retry"));
         assert!(queue.queue.lock().await.is_empty());
         assert_eq!(queue.finished.read().await.len(), 1);
     }
@@ -1681,10 +1841,12 @@ mod tests {
         };
 
         queue.scheduled.write().await.extend([due, future]);
+        let revision = queue.revision.load(Ordering::SeqCst);
 
         let promoted = queue.promote_due_scheduled(150).await;
 
         assert_eq!(promoted, 1);
+        assert_eq!(queue.revision.load(Ordering::SeqCst), revision + 1);
         let queued_items = queue.queue.lock().await.iter().cloned().collect::<Vec<_>>();
         assert_eq!(queued_items.len(), 1);
         assert_eq!(queued_items[0].uuid, "due");
@@ -2554,6 +2716,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mutate_invalid_candidate_keeps_existing_file_memory_and_revision() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_file = dir.path().join("downloads_state.json");
+        let queue = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+        let task = DownloadQueue::to_persisted(&make_test_recording_task("rec-1", dir.path().join("a.ts")));
+        mutate(&queue, |candidate| {
+            candidate.queue.push(task);
+            Ok(())
+        })
+        .await
+        .expect("initial commit");
+        let original_file = std::fs::read(&state_file).expect("read initial state");
+
+        let result: Result<(), QueueMutationError> = mutate(&queue, |candidate| {
+            if let Some(download) = candidate.queue.first_mut() {
+                download.url = "not a url".to_string();
+            }
+            Ok(())
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(queue.revision.load(Ordering::SeqCst), 1);
+        assert_eq!(std::fs::read(&state_file).expect("read unchanged state"), original_file);
+        assert_eq!(queue.queue.lock().await.front().map(|download| download.uuid.as_str()), Some("rec-1"));
+    }
+
+    #[tokio::test]
+    async fn control_uuid_mismatch_is_noop_and_preserves_next_task() {
+        let queue = DownloadQueue::new();
+        *queue.active.write().await = Some(make_test_recording_task("active", PathBuf::from("/tmp/active.ts")));
+        queue
+            .queue
+            .lock()
+            .await
+            .push_back(make_test_recording_task("next", PathBuf::from("/tmp/next.ts")));
+
+        assert!(!queue.pause_active("next").await.expect("uuid mismatch"));
+
+        assert_eq!(queue.revision.load(Ordering::SeqCst), 0);
+        assert_eq!(queue.active.read().await.as_ref().map(|download| download.uuid.as_str()), Some("active"));
+        assert_eq!(queue.queue.lock().await.front().map(|download| download.uuid.as_str()), Some("next"));
+        assert_eq!(*queue.control_signal.read().await, DownloadControl::None);
+    }
+
+    #[tokio::test]
+    async fn retry_finished_legacy_writer_commits_one_revision() {
+        let queue = DownloadQueue::new();
+        let mut finished = make_test_recording_task("done", PathBuf::from("/tmp/done.ts"));
+        finished.kind = DownloadKind::Download;
+        finished.recording = None;
+        finished.finished = true;
+        finished.state = DownloadState::Failed;
+        queue.finished.write().await.push(finished);
+
+        assert!(queue.retry_finished("done").await.expect("retry commit"));
+
+        assert_eq!(queue.revision.load(Ordering::SeqCst), 1);
+        assert!(queue.finished.read().await.is_empty());
+        assert_eq!(queue.queue.lock().await.front().map(|download| download.uuid.as_str()), Some("done"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_legacy_writers_serialize_and_increment_each_revision() {
+        let queue = Arc::new(DownloadQueue::new());
+        queue
+            .queue
+            .lock()
+            .await
+            .push_back(make_test_recording_task("remove", PathBuf::from("/tmp/remove.ts")));
+        let mut finished = make_test_recording_task("retry", PathBuf::from("/tmp/retry.ts"));
+        finished.kind = DownloadKind::Download;
+        finished.recording = None;
+        finished.finished = true;
+        finished.state = DownloadState::Failed;
+        queue.finished.write().await.push(finished);
+
+        let remove_queue = Arc::clone(&queue);
+        let retry_queue = Arc::clone(&queue);
+        let (removed, retried) = tokio::join!(
+            async move { remove_queue.remove_from_queue("remove").await },
+            async move { retry_queue.retry_finished("retry").await },
+        );
+
+        assert!(removed.expect("remove commit"));
+        assert!(retried.expect("retry commit"));
+        assert_eq!(queue.revision.load(Ordering::SeqCst), 2);
+        assert_eq!(queue.queue.lock().await.front().map(|download| download.uuid.as_str()), Some("retry"));
+        assert!(queue.finished.read().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn mutate_serializes_concurrent_calls() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_file = dir.path().join("downloads_state.json");
@@ -2574,6 +2828,115 @@ mod tests {
         }
         let final_rev = queue.revision.load(Ordering::SeqCst);
         assert_eq!(final_rev, 5);
+    }
+
+    #[tokio::test]
+    async fn committed_snapshot_waits_for_mutation_boundary() {
+        let queue = std::sync::Arc::new(DownloadQueue::new());
+        let task = make_test_recording_task("rec-1", PathBuf::from("/tmp/rec-1.ts"));
+        queue.queue.lock().await.push_back(task);
+
+        let mutation_guard = queue.mutation_guard.lock().await;
+        let snapshot_queue = std::sync::Arc::clone(&queue);
+        let snapshot = tokio::spawn(async move { snapshot_queue.committed_snapshot().await });
+
+        tokio::task::yield_now().await;
+        assert!(!snapshot.is_finished(), "snapshot must wait for the mutation boundary");
+
+        drop(mutation_guard);
+        let Ok((revision, tasks)) = snapshot.await else {
+            unreachable!("snapshot task failed");
+        };
+        assert_eq!(revision, QueueRevision(0));
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks.first().map(|task| task.uuid.as_str()), Some("rec-1"));
+    }
+
+    #[tokio::test]
+    async fn committed_download_snapshot_waits_for_mutation_boundary() {
+        let queue = Arc::new(DownloadQueue::new());
+        let mutation_guard = queue.mutation_guard.lock().await;
+        let snapshot_queue = Arc::clone(&queue);
+        let snapshot = tokio::spawn(async move { snapshot_queue.committed_download_snapshot().await });
+
+        tokio::task::yield_now().await;
+        assert!(!snapshot.is_finished());
+
+        drop(mutation_guard);
+        assert!(snapshot.await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn control_signal_is_ordered_inside_mutation_guard() {
+        let queue = Arc::new(DownloadQueue::new());
+        *queue.active.write().await = Some(make_test_recording_task("active", PathBuf::from("/tmp/active.ts")));
+        let control_lock = queue.control_signal.write().await;
+        let pause_queue = Arc::clone(&queue);
+        let pause = tokio::spawn(async move { pause_queue.pause_active("active").await });
+
+        for _ in 0..100 {
+            if queue.revision.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(queue.revision.load(Ordering::SeqCst), 1);
+        let snapshot_queue = Arc::clone(&queue);
+        let snapshot = tokio::spawn(async move { snapshot_queue.committed_snapshot().await });
+        tokio::task::yield_now().await;
+        assert!(!snapshot.is_finished(), "mutation guard must remain held until control publication");
+
+        drop(control_lock);
+        assert!(pause.await.is_ok_and(|result| result.is_ok()));
+        assert!(snapshot.await.is_ok());
+        assert_eq!(*queue.control_signal.read().await, DownloadControl::Pause);
+    }
+
+    #[tokio::test]
+    async fn same_value_control_is_published_after_worker_commit_and_clear() {
+        let queue = Arc::new(DownloadQueue::new());
+        *queue.active.write().await = Some(make_test_recording_task("task-a", PathBuf::from("/tmp/task-a.ts")));
+        queue
+            .queue
+            .lock()
+            .await
+            .push_back(make_test_recording_task("task-b", PathBuf::from("/tmp/task-b.ts")));
+        let mut control_lock = queue.control_signal.write().await;
+        *control_lock = DownloadControl::Cancel;
+        let worker_queue = Arc::clone(&queue);
+        let worker_commit = tokio::spawn(async move {
+            worker_queue
+                .mutate_optional_and_clear_control(DownloadControl::Cancel, |candidate| {
+                    let Some(mut active) = candidate.active.take() else {
+                        return Ok(None);
+                    };
+                    active.finished = true;
+                    candidate.finished.push(active);
+                    if !candidate.queue.is_empty() {
+                        candidate.active = Some(candidate.queue.remove(0));
+                    }
+                    Ok(Some(true))
+                })
+                .await
+        });
+
+        for _ in 0..100 {
+            if queue.revision.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(queue.revision.load(Ordering::SeqCst), 1);
+        let api_queue = Arc::clone(&queue);
+        let newer_cancel = tokio::spawn(async move { api_queue.cancel_active_matching("task-b").await });
+        tokio::task::yield_now().await;
+        assert!(!newer_cancel.is_finished());
+
+        drop(control_lock);
+
+        assert!(worker_commit.await.expect("worker task").expect("worker commit").is_some());
+        assert!(newer_cancel.await.expect("cancel task").expect("cancel commit"));
+        assert_eq!(*queue.control_signal.read().await, DownloadControl::Cancel);
     }
 
     #[tokio::test]
@@ -2801,7 +3164,7 @@ mod tests {
             *active = Some(task);
         }
         let prior_revision = queue.revision.load(Ordering::SeqCst);
-        queue.pause_active().await.expect("pause_active");
+        queue.pause_active("rec-1").await.expect("pause_active");
         let active = queue.active.read().await.clone().expect("active");
         assert!(active.paused);
         assert_eq!(active.state, DownloadState::Paused);

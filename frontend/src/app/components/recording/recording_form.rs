@@ -171,6 +171,19 @@ fn format_timestamp_for_filename(ts: i64) -> String {
 /// `recording.write`. Non-admins can only record privately.
 pub fn can_pick_shared(has_recording_write: bool, is_admin_role: bool) -> bool { has_recording_write && is_admin_role }
 
+pub fn target_name_for_id(
+    sources: &shared::model::SourcesConfigDto,
+    target_id: u16,
+    input_name: Option<&str>,
+) -> Option<String> {
+    sources.sources.iter().find_map(|source| {
+        if input_name.is_some_and(|name| !source.inputs.iter().any(|configured| configured.as_ref() == name)) {
+            return None;
+        }
+        source.targets.iter().find(|target| target.id == target_id).map(|target| target.name.to_string())
+    })
+}
+
 /// Translate the user's form choice into the wire enum. The form only
 /// ever emits `private` or `shared`; the server's
 /// `recording_shared_not_administrator` code path is the authoritative
@@ -550,11 +563,33 @@ mod tests {
 
     fn source() -> RecordingSourceInput {
         RecordingSourceInput {
-            target_id: "tgt-1".to_string(),
+            target_id: "default".to_string(),
             virtual_id: "virt-1".to_string(),
             cluster: shared::model::XtreamCluster::Live,
             input_name: "input-1".to_string(),
         }
+    }
+
+    #[test]
+    fn target_name_lookup_uses_current_id_and_optional_input_source() {
+        let target =
+            |id, name: &str| shared::model::ConfigTargetDto { id, name: name.to_string(), ..Default::default() };
+        let sources = shared::model::SourcesConfigDto {
+            sources: vec![
+                shared::model::ConfigSourceDto {
+                    inputs: vec!["input-a".to_string().into()],
+                    targets: vec![target(11, "target-a")],
+                },
+                shared::model::ConfigSourceDto {
+                    inputs: vec!["input-b".to_string().into()],
+                    targets: vec![target(12, "stable-target")],
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(target_name_for_id(&sources, 12, Some("input-b")).as_deref(), Some("stable-target"));
+        assert!(target_name_for_id(&sources, 12, Some("input-a")).is_none());
     }
 
     #[test]
@@ -655,7 +690,7 @@ mod tests {
     fn build_request_carries_source_padding_and_visibility() {
         let prefill = RecordingFormPrefill::new(source(), "Title", 100, 200, bounds());
         let request = build_request(&prefill, 60, 30, false, None, None);
-        assert_eq!(request.source.target_id, "tgt-1");
+        assert_eq!(request.source.target_id, "default");
         assert_eq!(request.source.virtual_id, "virt-1");
         assert_eq!(request.source.input_name, "input-1");
         assert_eq!(request.pre_roll_secs, 60);
@@ -735,7 +770,7 @@ mod tests {
             padding: bounds(),
             episode: None,
         });
-        assert_eq!(prefill.source.target_id, "tgt-1");
+        assert_eq!(prefill.source.target_id, "default");
         assert_eq!(prefill.channel_id.as_deref(), Some("ch-1"));
         assert_eq!(prefill.channel_name.as_deref(), Some("Channel 1"));
         assert_eq!(prefill.program_title, "Programme");

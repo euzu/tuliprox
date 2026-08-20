@@ -3,7 +3,7 @@ use crate::{
         endpoints::{download_api::download_queue_snapshot, v1_api::create_status_check},
         model::{AppState, EventMessage},
     },
-    auth::verify_token,
+    auth::{validate_token_claims, verify_token},
 };
 use axum::{
     extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
@@ -11,12 +11,12 @@ use axum::{
 };
 use log::{error, trace};
 use shared::{
+    defaults::default_kick_secs,
     model::{
-        Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserRole, WsCloseCode,
-        PERM_ALL, PROTOCOL_VERSION, ROLE_ADMIN,
+        Claims, Permission, ProtocolHandler, ProtocolHandlerMemory, ProtocolMessage, UserCommand, UserId, UserRole,
+        WsCloseCode, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, PROTOCOL_VERSION, ROLE_ADMIN, TOKEN_NO_AUTH,
     },
-    utils::{concat_path_leading_slash},
-    defaults::{default_kick_secs},
+    utils::concat_path_leading_slash,
 };
 use std::{fmt, io, sync::Arc};
 
@@ -86,14 +86,37 @@ pub fn ws_api_register(web_auth_enabled: bool, web_ui_path: &str) -> axum::Route
 }
 
 #[inline]
-fn set_websocket_auth(mem: &mut ProtocolHandlerMemory, auth_token: String, claims: &shared::model::Claims) {
+fn set_websocket_auth(mem: &mut ProtocolHandlerMemory, auth_token: String, claims: &Claims) -> bool {
+    if validate_token_claims(claims).is_err() {
+        return false;
+    }
     mem.permissions = claims.permissions;
-    mem.role = if claims.roles.iter().any(|role| role == ROLE_ADMIN) {
-        UserRole::Admin
-    } else {
-        UserRole::User
-    };
+    mem.role = if claims.roles.iter().any(|role| role == ROLE_ADMIN) { UserRole::Admin } else { UserRole::User };
+    mem.subject_id = claims.subject_id.as_ref().map(|u| u.0.clone());
     mem.token = Some(auth_token);
+    true
+}
+
+fn set_no_auth_websocket_identity(mem: &mut ProtocolHandlerMemory, auth_token: Option<String>) {
+    mem.permissions = PERM_ALL;
+    mem.role = UserRole::Admin;
+    mem.subject_id = Some(UserId::BUILTIN_ADMIN_NAMESPACE.to_string());
+    mem.token = auth_token;
+}
+
+fn websocket_claims(mem: &ProtocolHandlerMemory) -> Option<Claims> {
+    let subject_id = mem.subject_id.as_ref().map(|subject| UserId::from(subject.clone()))?;
+    Some(Claims {
+        username: "__ws__".to_string(),
+        iss: "tuliprox".to_string(),
+        iat: 0,
+        exp: i64::MAX,
+        roles: if mem.role == UserRole::Admin { vec![ROLE_ADMIN.to_string()] } else { Vec::new() },
+        permissions: mem.permissions,
+        pwd_version: 0,
+        subject_id: Some(subject_id),
+        permission_schema_version: CURRENT_PERMISSION_SCHEMA_VERSION,
+    })
 }
 
 #[inline]
@@ -110,6 +133,9 @@ fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &Eve
     match event {
         EventMessage::DownloadsUpdate(_) | EventMessage::DownloadsDeltaUpdate(_) => {
             mem.permissions.contains(Permission::DownloadRead)
+        }
+        EventMessage::RecordingChanged | EventMessage::RecordingRulesChanged => {
+            mem.permissions.contains(Permission::RecordingRead)
         }
         EventMessage::PlaylistUpdateProgress(_) | EventMessage::PlaylistUpdate(_) => {
             mem.permissions.contains(Permission::PlaylistWrite)
@@ -183,9 +209,7 @@ async fn handle_protocol_message(
         match ProtocolMessage::from_bytes(bytes) {
             Ok(ProtocolMessage::Auth(auth_token)) => {
                 if !auth_required {
-                    mem.permissions = PERM_ALL;
-                    mem.role = UserRole::Admin;
-                    mem.token = Some(auth_token);
+                    set_no_auth_websocket_identity(mem, Some(TOKEN_NO_AUTH.to_string()));
                     return Some(ProtocolMessage::Authorized);
                 }
 
@@ -197,8 +221,11 @@ async fn handle_protocol_message(
                     return Some(ProtocolMessage::Unauthorized);
                 };
 
-                set_websocket_auth(mem, auth_token, &token_data.claims);
-                Some(ProtocolMessage::Authorized)
+                if set_websocket_auth(mem, auth_token, &token_data.claims) {
+                    Some(ProtocolMessage::Authorized)
+                } else {
+                    Some(ProtocolMessage::Unauthorized)
+                }
             }
             Ok(ProtocolMessage::StatusRequest(auth_token)) => {
                 if auth_required {
@@ -214,7 +241,9 @@ async fn handle_protocol_message(
                         return Some(ProtocolMessage::Unauthorized);
                     }
 
-                    set_websocket_auth(mem, auth_token, &token_data.claims);
+                    if !set_websocket_auth(mem, auth_token, &token_data.claims) {
+                        return Some(ProtocolMessage::Unauthorized);
+                    }
                 }
 
                 let status = create_status_check(app_state).await;
@@ -234,6 +263,16 @@ async fn handle_protocol_message(
             Ok(ProtocolMessage::DownloadsRequest) => {
                 if websocket_requires_download_read(auth_required, mem) && (!auth_required || mem.token.is_some()) {
                     Some(ProtocolMessage::DownloadsResponse(download_queue_snapshot(&app_state.downloads).await))
+                } else {
+                    Some(ProtocolMessage::Unauthorized)
+                }
+            }
+            Ok(ProtocolMessage::RecordingSnapshotRequest) => {
+                if let Some(claims) = websocket_claims(mem) {
+                    let (revision, tasks) =
+                        crate::api::model::recording::recording_ws::recording_snapshot(&app_state.downloads, &claims)
+                            .await;
+                    Some(ProtocolMessage::RecordingSnapshotResponse { revision, tasks })
                 } else {
                     Some(ProtocolMessage::Unauthorized)
                 }
@@ -264,7 +303,10 @@ async fn handle_protocol_message(
 }
 
 fn handle_stream_meter_subscribe(mem: &mut ProtocolHandlerMemory, app_state: &Arc<AppState>, auth_required: bool) {
-    if websocket_requires_system_read(auth_required, mem) && (!auth_required || mem.token.is_some()) && !mem.stream_meter_subscribed {
+    if websocket_requires_system_read(auth_required, mem)
+        && (!auth_required || mem.token.is_some())
+        && !mem.stream_meter_subscribed
+    {
         mem.stream_meter_subscribed = true;
         app_state.event_manager.stream_meter_subscriber_connected();
     }
@@ -291,17 +333,16 @@ async fn handle_active_provider_count_request(
         let Some(token_data) = verify_token(&auth_token, secret_key.as_slice()) else {
             return Some(ProtocolMessage::Unauthorized);
         };
-        if token_data.claims.permissions.contains(Permission::SystemRead) {
-            set_websocket_auth(mem, auth_token, &token_data.claims);
+        if token_data.claims.permissions.contains(Permission::SystemRead)
+            && set_websocket_auth(mem, auth_token, &token_data.claims)
+        {
             let connections = app_state.active_provider.get_provider_connections_count().await;
             Some(ProtocolMessage::ActiveProviderCountResponse(connections))
         } else {
             Some(ProtocolMessage::Unauthorized)
         }
     } else {
-        mem.permissions = PERM_ALL;
-        mem.role = UserRole::Admin;
-        mem.token = Some(auth_token);
+        set_no_auth_websocket_identity(mem, Some(TOKEN_NO_AUTH.to_string()));
         let connections = app_state.active_provider.get_provider_connections_count().await;
         Some(ProtocolMessage::ActiveProviderCountResponse(connections))
     }
@@ -322,8 +363,7 @@ async fn handle_incoming_message(
             handle_handshake(msg, socket, *version).await?;
             let mut mem = ProtocolHandlerMemory::default();
             if !auth_required {
-                mem.permissions = PERM_ALL;
-                mem.role = UserRole::Admin;
+                set_no_auth_websocket_identity(&mut mem, Some(TOKEN_NO_AUTH.to_string()));
             }
             *handler = ProtocolHandler::Default(mem);
             Ok(())
@@ -344,7 +384,26 @@ async fn handle_incoming_message(
     }
 }
 
+async fn send_recording_snapshot_event(
+    app_state: &AppState,
+    socket: &mut WebSocket,
+    mem: &ProtocolHandlerMemory,
+) -> Result<(), WebSocketApiError> {
+    if let Some(claims) = websocket_claims(mem) {
+        let (revision, tasks) =
+            crate::api::model::recording::recording_ws::recording_snapshot(&app_state.downloads, &claims).await;
+        send_event_response(
+            socket,
+            ProtocolMessage::RecordingSnapshotResponse { revision, tasks },
+            "Recording snapshot event",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn handle_event_message(
+    app_state: &Arc<AppState>,
     socket: &mut WebSocket,
     event: EventMessage,
     handler: &ProtocolHandler,
@@ -425,8 +484,20 @@ async fn handle_event_message(
                         )
                         .await?;
                     }
-                    EventMessage::InputMetadataUpdatesCompleted(_)
-                    | EventMessage::InputMetadataUpdatesStarted(_) => {
+                    EventMessage::RecordingChanged => {
+                        // Re-fetch the per-session filtered snapshot so the
+                        // visibility contract is enforced by `recording_ws`.
+                        send_recording_snapshot_event(app_state, socket, mem).await?;
+                    }
+                    EventMessage::RecordingRulesChanged => {
+                        // The rule repository is per-process; the
+                        // session-filter is enforced server-side by
+                        // `list_recording_rules`. Just notify the
+                        // frontend — it will re-fetch.
+                        send_event_response(socket, ProtocolMessage::RecordingRulesChanged, "Recording rules changed")
+                            .await?;
+                    }
+                    EventMessage::InputMetadataUpdatesCompleted(_) | EventMessage::InputMetadataUpdatesStarted(_) => {
                         // Internal events or already handled above
                     }
                 }
@@ -442,10 +513,7 @@ async fn send_event_response(
     context: &'static str,
 ) -> Result<(), WebSocketApiError> {
     let msg = message.to_bytes()?;
-    socket
-        .send(Message::Binary(msg))
-        .await
-        .map_err(|source| WebSocketApiError::EventSend { context, source })
+    socket.send(Message::Binary(msg)).await.map_err(|source| WebSocketApiError::EventSend { context, source })
 }
 
 // WebSocket communication logic
@@ -472,7 +540,7 @@ async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_req
             event_result = event_rx.recv() => {
                 match event_result {
                     Ok(event) => {
-                        if let Err(e) = handle_event_message(&mut socket, event, &handler).await {
+                        if let Err(e) = handle_event_message(&app_state, &mut socket, event, &handler).await {
                             trace!("Failed to send ws event: {e}");
                             break;
                         }
@@ -554,14 +622,84 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{main_event_receive_error_action, websocket_can_receive_runtime_events, MainEventReceiveErrorAction};
+    use super::{
+        main_event_receive_error_action, set_no_auth_websocket_identity, set_websocket_auth,
+        websocket_can_receive_runtime_events, websocket_claims, MainEventReceiveErrorAction,
+    };
     use crate::api::model::EventMessage;
     use shared::model::{
-        DownloadsDelta, DownloadsResponse, FileDownloadDto, LibraryScanProgressEvent, LibraryScanSummary,
+        Claims, DownloadsDelta, DownloadsResponse, FileDownloadDto, LibraryScanProgressEvent, LibraryScanSummary,
         LibraryScanSummaryStatus, Permission, PlaylistUpdateProgressEvent, ProtocolHandler, ProtocolHandlerMemory,
-        TaskKindDto, TaskPriorityDto, TransferStatusDto, UserRole, PROTOCOL_VERSION,
+        TaskKindDto, TaskPriorityDto, TransferStatusDto, UserId, UserRole, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL,
+        PROTOCOL_VERSION, ROLE_ADMIN, TOKEN_NO_AUTH,
     };
     use tokio::sync::broadcast::error::RecvError;
+
+    #[test]
+    fn no_auth_websocket_identity_is_builtin_admin() {
+        let mut mem = ProtocolHandlerMemory::default();
+
+        set_no_auth_websocket_identity(&mut mem, Some(TOKEN_NO_AUTH.to_string()));
+        let claims = websocket_claims(&mem).expect("claims");
+
+        assert_eq!(mem.subject_id.as_deref(), Some("builtin:admin"));
+        assert_eq!(mem.role, UserRole::Admin);
+        assert_eq!(mem.permissions, PERM_ALL);
+        assert_eq!(claims.subject_id, Some(UserId::builtin_admin()));
+        assert_eq!(claims.roles, vec![ROLE_ADMIN]);
+        assert_eq!(claims.permission_schema_version, CURRENT_PERMISSION_SCHEMA_VERSION);
+    }
+
+    fn recording_claims(subject_id: Option<UserId>, permission_schema_version: u16) -> Claims {
+        Claims {
+            username: "alice".to_string(),
+            iss: "test".to_string(),
+            iat: 1,
+            exp: i64::MAX,
+            roles: vec![ROLE_ADMIN.to_string()],
+            permissions: Permission::RecordingRead.into(),
+            pwd_version: 0,
+            subject_id,
+            permission_schema_version,
+        }
+    }
+
+    #[test]
+    fn websocket_auth_rejects_stale_permission_schema() {
+        let mut mem = ProtocolHandlerMemory::default();
+        let claims = recording_claims(Some(UserId::from("web:alice")), CURRENT_PERMISSION_SCHEMA_VERSION - 1);
+
+        assert!(!set_websocket_auth(&mut mem, "token".to_string(), &claims));
+        assert!(mem.token.is_none());
+        assert!(mem.subject_id.is_none());
+    }
+
+    #[test]
+    fn websocket_auth_rejects_missing_subject() {
+        let mut mem = ProtocolHandlerMemory::default();
+        let claims = recording_claims(None, CURRENT_PERMISSION_SCHEMA_VERSION);
+
+        assert!(!set_websocket_auth(&mut mem, "token".to_string(), &claims));
+        assert!(mem.token.is_none());
+        assert!(mem.subject_id.is_none());
+    }
+
+    #[test]
+    fn current_websocket_auth_preserves_recording_authorization_context() {
+        let mut mem = ProtocolHandlerMemory::default();
+        let subject_id = UserId::from("web:alice");
+        let claims = recording_claims(Some(subject_id.clone()), CURRENT_PERMISSION_SCHEMA_VERSION);
+
+        assert!(set_websocket_auth(&mut mem, "token".to_string(), &claims));
+        let Some(snapshot_claims) = websocket_claims(&mem) else {
+            unreachable!("authenticated websocket must expose recording claims");
+        };
+
+        assert_eq!(snapshot_claims.subject_id, Some(subject_id));
+        assert_eq!(snapshot_claims.permissions, claims.permissions);
+        assert_eq!(snapshot_claims.roles, claims.roles);
+        assert_eq!(snapshot_claims.permission_schema_version, CURRENT_PERMISSION_SCHEMA_VERSION);
+    }
 
     #[test]
     fn lagged_main_event_receiver_resyncs_authorized_system_reader() {
@@ -608,65 +746,42 @@ mod tests {
 
     #[test]
     fn test_websocket_runtime_events_allowed_for_admin() {
-        let mut mem = ProtocolHandlerMemory {
-            permissions: Permission::SystemRead.into(),
-            ..ProtocolHandlerMemory::default()
-        };
+        let mut mem =
+            ProtocolHandlerMemory { permissions: Permission::SystemRead.into(), ..ProtocolHandlerMemory::default() };
         mem.role = UserRole::Admin;
 
-        assert!(websocket_can_receive_runtime_events(
-            &mem,
-            &EventMessage::ServerError("err".to_string())
-        ));
+        assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::ServerError("err".to_string())));
     }
 
     #[test]
     fn test_websocket_runtime_events_allowed_for_system_read_user() {
-        let mut mem = ProtocolHandlerMemory {
-            permissions: Permission::SystemRead.into(),
-            ..ProtocolHandlerMemory::default()
-        };
+        let mut mem =
+            ProtocolHandlerMemory { permissions: Permission::SystemRead.into(), ..ProtocolHandlerMemory::default() };
         mem.role = UserRole::User;
 
-        assert!(websocket_can_receive_runtime_events(
-            &mem,
-            &EventMessage::ServerError("err".to_string())
-        ));
+        assert!(websocket_can_receive_runtime_events(&mem, &EventMessage::ServerError("err".to_string())));
     }
 
     #[test]
     fn test_websocket_runtime_events_denied_without_system_read() {
-        let mut mem = ProtocolHandlerMemory {
-            permissions: Permission::ConfigRead.into(),
-            ..ProtocolHandlerMemory::default()
-        };
+        let mut mem =
+            ProtocolHandlerMemory { permissions: Permission::ConfigRead.into(), ..ProtocolHandlerMemory::default() };
         mem.role = UserRole::User;
 
-        assert!(!websocket_can_receive_runtime_events(
-            &mem,
-            &EventMessage::ServerError("err".to_string())
-        ));
+        assert!(!websocket_can_receive_runtime_events(&mem, &EventMessage::ServerError("err".to_string())));
     }
 
     #[test]
     fn test_websocket_runtime_events_denied_for_default_permissions() {
-        let mem = ProtocolHandlerMemory {
-            role: UserRole::User,
-            ..ProtocolHandlerMemory::default()
-        };
+        let mem = ProtocolHandlerMemory { role: UserRole::User, ..ProtocolHandlerMemory::default() };
 
-        assert!(!websocket_can_receive_runtime_events(
-            &mem,
-            &EventMessage::ServerError("err".to_string())
-        ));
+        assert!(!websocket_can_receive_runtime_events(&mem, &EventMessage::ServerError("err".to_string())));
     }
 
     #[test]
     fn test_websocket_playlist_progress_allowed_for_playlist_write_without_system_read() {
-        let mut mem = ProtocolHandlerMemory {
-            permissions: Permission::PlaylistWrite.into(),
-            ..ProtocolHandlerMemory::default()
-        };
+        let mut mem =
+            ProtocolHandlerMemory { permissions: Permission::PlaylistWrite.into(), ..ProtocolHandlerMemory::default() };
         mem.role = UserRole::User;
 
         assert!(websocket_can_receive_runtime_events(
@@ -680,10 +795,8 @@ mod tests {
 
     #[test]
     fn test_websocket_library_progress_allowed_for_library_write_without_system_read() {
-        let mut mem = ProtocolHandlerMemory {
-            permissions: Permission::LibraryWrite.into(),
-            ..ProtocolHandlerMemory::default()
-        };
+        let mut mem =
+            ProtocolHandlerMemory { permissions: Permission::LibraryWrite.into(), ..ProtocolHandlerMemory::default() };
         mem.role = UserRole::User;
 
         assert!(websocket_can_receive_runtime_events(
@@ -700,10 +813,8 @@ mod tests {
 
     #[test]
     fn test_websocket_download_updates_allowed_for_download_read_user() {
-        let mut mem = ProtocolHandlerMemory {
-            permissions: Permission::DownloadRead.into(),
-            ..ProtocolHandlerMemory::default()
-        };
+        let mut mem =
+            ProtocolHandlerMemory { permissions: Permission::DownloadRead.into(), ..ProtocolHandlerMemory::default() };
         mem.role = UserRole::User;
 
         assert!(websocket_can_receive_runtime_events(
@@ -718,10 +829,8 @@ mod tests {
 
     #[test]
     fn test_websocket_download_updates_denied_without_download_read() {
-        let mut mem = ProtocolHandlerMemory {
-            permissions: Permission::SystemRead.into(),
-            ..ProtocolHandlerMemory::default()
-        };
+        let mut mem =
+            ProtocolHandlerMemory { permissions: Permission::SystemRead.into(), ..ProtocolHandlerMemory::default() };
         mem.role = UserRole::User;
 
         assert!(!websocket_can_receive_runtime_events(
@@ -736,10 +845,8 @@ mod tests {
 
     #[test]
     fn test_websocket_download_delta_updates_allowed_for_download_read_user() {
-        let mut mem = ProtocolHandlerMemory {
-            permissions: Permission::DownloadRead.into(),
-            ..ProtocolHandlerMemory::default()
-        };
+        let mut mem =
+            ProtocolHandlerMemory { permissions: Permission::DownloadRead.into(), ..ProtocolHandlerMemory::default() };
         mem.role = UserRole::User;
 
         assert!(websocket_can_receive_runtime_events(

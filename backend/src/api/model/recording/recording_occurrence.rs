@@ -214,10 +214,10 @@ pub fn matches_weekly(rule_body: &RuleBody, candidate_start_utc: i64) -> bool {
         .from_local_datetime(&expected_local)
         .earliest()
         .map(|dt| dt.with_timezone(&Utc).timestamp());
-    match slot_start_utc {
-        Some(start) => candidate_start_utc >= start && candidate_start_utc < start + duration_secs.cast_signed(),
-        None => false,
-    }
+    let Ok(duration_secs) = i64::try_from(*duration_secs) else { return false };
+    slot_start_utc
+        .and_then(|start| start.checked_add(duration_secs).map(|end| (start, end)))
+        .is_some_and(|(start, end)| candidate_start_utc >= start && candidate_start_utc < end)
 }
 
 /// Resolve the next weekly occurrence at or after `now` in the

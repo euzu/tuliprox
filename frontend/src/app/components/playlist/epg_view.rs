@@ -1,7 +1,9 @@
 use crate::{
     app::{
         components::{
-            recording::{epg_programme_to_prefill, EpgProgrammePrefillInput, PaddingBounds, RecordingForm},
+            recording::{
+                epg_programme_to_prefill, target_name_for_id, EpgProgrammePrefillInput, PaddingBounds, RecordingForm,
+            },
             EpgSourceSelector, IconButton, NoContent, Search,
         },
         context::ConfigContext,
@@ -867,8 +869,15 @@ pub fn EpgView() -> Html {
         let dialog = dialog.clone();
         let services = services.clone();
         let translate = translate.clone();
+        let config = config_ctx.config.clone();
         Callback::from(move |(program, _event): (PendingProgram, MouseEvent)| {
             let Some(PlaylistEpgRequest::Target(target_id)) = (*selected_epg_source).clone() else {
+                services.toastr.error(translate.t("MESSAGES.RECORDING.NO_TARGET"));
+                return;
+            };
+            let Some(target_name) =
+                config.as_ref().and_then(|app_config| target_name_for_id(&app_config.sources, target_id, None))
+            else {
                 services.toastr.error(translate.t("MESSAGES.RECORDING.NO_TARGET"));
                 return;
             };
@@ -878,7 +887,7 @@ pub fn EpgView() -> Html {
             let padding: PaddingBounds = (*recording_padding).clone();
             spawn_local(async move {
                 let source = RecordingSourceInput {
-                    target_id: target_id.to_string(),
+                    target_id: target_name,
                     virtual_id: program.channel_id.clone(),
                     cluster: XtreamCluster::Live,
                     input_name: String::new(),

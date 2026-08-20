@@ -10,7 +10,7 @@ use crate::api::model::recording_service::{
     CreateRecordingInput, EditRecordingPatch, RecordingService, RecordingSourceInput, ServiceError,
 };
 use crate::api::model::recording_rule_service::{DeleteFuture, RuleServiceError};
-use crate::api::model::{recording_quota, recording_ws, FileDownload};
+use crate::api::model::{event_manager::EventMessage, recording_quota, recording_ws, FileDownload};
 use crate::api::model::AppState;
 use crate::repository::recording_rule_repository::RecordingRuleRepository;
 use shared::model::{
@@ -34,6 +34,7 @@ fn service_error_response(err: &ServiceError) -> axum::response::Response {
         ServiceError::UnknownOwner => StatusCode::UNAUTHORIZED,
         ServiceError::InvalidSource
         | ServiceError::InvalidInterval
+        | ServiceError::PaddingLimitExceeded
         | ServiceError::InvalidState
         | ServiceError::QuotaExceeded => StatusCode::BAD_REQUEST,
         ServiceError::Forbidden | ServiceError::SharedCreationNotAdministrator => StatusCode::FORBIDDEN,
@@ -52,7 +53,7 @@ pub async fn list_recording_tasks(
     if !claims.permissions.contains(Permission::RecordingRead) {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
-    let (revision, mut tasks) = recording_ws::recording_snapshot(&app_state.downloads, &claims);
+    let (revision, mut tasks) = recording_ws::recording_snapshot(&app_state.downloads, &claims).await;
     if let Some(owner) = params.owner.as_deref() {
         tasks.retain(|task| {
             task.recording
@@ -95,14 +96,17 @@ pub async fn create_recording_task(
     Json(body): Json<CreateRecordingTaskBody>,
 ) -> impl IntoResponse {
     let mut source = body.source;
-    resolve_epg_recording_source_if_needed(
+    if !resolve_recording_source(
         &app_state,
         &source.target_id,
         &mut source.virtual_id,
         &mut source.input_name,
         source.cluster,
     )
-    .await;
+    .await
+    {
+        return service_error_response(&ServiceError::InvalidSource);
+    }
     let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
     let input = CreateRecordingInput {
         source: RecordingSourceInput {
@@ -120,14 +124,18 @@ pub async fn create_recording_task(
         channel_id: body.channel_id,
         channel_name: body.channel_name,
         provenance: RecordingProvenance::default(),
+        epg: body.epg,
     };
     match service.create_recording(&claims, &input).await {
-        Ok(view) => Json(CreateRecordingTaskResponse {
-            id: view.uuid,
-            title: view.filename_preview,
-            recording: None,
-        })
-        .into_response(),
+        Ok(view) => {
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
+            Json(CreateRecordingTaskResponse {
+                id: view.uuid,
+                title: view.filename_preview,
+                recording: None,
+            })
+            .into_response()
+        }
         Err(err) => service_error_response(&err),
     }
 }
@@ -145,6 +153,8 @@ pub struct CreateRecordingTaskBody {
     pub channel_id: Option<String>,
     #[serde(default)]
     pub channel_name: Option<String>,
+    #[serde(default)]
+    pub epg: Option<shared::model::recording::EpgEpisodeMetadata>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -171,7 +181,10 @@ pub async fn edit_recording_task(
 ) -> impl IntoResponse {
     let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
     match service.edit_recording(&claims, &id, body.into()).await {
-        Ok(_view) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_view) => {
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(err) => service_error_response(&err),
     }
 }
@@ -216,7 +229,10 @@ pub async fn cancel_recording_task(
 ) -> impl IntoResponse {
     let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
     match service.cancel_recording(&claims, &id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(err) => service_error_response(&err),
     }
 }
@@ -229,7 +245,10 @@ pub async fn delete_recording_task(
 ) -> impl IntoResponse {
     let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
     match service.delete_recording(&claims, &id).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Ok(()) => {
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(err) => service_error_response(&err),
     }
 }
@@ -397,18 +416,6 @@ fn is_admin(claims: &shared::model::Claims) -> bool {
     claims.roles.iter().any(|role| role == ROLE_ADMIN)
 }
 
-fn rule_timezone(app_state: &AppState) -> String {
-    app_state
-        .app_config
-        .config
-        .load()
-        .video
-        .as_ref()
-        .and_then(|v| v.download.as_ref())
-        .and_then(|d| d.recording.as_ref())
-        .map_or_else(|| "UTC".to_string(), |r| r.timezone.to_string())
-}
-
 fn quota_limits_from_config(config: Option<&crate::model::RecordingQuotaConfig>) -> recording_quota::QuotaLimits {
     let mut per_user_bytes = std::collections::HashMap::new();
     if let Some(config) = config {
@@ -441,32 +448,46 @@ async fn all_recording_tasks(app_state: &AppState) -> Vec<FileDownload> {
     tasks
 }
 
-async fn resolve_epg_recording_source_if_needed(
-    app_state: &AppState,
-    target_id: &str,
+async fn resolve_recording_source(
+    app_state: &Arc<AppState>,
+    target_name: &str,
     virtual_id: &mut String,
     input_name: &mut String,
     cluster: XtreamCluster,
-) {
-    if cluster != XtreamCluster::Live || virtual_id.parse::<u32>().is_ok() {
-        return;
-    }
-    let Ok(target) = target_id.parse::<u16>() else {
-        return;
-    };
-    if let Some(resolved) =
+) -> bool {
+    if recording_virtual_id(virtual_id).is_none() {
+        if cluster != XtreamCluster::Live {
+            return false;
+        }
+        let Some(resolved) =
         crate::api::endpoints::v1_api_playlist::resolve_target_live_recording_source_by_epg_channel(
             &app_state.app_config,
-            target,
+            target_name,
             virtual_id,
         )
         .await
-    {
-        *virtual_id = resolved.virtual_id.to_string();
-        if input_name.trim().is_empty() {
-            *input_name = resolved.input_name;
+        else {
+            return false;
+        };
+        if !accept_resolved_recording_source(virtual_id, input_name, resolved) {
+            return false;
         }
     }
+    let Some(virtual_id_value) = recording_virtual_id(virtual_id) else {
+        return false;
+    };
+    let Some(resolved) = crate::api::endpoints::v1_api_playlist::resolve_target_recording_source(
+        &app_state.app_config,
+        target_name,
+        input_name,
+        virtual_id_value,
+        cluster,
+    )
+    .await
+    else {
+        return false;
+    };
+    accept_resolved_recording_source(virtual_id, input_name, resolved)
 }
 
 /// GET /api/v1/recording/rules
@@ -489,7 +510,7 @@ pub async fn list_recording_rules(
         rules
             .into_iter()
             .filter(|rule| rule.visibility == RuleVisibility::Shared || admin || &rule.owner_id == subject_id)
-            .map(|rule| RecordingRuleResponse { id: rule.id, revision })
+            .map(|rule| RecordingRuleResponse { revision, rule })
             .collect::<Vec<_>>(),
     )
     .into_response()
@@ -497,8 +518,11 @@ pub async fn list_recording_rules(
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordingRuleResponse {
-    pub id: String,
+    /// Latest queue revision observed when the response was assembled.
+    /// The frontend uses this to detect stale snapshots when polling.
     pub revision: u64,
+    #[serde(flatten)]
+    pub rule: RecordingRule,
 }
 
 /// POST /api/v1/recording/rules
@@ -510,33 +534,19 @@ pub async fn create_recording_rule(
     let Some(owner_id) = claims.subject_id.clone() else {
         return error_response(StatusCode::UNAUTHORIZED, "recording_token_refresh_required");
     };
-    resolve_epg_recording_source_if_needed(
+    if !resolve_recording_source(
         &app_state,
         &body.target_id,
         &mut body.virtual_id,
         &mut body.input_name,
         XtreamCluster::Live,
     )
-    .await;
+    .await
+    {
+        return rule_error_response(&RuleServiceError::InvalidRule);
+    }
     let now = chrono::Utc::now().timestamp();
-    let rule = RecordingRule {
-        id: format!("rule-{}-{}", now, shared::utils::generate_random_string(8)),
-        owner_id,
-        visibility: body.visibility.unwrap_or_default(),
-        enabled: true,
-        source: RuleSource::new(body.target_id, body.virtual_id, body.input_name),
-        channel_id: body.channel_id,
-        body: RuleBody::WeeklyTimeslot {
-            weekday: body.weekday,
-            local_start_time: body.start_time,
-            duration_secs: body.duration_secs,
-            timezone: body.timezone.unwrap_or_else(|| rule_timezone(&app_state)),
-        },
-        pre_roll_secs: body.pre_roll_secs,
-        post_roll_secs: body.post_roll_secs,
-        created_at: now,
-        updated_at: now,
-    };
+    let rule = recording_rule_from_create(owner_id, body, now);
     if let Err(err) = crate::api::model::recording_rule_service::validate_rule(&rule)
         .and_then(|()| {
             crate::api::model::recording_rule_service::authorize_rule_action(
@@ -550,11 +560,14 @@ pub async fn create_recording_rule(
         return rule_error_response(&err);
     }
     match recording_rule_repo(&app_state).create(rule).await {
-        Ok(rule) => Json(RecordingRuleResponse {
-            id: rule.id,
-            revision: app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst),
-        })
-        .into_response(),
+        Ok(rule) => {
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingRulesChanged);
+            Json(RecordingRuleResponse {
+                revision: app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst),
+                rule,
+            })
+            .into_response()
+        }
         Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed"),
     }
 }
@@ -564,11 +577,7 @@ pub struct CreateRecordingRuleBody {
     pub target_id: String,
     pub virtual_id: String,
     pub input_name: String,
-    pub weekday: u8,
-    pub start_time: String,
-    pub duration_secs: u64,
-    #[serde(default)]
-    pub timezone: Option<String>,
+    pub body: RuleBody,
     #[serde(default)]
     pub visibility: Option<RuleVisibility>,
     #[serde(default)]
@@ -579,6 +588,22 @@ pub struct CreateRecordingRuleBody {
     pub post_roll_secs: u64,
 }
 
+fn recording_rule_from_create(owner_id: UserId, body: CreateRecordingRuleBody, now: i64) -> RecordingRule {
+    RecordingRule {
+        id: format!("rule-{}-{}", now, shared::utils::generate_random_string(8)),
+        owner_id,
+        visibility: body.visibility.unwrap_or_default(),
+        enabled: true,
+        source: RuleSource::new(body.target_id, body.virtual_id, body.input_name),
+        channel_id: body.channel_id,
+        body: body.body,
+        pre_roll_secs: body.pre_roll_secs,
+        post_roll_secs: body.post_roll_secs,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
 /// PATCH /api/v1/recording/rules/{id}
 pub async fn edit_recording_rule(
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -586,6 +611,9 @@ pub async fn edit_recording_rule(
     AuthClaims(claims): AuthClaims,
     Json(body): Json<EditRecordingRuleBody>,
 ) -> impl IntoResponse {
+    if claims.subject_id.is_none() {
+        return error_response(StatusCode::UNAUTHORIZED, "recording_token_refresh_required");
+    }
     let repo = recording_rule_repo(&app_state);
     let mut rule = match repo.load().await {
         Ok(file) => match file.rules.into_iter().find(|rule| rule.id == id) {
@@ -594,47 +622,23 @@ pub async fn edit_recording_rule(
         },
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed"),
     };
-    if let Err(err) = crate::api::model::recording_rule_service::authorize_rule_action(
-        can_write_rules(&claims),
-        is_admin(&claims),
-        claims.subject_id.as_ref().unwrap_or(&rule.owner_id),
-        &rule,
-    ) {
-        return rule_error_response(&err);
-    }
-    if let Some(channel_id) = body.channel_id {
-        rule.channel_id = Some(channel_id);
-    }
-    if let Some(pre_roll_secs) = body.pre_roll_secs {
-        rule.pre_roll_secs = pre_roll_secs;
-    }
-    if let Some(post_roll_secs) = body.post_roll_secs {
-        rule.post_roll_secs = post_roll_secs;
-    }
-    if let RuleBody::WeeklyTimeslot { weekday, local_start_time, duration_secs, timezone } = &mut rule.body {
-        if let Some(value) = body.weekday {
-            *weekday = value;
-        }
-        if let Some(value) = body.start_time {
-            *local_start_time = value;
-        }
-        if let Some(value) = body.duration_secs {
-            *duration_secs = value;
-        }
-        if let Some(value) = body.timezone {
-            *timezone = value;
-        }
-    }
-    rule.updated_at = chrono::Utc::now().timestamp();
-    if let Err(err) = crate::api::model::recording_rule_service::validate_rule(&rule) {
-        return rule_error_response(&err);
+    if let Err(err) = authorize_and_apply_recording_rule_edit(&claims, &mut rule, body, chrono::Utc::now().timestamp()) {
+        return match err {
+            EditRuleError::MissingSubject => {
+                error_response(StatusCode::UNAUTHORIZED, "recording_token_refresh_required")
+            }
+            EditRuleError::Rule(err) => rule_error_response(&err),
+        };
     }
     match repo.update(rule).await {
-        Ok(Some(rule)) => Json(RecordingRuleResponse {
-            id: rule.id,
-            revision: app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst),
-        })
-        .into_response(),
+        Ok(Some(rule)) => {
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingRulesChanged);
+            Json(RecordingRuleResponse {
+                revision: app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst),
+                rule,
+            })
+            .into_response()
+        }
         Ok(None) => rule_error_response(&crate::api::model::recording_rule_service::RuleServiceError::UnknownRule),
         Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed"),
     }
@@ -643,19 +647,89 @@ pub async fn edit_recording_rule(
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct EditRecordingRuleBody {
     #[serde(default)]
-    pub weekday: Option<u8>,
+    pub body: Option<RuleBody>,
     #[serde(default)]
-    pub start_time: Option<String>,
+    pub visibility: Option<RuleVisibility>,
     #[serde(default)]
-    pub duration_secs: Option<u64>,
-    #[serde(default)]
-    pub timezone: Option<String>,
+    pub enabled: Option<bool>,
     #[serde(default)]
     pub channel_id: Option<String>,
+    #[serde(default)]
+    pub clear_channel_id: bool,
     #[serde(default)]
     pub pre_roll_secs: Option<u64>,
     #[serde(default)]
     pub post_roll_secs: Option<u64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum EditRuleError {
+    MissingSubject,
+    Rule(RuleServiceError),
+}
+
+fn authorize_and_apply_recording_rule_edit(
+    claims: &shared::model::Claims,
+    rule: &mut RecordingRule,
+    body: EditRecordingRuleBody,
+    now: i64,
+) -> Result<(), EditRuleError> {
+    let subject_id = claims.subject_id.as_ref().ok_or(EditRuleError::MissingSubject)?;
+    crate::api::model::recording_rule_service::authorize_rule_action(
+        can_write_rules(claims),
+        is_admin(claims),
+        subject_id,
+        rule,
+    )
+    .map_err(EditRuleError::Rule)?;
+    apply_recording_rule_edit(rule, body, now);
+    crate::api::model::recording_rule_service::validate_rule(rule).map_err(EditRuleError::Rule)?;
+    crate::api::model::recording_rule_service::authorize_rule_action(
+        can_write_rules(claims),
+        is_admin(claims),
+        subject_id,
+        rule,
+    )
+    .map_err(EditRuleError::Rule)
+}
+
+fn apply_recording_rule_edit(rule: &mut RecordingRule, body: EditRecordingRuleBody, now: i64) {
+    if body.clear_channel_id {
+        rule.channel_id = None;
+    } else if let Some(channel_id) = body.channel_id {
+        rule.channel_id = Some(channel_id);
+    }
+    if let Some(pre_roll_secs) = body.pre_roll_secs {
+        rule.pre_roll_secs = pre_roll_secs;
+    }
+    if let Some(post_roll_secs) = body.post_roll_secs {
+        rule.post_roll_secs = post_roll_secs;
+    }
+    if let Some(visibility) = body.visibility {
+        rule.visibility = visibility;
+    }
+    if let Some(enabled) = body.enabled {
+        rule.enabled = enabled;
+    }
+    if let Some(rule_body) = body.body {
+        rule.body = rule_body;
+    }
+    rule.updated_at = now;
+}
+
+fn recording_virtual_id(virtual_id: &str) -> Option<u32> { virtual_id.parse::<u32>().ok() }
+
+fn accept_resolved_recording_source(
+    virtual_id: &mut String,
+    input_name: &mut String,
+    resolved: crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource,
+) -> bool {
+    if !input_name.trim().is_empty() && input_name != &resolved.input_name {
+        return false;
+    }
+    *virtual_id = resolved.virtual_id.to_string();
+    *input_name = resolved.input_name;
+    true
 }
 
 /// DELETE /api/v1/recording/rules/{id}
@@ -708,7 +782,10 @@ pub async fn delete_recording_rule(
         }
     }
     match repo.delete(&id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingRulesChanged);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Ok(false) => rule_error_response(&RuleServiceError::UnknownRule),
         Err(_) if future == DeleteFuture::Cancel => rule_error_response(&RuleServiceError::PartialOperation {
             primary: "future_cancelled".to_string(),
@@ -722,8 +799,8 @@ pub async fn delete_recording_rule(
 ///
 /// The router is a thin wrapper. The state type is `Arc<AppState>`
 /// (which matches the rest of the v1 router tree). Production wiring
-/// in `v1_api::router_v1` will call
-/// `recording_api::router().with_state(Arc::clone(&app_state))`.
+/// in `v1_api::router_v1` calls `recording_api_register(router)` which
+/// merges the recording routes into the v1 router tree.
 pub fn recording_api_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
     let recording_routes = Router::new()
         .route("/tasks", get(list_recording_tasks).post(create_recording_task))
@@ -747,6 +824,294 @@ pub fn recording_api_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn edit_claims(subject_id: Option<UserId>, admin: bool) -> shared::model::Claims {
+        shared::model::Claims {
+            username: "alice".to_string(),
+            iss: "tuliprox".to_string(),
+            iat: 0,
+            exp: 0,
+            roles: admin.then(|| ROLE_ADMIN.to_string()).into_iter().collect(),
+            permissions: Permission::RecordingWrite.into(),
+            pwd_version: 0,
+            subject_id,
+            permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+        }
+    }
+
+    fn editable_rule() -> RecordingRule {
+        RecordingRule {
+            id: "rule-1".to_string(),
+            owner_id: UserId::from("web:alice"),
+            visibility: RuleVisibility::Private,
+            enabled: true,
+            source: RuleSource::new("7", "42", "input-a"),
+            channel_id: Some("channel-1".to_string()),
+            body: RuleBody::WeeklyTimeslot {
+                weekday: 3,
+                local_start_time: "20:00".to_string(),
+                duration_secs: 3600,
+                timezone: "UTC".to_string(),
+            },
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn edit_rule_requires_subject_id() {
+        let mut rule = editable_rule();
+        let result = authorize_and_apply_recording_rule_edit(
+            &edit_claims(None, false),
+            &mut rule,
+            EditRecordingRuleBody::default(),
+            2,
+        );
+
+        assert!(matches!(result, Err(EditRuleError::MissingSubject)));
+    }
+
+    #[test]
+    fn owner_cannot_promote_private_rule_to_shared() {
+        let mut rule = editable_rule();
+        let patch: EditRecordingRuleBody = serde_json::from_value(json!({"visibility": "shared"})).expect("parse");
+        let result = authorize_and_apply_recording_rule_edit(
+            &edit_claims(Some(UserId::from("web:alice")), false),
+            &mut rule,
+            patch,
+            2,
+        );
+
+        assert!(matches!(
+            result,
+            Err(EditRuleError::Rule(RuleServiceError::SharedManagementNotAdministrator))
+        ));
+    }
+
+    #[test]
+    fn admin_can_promote_private_rule_to_shared() {
+        let mut rule = editable_rule();
+        let patch: EditRecordingRuleBody = serde_json::from_value(json!({"visibility": "shared"})).expect("parse");
+
+        authorize_and_apply_recording_rule_edit(
+            &edit_claims(Some(UserId::builtin_admin()), true),
+            &mut rule,
+            patch,
+            2,
+        )
+        .expect("admin edit");
+
+        assert_eq!(rule.visibility, RuleVisibility::Shared);
+    }
+
+    #[test]
+    fn edit_rule_clear_channel_id_is_distinct_from_unchanged() {
+        let mut unchanged = editable_rule();
+        apply_recording_rule_edit(&mut unchanged, EditRecordingRuleBody::default(), 2);
+        assert_eq!(unchanged.channel_id.as_deref(), Some("channel-1"));
+
+        let mut cleared = editable_rule();
+        let patch: EditRecordingRuleBody = serde_json::from_value(json!({"clear_channel_id": true})).expect("parse");
+        apply_recording_rule_edit(&mut cleared, patch, 2);
+        assert!(cleared.channel_id.is_none());
+    }
+
+    #[test]
+    fn recording_virtual_id_rejects_non_numeric_and_overflow() {
+        assert_eq!(recording_virtual_id("42"), Some(42));
+        assert_eq!(recording_virtual_id("epg-channel"), None);
+        assert_eq!(recording_virtual_id("4294967296"), None);
+    }
+
+    #[test]
+    fn resolved_source_rejects_conflicting_input_and_canonicalizes_id() {
+        let resolved = crate::api::endpoints::v1_api_playlist::ResolvedRecordingSource {
+            virtual_id: 42,
+            input_name: "input-a".to_string(),
+        };
+        let mut virtual_id = "00042".to_string();
+        let mut input_name = "input-b".to_string();
+        assert!(!accept_resolved_recording_source(&mut virtual_id, &mut input_name, resolved.clone()));
+        assert_eq!(input_name, "input-b");
+
+        input_name.clear();
+        assert!(accept_resolved_recording_source(&mut virtual_id, &mut input_name, resolved));
+        assert_eq!(virtual_id, "42");
+        assert_eq!(input_name, "input-a");
+    }
+
+    #[test]
+    fn create_rule_body_accepts_string_target_and_weekly_body() {
+        let parsed: CreateRecordingRuleBody = serde_json::from_value(json!({
+            "target_id": "default",
+            "virtual_id": "42",
+            "input_name": "input-a",
+            "body": {
+                "kind": "weekly_timeslot",
+                "weekday": 3,
+                "local_start_time": "20:00",
+                "duration_secs": 3600,
+                "timezone": "Europe/Berlin"
+            }
+        }))
+        .expect("parse weekly rule");
+
+        assert_eq!(parsed.target_id, "default");
+        assert!(matches!(parsed.body, RuleBody::WeeklyTimeslot { weekday: 3, .. }));
+    }
+
+    #[test]
+    fn create_rule_body_accepts_new_episode_body() {
+        let parsed: CreateRecordingRuleBody = serde_json::from_value(json!({
+            "target_id": "default",
+            "virtual_id": "42",
+            "input_name": "input-a",
+            "body": {
+                "kind": "new_episode",
+                "series_id": "series-1",
+                "title_pattern": null,
+                "exclude_repeat": true
+            }
+        }))
+        .expect("parse new episode rule");
+
+        assert!(matches!(
+            parsed.body,
+            RuleBody::NewEpisode { series_id: Some(ref id), exclude_repeat: true, .. } if id == "series-1"
+        ));
+    }
+
+    #[test]
+    fn create_rule_body_rejects_numeric_target() {
+        let parsed = serde_json::from_value::<CreateRecordingRuleBody>(json!({
+            "target_id": 7,
+            "virtual_id": "42",
+            "input_name": "input-a",
+            "body": {
+                "kind": "weekly_timeslot",
+                "weekday": 3,
+                "local_start_time": "20:00",
+                "duration_secs": 3600,
+                "timezone": "UTC"
+            }
+        }));
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn create_rule_preserves_new_episode_body() {
+        let body: CreateRecordingRuleBody = serde_json::from_value(json!({
+            "target_id": "default",
+            "virtual_id": "42",
+            "input_name": "input-a",
+            "body": {
+                "kind": "new_episode",
+                "series_id": "series-1",
+                "title_pattern": null,
+                "exclude_repeat": true
+            }
+        }))
+        .expect("parse new episode rule");
+
+        let rule = recording_rule_from_create(UserId::from("web:alice"), body, 123);
+
+        assert_eq!(rule.source.target_id, "default");
+        assert!(matches!(rule.body, RuleBody::NewEpisode { series_id: Some(ref id), .. } if id == "series-1"));
+    }
+
+    #[test]
+    fn create_recording_source_rejects_numeric_target() {
+        let parsed = serde_json::from_value::<CreateRecordingSourceBody>(json!({
+            "target_id": 7,
+            "virtual_id": "42",
+            "cluster": "Live",
+            "input_name": "input-a"
+        }));
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn create_recording_source_accepts_string_target() {
+        let parsed: CreateRecordingSourceBody = serde_json::from_value(json!({
+            "target_id": "default",
+            "virtual_id": "42",
+            "cluster": "Live",
+            "input_name": "input-a"
+        }))
+        .expect("parse recording source");
+
+        assert_eq!(parsed.target_id, "default");
+    }
+
+    #[test]
+    fn edit_rule_body_round_trips_enabled_field() {
+        let wire = r#"{"enabled":false,"visibility":"shared"}"#;
+        let parsed: EditRecordingRuleBody = serde_json::from_str(wire).expect("parse");
+        assert_eq!(parsed.enabled, Some(false));
+        assert!(parsed.visibility.is_some());
+        assert!(parsed.body.is_none());
+    }
+
+    #[test]
+    fn edit_rule_body_replaces_variant() {
+        let parsed: EditRecordingRuleBody = serde_json::from_value(json!({
+            "body": {
+                "kind": "new_episode",
+                "series_id": null,
+                "title_pattern": "News",
+                "exclude_repeat": false
+            }
+        }))
+        .expect("parse edit body");
+
+        assert!(matches!(
+            parsed.body,
+            Some(RuleBody::NewEpisode { title_pattern: Some(ref title), exclude_repeat: false, .. }) if title == "News"
+        ));
+    }
+
+    #[test]
+    fn apply_edit_rule_body_switches_variant() {
+        let mut rule = RecordingRule {
+            id: "rule-1".to_string(),
+            owner_id: UserId::from("web:alice"),
+            visibility: RuleVisibility::Private,
+            enabled: true,
+            source: RuleSource::new("7", "42", "input-a"),
+            channel_id: None,
+            body: RuleBody::WeeklyTimeslot {
+                weekday: 3,
+                local_start_time: "20:00".to_string(),
+                duration_secs: 3600,
+                timezone: "UTC".to_string(),
+            },
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let patch: EditRecordingRuleBody = serde_json::from_value(json!({
+            "body": {
+                "kind": "new_episode",
+                "series_id": null,
+                "title_pattern": "News",
+                "exclude_repeat": false
+            }
+        }))
+        .expect("parse edit body");
+
+        apply_recording_rule_edit(&mut rule, patch, 2);
+
+        assert!(matches!(
+            rule.body,
+            RuleBody::NewEpisode { title_pattern: Some(ref title), exclude_repeat: false, .. } if title == "News"
+        ));
+        assert_eq!(rule.updated_at, 2);
+    }
 
     #[test]
     fn error_response_round_trip_serializes_code() {

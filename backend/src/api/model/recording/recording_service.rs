@@ -9,6 +9,7 @@ use crate::api::model::download::{
     PersistedFileDownload, QueueMutationError,
 };
 use crate::api::model::recording_quota::{self, AdmissionOutcome, QuotaLimits, QuotaPool};
+use crate::api::model::recording_edit::{self, EditError, PaddingBounds};
 use crate::auth::{
     authorize, authorize_orphan, RecordingAction, RecordingDecision, RecordingSubject, TerminalState,
 };
@@ -33,7 +34,7 @@ pub struct RecordingSourceInput {
 
 impl RecordingSourceInput {
     pub fn validate(&self) -> Result<(), ServiceError> {
-        if self.target_id.trim().is_empty() || self.virtual_id.trim().is_empty() {
+        if self.target_id.trim().is_empty() || self.virtual_id.trim().is_empty() || self.input_name.trim().is_empty() {
             return Err(ServiceError::InvalidSource);
         }
         Ok(())
@@ -53,12 +54,13 @@ pub struct CreateRecordingInput {
     pub channel_id: Option<String>,
     pub channel_name: Option<String>,
     pub provenance: RecordingProvenance,
+    pub epg: Option<shared::model::recording::EpgEpisodeMetadata>,
 }
 
 impl CreateRecordingInput {
     pub fn validate(&self) -> Result<(), ServiceError> {
         self.source.validate()?;
-        if self.program_start >= self.program_end {
+        if self.program_end.checked_sub(self.program_start).is_none_or(|duration| duration <= 0) {
             return Err(ServiceError::InvalidInterval);
         }
         Ok(())
@@ -85,6 +87,8 @@ pub enum ServiceError {
     InvalidState,
     /// `program_end - program_start` overflows or is non-positive.
     InvalidInterval,
+    /// Requested padding exceeds the configured recording maximum.
+    PaddingLimitExceeded,
     /// uuid not in the queue.
     UnknownRecording,
     /// `mutate`'s persist step failed and the in-memory state was
@@ -114,11 +118,69 @@ impl ServiceError {
             Self::SharedCreationNotAdministrator => "recording_shared_not_administrator",
             Self::InvalidState => "recording_invalid_state",
             Self::InvalidInterval => "recording_invalid_interval",
+            Self::PaddingLimitExceeded => "recording_padding_limit_exceeded",
             Self::UnknownRecording => "recording_unknown",
             Self::PersistenceFailed => "recording_persistence_failed",
             Self::IoError(_) => "recording_io_error",
             Self::QuotaExceeded => "recording_quota_exceeded",
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EffectiveRecordingWindow {
+    scheduled_start: i64,
+    scheduled_end: i64,
+    execution_start: i64,
+    remaining_duration_secs: u64,
+}
+
+fn effective_recording_window(
+    program_start: i64,
+    program_end: i64,
+    pre_roll_secs: u64,
+    post_roll_secs: u64,
+    now: i64,
+) -> Result<EffectiveRecordingWindow, ServiceError> {
+    if program_end <= program_start {
+        return Err(ServiceError::InvalidInterval);
+    }
+    let pre_roll = i64::try_from(pre_roll_secs).map_err(|_| ServiceError::InvalidInterval)?;
+    let post_roll = i64::try_from(post_roll_secs).map_err(|_| ServiceError::InvalidInterval)?;
+    let scheduled_start = program_start.saturating_sub(pre_roll);
+    let scheduled_end = program_end.saturating_add(post_roll);
+    let execution_start = now.max(scheduled_start);
+    let remaining_duration_secs = scheduled_end
+        .checked_sub(execution_start)
+        .and_then(|duration| u64::try_from(duration).ok())
+        .filter(|duration| *duration > 0)
+        .ok_or(ServiceError::InvalidInterval)?;
+    Ok(EffectiveRecordingWindow {
+        scheduled_start,
+        scheduled_end,
+        execution_start,
+        remaining_duration_secs,
+    })
+}
+
+fn padding_bounds(recording: Option<&crate::model::RecordingConfig>) -> PaddingBounds {
+    recording.map_or(
+        PaddingBounds {
+            max_pre_roll_secs: shared::model::default_recording_max_pre_roll_secs(),
+            max_post_roll_secs: shared::model::default_recording_max_post_roll_secs(),
+        },
+        |config| PaddingBounds {
+            max_pre_roll_secs: config.max_pre_roll_secs,
+            max_post_roll_secs: config.max_post_roll_secs,
+        },
+    )
+}
+
+fn map_edit_validation_error(error: &EditError) -> ServiceError {
+    match error {
+        EditError::InvalidInterval => ServiceError::InvalidInterval,
+        EditError::PaddingLimitExceeded => ServiceError::PaddingLimitExceeded,
+        _ => ServiceError::InvalidState,
     }
 }
 
@@ -170,8 +232,20 @@ impl RecordingService {
         claims.subject_id.clone().ok_or(ServiceError::UnknownOwner)
     }
 
+    fn recording_url(&self, source: &RecordingSourceInput) -> Option<String> {
+        let virtual_id = source.virtual_id.parse::<u32>().ok()?;
+        v1_api_playlist::resolve_recording_target(&self.app_config, &source.target_id, &source.input_name)?;
+        v1_api_playlist::build_recording_source_descriptor(
+            &source.target_id,
+            &source.input_name,
+            virtual_id,
+            source.cluster,
+        )
+    }
+
     /// Create a new recording. Enforces well-formedness, source
     /// validity, owner from claims, and the authorization matrix.
+    #[allow(clippy::too_many_lines)]
     pub async fn create_recording(
         &self,
         claims: &shared::model::Claims,
@@ -179,24 +253,30 @@ impl RecordingService {
     ) -> Result<RecordingTaskView, ServiceError> {
         input.validate()?;
         let owner_id = Self::subject_id(claims)?;
-        let target_id = input.source.target_id.parse::<u16>().map_err(|_| ServiceError::InvalidSource)?;
-        let virtual_id = input.source.virtual_id.parse::<u32>().map_err(|_| ServiceError::InvalidSource)?;
         let config = self.app_config.config.load();
         let Some(download_cfg) = config.video.as_ref().and_then(|v| v.download.as_ref()) else {
             return Err(ServiceError::InvalidSource);
         };
-        let url = v1_api_playlist::build_webplayer_recording_url(
-            &self.app_config,
-            target_id,
-            virtual_id,
-            input.source.cluster,
+        let recording_cfg = download_cfg.recording.as_ref();
+        recording_edit::validate_padding(
+            input.pre_roll_secs,
+            input.post_roll_secs,
+            padding_bounds(recording_cfg),
         )
-        .ok_or(ServiceError::InvalidSource)?;
+        .map_err(|error: EditError| map_edit_validation_error(&error))?;
+        let window = effective_recording_window(
+            input.program_start,
+            input.program_end,
+            input.pre_roll_secs,
+            input.post_roll_secs,
+            chrono::Utc::now().timestamp(),
+        )?;
+        let url = self.recording_url(&input.source).ok_or(ServiceError::InvalidSource)?;
 
         // Shared creation requires admin.
         authorize_create_recording(claims, &owner_id, input.visibility)?;
 
-        let duration_secs = u64::try_from(input.program_end - input.program_start).map_err(|_| ServiceError::InvalidInterval)?;
+        let duration_secs = window.remaining_duration_secs;
         let priority = download_cfg.recording_priority;
         let filename = render_filename_preview(claims, input);
         let input_name: Option<Arc<str>> = (!input.source.input_name.trim().is_empty())
@@ -205,7 +285,7 @@ impl RecordingService {
             &url,
             &filename,
             download_cfg,
-            input.program_start,
+            window.execution_start,
             duration_secs,
             input_name,
             priority,
@@ -215,7 +295,8 @@ impl RecordingService {
             input.source.target_id.clone(),
             input.source.virtual_id.clone(),
             input.source.input_name.clone(),
-        );
+        )
+        .with_cluster(input.source.cluster);
         let mut meta = RecordingMetadata::new(
             RecordingOwner::User(owner_id.clone()),
             input.visibility,
@@ -225,11 +306,13 @@ impl RecordingService {
             input.pre_roll_secs,
             input.post_roll_secs,
         );
+        meta.scheduled_start = Some(window.scheduled_start);
+        meta.scheduled_end = Some(window.scheduled_end);
         meta.channel_id.clone_from(&input.channel_id);
         meta.channel_name.clone_from(&input.channel_name);
         meta.program_title = Some(input.program_title.clone());
         meta.provenance = input.provenance.clone();
-        let recording_cfg = download_cfg.recording.as_ref();
+        meta.epg.clone_from(&input.epg);
         let fallback_bytes_per_minute = recording_cfg.map_or(8 * 1024 * 1024, |cfg| cfg.fallback_bytes_per_minute);
         let (reserved_bytes, _) = recording_quota::estimate_reservation(duration_secs, 0, fallback_bytes_per_minute);
         meta.reserved_bytes = reserved_bytes;
@@ -273,7 +356,7 @@ impl RecordingService {
             owner_id,
             visibility: input.visibility,
             filename_preview: view_task.filename,
-            start_at: Some(input.program_start),
+            start_at: Some(window.execution_start),
             duration_secs: Some(duration_secs),
             state: DownloadState::Scheduled,
         })
@@ -327,7 +410,10 @@ impl RecordingService {
             if start >= end {
                 return Err(QueueMutationError::new("recording invalid interval"));
             }
-            let duration_secs = u64::try_from(end - start).map_err(|_| QueueMutationError::new("recording invalid interval"))?;
+            let duration_secs = end
+                .checked_sub(start)
+                .and_then(|duration| u64::try_from(duration).ok())
+                .ok_or_else(|| QueueMutationError::new("recording invalid interval"))?;
             task.start_at = Some(start);
             task.duration_secs = Some(duration_secs);
             meta.program_start = Some(start);
@@ -821,11 +907,11 @@ impl std::fmt::Debug for RecordingService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::XtreamCluster;
+    use shared::model::{Permission, XtreamCluster};
 
-    fn source(target_id: &str, virtual_id: &str, input_name: &str) -> RecordingSourceInput {
+    fn source(target_name: &str, virtual_id: &str, input_name: &str) -> RecordingSourceInput {
         RecordingSourceInput {
-            target_id: target_id.to_string(),
+            target_id: target_name.to_string(),
             virtual_id: virtual_id.to_string(),
             cluster: XtreamCluster::Live,
             input_name: input_name.to_string(),
@@ -834,7 +920,7 @@ mod tests {
 
     fn create_input() -> CreateRecordingInput {
         CreateRecordingInput {
-            source: source("1", "1", "input-a"),
+            source: source("target", "1", "input-a"),
             program_title: "Pilot".to_string(),
             program_start: 1_700_000_000,
             program_end: 1_700_003_600,
@@ -844,6 +930,7 @@ mod tests {
             channel_id: None,
             channel_name: None,
             provenance: RecordingProvenance::default(),
+            epg: None,
         }
     }
 
@@ -883,26 +970,20 @@ mod tests {
     }
 
     #[test]
-    fn source_input_rejects_empty_target_id() {
-        let input = source("", "1", "i");
-        assert!(matches!(input.validate(), Err(ServiceError::InvalidSource)));
-    }
-
-    #[test]
     fn source_input_rejects_empty_virtual_id() {
-        let input = source("1", "", "i");
+        let input = source("target", "", "i");
         assert!(matches!(input.validate(), Err(ServiceError::InvalidSource)));
     }
 
     #[test]
-    fn source_input_accepts_empty_input_name_for_epg() {
-        let input = source("1", "1", "");
-        assert!(input.validate().is_ok());
+    fn source_input_rejects_empty_input_name() {
+        let input = source("target", "1", "");
+        assert!(matches!(input.validate(), Err(ServiceError::InvalidSource)));
     }
 
     #[test]
     fn source_input_accepts_non_empty_identifiers() {
-        let input = source("1", "1", "input-a");
+        let input = source("target", "1", "input-a");
         assert!(input.validate().is_ok());
     }
 
@@ -919,6 +1000,119 @@ mod tests {
     fn create_recording_input_accepts_valid_interval() {
         let input = create_input();
         assert!(input.validate().is_ok());
+    }
+
+    #[test]
+    fn create_recording_input_rejects_overflowing_interval() {
+        let mut input = create_input();
+        input.program_start = i64::MIN;
+        input.program_end = i64::MAX;
+
+        assert!(matches!(input.validate(), Err(ServiceError::InvalidInterval)));
+    }
+
+    #[test]
+    fn effective_window_applies_padding_and_remaining_duration() {
+        let window = effective_recording_window(1_000, 2_000, 100, 200, 1_500)
+            .expect("valid effective window");
+
+        assert_eq!(window.scheduled_start, 900);
+        assert_eq!(window.scheduled_end, 2_200);
+        assert_eq!(window.execution_start, 1_500);
+        assert_eq!(window.remaining_duration_secs, 700);
+    }
+
+    #[test]
+    fn effective_window_rejects_exact_or_past_end_boundary() {
+        assert!(matches!(
+            effective_recording_window(1_000, 2_000, 100, 200, 2_200),
+            Err(ServiceError::InvalidInterval)
+        ));
+        assert!(matches!(
+            effective_recording_window(1_000, 2_000, 100, 200, 2_201),
+            Err(ServiceError::InvalidInterval)
+        ));
+    }
+
+    #[test]
+    fn effective_window_is_panic_free_at_integer_boundaries() {
+        let window = effective_recording_window(i64::MIN + 1, i64::MAX - 1, 10, 10, 0)
+            .expect("saturated effective window");
+
+        assert_eq!(window.scheduled_start, i64::MIN);
+        assert_eq!(window.scheduled_end, i64::MAX);
+        assert_eq!(window.execution_start, 0);
+        assert_eq!(window.remaining_duration_secs, i64::MAX as u64);
+    }
+
+    #[tokio::test]
+    async fn edit_recording_rejects_overflowing_interval_without_persisting_mutation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_file = dir.path().join("downloads.json");
+        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(state_file.clone())));
+        let task = DownloadQueue::from_persisted(persisted_rule_recording("recording", None, 100))
+            .expect("valid recording task");
+        downloads.scheduled.write().await.push(task);
+        downloads.persist_to_disk().await.expect("persist initial queue");
+        let persisted_before = std::fs::read(&state_file).expect("read initial queue");
+        let revision_before = downloads.revision.load(std::sync::atomic::Ordering::SeqCst);
+        let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
+        let claims = shared::model::Claims {
+            username: "alice".to_string(),
+            iss: "tuliprox".to_string(),
+            iat: 0,
+            exp: 0,
+            roles: Vec::new(),
+            permissions: Permission::RecordingWrite.into(),
+            pwd_version: 0,
+            subject_id: Some(UserId::from("web:alice")),
+            permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+        };
+        let patch = EditRecordingPatch {
+            program_start: Some(i64::MIN),
+            program_end: Some(i64::MAX),
+            program_title: Some("must not persist".to_string()),
+            ..EditRecordingPatch::default()
+        };
+
+        let result = service.edit_recording(&claims, "recording", patch).await;
+
+        assert!(matches!(result, Err(ServiceError::InvalidInterval)));
+        assert_eq!(downloads.revision.load(std::sync::atomic::Ordering::SeqCst), revision_before);
+        assert_eq!(std::fs::read(&state_file).expect("read unchanged queue"), persisted_before);
+        let scheduled = downloads.scheduled.read().await;
+        assert_eq!(scheduled[0].start_at, Some(100));
+        assert_ne!(
+            scheduled[0].recording.as_ref().and_then(|metadata| metadata.program_title.as_deref()),
+            Some("must not persist")
+        );
+    }
+
+    fn test_app_config() -> Arc<AppConfig> {
+        Arc::new(AppConfig {
+            config: Arc::new(arc_swap::ArcSwap::from_pointee(crate::model::Config::default())),
+            sources: Arc::new(arc_swap::ArcSwap::from_pointee(crate::model::SourcesConfig::default())),
+            hdhomerun: Arc::new(arc_swap::ArcSwapOption::empty()),
+            api_proxy: Arc::new(arc_swap::ArcSwapOption::empty()),
+            file_locks: Arc::new(crate::utils::FileLockManager::default()),
+            paths: Arc::new(arc_swap::ArcSwap::from_pointee(shared::model::ConfigPaths {
+                home_path: String::new(),
+                config_path: String::new(),
+                storage_path: String::new(),
+                config_file_path: String::new(),
+                sources_file_path: String::new(),
+                mapping_file_path: None,
+                mapping_files_used: None,
+                template_file_path: None,
+                template_files_used: None,
+                api_proxy_file_path: String::new(),
+                custom_stream_response_path: None,
+            })),
+            custom_stream_response: Arc::new(arc_swap::ArcSwapOption::empty()),
+            access_token_secret: [0; 32],
+            encrypt_secret: [0; 16],
+            media_tools: Arc::new(crate::model::MediaToolCapabilities::default()),
+        })
     }
 
     #[test]

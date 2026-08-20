@@ -71,6 +71,13 @@ impl RuleServiceError {
 /// matching fields, timezone, local time, duration and padding.
 pub fn validate_rule(rule: &RecordingRule) -> Result<(), RuleServiceError> {
     rule.validate().map_err(|_| RuleServiceError::InvalidRule)?;
+    if matches!(
+        rule.body,
+        shared::model::recording_rule::RuleBody::WeeklyTimeslot { duration_secs, .. }
+            if i64::try_from(duration_secs).is_err()
+    ) {
+        return Err(RuleServiceError::InvalidRule);
+    }
     if rule.pre_roll_secs > 15 * 60 {
         return Err(RuleServiceError::InvalidRule);
     }
@@ -203,6 +210,19 @@ mod tests {
         assert_eq!(validate_rule(&r), Err(RuleServiceError::InvalidRule));
         let mut r = private_rule(user());
         r.post_roll_secs = 31 * 60;
+        assert_eq!(validate_rule(&r), Err(RuleServiceError::InvalidRule));
+    }
+
+    #[test]
+    fn validate_rule_rejects_duration_larger_than_i64() {
+        let mut r = private_rule(user());
+        r.body = RuleBody::WeeklyTimeslot {
+            weekday: 1,
+            local_start_time: "20:00".to_string(),
+            duration_secs: u64::MAX,
+            timezone: "UTC".to_string(),
+        };
+
         assert_eq!(validate_rule(&r), Err(RuleServiceError::InvalidRule));
     }
 

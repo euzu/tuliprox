@@ -235,6 +235,15 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                     </CollapsePanel>
                 }
             )}
+            {html_if!(
+                auth.has_permission(Permission::RecordingRead),
+                {
+                    <CollapsePanel title={translate.t("LABEL.RECORDING")}>
+                      <MenuItem class={if active_menu == ViewType::RecordingLibrary { "active" } else {""}} icon="LibraryOutline" name={ViewType::RecordingLibrary.to_string()} label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></MenuItem>
+                      <MenuItem class={if active_menu == ViewType::RecordingRules { "active" } else {""}} icon="ScheduleOutline" name={ViewType::RecordingRules.to_string()} label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></MenuItem>
+                    </CollapsePanel>
+                }
+            )}
           </div>
         }
     };
@@ -291,6 +300,13 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             })}
             {html_if!(auth.has_permission(Permission::EpgRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistEpg, if active_menu == ViewType::PlaylistEpg { " active" } else {""})} icon="Epg" name={ViewType::PlaylistEpg.to_string()} hint={translate.t("LABEL.PLAYLIST_EPG")} aria_label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></IconButton>
+            })}
+            {html_if!(auth.has_permission(Permission::RecordingRead), {
+                <>
+                <span class="tp__app-sidebar__content-space"></span>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingLibrary, if active_menu == ViewType::RecordingLibrary { " active" } else {""})} icon="LibraryOutline" name={ViewType::RecordingLibrary.to_string()} hint={translate.t("LABEL.RECORDING_LIBRARY")} aria_label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingRules, if active_menu == ViewType::RecordingRules { " active" } else {""})} icon="ScheduleOutline" name={ViewType::RecordingRules.to_string()} hint={translate.t("LABEL.RECORDING_RULES")} aria_label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></IconButton>
+                </>
             })}
           </div>
         }

@@ -148,9 +148,10 @@ pub fn plan_materializations(
                 }
             }
             RuleBody::WeeklyTimeslot { duration_secs, .. } => {
-                let horizon_end = epg_horizon_end
-                    .unwrap_or(now + WEEKLY_FALLBACK_HORIZON_SECS)
-                    .min(now + WEEKLY_FALLBACK_HORIZON_SECS);
+                let Some(fallback_horizon_end) = now.checked_add(WEEKLY_FALLBACK_HORIZON_SECS) else {
+                    continue;
+                };
+                let horizon_end = epg_horizon_end.unwrap_or(fallback_horizon_end).min(fallback_horizon_end);
                 let Some(now_utc) = DateTime::<Utc>::from_timestamp(now, 0) else {
                     continue;
                 };
@@ -160,6 +161,12 @@ pub fn plan_materializations(
                 if start > horizon_end {
                     continue;
                 }
+                let Ok(duration_secs) = i64::try_from(*duration_secs) else {
+                    continue;
+                };
+                let Some(programme_end) = start.checked_add(duration_secs) else {
+                    continue;
+                };
                 let channel = candidate_channel_key(rule.channel_id.as_deref(), None);
                 let episode = String::new();
                 let key = occurrence_key(&rule.id, &rule.source, &channel, start, &episode);
@@ -176,7 +183,7 @@ pub fn plan_materializations(
                     pre_roll_secs: rule.pre_roll_secs,
                     post_roll_secs: rule.post_roll_secs,
                     programme_start: start,
-                    programme_end: start + duration_secs.cast_signed(),
+                    programme_end,
                     programme_title: format!("Weekly slot at {start}"),
                     occurrence_key: key,
                 });
@@ -246,6 +253,7 @@ async fn materialize_due_rules(app_state: &Arc<AppState>) -> Result<(), String> 
                 rule_id: Some(candidate.rule_id),
                 occurrence_key: Some(candidate.occurrence_key),
             },
+            epg: None,
         };
         match service.create_recording(&claims, &input).await {
             Ok(view) => debug!("Materialized recording rule task {}", view.uuid),
@@ -454,6 +462,18 @@ mod tests {
         // Set the EPG horizon to 1 hour — the next Sunday is
         // days away.
         let out = plan_materializations(&rules, &[], &[], &TombstoneSet::default(), now, Some(3_600));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn weekly_rule_skips_duration_that_overflows_end_timestamp() {
+        let mut rule = weekly_rule();
+        if let RuleBody::WeeklyTimeslot { duration_secs, .. } = &mut rule.body {
+            *duration_secs = i64::MAX as u64;
+        }
+
+        let out = plan_materializations(&[rule], &[], &[], &TombstoneSet::default(), 0, None);
+
         assert!(out.is_empty());
     }
 }

@@ -97,15 +97,21 @@ pub fn validate_patch(
             return Err(EditError::InvalidInterval);
         }
     }
-    if let Some(pre) = patch.pre_roll_secs {
-        if pre > bounds.max_pre_roll_secs {
-            return Err(EditError::PaddingLimitExceeded);
-        }
-    }
-    if let Some(post) = patch.post_roll_secs {
-        if post > bounds.max_post_roll_secs {
-            return Err(EditError::PaddingLimitExceeded);
-        }
+    validate_padding(
+        patch.pre_roll_secs.unwrap_or(current.pre_roll_secs),
+        patch.post_roll_secs.unwrap_or(current.post_roll_secs),
+        bounds,
+    )?;
+    Ok(())
+}
+
+pub fn validate_padding(
+    pre_roll_secs: u64,
+    post_roll_secs: u64,
+    bounds: PaddingBounds,
+) -> Result<(), EditError> {
+    if pre_roll_secs > bounds.max_pre_roll_secs || post_roll_secs > bounds.max_post_roll_secs {
+        return Err(EditError::PaddingLimitExceeded);
     }
     Ok(())
 }
@@ -131,13 +137,10 @@ pub fn channel_changed(patch: &EditPatch, current_channel_id: Option<&str>, curr
 }
 
 /// Pure: derive the new interval and padded window from the
-/// `current` metadata and the patch. The runtime starts at
-/// `max(now, scheduled_start)` for currently-airing edits; the
-/// reservation is recalculated only for the remaining duration.
+/// `current` metadata and the patch.
 pub fn apply_interval_patch(
     current: &RecordingMetadata,
     patch: &EditPatch,
-    now: i64,
 ) -> (i64, i64, i64, i64) {
     let program_start = patch.program_start.unwrap_or_else(|| current.program_start.unwrap_or(0));
     let program_end = patch.program_end.unwrap_or_else(|| current.program_end.unwrap_or(0));
@@ -145,8 +148,6 @@ pub fn apply_interval_patch(
     let post = patch.post_roll_secs.unwrap_or(current.post_roll_secs);
     let scheduled_start = program_start.saturating_sub(pre.cast_signed());
     let scheduled_end = program_end.saturating_add(post.cast_signed());
-    let start_at = now.max(scheduled_start);
-    let _remaining = (scheduled_end - start_at).max(0);
     (program_start, program_end, scheduled_start, scheduled_end)
 }
 
@@ -259,6 +260,13 @@ mod tests {
     }
 
     #[test]
+    fn validate_padding_rejects_values_above_configured_maximum() {
+        assert_eq!(validate_padding(901, 0, bounds()), Err(EditError::PaddingLimitExceeded));
+        assert_eq!(validate_padding(0, 1_801, bounds()), Err(EditError::PaddingLimitExceeded));
+        assert!(validate_padding(900, 1_800, bounds()).is_ok());
+    }
+
+    #[test]
     fn validate_patch_accepts_padded_extensions() {
         let patch = EditPatch { program_end: Some(1_000), post_roll_secs: Some(1_800), ..Default::default() };
         assert!(validate_patch(&patch, &current_meta(), bounds()).is_ok());
@@ -278,7 +286,7 @@ mod tests {
     fn apply_interval_patch_keeps_current_when_unset() {
         let meta = make_meta(100, 200, 0, 0);
         let patch = EditPatch::default();
-        let (start, end, scheduled_start, scheduled_end) = apply_interval_patch(&meta, &patch, 50);
+        let (start, end, scheduled_start, scheduled_end) = apply_interval_patch(&meta, &patch);
         assert_eq!((start, end, scheduled_start, scheduled_end), (100, 200, 100, 200));
     }
 
@@ -286,9 +294,18 @@ mod tests {
     fn apply_interval_patch_uses_padding() {
         let meta = make_meta(100, 200, 0, 0);
         let patch = EditPatch { pre_roll_secs: Some(60), post_roll_secs: Some(120), ..Default::default() };
-        let (_, _, scheduled_start, scheduled_end) = apply_interval_patch(&meta, &patch, 150);
+        let (_, _, scheduled_start, scheduled_end) = apply_interval_patch(&meta, &patch);
         assert_eq!(scheduled_start, 40);
         assert_eq!(scheduled_end, 320);
+    }
+
+    #[test]
+    fn apply_interval_patch_handles_extreme_window_without_panicking() {
+        let meta = make_meta(i64::MIN, i64::MAX, 0, 0);
+
+        let interval = apply_interval_patch(&meta, &EditPatch::default());
+
+        assert_eq!(interval, (i64::MIN, i64::MAX, i64::MIN, i64::MAX));
     }
 
     #[test]

@@ -13,10 +13,16 @@
 
 use crate::{
     error::Error,
-    services::{get_base_href, request_delete, request_get, request_post, request_put, Encoding},
+    services::{get_base_href, request_delete, request_get, request_patch, request_post, Encoding},
 };
 use serde::{Deserialize, Serialize};
-use shared::{model::XtreamCluster, utils::concat_path_leading_slash};
+use shared::{
+    model::{
+        recording_rule::{RuleBody, RuleVisibility},
+        TaskKindDto, TaskPriorityDto, TransferStatusDto, TransferTaskDto, XtreamCluster,
+    },
+    utils::concat_path_leading_slash,
+};
 
 /// Source identifiers (server-resolved) for creating a recording.
 /// These come from the configured target/input combination, never a
@@ -65,28 +71,121 @@ pub struct RecordingTaskId {
     pub id: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct RecordingTaskResponse {
     pub id: String,
     pub title: String,
+    /// `create_recording_task` returns only `{id, title, recording}`; the
+    /// `list_tasks` snapshot returns the full `TransferTaskDto` shape.
+    /// `#[serde(default)]` lets both responses deserialize into one type.
+    #[serde(default = "default_kind")]
+    pub kind: TaskKindDto,
+    #[serde(default = "default_priority")]
+    pub priority: TaskPriorityDto,
+    #[serde(default = "default_status")]
+    pub status: TransferStatusDto,
+    #[serde(default)]
+    pub retry_attempts: u8,
+    #[serde(default)]
+    pub downloaded_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_start_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
     pub recording: Option<shared::model::recording::RecordingTaskDto>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+fn default_priority() -> TaskPriorityDto { TaskPriorityDto::Normal }
+fn default_status() -> TransferStatusDto { TransferStatusDto::Scheduled }
+fn default_kind() -> TaskKindDto { TaskKindDto::Recording }
+
+impl From<TransferTaskDto> for RecordingTaskResponse {
+    fn from(value: TransferTaskDto) -> Self {
+        Self {
+            id: value.id,
+            title: value.title,
+            kind: value.kind,
+            priority: value.priority,
+            status: value.status,
+            retry_attempts: value.retry_attempts,
+            downloaded_bytes: value.downloaded_bytes,
+            total_bytes: value.total_bytes,
+            next_retry_at: value.next_retry_at,
+            scheduled_start_at: value.scheduled_start_at,
+            duration_secs: value.duration_secs,
+            error: value.error,
+            recording: value.recording,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct RecordingSnapshot {
     pub revision: u64,
     pub tasks: Vec<RecordingTaskResponse>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-pub struct RecordingConflict {
-    pub task_id: String,
-    pub revision: u64,
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct OverlapSegmentDto {
+    pub start: i64,
+    pub end: i64,
+    pub peak_demand: u32,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictSeverity {
+    NoKnownConflict,
+    PossibleCapacityWait,
+    LikelyMissedWindow,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct RecordingConflictPreview {
-    pub conflicts: Vec<RecordingConflict>,
+    pub severity: ConflictSeverity,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_scope: Option<String>,
+    #[serde(default)]
+    pub overlap_segments: Vec<OverlapSegmentDto>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PreviewConflictsRequest {
+    pub candidate: PreviewCandidateDto,
+    #[serde(default)]
+    pub others: Vec<PreviewOtherDto>,
+    pub capacity: PreviewCapacityDto,
+    #[serde(default)]
+    pub provider_scope: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PreviewCandidateDto {
+    #[serde(default)]
+    pub task_id: String,
+    pub padded_start: i64,
+    pub padded_end: i64,
+    pub priority: i32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PreviewOtherDto {
+    pub task_id: String,
+    pub padded_start: i64,
+    pub padded_end: i64,
+    pub priority: i32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PreviewCapacityDto {
+    pub background_slots: u32,
+    pub reserved_interactive_slots: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -100,38 +199,54 @@ pub struct RecordingQuota {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct CreateRecordingRuleRequest {
-    pub owner_id: String,
     pub target_id: String,
     pub virtual_id: String,
     pub input_name: String,
-    pub weekday: u8,
-    pub start_time: String,
-    pub duration_secs: u64,
+    pub body: RuleBody,
     pub channel_id: Option<String>,
     pub pre_roll_secs: u64,
     pub post_roll_secs: u64,
+    pub visibility: RuleVisibility,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct EditRecordingRuleRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub weekday: Option<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub start_time: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub duration_secs: Option<u64>,
+    pub body: Option<RuleBody>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "shared::defaults::is_false")]
+    pub clear_channel_id: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pre_roll_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_roll_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<RuleVisibility>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct RecordingRuleResponse {
-    pub id: String,
     pub revision: u64,
+    #[serde(flatten)]
+    pub rule: RecordingRuleSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct RecordingRuleSnapshot {
+    pub id: String,
+    pub owner_id: String,
+    pub visibility: shared::model::recording_rule::RuleVisibility,
+    pub enabled: bool,
+    pub source: shared::model::recording_rule::RuleSource,
+    pub channel_id: Option<String>,
+    pub body: shared::model::recording_rule::RuleBody,
+    pub pre_roll_secs: u64,
+    pub post_roll_secs: u64,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -186,19 +301,24 @@ impl RecordingError {
     /// frontend enum. Unknown codes fall through to `Other`.
     pub fn from_code(code: &str) -> Self {
         match code {
-            "recording_unknown_owner" | "recording_invalid_template" => Self::TokenRefreshRequired,
+            "recording_unknown_owner" | "recording_invalid_template" | "recording_token_refresh_required" => {
+                Self::TokenRefreshRequired
+            }
             "recording_invalid_source" => Self::InvalidSource,
             "recording_invalid_path" => Self::InvalidPath,
             "recording_shared_not_administrator" => Self::SharedCreationNotAdministrator,
-            "recording_forbidden" => Self::Forbidden,
+            "recording_forbidden" | "recording_rule_forbidden" | "recording_rule_not_owner" => Self::Forbidden,
             "recording_invalid_state" => Self::InvalidState,
             "recording_invalid_interval" => Self::InvalidInterval,
             "recording_invalid_padding" => Self::InvalidInterval,
-            "recording_unknown" => Self::UnknownRecording,
+            "recording_unknown" | "recording_rule_unknown" => Self::UnknownRecording,
             "recording_duplicate" => Self::Duplicate,
             "recording_path_reservation_failed" => Self::PathReservationFailed,
             "recording_quota_exceeded" => Self::QuotaExceeded,
             "recording_io_error" | "recording_persistence_failed" => Self::Other(code.to_string()),
+            "recording_rule_invalid" | "recording_rule_invalid_future" | "recording_rule_partial_operation" => {
+                Self::Other(code.to_string())
+            }
             other => Self::Other(other.to_string()),
         }
     }
@@ -288,17 +408,17 @@ impl RecordingService {
         Ok(body)
     }
 
-    /// PATCH /recording/tasks/{id}
-    pub async fn edit_task(
-        &self,
-        id: &str,
-        request: EditRecordingTaskRequest,
-    ) -> Result<RecordingTaskResponse, RecordingError> {
-        let body: RecordingTaskResponse = request_put(&self.task_path(id), &request, None, Some(Encoding::Json))
-            .await
-            .map_err(network)?
-            .ok_or_else(|| RecordingError::Other("empty response".into()))?;
-        Ok(body)
+    /// PATCH /recording/tasks/{id}. Backend returns 204 No Content.
+    pub async fn edit_task(&self, id: &str, request: EditRecordingTaskRequest) -> Result<(), RecordingError> {
+        let _ = request_patch::<&EditRecordingTaskRequest, serde_json::Value>(
+            &self.task_path(id),
+            &request,
+            None,
+            Some(Encoding::Json),
+        )
+        .await
+        .map_err(network)?;
+        Ok(())
     }
 
     /// POST /recording/tasks/{id}/cancel
@@ -317,17 +437,16 @@ impl RecordingService {
 
     /// DELETE /recording/tasks/{id}
     pub async fn delete_task(&self, id: &str) -> Result<(), RecordingError> {
-        let _ = {
-            let path = format!("{}?uuid={id}", self.task_path(id));
-            request_delete::<()>(&path, None, None).await.map_err(network)?
-        };
+        request_delete::<()>(&self.task_path(id), None, None).await.map_err(network)?;
         Ok(())
     }
 
-    /// POST /recording/conflicts/preview
+    /// POST /recording/conflicts/preview. Advisory only — the backend
+    /// reads only the candidate fields plus provider_scope; `others`
+    /// and `capacity` are server-derived or echoed from the request.
     pub async fn preview_conflicts(
         &self,
-        request: &CreateRecordingTaskRequest,
+        request: &PreviewConflictsRequest,
     ) -> Result<RecordingConflictPreview, RecordingError> {
         let body: RecordingConflictPreview = request_post(&self.conflicts_path(), request, None, Some(Encoding::Json))
             .await
@@ -366,13 +485,13 @@ impl RecordingService {
         Ok(body)
     }
 
-    /// PATCH /recording/rules/{id}
+    /// PATCH /recording/rules/{id}. Backend returns the full rule body.
     pub async fn edit_rule(
         &self,
         id: &str,
         request: EditRecordingRuleRequest,
     ) -> Result<RecordingRuleResponse, RecordingError> {
-        let body: RecordingRuleResponse = request_put(&self.rule_path(id), &request, None, Some(Encoding::Json))
+        let body: RecordingRuleResponse = request_patch(&self.rule_path(id), &request, None, Some(Encoding::Json))
             .await
             .map_err(network)?
             .ok_or_else(|| RecordingError::Other("empty response".into()))?;
@@ -381,10 +500,8 @@ impl RecordingService {
 
     /// DELETE /recording/rules/{id}?future=retain|cancel
     pub async fn delete_rule(&self, id: &str, future: &str) -> Result<(), RecordingError> {
-        let _ = {
-            let path = format!("{}?future={future}&id={id}", self.rule_path(id));
-            request_delete::<()>(&path, None, None).await.map_err(network)?
-        };
+        let path = format!("{}?future={future}", self.rule_path(id));
+        request_delete::<()>(&path, None, None).await.map_err(network)?;
         Ok(())
     }
 }
@@ -407,18 +524,17 @@ fn network(e: Error) -> RecordingError {
 
 /// Try to pull a stable backend error code (e.g. `recording_forbidden`,
 /// `recording_quota_exceeded`) out of the `Error` payload. The
-/// `request` crate embeds the response body on non-2xx replies; for
-/// our endpoints the body is JSON of shape `{"error": "<code>"}`.
+/// `request` crate embeds the response body on non-2xx replies; the
+/// request layer parses JSON error bodies into `Error::{...}(message)`
+/// where `message` is the `error` field. So the stable code is the
+/// message itself when it matches our wire format.
 fn extract_error_code(e: &Error) -> Option<String> {
     let body = e.to_string();
-    let start = body.find("\"error\"")?;
-    let after = body.get(start..)?;
-    let colon = after.find(':')?;
-    let rest = after.get(colon + 1..)?;
-    let quote1 = rest.find('"')?;
-    let rest = rest.get(quote1 + 1..)?;
-    let quote2 = rest.find('"')?;
-    rest.get(..quote2).map(|s| s.to_string())
+    if body.starts_with("recording_") {
+        Some(body)
+    } else {
+        None
+    }
 }
 
 impl Default for RecordingService {
@@ -428,6 +544,166 @@ impl Default for RecordingService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn create_recording_task_serializes_stable_target_name() {
+        let request = CreateRecordingTaskRequest {
+            source: RecordingSourceInput {
+                target_id: "default".to_string(),
+                virtual_id: "42".to_string(),
+                cluster: XtreamCluster::Live,
+                input_name: "input-a".to_string(),
+            },
+            program_title: "News".to_string(),
+            program_start: 100,
+            program_end: 200,
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            visibility: "private".to_string(),
+            channel_id: None,
+            channel_name: None,
+            epg: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize recording task"),
+            json!({
+                "source": {
+                    "target_id": "default",
+                    "virtual_id": "42",
+                    "cluster": "Live",
+                    "input_name": "input-a"
+                },
+                "program_title": "News",
+                "program_start": 100,
+                "program_end": 200,
+                "pre_roll_secs": 0,
+                "post_roll_secs": 0,
+                "visibility": "private"
+            })
+        );
+    }
+
+    #[test]
+    fn create_weekly_rule_serializes_target_name_and_body() {
+        let request = CreateRecordingRuleRequest {
+            target_id: "default".to_string(),
+            virtual_id: "42".to_string(),
+            input_name: "input-a".to_string(),
+            body: shared::model::recording_rule::RuleBody::WeeklyTimeslot {
+                weekday: 3,
+                local_start_time: "20:00".to_string(),
+                duration_secs: 3600,
+                timezone: "Europe/Berlin".to_string(),
+            },
+            channel_id: None,
+            pre_roll_secs: 60,
+            post_roll_secs: 120,
+            visibility: RuleVisibility::Private,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize weekly rule"),
+            json!({
+                "target_id": "default",
+                "virtual_id": "42",
+                "input_name": "input-a",
+                "body": {
+                    "kind": "weekly_timeslot",
+                    "weekday": 3,
+                    "local_start_time": "20:00",
+                    "duration_secs": 3600,
+                    "timezone": "Europe/Berlin"
+                },
+                "channel_id": null,
+                "pre_roll_secs": 60,
+                "post_roll_secs": 120,
+                "visibility": "private"
+            })
+        );
+    }
+
+    #[test]
+    fn create_new_episode_rule_serializes_body() {
+        let request = CreateRecordingRuleRequest {
+            target_id: "default".to_string(),
+            virtual_id: "42".to_string(),
+            input_name: "input-a".to_string(),
+            body: shared::model::recording_rule::RuleBody::NewEpisode {
+                series_id: Some("series-1".to_string()),
+                title_pattern: None,
+                exclude_repeat: true,
+            },
+            channel_id: Some("channel-1".to_string()),
+            pre_roll_secs: 0,
+            post_roll_secs: 0,
+            visibility: RuleVisibility::Shared,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize new episode rule"),
+            json!({
+                "target_id": "default",
+                "virtual_id": "42",
+                "input_name": "input-a",
+                "body": {
+                    "kind": "new_episode",
+                    "series_id": "series-1",
+                    "title_pattern": null,
+                    "exclude_repeat": true
+                },
+                "channel_id": "channel-1",
+                "pre_roll_secs": 0,
+                "post_roll_secs": 0,
+                "visibility": "shared"
+            })
+        );
+    }
+
+    #[test]
+    fn edit_rule_serializes_optional_body() {
+        let request = EditRecordingRuleRequest {
+            body: Some(shared::model::recording_rule::RuleBody::NewEpisode {
+                series_id: None,
+                title_pattern: Some("News".to_string()),
+                exclude_repeat: false,
+            }),
+            channel_id: None,
+            pre_roll_secs: None,
+            post_roll_secs: None,
+            visibility: None,
+            enabled: None,
+            clear_channel_id: false,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize edit rule"),
+            json!({
+                "body": {
+                    "kind": "new_episode",
+                    "series_id": null,
+                    "title_pattern": "News",
+                    "exclude_repeat": false
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn edit_rule_serializes_explicit_channel_clear() {
+        let request = EditRecordingRuleRequest {
+            body: None,
+            channel_id: None,
+            clear_channel_id: true,
+            pre_roll_secs: None,
+            post_roll_secs: None,
+            visibility: None,
+            enabled: None,
+        };
+
+        assert_eq!(serde_json::to_value(request).expect("serialize channel clear"), json!({"clear_channel_id": true}));
+    }
 
     #[test]
     fn error_from_code_maps_known_codes() {
@@ -482,5 +758,40 @@ mod tests {
         assert_eq!(svc.quota_path(), "/api/v1/recording/quota");
         assert_eq!(svc.rules_path(), "/api/v1/recording/rules");
         assert_eq!(svc.rule_path("rule-1"), "/api/v1/recording/rules/rule-1");
+    }
+
+    #[test]
+    fn preview_conflicts_request_serializes_to_backend_shape() {
+        let req = PreviewConflictsRequest {
+            candidate: PreviewCandidateDto {
+                task_id: "candidate".to_string(),
+                padded_start: 1_700_000_000,
+                padded_end: 1_700_003_600,
+                priority: 5,
+            },
+            others: vec![PreviewOtherDto {
+                task_id: "other-1".to_string(),
+                padded_start: 1_700_003_000,
+                padded_end: 1_700_004_000,
+                priority: 5,
+            }],
+            capacity: PreviewCapacityDto { background_slots: 2, reserved_interactive_slots: 1 },
+            provider_scope: None,
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(json.contains("\"candidate\""));
+        assert!(json.contains("\"others\""));
+        assert!(json.contains("\"capacity\""));
+        assert!(json.contains("\"background_slots\":2"));
+        assert!(json.contains("\"reserved_interactive_slots\":1"));
+        assert!(json.contains("\"padded_start\":1700000000"));
+    }
+
+    #[test]
+    fn preview_conflicts_response_deserializes_severity_snake_case() {
+        let json = r#"{"severity":"possible_capacity_wait","provider_scope":"de","overlap_segments":[]}"#;
+        let parsed: RecordingConflictPreview = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(parsed.severity, ConflictSeverity::PossibleCapacityWait);
+        assert_eq!(parsed.provider_scope.as_deref(), Some("de"));
     }
 }

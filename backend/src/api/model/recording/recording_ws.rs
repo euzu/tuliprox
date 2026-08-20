@@ -45,7 +45,7 @@ pub fn task_visible_to(
     }
 }
 
-pub fn recording_snapshot(
+pub async fn recording_snapshot(
     queue: &DownloadQueue,
     claims: &Claims,
 ) -> (QueueRevision, Vec<FileDownloadDto>) {
@@ -55,9 +55,13 @@ pub fn recording_snapshot(
     let Some(subject) = claims.subject_id.clone() else {
         return (current_revision(queue), Vec::new());
     };
-    let mut tasks = Vec::new();
-    collect_visible(queue, &mut tasks, &subject, claims);
-    (current_revision(queue), tasks)
+    let (revision, tasks) = queue.committed_snapshot().await;
+    let tasks = tasks
+        .iter()
+        .filter(|task| task_visible_to(task.recording.as_ref(), claims, &subject))
+        .map(FileDownloadDto::from)
+        .collect();
+    (revision, tasks)
 }
 
 pub fn recording_delta(
@@ -282,18 +286,18 @@ mod tests {
         assert!(!task_visible_to(Some(&meta_legacy_admin()), &non_admin, &UserId::from("web:alice")));
     }
 
-    #[test]
-    fn recording_snapshot_yields_no_subject_id() {
+    #[tokio::test]
+    async fn recording_snapshot_yields_no_subject_id() {
         let queue = DownloadQueue::new();
-        let (rev, tasks) = recording_snapshot(&queue, &no_subject_claims());
+        let (rev, tasks) = recording_snapshot(&queue, &no_subject_claims()).await;
         assert_eq!(rev.0, 0);
         assert!(tasks.is_empty());
     }
 
-    #[test]
-    fn recording_snapshot_yields_no_recording_read_perm() {
+    #[tokio::test]
+    async fn recording_snapshot_yields_no_recording_read_perm() {
         let queue = DownloadQueue::new();
-        let (rev, tasks) = recording_snapshot(&queue, &no_read_claims());
+        let (rev, tasks) = recording_snapshot(&queue, &no_read_claims()).await;
         assert_eq!(rev.0, 0);
         assert!(tasks.is_empty());
     }
