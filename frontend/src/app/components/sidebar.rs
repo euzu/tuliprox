@@ -239,8 +239,8 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                 auth.has_permission(Permission::RecordingRead),
                 {
                     <CollapsePanel title={translate.t("LABEL.RECORDING")}>
-                      <MenuItem class={if active_menu == ViewType::RecordingLibrary { "active" } else {""}} icon="LibraryOutline" name={ViewType::RecordingLibrary.to_string()} label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></MenuItem>
-                      <MenuItem class={if active_menu == ViewType::RecordingRules { "active" } else {""}} icon="ScheduleOutline" name={ViewType::RecordingRules.to_string()} label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></MenuItem>
+                      <MenuItem class={if active_menu == ViewType::RecordingLibrary { "active" } else {""}} icon="DVR" name={ViewType::RecordingLibrary.to_string()} label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></MenuItem>
+                      <MenuItem class={if active_menu == ViewType::RecordingRules { "active" } else {""}} icon="DVR" name={ViewType::RecordingRules.to_string()} label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></MenuItem>
                     </CollapsePanel>
                 }
             )}

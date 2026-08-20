@@ -249,7 +249,7 @@ pub fn recording_library_view() -> Html {
                     if !can_mutate {
                         return html! { <></> };
                     }
-                    let on_edit_noop = {
+                    let on_edit_click = {
                         let id_clone = task.id.clone();
                         let editing_task_id = editing_for_actions.clone();
                         Callback::from(move |_: String| {
@@ -287,7 +287,7 @@ pub fn recording_library_view() -> Html {
                     });
                     html! {
                         <div class="tp__recording-row-actions">
-                            <TextButton name="task_edit" icon="" title={translate.t("LABEL.RECORDING_ACTION_EDIT")} onclick={on_edit_noop} />
+                            <TextButton name="task_edit" icon="" title={translate.t("LABEL.RECORDING_ACTION_EDIT")} onclick={on_edit_click} />
                             <TextButton name="task_cancel" icon="" title={translate.t("LABEL.RECORDING_ACTION_CANCEL")} onclick={on_cancel_click} />
                             <TextButton name="task_delete" icon="" class="tp__button--danger" title={translate.t("LABEL.RECORDING_ACTION_DELETE")} onclick={on_delete_click} />
                         </div>

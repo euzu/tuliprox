@@ -280,7 +280,7 @@ mod tests {
         // would write here.
         touch_with_age(&active, Duration::from_secs(5));
 
-        cleanup_orphaned_staging_artifacts(dir.path(), Duration::from_secs(600));
+        cleanup_orphaned_staging_artifacts(dir.path(), Duration::from_mins(10));
 
         assert!(active.exists(), "recent staging file must not be deleted by a parallel refresh");
     }
@@ -295,10 +295,10 @@ mod tests {
 
         fs::write(&published, b"kept").expect("write published");
         touch_with_age(&active, Duration::from_secs(5));
-        touch_with_age(&orphan_db, Duration::from_secs(3600));
-        touch_with_age(&orphan_cat, Duration::from_secs(3600));
+        touch_with_age(&orphan_db, Duration::from_hours(1));
+        touch_with_age(&orphan_cat, Duration::from_hours(1));
 
-        cleanup_orphaned_staging_artifacts(dir.path(), Duration::from_secs(600));
+        cleanup_orphaned_staging_artifacts(dir.path(), Duration::from_mins(10));
 
         assert!(published.exists());
         assert!(active.exists(), "in-flight staging must survive");
@@ -314,7 +314,7 @@ mod tests {
         let active = dir.path().join("live.refresh-44444444444444444444444444444444.db");
         let sidecar = dir.path().join(".live.refresh-44444444444444444444444444444444.lock");
 
-        touch_with_age(&active, Duration::from_secs(3600));
+        touch_with_age(&active, Duration::from_hours(1));
         let lock_file = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -323,7 +323,7 @@ mod tests {
             .expect("open sidecar");
         lock_file.lock_exclusive().expect("acquire active lease");
 
-        cleanup_orphaned_staging_artifacts(dir.path(), Duration::from_secs(600));
+        cleanup_orphaned_staging_artifacts(dir.path(), Duration::from_mins(10));
 
         assert!(active.exists(), "active generation older than min_age must survive");
     }

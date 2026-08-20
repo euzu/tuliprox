@@ -2952,7 +2952,7 @@ mod tests {
         let result = broadcast_worker_mutation(
             &event_manager,
             &queue,
-            Err(crate::api::model::QueueMutationError::new("disk full")),
+            Err(crate::api::model::QueueMutationError::DiskFull),
             "terminal transition",
         )
         .await;

@@ -125,10 +125,10 @@ fn prior_terminal_state(download: &FileDownload) -> Option<DeletionPreviousState
 pub async fn begin_deletion(queue: &DownloadQueue, uuid: &str) -> Result<(), DeletionError> {
     crate::api::model::download::mutate(queue, |candidate| {
         let Some(meta) = read_meta(candidate, uuid) else {
-            return Err(QueueMutationError::from("recording not found".to_string()));
+            return Err(QueueMutationError::UnknownRecording);
         };
         let Some((bucket, idx)) = locate(candidate, uuid) else {
-            return Err(QueueMutationError::from("recording not found".to_string()));
+            return Err(QueueMutationError::UnknownRecording);
         };
         // Resolve the current persisted file to read its terminal state.
         let task = match bucket {
@@ -136,15 +136,15 @@ pub async fn begin_deletion(queue: &DownloadQueue, uuid: &str) -> Result<(), Del
             "scheduled" => &candidate.scheduled[idx],
             "active" => {
                 let Some(active) = candidate.active.as_ref() else {
-                    return Err(QueueMutationError::from("recording not found".to_string()));
+                    return Err(QueueMutationError::UnknownRecording);
                 };
                 active
             }
             "finished" => &candidate.finished[idx],
-            _ => return Err(QueueMutationError::from("recording not found".to_string())),
+            _ => return Err(QueueMutationError::UnknownRecording),
         };
         let Some(prior) = prior_terminal_state_runtime(task) else {
-            return Err(QueueMutationError::from("recording not in terminal state".to_string()));
+            return Err(QueueMutationError::NotInTerminalState);
         };
         // Stamp the deletion. The persisted task gets `state = Cancelled`
         // (the canonical "removing" marker) plus
@@ -328,7 +328,7 @@ pub async fn finalize_deletion(queue: &DownloadQueue, uuid: &str) -> Result<(), 
             }
             return Ok(());
         }
-        Err(QueueMutationError::from("recording not found".to_string()))
+        Err(QueueMutationError::UnknownRecording)
     })
     .await
     .map_err(DeletionError::FinalizeFailed)?;

@@ -413,14 +413,19 @@ mod tests {
         Config { web_ui: Some((&web_ui).into()), ..Config::default() }
     }
 
-    async fn extract_auth_claims(state: &Arc<AppState>, authorization: Option<&str>) -> Result<AuthClaims, Response> {
+    async fn extract_auth_claims(
+        state: &Arc<AppState>,
+        authorization: Option<&str>,
+    ) -> Result<AuthClaims, Box<Response>> {
         let mut builder = Request::builder();
         if let Some(value) = authorization {
             builder = builder.header(header::AUTHORIZATION, value);
         }
         let request = builder.body(()).expect("request");
         let (mut parts, ()) = request.into_parts();
-        AuthClaims::from_request_parts(&mut parts, state).await
+        AuthClaims::from_request_parts(&mut parts, state)
+            .await
+            .map_err(Box::new)
     }
 
     #[tokio::test]

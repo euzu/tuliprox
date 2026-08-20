@@ -30,6 +30,11 @@ fn error_response(status: StatusCode, error: &'static str) -> axum::response::Re
 }
 
 fn service_error_response(err: &ServiceError) -> axum::response::Response {
+    let (status, _) = service_error_status(err);
+    error_response(status, err.code())
+}
+
+fn service_error_status(err: &ServiceError) -> (StatusCode, &'static str) {
     let status = match err {
         ServiceError::UnknownOwner => StatusCode::UNAUTHORIZED,
         ServiceError::InvalidSource
@@ -41,7 +46,7 @@ fn service_error_response(err: &ServiceError) -> axum::response::Response {
         ServiceError::UnknownRecording => StatusCode::NOT_FOUND,
         ServiceError::PersistenceFailed | ServiceError::IoError(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    error_response(status, err.code())
+    (status, err.code())
 }
 
 /// GET /api/v1/recording/tasks
@@ -255,37 +260,33 @@ pub async fn delete_recording_task(
 
 /// POST /api/v1/recording/conflicts/preview
 pub async fn preview_recording_conflicts(
-    AuthClaims(_claims): AuthClaims,
-    axum::extract::State(_): axum::extract::State<Arc<AppState>>,
+    AuthClaims(claims): AuthClaims,
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(body): axum::extract::Json<PreviewConflictsBody>,
-) -> Json<PreviewConflictsResponse> {
-    let candidate = crate::api::model::recording_conflict::DemandPoint {
-        task_id: body.candidate.task_id,
+) -> Result<Json<PreviewConflictsResponse>, (StatusCode, String)> {
+    let source = crate::api::model::recording_service::RecordingSourceInput {
+        target_id: body.source.target_name,
+        virtual_id: body.source.virtual_id,
+        cluster: shared::model::XtreamCluster::Live,
+        input_name: body.source.input_name,
+    };
+    let request = crate::api::model::recording_service::ConflictPreviewRequest {
+        source,
         padded_start: body.candidate.padded_start,
         padded_end: body.candidate.padded_end,
+        pre_roll_secs: body.candidate.pre_roll_secs,
+        post_roll_secs: body.candidate.post_roll_secs,
         priority: body.candidate.priority,
     };
-    let others: Vec<crate::api::model::recording_conflict::DemandPoint> = body
-        .others
-        .into_iter()
-        .map(|o| crate::api::model::recording_conflict::DemandPoint {
-            task_id: o.task_id,
-            padded_start: o.padded_start,
-            padded_end: o.padded_end,
-            priority: o.priority,
-        })
-        .collect();
-    let capacity = crate::api::model::recording_conflict::EffectiveCapacity {
-        background_slots: body.capacity.background_slots,
-        reserved_interactive_slots: body.capacity.reserved_interactive_slots,
+    let service = crate::api::model::recording_service::RecordingService::from_app_state(&state);
+    let preview = match service.preview_conflicts(&claims, &request).await {
+        Ok(preview) => preview,
+        Err(err) => {
+            let (status, code) = service_error_status(&err);
+            return Err((status, code.to_string()));
+        }
     };
-    let preview = crate::api::model::recording_conflict::preview_conflict(
-        &candidate,
-        &others,
-        capacity,
-        body.provider_scope,
-    );
-    Json(PreviewConflictsResponse {
+    Ok(Json(PreviewConflictsResponse {
         severity: preview.severity.as_wire().to_string(),
         provider_scope: preview.provider_scope,
         overlap_segments: preview
@@ -293,46 +294,35 @@ pub async fn preview_recording_conflicts(
             .into_iter()
             .map(|s| OverlapSegmentDto { start: s.start, end: s.end, peak_demand: s.peak_demand })
             .collect(),
-    })
+    }))
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PreviewConflictsBody {
+    /// Server-owned source identifiers. The caller never submits
+    /// another recording's padded interval, capacity, or provider
+    /// identifier — those are derived server-side.
+    pub source: PreviewSourceDto,
     pub candidate: PreviewCandidateDto,
-    #[serde(default)]
-    pub others: Vec<PreviewOtherDto>,
-    pub capacity: PreviewCapacityDto,
-    #[serde(default)]
-    pub provider_scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PreviewSourceDto {
+    pub target_name: String,
+    pub virtual_id: String,
+    pub input_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PreviewCandidateDto {
-    /// Opaque task id used for log correlation; never surfaced in the
-    /// response. Empty string is allowed for the candidate (the
-    /// preview has not yet produced a task id).
+    pub padded_start: i64,
+    pub padded_end: i64,
     #[serde(default)]
-    pub task_id: String,
-    pub padded_start: i64,
-    pub padded_end: i64,
+    pub pre_roll_secs: u64,
+    #[serde(default)]
+    pub post_roll_secs: u64,
+    #[serde(default)]
     pub priority: i32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PreviewOtherDto {
-    /// Opaque task id used for log correlation; never surfaced in the
-    /// response. The privacy contract in `recording_conflict.rs`
-    /// guarantees this id is dropped before the response.
-    pub task_id: String,
-    pub padded_start: i64,
-    pub padded_end: i64,
-    pub priority: i32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PreviewCapacityDto {
-    pub background_slots: u32,
-    pub reserved_interactive_slots: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]

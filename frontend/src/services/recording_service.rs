@@ -157,35 +157,31 @@ pub struct RecordingConflictPreview {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PreviewConflictsRequest {
+    /// Server-owned source identifiers. The backend resolves them,
+    /// enumerates the committed queue state, and computes capacity
+    /// from config; the frontend never submits another recording's
+    /// padded interval, capacity, or provider identifier.
+    pub source: PreviewSourceDto,
     pub candidate: PreviewCandidateDto,
-    #[serde(default)]
-    pub others: Vec<PreviewOtherDto>,
-    pub capacity: PreviewCapacityDto,
-    #[serde(default)]
-    pub provider_scope: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PreviewSourceDto {
+    pub target_name: String,
+    pub virtual_id: String,
+    pub input_name: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PreviewCandidateDto {
+    pub padded_start: i64,
+    pub padded_end: i64,
     #[serde(default)]
-    pub task_id: String,
-    pub padded_start: i64,
-    pub padded_end: i64,
+    pub pre_roll_secs: u64,
+    #[serde(default)]
+    pub post_roll_secs: u64,
+    #[serde(default)]
     pub priority: i32,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct PreviewOtherDto {
-    pub task_id: String,
-    pub padded_start: i64,
-    pub padded_end: i64,
-    pub priority: i32,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct PreviewCapacityDto {
-    pub background_slots: u32,
-    pub reserved_interactive_slots: u32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -763,27 +759,30 @@ mod tests {
     #[test]
     fn preview_conflicts_request_serializes_to_backend_shape() {
         let req = PreviewConflictsRequest {
+            source: PreviewSourceDto {
+                target_name: "target-1".to_string(),
+                virtual_id: "42".to_string(),
+                input_name: "input-a".to_string(),
+            },
             candidate: PreviewCandidateDto {
-                task_id: "candidate".to_string(),
                 padded_start: 1_700_000_000,
                 padded_end: 1_700_003_600,
+                pre_roll_secs: 0,
+                post_roll_secs: 0,
                 priority: 5,
             },
-            others: vec![PreviewOtherDto {
-                task_id: "other-1".to_string(),
-                padded_start: 1_700_003_000,
-                padded_end: 1_700_004_000,
-                priority: 5,
-            }],
-            capacity: PreviewCapacityDto { background_slots: 2, reserved_interactive_slots: 1 },
-            provider_scope: None,
         };
         let json = serde_json::to_string(&req).expect("serialize");
+        assert!(json.contains("\"source\""));
+        assert!(json.contains("\"target_name\":\"target-1\""));
         assert!(json.contains("\"candidate\""));
-        assert!(json.contains("\"others\""));
-        assert!(json.contains("\"capacity\""));
-        assert!(json.contains("\"background_slots\":2"));
-        assert!(json.contains("\"reserved_interactive_slots\":1"));
+        // The client never submits `others`, `capacity`, or
+        // `provider_scope`; the server derives them from the queue
+        // state and config.
+        assert!(!json.contains("\"others\""));
+        assert!(!json.contains("\"capacity\""));
+        assert!(!json.contains("\"background_slots\""));
+        assert!(!json.contains("\"provider_scope\""));
         assert!(json.contains("\"padded_start\":1700000000"));
     }
 

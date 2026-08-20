@@ -26,7 +26,7 @@ create_bitset!(
 pub const PERM_ALL: PermissionSet = PermissionSet::ALL;
 
 /// Bitmask for the legacy 16-bit permission set. A user with
-/// `permissions: 65535` in their old config (pre-Phase 2) carries only
+/// `permissions: 65535` in their old config carries only
 /// these bits; the new DVR permissions are not implicitly granted.
 /// This constant is exported for old-config deserialization tests and
 /// the "configured old numeric value 65535 limited to old
@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_old_perms_only_covers_pre_phase2_bits() {
+    fn test_legacy_old_perms_only_covers_pre_bits() {
         // A config value of `65535` (the old u16 `PERM_ALL`) must
         // not implicitly grant the new DVR permissions. `LEGACY_OLD_PERMS`
         // sets only the first 16 bits.
