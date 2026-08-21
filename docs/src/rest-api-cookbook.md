@@ -275,36 +275,36 @@ This is a compact operator-oriented overview of the `/api/v1` REST API groups cu
 
 ### Downloads and recordings
 
-| Method   | Path                                                 | Purpose                                                               |
-| -------- |------------------------------------------------------|-----------------------------------------------------------------------|
-| `GET`    | `/api/v1/file/download/info`                         | Inspect remote file/download info                                     |
-| `POST`   | `/api/v1/file/download`                              | Queue a file download                                                 |
-| `POST`   | `/api/v1/file/record`                                | Queue a live recording                                                |
-| `POST`   | `/api/v1/file/download/pause`                        | Pause a queued or active download                                     |
-| `POST`   | `/api/v1/file/download/resume`                       | Resume a paused download                                              |
-| `POST`   | `/api/v1/file/download/cancel`                       | Cancel a queued or active download                                    |
-| `POST`   | `/api/v1/file/download/remove`                       | Remove a task from the download database                              |
-| `POST`   | `/api/v1/file/download/retry`                        | Retry a failed download                                               |
-| `GET`    | `/api/v1/recording/tasks`                            | List visible DVR tasks                                                |
-| `POST`   | `/api/v1/recording/tasks`                            | Create a DVR recording task from server-owned source ids              |
-| `PATCH`  | `/api/v1/recording/tasks/{id}`                       | Edit an upcoming DVR recording                                        |
-| `POST`   | `/api/v1/recording/tasks/{id}/cancel`                | Cancel an active, queued, or scheduled DVR recording                  |
-| `DELETE` | `/api/v1/recording/tasks/{id}`                       | Delete a finished DVR recording through the safe deletion lifecycle   |
+| Method   | Path                                                 | Purpose                                                                         |
+| -------- |------------------------------------------------------|---------------------------------------------------------------------------------|
+| `GET`    | `/api/v1/file/download/info`                         | Inspect remote file/download info                                               |
+| `POST`   | `/api/v1/file/download`                              | Queue a file download                                                           |
+| `POST`   | `/api/v1/file/record`                                | Queue a live recording                                                          |
+| `POST`   | `/api/v1/file/download/pause`                        | Pause a queued or active download                                               |
+| `POST`   | `/api/v1/file/download/resume`                       | Resume a paused download                                                        |
+| `POST`   | `/api/v1/file/download/cancel`                       | Cancel a queued or active download                                              |
+| `POST`   | `/api/v1/file/download/remove`                       | Remove a task from the download database                                        |
+| `POST`   | `/api/v1/file/download/retry`                        | Retry a failed download                                                         |
+| `GET`    | `/api/v1/recording/tasks`                            | List visible DVR tasks                                                          |
+| `POST`   | `/api/v1/recording/tasks`                            | Create a DVR recording task from server-owned source ids                        |
+| `PATCH`  | `/api/v1/recording/tasks/{id}`                       | Edit an upcoming DVR recording                                                  |
+| `POST`   | `/api/v1/recording/tasks/{id}/cancel`                | Cancel an active, queued, or scheduled DVR recording                            |
+| `DELETE` | `/api/v1/recording/tasks/{id}`                       | Delete a finished DVR recording through the safe deletion lifecycle             |
 | `POST`   | `/api/v1/recording/conflicts/preview`                | Advisory conflict preview (severity, optional provider scope, overlap segments) |
-| `GET`    | `/api/v1/recording/quota`                            | Read the caller's private quota and shared DVR usage                  |
-| `GET`    | `/api/v1/recording/rules`                            | List visible recurring recording rules                                |
-| `POST`   | `/api/v1/recording/rules`                            | Create a weekly recurring recording rule                              |
-| `PATCH`  | `/api/v1/recording/rules/{id}`                       | Edit a recurring recording rule                                       |
-| `DELETE` | `/api/v1/recording/rules/{id}?future=retain\|cancel` | Delete a recurring recording rule                                     |
+| `GET`    | `/api/v1/recording/quota`                            | Read the caller's private quota and shared DVR usage                            |
+| `GET`    | `/api/v1/recording/rules`                            | List visible recurring recording rules                                          |
+| `POST`   | `/api/v1/recording/rules`                            | Create a weekly recurring recording rule                                        |
+| `PATCH`  | `/api/v1/recording/rules/{id}`                       | Edit a recurring recording rule                                                 |
+| `DELETE` | `/api/v1/recording/rules/{id}?future=retain\|cancel` | Delete a recurring recording rule                                               |
 
 #### DVR WebSocket protocol
 
 The DVR layer ships its own scoped protocol messages on the same WebSocket connection as the rest of the
 backend. The frontend sends `ProtocolMessage::RecordingSnapshotRequest` to subscribe and receives:
 
-* `ProtocolMessage::RecordingSnapshotResponse { revision, tasks }` — the full filtered task list for the
+- `ProtocolMessage::RecordingSnapshotResponse { revision, tasks }` — the full filtered task list for the
   caller's session, sent on connect and after every mutation the session is permitted to see.
-* `ProtocolMessage::RecordingDeltaResponse { revision, tasks }` — a smaller diff when only a few tasks
+- `ProtocolMessage::RecordingDeltaResponse { revision, tasks }` — a smaller diff when only a few tasks
   changed.
 
 The frontend never polls. After a successful `POST /api/v1/recording/tasks` it relies on the next

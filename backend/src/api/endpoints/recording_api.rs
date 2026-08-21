@@ -43,7 +43,10 @@ fn service_error_status(err: &ServiceError) -> StatusCode {
         | ServiceError::PaddingLimitExceeded
         | ServiceError::InvalidState
         | ServiceError::ProvenanceImmutable
+        | ServiceError::Duplicate
+        | ServiceError::InvalidPath
         | ServiceError::QuotaExceeded => StatusCode::BAD_REQUEST,
+        ServiceError::DiskFull => StatusCode::INSUFFICIENT_STORAGE,
         ServiceError::Forbidden | ServiceError::SharedCreationNotAdministrator => StatusCode::FORBIDDEN,
         ServiceError::UnknownRecording => StatusCode::NOT_FOUND,
         ServiceError::PersistenceFailed | ServiceError::IoError(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -864,6 +867,9 @@ pub async fn delete_recording_rule(
     }
     match repo.delete(&id).await {
         Ok(true) => {
+            // Cancelling future rule recordings mutates the queue, so the
+            // frontend needs both the rules change and a snapshot refresh.
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
             let _ = app_state.event_manager.send_event(EventMessage::RecordingRulesChanged);
             StatusCode::NO_CONTENT.into_response()
         }

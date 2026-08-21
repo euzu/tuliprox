@@ -45,16 +45,16 @@ video:
       fallback_bytes_per_minute: 8388608     # 8 MiB/min, > 0
 ```
 
-| Field | Default | Range | Restart required | Effect |
-|---|---|---|---|---|
-| `enabled` | `true` | bool | no | `false` skips reconciliation, retention, and the notification outbox at startup, makes running supervisors idle on their next tick, answers every `/api/v1/recording/**` route with `501 recording_disabled`, and hides the DVR entries from the web UI navigation. |
-| `container_format` | `mpegts` | `mpegts`, `matroska`, `mp4` | no | The `-f` muxer ffmpeg writes. `mpegts` survives truncation, so a recording killed mid-stream still plays — prefer it unless the source codecs need another container. Applies to recordings that start after the change. |
-| `retention.sweep_interval_secs` | `3600` | > 0 | no | Cadence of the age/count sweep. Independent of `disk.cleanup_interval_secs`. |
-| `disk.cleanup_interval_secs` | `3600` | > 0 | no | Cadence of the supervisor's tick, and therefore of the watermark check. Measurements are floored at one per 30 s. |
-| `notifications.outbox_buffer` | `1024` | ≥ 1 | **yes** | Channel capacity between the recorder and the outbox worker. Fixed when the worker starts. |
-| `notifications.max_attempts` | `6` | ≥ 1 | no | Delivery attempts per notification before it is dead-lettered. |
-| `notifications.backoff_initial_secs` | `5` | ≥ 1 | no | First retry delay; doubles per attempt. |
-| `notifications.backoff_max_secs` | `900` | ≥ `backoff_initial_secs` | no | Ceiling for the doubling. |
+| Field                                | Default  | Range                       | Restart required | Effect                                                                                                                                                                                                                                                              |
+|--------------------------------------|----------|-----------------------------|------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `enabled`                            | `true`   | bool                        | no               | `false` skips reconciliation, retention, and the notification outbox at startup, makes running supervisors idle on their next tick, answers every `/api/v1/recording/**` route with `501 recording_disabled`, and hides the DVR entries from the web UI navigation. |
+| `container_format`                   | `mpegts` | `mpegts`, `matroska`, `mp4` | no               | The `-f` muxer ffmpeg writes. `mpegts` survives truncation, so a recording killed mid-stream still plays — prefer it unless the source codecs need another container. Applies to recordings that start after the change.                                            |
+| `retention.sweep_interval_secs`      | `3600`   | > 0                         | no               | Cadence of the age/count sweep. Independent of `disk.cleanup_interval_secs`.                                                                                                                                                                                        |
+| `disk.cleanup_interval_secs`         | `3600`   | > 0                         | no               | Cadence of the supervisor's tick, and therefore of the watermark check. Measurements are floored at one per 30 s.                                                                                                                                                   |
+| `notifications.outbox_buffer`        | `1024`   | ≥ 1                         | **yes**          | Channel capacity between the recorder and the outbox worker. Fixed when the worker starts.                                                                                                                                                                          |
+| `notifications.max_attempts`         | `6`      | ≥ 1                         | no               | Delivery attempts per notification before it is dead-lettered.                                                                                                                                                                                                      |
+| `notifications.backoff_initial_secs` | `5`      | ≥ 1                         | no               | First retry delay; doubles per attempt.                                                                                                                                                                                                                             |
+| `notifications.backoff_max_secs`     | `900`    | ≥ `backoff_initial_secs`    | no               | Ceiling for the doubling.                                                                                                                                                                                                                                           |
 
 Choosing values:
 
@@ -126,11 +126,11 @@ before but were never started, so the DVR worked on the happy path and silently 
 everything else. The consequences of switching them on are all things this guide describes, but
 they happen now where they did not before:
 
-| Supervisor | What now happens |
-|---|---|
-| Startup reconciliation | Recordings stuck in `Deleting` from an earlier crash are finished or restored on boot. Orphaned rule tombstones are repaired. |
-| Retention | Age, count, and disk-watermark deletion begin. See the retention warning above. |
-| Notification outbox | Lifecycle notifications are retried and persisted instead of being dropped on transient error. |
+| Supervisor               | What now happens                                                                                                              |
+|--------------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| Startup reconciliation   | Recordings stuck in `Deleting` from an earlier crash are finished or restored on boot. Orphaned rule tombstones are repaired. |
+| Retention                | Age, count, and disk-watermark deletion begin. See the retention warning above.                                               |
+| Notification outbox      | Lifecycle notifications are retried and persisted instead of being dropped on transient error.                                |
 
 ### 1.4 Supervisors
 
@@ -138,11 +138,11 @@ Three background supervisors implement the behaviour described in the rest of th
 three are started once the HTTP listener is bound, and all three honour the `downloads`
 cancellation token, so a config reload stops and restarts them cleanly.
 
-| Supervisor | Cadence | Responsibility |
-|---|---|---|
-| Startup reconciliation | once at boot, before the rule scheduler | Finishes or undoes deletions interrupted by a crash; repairs queue/rule-store drift. |
-| Retention | `disk.cleanup_interval_secs` tick, policy sweep every `retention.sweep_interval_secs` | Age, count, and watermark deletion — all through the single `system_retention_delete` path. |
-| Notification outbox | event-driven, with per-entry retry timers | Durable lifecycle-notification delivery with per-channel retry and dead-lettering. |
+| Supervisor               | Cadence                                                                                 | Responsibility                                                                              |
+|--------------------------|-----------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|
+| Startup reconciliation   | once at boot, before the rule scheduler                                                 | Finishes or undoes deletions interrupted by a crash; repairs queue/rule-store drift.        |
+| Retention                | `disk.cleanup_interval_secs` tick, policy sweep every `retention.sweep_interval_secs`   | Age, count, and watermark deletion — all through the single `system_retention_delete` path. |
+| Notification outbox      | event-driven, with per-entry retry timers                                               | Durable lifecycle-notification delivery with per-channel retry and dead-lettering.          |
 
 Passes never overlap: a tick that arrives while the previous pass is still deleting is skipped.
 
@@ -247,13 +247,13 @@ A crash at any point is recoverable:
 
 The quota ledger charges the bytes below per `DownloadState`:
 
-| State | Charged bytes |
-|---|---:|
-| `Scheduled` / `Queued` / `WaitingForCapacity` / `RetryWaiting` | `reserved_bytes` |
-| `Downloading` | `max(reserved_bytes, measured_bytes)` |
-| `Completed` | final `measured_bytes` |
-| `Failed` / `Cancelled` with partial file | partial `measured_bytes` |
-| `Deleting` | charge of the saved terminal state until removal commits |
+| State                                                          |                                            Charged bytes |
+|----------------------------------------------------------------|---------------------------------------------------------:|
+| `Scheduled` / `Queued` / `WaitingForCapacity` / `RetryWaiting` |                                       `reserved_bytes`   |
+| `Downloading`                                                  |                    `max(reserved_bytes, measured_bytes)` |
+| `Completed`                                                    |                                   final `measured_bytes` |
+| `Failed` / `Cancelled` with partial file                       |                                 partial `measured_bytes` |
+| `Deleting`                                                     | charge of the saved terminal state until removal commits |
 
 A task is counted exactly once. Private pools key on `RecordingOwner::User(uid)`; shared pools key
 on `RecordingVisibility::Shared`; `LegacyAdmin` recordings count toward the shared pool. Per-user
@@ -314,12 +314,12 @@ The four guarantees — no symlink is followed, no existing file is clobbered, t
 atomic, nothing escapes the recording root — are built from portable primitives and hold
 identically on every supported target:
 
-| Guarantee | Primitive | Portable? |
-|---|---|---|
-| No symlink followed on inspection | `symlink_metadata` (never `metadata`) | yes |
-| No existing file clobbered | `create_new` → `O_CREAT\|O_EXCL` / `CREATE_NEW`; both fail on an existing entry *including a dangling symlink* | yes |
-| Atomic publish | `rename`, after a no-follow existence check on the destination | yes |
-| Contained in the recording root | component validation plus an owner-id component check, before any syscall | yes |
+| Guarantee                           | Primitive                                                                                                      | Portable? |
+|-------------------------------------|----------------------------------------------------------------------------------------------------------------|-----------|
+| No symlink followed on inspection   | `symlink_metadata` (never `metadata`)                                                                          | yes       |
+| No existing file clobbered          | `create_new` → `O_CREAT\|O_EXCL` / `CREATE_NEW`; both fail on an existing entry *including a dangling symlink* | yes       |
+| Atomic publish                      | `rename`, after a no-follow existence check on the destination                                                 | yes       |
+| Contained in the recording root     | component validation plus an owner-id component check, before any syscall                                      | yes       |
 
 Only one call has a platform-specific branch: `open_partial_no_clobber` additionally passes
 `O_NOFOLLOW` on Unix. That is **defense in depth, not the mechanism** — the no-clobber property
@@ -334,15 +334,15 @@ behaviour they cover is asserted portably by the no-clobber tests.
 
 ## 8. Authorization matrix
 
-| Operation | Private recording | Shared recording | `LegacyAdmin` | Orphan |
-|---|---|---|---|---|
-| Read / Playback / Download | owner with `recording.read` | anyone with `recording.read` | admin only | admin only |
-| Create private | user with `recording.write` | n/a | admin only | n/a |
-| Create shared | rejected (admin only) | admin + `recording.write` | admin only | n/a |
-| Edit / Cancel / Delete | owner + `recording.write` | admin + `recording.write` | admin only | n/a |
-| Manage recurring rule | owner + `recording.write` | admin + `recording.write` | admin only | n/a |
-| `SystemRetentionDelete` | ownership bypassed; state-gated | ownership bypassed; state-gated | ownership bypassed; state-gated | n/a |
-| Orphan catalog | n/a | n/a | n/a | admin only |
+| Operation                    | Private recording                 | Shared recording                 | `LegacyAdmin`                   | Orphan       |
+|------------------------------|-----------------------------------|----------------------------------|---------------------------------|--------------|
+| Read / Playback / Download   | owner with `recording.read`       | anyone with `recording.read`     | admin only                      | admin only   |
+| Create private               | user with `recording.write`       | n/a                              | admin only                      | n/a          |
+| Create shared                | rejected (admin only)             | admin + `recording.write`        | admin only                      | n/a          |
+| Edit / Cancel / Delete       | owner + `recording.write`         | admin + `recording.write`        | admin only                      | n/a          |
+| Manage recurring rule        | owner + `recording.write`         | admin + `recording.write`        | admin only                      | n/a          |
+| `SystemRetentionDelete`      | ownership bypassed; state-gated   | ownership bypassed; state-gated  | ownership bypassed; state-gated | n/a          |
+| Orphan catalog               | n/a                               | n/a                              | n/a                             | admin only   |
 
 Administrators **do not** implicitly receive another regular user's private recording content. The
 private owner is the only non-administrator allowed to read it. Administrative access is read-only
@@ -473,17 +473,17 @@ Two stores can drift when one commit succeeds and the other fails. The reconcili
 produces a list of `ReconcileAction`s the caller applies under the queue-mutation boundary. The
 truth table:
 
-| Situation | Action |
-|---|---|
-| Materialized task, no `Scheduled` tombstone | `AddScheduledTombstone` |
-| `Scheduled` tombstone, no task, rule enabled | `Materialize` |
-| `Cancelled` tombstone, eligible inactive task | `Finalize` |
-| `Cancelled` tombstone, **active** task | `ConflictingIntent` (log, manual resolution) |
-| `Completed` tombstone, any task | suppress (no rematerialize) |
-| Task terminal, tombstone `Scheduled` | `UpdateTombstone { kind: Completed }` |
-| Tombstone past `expires_at` | `PruneTombstone` |
-| Disabled rule | skip (no rematerialize) |
-| Deleted rule | leave tombstone until expiry |
+| Situation                                     | Action                                       |
+|-----------------------------------------------|----------------------------------------------|
+| Materialized task, no `Scheduled` tombstone   | `AddScheduledTombstone`                      |
+| `Scheduled` tombstone, no task, rule enabled  | `Materialize`                                |
+| `Cancelled` tombstone, eligible inactive task | `Finalize`                                   |
+| `Cancelled` tombstone, **active** task        | `ConflictingIntent` (log, manual resolution) |
+| `Completed` tombstone, any task               | suppress (no rematerialize)                  |
+| Task terminal, tombstone `Scheduled`          | `UpdateTombstone { kind: Completed }`        |
+| Tombstone past `expires_at`                   | `PruneTombstone`                             |
+| Disabled rule                                 | skip (no rematerialize)                      |
+| Deleted rule                                  | leave tombstone until expiry                 |
 
 Tombstones are retained for the longer of the EPG horizon and the 14-day minimum horizon
 (`MIN_TOMBSTONE_HORIZON_SECS`). The fixed cross-store lock order is
@@ -501,10 +501,10 @@ never plans against half-repaired state. Two notes on how the actions are applie
 Deletions interrupted by a crash are repaired in the same pass. For each task still carrying
 `deleting_previous_state`, the physical file decides:
 
-| File state | Action |
-|---|---|
-| Gone | Finish the deletion — remove the task from the queue. |
-| Present, inside the recording root | Restore the prior terminal state and clear the marker. |
+| File state                          | Action                                                                                                                                                                                    |
+|-------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Gone                                | Finish the deletion — remove the task from the queue.                                                                                                                                     |
+| Present, inside the recording root  | Restore the prior terminal state and clear the marker.                                                                                                                                    |
 | Present, outside the recording root | Restore the prior state, leave the file alone, and log `recording_reconciliation_unsafe_path` (`recording::audit`, `warn`). Dropping the task instead would orphan a file nothing tracks. |
 
 ### 14.4 Delete with retain / cancel

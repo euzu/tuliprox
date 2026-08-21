@@ -61,7 +61,9 @@ fetch() {
   # $1 = path. Prints the body; returns non-zero on a transport failure.
   local path="$1"
   if [[ -n "${TOKEN}" ]]; then
-    curl -fsS -H "Authorization: Bearer ${TOKEN}" "${URL}${path}"
+    # Token goes through stdin (curl `-H @-`) so it does not appear in
+    # the process listing (`ps`, `/proc/<pid>/cmdline`).
+    curl -fsS -H @- "${URL}${path}" <<<"Authorization: Bearer ${TOKEN}"
   else
     curl -fsS "${URL}${path}"
   fi
@@ -110,12 +112,28 @@ queue_file="${STORAGE_DIR}/downloads_state.json"
 rules_file="${STORAGE_DIR}/recording_rules.json"
 outbox_file="${STORAGE_DIR}/recording_notification_outbox.json"
 
+# mtime_as_iso8601_utc <file>
+#   Prints the file's modification time as `YYYY-MM-DDTHH:MM:SSZ`, or
+#   `unknown` if neither `stat` flavour works. GNU `stat -c %Y` and BSD
+#   / macOS `stat -f %m` both yield an mtime epoch; GNU `date -d @N`
+#   and BSD `date -r @N` both format it.
+mtime_as_iso8601_utc() {
+  local f="$1" ts
+  if ts=$(stat -c %Y -- "${f}" 2>/dev/null); then
+    date -u -d "@${ts}" '+%Y-%m-%dT%H:%M:%SZ'
+  elif ts=$(stat -f %m -- "${f}" 2>/dev/null); then
+    date -u -r "@${ts}" '+%Y-%m-%dT%H:%M:%SZ'
+  else
+    echo unknown
+  fi
+}
+
 for f in "${queue_file}" "${rules_file}" "${outbox_file}"; do
   if [[ -f "${f}" ]]; then
     printf '%s  (%s bytes, modified %s)\n' \
       "${f}" \
       "$(wc -c <"${f}" | tr -d ' ')" \
-      "$(date -u -r "${f}" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)"
+      "$(mtime_as_iso8601_utc "${f}")"
   else
     printf '%s  (absent)\n' "${f}"
   fi

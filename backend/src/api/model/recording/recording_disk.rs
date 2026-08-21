@@ -148,13 +148,16 @@ pub fn filesystem_capacity_for(path: &Path) -> Option<(u64, u64)> {
         let mut total_bytes: u64 = 0;
         let mut total_free_bytes: u64 = 0;
         // SAFETY: `wide` is a NUL-terminated UTF-16 path; the three output
-        // pointers are valid mutable u64 references.
+        // pointers alias `ULARGE_INTEGER` (which is a `u64` newtype on
+        // the winapi crate). `&raw mut` gives us a stable raw pointer
+        // to each `u64`; `.cast()` widens it to the `*mut ULARGE_INTEGER`
+        // the FFI expects.
         let ok = unsafe {
             winapi::um::fileapi::GetDiskFreeSpaceExW(
                 wide.as_ptr(),
-                &mut free_bytes_available,
-                &mut total_bytes,
-                &mut total_free_bytes,
+                (&raw mut free_bytes_available).cast(),
+                (&raw mut total_bytes).cast(),
+                (&raw mut total_free_bytes).cast(),
             )
         };
         if ok == 0 {
@@ -200,14 +203,15 @@ pub fn free_bytes_for(path: &Path) -> Option<u64> {
         let mut free_bytes_available: u64 = 0;
         let mut total_bytes: u64 = 0;
         let mut total_free_bytes: u64 = 0;
-        // SAFETY: `wide` is a NUL-terminated UTF-16 path; the three output
-        // pointers are valid mutable u64 references.
+        // SAFETY: see `filesystem_capacity_for` — the three output
+        // pointers alias `ULARGE_INTEGER` (`u64` newtype); `&raw mut`
+        // + `.cast()` produces the right raw pointer type.
         let ok = unsafe {
             winapi::um::fileapi::GetDiskFreeSpaceExW(
                 wide.as_ptr(),
-                &mut free_bytes_available,
-                &mut total_bytes,
-                &mut total_free_bytes,
+                (&raw mut free_bytes_available).cast(),
+                (&raw mut total_bytes).cast(),
+                (&raw mut total_free_bytes).cast(),
             )
         };
         if ok == 0 {

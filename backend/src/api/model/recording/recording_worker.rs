@@ -42,7 +42,7 @@ fn stderr_summary(stderr: &[u8]) -> String {
 /// Substring supersets are removed: `"timed out"` already matches every
 /// line that contains `"connection timed out"`, so the narrower phrase
 /// is dead weight. The
-/// [`retryable_phrases_have_no_proper_subset`](Self::retryable_phrases_have_no_proper_subset)
+/// [`retryable_phrases_have_no_proper_subset`](tests::retryable_phrases_have_no_proper_subset)
 /// test catches future reintroductions.
 const RETRYABLE_FFMPEG_PHRASES: &[&str] = &[
     "timed out",

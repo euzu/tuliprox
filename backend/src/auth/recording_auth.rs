@@ -201,7 +201,13 @@ pub const SYSTEM_PRINCIPAL_USERNAME: &str = "recording-supervisor";
 /// call this early so adding such a policy does not regress the
 /// background workers.
 pub fn is_system_principal(claims: &Claims) -> bool {
+    // Both checks are required: `username` alone would let any user who
+    // registers with the sentinel name forge a bypass, and `subject_id`
+    // alone would not survive a future auth refactor that issues the
+    // builtin admin subject_id to a real account. The supervisor is
+    // the only place that mints a Claims with both sentinel values.
     claims.username == SYSTEM_PRINCIPAL_USERNAME
+        && claims.subject_id.as_ref().is_some_and(UserId::is_builtin_admin)
 }
 
 fn check_create(claims: &Claims, action: RecordingAction) -> RecordingDecision {

@@ -321,29 +321,29 @@ fn path_is_contained(path: &Path, root: &Path) -> bool {
     if root.as_os_str().is_empty() {
         return false;
     }
-    let p = path.to_string_lossy();
-    let r = root.to_string_lossy();
-    let prefix = r.as_ref();
-    if !p.starts_with(prefix) {
-        return false;
-    }
-    // Require a path-separator boundary immediately after the root prefix
-    // so siblings like `/data/records` do not match root `/data/rec`.
-    p.as_bytes().get(prefix.len()).copied() == Some(b'/')
-        || prefix.ends_with('/')
-        || p.len() == prefix.len()
+    // `Path::starts_with` compares component-by-component, so
+    // `/data/rec` is correctly rejected as a prefix of `/data/records`.
+    path.starts_with(root)
 }
 
 fn strip_prefix(path: &Path, root: &Path) -> Option<String> {
-    if !path_is_contained(path, root) {
+    if root.as_os_str().is_empty() {
         return None;
     }
-    let p = path.to_string_lossy();
-    let r = root.to_string_lossy();
-    let prefix = r.as_ref();
-    let remainder = p.get(prefix.len()..).unwrap_or("");
-    let remainder = remainder.trim_start_matches('/');
-    Some(if remainder.is_empty() { String::new() } else { remainder.to_string() })
+    // `Path::strip_prefix` already enforces the same component-level
+    // boundary as `starts_with`, so a separate `path_is_contained`
+    // check would be redundant.
+    path.strip_prefix(root).ok().map(path_to_unix_string)
+}
+
+/// Render a path with `/` as the separator regardless of platform. The
+/// callers of `derive_legacy_relative_path` store the result as a
+/// portable relative-path string.
+fn path_to_unix_string(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 fn derive_legacy_completed_at(

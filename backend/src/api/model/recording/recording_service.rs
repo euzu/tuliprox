@@ -103,6 +103,16 @@ pub enum ServiceError {
     /// immutable provenance; surfacing this as `InvalidState` hid the
     /// real reason from the client.
     ProvenanceImmutable,
+    /// Caller tried to create a recording that already exists in the
+    /// queue (same target / window). Distinct from `InvalidState` so
+    /// the client can render a specific "duplicate" message.
+    Duplicate,
+    /// The recording's filesystem path is not within the configured
+    /// storage root, or otherwise violates the path policy.
+    InvalidPath,
+    /// The recording cannot fit on disk; reservation would exceed
+    /// available space.
+    DiskFull,
 }
 
 impl std::fmt::Display for ServiceError {
@@ -129,6 +139,9 @@ impl ServiceError {
             Self::IoError(_) => "recording_io_error",
             Self::QuotaExceeded => "recording_quota_exceeded",
             Self::ProvenanceImmutable => "recording_provenance_immutable",
+            Self::Duplicate => "recording_duplicate",
+            Self::InvalidPath => "recording_invalid_path",
+            Self::DiskFull => "recording_disk_full",
         }
     }
 }
@@ -988,12 +1001,12 @@ fn map_queue_error(err: &QueueMutationError) -> ServiceError {
         QueueMutationError::InvalidInterval => ServiceError::InvalidInterval,
         QueueMutationError::PaddingLimitExceeded => ServiceError::PaddingLimitExceeded,
         QueueMutationError::QuotaExceeded => ServiceError::QuotaExceeded,
+        QueueMutationError::Duplicate => ServiceError::Duplicate,
+        QueueMutationError::InvalidPath => ServiceError::InvalidPath,
+        QueueMutationError::DiskFull => ServiceError::DiskFull,
         QueueMutationError::StateNotEditable
-        | QueueMutationError::Duplicate
         | QueueMutationError::InvalidQuotaPool
-        | QueueMutationError::InvalidPath
         | QueueMutationError::NotInTerminalState
-        | QueueMutationError::DiskFull
         | QueueMutationError::MutationSkipped
         | QueueMutationError::Other(_) => ServiceError::InvalidState,
     }

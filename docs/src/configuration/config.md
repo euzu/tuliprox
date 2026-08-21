@@ -731,7 +731,7 @@ The DVR layer runs an additional authorization pass on top of `recording.read` /
 
 | Visibility | Owner                  | Admin (`builtin:admin`) | Foreign user | Notes                                     |
 |------------|------------------------|-------------------------|--------------|-------------------------------------------|
-| `private`  | read + write + delete  | read + write + delete   | —            | Foreign reads return 404                 |
+| `private`  | read + write + delete  | read + write + delete   | —            | Foreign reads return 404                  |
 | `shared`   | —                      | read + write + delete   | read         | Only admins create shared recordings      |
 | `legacy`   | — (orphan)             | read + write + delete   | —            | Created by the deprecated `/file/record`  |
 
