@@ -1288,8 +1288,9 @@ pub async fn xtream_get_stream_info_response(
 
     let input = app_state.app_config.get_input_by_name(&pli.input_name);
     let is_media_server = input.as_ref().is_some_and(|i| i.input_type.is_media_server());
-    // handle local items and media server
-    if pli.item_type.is_local() || is_media_server {
+    // handle local items, media server, and items with embedded details
+    // (e.g. M3U-synthesized SeriesInfo carrying seasons/episodes).
+    if pli.item_type.is_local() || is_media_server || pli.has_details() {
         let Some(xtream_output) = target.get_xtream_output() else {
             return empty_stream_info_response(cluster);
         };
@@ -1536,6 +1537,12 @@ async fn xtream_get_catchup_response(
     let pli = try_result_bad_request!(
         xtream_get_item_for_stream_id(req_virtual_id, app_state, target, Some(XtreamCluster::Live)).await
     );
+
+    // Content filter: hidden items expose no catch-up table either, so a
+    // plan-tier-restricted user cannot probe hidden channels via catchup.
+    if !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli))) {
+        return axum::Json(json!(ShortEpgResultDto::default())).into_response();
+    }
 
     let input = try_option_bad_request!(app_state.app_config.get_input_by_name(&pli.input_name));
 

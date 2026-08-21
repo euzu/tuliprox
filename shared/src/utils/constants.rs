@@ -93,6 +93,23 @@ pub struct Constants {
     pub re_html_tag: Regex,
 }
 
+/// Source regex for `re_episode_code`. Single source of truth: the
+/// user-facing config default in `crate::defaults::DEFAULT_EPISODE_PATTERN`
+/// is just a reference to this constant. Covers the four historical
+/// shapes (compact `SxxEyy` / `NxNN`, verbose `Season X Episode Y`,
+/// bare `Episode Y`). Rust regex requires unique capture names across
+/// the whole pattern, so the season and episode captures are suffixed
+/// per branch (`_s`, `_n`, `_v`, `_vo`/`_vf`); `parse_season_episode`
+/// recognises all of them.
+pub const EPISODE_PATTERN: &str = concat!(
+    r"(?i)\b(?:",
+    r"[Ss](?P<season_s>\d{1,2})[Ee](?P<episode_s>\d{1,3})",
+    r"|(?P<season_n>\d{1,2})x(?P<episode_n>\d{1,3})",
+    r"|season[\s._-]*(?P<season_v>\d{1,2})(?:[\s._-]*episode[\s._-]*(?P<episode_vf>\d{1,3}))?",
+    r"|episode[\s._-]*(?P<episode_vo>\d{1,3})",
+    r")\b",
+);
+
 pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(|| {
     Constants {
         re_credentials: Regex::new(r"((username|password|token|api_key)=)[^&]*").unwrap(),
@@ -147,10 +164,10 @@ pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(|| {
         re_quality: Regex::new(r"(?i)\b(x265|4K|UHD|8K|2160p?|1080p?|720p?|480p?|BLURAY|HDTV|DVDRIP|BRRIP|CAM|TS|HDR|DV|SDR)\b").unwrap(),
         re_classifier_year: Regex::new(r"[\(\[]?(\d{4})[\)\]]?").unwrap(),
         re_classifier_cleanup: Regex::new(r"(?i)[\s\._-]*(?:s\d+e\d+|\d+x\d+|season[\s\._-]*\d+|episode[\s\._-]*\d+).*$").unwrap(),
-        re_episode_code: Regex::new(
-            r"(?i)\b(?:s\d{1,2}e\d{1,3}|\d{1,2}x\d{1,3}|season[\s._-]*\d{1,2}(?:[\s._-]*episode[\s._-]*\d{1,3})?|episode[\s._-]*\d{1,3})\b"
-        )
-        .unwrap(),
+        // Single source of truth: `EPISODE_PATTERN` (above) is reused
+        // as the user-facing config default by
+        // `crate::defaults::DEFAULT_EPISODE_PATTERN`.
+        re_episode_code: Regex::new(EPISODE_PATTERN).expect("episode pattern must compile"),
         re_classifier_episode: Regex::new(r"(?i)(?:e|episode|x)[\s\._-]*(\d+)").unwrap(),
         re_classifier_season: Regex::new(r"(?i)(?:s|season)[\s\._-]*(\d+)").unwrap(),
         re_classifier_moviedb_id: Regex::new(r"(?i)\b(tmdb|tvdb|imdb)[\s._=-]?(\d+)\b").unwrap(),

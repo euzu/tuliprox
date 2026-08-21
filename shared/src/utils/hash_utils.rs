@@ -210,9 +210,104 @@ pub fn create_alias_uuid(base_uuid: &UUIDType, mapping_id: &str) -> UUIDType {
     UUIDType(hasher.finalize().into())
 }
 
+// === FNV-1a 32-bit hash for stable numeric IDs. ===
+//
+// Used when an upstream id is missing (e.g. M3U episodes, Stalker synthetic
+// storage ids). Deterministic across runs; collisions are extremely rare but
+// callers should still de-duplicate within a snapshot batch.
+
+pub fn fnv1a_32(key: &str) -> u32 {
+    let hash = key.bytes().fold(2_166_136_261_u32, |hash, byte| (hash ^ u32::from(byte)).wrapping_mul(16_777_619));
+    hash.max(1)
+}
+
+/// Streaming FNV-1a over a sequence of string parts joined by `:` without
+/// allocating an intermediate `String`. Equivalent to
+/// `fnv1a_32(&parts.join(":"))` for any non-empty `parts`, with an empty
+/// separator byte between consecutive parts.
+pub fn fnv1a_32_parts(parts: &[&str]) -> u32 {
+    let mut hash = 2_166_136_261_u32;
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            hash ^= u32::from(b':');
+            hash = hash.wrapping_mul(16_777_619);
+        }
+        for &byte in part.as_bytes() {
+            hash ^= u32::from(byte);
+            hash = hash.wrapping_mul(16_777_619);
+        }
+    }
+    hash.max(1)
+}
+
+pub fn stable_episode_storage_id(series_id: u32, season_number: u32, episode_id: &str, episode_number: u32) -> u32 {
+    let key = format!("{series_id}:{season_number}:{episode_id}:{episode_number}");
+    fnv1a_32(&key)
+}
+
+// === Season/episode extraction from a configured regex. ===
+//
+// The regex must expose named `season` and `episode` captures. Supported
+// shapes include the compact `SxxEyy` / `NxNN` forms and the verbose
+// `Season X Episode Y` / `Episode Y` forms. When the regex matches a
+// shape without an explicit season (e.g. bare `Episode 5`), the season
+// defaults to `1` so the caller still receives a usable pair.
+//
+// `crate::defaults::default_episode_pattern` exposes `EPISODE_PATTERN`
+// as the user-facing default.
+
+pub fn parse_season_episode(title: &str, pattern: &regex::Regex) -> Option<(u32, u32)> {
+    let caps = pattern.captures(title)?;
+    // The CONSTANTS pattern uses branch-specific capture names
+    // (`season_s`/`episode_s`, `season_n`/`episode_n`,
+    // `season_v`/`episode_vf`/`episode_vo`); the simpler DEFAULT
+    // pattern uses `season`/`episode`. Whichever branch matched,
+    // pick the first populated capture.
+    let episode_str = caps
+        .name("episode")
+        .or_else(|| caps.name("episode_s"))
+        .or_else(|| caps.name("episode_n"))
+        .or_else(|| caps.name("episode_vf"))
+        .or_else(|| caps.name("episode_vo"))?
+        .as_str()
+        .trim();
+    let season_str = caps
+        .name("season")
+        .or_else(|| caps.name("season_s"))
+        .or_else(|| caps.name("season_n"))
+        .or_else(|| caps.name("season_v"))
+        .map(|m| m.as_str().trim());
+
+    // New-format patterns expose season and episode as separate
+    // numeric captures. For legacy user-configured patterns that
+    // still wrap `SxxEyy` inside a single named capture (e.g.
+    // `(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2})`), fall back to
+    // splitting the captured string.
+    let (season, episode) = match (season_str, episode_str.parse::<u32>()) {
+        (Some(s), Ok(e)) => (s.parse::<u32>().ok()?, e),
+        (None, Ok(e)) => (1, e),
+        (_, Err(_)) => parse_sxxeyy_fallback(episode_str)?,
+    };
+    Some((season, episode))
+}
+
+/// Legacy fallback: a user-configured pattern may still expose the
+/// whole `SxxEyy` token under one named capture. Strip the leading
+/// `S`/`s`, find the next letter, and parse the digit runs around it.
+fn parse_sxxeyy_fallback(token: &str) -> Option<(u32, u32)> {
+    let after_s = token.strip_prefix(|c: char| c.is_ascii_alphabetic()).unwrap_or(token);
+    let e_idx = after_s.find(|c: char| c.is_ascii_alphabetic())?;
+    let (s_str, e_str) = after_s.split_at(e_idx);
+    let season = s_str.trim().parse().ok()?;
+    let episode = e_str[1..].trim().parse().ok()?;
+    Some((season, episode))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::{constants::EPISODE_PATTERN, CONSTANTS};
+    use regex::Regex;
 
     // ── extract_id_from_url ────────────────────────────────────────────
 
@@ -695,5 +790,82 @@ mod tests {
                 "{item_type:?}"
             );
         }
+    }
+
+    #[test]
+    fn fnv1a_32_is_deterministic_and_nonzero() {
+        let a = fnv1a_32("input_a:Show Name:https://example.test/series/ep1");
+        let b = fnv1a_32("input_a:Show Name:https://example.test/series/ep1");
+        assert_eq!(a, b);
+        assert!(fnv1a_32("") > 0);
+        assert!(fnv1a_32("0") > 0);
+        assert_ne!(a, fnv1a_32("input_a:Show Name:https://example.test/series/ep2"));
+    }
+
+    #[test]
+    fn fnv1a_32_matches_known_vector() {
+        // FNV-1a 32-bit of "" is 0x811c9dc5 (offset basis). Our implementation
+        // forces the result to `>= 1` so the sentinel-zero guard kicks in.
+        assert_eq!(fnv1a_32(""), 0x811c9dc5);
+    }
+
+    #[test]
+    fn fnv1a_32_parts_matches_joined_string() {
+        let joined = fnv1a_32("a:b:c");
+        let parts = fnv1a_32_parts(&["a", "b", "c"]);
+        assert_eq!(joined, parts);
+        // Empty parts list still produces the offset-basis sentinel.
+        assert_eq!(fnv1a_32_parts(&[]), fnv1a_32(""));
+        // Single part produces no separator byte.
+        assert_eq!(fnv1a_32_parts(&["only"]), fnv1a_32("only"));
+    }
+
+    #[test]
+    fn stable_episode_storage_id_keys_separate_contexts() {
+        // Same (series, season, episode_num, episode_id) tuple must hash
+        // identically regardless of how the caller order is.
+        let a = stable_episode_storage_id(1, 1, "10", 1);
+        let b = stable_episode_storage_id(1, 1, "10", 1);
+        assert_eq!(a, b);
+        // Different episode_num must not collide.
+        assert_ne!(a, stable_episode_storage_id(1, 1, "10", 2));
+        // Different series must not collide.
+        assert_ne!(a, stable_episode_storage_id(2, 1, "10", 1));
+    }
+
+    #[test]
+    fn parse_season_episode_extracts_with_default_pattern() {
+        let pattern = Regex::new(EPISODE_PATTERN).unwrap();
+        assert_eq!(parse_season_episode("Show S02E05 [1080p]", &pattern), Some((2, 5)));
+        assert_eq!(parse_season_episode("Show s8e2", &pattern), Some((8, 2)));
+        assert_eq!(parse_season_episode("Show without episode", &pattern), None);
+        // Pattern only matches the digits grouped after S and E.
+        assert_eq!(parse_season_episode("Pilot", &pattern), None);
+    }
+
+    #[test]
+    fn parse_season_episode_legacy_user_pattern_with_wrapped_episode_capture() {
+        // A user-configured pattern that still wraps the whole
+        // `SxxEyy` token inside a single named capture (the
+        // pre-refactor format) must keep working — the function
+        // falls back to splitting the captured string.
+        let legacy = Regex::new(r".*(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2}).*").unwrap();
+        assert_eq!(parse_season_episode("Show S02E05 [1080p]", &legacy), Some((2, 5)));
+        assert_eq!(parse_season_episode("Show s8e2", &legacy), Some((8, 2)));
+    }
+
+    #[test]
+    fn parse_season_episode_handles_verbose_and_fallback_shapes() {
+        // The CONSTANTS regex covers the four historical shapes.
+        let pattern = Regex::new(CONSTANTS.re_episode_code.as_str()).unwrap();
+        // Verbose `Season X Episode Y`
+        assert_eq!(parse_season_episode("Show - Season 2 Episode 5", &pattern), Some((2, 5)),);
+        assert_eq!(parse_season_episode("Show Season 02 Episode 05", &pattern), Some((2, 5)),);
+        // `NxNN`
+        assert_eq!(parse_season_episode("Show 1x05", &pattern), Some((1, 5)));
+        // Bare `Episode Y` falls back to season 1.
+        assert_eq!(parse_season_episode("Show Episode 7", &pattern), Some((1, 7)));
+        // No match → None.
+        assert_eq!(parse_season_episode("Pilot", &pattern), None);
     }
 }
