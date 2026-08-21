@@ -184,7 +184,7 @@ fn next_wakeup(file: &OutboxFile, now: i64) -> Duration {
         .iter()
         .map(|entry| entry.next_attempt_at.saturating_sub(now).max(0))
         .min()
-        .map_or(Duration::from_secs(3600), |secs| {
+        .map_or(Duration::from_hours(1), |secs| {
             Duration::from_secs(u64::try_from(secs).unwrap_or(0))
         })
 }

@@ -130,6 +130,54 @@ pub async fn no_follow_regular_file(path: &Path) -> Option<std::fs::Metadata> {
     Some(meta)
 }
 
+/// Walk from `root` to `target` one component at a time, asserting via
+/// `symlink_metadata` that no intermediate directory is a symlink, and
+/// that the final path resolves to a regular file. Returns the final
+/// metadata on success.
+///
+/// `no_follow_regular_file` only checks the leaf. If a sibling such as
+/// `<root>/users/alice -> /etc` is a symlink, a path built by joining
+/// `<root>/users/alice/file.ts` would resolve through that link to
+/// `/etc/alice/file.ts` and bypass the lexical containment of
+/// `resolve_recording_dir`. Closing that hole is the whole point of
+/// this helper: callers that serve media under a configured root must
+/// invoke it before opening the file, not the leaf-only variant.
+///
+/// `target` must lie under `root`; this is the caller's responsibility
+/// (`resolve_recording_dir` enforces it). Each prefix is checked with
+/// `symlink_metadata` so the cost is one stat per directory.
+pub async fn no_follow_path_in_root(
+    root: &Path,
+    target: &Path,
+) -> Option<std::fs::Metadata> {
+    let relative = target.strip_prefix(root).ok()?;
+    if relative.as_os_str().is_empty() {
+        // `target == root` would open a directory, not a file.
+        return None;
+    }
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        use std::path::Component;
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir | Component::Prefix(_) | Component::RootDir => return None,
+        }
+        current.push(component);
+        let meta = fs::symlink_metadata(&current).await.ok()?;
+        if meta.file_type().is_symlink() {
+            return None;
+        }
+        if current != target && !meta.is_dir() {
+            return None;
+        }
+    }
+    let final_meta = fs::symlink_metadata(target).await.ok()?;
+    if final_meta.file_type().is_symlink() || !final_meta.is_file() {
+        return None;
+    }
+    Some(final_meta)
+}
+
 /// Open a new partial file with no-clobber, no-follow semantics suitable
 /// for ffmpeg to write into.
 ///
@@ -312,6 +360,48 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let missing = dir.path().join("does-not-exist.ts");
         assert!(no_follow_regular_file(&missing).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn no_follow_path_in_root_returns_some_for_clean_layout() {
+        let dir = TempDir::new().expect("tempdir");
+        let users = dir.path().join("users");
+        let owner = users.join("alice");
+        let leaf = owner.join("recording.ts");
+        tokio::fs::create_dir_all(&owner).await.expect("mkdir");
+        tokio::fs::write(&leaf, b"data").await.expect("write");
+        let meta = no_follow_path_in_root(dir.path(), &leaf).await.expect("clean layout");
+        assert!(meta.is_file());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn no_follow_path_in_root_rejects_symlink_owner_directory() {
+        // `<root>/users/alice -> /etc` would otherwise resolve
+        // `<root>/users/alice/file.ts` to `/etc/file.ts` and bypass
+        // the lexical containment of `resolve_recording_dir`.
+        let dir = TempDir::new().expect("tempdir");
+        let users = dir.path().join("users");
+        let outside = dir.path().join("outside.ts");
+        tokio::fs::create_dir_all(&users).await.expect("mkdir");
+        tokio::fs::write(&outside, b"data").await.expect("write");
+        let alice_link = users.join("alice");
+        symlink(&outside, &alice_link).expect("symlink");
+        let target = alice_link.join("file.ts");
+        assert!(no_follow_path_in_root(dir.path(), &target).await.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn no_follow_path_in_root_rejects_symlink_leaf() {
+        let dir = TempDir::new().expect("tempdir");
+        let users = dir.path().join("users").join("alice");
+        tokio::fs::create_dir_all(&users).await.expect("mkdir");
+        let outside = dir.path().join("outside.ts");
+        tokio::fs::write(&outside, b"data").await.expect("write");
+        let leaf_link = users.join("file.ts");
+        symlink(&outside, &leaf_link).expect("symlink");
+        assert!(no_follow_path_in_root(dir.path(), &leaf_link).await.is_none());
     }
 
     #[cfg(unix)]

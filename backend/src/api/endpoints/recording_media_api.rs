@@ -19,7 +19,7 @@ use crate::{
         AppState, DownloadQueue,
     },
     auth::{validate_token_claims, verify_token, AuthBearer, AuthError},
-    utils::{no_follow_regular_file, resolve_recording_dir, RecordingPathError, RecordingVisibility as PathVisibility},
+    utils::{no_follow_path_in_root, resolve_recording_dir, RecordingPathError, RecordingVisibility as PathVisibility},
 };
 use axum::{
     body::Body,
@@ -96,10 +96,15 @@ impl AuthClaims {
     // `self` when callers only have a `&Claims` in scope.
 }
 
-/// Resolved target for a media request: the absolute path on disk
-/// plus the file size for the response headers.
+/// Resolved target for a media request: the absolute path on disk,
+/// the recording root it was resolved against, and the file size for
+/// the response headers. The root travels alongside the `abs_path` so
+/// every later re-validation (between `File::open` and the actual
+/// byte read) can re-check that no intermediate component has been
+/// swapped in as a symlink.
 struct ResolvedMedia {
     abs_path: PathBuf,
+    recording_root: PathBuf,
     size: u64,
 }
 
@@ -256,12 +261,18 @@ async fn resolve_for_open(app_state: &AppState, claims: &Claims, uuid: &str) -> 
     )
     .map_err(|_e: RecordingPathError| Box::new(access_error_to_response(&CatalogAccessError::InvalidPath)))?;
     // Re-validate the on-disk file is a regular file (no symlink,
-    // no directory) — revalidate the relative path and file type at
-    // open time.
-    let file_meta = no_follow_regular_file(&abs_path)
+    // no directory) at every intermediate component between the
+    // configured root and the leaf — otherwise a swapped-in symlink
+    // under `<root>/users/alice` would route reads outside the
+    // recording root.
+    let file_meta = no_follow_path_in_root(&recording_root, &abs_path)
         .await
         .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::NotFound)))?;
-    Ok(ResolvedMedia { abs_path, size: file_meta.len() })
+    Ok(ResolvedMedia {
+        abs_path,
+        recording_root,
+        size: file_meta.len(),
+    })
 }
 
 /// `GET /library/recording/playback/{uuid}` — supports HTTP Range
@@ -329,9 +340,10 @@ async fn serve_range(
         let Ok(file) = tokio::fs::File::open(&resolved.abs_path).await else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        // Race rule: re-validate the file is still a regular
-        // file after the policy gate approved the open.
-        if no_follow_regular_file(&resolved.abs_path).await.is_none() {
+        // Race rule: re-validate no component between root and the
+        // leaf has been swapped in as a symlink since `resolve_for_open`
+        // approved the open.
+        if no_follow_path_in_root(&resolved.recording_root, &resolved.abs_path).await.is_none() {
             return access_error_to_response(&CatalogAccessError::NotFound);
         }
         let mut seeked = file;
@@ -353,7 +365,7 @@ async fn serve_range(
         let Ok(file) = tokio::fs::File::open(&resolved.abs_path).await else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        if no_follow_regular_file(&resolved.abs_path).await.is_none() {
+        if no_follow_path_in_root(&resolved.recording_root, &resolved.abs_path).await.is_none() {
             return access_error_to_response(&CatalogAccessError::NotFound);
         }
         let limited = file.take(total);
