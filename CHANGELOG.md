@@ -74,20 +74,36 @@
 
 ## 🌟 New Features
 
-- **DVR supervisors are now running.** The recording feature shipped three decision layers whose runners were never
-  started, so a DVR worked on the happy path but could not bound its disk use or heal itself after a crash. All three
-  now start once the HTTP listener is bound, honour the `downloads` cancellation token, and re-read their config each
-  tick so a reload applies without a restart:
-  - **Startup reconciliation** finishes or undoes deletions interrupted by a crash (a task left in `Deleting` used to
-    stay there forever, visible but undeletable) and repairs queue/rule-store drift.
-  - **Retention** performs the age, count, and disk-watermark sweeps described in the operator guide. Previously no
-    retention ran at all, so recording storage was unbounded regardless of configuration.
+- **DVR Feature**: a full digital video recorder built around a queue-mutation boundary with a typed `QueueMutationError`,
+  atomic edit/quota rollback, O(1) edit writes via a remembered `RecordingLocation`, server-side conflict preview
+  (`POST /api/v1/recording/conflicts/preview`), and a `ConflictSeverity` of `NoKnownConflict` / `PossibleCapacityWait` /
+  `LikelyMissedWindow`. Three background supervisors start once the HTTP listener is bound, honour the `downloads`
+  cancellation token, and re-read their config each tick so a reload applies without a restart:
+  - **Startup reconciliation** finishes or undoes deletions interrupted by a crash (tasks whose
+    `recording.deleting_previous_state` was set), and repairs queue/rule-store drift.
+  - **Retention** performs the age, count, and disk-watermark sweeps described in the operator guide
+    (`tuliprox/docs/src/operator/dvr.md`).
   - **Notification outbox** delivers lifecycle notifications durably, retrying **per channel** with capped exponential
     backoff and dead-lettering after `max_attempts`. A notification that reached Telegram but not Discord is retried
-    only against Discord, so retries stay compatible with the at-most-once contract. Previously a transient provider
-    error dropped the notification permanently.
+    only against Discord, so retries stay compatible with the at-most-once contract.
   - `GET /api/v1/recording/health` (administrator only) reports each supervisor's last-tick timestamp, the outbox
     depth, and the dead-letter count.
+
+  Two WebSocket notifications carry the recording subsystem: `RecordingChanged` (any queue mutation) and
+  `RecordingRulesChanged` (rule-store mutation). The cancel-recording-task endpoint emits both because cancelling
+  future rule recordings mutates the queue as well as the rule store.
+
+  Authorization is gated by `Claims::is_system_principal`, which now requires both `username == "recording-supervisor"`
+  *and* `subject_id.is_builtin_admin()` so a web user registered with the sentinel name cannot forge the system bypass;
+  the supervisor is the only path that mints both.
+
+  Media opens for catalog, range, full-body, thumbnail and subtitle flows go through `no_follow_path_in_root`, which
+  walks every component from `recording_root` to the leaf with `symlink_metadata`. A symlink at any intermediate path
+  such as `<root>/users/alice` is rejected before `File::open` follows it, closing the `<recording_root>/users/alice -> /etc`
+  containment bypass.
+
+  `bin/dvr_doctor.sh` exposes supervisor health, the effective recording config block, the quota ledger and on-disk
+  state as one read-only dump suitable for a support ticket.
 
 - **Automatic Xtream Account Expiration Refresh**:
   - Server mode now refreshes missing or soon-expiring Xtream `exp_date` values directly through each account's

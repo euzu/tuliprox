@@ -343,6 +343,31 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Environment variables**: `${env:VAR}` interpolation in all config files
 - **Default User-Agent**: Configurable default user-agent for all outgoing requests
 
+### 20. Digital Video Recorder (DVR) — Record, Manage & Keep What Matters
+
+Turn Tuliprox into your personal IPTV recorder. Record live TV directly from your existing sources, automate recurring recordings,  
+manage everything from the Web UI, and let Tuliprox handle storage, retries and cleanup in the background.
+
+- **Live TV Recording**: Record channels directly through Tuliprox without a separate DVR service
+- **Scheduled & Recurring Recordings**: Create recording rules for programs you want to capture automatically
+- **Smart Conflict Detection**: Preview potential recording conflicts before they happen and identify recordings that may exceed available provider capacity
+- **Provider-Aware Scheduling**: Recording jobs respect available provider connections instead of blindly consuming stream slots
+- **Reliable Recording Queue**: Queue, pause, resume, retry, edit or cancel recording jobs while Tuliprox keeps the queue consistent
+- **Crash-Safe Recovery**: Interrupted operations are automatically reconciled after a restart so the recording library stays consistent
+- **Automatic Retention**: Keep storage under control with configurable age, recording-count and disk-space policies
+- **Quota Management**: Recording storage can be tracked and limited instead of allowing recordings to consume the entire disk
+- **Durable Notifications**: Recording lifecycle events can be delivered through configured notification channels with automatic  
+  retries when individual services are temporarily unavailable
+- **Real-Time Web UI Updates**: Recording and recording-rule changes are pushed directly to connected Web UI clients
+- **Secure Media Access**: Recorded media, thumbnails and subtitles are served through protected paths with strict filesystem containment
+- **Built for 24/7 Operation**: Dedicated background supervisors continuously handle recovery, retention and notifications
+- **Hot-Reloadable Configuration**: Change DVR settings without restarting Tuliprox
+- **Built-In Health Monitoring**: Inspect DVR subsystem health, background processing and notification queues from the management interface
+- **Support-Friendly Diagnostics**: A bundled DVR doctor command collects recording configuration, storage state, quota information and  
+  supervisor health for troubleshooting
+
+**Your IPTV sources become your own managed recording library — without adding another database, DVR server or separate management stack.**
+
 ## 🎯 Target Audiences
 
 ### For IPTV Enthusiasts
