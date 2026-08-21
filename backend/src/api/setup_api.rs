@@ -964,13 +964,19 @@ pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -
 
 #[cfg(test)]
 mod tests {
-    use super::{api_proxy_or_default, setup_complete_inner, SetupCompleteRequestDto, SetupModeState, SetupWebUserCredentialDto};
-    use axum::{body::to_bytes, http::StatusCode};
+    use super::api_proxy_or_default;
     use shared::model::{ApiProxyConfigDto, AppConfigDto, TargetUserDto};
+
+    #[cfg(unix)]
+    use super::{setup_complete_inner, SetupCompleteRequestDto, SetupModeState, SetupWebUserCredentialDto};
+    #[cfg(unix)]
+    use axum::{body::to_bytes, http::StatusCode};
+    #[cfg(unix)]
     use std::{
         path::PathBuf,
         sync::{atomic::AtomicBool, Arc},
     };
+    #[cfg(unix)]
     use tokio::sync::{oneshot, Mutex, RwLock};
 
     #[test]

@@ -244,7 +244,16 @@ impl From<&MessagingConfig> for MessagingConfigDto {
 }
 
 fn discover_templates(prefix: &str, templates: &mut std::collections::HashMap<MsgKind, String>, templates_dir: &Path) {
-    let variants = [MsgKind::Info, MsgKind::Stats, MsgKind::Error, MsgKind::Watch, MsgKind::DiskAlert];
+    let variants = [
+        MsgKind::Info,
+        MsgKind::Stats,
+        MsgKind::Error,
+        MsgKind::Watch,
+        MsgKind::DiskAlert,
+        MsgKind::RecordingStarted,
+        MsgKind::RecordingCompleted,
+        MsgKind::RecordingFailed,
+    ];
     for kind in variants {
         if let std::collections::hash_map::Entry::Vacant(e) = templates.entry(kind) {
             let filename = kind.template_filename(prefix);

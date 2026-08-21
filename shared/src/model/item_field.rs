@@ -14,6 +14,9 @@ pub enum ItemField {
     Input,
     Type,
     Caption,
+    EpgId,
+    Chno,
+    Quality,
 }
 
 impl<'de> Deserialize<'de> for ItemField {
@@ -37,6 +40,9 @@ impl Display for ItemField {
             Self::Input => "Input",
             Self::Type => "Type",
             Self::Caption => "Caption",
+            Self::EpgId => "EpgId",
+            Self::Chno => "Chno",
+            Self::Quality => "Quality",
         })
     }
 }

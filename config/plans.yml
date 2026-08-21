@@ -1,0 +1,26 @@
+plans:
+- name: 3d Trial
+  proxy: reverse
+  max_connections: 1
+  soft_connections: 0
+  trial:
+    duration: 3d
+  comment: 3 day trial, all channels, 1 connection
+- name: 7d Trial
+  proxy: reverse
+  max_connections: 1
+  soft_connections: 0
+  trial:
+    duration: 7d
+  comment: 7 day trial, 1 connection
+- name: Unlimited
+  proxy: reverse
+  max_connections: 0
+  soft_connections: 0
+  comment: Unlimited connections, all channels
+- name: Sports
+  proxy: reverse
+  max_connections: 1
+  soft_connections: 0
+  filter: Group ~ "(?i).*sport.*"
+  comment: Sports channels only, 1 connection

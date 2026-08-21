@@ -6,6 +6,7 @@
 @forward "components/text_button";
 @forward "components/toggle_switch";
 @forward "components/table";
+@forward "components/task_status";
 @forward "components/panel";
 @forward "components/card";
 @forward "components/collapse_panel";
@@ -18,6 +19,7 @@
 @forward "components/dashboard/sparkline";
 @forward "components/dashboard/dashboard_view";
 @forward "components/dashboard/stats_view";
+@forward "components/dashboard/log_console";
 @forward "components/dashboard/streams_view";
 @forward "components/dashboard/stream_history_view";
 @forward "components/list_view";
@@ -98,3 +100,4 @@
 @forward "components/field_explanation";
 @forward "components/rbac/user_management";
 @forward "components/country";
+@forward "components/recording";

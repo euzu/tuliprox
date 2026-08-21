@@ -106,6 +106,9 @@ pub struct ConfigSortRuleDto {
     // channel/Group field
     pub field: ItemField,
     pub order: SortOrder,
+    /// Compare embedded numbers numerically ("Chan 2" before "Chan 10").
+    #[serde(default)]
+    pub natural: bool,
     #[serde(default)]
     pub sequence: Option<Vec<String>>,
     pub filter: String,
@@ -120,6 +123,7 @@ impl PartialEq for ConfigSortRuleDto {
         self.field == other.field
             && self.target == other.target
             && self.order == other.order
+            && self.natural == other.natural
             && self.sequence == other.sequence
             && self.filter == other.filter
     }

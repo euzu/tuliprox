@@ -1271,7 +1271,15 @@ impl Default for ProviderDnsDto {
 
 impl ProviderDnsDto {
     pub fn prepare(&mut self) -> Result<(), TuliproxError> {
-        self.refresh_secs = self.refresh_secs.max(10);
+        if self.refresh_secs == 0 {
+            self.refresh_secs = default_provider_dns_refresh_secs();
+        } else if self.refresh_secs < 10 {
+            // Explicit low values are honored for fast failover, but flagged
+            warn!(
+                "Provider dns refresh_secs={} is below the recommended minimum of 10s; this increases resolver load",
+                self.refresh_secs
+            );
+        }
         if self.max_addrs == Some(0) {
             return Err(TuliproxError::ConfigInput("Provider dns max_addrs must be >= 1 when set".to_string()));
         }
@@ -1556,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_dns_prepare_normalizes_overrides_and_clamps_refresh() {
+    fn test_provider_dns_prepare_normalizes_overrides_and_preserves_low_refresh() {
         let mut dns = ProviderDnsDto {
             refresh_secs: 1,
             schemes: Some(vec![DnsScheme::Http, DnsScheme::Http, DnsScheme::Https]),
@@ -1572,7 +1580,8 @@ mod tests {
 
         dns.prepare().expect("dns prepare should succeed");
 
-        assert_eq!(dns.refresh_secs, 10);
+        // Explicit low values are honored (only warned about), not clamped.
+        assert_eq!(dns.refresh_secs, 1);
         assert_eq!(dns.schemes, Some(vec![DnsScheme::Http, DnsScheme::Https]));
         let overrides = dns.overrides.expect("overrides should exist");
         assert_eq!(overrides.len(), 1);

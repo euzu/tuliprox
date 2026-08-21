@@ -219,7 +219,9 @@ async fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
 
     if route_kind == CvsRouteKind::Ts {
         let api_proxy_user = create_api_proxy_user(app_state);
-        if username == api_proxy_user.username && password == api_proxy_user.password {
+        if username == api_proxy_user.username
+            && crate::auth::constant_time_eq(password.as_bytes(), api_proxy_user.password.as_bytes())
+        {
             let token = raw_query.and_then(|query| {
                 form_urlencoded::parse(query.as_bytes())
                     .find_map(|(key, value)| (key == "token").then(|| value.into_owned()))

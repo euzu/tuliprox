@@ -113,6 +113,38 @@ mod tests {
         assert_eq!(programmes[0].start, 0);
         assert_eq!(programmes[1].start, 60);
     }
+
+    #[test]
+    fn airing_status_uses_is_new_for_new() {
+        let mut p = EpgProgramme::new(0, 1, "c".intern());
+        p.is_new = true;
+        p.previously_shown = false;
+        assert!(matches!(p.airing_status(), crate::model::recording::AiringStatus::New));
+    }
+
+    #[test]
+    fn airing_status_uses_previously_shown_for_repeat() {
+        let mut p = EpgProgramme::new(0, 1, "c".intern());
+        p.is_new = false;
+        p.previously_shown = true;
+        assert!(matches!(p.airing_status(), crate::model::recording::AiringStatus::Repeat));
+    }
+
+    #[test]
+    fn airing_status_unknown_when_neither_flag_set() {
+        let p = EpgProgramme::new(0, 1, "c".intern());
+        assert!(matches!(p.airing_status(), crate::model::recording::AiringStatus::Unknown));
+    }
+
+    #[test]
+    fn airing_status_is_new_wins_over_previously_shown() {
+        // An explicit `<new>` survives a merged `<previously-shown>`
+        // from another source.
+        let mut p = EpgProgramme::new(0, 1, "c".intern());
+        p.is_new = true;
+        p.previously_shown = true;
+        assert!(matches!(p.airing_status(), crate::model::recording::AiringStatus::New));
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -136,6 +168,13 @@ pub struct EpgProgramme {
     pub is_live: bool,
     #[serde(default)]
     pub is_new: bool,
+    /// XMLTV `<previously-shown>` flag. Required for the
+    /// tri-state AiringStatus (Unknown / New / Repeat) used by
+    /// new-episode rules. The legacy `is_new` field stays
+    /// serialized for backward compatibility; new code should
+    /// derive `airing_status()` from both flags.
+    #[serde(default)]
+    pub previously_shown: bool,
     #[serde(skip)]
     channel: Arc<str>,
 }
@@ -157,6 +196,7 @@ impl EpgProgramme {
             categories: Vec::new(),
             is_live: false,
             is_new: false,
+            previously_shown: false,
         }
     }
     pub fn new_all(
@@ -167,7 +207,35 @@ impl EpgProgramme {
         desc: Option<Arc<str>>,
         catchup_id: Option<Arc<str>>,
     ) -> Self {
-        Self { start, stop, channel, title, desc, catchup_id, categories: Vec::new(), is_live: false, is_new: false }
+        Self {
+            start,
+            stop,
+            channel,
+            title,
+            desc,
+            catchup_id,
+            categories: Vec::new(),
+            is_live: false,
+            is_new: false,
+            previously_shown: false,
+        }
+    }
+
+    /// Pure: collapse the two XMLTV booleans into the tri-state
+    /// `AiringStatus`. Never infer `Repeat` only from old
+    /// `is_new == false`. Both `false` means `Unknown`; `is_new`
+    /// wins over `previously_shown` so an
+    /// explicit `<new>` survives a merged `<previously-shown>`
+    /// from another source.
+    pub fn airing_status(&self) -> crate::model::recording::AiringStatus {
+        use crate::model::recording::AiringStatus;
+        if self.is_new {
+            AiringStatus::New
+        } else if self.previously_shown {
+            AiringStatus::Repeat
+        } else {
+            AiringStatus::Unknown
+        }
     }
 }
 

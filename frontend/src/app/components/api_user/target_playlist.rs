@@ -409,6 +409,7 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
                                     }
                                 })}
                                 options={Rc::new([FilterState::All, FilterState::Selected, FilterState::Deselected].iter().map(|s| s.to_string()).collect::<Vec<String>>())}
+                                labels={Rc::new(vec![translate.t("LABEL.ALL"), translate.t("LABEL.SELECTED"), translate.t("LABEL.DESELECTED")])}
                                 selected={filter_state_selections}
                         />
                         <IconButton hint={translate.t("LABEL.SELECT_ALL")} name="SelectAll" icon="SelectAll" onclick={select_all} />

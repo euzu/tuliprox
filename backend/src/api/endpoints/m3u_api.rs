@@ -159,7 +159,9 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
 
     let is_hls_manifest_request = effective_playback_extension(pli.item_type, &pli.url, stream_ext) == Some(HLS_EXT);
 
-    if !user.allows_item_type(pli.item_type) {
+    if !user.allows_item_type(pli.item_type)
+        || !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli)))
+    {
         if is_hls_manifest_request {
             return hls_custom_video_manifest_response(
                 app_state,
@@ -898,7 +900,9 @@ async fn m3u_api_resource(
         }
     };
 
-    if !user.allows_item_type(m3u_item.item_type) {
+    if !user.allows_item_type(m3u_item.item_type)
+        || !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&m3u_item)))
+    {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
 

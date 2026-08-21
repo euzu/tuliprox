@@ -401,7 +401,22 @@ fn handle_socket_protocol_msg(
                     | ProtocolMessage::DownloadsRequest
                     | ProtocolMessage::ActiveProviderCountRequest(_)
                     | ProtocolMessage::StatusRequest(_)
-                    | ProtocolMessage::UserAction(_) => {}
+                    | ProtocolMessage::UserAction(_)
+                    | ProtocolMessage::RecordingSnapshotRequest => {}
+                    ProtocolMessage::RecordingSnapshotResponse { revision, tasks } => {
+                        event_service
+                            .broadcast(EventMessage::RecordingSnapshot { revision: revision.0, tasks: Rc::new(tasks) });
+                    }
+                    ProtocolMessage::RecordingDeltaResponse { revision, tasks } => {
+                        event_service
+                            .broadcast(EventMessage::RecordingDelta { revision: revision.0, tasks: Rc::new(tasks) });
+                    }
+                    ProtocolMessage::RecordingRulesChanged => {
+                        event_service.broadcast(EventMessage::RecordingRulesChanged);
+                    }
+                    ProtocolMessage::RecordingWsError { code } => {
+                        event_service.broadcast(EventMessage::RecordingUnavailable { code });
+                    }
                 }
             }
             Err(err) => error!("Failed to decode websocket message: {err}"),

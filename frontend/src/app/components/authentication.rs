@@ -1,5 +1,8 @@
 use crate::{
-    app::{components::login::Login, AppRoute},
+    app::{
+        components::{login::Login, LoadingScreen},
+        AppRoute,
+    },
     hooks::use_service_context,
     i18n::use_translation,
 };
@@ -107,7 +110,7 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
     }
 
     if *loading {
-        html! {}
+        html! { <LoadingScreen/> }
     } else if *authenticated {
         html! {
             { for props.children.iter() }

@@ -1,5 +1,5 @@
 use crate::utils::debug_if_enabled;
-use log::{debug, error, trace};
+use log::{debug, error, trace, warn};
 use path_clean::PathClean;
 use shared::{
     error::str_to_io_error,
@@ -269,11 +269,18 @@ pub fn prepare_persist_path(file_name: &str, date_prefix: &str) -> PathBuf {
 }
 
 pub fn get_file_path(wd: &str, path: Option<PathBuf>) -> Option<PathBuf> {
-    path.map(|p| if p.is_relative() {
-        let pb = PathBuf::from(wd);
-        pb.join(&p).clean()
+    path.and_then(|p| if p.is_relative() {
+        let base = PathBuf::from(wd).clean();
+        let joined = base.join(&p).clean();
+        // Relative segments like ../ must not escape the working directory
+        if joined.starts_with(&base) {
+            Some(joined)
+        } else {
+            warn!("Relative path escapes working directory and is ignored: {}", p.display());
+            None
+        }
     } else {
-        p
+        Some(p)
     })
 }
 

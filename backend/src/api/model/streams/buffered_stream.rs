@@ -26,29 +26,34 @@ pub(in crate::api::model) struct BufferedStream {
     stream: ReceiverStream<Result<bytes::Bytes, StreamError>>,
     close_cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
     semaphore: Arc<Semaphore>,
+    max_buffer_bytes: usize,
 }
 
 impl BufferedStream {
     pub fn new(
         stream: BoxedProviderStream,
         buffer_size: usize,
+        max_buffer_bytes: usize,
         client_close_signal: CancellationToken,
         _url: &str,
     ) -> Self {
+        let max_buffer_bytes = if max_buffer_bytes == 0 { MAX_BUFFER_BYTES } else { max_buffer_bytes };
         // Item-count limit remains as a secondary cap; byte-level backpressure
-        // is enforced via `MAX_BUFFER_BYTES` and `Semaphore`.
+        // is enforced via `max_buffer_bytes` and `Semaphore`.
         let (tx, rx) = channel(max(buffer_size, CHANNEL_SIZE));
-        let semaphore = Arc::new(Semaphore::new(MAX_BUFFER_BYTES));
+        let semaphore = Arc::new(Semaphore::new(max_buffer_bytes));
         tokio::spawn(Self::buffer_stream(
             tx,
             stream,
             client_close_signal.clone(),
             Arc::clone(&semaphore),
+            max_buffer_bytes,
         ));
         Self {
             stream: ReceiverStream::new(rx),
             close_cancelled: Box::pin(client_close_signal.cancelled_owned()),
             semaphore,
+            max_buffer_bytes,
         }
     }
 
@@ -57,6 +62,7 @@ impl BufferedStream {
         mut stream: BoxedProviderStream,
         client_close_signal: CancellationToken,
         semaphore: Arc<Semaphore>,
+        max_buffer_bytes: usize,
     ) {
         let idle_timeout = Duration::from_secs(STREAM_IDLE_TIMEOUT);
         let idle = sleep(idle_timeout);
@@ -78,14 +84,14 @@ impl BufferedStream {
                     match chunk {
                         Some(Ok(chunk)) => {
                             let chunk_len = chunk.len();
-                            // Cap permits at MAX_BUFFER_BYTES per chunk.  A single chunk larger
+                            // Cap permits at max_buffer_bytes per chunk.  A single chunk larger
                             // than the cap consumes fewer permits than its actual byte count, so
                             // the semaphore may temporarily allow more bytes in the channel than
-                            // MAX_BUFFER_BYTES.  This is an intentional trade-off: upstream
+                            // max_buffer_bytes.  This is an intentional trade-off: upstream
                             // providers are expected to emit chunks well below this limit; the
                             // inaccuracy is bounded to a single oversized chunk and is self-
                             // correcting once that chunk is delivered.
-                            let permits = chunk_len.min(MAX_BUFFER_BYTES);
+                            let permits = chunk_len.min(max_buffer_bytes);
                             if permits > 0 {
                                 let acquired = select! {
                                     biased;
@@ -162,7 +168,7 @@ impl Stream for BufferedStream {
         } else {
             match Pin::new(&mut this.stream).poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    this.semaphore.add_permits(bytes.len().min(MAX_BUFFER_BYTES));
+                    this.semaphore.add_permits(bytes.len().min(this.max_buffer_bytes));
                     Poll::Ready(Some(Ok(bytes)))
                 }
                 other => other,
@@ -223,7 +229,7 @@ mod tests {
             dropped: Some(dropped_tx),
             yielded: false,
         };
-        let buffered = BufferedStream::new(Box::pin(upstream), 1, cancel.clone(), "test");
+        let buffered = BufferedStream::new(Box::pin(upstream), 1, 0, cancel.clone(), "test");
 
         drop(buffered);
         gate_tx.send(()).expect("producer should still own the gated upstream");

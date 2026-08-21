@@ -12,7 +12,7 @@ enum RequestMethod {
     Get,
     Post,
     Put,
-    // Patch,
+    Patch,
     Delete,
 }
 
@@ -184,7 +184,10 @@ where
             let encoded = c_type.encode(&body)?;
             apply_encoded_body(Request::put(url), encoded, c_type.as_content_type())
         }
-        // RequestMethod::PATCH =>  Request::patch(&url).body(serde_json::to_string(&body).unwrap()),
+        RequestMethod::Patch => {
+            let encoded = c_type.encode(&body)?;
+            apply_encoded_body(Request::patch(url), encoded, c_type.as_content_type())
+        }
         RequestMethod::Delete => Request::delete(url),
     };
     if let Some(token) = get_token() {
@@ -454,6 +457,38 @@ where
     B: Serialize + std::fmt::Debug,
 {
     request(RequestMethod::Put, url, body, content_type, response_type, request_headers, Some(response_header_keys))
+        .await
+}
+
+/// Patch request with a body
+pub async fn request_patch<B, T>(
+    url: &str,
+    body: B,
+    content_type: Option<Encoding>,
+    response_type: Option<Encoding>,
+) -> Result<Option<T>, Error>
+where
+    T: DeserializeOwned + 'static + std::fmt::Debug,
+    B: Serialize + std::fmt::Debug,
+{
+    request(RequestMethod::Patch, url, body, content_type, response_type, None, None)
+        .await
+        .map(|response| response.body)
+}
+
+pub async fn request_patch_meta<B, T>(
+    url: &str,
+    body: B,
+    content_type: Option<Encoding>,
+    response_type: Option<Encoding>,
+    request_headers: Option<&[(String, String)]>,
+    response_header_keys: &[&str],
+) -> Result<ResponseMeta<T>, Error>
+where
+    T: DeserializeOwned + 'static + std::fmt::Debug,
+    B: Serialize + std::fmt::Debug,
+{
+    request(RequestMethod::Patch, url, body, content_type, response_type, request_headers, Some(response_header_keys))
         .await
 }
 

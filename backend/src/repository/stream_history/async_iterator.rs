@@ -45,8 +45,8 @@ impl StreamHistoryStream {
     /// - Pending files: fully async (`tokio::fs::File` + `AsyncStreamHistoryPendingReader`)
     /// - Archive files: sync via `spawn_blocking` (`lz4_flex` is sync-only)
     #[allow(dead_code)]
-    // Kept together with `StreamHistoryStream::new` for the planned streaming
-    // history endpoint; not currently wired into routing.
+    // Kept together with `StreamHistoryStream::new` for the future
+    // streaming-history endpoint; not currently wired into routing.
     #[allow(clippy::needless_pass_by_value)]
     async fn read_files_async(
         dir: &str,

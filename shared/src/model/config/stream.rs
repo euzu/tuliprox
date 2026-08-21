@@ -2,8 +2,10 @@ use crate::{
     defaults::{
         default_as_true, default_catchup_session_ttl_secs, default_grace_period_millis,
         default_grace_period_timeout_secs, default_hls_session_ttl_secs, default_shared_burst_buffer_mb,
+        default_shared_subscriber_idle_timeout_secs, default_stream_buffer_max_bytes_mb,
         is_default_catchup_session_ttl_secs, is_default_grace_period_millis, is_default_grace_period_timeout_secs,
-        is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb, is_false, is_true,
+        is_default_hls_session_ttl_secs, is_default_shared_burst_buffer_mb,
+        is_default_shared_subscriber_idle_timeout_secs, is_default_stream_buffer_max_bytes_mb, is_false, is_true,
     },
     error::TuliproxError,
     utils::{is_blank_optional_string, parse_to_kbps},
@@ -71,21 +73,37 @@ impl FromStr for AdmissionStrategy {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StreamBufferConfigDto {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub size: usize,
+    /// Byte-level backpressure cap for the buffered provider stream, in MiB.
+    #[serde(
+        default = "default_stream_buffer_max_bytes_mb",
+        skip_serializing_if = "is_default_stream_buffer_max_bytes_mb"
+    )]
+    pub max_bytes_mb: u64,
+}
+
+impl Default for StreamBufferConfigDto {
+    fn default() -> Self { Self { enabled: false, size: 0, max_bytes_mb: default_stream_buffer_max_bytes_mb() } }
 }
 
 impl StreamBufferConfigDto {
-    pub fn is_empty(&self) -> bool { !self.enabled && self.size == 0 }
-    fn prepare(&mut self) {
+    pub fn is_empty(&self) -> bool {
+        !self.enabled && self.size == 0 && self.max_bytes_mb == default_stream_buffer_max_bytes_mb()
+    }
+    fn prepare(&mut self) -> Result<(), TuliproxError> {
         if self.enabled && self.size == 0 {
             self.size = STREAM_QUEUE_SIZE;
         }
+        if self.max_bytes_mb == 0 {
+            return Err(TuliproxError::ConfigStream("`buffer.max_bytes_mb` must be at least 1 MB".to_string()));
+        }
+        Ok(())
     }
 }
 
@@ -118,6 +136,12 @@ pub struct StreamConfigDto {
     pub throttle_kbps: u64,
     #[serde(default = "default_shared_burst_buffer_mb", skip_serializing_if = "is_default_shared_burst_buffer_mb")]
     pub shared_burst_buffer_mb: u64,
+    /// Idle timeout in seconds after which a shared-stream subscriber that consumed no data is dropped.
+    #[serde(
+        default = "default_shared_subscriber_idle_timeout_secs",
+        skip_serializing_if = "is_default_shared_subscriber_idle_timeout_secs"
+    )]
+    pub shared_subscriber_idle_timeout_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_strategies: Option<Vec<AdmissionStrategy>>,
 }
@@ -133,6 +157,7 @@ impl Default for StreamConfigDto {
             grace_period_timeout_secs: default_grace_period_timeout_secs(),
             throttle_kbps: 0,
             shared_burst_buffer_mb: default_shared_burst_buffer_mb(),
+            shared_subscriber_idle_timeout_secs: default_shared_subscriber_idle_timeout_secs(),
             grace_period_hold_stream: true,
             hls_session_ttl_secs: default_hls_session_ttl_secs(),
             catchup_session_ttl_secs: default_catchup_session_ttl_secs(),
@@ -151,6 +176,7 @@ impl StreamConfigDto {
             && self.grace_period_timeout_secs == default_grace_period_timeout_secs()
             && self.throttle_kbps == 0
             && self.shared_burst_buffer_mb == default_shared_burst_buffer_mb()
+            && self.shared_subscriber_idle_timeout_secs == default_shared_subscriber_idle_timeout_secs()
             && self.grace_period_hold_stream
             && self.hls_session_ttl_secs == default_hls_session_ttl_secs()
             && self.catchup_session_ttl_secs == default_catchup_session_ttl_secs()
@@ -159,7 +185,7 @@ impl StreamConfigDto {
 
     pub(crate) fn prepare(&mut self) -> Result<(), TuliproxError> {
         if let Some(buffer) = self.buffer.as_mut() {
-            buffer.prepare();
+            buffer.prepare()?;
         }
         if let Some(throttle) = &self.throttle {
             parse_to_kbps(throttle).map_err(TuliproxError::ConfigStream)?;
@@ -183,6 +209,12 @@ impl StreamConfigDto {
             return Err(TuliproxError::ConfigStream(format!(
                 "`shared_burst_buffer_mb` must be at least {MIN_SHARED_BURST_BUFFER_MB} MB"
             )));
+        }
+
+        if self.shared_subscriber_idle_timeout_secs == 0 {
+            return Err(TuliproxError::ConfigStream(
+                "`shared_subscriber_idle_timeout_secs` must be at least 1 second".to_string(),
+            ));
         }
 
         if let Some(strategies) = &self.admission_strategies {

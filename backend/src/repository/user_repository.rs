@@ -16,7 +16,7 @@ use std::io::Error;
 use std::path::{Path, PathBuf};
 use tokio::task;
 
-// V6 (current): added network_access. V1-V5 are migrated to V6 at startup
+// V7 (current): added plan and filter. V1-V6 are migrated to V7 at startup
 // by `bplustree::run_all_startup_migrations`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredProxyUserCredentials {
@@ -40,6 +40,10 @@ struct StoredProxyUserCredentials {
     pub soft_priority: Option<i8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_access: Option<shared::model::NetworkAccessDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<String>,
 }
 
 impl StoredProxyUserCredentials {
@@ -55,19 +59,25 @@ impl StoredProxyUserCredentials {
             epg_request_timeshift: proxy.epg_request_timeshift.clone(),
             created_at: proxy.created_at,
             exp_date: proxy.exp_date,
-            max_connections: if proxy.max_connections > 0 { Some(proxy.max_connections) } else { None },
+            // Persist raw (pre-plan-resolution) values; resolution re-runs on load.
+            max_connections: if proxy.raw_max_connections > 0 { Some(proxy.raw_max_connections) } else { None },
             status: proxy.status,
-            output_clusters: proxy.output_clusters,
+            output_clusters: proxy.raw_output_clusters.unwrap_or_else(ClusterFlags::all),
             ui_enabled: proxy.ui_enabled,
             comment: proxy.comment.clone(),
             priority: if proxy.priority != 0 { Some(proxy.priority) } else { None },
-            soft_connections: if proxy.soft_connections > 0 { Some(proxy.soft_connections) } else { None },
+            soft_connections: if proxy.raw_soft_connections > 0 { Some(proxy.raw_soft_connections) } else { None },
             soft_priority: if proxy.soft_priority != 0 { Some(proxy.soft_priority) } else { None },
             network_access: proxy.network_access.as_ref().map(Into::into),
+            plan: proxy.plan.clone(),
+            filter: proxy.filter.clone(),
         }
     }
 
     fn to(stored: &StoredProxyUserCredentials) -> ProxyUserCredentials {
+        let raw_output_clusters = if stored.output_clusters.is_all() { None } else { Some(stored.output_clusters) };
+        let raw_max_connections = stored.max_connections.unwrap_or_default();
+        let raw_soft_connections = stored.soft_connections.unwrap_or(0);
         ProxyUserCredentials {
             username: stored.username.clone(),
             password: stored.password.clone(),
@@ -78,16 +88,25 @@ impl StoredProxyUserCredentials {
             epg_request_timeshift: stored.epg_request_timeshift.clone(),
             created_at: stored.created_at,
             exp_date: stored.exp_date,
-            max_connections: stored.max_connections.unwrap_or_default(),
+            max_connections: raw_max_connections,
             status: stored.status,
             output_clusters: stored.output_clusters,
             ui_enabled: stored.ui_enabled,
             comment: stored.comment.clone(),
             priority: stored.priority.unwrap_or(0),
-            soft_connections: stored.soft_connections.unwrap_or(0),
+            soft_connections: raw_soft_connections,
             soft_priority: stored.soft_priority.unwrap_or(0),
             t_is_api_user: false,
             network_access: stored.network_access.as_ref().map(NetworkAccess::from),
+            plan: stored.plan.clone(),
+            filter: stored.filter.clone(),
+            raw_output_clusters,
+            raw_max_connections,
+            raw_soft_connections,
+            raw_proxy: if stored.plan.is_some() && stored.proxy == ProxyType::default() { None } else { Some(stored.proxy) },
+            t_filter: None,
+            t_has_unresolved_plan: false,
+            t_has_invalid_filter: false,
         }
     }
 }
@@ -524,6 +543,15 @@ mod tests {
             soft_priority: 0,
             t_is_api_user: false,
             network_access: None,
+            plan: None,
+            filter: None,
+            raw_output_clusters: None,
+            raw_max_connections: 1,
+            raw_soft_connections: 0,
+            raw_proxy: Some(ProxyType::Reverse(None)),
+            t_filter: None,
+            t_has_unresolved_plan: false,
+            t_has_invalid_filter: false,
         }
     }
 
@@ -539,8 +567,11 @@ mod tests {
                 Arc::new({
                     let mut c = make_test_credential("Test4", ProxyUserStatus::Expired);
                     c.output_clusters = ClusterFlags::Live | ClusterFlags::Vod;
+                    // keep raw values in sync: the serializer persists the raw fields
+                    c.raw_output_clusters = Some(ClusterFlags::Live | ClusterFlags::Vod);
                     c.priority = -10;
                     c.soft_connections = 2;
+                    c.raw_soft_connections = 2;
                     c.soft_priority = -3;
                     c.network_access = Some(crate::model::NetworkAccess {
                         allowed_countries: vec!["DE".to_string(), "AT".to_string()],

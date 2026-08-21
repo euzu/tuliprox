@@ -41,7 +41,20 @@ fn add_pcr_offset_27mhz(timestamp_27mhz: u64, offset_27mhz: u64) -> u64 {
 const TS_PACKET_SIZE: usize = 188;
 const SYNC_BYTE: u8 = 0x47;
 const PACKET_COUNT: usize = 7; // Reduced from 250 to 7 (1316 bytes) to prevent latency/timeout on low-bitrate streams
-const CHUNK_SIZE: usize = TS_PACKET_SIZE * PACKET_COUNT;
+const MAX_PACKET_COUNT: usize = 250;
+
+/// Packets per emitted chunk; overridable via `TULIPROX_TS_CHUNK_PACKETS` (1-250).
+/// Larger chunks raise throughput, smaller chunks lower latency on low-bitrate streams.
+fn ts_chunk_packet_count() -> usize {
+    static PACKET_COUNT_OVERRIDE: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+        std::env::var("TULIPROX_TS_CHUNK_PACKETS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|count| (1..=MAX_PACKET_COUNT).contains(count))
+            .unwrap_or(PACKET_COUNT)
+    });
+    *PACKET_COUNT_OVERRIDE
+}
 
 const ADAPTATION_FIELD_FLAG_PCR: u8 = 0x10; // PCR flag bit in adaptation field flags
 const NULL_PID: u16 = 0x1FFF;
@@ -1614,8 +1627,9 @@ impl TransportStreamBuffer {
         if self.length == 0 {
             return None;
         }
-        let mut bytes = BytesMut::with_capacity(CHUNK_SIZE);
-        let mut packets_remaining = PACKET_COUNT;
+        let packet_count = ts_chunk_packet_count();
+        let mut bytes = BytesMut::with_capacity(TS_PACKET_SIZE * packet_count);
+        let mut packets_remaining = packet_count;
 
         while packets_remaining > 0 {
             if self.current_pos >= self.length {

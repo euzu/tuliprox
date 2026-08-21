@@ -591,6 +591,13 @@ impl ConfigInput {
                 self.name
             )));
         }
+        // Keep in sync with shared ConfigInputDto::prepare_media_server_input
+        if self.provider_configs.as_ref().is_some_and(|providers| !providers.is_empty()) {
+            return Err(TuliproxError::ConfigInput(format!(
+                "media-server input does not support provider failover definitions (input: {})",
+                self.name
+            )));
+        }
         Ok(())
     }
 

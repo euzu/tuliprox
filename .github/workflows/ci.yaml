@@ -106,6 +106,12 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
+      # Non-test code only. `--all-targets` would additionally compile the
+      # test modules, ~10 of which still use ungated `std::os::unix`
+      # (alias_repository, xtream_repository, bplustree/v3/publish,
+      # iptv/stalker/client, api_utils, api/model/download, setup_api).
+      # Widening this step means gating those first; the recording module
+      # tree is already `--all-targets`-clean on Windows.
       - name: Check Windows build
         run: cargo check --package tuliprox
 

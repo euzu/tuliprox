@@ -1,3 +1,4 @@
+use super::recording::RecordingTaskDto;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -48,6 +49,10 @@ pub struct TransferTaskDto {
     pub duration_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Present only when the task is a recording. Filters server-internal
+    /// fields per the DVR design.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<RecordingTaskDto>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -58,6 +63,11 @@ pub struct TransfersResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+// `TransfersDelta` is serialized over the WebSocket; the recording field
+// inflates `TransferTaskDto` past clippy's `large_enum_variant` threshold
+// even though `SnapshotReset` is bigger. Allow the lint here to keep the
+// on-the-wire shape stable.
+#[allow(clippy::large_enum_variant)]
 #[serde(tag = "delta_type", rename_all = "snake_case")]
 pub enum TransfersDelta {
     SnapshotReset(TransfersResponse),
@@ -103,6 +113,7 @@ mod tests {
             scheduled_start_at: None,
             duration_secs: None,
             error: None,
+            recording: None,
         }
     }
 

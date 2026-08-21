@@ -1444,7 +1444,7 @@ pub fn ReverseProxyConfigView() -> Html {
                                     <IconButton
                                         name={format!("move_up_{index}")}
                                         icon="ChevronUp"
-                                        hint="Move up"
+                                        hint={translate.t("LABEL.MOVE_UP")}
                                         onclick={Callback::from(move |_| {
                                             move_up_state.dispatch(AdmissionStrategiesFormAction::Strategies(Some(
                                                 move_admission_strategy_tag(&move_up_tags, index, -1)
@@ -1456,7 +1456,7 @@ pub fn ReverseProxyConfigView() -> Html {
                                     <IconButton
                                         name={format!("move_down_{index}")}
                                         icon="ChevronDown"
-                                        hint="Move down"
+                                        hint={translate.t("LABEL.MOVE_DOWN")}
                                         onclick={Callback::from(move |_| {
                                             move_down_state.dispatch(AdmissionStrategiesFormAction::Strategies(Some(
                                                 move_admission_strategy_tag(&move_down_tags, index, 1)

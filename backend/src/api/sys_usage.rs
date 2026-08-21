@@ -239,24 +239,36 @@ impl CpuTracker {
 #[allow(clippy::cast_possible_truncation)]
 fn cpu_percent(cpu_delta_secs: f64, elapsed_secs: f64) -> f32 { ((cpu_delta_secs / elapsed_secs) * 100.0) as f32 }
 
+#[derive(Clone, Copy, Default)]
+struct NetSample {
+    rx_bytes_per_sec: f64,
+    tx_bytes_per_sec: f64,
+    rx_bytes_total: u64,
+    tx_bytes_total: u64,
+}
+
 #[allow(clippy::struct_field_names)]
 struct NetTracker {
     last_rx_bytes: u64,
     last_tx_bytes: u64,
+    total_rx_bytes: u64,
+    total_tx_bytes: u64,
     last_sample_at: Option<Instant>,
 }
 
 impl NetTracker {
-    fn new() -> Self { Self { last_rx_bytes: 0, last_tx_bytes: 0, last_sample_at: None } }
+    fn new() -> Self {
+        Self { last_rx_bytes: 0, last_tx_bytes: 0, total_rx_bytes: 0, total_tx_bytes: 0, last_sample_at: None }
+    }
 
     #[allow(clippy::cast_precision_loss)]
-    fn sample(&mut self, rx_bytes: u64, tx_bytes: u64) -> (f64, f64) {
+    fn sample(&mut self, rx_bytes: u64, tx_bytes: u64) -> NetSample {
         let now = Instant::now();
         let Some(last_sample_at) = self.last_sample_at else {
             self.last_rx_bytes = rx_bytes;
             self.last_tx_bytes = tx_bytes;
             self.last_sample_at = Some(now);
-            return (0.0, 0.0);
+            return NetSample::default();
         };
         let elapsed_secs = now.duration_since(last_sample_at).as_secs_f64();
 
@@ -265,12 +277,20 @@ impl NetTracker {
 
         self.last_rx_bytes = rx_bytes;
         self.last_tx_bytes = tx_bytes;
+        self.total_rx_bytes = self.total_rx_bytes.saturating_add(rx_delta);
+        self.total_tx_bytes = self.total_tx_bytes.saturating_add(tx_delta);
         self.last_sample_at = Some(now);
 
-        if elapsed_secs <= f64::EPSILON {
+        let (rx_bytes_per_sec, tx_bytes_per_sec) = if elapsed_secs <= f64::EPSILON {
             (0.0, 0.0)
         } else {
             (rx_delta as f64 / elapsed_secs, tx_delta as f64 / elapsed_secs)
+        };
+        NetSample {
+            rx_bytes_per_sec,
+            tx_bytes_per_sec,
+            rx_bytes_total: self.total_rx_bytes,
+            tx_bytes_total: self.total_tx_bytes,
         }
     }
 }
@@ -341,14 +361,16 @@ impl FallbackSampler {
         self.networks.refresh(true);
 
         let (rx_bytes, tx_bytes) = sum_sysinfo_network_bytes(&self.networks);
-        let (rx_bytes_per_sec, tx_bytes_per_sec) = self.net_tracker.sample(rx_bytes, tx_bytes);
+        let net = self.net_tracker.sample(rx_bytes, tx_bytes);
 
         self.inner.processes().get(&self.pid).map(|proc| SystemInfo {
             cpu_usage: proc.cpu_usage(),
             memory_usage: proc.memory(),
             memory_total: self.inner.total_memory(),
-            net_rx_bytes_per_sec: rx_bytes_per_sec,
-            net_tx_bytes_per_sec: tx_bytes_per_sec,
+            net_rx_bytes_per_sec: net.rx_bytes_per_sec,
+            net_tx_bytes_per_sec: net.tx_bytes_per_sec,
+            net_rx_bytes_total: net.rx_bytes_total,
+            net_tx_bytes_total: net.tx_bytes_total,
             disk_total_bytes: 0,
             disk_free_bytes: 0,
         })
@@ -364,7 +386,7 @@ fn sum_sysinfo_network_bytes(networks: &sysinfo::Networks) -> (u64, u64) {
 
 #[cfg(target_os = "linux")]
 mod platform {
-    use super::{parse_ascii_u64_bytes, CpuTracker, DiskProbe, SystemInfo};
+    use super::{parse_ascii_u64_bytes, CpuTracker, DiskProbe, NetSample, SystemInfo};
     use log::debug;
     use std::{
         fs::{read, File},
@@ -424,8 +446,8 @@ mod platform {
             let resident_pages = parse_linux_proc_statm(&self.resident_pages_buf[..resident_pages_len])?;
             let cpu_time_secs = ticks_to_cpu_secs(utime, stime, self.clock_ticks_per_sec);
 
-            let (net_rx_bytes_per_sec, net_tx_bytes_per_sec) = read_proc_net_dev_bytes()
-                .map_or((0.0, 0.0), |(rx_bytes, tx_bytes)| self.net_tracker.sample(rx_bytes, tx_bytes));
+            let net = read_proc_net_dev_bytes()
+                .map_or_else(NetSample::default, |(rx_bytes, tx_bytes)| self.net_tracker.sample(rx_bytes, tx_bytes));
 
             let (disk_total_bytes, disk_free_bytes) = self.disk_probe.as_ref().map_or((0, 0), DiskProbe::sample);
 
@@ -433,8 +455,10 @@ mod platform {
                 cpu_usage: self.cpu_tracker.sample(cpu_time_secs),
                 memory_usage: resident_pages.saturating_mul(self.page_size),
                 memory_total: self.memory_total,
-                net_rx_bytes_per_sec,
-                net_tx_bytes_per_sec,
+                net_rx_bytes_per_sec: net.rx_bytes_per_sec,
+                net_tx_bytes_per_sec: net.tx_bytes_per_sec,
+                net_rx_bytes_total: net.rx_bytes_total,
+                net_tx_bytes_total: net.tx_bytes_total,
                 disk_total_bytes,
                 disk_free_bytes,
             })
@@ -583,14 +607,16 @@ mod platform {
             let memory_usage = query_process_memory_usage(self.process.0)?;
             self.networks.refresh(true);
             let (rx_bytes, tx_bytes) = super::sum_sysinfo_network_bytes(&self.networks);
-            let (received_bps, sent_bps) = self.net_tracker.sample(rx_bytes, tx_bytes);
+            let net = self.net_tracker.sample(rx_bytes, tx_bytes);
             let (disk_total_bytes, disk_free_bytes) = self.disk_probe.as_ref().map_or((0, 0), DiskProbe::sample);
             Some(SystemInfo {
                 cpu_usage: self.cpu_tracker.sample(cpu_time_secs),
                 memory_usage,
                 memory_total: self.memory_total,
-                net_rx_bytes_per_sec: received_bps,
-                net_tx_bytes_per_sec: sent_bps,
+                net_rx_bytes_per_sec: net.rx_bytes_per_sec,
+                net_tx_bytes_per_sec: net.tx_bytes_per_sec,
+                net_rx_bytes_total: net.rx_bytes_total,
+                net_tx_bytes_total: net.tx_bytes_total,
                 disk_total_bytes,
                 disk_free_bytes,
             })
@@ -710,14 +736,16 @@ mod platform {
             let memory_usage = query_process_memory_usage()?;
             self.networks.refresh(true);
             let (rx_bytes, tx_bytes) = super::sum_sysinfo_network_bytes(&self.networks);
-            let (received_bps, sent_bps) = self.net_tracker.sample(rx_bytes, tx_bytes);
+            let net = self.net_tracker.sample(rx_bytes, tx_bytes);
             let (disk_total_bytes, disk_free_bytes) = self.disk_probe.as_ref().map_or((0, 0), DiskProbe::sample);
             Some(SystemInfo {
                 cpu_usage: self.cpu_tracker.sample(cpu_time_secs),
                 memory_usage,
                 memory_total: self.memory_total,
-                net_rx_bytes_per_sec: received_bps,
-                net_tx_bytes_per_sec: sent_bps,
+                net_rx_bytes_per_sec: net.rx_bytes_per_sec,
+                net_tx_bytes_per_sec: net.tx_bytes_per_sec,
+                net_rx_bytes_total: net.rx_bytes_total,
+                net_tx_bytes_total: net.tx_bytes_total,
                 disk_total_bytes,
                 disk_free_bytes,
             })
@@ -880,9 +908,11 @@ mod tests {
         let mut tracker = super::NetTracker::new();
         let _ = tracker.sample(1000, 500);
         tracker.last_sample_at = tracker.last_sample_at.map(|instant| instant.checked_sub(Duration::from_secs(2)).unwrap());
-        let (rx_rate, tx_rate) = tracker.sample(3000, 1500);
-        assert!((999.0..=1001.0).contains(&rx_rate));
-        assert!((499.0..=501.0).contains(&tx_rate));
+        let sample = tracker.sample(3000, 1500);
+        assert!((999.0..=1001.0).contains(&sample.rx_bytes_per_sec));
+        assert!((499.0..=501.0).contains(&sample.tx_bytes_per_sec));
+        assert_eq!(sample.rx_bytes_total, 2000);
+        assert_eq!(sample.tx_bytes_total, 1000);
     }
 }
 

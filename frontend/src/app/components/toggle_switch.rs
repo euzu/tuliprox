@@ -48,6 +48,8 @@ pub fn ToggleSwitch(props: &ToggleSwitchProps) -> Html {
         )}>
             <input type="checkbox"
                    checked={*toggled}
+                   disabled={props.readonly}
+                   aria-readonly={props.readonly.to_string()}
                    onclick={onclick}/>
               <span class={classes!("tp__toggle-switch__track", if *toggled { "tp__toggle-switch__active" } else { "" })}>
                <span class={classes!("tp__toggle-switch__toggle", if *toggled { "tp__toggle-switch__on" } else { "" })}>

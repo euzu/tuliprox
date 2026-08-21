@@ -1,5 +1,8 @@
 use crate::{
-    app::components::{menu_item::MenuItem, svg_icon::AppIcon, CollapsePanel, IconButton},
+    app::{
+        components::{menu_item::MenuItem, svg_icon::AppIcon, CollapsePanel, IconButton},
+        ConfigContext,
+    },
     hooks::use_service_context,
     i18n::use_translation,
     model::ViewType,
@@ -58,6 +61,20 @@ fn is_sidebar_expanded(collapsed: CollapseState) -> bool {
     matches!(collapsed, CollapseState::AutoExpanded | CollapseState::ManualExpanded)
 }
 
+/// Should the DVR entries appear in the navigation?
+///
+/// Two independent gates: the principal needs `recording.read`, and the
+/// server must have the DVR switched on. Showing the entries on a server
+/// where `recording.enabled: false` would lead every route to
+/// `501 recording_disabled`.
+///
+/// `recording_enabled` is `None` when the config has not loaded yet or
+/// carries no `recording:` block; both mean "assume the default", and the
+/// default is enabled.
+pub fn show_recording_nav(has_recording_read: bool, recording_enabled: Option<bool>) -> bool {
+    has_recording_read && recording_enabled.unwrap_or(true)
+}
+
 #[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {
     let services = use_service_context();
@@ -70,6 +87,19 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     let is_mobile = use_state(|| false);
     let resolved_state = resolved_sidebar_state(*collapsed, *is_mobile);
     let active_menu = props.active_page;
+    let config_ctx = use_context::<ConfigContext>();
+    let recording_enabled = config_ctx.and_then(|ctx| {
+        ctx.config.as_ref().and_then(|config| {
+            config
+                .config
+                .video
+                .as_ref()
+                .and_then(|video| video.download.as_ref())
+                .and_then(|download| download.recording.as_ref())
+                .map(|recording| recording.enabled)
+        })
+    });
+    let show_recording = show_recording_nav(services.auth.has_permission(Permission::RecordingRead), recording_enabled);
 
     let handle_menu_click = {
         let viewchange = props.onview.clone();
@@ -210,6 +240,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                       {html_if!(auth.has_permission(Permission::UserRead), {
                           <MenuItem class={if active_menu == ViewType::Users { "active" } else {""}} icon="UserOutline" name={ViewType::Users.to_string()} label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></MenuItem>
                       })}
+                      {html_if!(auth.has_permission(Permission::ConfigRead), {
+                          <MenuItem class={if active_menu == ViewType::Plans { "active" } else {""}} icon="Group" name={ViewType::Plans.to_string()} label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></MenuItem>
+                      })}
                       {html_if!(auth.has_permission(Permission::SourceRead), {
                           <>
                           <MenuItem class={if active_menu == ViewType::SourceEditor { "active" } else {""}} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} label={translate.t("LABEL.SOURCE_EDITOR")}  onclick={&handle_menu_click}></MenuItem>
@@ -232,6 +265,15 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                       {html_if!(auth.has_permission(Permission::EpgRead), {
                           <MenuItem class={if active_menu == ViewType::PlaylistEpg { "active" } else {""}} icon="Epg" name={ViewType::PlaylistEpg.to_string()} label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></MenuItem>
                       })}
+                    </CollapsePanel>
+                }
+            )}
+            {html_if!(
+                show_recording,
+                {
+                    <CollapsePanel title={translate.t("LABEL.RECORDING")}>
+                      <MenuItem class={if active_menu == ViewType::RecordingLibrary { "active" } else {""}} icon="DVR" name={ViewType::RecordingLibrary.to_string()} label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></MenuItem>
+                      <MenuItem class={if active_menu == ViewType::RecordingRules { "active" } else {""}} icon="DVR" name={ViewType::RecordingRules.to_string()} label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></MenuItem>
                     </CollapsePanel>
                 }
             )}
@@ -271,6 +313,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             {html_if!(auth.has_permission(Permission::UserRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Users, if active_menu == ViewType::Users { " active" } else {""})} icon="UserOutline" name={ViewType::Users.to_string()} hint={translate.t("LABEL.USER")} aria_label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></IconButton>
             })}
+            {html_if!(auth.has_permission(Permission::ConfigRead), {
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Plans, if active_menu == ViewType::Plans { " active" } else {""})} icon="Group" name={ViewType::Plans.to_string()} hint={translate.t("LABEL.PLANS")} aria_label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></IconButton>
+            })}
             {html_if!(auth.has_permission(Permission::SourceRead), {
                 <>
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::SourceEditor, if active_menu == ViewType::SourceEditor { " active" } else {""})} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} hint={translate.t("LABEL.SOURCE_EDITOR")} aria_label={translate.t("LABEL.SOURCE_EDITOR")} onclick={&handle_menu_click}></IconButton>
@@ -291,6 +336,13 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             })}
             {html_if!(auth.has_permission(Permission::EpgRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::PlaylistEpg, if active_menu == ViewType::PlaylistEpg { " active" } else {""})} icon="Epg" name={ViewType::PlaylistEpg.to_string()} hint={translate.t("LABEL.PLAYLIST_EPG")} aria_label={translate.t("LABEL.PLAYLIST_EPG")} onclick={&handle_menu_click}></IconButton>
+            })}
+            {html_if!(show_recording, {
+                <>
+                <span class="tp__app-sidebar__content-space"></span>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingLibrary, if active_menu == ViewType::RecordingLibrary { " active" } else {""})} icon="LibraryOutline" name={ViewType::RecordingLibrary.to_string()} hint={translate.t("LABEL.RECORDING_LIBRARY")} aria_label={translate.t("LABEL.RECORDING_LIBRARY")} onclick={&handle_menu_click}></IconButton>
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::RecordingRules, if active_menu == ViewType::RecordingRules { " active" } else {""})} icon="ScheduleOutline" name={ViewType::RecordingRules.to_string()} hint={translate.t("LABEL.RECORDING_RULES")} aria_label={translate.t("LABEL.RECORDING_RULES")} onclick={&handle_menu_click}></IconButton>
+                </>
             })}
           </div>
         }
@@ -355,6 +407,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
 #[cfg(test)]
 mod tests {
     use super::{is_sidebar_expanded, resolved_sidebar_state, sidebar_variant_class, CollapseState};
+    use crate::app::components::show_recording_nav;
 
     #[test]
     fn sidebar_variant_class_reports_collapsed_variants() {
@@ -381,5 +434,20 @@ mod tests {
         assert!(is_sidebar_expanded(CollapseState::ManualExpanded));
         assert!(!is_sidebar_expanded(CollapseState::AutoCollapsed));
         assert!(!is_sidebar_expanded(CollapseState::ManualCollapsed));
+    }
+
+    #[test]
+    fn recording_nav_needs_both_the_permission_and_the_feature_flag() {
+        assert!(show_recording_nav(true, Some(true)));
+        assert!(!show_recording_nav(true, Some(false)));
+        assert!(!show_recording_nav(false, Some(true)));
+        assert!(!show_recording_nav(false, None));
+    }
+
+    #[test]
+    fn recording_nav_assumes_enabled_before_the_config_arrives() {
+        // Hiding the entries until the config loads would make them flash
+        // in on every page load; the default is enabled anyway.
+        assert!(show_recording_nav(true, None));
     }
 }

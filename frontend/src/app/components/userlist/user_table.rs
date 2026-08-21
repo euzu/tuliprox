@@ -2,26 +2,27 @@ use crate::{
     app::{
         components::{
             convert_bool_to_chip_style, make_translated_header_callback, menu_item::MenuItem, popup_menu::PopupMenu,
-            AppIcon, CellValue, Chip, HideContent, MaxConnections, ProxyTypeView, RevealContent, Table,
-            TableDefinition, UserStatus, UserlistContext, UserlistPage,
+            AppIcon, CellValue, Chip, HideContent, MaxConnections, PagedTable, ProxyTypeView, RevealContent,
+            TableDefinition, UserStatus, UserlistContext, UserlistPage, PAGE_SIZES, TP_PAGE_SIZE_KEY,
         },
         context::{target_users_to_api_proxy_users, TargetUser},
         ConfigContext, TargetUserList,
     },
-    hooks::use_service_context,
+    hooks::{use_clipboard_copy, use_service_context},
     html_if,
     i18n::use_translation,
     model::DialogResult,
     services::DialogService,
+    utils::{get_local_storage_item, set_local_storage_item},
 };
 use shared::{
+    defaults::default_page_size,
     error::TuliproxError,
     model::{permission::Permission, SortOrder},
     utils::{unix_ts_to_str, Substring},
 };
 use std::{cmp::Ordering, collections::HashSet, fmt::Display, rc::Rc, str::FromStr};
 use yew::{platform::spawn_local, prelude::*};
-use yew_hooks::use_clipboard;
 
 const HEADERS: [&str; 19] = [
     "LABEL.EMPTY",
@@ -114,7 +115,7 @@ pub struct UserTableProps {
 #[component]
 pub fn UserTable(props: &UserTableProps) -> Html {
     let translate = use_translation();
-    let clipboard = use_clipboard();
+    let copy_to_clipboard = use_clipboard_copy();
     let service_ctx = use_service_context();
     let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
     let dialog = use_context::<DialogService>().expect("Dialog service not found");
@@ -124,6 +125,13 @@ pub fn UserTable(props: &UserTableProps) -> Html {
     let popup_is_open = use_state(|| false);
     let selected_dto = use_state(|| None::<Rc<TargetUser>>);
     let user_list = use_state(|| props.users.clone());
+    let page = use_state(|| 1u32);
+    let page_size = use_state(|| {
+        get_local_storage_item(TP_PAGE_SIZE_KEY)
+            .and_then(|v| v.parse::<u16>().ok())
+            .filter(|size| PAGE_SIZES.contains(size))
+            .unwrap_or_else(default_page_size)
+    });
     let target_names = use_memo(config_ctx.clone(), |cfg| {
         cfg.config
             .as_ref()
@@ -141,8 +149,10 @@ pub fn UserTable(props: &UserTableProps) -> Html {
     {
         let user_list = user_list.clone();
         let users = props.users.clone();
+        let page = page.clone();
         use_effect_with(users, move |users| {
             user_list.set(users.clone());
+            page.set(1);
             || ()
         });
     }
@@ -246,6 +256,10 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         })
     };
 
+    let total_items = user_list.as_ref().map_or(0, |l| l.len()) as u64;
+    let total_pages = if total_items == 0 { 1 } else { total_items.div_ceil(u64::from(*page_size)) as u32 };
+    let current_page = (*page).min(total_pages);
+
     let table_definition = {
         // first register for config update
         let render_header_cell_cb = render_header_cell.clone();
@@ -253,11 +267,21 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         let on_sort = on_sort.clone();
         let is_sortable = is_sortable.clone();
         let num_cols = HEADERS.len();
+        let page_size_value = *page_size;
         // Dereference the UseStateHandle to pass the actual value as dependency.
         // Yew 0.22 compares UseStateHandle by identity, not value, so use_memo
         // would never detect value changes if we passed the handle directly.
-        use_memo((*user_list).clone(), move |targets| {
-            let items = if targets.as_ref().is_none_or(|l| l.is_empty()) { None } else { targets.clone() };
+        use_memo(((*user_list).clone(), current_page, page_size_value), move |(targets, current_page, page_size)| {
+            let items = if targets.as_ref().is_none_or(|l| l.is_empty()) {
+                None
+            } else {
+                targets.as_ref().map(|list| {
+                    let start = ((current_page - 1) as usize) * (*page_size as usize);
+                    let page_items =
+                        list.iter().skip(start).take(*page_size as usize).cloned().collect::<Vec<Rc<TargetUser>>>();
+                    Rc::new(page_items)
+                })
+            };
             TableDefinition::<TargetUser> {
                 items,
                 num_cols,
@@ -269,6 +293,21 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         })
     };
 
+    let handle_page_change = {
+        let page = page.clone();
+        Callback::from(move |new_page: u32| page.set(new_page.max(1)))
+    };
+
+    let handle_page_size_change = {
+        let page = page.clone();
+        let page_size = page_size.clone();
+        Callback::from(move |new_size: u16| {
+            set_local_storage_item(TP_PAGE_SIZE_KEY, &new_size.to_string());
+            page_size.set(new_size);
+            page.set(1);
+        })
+    };
+
     let handle_menu_click = {
         let popup_is_open_state = popup_is_open.clone();
         let confirm = dialog.clone();
@@ -276,8 +315,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
         let services = service_ctx.clone();
         let selected_dto = selected_dto.clone();
         let ul_context = userlist_context.clone();
-        let clipboard = clipboard.clone();
-        let dialog = dialog.clone();
+        let copy_to_clipboard = copy_to_clipboard.clone();
         Callback::from(move |(name, e): (String, MouseEvent)| {
             e.prevent_default();
             e.stop_propagation();
@@ -355,21 +393,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                                 dto.credentials.password,
                                 dto.credentials.token.as_ref().map_or_else(String::new, |t| t.to_string())
                             );
-
-                            if *clipboard.is_supported {
-                                clipboard.write_text(text);
-                            } else {
-                                let dlg = dialog.clone();
-                                spawn_local(async move {
-                                    let _result = dlg
-                                        .content(
-                                            html! {<input value={text} readonly={true} class="tp__copy-input"/>},
-                                            None,
-                                            false,
-                                        )
-                                        .await;
-                                });
-                            }
+                            copy_to_clipboard.emit(text);
                         }
                     }
                 }
@@ -383,7 +407,15 @@ pub fn UserTable(props: &UserTableProps) -> Html {
           {
             html! {
               <>
-               <Table::<TargetUser> definition={table_definition.clone()} />
+               <PagedTable::<TargetUser> definition={table_definition.clone()}
+                    page={current_page}
+                    page_size={*page_size}
+                    total_items={total_items}
+                    total_pages={total_pages}
+                    has_prev={current_page > 1}
+                    has_next={current_page < total_pages}
+                    on_page_change={handle_page_change}
+                    on_page_size_change={handle_page_size_change} />
                 <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
                     { html_if!(can_write_users, {
                         <MenuItem icon="Edit" name={TableAction::Edit.to_string()} label={translate.t("LABEL.EDIT")} onclick={&handle_menu_click}></MenuItem>

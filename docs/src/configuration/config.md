@@ -427,10 +427,13 @@ Messaging is strictly **opt-in**. You must explicitly define which event types s
 * `stats`: Summary of processed items and performance metrics after a run.
 * `error`: Alerts when processing or source fetching fails.
 * `watch`: Triggered by changes in monitored groups/targets.
+* `recording_started`: DVR recording entered the active recording worker.
+* `recording_completed`: DVR recording finished and the final file was committed.
+* `recording_failed`: DVR recording reached a terminal failure.
 
 ```yaml
 messaging:
-  notify_on: [ "info", "stats", "error", "watch" ]
+  notify_on: [ "info", "stats", "error", "watch", "recording_started", "recording_completed", "recording_failed" ]
 
   # Telegram: Supports Markdown and Group Topics
   telegram:
@@ -441,6 +444,7 @@ messaging:
       - "<CHAT_ID>:<MESSAGE_THREAD_ID>" # Use colon to target specific Discord-like topics/threads
     templates:
       stats: 'file:///config/messaging_templates/telegram_stats.templ'
+      recording_completed: 'file:///config/messaging_templates/telegram_recording_completed.templ'
 
   # Discord: Webhook integration
   discord:
@@ -505,6 +509,13 @@ populated:
   * **Access:** Iterate over the change sets using loops. Common keys include `added`, `removed`, and `modified`.
   * **Example:** Use `{{#each watch.added}} • {{name}} {{/each}}` to list all new channels detected in the monitored
     groups.
+* `{{recording}}`: **DVR Lifecycle Data.** Available for `recording_started`, `recording_completed`, and
+  `recording_failed`. Common fields are `programme_title`, `channel`, `effective_start`, `effective_end`,
+  `visibility`, `output_filename`, and `failure_reason` for failed recordings.
+
+Recording lifecycle notifications are global-channel notifications. Tuliprox sends them for shared recordings,
+legacy administrator recordings, and built-in administrator private recordings. Private recordings owned by regular
+users are suppressed.
 
 #### Template Examples
 
@@ -676,9 +687,79 @@ Tuliprox handles these transfers like provider-bound background streams:
 * RBAC integration is explicit:
   * `download.read` allows opening the downloads view and receiving transfer snapshots.
   * `download.write` allows queueing, pausing, cancelling, retrying, and removing transfers.
+  * `recording.read` allows opening DVR task, quota, library, and recurring-rule views.
+  * `recording.write` allows creating, editing, cancelling, deleting, and managing DVR tasks and rules.
 * Persisted queue recovery is tolerant of corruption. If `downloads_state.json` cannot be deserialized,  
   Tuliprox renames it to a timestamped `*_corrupt.*.json` backup and starts with an empty transfer queue instead of
   aborting server boot.
+
+### 6.1 DVR Runtime Files
+
+The DVR runtime keeps durable state under `storage_dir`:
+
+* `downloads_state.json`: queued, scheduled, active, and finished downloads and recordings.
+* `recording_rules.json`: recurring recording rules and tombstones.
+
+Live recordings use a partial-file lifecycle. The worker writes to `<filename>.partial` and renames it to the final
+path only after ffmpeg exits successfully and the final path is still free.
+
+> **See also:** the full [DVR Operator Reference](../operator/dvr.md) — configuration reference, directory layout,
+> filename placeholders, lifecycle / restart, quota charge-by-state, disk admission, safe deletion, authorization
+> matrix, identity-registry bootstrap, token refresh, deprecated `/file/record`, REST + WebSocket surface, conflict
+> preview, recurring-rule matching + DST + reconciliation, at-most-once notification protocol, migration checklist,
+> and the 32-scenario acceptance sweep.
+
+#### 6.1.1 Filename placeholders
+
+The filename template supports these placeholders (filename only — **never** the directory):
+
+| Placeholder         | Resolves to                                                       |
+|---------------------|-------------------------------------------------------------------|
+| `{channel}`         | Channel name                                                      |
+| `{program_title}`   | Programme title (sanitized)                                       |
+| `{start_time}`      | UTC `YYYY-MM-DDTHH-MM`                                            |
+| `{end_time}`        | UTC `YYYY-MM-DDTHH-MM`                                            |
+| `{episode}`         | Episode identifier extracted by `episode_pattern`                 |
+| `{owner}`           | The owner principal id (`user:<id>` or `legacy:admin`)            |
+
+> **Security:** `{owner}` is allowed **only** in the filename template, never in directory templates.
+> Directory templates are resolved against the caller's identity, so the directory part is intrinsically owner-scoped.
+
+#### 6.1.2 Authorization matrix
+
+The DVR layer runs an additional authorization pass on top of `recording.read` / `recording.write`.
+
+| Visibility | Owner                  | Admin (`builtin:admin`) | Foreign user | Notes                                     |
+|------------|------------------------|-------------------------|--------------|-------------------------------------------|
+| `private`  | read + write + delete  | read + write + delete   | —            | Foreign reads return 404                  |
+| `shared`   | —                      | read + write + delete   | read         | Only admins create shared recordings      |
+| `legacy`   | — (orphan)             | read + write + delete   | —            | Created by the deprecated `/file/record`  |
+
+#### 6.1.3 Identity bootstrap
+
+If the `users` table is empty on first boot:
+
+1. Tuliprox reads `TULIPROX_BOOTSTRAP_ADMIN` from the environment.
+2. The built-in `builtin:admin` role is assigned to that user.
+3. The bootstrap admin must use `POST /api/v1/auth/login` to obtain a JWT.
+4. From that point on, the admin creates additional users via `POST /api/v1/users`.
+5. If `TULIPROX_BOOTSTRAP_ADMIN` is unset and the table is empty, the server **fails closed** at boot.
+6. The bootstrap admin cannot be deleted while it is the sole `builtin:admin` member.
+
+#### 6.1.4 Token refresh on schema bump
+
+When the JWT schema version is bumped (a new field is added), existing tokens are rejected with
+`401 Unauthorized` and an `X-Token-Refresh: required` response header. The frontend automatically calls
+`POST /api/v1/auth/refresh` to mint a new token. The wire code is `recording_token_refresh_required` so the
+toastr surfaces a stable, translatable message. Operators upgrading across a schema-bump release do not need
+to do anything manually.
+
+#### 6.1.5 Deprecated `/file/record`
+
+`POST /api/v1/file/record` is the legacy recording endpoint. It is still functional and admin-gated, but
+returns a `recording_forbidden` error for non-admin principals and is **scheduled for removal in the next
+major version**. New code should use `POST /api/v1/recording/tasks` with a `CreateRecordingTaskBody` payload
+(see [REST API cookbook](../rest-api-cookbook.md#downloads-and-recordings)).
 
 > **Note:** The named capture group `(?P<episode>...)` is **mandatory** for this to function correctly.
 >

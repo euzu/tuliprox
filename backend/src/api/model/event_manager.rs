@@ -1,8 +1,9 @@
 use crate::api::model::streams::{MeterReading, StreamMeterHandle};
 use log::trace;
 use shared::model::{
-    ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse, LibraryScanProgressEvent,
-    PlaylistUpdateProgressEvent, PlaylistUpdateState, StreamMeterEntry, SystemInfo,
+    ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse,
+    LibraryScanProgressEvent, PlaylistUpdateProgressEvent, PlaylistUpdateState, StreamMeterEntry,
+    SystemInfo,
 };
 use std::{
     collections::HashMap,
@@ -28,6 +29,8 @@ pub enum EventMessage {
     LibraryScanProgress(LibraryScanProgressEvent),
     DownloadsUpdate(DownloadsResponse),
     DownloadsDeltaUpdate(DownloadsDelta),
+    RecordingChanged,
+    RecordingRulesChanged,
     InputMetadataUpdatesCompleted(Arc<str>),
     InputMetadataUpdatesStarted(Arc<str>),
 }
@@ -77,6 +80,9 @@ impl EventManager {
         stream_meter_subscriber_count: Arc<AtomicUsize>,
         cancel_token: CancellationToken,
     ) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(STREAM_METER_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

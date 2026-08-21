@@ -5,6 +5,19 @@ pub fn format_duration(seconds: u64) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
+pub fn format_uptime(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3600;
+    let minutes = (seconds % 3600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h {minutes}m")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m {}s", seconds % 60)
+    }
+}
+
 /// Shared body of `format_bandwidth` and `format_transferred`.
 /// `gb_decimals` controls the precision used in the GB range; `unit_suffix`
 /// is appended to every unit (e.g. `/s` for bandwidth, empty for transferred).
