@@ -2,14 +2,9 @@ use crate::{
     model::{
         EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_DESC,
         EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW, EPG_TAG_PROGRAMME, EPG_TAG_TITLE, EPG_TAG_TV,
+        EPG_TAG_PREVIOUSLY_SHOWN,
         Epg, EpgSmartMatchConfig, IcsDummyPolicy, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
-        TVGuide, XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY,
-        EPG_TAG_CHANNEL, EPG_TAG_DESC, EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW,
-        EPG_TAG_PREVIOUSLY_SHOWN, EPG_TAG_PROGRAMME, EPG_TAG_TITLE, EPG_TAG_TV,
-    },
-    processing::{
-        parser::ics,
-        processor::EpgIdCache,
+        TVGuide, XmlTag, XmlTagIcon
     },
     processing::{parser::ics, processor::EpgIdCache},
     repository::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy},
