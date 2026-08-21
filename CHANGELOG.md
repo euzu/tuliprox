@@ -4,6 +4,10 @@
 
 ## ⚠️ Breaking Changes
 
+- **Smart EPG normalization now preserves XMLTV ID separators by default.** The default `normalize_regex` changed from
+  `[^a-zA-Z0-9\-]` to `[^a-zA-Z0-9._\-]`. Existing configurations that explicitly set the former pattern keep the
+  legacy separator-removal behavior; remove the override or use the new pattern to adopt the new default.
+
 - **STRM names now use the processed target title by default**: Previously, STRM folders and filenames preferred the
   media metadata name. Existing STRM targets that must retain that behavior need `use_metadata: true`; otherwise the
   next export can generate different paths, and `cleanup: true` can remove the old files.

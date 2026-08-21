@@ -682,11 +682,14 @@ For ICS sources, Tuliprox uses the generated virtual channel metadata:
 | `enabled`               | Bool   | `false`            | Activates the Smart Match engine for streams without a fixed `tvg-id`.                                               |
 | `fuzzy_matching`        | Bool   | `false`            | Fallback to phonetic and Jaro-Winkler similarity matching if exact ID match fails.                                   |
 | `match_threshold`       | Int    | `80`               | Minimum similarity score (10-100) required to accept a fuzzy match.                                                  |
-| `best_match_threshold`  | Int    | `99`               | Score at which Tuliprox stops searching and immediately accepts the EPG assignment.                                  |
+| `best_match_threshold`  | Int    | `95`               | Minimum score for the strict fallback used when phonetic keys differ.                                                |
 | `name_prefix`           | Object | `ignore`           | Options: `ignore`, `suffix`, `prefix`. For `suffix`/`prefix`, a concat string (e.g., `{ suffix: "." }`) is required. |
 | `name_prefix_separator` | List   | `[':', '\|', '-']` | Characters used by providers to delimit country codes (e.g., `US:`, `FR\|`).                                         |
-| `strip`                 | List   | *(HD/4K tags)*     | Default: `["3840p", "uhd", "fhd", "hd", "sd", "4k", "plus", "raw"]`. Terms stripped before matching.                 |
-| `normalize_regex`       | String | `[^a-zA-Z0-9\-]`   | Default pattern to strip non-alphanumeric characters (except dashes) for cleaner matching.                           |
+| `strip`                 | List   | *(quality tags)*   | Resolution, codec and frame-rate markers stripped as complete terms before matching.                                 |
+| `normalize_regex`       | String | `[^a-zA-Z0-9._\-]` | Default pattern preserving the separators commonly found in XMLTV channel IDs.                                       |
+
+When upgrading, an explicitly configured legacy pattern such as `[^a-zA-Z0-9\-]` remains unchanged and continues to
+remove periods and underscores. Remove that override or set `[^a-zA-Z0-9._\-]` to adopt the new default behavior.
 
 #### How Smart-Matching works
 
@@ -699,8 +702,21 @@ If a stream is missing the `tvg-id`, Tuliprox performs the following steps:
    becomes `hbo`.
 4. **Reconstruction:** Using `name_prefix.suffix` (`.`), the country code is appended to the name. The target search key
    becomes `hbo.us`.
-5. **Phonetic Matching:** The engine uses **Double Metaphone** phonetic encoding to search for the ID `hbo.us` in the
-   aggregated EPG database.
+5. **Exact Matching:** Normalized XMLTV IDs and display names are checked first. Source priority resolves duplicate
+   exact candidates. Quality variants sharing one normalized name can reuse a populated direct ID.
+6. **Fuzzy Matching:** When enabled, the engine scores every candidate in the matching **Double Metaphone** bucket and
+   keeps the globally best result rather than the first acceptable result. If the phonetic lookup yields nothing, a
+   same-initial fallback is allowed only at `best_match_threshold`.
+7. **Safety Checks:** Numeric signatures must agree (`TF1` cannot match `TF1+1`), tied candidates are rejected, and
+   low-confidence candidates must beat the runner-up by a minimum margin. Explicit XMLTV ID country suffixes prevent
+   cross-country matches, and decorative playlist separators are ignored.
+8. **Programme Validation:** A channel declaration without programmes is not treated as a successful guide match.
+   Tuliprox keeps ranked alternatives while parsing and selects the best candidate that actually contributes programme
+   data. Existing IDs with no programmes can therefore be replaced by a populated, semantically compatible candidate.
+   ICS channels with an enabled dummy policy also count as populated.
+
+At `debug` level, each processed input emits one `Smart EPG summary` with the number of live channels whose original ID
+was valid, whose ID was assigned by Smart Match, or which remained unresolved.
 
 For an ICS source, the generated EPG channel participates in the same matching process. For example, this configuration:
 

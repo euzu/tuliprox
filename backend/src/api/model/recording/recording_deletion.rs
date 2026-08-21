@@ -329,18 +329,35 @@ pub fn rollback_deletion(candidate: &mut PersistedDownloadQueue, uuid: &str) {
 /// state-owned file is removed. Terminal `Completed` → final; `Failed`/
 /// `Cancelled` → partial (a failed/cancelled recording never reached
 /// finalization).
-pub fn file_path_for_deletion(
+///
+/// The returned path is **canonicalized** when the file exists on
+/// disk. `recovery_action_for` compares the result against
+/// `recording_root` to detect a path that escapes the recording
+/// directory; a raw `download.file_path` may still carry literal `..`
+/// segments (`dir/../outside.ts`) that defeat a lexical `starts_with`,
+/// so canonicalization is the only honest way to decide whether the
+/// file is actually inside the root.
+///
+/// `recording_root` is accepted for symmetry with the recovery
+/// caller; today every site passes `None` and resolves the path from
+/// the task itself, which is the right call while `RecordingMetadata`
+/// still carries the absolute path verbatim.
+pub async fn file_path_for_deletion(
     download: &FileDownload,
-    recording_root: Option<&Path>,
+    _recording_root: Option<&Path>,
 ) -> Option<PathBuf> {
-    let _ = recording_root; // placeholder; future tasks resolve via metadata
     let partial = crate::api::model::recording_worker::recording_partial_path(&download.file_path);
     let prior = download.recording.as_ref().and_then(|m| m.deleting_previous_state);
-    match prior {
-        Some(DeletionPreviousState::Completed) => Some(download.file_path.clone()),
-        Some(_) => Some(partial),
-        None => None,
-    }
+    let raw = match prior {
+        Some(DeletionPreviousState::Completed) => download.file_path.clone(),
+        Some(_) => partial,
+        None => return None,
+    };
+    // Canonicalize to resolve `..` segments and symlinks. If the file
+    // is missing or unreadable, `canonicalize` fails — keep the raw
+    // path; the missing-file branch in the caller will turn it into
+    // `FinishDeletion`/`NotDeleting` instead of running IO on it.
+    Some(tokio::fs::canonicalize(&raw).await.unwrap_or(raw))
 }
 
 /// Unlink the file owned by a `DeletionTarget`. Missing files count as
@@ -367,7 +384,7 @@ async fn unlink_owned_file(path: &Path) -> Result<Option<PathBuf>, DeletionError
 /// success. Returns the path that was unlinked, or `None` if no
 /// physical file was present.
 pub async fn execute_deletion(download: &FileDownload, recording_root: Option<&Path>) -> Result<Option<PathBuf>, DeletionError> {
-    let Some(path) = file_path_for_deletion(download, recording_root) else {
+    let Some(path) = file_path_for_deletion(download, recording_root).await else {
         return Ok(None);
     };
     unlink_owned_file(&path).await
@@ -432,7 +449,7 @@ pub async fn recovery_action_for(
 ) -> RecoveryAction {
     let Some(meta) = &download.recording else { return RecoveryAction::NotDeleting };
     let Some(_prior) = meta.deleting_previous_state else { return RecoveryAction::NotDeleting };
-    let Some(path) = file_path_for_deletion(download, recording_root) else {
+    let Some(path) = file_path_for_deletion(download, recording_root).await else {
         return RecoveryAction::FinishDeletion;
     };
     if no_follow_existing(&path).await.is_none() {
@@ -440,9 +457,12 @@ pub async fn recovery_action_for(
     }
     // The file is still present. If the metadata-derived path is outside
     // the recording root, treat as unsafe; otherwise restore the
-    // previous state.
+    // previous state. `path` already comes back canonicalized from
+    // `file_path_for_deletion` (so literal `..` segments cannot slip
+    // past the lexical check); only `root` needs canonicalizing here.
     if let Some(root) = recording_root {
-        if !path.starts_with(root) {
+        let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        if !path.starts_with(&root_canon) {
             return RecoveryAction::UnsafeRestore;
         }
     }
@@ -572,13 +592,13 @@ mod tests {
         assert_eq!(prior_terminal_state(&task), None);
     }
 
-    #[test]
-    fn file_path_for_deletion_uses_final_for_completed_partial_otherwise() {
+    #[tokio::test]
+    async fn file_path_for_deletion_uses_final_for_completed_partial_otherwise() {
         let task = finished_with_state("r", DownloadState::Completed, Some(DeletionPreviousState::Completed));
-        let path = file_path_for_deletion(&task, None).expect("path");
+        let path = file_path_for_deletion(&task, None).await.expect("path");
         assert_eq!(path, PathBuf::from("/tmp/r.ts"));
         let task = finished_with_state("r", DownloadState::Failed, Some(DeletionPreviousState::Failed));
-        let path = file_path_for_deletion(&task, None).expect("path");
+        let path = file_path_for_deletion(&task, None).await.expect("path");
         assert_eq!(path, PathBuf::from("/tmp/r.ts.partial"));
     }
 
