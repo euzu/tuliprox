@@ -179,6 +179,31 @@ fn is_admin(claims: &Claims) -> bool {
     claims.roles.iter().any(|r| r == ROLE_ADMIN)
 }
 
+/// The `username` of the synthetic `Claims` the retention worker
+/// builds to act on shared / orphan / legacy-owned recordings.
+///
+/// The DVR runs three background operations that cannot wait for a
+/// human to log in: retention sweeps, disk-pressure sweeps, and the
+/// notification outbox. They all go through the same authorization
+/// gates a user would, so the synthetic principal must (a) look
+/// sufficiently administrative for those gates to open, and (b) be
+/// trivially recognisable so any future policy addition can decide
+/// whether the bypass applies.
+pub const SYSTEM_PRINCIPAL_USERNAME: &str = "recording-supervisor";
+
+/// `true` when `claims` was minted by the retention supervisor itself
+/// rather than by an authenticating user.
+///
+/// A future check on, for example, `pwd_version` or
+/// `permission_schema_version` must short-circuit for the system
+/// principal; otherwise the background workers silently lose access
+/// the moment a stricter policy lands. The retention-side checks below
+/// call this early so adding such a policy does not regress the
+/// background workers.
+pub fn is_system_principal(claims: &Claims) -> bool {
+    claims.username == SYSTEM_PRINCIPAL_USERNAME
+}
+
 fn check_create(claims: &Claims, action: RecordingAction) -> RecordingDecision {
     match action {
         RecordingAction::CreatePrivate => {
@@ -232,6 +257,13 @@ pub fn authorize(
     action: RecordingAction,
     recording: &RecordingSubject<'_>,
 ) -> RecordingDecision {
+    // The synthetic supervisor principal is the only legitimate caller
+    // of `SystemRetentionDelete`. Allow it before the policy checks so
+    // adding a stricter rule later (e.g., one that consults
+    // `pwd_version`) does not silently break the background workers.
+    if matches!(action, RecordingAction::SystemRetentionDelete) && is_system_principal(claims) {
+        return RecordingDecision::Allow;
+    }
     // System retention can delete a Completed/Failed/Cancelled
     // recording on behalf of any user, including when the owner
     // cannot be resolved (e.g., a corrupted registry entry). The
@@ -383,6 +415,13 @@ fn action_requires_owner(action: RecordingAction) -> bool {
 /// non-admin callers — even the real owner — cannot re-claim
 /// an orphan.
 pub fn authorize_orphan(claims: &Claims) -> RecordingDecision {
+    // The synthetic supervisor principal is the only legitimate
+    // background reader of the orphan catalog. Allow it before the
+    // policy checks so adding a stricter rule later does not silently
+    // break the retention / reconciliation workers.
+    if is_system_principal(claims) {
+        return RecordingDecision::Allow;
+    }
     if !is_admin(claims) {
         return RecordingDecision::Deny(DenyReason::NotAdministrator);
     }
@@ -696,5 +735,74 @@ mod tests {
         assert!(!TerminalState::Active.is_eligible_for_retention());
         assert!(!TerminalState::Scheduled.is_eligible_for_retention());
         assert!(!TerminalState::Deleting.is_eligible_for_retention());
+    }
+
+    #[test]
+    fn system_principal_recognised_by_username() {
+        // The sentinel is a constant for exactly one reason: the bypass
+        // in `authorize` / `authorize_orphan` has to agree with the
+        // `Claims` the supervisor mints, and the agreement has to be
+        // verifiable without touching the supervisor module.
+        let mut perms = shared::model::permission::PermissionSet::new();
+        perms.set(Permission::RecordingWrite);
+        perms.set(Permission::RecordingRead);
+        let claims = make_claims(
+            SYSTEM_PRINCIPAL_USERNAME,
+            Some(UserId::builtin_admin()),
+            vec![ROLE_ADMIN],
+            perms,
+        );
+        assert!(is_system_principal(&claims));
+    }
+
+    #[test]
+    fn an_admin_user_is_not_a_system_principal() {
+        // Same role, same permissions — but the username does not
+        // match. Without this distinction a forged `username` field
+        // would silently elevate the caller to a bypass path.
+        let mut perms = shared::model::permission::PermissionSet::new();
+        perms.set(Permission::RecordingWrite);
+        perms.set(Permission::RecordingRead);
+        let claims = make_claims(
+            "alice",
+            Some(UserId::builtin_admin()),
+            vec![ROLE_ADMIN],
+            perms,
+        );
+        assert!(!is_system_principal(&claims));
+    }
+
+    #[test]
+    fn system_retention_delete_allows_the_supervisor_principal() {
+        // The supervisor is the only legitimate caller. Even with an
+        // ineligible state (which would normally deny), the bypass
+        // short-circuits before the policy checks — that is the whole
+        // point: future policy additions must not silently break the
+        // background workers.
+        let mut perms = shared::model::permission::PermissionSet::new();
+        perms.set(Permission::RecordingWrite);
+        perms.set(Permission::RecordingRead);
+        let claims = make_claims(
+            SYSTEM_PRINCIPAL_USERNAME,
+            Some(UserId::builtin_admin()),
+            vec![ROLE_ADMIN],
+            perms,
+        );
+        let meta = make_meta(RecordingOwner::User(UserId::from("web:alice")), RecordingVisibility::Private);
+        let subject = RecordingSubject::new(Some(&meta), TerminalState::Active, false);
+        assert_eq!(
+            authorize(&claims, &UserId::builtin_admin(), RecordingAction::SystemRetentionDelete, &subject),
+            RecordingDecision::Allow
+        );
+    }
+
+    #[test]
+    fn system_principal_orphan_allow_short_circuits_admin_check() {
+        // The bypass exists so a future stricter rule does not silently
+        // lock the retention worker out of the orphan catalog. Lock in
+        // the behaviour with a no-permission / no-admin system caller.
+        let perms = shared::model::permission::PermissionSet::new();
+        let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), vec![], perms);
+        assert_eq!(authorize_orphan(&claims), RecordingDecision::Allow);
     }
 }

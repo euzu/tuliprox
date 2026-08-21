@@ -50,6 +50,10 @@ pub enum RuleServiceError {
     /// this with a reconciliation status the operator can use to
     /// decide whether to retry.
     PartialOperation { primary: String, secondary: String },
+    /// The rule uses a feature the server knows about but does not
+    /// currently implement. The stable code names the feature so the
+    /// frontend can render a localized, feature-specific message.
+    Unsupported { feature: &'static str },
 }
 
 impl RuleServiceError {
@@ -63,6 +67,10 @@ impl RuleServiceError {
             Self::NotOwner => "recording_rule_not_owner",
             Self::PersistenceFailed => "recording_persistence_failed",
             Self::PartialOperation { .. } => "recording_rule_partial_operation",
+            Self::Unsupported { feature } => match *feature {
+                "new_episode_rule" => "recording_rule_new_episode_unsupported",
+                _ => "recording_rule_unsupported",
+            },
         }
     }
 }
@@ -83,6 +91,13 @@ pub fn validate_rule(rule: &RecordingRule) -> Result<(), RuleServiceError> {
     }
     if rule.post_roll_secs > 30 * 60 {
         return Err(RuleServiceError::InvalidRule);
+    }
+    // `RuleBody::NewEpisode` is parsed and persisted, but the scheduler
+    // has no EPG horizon to match it against, so the rule would sit
+    // inert forever. Refuse it at the edge instead of letting an
+    // operator create a rule that never fires.
+    if matches!(rule.body, shared::model::recording_rule::RuleBody::NewEpisode { .. }) {
+        return Err(RuleServiceError::Unsupported { feature: "new_episode_rule" });
     }
     Ok(())
 }
@@ -228,10 +243,43 @@ mod tests {
 
     #[test]
     fn validate_rule_accepts_within_bounds() {
+        // The body is incidental to this assertion; the helper builds
+        // a `NewEpisode` body which `validate_rule` now refuses for
+        // unrelated reasons. Swap to `WeeklyTimeslot` so the padding
+        // bounds are what gets tested.
         let mut r = private_rule(user());
+        r.body = RuleBody::WeeklyTimeslot {
+            weekday: 1,
+            local_start_time: "20:00".to_string(),
+            duration_secs: 3_600,
+            timezone: "UTC".to_string(),
+        };
         r.pre_roll_secs = 15 * 60;
         r.post_roll_secs = 30 * 60;
         assert!(validate_rule(&r).is_ok());
+    }
+
+    #[test]
+    fn validate_rule_rejects_new_episode_until_epg_horizon_is_wired() {
+        // The scheduler has no EPG horizon yet, so a `NewEpisode` rule
+        // would sit inert forever. Validation refuses it with a stable,
+        // feature-specific code so the frontend can render an actionable
+        // message and so removing the guard later is a single,
+        // searchable edit.
+        let mut r = private_rule(user());
+        r.body = RuleBody::NewEpisode {
+            series_id: Some("series-1".into()),
+            title_pattern: Some("News".into()),
+            exclude_repeat: false,
+        };
+        assert_eq!(
+            validate_rule(&r),
+            Err(RuleServiceError::Unsupported { feature: "new_episode_rule" })
+        );
+        assert_eq!(
+            validate_rule(&r).err().map(|e| e.code()),
+            Some("recording_rule_new_episode_unsupported")
+        );
     }
 
     #[test]

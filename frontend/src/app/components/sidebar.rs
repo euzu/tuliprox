@@ -401,6 +401,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
 #[cfg(test)]
 mod tests {
     use super::{is_sidebar_expanded, resolved_sidebar_state, sidebar_variant_class, CollapseState};
+    use crate::app::components::show_recording_nav;
 
     #[test]
     fn sidebar_variant_class_reports_collapsed_variants() {

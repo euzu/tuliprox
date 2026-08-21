@@ -10,13 +10,13 @@ use crate::{
     app::components::{number_input::NumberInput, DateTimeInput, RadioButtonGroup},
     i18n::use_translation,
     services::{
-        ConflictSeverity, CreateRecordingTaskRequest, PreviewCandidateDto, PreviewConflictsRequest,
-        PreviewSourceDto, RecordingConflictPreview, RecordingService, RecordingSourceInput,
+        ConflictSeverity, CreateRecordingTaskRequest, PreviewCandidateDto, PreviewConflictsRequest, PreviewSourceDto,
+        RecordingConflictPreview, RecordingService, RecordingSourceInput,
     },
 };
+use gloo_timers::future::TimeoutFuture;
 #[cfg(test)]
 use shared::model::permission::Permission;
-use gloo_timers::future::TimeoutFuture;
 use shared::model::recording::EpgEpisodeMetadata;
 use std::rc::Rc;
 use yew::prelude::*;
@@ -938,8 +938,7 @@ mod tests {
             ("possible_capacity_wait", ConflictSeverity::PossibleCapacityWait),
             ("likely_missed_window", ConflictSeverity::LikelyMissedWindow),
         ] {
-            let parsed: ConflictSeverity =
-                serde_json::from_str(&format!("\"{wire}\"")).expect("severity deserializes");
+            let parsed: ConflictSeverity = serde_json::from_str(&format!("\"{wire}\"")).expect("severity deserializes");
             assert_eq!(parsed, expected);
         }
     }

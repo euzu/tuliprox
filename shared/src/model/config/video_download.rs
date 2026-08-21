@@ -91,12 +91,8 @@ fn is_default_recording_max_post_roll_secs(value: &u64) -> bool { *value == defa
 pub const fn default_recording_retention_sweep_interval_secs() -> u64 {
     DEFAULT_RECORDING_RETENTION_SWEEP_INTERVAL_SECS
 }
-pub const fn default_recording_notification_outbox_buffer() -> usize {
-    DEFAULT_RECORDING_NOTIFICATION_OUTBOX_BUFFER
-}
-pub const fn default_recording_notification_max_attempts() -> u32 {
-    DEFAULT_RECORDING_NOTIFICATION_MAX_ATTEMPTS
-}
+pub const fn default_recording_notification_outbox_buffer() -> usize { DEFAULT_RECORDING_NOTIFICATION_OUTBOX_BUFFER }
+pub const fn default_recording_notification_max_attempts() -> u32 { DEFAULT_RECORDING_NOTIFICATION_MAX_ATTEMPTS }
 pub const fn default_recording_notification_backoff_initial_secs() -> u64 {
     DEFAULT_RECORDING_NOTIFICATION_BACKOFF_INITIAL_SECS
 }
@@ -200,10 +196,7 @@ pub struct RecordingConfigDto {
     /// supervisors, so nothing is materialized, swept, or notified.
     #[serde(default = "default_recording_enabled", skip_serializing_if = "is_recording_enabled")]
     pub enabled: bool,
-    #[serde(
-        default,
-        skip_serializing_if = "is_default_recording_container_format"
-    )]
+    #[serde(default, skip_serializing_if = "is_default_recording_container_format")]
     pub container_format: RecordingContainerFormat,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
@@ -717,9 +710,10 @@ fn prepare_recording_config(recording: &mut RecordingConfigDto, download_dir: &s
     // Nothing bounds recording disk use unless at least one of the three
     // policies is set. Worth a warning, not an error: a dedicated
     // filesystem is a legitimate reason to run without any of them.
-    let has_policy_retention = recording.retention.as_ref().is_some_and(|retention| {
-        retention.keep_last_per_channel.is_some() || retention.delete_after_days.is_some()
-    });
+    let has_policy_retention = recording
+        .retention
+        .as_ref()
+        .is_some_and(|retention| retention.keep_last_per_channel.is_some() || retention.delete_after_days.is_some());
     let has_watermarks = recording
         .disk
         .as_ref()
@@ -914,17 +908,14 @@ mod tests {
 
     // --- Recording config tests ---
 
-    fn make_recording_config() -> RecordingConfigDto {
-        RecordingConfigDto::default()
-    }
+    fn make_recording_config() -> RecordingConfigDto { RecordingConfigDto::default() }
 
     #[test]
     fn recording_config_default_matches_the_serde_defaults() {
         // A derived `Default` would produce `enabled: false` and zero
         // padding limits — a silently disabled DVR. Deserializing an empty
         // mapping and calling `default()` must agree.
-        let deserialized: RecordingConfigDto =
-            serde_json::from_str("{}").expect("empty recording block deserializes");
+        let deserialized: RecordingConfigDto = serde_json::from_str("{}").expect("empty recording block deserializes");
         assert_eq!(deserialized, RecordingConfigDto::default());
         assert!(RecordingConfigDto::default().enabled);
         assert!(RecordingConfigDto::default().is_empty());
@@ -939,18 +930,16 @@ mod tests {
         assert_eq!(RecordingContainerFormat::default(), RecordingContainerFormat::Mpegts);
         assert_eq!(RecordingContainerFormat::Mpegts.ffmpeg_format(), "mpegts");
         assert_eq!(RecordingContainerFormat::Matroska.file_extension(), "mkv");
-        let parsed: RecordingConfigDto = serde_json::from_str(r#"{"container_format":"matroska"}"#)
-            .expect("parse container format");
+        let parsed: RecordingConfigDto =
+            serde_json::from_str(r#"{"container_format":"matroska"}"#).expect("parse container format");
         assert_eq!(parsed.container_format, RecordingContainerFormat::Matroska);
     }
 
     #[test]
     fn recording_notification_block_rejects_impossible_values() {
         let mut recording = make_recording_config();
-        recording.notifications = Some(RecordingNotificationConfigDto {
-            max_attempts: 0,
-            ..RecordingNotificationConfigDto::default()
-        });
+        recording.notifications =
+            Some(RecordingNotificationConfigDto { max_attempts: 0, ..RecordingNotificationConfigDto::default() });
         let mut video = make_recording_video_config(recording);
         assert!(video.prepare().is_err());
 
@@ -1128,8 +1117,10 @@ mod tests {
     #[test]
     fn recording_retention_zero_keep_last_is_rejected() {
         let mut recording = make_recording_config();
-        recording.retention =
-            Some(RecordingRetentionConfigDto { keep_last_per_channel: Some(0), ..RecordingRetentionConfigDto::default() });
+        recording.retention = Some(RecordingRetentionConfigDto {
+            keep_last_per_channel: Some(0),
+            ..RecordingRetentionConfigDto::default()
+        });
         let mut video = make_recording_video_config(recording);
         let err = video.prepare().expect_err("zero keep_last should fail");
         assert!(err.to_string().contains("keep_last_per_channel"), "error: {err}");

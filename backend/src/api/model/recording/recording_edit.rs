@@ -27,9 +27,31 @@
 
 use shared::model::recording::{RecordingMetadata, RecordingVisibility};
 
+use crate::api::model::DownloadState;
+
 /// The set of states a recording can be in for an edit to be
 /// accepted.
 pub const EDITABLE_STATES: &[&str] = &["Scheduled", "Queued", "WaitingForCapacity", "RetryWaiting"];
+
+impl DownloadState {
+    /// Stable wire label consumed by `state_is_editable` and any caller
+    /// that needs to surface the state name in logs, errors, or tests.
+    /// Kept here so the source of truth for both the label and the
+    /// editable set lives next to `EDITABLE_STATES`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Queued => "Queued",
+            Self::Scheduled => "Scheduled",
+            Self::WaitingForCapacity => "WaitingForCapacity",
+            Self::RetryWaiting => "RetryWaiting",
+            Self::Downloading => "Downloading",
+            Self::Paused => "Paused",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
 
 /// Edit-time error taxonomy. Stable wire codes live in
 /// `RecordingService::ServiceError`; this enum is the *pure*

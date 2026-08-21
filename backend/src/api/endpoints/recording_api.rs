@@ -278,12 +278,7 @@ pub async fn preview_recording_conflicts(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(body): axum::extract::Json<PreviewConflictsBody>,
 ) -> axum::response::Response {
-    let source = crate::api::model::recording_service::RecordingSourceInput {
-        target_id: body.source.target_name,
-        virtual_id: body.source.virtual_id,
-        cluster: shared::model::XtreamCluster::Live,
-        input_name: body.source.input_name,
-    };
+    let source = RecordingSourceInput::from(&body.source);
     let request = crate::api::model::recording_service::ConflictPreviewRequest {
         source,
         padded_start: body.candidate.padded_start,
@@ -323,6 +318,27 @@ pub struct PreviewSourceDto {
     pub target_name: String,
     pub virtual_id: String,
     pub input_name: String,
+}
+
+impl From<&PreviewSourceDto> for RecordingSourceInput {
+    /// `PreviewConflictsBody::source` is the only DTO that carries a
+    /// source across the preview endpoint, so the field mapping lives
+    /// here rather than at the call site: adding a field to
+    /// `RecordingSourceInput` then fails the compile in exactly one
+    /// place, and the cluster choice stays consistent with whatever the
+    /// preview service decides to support in the future.
+    ///
+    /// `XtreamCluster::Live` is the only cluster the preview surface
+    /// currently accepts; widening it is a deliberate, single-site
+    /// change rather than a quiet drift in the handler.
+    fn from(value: &PreviewSourceDto) -> Self {
+        Self {
+            target_id: value.target_name.clone(),
+            virtual_id: value.virtual_id.clone(),
+            cluster: shared::model::XtreamCluster::Live,
+            input_name: value.input_name.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -450,7 +466,9 @@ fn rule_error_response(err: &crate::api::model::recording_rule_service::RuleServ
         RuleServiceError::Forbidden
         | RuleServiceError::SharedManagementNotAdministrator
         | RuleServiceError::NotOwner => StatusCode::FORBIDDEN,
-        RuleServiceError::InvalidRule | RuleServiceError::InvalidFuture => StatusCode::BAD_REQUEST,
+        RuleServiceError::InvalidRule
+        | RuleServiceError::InvalidFuture
+        | RuleServiceError::Unsupported { .. } => StatusCode::BAD_REQUEST,
         RuleServiceError::UnknownRule => StatusCode::NOT_FOUND,
         RuleServiceError::PersistenceFailed | RuleServiceError::PartialOperation { .. } => StatusCode::INTERNAL_SERVER_ERROR,
     };

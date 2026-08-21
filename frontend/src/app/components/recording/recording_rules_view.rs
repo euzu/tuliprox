@@ -165,9 +165,7 @@ pub fn rule_schedule_label(translate: &YewI18n, rule: &RecordingRuleResponse) ->
 }
 
 /// Translate a rule-service failure for display.
-fn error_message(translate: &YewI18n, error: &RecordingError) -> String {
-    translate.t(error.i18n_key())
-}
+fn error_message(translate: &YewI18n, error: &RecordingError) -> String { translate.t(error.i18n_key()) }
 
 #[function_component(RecordingRulesView)]
 pub fn recording_rules_view() -> Html {
@@ -339,7 +337,7 @@ pub fn recording_rules_view() -> Html {
                         // The switch moves optimistically, so success and
                         // failure look the same for a moment. Say which
                         // one happened.
-                        Ok(()) => services.toastr.success(translate.t("MESSAGES.RECORDING.RULE_UPDATED")),
+                        Ok(_) => services.toastr.success(translate.t("MESSAGES.RECORDING.RULE_UPDATED")),
                         Err(error) => {
                             log::error!("rule enable toggle failed: {error}");
                             services.toastr.error(error_message(&translate, &error));

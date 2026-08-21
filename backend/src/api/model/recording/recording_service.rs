@@ -151,16 +151,20 @@ fn effective_recording_window(
     if program_end <= program_start {
         return Err(ServiceError::InvalidInterval);
     }
-    let pre_roll = i64::try_from(pre_roll_secs).map_err(|_| ServiceError::InvalidInterval)?;
-    let post_roll = i64::try_from(post_roll_secs).map_err(|_| ServiceError::InvalidInterval)?;
+    let pre_roll = i64::try_from(pre_roll_secs).map_err(|_| ServiceError::PaddingLimitExceeded)?;
+    let post_roll = i64::try_from(post_roll_secs).map_err(|_| ServiceError::PaddingLimitExceeded)?;
     let scheduled_start = program_start.saturating_sub(pre_roll);
     let scheduled_end = program_end.saturating_add(post_roll);
     let execution_start = now.max(scheduled_start);
-    let remaining_duration_secs = scheduled_end
-        .checked_sub(execution_start)
-        .and_then(|duration| u64::try_from(duration).ok())
-        .filter(|duration| *duration > 0)
-        .ok_or(ServiceError::InvalidInterval)?;
+    // `scheduled_end >= execution_start` because both come from
+    // saturating arithmetic on a non-empty interval, so the cast is
+    // safe and the only remaining error is the degenerate
+    // already-finished window.
+    let remaining = scheduled_end.saturating_sub(execution_start);
+    if remaining <= 0 {
+        return Err(ServiceError::InvalidInterval);
+    }
+    let remaining_duration_secs = remaining.cast_unsigned();
     Ok(EffectiveRecordingWindow {
         scheduled_start,
         scheduled_end,
@@ -364,7 +368,7 @@ impl RecordingService {
             Ok(())
         })
         .await
-        .map_err(map_queue_error)?;
+        .map_err(|e| map_queue_error(&e))?;
 
         Ok(RecordingTaskView {
             uuid: view_task.uuid,
@@ -410,26 +414,11 @@ impl RecordingService {
             // via the remembered location for the O(1) write phase.
             let location = locate_recording(candidate, uuid)
                 .ok_or(QueueMutationError::UnknownRecording)?;
-            // State gate first — a patch on an immutable task
-            // (Downloading / terminal / `Deleting`) reports
-            // `recording_state_not_editable` regardless of any padding
-            // / interval validity. Immutable locations also short-
-            // circuit before the per-list lookup below.
-            if !location.is_in_editable_list() {
-                return Err(QueueMutationError::StateNotEditable);
-            }
-            // `is_in_editable_list` already excluded these; the arm below
-            // exists only so the match stays exhaustive if a new location
-            // is added. A debug build fails loudly instead of silently
-            // returning a misleading error.
-            debug_assert!(
-                matches!(
-                    location,
-                    RecordingLocation::Scheduled(_) | RecordingLocation::Queue(_)
-                ),
-                "edit reached a non-editable location past the state gate"
-            );
             let snapshot = {
+                // `Active` and `Finished` are not in `scheduled` /
+                // `queue`, but `locate_recording` returns them anyway —
+                // short-circuit with `StateNotEditable` so the match
+                // arms below stay narrowed to the editable lists.
                 let task = match location {
                     RecordingLocation::Scheduled(i) => &candidate.scheduled[i],
                     RecordingLocation::Queue(i) => &candidate.queue[i],
@@ -437,7 +426,7 @@ impl RecordingService {
                         return Err(QueueMutationError::StateNotEditable);
                     }
                 };
-                if !recording_edit::state_is_editable(state_label_for(&task.state)) {
+                if !recording_edit::state_is_editable(task.state.label()) {
                     return Err(QueueMutationError::StateNotEditable);
                 }
                 let Some(meta_snapshot) = task.recording.as_ref() else {
@@ -454,9 +443,14 @@ impl RecordingService {
                 }
                 let merged_pre = patch.pre_roll_secs.unwrap_or(meta_snapshot.pre_roll_secs);
                 let merged_post = patch.post_roll_secs.unwrap_or(meta_snapshot.post_roll_secs);
-                recording_edit::validate_padding(merged_pre, merged_post, bounds)
-                    .map_err(|error: EditError| map_edit_validation_error(&error))
-                    .map_err(|_| QueueMutationError::PaddingLimitExceeded)?;
+                recording_edit::validate_padding(merged_pre, merged_post, bounds).map_err(|err| match err {
+                    EditError::PaddingLimitExceeded => QueueMutationError::PaddingLimitExceeded,
+                    EditError::InvalidInterval => QueueMutationError::InvalidInterval,
+                    EditError::StateNotEditable | EditError::ChannelChangedWithoutProgramme => {
+                        QueueMutationError::StateNotEditable
+                    }
+                    EditError::ProvenanceCleared => QueueMutationError::Forbidden,
+                })?;
                 let channel_changed_now = recording_edit::channel_changed(
                     &recording_edit::EditPatch {
                         program_start: patch.program_start,
@@ -561,7 +555,7 @@ impl RecordingService {
             Ok(())
         })
         .await
-        .map_err(map_queue_error)?;
+        .map_err(|e| map_queue_error(&e))?;
         out.ok_or(ServiceError::UnknownRecording)
     }
 
@@ -629,7 +623,7 @@ impl RecordingService {
             Ok(())
         })
         .await
-        .map_err(map_queue_error)
+        .map_err(|e| map_queue_error(&e))
     }
 
     /// Cancel future inactive recordings that were materialized from a
@@ -655,7 +649,7 @@ impl RecordingService {
             Ok(())
         })
         .await
-        .map_err(map_queue_error)?;
+        .map_err(|e| map_queue_error(&e))?;
         Ok(cancelled)
     }
 
@@ -688,7 +682,7 @@ impl RecordingService {
             Ok(())
         })
         .await
-        .map_err(map_queue_error)
+        .map_err(|e| map_queue_error(&e))
     }
 
     /// Delete a finished recording via the three-step service.
@@ -870,13 +864,13 @@ const WINDOWS_RESERVED_STEMS: &[&str] = &[
 ///
 /// The previous implementation replaced only the two path separators,
 /// which let control characters, Windows-reserved characters, trailing
-/// dots/spaces, and BiDi override codepoints through into the path the
+/// dots/spaces, and `BiDi` override codepoints through into the path the
 /// muxer opens and the media API re-validates. This is the single
 /// chokepoint: everything that lands in `filename` goes through here.
 ///
 /// Guarantees on the returned string:
 /// - exactly one path component (no separator survives),
-/// - no ASCII control characters and no Unicode BiDi / invisible
+/// - no ASCII control characters and no Unicode `BiDi` / invisible
 ///   formatting codepoints,
 /// - no leading or trailing whitespace or `.`,
 /// - never empty, never `.` or `..`, never a Windows device name,
@@ -918,7 +912,7 @@ pub fn sanitize_filename_component(raw: &str) -> String {
     result
 }
 
-/// BiDi controls, zero-width characters, and the other invisible
+/// `BiDi` controls, zero-width characters, and the other invisible
 /// formatting codepoints that make a filename render differently from
 /// what it actually contains.
 fn is_invisible_formatting(ch: char) -> bool {
@@ -986,7 +980,7 @@ fn authorize_create_recording(
 /// matches. The variants that carry no site-specific meaning collapse
 /// here; a site that needs a different mapping for one variant still
 /// handles it before delegating.
-fn map_queue_error(err: QueueMutationError) -> ServiceError {
+fn map_queue_error(err: &QueueMutationError) -> ServiceError {
     match err {
         QueueMutationError::Io(_) => ServiceError::PersistenceFailed,
         QueueMutationError::UnknownRecording => ServiceError::UnknownRecording,
@@ -1025,9 +1019,9 @@ fn quota_limits_from_config(config: Option<&crate::model::RecordingQuotaConfig>)
 /// inside `mutate`, so this must not allocate a clone per task — the
 /// previous implementation built a `Vec<PersistedFileDownload>` of the
 /// entire queue on every create and every edit.
-fn candidate_tasks<'a>(
-    candidate: &'a PersistedDownloadQueue,
-) -> impl Iterator<Item = &'a PersistedFileDownload> + 'a {
+fn candidate_tasks(
+    candidate: &PersistedDownloadQueue,
+) -> impl Iterator<Item = &PersistedFileDownload> + '_ {
     candidate
         .queue
         .iter()
@@ -1076,9 +1070,9 @@ fn reserve_recording_relative_path(
     Ok(())
 }
 
-fn collect_existing_relative_paths<'a>(
-    candidate: &'a PersistedDownloadQueue,
-) -> impl Iterator<Item = &'a str> + 'a {
+fn collect_existing_relative_paths(
+    candidate: &PersistedDownloadQueue,
+) -> impl Iterator<Item = &str> + '_ {
     candidate_tasks(candidate).map(task_relative_path)
 }
 
@@ -1225,14 +1219,6 @@ enum RecordingLocation {
     Finished(usize),
 }
 
-impl RecordingLocation {
-    /// True when the task is in `Scheduled` or `Queue` (the editable
-    /// list). `Active` and `Finished` are not editable.
-    fn is_in_editable_list(self) -> bool {
-        matches!(self, Self::Scheduled(_) | Self::Queue(_))
-    }
-}
-
 /// Single linear scan that locates a recording anywhere in the
 /// candidate snapshot. The returned `RecordingLocation` lets the
 /// caller re-acquire the same task for a mutable borrow without a
@@ -1271,24 +1257,6 @@ fn recording_mut_at(
     }
 }
 
-/// Map a `DownloadState` to the label expected by
-/// `recording_edit::state_is_editable`. `Deleting` is handled by the
-/// caller (the boundary rejects any edit on a deleting task before it
-/// reaches this helper).
-fn state_label_for(state: &DownloadState) -> &'static str {
-    match state {
-        DownloadState::Queued => "Queued",
-        DownloadState::Scheduled => "Scheduled",
-        DownloadState::WaitingForCapacity => "WaitingForCapacity",
-        DownloadState::RetryWaiting => "RetryWaiting",
-        DownloadState::Downloading => "Downloading",
-        DownloadState::Paused => "Paused",
-        DownloadState::Completed => "Completed",
-        DownloadState::Failed => "Failed",
-        DownloadState::Cancelled => "Cancelled",
-    }
-}
-
 /// Primitives extracted from `RecordingMetadata` during the immutable
 /// analysis pass. Carries only the fields the post-borrow code needs
 /// so we never clone the full `RecordingMetadata` (which holds
@@ -1302,7 +1270,6 @@ struct EditSnapshot {
     current_end: Option<i64>,
     current_reserved: u64,
 }
-
 /// Server-owned input for the conflict preview. The caller never
 /// supplies another recording's padded interval, capacity, or
 /// provider identifier — those are derived server-side.
@@ -1465,12 +1432,22 @@ fn drain_future_rule_recordings(
 }
 
 fn is_future_rule_recording(task: &PersistedFileDownload, rule_id: &str, now_secs: i64) -> bool {
-    task.kind == DownloadKind::Recording
-        && task.start_at.is_some_and(|start| start > now_secs)
-        && task.recording.as_ref().is_some_and(|meta| {
-            meta.provenance.rule_id.as_deref() == Some(rule_id)
-                && crate::api::model::recording_rule_service::cancel_targets_task(false, true)
-        })
+    if task.kind != DownloadKind::Recording {
+        return false;
+    }
+    let Some(start_at) = task.start_at else {
+        return false;
+    };
+    if start_at <= now_secs {
+        return false;
+    }
+    let Some(meta) = task.recording.as_ref() else {
+        return false;
+    };
+    if meta.provenance.rule_id.as_deref() != Some(rule_id) {
+        return false;
+    }
+    recording_edit::state_is_editable(task.state.label())
 }
 
 fn validate_reserved_filename(filename: &str) -> Result<(), &'static str> {
@@ -1500,7 +1477,8 @@ impl std::fmt::Debug for RecordingService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::{Permission, XtreamCluster};
+    use shared::model::{Permission, RecordingContainerFormat, XtreamCluster};
+    use crate::model::{RecordingConfig, RecordingNotificationConfig};
 
     fn source(target_name: &str, virtual_id: &str, input_name: &str) -> RecordingSourceInput {
         RecordingSourceInput {
@@ -1754,6 +1732,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn edit_recording_re_validates_quota_against_new_duration_atomically() {
         // Owner already has 800 reserved. New duration would push the
         // reservation to 1100 against a 1000-byte quota. Edit must
@@ -1774,7 +1753,9 @@ mod tests {
             per_user_bytes: HashMap::new(),
             shared_bytes: None,
         };
-        let rec_cfg = crate::model::RecordingConfig {
+        let rec_cfg = RecordingConfig {
+            enabled: true,
+            container_format: RecordingContainerFormat::default(),
             directory: String::new(),
             timezone: "UTC".parse().expect("UTC must parse"),
             filename_template: String::new(),
@@ -1785,6 +1766,7 @@ mod tests {
             retention: None,
             disk: None,
             quota: Some(quota),
+            notifications: RecordingNotificationConfig::default(),
             fallback_bytes_per_minute: 60,
         };
         let dl_cfg = crate::model::VideoDownloadConfig {
@@ -2109,5 +2091,25 @@ mod tests {
         assert!(validate_reserved_filename(".").is_err());
         assert!(validate_reserved_filename("a/..").is_err());
         assert!(validate_reserved_filename("normal.ts").is_ok());
+    }
+
+    #[test]
+    fn is_future_rule_recording_rejects_non_editable_states() {
+        // Old implementation passed `cancel_targets_task(false, true)`
+        // literally — that always returned `true`, so the rule cancel
+        // path would happily tear down a task whose state was already
+        // terminal. Both terminal and non-editable-but-active states
+        // must be skipped now.
+        let mut cancelled_task = persisted_rule_recording("uuid-c", Some("rule-1"), 1_900_000_000);
+        cancelled_task.state = DownloadState::Cancelled;
+        assert!(!is_future_rule_recording(&cancelled_task, "rule-1", 1_800_000_000));
+
+        let mut paused_task = persisted_rule_recording("uuid-p", Some("rule-1"), 1_900_000_000);
+        paused_task.state = DownloadState::Paused;
+        assert!(!is_future_rule_recording(&paused_task, "rule-1", 1_800_000_000));
+
+        // Sanity: the happy path still accepts editable future tasks.
+        let scheduled_task = persisted_rule_recording("uuid-s", Some("rule-1"), 1_900_000_000);
+        assert!(is_future_rule_recording(&scheduled_task, "rule-1", 1_800_000_000));
     }
 }

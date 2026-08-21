@@ -6,11 +6,7 @@
 
 use super::recording_edit_view::{EditingTaskId, RecordingEditView};
 use crate::{
-    app::components::{
-        task_status_badge::TaskStatusBadge,
-        text_button::TextButton,
-        Table, TableDefinition,
-    },
+    app::components::{task_status_badge::TaskStatusBadge, text_button::TextButton, Table, TableDefinition},
     hooks::use_service_context,
     i18n::{use_translation, YewI18n},
     model::{DialogResult, EventMessage},
@@ -193,9 +189,7 @@ fn is_sortable_col(col: LibraryColumn) -> bool { !matches!(col, LibraryColumn::A
 /// failed: {}", e)` — untranslated English with a raw wire code
 /// appended. The code still reaches the browser console; the user sees
 /// a sentence in their own language.
-fn error_message(translate: &YewI18n, error: &RecordingError) -> String {
-    translate.t(error.i18n_key())
-}
+fn error_message(translate: &YewI18n, error: &RecordingError) -> String { translate.t(error.i18n_key()) }
 
 #[function_component(RecordingLibraryView)]
 pub fn recording_library_view() -> Html {

@@ -38,12 +38,15 @@ fn stderr_summary(stderr: &[u8]) -> String {
 /// Kept as a `const` so the entries stay lowercase by construction: the
 /// matcher lowercases the haystack once, so an upper-case entry added
 /// here would silently never match.
+///
+/// Substring supersets are removed: `"timed out"` already matches every
+/// line that contains `"connection timed out"`, so the narrower phrase
+/// is dead weight. The
+/// [`retryable_phrases_have_no_proper_subset`](Self::retryable_phrases_have_no_proper_subset)
+/// test catches future reintroductions.
 const RETRYABLE_FFMPEG_PHRASES: &[&str] = &[
-    "connection timed out",
     "timed out",
     "temporarily unavailable",
-    "temporary failure",
-    "resource temporarily unavailable",
     "connection reset",
     "connection refused",
     "connection closed",
@@ -54,7 +57,6 @@ const RETRYABLE_FFMPEG_PHRASES: &[&str] = &[
     "no route to host",
     "name or service not known",
     "temporary failure in name resolution",
-    "could not resolve host",
     "could not resolve",
     "failed to resolve hostname",
     "server returned 5",
@@ -78,25 +80,27 @@ const RETRYABLE_FFMPEG_PHRASES: &[&str] = &[
 /// `connection_refused` would flip every fatal error into a retryable
 /// one and the worker would spin until the recording window closed.
 /// The classifier must only see ffmpeg's own words.
+fn is_url_token(token: &str) -> bool {
+    token.starts_with("http://")
+        || token.starts_with("https://")
+        || token.starts_with("rtmp://")
+        || token.starts_with("rtsp://")
+        || token.starts_with("udp://")
+        || token.starts_with("srt://")
+        || token.starts_with("file://")
+}
+
 fn strip_url_tokens(message: &str) -> String {
     message
         .split_whitespace()
-        .filter(|token| {
-            let lowered = token.to_ascii_lowercase();
-            !(lowered.starts_with("http://")
-                || lowered.starts_with("https://")
-                || lowered.starts_with("rtmp://")
-                || lowered.starts_with("rtsp://")
-                || lowered.starts_with("udp://")
-                || lowered.starts_with("srt://")
-                || lowered.starts_with("file://"))
-        })
+        .filter(|token| !is_url_token(token))
         .collect::<Vec<_>>()
         .join(" ")
+        .to_ascii_lowercase()
 }
 
 fn is_retryable_ffmpeg_failure_message(message: &str) -> bool {
-    let msg = strip_url_tokens(message).to_ascii_lowercase();
+    let msg = strip_url_tokens(message);
     RETRYABLE_FFMPEG_PHRASES
         .iter()
         .any(|phrase| msg.contains(phrase))
@@ -350,6 +354,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tokio::sync::{Notify, RwLock};
     use tokio_util::sync::CancellationToken;
+    use shared::model::RecordingContainerFormat;
+    use crate::api::model::recording_worker::RETRYABLE_FFMPEG_PHRASES;
 
     fn unique_recording_output() -> (PathBuf, PathBuf, String) {
         let nanos = SystemTime::now()
@@ -477,6 +483,31 @@ mod tests {
                 phrase.to_ascii_lowercase(),
                 "phrase must be lowercase to match the lowercased haystack"
             );
+        }
+    }
+
+    #[test]
+    fn retryable_phrases_have_no_proper_subset() {
+        // A phrase that is a proper substring of another phrase is dead
+        // weight: the matcher uses `contains`, so the longer entry
+        // matches anything the shorter one does. Two entries with the
+        // same characters (case-insensitive) are also caught: order
+        // matters at evaluation time but the matcher must be
+        // deterministic.
+        let phrases: Vec<String> = RETRYABLE_FFMPEG_PHRASES
+            .iter()
+            .map(|p| p.to_ascii_lowercase())
+            .collect();
+        for (i, outer) in phrases.iter().enumerate() {
+            for (j, inner) in phrases.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert!(
+                    !inner.contains(outer.as_str()),
+                    "phrase {inner:?} is a substring of {outer:?}; the longer entry already covers it"
+                );
+            }
         }
     }
 

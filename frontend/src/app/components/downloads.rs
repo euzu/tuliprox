@@ -523,7 +523,9 @@ pub fn downloads_view() -> Html {
                 }
                 1 => html! { <span class="tp__table__nowrap">{dto.title.clone()}</span> },
                 2 => html! { format_download_kind(&translate, &dto.kind) },
-                3 => html! { <TaskStatusBadge status={dto.status.clone()} kind={dto.kind.clone()} detail={dto.error.clone()} /> },
+                3 => {
+                    html! { <TaskStatusBadge status={dto.status.clone()} kind={dto.kind.clone()} detail={dto.error.clone()} /> }
+                }
                 4 => html! { <span class="tp__table__nowrap">{format_download_progress(&dto)}</span> },
                 5 => {
                     html! { <span class="tp__table__nowrap">{dto.total_bytes.map_or_else(String::new, format_bytes)}</span> }

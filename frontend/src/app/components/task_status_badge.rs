@@ -70,10 +70,7 @@ pub struct TaskStatusBadgeProps {
 pub fn TaskStatusBadge(props: &TaskStatusBadgeProps) -> Html {
     let translate = crate::i18n::use_translation();
     let label = task_status_label(&translate, &props.status, &props.kind);
-    let title = props
-        .detail
-        .as_ref()
-        .map_or_else(|| label.clone(), |detail| format!("{label}: {detail}"));
+    let title = props.detail.as_ref().map_or_else(|| label.clone(), |detail| format!("{label}: {detail}"));
     html! {
         <span
             class={classes!("tp__task-status", task_status_modifier(&props.status))}
