@@ -2,31 +2,33 @@ use crate::{
     api::{
         api_utils::{internal_server_error, json_or_bin_response, try_unwrap_body},
         endpoints::{
-            download_api, extract_accept_header::ExtractAcceptHeader, library_api::library_api_register,
-            rbac_api::rbac_api_register,
-            user_api::user_api_register, v1_api_config::v1_api_config_register,
-            v1_api_config::v1_api_config_register_with_permissions, v1_api_playlist::{
-                v1_api_playlist_register_public,
-                v1_api_playlist_register_protected,
+            download_api,
+            extract_accept_header::ExtractAcceptHeader,
+            library_api::library_api_register,
+            rbac_api::{rbac_api_register, rbac_api_register_unprotected},
+            recording_api::{recording_api_register, recording_enabled_layer},
+            recording_media_api::recording_media_api_register,
+            user_api::user_api_register,
+            v1_api_config::{v1_api_config_register, v1_api_config_register_with_permissions},
+            v1_api_playlist::{
+                v1_api_playlist_register_protected, v1_api_playlist_register_public,
                 v1_api_playlist_register_with_permissions,
             },
             v1_api_user::{v1_api_user_register, v1_api_user_register_with_permissions},
         },
         model::AppState,
     },
+    auth::permission_layer,
     processing::geoip::{update_geoip_db, GeoIpUpdateError},
     utils::ip_checker::get_ips,
     VERSION,
 };
 use axum::response::IntoResponse;
-use crate::auth::permission_layer;
 use shared::{
-    model::permission::Permission,
-    model::{IpCheckDto, StatusCheck},
+    model::{permission::Permission, IpCheckDto, StatusCheck},
     utils::concat_path_leading_slash,
 };
 use std::{collections::BTreeMap, sync::Arc};
-use crate::api::endpoints::rbac_api::rbac_api_register_unprotected;
 
 pub const API_V1_PATH: &str = "api/v1";
 
@@ -59,6 +61,7 @@ pub async fn create_status_check(app_state: &Arc<AppState>) -> StatusCheck {
         version: VERSION.to_string(),
         build_time: crate::api::api_utils::get_build_time(),
         server_time: crate::api::api_utils::get_server_time(),
+        uptime_secs: crate::api::api_utils::get_uptime_secs(),
         active_users,
         active_user_connections,
         active_provider_connections,
@@ -133,11 +136,10 @@ pub fn v1_api_register(
             axum::routing::get(super::stream_history_api::qos_snapshot_detail_query),
         );
 
-    let system_write = axum::routing::Router::new()
-        .route("/geoip/update", axum::routing::get(geoip_update));
+    let system_write = axum::routing::Router::new().route("/geoip/update", axum::routing::get(geoip_update));
 
-    let download_read = axum::routing::Router::new()
-        .route("/file/download/info", axum::routing::get(download_api::download_file_info));
+    let download_read =
+        axum::routing::Router::new().route("/file/download/info", axum::routing::get(download_api::download_file_info));
 
     let download_write = axum::routing::Router::new()
         .route("/file/download", axum::routing::post(download_api::queue_download_file))
@@ -160,7 +162,16 @@ pub fn v1_api_register(
             .merge(v1_api_user_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(v1_api_playlist_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(library_api_register(axum::routing::Router::new(), Some(app_state)))
-            .merge(rbac_api_register(Arc::clone(app_state)));
+            .merge(rbac_api_register(Arc::clone(app_state)))
+            // `recording.enabled: false` turns the DVR off end to end:
+            // the supervisors idle and the routes answer
+            // `501 recording_disabled` instead of queueing work nothing
+            // will run.
+            .merge(
+                recording_api_register(axum::routing::Router::new())
+                    .merge(recording_media_api_register(axum::routing::Router::new()))
+                    .layer(recording_enabled_layer!(app_state)),
+            );
     } else {
         router = router
             .merge(system_read)
@@ -171,7 +182,12 @@ pub fn v1_api_register(
             .merge(v1_api_user_register(axum::routing::Router::new()))
             .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))
             .merge(library_api_register(axum::routing::Router::new(), None))
-            .merge(rbac_api_register_unprotected(Arc::clone(app_state)));
+            .merge(rbac_api_register_unprotected(Arc::clone(app_state)))
+            .merge(
+                recording_api_register(axum::routing::Router::new())
+                    .merge(recording_media_api_register(axum::routing::Router::new()))
+                    .layer(recording_enabled_layer!(app_state)),
+            );
     }
 
     let config = app_state.app_config.config.load();
@@ -182,24 +198,100 @@ pub fn v1_api_register(
     }
 
     let api_prefix = concat_path_leading_slash(web_ui_path, API_V1_PATH);
-    base_router
-        .nest(&api_prefix, public_router)
-        .nest(&api_prefix, router)
+    base_router.nest(&api_prefix, public_router).nest(&api_prefix, router)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::create_status_check;
+    use super::{create_status_check, v1_api_register};
     use crate::{
         api::model::{create_test_app_state, ConnectionKind, ConnectionParams},
         auth::Fingerprint,
         model::Config,
+    };
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
     };
     use shared::{
         model::{PlaylistItemType, StreamChannel, XtreamCluster},
         utils::Internable,
     };
     use std::{borrow::Cow, net::SocketAddr};
+    use tower::ServiceExt;
+
+    /// A config whose DVR block is present and explicitly on or off.
+    /// Built through the DTO so the `enabled` flag travels the same
+    /// deserialize → domain path it does in production.
+    fn config_with_recording_enabled(enabled: bool) -> Config {
+        let recording = shared::model::RecordingConfigDto { enabled, ..Default::default() };
+        let download =
+            shared::model::VideoDownloadConfigDto { recording: Some(recording), ..Default::default() };
+        let video = shared::model::VideoConfigDto { download: Some(download), ..Default::default() };
+        Config { video: Some((&video).into()), ..Config::default() }
+    }
+
+    #[tokio::test]
+    async fn recording_routes_answer_not_implemented_when_the_dvr_is_disabled() {
+        // `recording.enabled: false` has to be visible at the API edge,
+        // not just in the schedulers: a client that keeps calling would
+        // otherwise queue recordings nothing will ever run. 501 also
+        // distinguishes "switched off here" from 403 and 404.
+        let app_state = create_test_app_state(config_with_recording_enabled(false));
+        let router = v1_api_register(false, &app_state, "").with_state(app_state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/recording/tasks")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn recording_routes_are_reachable_when_the_dvr_is_enabled() {
+        // The mirror of the test above: the gate must not be a blanket
+        // block. An explicitly enabled DVR reaches the handler, which
+        // then rejects the unauthenticated call on its own terms —
+        // anything other than 501 proves the layer let the request past.
+        let app_state = create_test_app_state(config_with_recording_enabled(true));
+        let router = v1_api_register(false, &app_state, "").with_state(app_state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/recording/tasks")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_ne!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn no_auth_router_exposes_recording_routes() {
+        let app_state = create_test_app_state(Config::default());
+        let router = v1_api_register(false, &app_state, "").with_state(app_state);
+
+        for path in ["/api/v1/recording/tasks", "/api/v1/library/recording/playback/missing"] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().method("OPTIONS").uri(path).body(Body::empty()).expect("request"))
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "missing route: {path}");
+        }
+    }
 
     #[tokio::test]
     async fn status_snapshot_removes_released_direct_series_stream() {
@@ -259,13 +351,6 @@ mod tests {
         assert_eq!(clean.active_users, 0);
         assert_eq!(clean.active_user_connections, 0);
         assert!(clean.active_user_streams.is_empty());
-        assert_eq!(
-            clean
-                .active_provider_connections
-                .unwrap_or_default()
-                .values()
-                .sum::<usize>(),
-            0
-        );
+        assert_eq!(clean.active_provider_connections.unwrap_or_default().values().sum::<usize>(), 0);
     }
 }

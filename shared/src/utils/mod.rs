@@ -7,6 +7,7 @@ mod hdhomerun_utils;
 mod json_utils;
 mod net_utils;
 mod number_utils;
+mod recording_filename;
 mod request;
 mod serde_utils;
 mod size_utils;
@@ -26,6 +27,7 @@ pub use self::{
     json_utils::*,
     net_utils::*,
     number_utils::*,
+    recording_filename::*,
     request::*,
     serde_utils::*,
     size_utils::*,

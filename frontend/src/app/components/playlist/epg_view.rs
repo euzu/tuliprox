@@ -1,22 +1,31 @@
 use crate::{
-    app::components::{EpgSourceSelector, NoContent, Search},
+    app::{
+        components::{
+            recording::{
+                epg_programme_to_prefill, target_name_for_id, EpgProgrammePrefillInput, PaddingBounds, RecordingForm,
+            },
+            EpgSourceSelector, IconButton, NoContent, Search,
+        },
+        context::ConfigContext,
+    },
     hooks::use_service_context,
     i18n::use_translation,
-    model::{BusyStatus, EventMessage},
+    model::{BusyStatus, DialogAction, DialogActions, DialogResult, EventMessage},
+    services::{CreateRecordingTaskRequest, DialogService, RecordingService, RecordingSourceInput},
     utils::set_timeout,
 };
 use chrono::{Datelike, Local, TimeZone, Utc};
 use gloo_timers::callback::{Interval, Timeout};
 use shared::{
     concat_string,
-    model::{EpgTv, PlaylistEpgRequest, SearchRequest},
+    model::{EpgTv, Permission, PlaylistEpgRequest, SearchRequest, XtreamCluster},
 };
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::{prelude::Closure, JsCast};
 use web_sys::{window, HtmlElement, MouseEvent, TouchEvent, WheelEvent};
 use yew::{
-    classes, component, html, platform::spawn_local, use_effect_with, use_memo, use_mut_ref, use_node_ref, use_state,
-    Callback, Html,
+    classes, component, html, platform::spawn_local, use_context, use_effect_with, use_memo, use_mut_ref, use_node_ref,
+    use_state, Callback, Html,
 };
 
 const TIME_BLOCK_MINS: i64 = 30;
@@ -165,6 +174,15 @@ struct TimelinePanState {
     scroll_left: i32,
 }
 
+#[derive(Clone)]
+struct PendingProgram {
+    channel_id: String,
+    channel_name: Option<String>,
+    title: String,
+    start: i64,
+    stop: i64,
+}
+
 fn update_now_line(
     container_ref: &yew::NodeRef,
     now_line_ref: &yew::NodeRef,
@@ -196,6 +214,8 @@ fn update_now_line(
 #[component]
 pub fn EpgView() -> Html {
     let services = use_service_context();
+    let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
+    let dialog = use_context::<DialogService>().expect("Dialog service not found");
     let translate = use_translation();
     let epg = use_state::<Option<EpgTv>, _>(|| None);
     let container_ref = use_node_ref();
@@ -214,10 +234,28 @@ pub fn EpgView() -> Html {
     let timeline_pan_state = use_mut_ref(|| None::<TimelinePanState>);
     let is_program_panning = use_state(|| false);
     let is_timeline_panning = use_state(|| false);
+    let selected_epg_source = use_state(|| None::<PlaylistEpgRequest>);
+    let can_write_recordings = services.auth.has_permission(Permission::RecordingWrite);
+    let is_admin_role = services.auth.is_admin();
+    let recording_padding = {
+        let rec = config_ctx
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.config.video.as_ref())
+            .and_then(|video| video.download.as_ref())
+            .and_then(|video| video.recording.as_ref());
+        Rc::new(PaddingBounds {
+            default_pre_roll_secs: rec.and_then(|c| c.default_pre_roll_secs).unwrap_or(0),
+            max_pre_roll_secs: rec.map(|c| c.max_pre_roll_secs).unwrap_or(900),
+            default_post_roll_secs: rec.and_then(|c| c.default_post_roll_secs).unwrap_or(0),
+            max_post_roll_secs: rec.map(|c| c.max_post_roll_secs).unwrap_or(1800),
+        })
+    };
 
     // State to keep track of visible channel range
     let visible_range = use_state(|| (0, 20)); // (start_index, end_index)
     let search_filter = use_state::<SearchRequest, _>(|| SearchRequest::Clear);
+    let is_hosted_epg = matches!(*selected_epg_source, Some(PlaylistEpgRequest::Target(_)));
 
     let handle_search = {
         let search_filter = search_filter.clone();
@@ -244,7 +282,9 @@ pub fn EpgView() -> Html {
         let raf_id = raf_id.clone();
         let raf_closure = raf_closure.clone();
         let epg_request_token = epg_request_token.clone();
+        let selected_epg_source = selected_epg_source.clone();
         Callback::from(move |req: PlaylistEpgRequest| {
+            selected_epg_source.set(Some(req.clone()));
             epg_set.set(None);
             search_filter.set(SearchRequest::Clear);
             visible_range.set((0, 20));
@@ -448,6 +488,8 @@ pub fn EpgView() -> Html {
         let apply_timeline_zoom = apply_timeline_zoom.clone();
         let pixels_per_min = pixels_per_min.clone();
         Callback::from(move |e: WheelEvent| {
+            // The time header is the only place wheel zooms; elsewhere we let
+            // the container scroll so the EPG can stream-load more rows.
             e.prevent_default();
             e.stop_propagation();
             if let Some(timeline) = timeline_ref.cast::<HtmlElement>() {
@@ -761,11 +803,13 @@ pub fn EpgView() -> Html {
     };
 
     let row_height = use_memo((), move |_| {
-        let doc = window().unwrap().document().unwrap();
-        let root = doc.document_element().unwrap(); // <html>
-        let style = window().unwrap().get_computed_style(&root).unwrap().unwrap();
-
-        let row_height = style.get_property_value("--epg-row-height").unwrap_or_else(|_| String::new()); // fallback if not set
+        let row_height = window()
+            .and_then(|win| {
+                let root = win.document()?.document_element()?;
+                win.get_computed_style(&root).ok().flatten()
+            })
+            .and_then(|style| style.get_property_value("--epg-row-height").ok())
+            .unwrap_or_default();
 
         row_height.trim_end_matches("px").parse::<usize>().unwrap_or(60).max(1)
     });
@@ -778,6 +822,7 @@ pub fn EpgView() -> Html {
         use_effect_with((), move |_| {
             let debounce_handle: Rc<RefCell<Option<Timeout>>> = Rc::new(RefCell::new(None));
             let onscroll_handle: OnScrollHandle = Rc::new(RefCell::new(None));
+            let cleanup_container_ref = container_ref.clone();
             if let Some(div) = container_ref.cast::<HtmlElement>() {
                 let visible_range = visible_range.clone();
                 // Store debounce timer in Rc<RefCell>
@@ -807,7 +852,9 @@ pub fn EpgView() -> Html {
 
                     *debounce_handle_clone.borrow_mut() = Some(handle);
                 }) as Box<dyn FnMut(_)>);
-                div.add_event_listener_with_callback("scroll", onscroll.as_ref().unchecked_ref()).unwrap();
+                if let Err(err) = div.add_event_listener_with_callback("scroll", onscroll.as_ref().unchecked_ref()) {
+                    log::error!("Failed to register EPG scroll listener: {err:?}");
+                }
                 *onscroll_handle_clone.borrow_mut() = Some(onscroll);
             }
             move || {
@@ -815,11 +862,104 @@ pub fn EpgView() -> Html {
                     prev.cancel();
                 }
                 if let Some(onscroll) = onscroll_handle.borrow_mut().take() {
+                    // Detach before dropping the closure so a live element cannot invoke a destroyed callback
+                    if let Some(div) = cleanup_container_ref.cast::<HtmlElement>() {
+                        let _ = div.remove_event_listener_with_callback("scroll", onscroll.as_ref().unchecked_ref());
+                    }
                     drop(onscroll);
                 }
             }
         });
     }
+
+    let handle_record_click = {
+        let selected_epg_source = selected_epg_source.clone();
+        let recording_padding = recording_padding.clone();
+        let dialog = dialog.clone();
+        let services = services.clone();
+        let translate = translate.clone();
+        let config = config_ctx.config.clone();
+        Callback::from(move |(program, _event): (PendingProgram, MouseEvent)| {
+            let Some(PlaylistEpgRequest::Target(target_id)) = (*selected_epg_source).clone() else {
+                services.toastr.error(translate.t("MESSAGES.RECORDING.NO_TARGET"));
+                return;
+            };
+            let Some(target_name) =
+                config.as_ref().and_then(|app_config| target_name_for_id(&app_config.sources, target_id, None))
+            else {
+                services.toastr.error(translate.t("MESSAGES.RECORDING.NO_TARGET"));
+                return;
+            };
+            let dialog = dialog.clone();
+            let services = services.clone();
+            let translate = translate.clone();
+            let padding: PaddingBounds = (*recording_padding).clone();
+            spawn_local(async move {
+                let source = RecordingSourceInput {
+                    target_id: target_name,
+                    virtual_id: program.channel_id.clone(),
+                    cluster: XtreamCluster::Live,
+                    input_name: String::new(),
+                };
+                let mut prefill = epg_programme_to_prefill(EpgProgrammePrefillInput {
+                    source,
+                    channel_id: Some(program.channel_id.clone()),
+                    channel_name: program.channel_name.clone(),
+                    programme_title: program.title,
+                    programme_start: program.start,
+                    programme_end: program.stop,
+                    padding: padding.clone(),
+                    episode: None,
+                });
+                if let Some(name) = program.channel_name.clone() {
+                    prefill = prefill.with_channel_name(name);
+                }
+                let request_slot: Rc<RefCell<Option<CreateRecordingTaskRequest>>> = Rc::new(RefCell::new(None));
+                let on_submit = {
+                    let request_slot = Rc::clone(&request_slot);
+                    Callback::from(move |request: CreateRecordingTaskRequest| {
+                        *request_slot.borrow_mut() = Some(request);
+                    })
+                };
+                let body = html! {
+                    <RecordingForm
+                        prefill={prefill}
+                        has_recording_write={can_write_recordings}
+                        is_admin_role={is_admin_role}
+                        on_submit={on_submit}
+                        on_cancel={Callback::from(|_| {})}
+                    />
+                };
+                let actions = DialogActions {
+                    left: Some(vec![DialogAction::new(
+                        "cancel",
+                        "LABEL.CANCEL",
+                        DialogResult::Cancel,
+                        Some("Close".to_owned()),
+                        None,
+                    )]),
+                    right: vec![DialogAction::new_focused(
+                        "record",
+                        "LABEL.RECORD",
+                        DialogResult::Ok,
+                        Some("Record".to_owned()),
+                        Some("primary".to_string()),
+                    )],
+                };
+                if dialog.content(body, Some(actions), false).await != DialogResult::Ok {
+                    return;
+                }
+                let Some(request) = request_slot.borrow_mut().take() else {
+                    services.toastr.error(translate.t("MESSAGES.RECORDING.NO_REQUEST"));
+                    return;
+                };
+                match RecordingService::new().create_task(request).await {
+                    Ok(_) => services.toastr.success(translate.t("MESSAGES.RECORDING.QUEUED")),
+                    Err(err) => services.toastr.error(err.to_string()),
+                }
+            });
+        })
+    };
 
     html! {
         <div class="tp__epg tp__list-view">
@@ -918,6 +1058,7 @@ pub fn EpgView() -> Html {
                                       <div key={i} class="tp__epg__channel-programs" style={row_style}>
                                         { for ch.programmes.iter().map(|p| {
                                             let is_active = now >= p.start && now < p.stop;
+                                            let is_past = now >= p.stop;
                                             let left = get_pos(p.start, *start_window, pixels_per_min.value());
                                             let right = get_pos(p.stop, *start_window, pixels_per_min.value());
                                             let width = (right - left).max(0);
@@ -930,13 +1071,41 @@ pub fn EpgView() -> Html {
                                                 let pstart = pstart_time_local.format("%H:%M").to_string();
                                                 let pend = pend_time_local.format("%H:%M").to_string();
                                                 let program_style = format!("left:{left}px; width:{width}px; min-width:{width}px; max-width:{width}px");
+                                                let pending = PendingProgram {
+                                                    channel_id: ch.id.to_string(),
+                                                    channel_name: ch.title.as_ref().map(ToString::to_string),
+                                                    title: p.title.as_ref().map(ToString::to_string).unwrap_or_default(),
+                                                    start: p.start,
+                                                    stop: p.stop,
+                                                };
+                                                let program_record_click = {
+                                                    let handle_record_click = handle_record_click.clone();
+                                                    let pending = pending.clone();
+                                                    Callback::from(move |(_name, event): (String, MouseEvent)| {
+                                                        handle_record_click.emit((pending.clone(), event));
+                                                    })
+                                                };
 
                                                 html! {
-                                                <div class={classes!("tp__epg__program", if is_active { "tp__epg__program-active" } else {""})} style={program_style} title={ p.title.as_ref().map(ToString::to_string).unwrap_or_default() }>
+                                                <div class={classes!("tp__epg__program", if is_active { "tp__epg__program-active" } else {""})} style={program_style.clone()} title={ p.title.as_ref().map(ToString::to_string).unwrap_or_default() }>
                                                     <div class="tp__epg__program-time">{ &pstart } {"-"} { &pend }</div>
                                                     <div class="tp__epg__program-title">
                                                         { p.title.as_ref().map(ToString::to_string).unwrap_or_default() }
                                                     </div>
+                                                    {
+                                                        if can_write_recordings && !is_past && is_hosted_epg {
+                                                            html! {
+                                                                <IconButton
+                                                                    name="program_record"
+                                                                    icon="DVR"
+                                                                    class="tp__epg__program-menu"
+                                                                    onclick={program_record_click}
+                                                                />
+                                                            }
+                                                        } else {
+                                                            html! {}
+                                                        }
+                                                    }
                                                 </div>
                                                 }
                                             } else {

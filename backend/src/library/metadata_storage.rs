@@ -1,5 +1,5 @@
 use crate::library::metadata::{MediaMetadata, MetadataCacheEntry};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use path_clean::PathClean;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -159,7 +159,9 @@ impl MetadataStorage {
         let path = self.get_thumbnail_path(hash);
         if fs::try_exists(&path).await.unwrap_or(false) {
             debug!("Deleting thumbnail file: {}", path.display());
-            let _ = fs::remove_file(path).await;
+            if let Err(err) = fs::remove_file(&path).await {
+                warn!("Failed to delete thumbnail {}: {err}", path.display());
+            }
         }
     }
 
@@ -219,7 +221,9 @@ impl MetadataStorage {
             let path = self.get_thumbnail_path(&thumbnail_id);
             if fs::try_exists(&path).await.unwrap_or(false) {
                 debug!("Deleting thumbnail file: {}", path.display());
-                let _ = fs::remove_file(path).await;
+                if let Err(err) = fs::remove_file(&path).await {
+                    warn!("Failed to delete thumbnail {}: {err}", path.display());
+                }
             }
         }
 
@@ -287,7 +291,9 @@ impl MetadataStorage {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                 if !referenced.contains(stem) && !is_recent_thumbnail(&path).await {
                     debug!("Removing orphaned thumbnail: {}", path.display());
-                    let _ = fs::remove_file(&path).await;
+                    if let Err(err) = fs::remove_file(&path).await {
+                        warn!("Failed to remove orphaned thumbnail {}: {err}", path.display());
+                    }
                 }
             }
         }

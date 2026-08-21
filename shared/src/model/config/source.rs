@@ -1,5 +1,4 @@
 use crate::{
-    defaults::default_as_default,
     error::TuliproxError,
     foundation::prepare_templates,
     model::{
@@ -199,19 +198,14 @@ impl SourcesConfigDto {
 
     fn check_unique_target_names(&self) -> Result<(), TuliproxError> {
         let mut seen_names = HashSet::new();
-        let default_target_name = default_as_default();
         for source in &self.sources {
             for target in &source.targets {
                 // check the target name is unique
                 let target_name = target.name.as_str();
-                if !default_target_name.eq_ignore_ascii_case(target_name) {
-                    if seen_names.contains(target_name) {
-                        return Err(TuliproxError::ConfigSource(format!(
-                            "target names should be unique: {target_name}"
-                        )));
-                    }
-                    seen_names.insert(target_name);
+                if seen_names.contains(target_name) {
+                    return Err(TuliproxError::ConfigSource(format!("target names should be unique: {target_name}")));
                 }
+                seen_names.insert(target_name);
             }
         }
         Ok(())
@@ -239,6 +233,39 @@ mod tests {
             staged: Some(ConfigInputStagedDto { for_input: Some(provider.intern()), ..Default::default() }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn duplicate_default_target_names_are_rejected() {
+        let sources = SourcesConfigDto {
+            sources: vec![
+                ConfigSourceDto {
+                    inputs: vec!["input-a".intern()],
+                    targets: vec![ConfigTargetDto { name: "default".to_string(), ..Default::default() }],
+                },
+                ConfigSourceDto {
+                    inputs: vec!["input-b".intern()],
+                    targets: vec![ConfigTargetDto { name: "default".to_string(), ..Default::default() }],
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert!(sources.check_unique_target_names().is_err());
+    }
+
+    #[test]
+    fn input_and_target_may_share_a_name() {
+        let sources = SourcesConfigDto {
+            inputs: vec![ConfigInputDto { name: "shared-name".intern(), ..Default::default() }],
+            sources: vec![ConfigSourceDto {
+                inputs: vec!["shared-name".intern()],
+                targets: vec![ConfigTargetDto { name: "shared-name".to_string(), ..Default::default() }],
+            }],
+            ..Default::default()
+        };
+
+        assert!(sources.check_unique_target_names().is_ok());
     }
 
     #[test]

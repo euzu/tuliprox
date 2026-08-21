@@ -5,6 +5,7 @@ mod xtream;
 // mod affix;
 mod xtream_vod;
 mod xtream_series;
+mod deduplicate;
 mod epg;
 mod sort;
 mod trakt;

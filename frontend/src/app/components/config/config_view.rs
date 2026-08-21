@@ -19,7 +19,7 @@ use crate::{
         },
         ConfigContext,
     },
-    hooks::use_service_context,
+    hooks::{use_key_down, use_service_context},
     html_if,
     i18n::use_translation,
     services::{get_base_href, SetupCompleteRequestDto, SetupWebUserCredentialDto},
@@ -472,6 +472,23 @@ pub fn ConfigView() -> Html {
                             win.remove_event_listener_with_callback("beforeunload", closure.as_ref().unchecked_ref());
                     }
                 }
+            }
+        });
+    }
+
+    // Save shortcut (Ctrl/Cmd+S) while editing
+    {
+        let handle_save_config = handle_save_config.clone();
+        let can_save = (*edit_mode || setup_mode)
+            && services_ctx.auth.has_any_permissions(Permission::ConfigWrite | Permission::SourceWrite);
+        use_key_down(can_save, move |event: &web_sys::KeyboardEvent| {
+            if can_save
+                && !event.repeat()
+                && event.key().eq_ignore_ascii_case("s")
+                && (event.ctrl_key() || event.meta_key())
+            {
+                event.prevent_default();
+                handle_save_config.emit(String::new());
             }
         });
     }

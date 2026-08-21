@@ -34,6 +34,7 @@ const YIELD_COUNTER: usize = 64;
 const MIN_BURST_BUFFER_CHUNKS: usize = 2;
 const MIN_BURST_BUFFER_CHUNK_ACCOUNTING_BYTES: usize = 188;
 const SHARED_BURST_BYTES_PER_BUFFER_SLOT: usize = 12 * 1024;
+const DEFAULT_SUBSCRIBER_IDLE_TIMEOUT_SECS: u64 = 300;
 
 struct ReceiverStreamWrapper<S> {
     stream: S,
@@ -229,6 +230,7 @@ pub struct SharedStreamState {
     burst_buffer: Arc<Mutex<BurstBuffer>>,
     live_notification: Arc<Notify>,
     task_handles: RwLock<Vec<tokio::task::JoinHandle<()>>>,
+    subscriber_idle_timeout_secs: u64,
 }
 
 impl SharedStreamState {
@@ -254,7 +256,15 @@ impl SharedStreamState {
             burst_buffer: Arc::new(Mutex::new(BurstBuffer::new(burst_buffer_size_in_bytes))),
             live_notification: Arc::new(Notify::new()),
             task_handles: RwLock::new(Vec::new()),
+            subscriber_idle_timeout_secs: DEFAULT_SUBSCRIBER_IDLE_TIMEOUT_SECS,
         }
+    }
+
+    fn with_subscriber_idle_timeout_secs(mut self, secs: u64) -> Self {
+        if secs > 0 {
+            self.subscriber_idle_timeout_secs = secs;
+        }
+        self
     }
 
     async fn register_subscriber(&self, addr: &SocketAddr, cancel_token: CancellationToken) -> SharedSubscriberOwner {
@@ -341,7 +351,7 @@ impl SharedStreamState {
         let burst_buffer = Arc::clone(&self.burst_buffer);
         let burst_buffer_for_log = Arc::clone(&self.burst_buffer);
         let live_notification = Arc::clone(&self.live_notification);
-        let timeout_duration = Duration::from_mins(5);
+        let timeout_duration = Duration::from_secs(self.subscriber_idle_timeout_secs);
         let idle_check_interval = Duration::from_secs(1);
         let mut last_active = Instant::now();
         let mut last_lag_log = Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now);
@@ -570,7 +580,11 @@ impl SharedStreamState {
                     }
 
                     chunk = source_stream.next() => {
-                        idle.as_mut().reset(Instant::now() + idle_timeout);
+                        // Only successful chunks count as liveness; resetting on Err would let an
+                        // error-spinning source dodge the idle timeout forever
+                        if matches!(chunk, Some(Ok(_))) {
+                            idle.as_mut().reset(Instant::now() + idle_timeout);
+                        }
                         match chunk {
                             Some(Ok(data)) => {
                                 let chunk_len = data.len();
@@ -904,13 +918,22 @@ impl SharedStreamManager {
             .load()
             .as_ref()
             .and_then(|c| c.low_priority_preempted.clone());
-        let shared_state = Arc::new(SharedStreamState::new(
-            headers,
-            buf_size,
-            provider_handle,
-            min_buffer_bytes,
-            low_priority_preempted,
-        ));
+        let shared_state = Arc::new(
+            SharedStreamState::new(
+                headers,
+                buf_size,
+                provider_handle,
+                min_buffer_bytes,
+                low_priority_preempted,
+            )
+            .with_subscriber_idle_timeout_secs(
+                config
+                    .reverse_proxy
+                    .as_ref()
+                    .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
+                    .map_or(DEFAULT_SUBSCRIBER_IDLE_TIMEOUT_SECS, |stream| stream.shared_subscriber_idle_timeout_secs),
+            ),
+        );
         app_state.shared_stream_manager.register(addr, stream_url, Arc::clone(&shared_state)).await;
         app_state.active_provider.make_shared_connection(addr, stream_url).await;
         let subscribed_stream = Self::subscribe_shared_stream(app_state, stream_url, addr, user_priority, connection_kind).await;

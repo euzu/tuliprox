@@ -1,11 +1,12 @@
 use crate::{
     app::components::{
-        use_metrics_history, Card, CollapsePanel, MetricsHistory, PlaylistProgressStatusCard, Sparkline,
+        use_metrics_history, Card, CollapsePanel, LogConsole, MetricsHistory, PlaylistProgressStatusCard, Sparkline,
         SparklineFormat, SparklineSeries, StatusCard, StatusContext, StreamsView,
     },
     i18n::use_translation,
+    utils::format_uptime,
 };
-use shared::utils::human_readable_byte_size;
+use shared::{model::XtreamCluster, utils::human_readable_byte_size};
 use std::rc::Rc;
 use yew::prelude::*;
 
@@ -27,7 +28,11 @@ pub struct StatsViewProps {
 #[component]
 pub fn StatsView(props: &StatsViewProps) -> Html {
     let translate = use_translation();
-    let status_ctx = use_context::<StatusContext>().expect("Status context not found");
+    // Render a fallback instead of panicking when the provider is missing
+    let Some(status_ctx) = use_context::<StatusContext>() else {
+        log::error!("StatsView rendered without StatusContext provider");
+        return html! {};
+    };
     let history = use_metrics_history();
     let sparkline_data = use_memo(history.clone(), |history| StatsSparklineData {
         memory: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.memory))]),
@@ -44,8 +49,17 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
         connections: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.connections))]),
     });
 
-    let (mem, cpu, net, disk) = status_ctx.system_info.as_ref().map_or_else(
-        || ("n/a".to_string(), "n/a".to_string(), "n/a".to_string(), "n/a".to_string()),
+    let logs_expanded = use_state(|| false);
+    let on_logs_toggle = {
+        let logs_expanded = logs_expanded.clone();
+        Callback::from(move |expanded: bool| {
+            logs_expanded.set(expanded);
+        })
+    };
+
+    let loading_label = translate.t("LABEL.LOADING");
+    let (mem, cpu, net, disk, net_total) = status_ctx.system_info.as_ref().map_or_else(
+        || (loading_label.clone(), loading_label.clone(), loading_label.clone(), loading_label.clone(), String::new()),
         |system| {
             let disk = if system.disk_total_bytes > 0 {
                 format!(
@@ -69,9 +83,16 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                     human_readable_byte_size(system.net_tx_bytes_per_sec as u64),
                 ),
                 disk,
+                format!(
+                    "\u{2211} \u{2193} {} \u{2191} {}",
+                    human_readable_byte_size(system.net_rx_bytes_total),
+                    human_readable_byte_size(system.net_tx_bytes_total),
+                ),
             )
         },
     );
+    let uptime =
+        status_ctx.status.as_ref().map_or_else(|| loading_label.clone(), |status| format_uptime(status.uptime_secs));
 
     let render_system_stats = |cache| {
         html! {
@@ -83,17 +104,19 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                    chart={Some(html! { <Sparkline class="tp__sparkline--memory" format={SparklineFormat::Percent}
                        series={sparkline_data.memory.clone()} /> })} /></Card>
                <Card class="tp__stats__system"><StatusCard icon="NetworkSpeed" title={translate.t("LABEL.NETWORK")} data={net.clone()}
+                   footer={net_total.clone()}
                    chart={Some(html! { <Sparkline class="tp__sparkline--network" format={SparklineFormat::BytesPerSec}
                        series={sparkline_data.network.clone()} /> })} /></Card>
                <Card class="tp__stats__system"><StatusCard icon="Cache" title={translate.t("LABEL.CACHE")} data={cache} /></Card>
                <Card class="tp__stats__system"><StatusCard icon="Storage" title={translate.t("LABEL.DISK")} data={disk.clone()} /></Card>
+               <Card class="tp__stats__system"><StatusCard icon="Clock" title={translate.t("LABEL.UPTIME")} data={uptime.clone()} /></Card>
             </div>
         }
     };
 
     let render_streams_embedded = || {
         let cache = status_ctx.status.as_ref().map_or_else(
-            || "n/a".to_string(),
+            || loading_label.clone(),
             |status| status.cache.as_ref().map_or_else(|| "n/a".to_string(), |c| c.clone()),
         );
 
@@ -120,6 +143,15 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                   <div class="tp__stats__body-group">
                      <StreamsView embedded={true} />
                   </div>
+                </div>
+            </CollapsePanel>
+            <CollapsePanel expanded={*logs_expanded} on_state_change={on_logs_toggle.clone()} title_content={Some(html! {
+                <div class="tp__stats__header">
+                 <h1>{ translate.t("LABEL.LOGS")}</h1>
+                </div>
+                })}>
+                <div class="tp__stats__body">
+                    <LogConsole active={*logs_expanded} />
                 </div>
             </CollapsePanel>
             </div>
@@ -171,12 +203,35 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
         };
 
         let (cache, users, connections) = status_ctx.status.as_ref().map_or_else(
-            || ("n/a".to_string(), "n/a".to_string(), "n/a".to_string()),
+            || (loading_label.clone(), loading_label.clone(), loading_label.clone()),
             |status| {
                 (
                     status.cache.as_ref().map_or_else(|| "n/a".to_string(), |c| c.clone()),
                     status.active_users.to_string(),
                     status.active_user_connections.to_string(),
+                )
+            },
+        );
+
+        let (stream_count, stream_footer) = status_ctx.status.as_ref().map_or_else(
+            || (loading_label.clone(), String::new()),
+            |status| {
+                let (live, video, series) = status.active_user_streams.iter().fold(
+                    (0_usize, 0_usize, 0_usize),
+                    |(l, v, s), stream| match stream.channel.cluster {
+                        XtreamCluster::Live => (l + 1, v, s),
+                        XtreamCluster::Video => (l, v + 1, s),
+                        XtreamCluster::Series => (l, v, s + 1),
+                    },
+                );
+                (
+                    status.active_user_streams.len().to_string(),
+                    format!(
+                        "{} {live} \u{b7} {} {video} \u{b7} {} {series}",
+                        translate.t("LABEL.LIVE"),
+                        translate.t("LABEL.VOD"),
+                        translate.t("LABEL.SERIES"),
+                    ),
                 )
             },
         );
@@ -198,8 +253,19 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                     <Card><StatusCard title={translate.t("LABEL.ACTIVE_USER_CONNECTIONS")} data={connections}
                         chart={Some(html! { <Sparkline class="tp__sparkline--connections" format={SparklineFormat::Count}
                             series={sparkline_data.connections.clone()} /> })} /></Card>
+                    <Card><StatusCard icon="PlayArrow" title={translate.t("LABEL.ACTIVE_STREAMS")} data={stream_count}
+                        footer={stream_footer} /></Card>
                     { render_active_provider_connections() }
                 </div>
+                <CollapsePanel expanded={*logs_expanded} on_state_change={on_logs_toggle.clone()} title_content={Some(html! {
+                    <div class="tp__stats__header">
+                     <h1>{ translate.t("LABEL.LOGS")}</h1>
+                    </div>
+                    })}>
+                    <div class="tp__stats__body">
+                        <LogConsole active={*logs_expanded} />
+                    </div>
+                </CollapsePanel>
             </div>
           </div>
         }

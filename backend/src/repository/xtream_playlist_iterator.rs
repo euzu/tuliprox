@@ -74,6 +74,7 @@ impl XtreamPlaylistIterator {
             let xtream_path = xtream_path.clone();
             let index_path = get_file_path_for_db_index(&xtream_path);
             let (tx, rx) = mpsc::channel::<Result<(XtreamPlaylistItem, bool), TuliproxError>>(256);
+            let user_filter = user.t_filter.clone();
 
             let xtream_path_for_log = xtream_path.clone();
             let join_error_tx = tx.clone();
@@ -105,7 +106,7 @@ impl XtreamPlaylistIterator {
                         }
                     };
 
-                    if !Self::matches_filters(cluster, filter_ids.as_ref(), &item) {
+                    if !Self::matches_filters(cluster, filter_ids.as_ref(), user_filter.as_ref(), &item) {
                         continue;
                     }
 
@@ -141,7 +142,12 @@ impl XtreamPlaylistIterator {
         }
     }
 
-    fn matches_filters(cluster: XtreamCluster, filter_ids: Option<&HashSet<u32>>, item: &XtreamPlaylistItem) -> bool {
+    fn matches_filters(
+        cluster: XtreamCluster,
+        filter_ids: Option<&HashSet<u32>>,
+        user_filter: Option<&Arc<shared::foundation::Filter>>,
+        item: &XtreamPlaylistItem,
+    ) -> bool {
         // We can't serve episodes within series
         if cluster == XtreamCluster::Series
             && !matches!(item.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
@@ -152,6 +158,15 @@ impl XtreamPlaylistIterator {
         // category_id-Filter
         if let Some(set) = filter_ids {
             if !set.contains(&item.category_id) {
+                return false;
+            }
+        }
+
+        // per-user content filter (plan AND user), applied post-cache
+        if let Some(filter) = user_filter {
+            let pli = shared::model::PlaylistItem::from(item);
+            let provider = shared::foundation::ValueProvider { pli: &pli, match_as_ascii: false };
+            if !filter.filter(&provider) {
                 return false;
             }
         }
@@ -245,6 +260,51 @@ mod tests {
         assert!(is_cluster_allowed_for_user(&user, XtreamCluster::Live));
         assert!(!is_cluster_allowed_for_user(&user, XtreamCluster::Video));
         assert!(is_cluster_allowed_for_user(&user, XtreamCluster::Series));
+    }
+
+    #[test]
+    fn matches_filters_applies_user_content_filter() {
+        let make_item = |group: &str| XtreamPlaylistItem {
+            virtual_id: 1,
+            provider_id: 1,
+            name: "name".intern(),
+            logo: "".intern(),
+            logo_small: "".intern(),
+            group: group.intern(),
+            title: "title".intern(),
+            parent_code: "".intern(),
+            rec: "".intern(),
+            url: "http://example.test/live.ts".intern(),
+            epg_channel_id: None,
+            xtream_cluster: XtreamCluster::Live,
+            additional_properties: None,
+            item_type: PlaylistItemType::Live,
+            category_id: 1,
+            input_name: "input".intern(),
+            channel_no: 0,
+            source_ordinal: 0,
+            input_stream_id: "1".intern(),
+            upstream_user_agent: None,
+        };
+        let filter = std::sync::Arc::new(
+            shared::foundation::get_filter(r#"NOT Group ~ "^VIP.*""#, None).expect("filter parses"),
+        );
+
+        // no filter: everything passes
+        assert!(XtreamPlaylistIterator::matches_filters(XtreamCluster::Live, None, None, &make_item("VIP Sports")));
+        // filter hides matching groups, keeps the rest
+        assert!(!XtreamPlaylistIterator::matches_filters(
+            XtreamCluster::Live,
+            None,
+            Some(&filter),
+            &make_item("VIP Sports")
+        ));
+        assert!(XtreamPlaylistIterator::matches_filters(
+            XtreamCluster::Live,
+            None,
+            Some(&filter),
+            &make_item("News")
+        ));
     }
 
     #[tokio::test]

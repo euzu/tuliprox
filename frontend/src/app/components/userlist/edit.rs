@@ -10,7 +10,7 @@ use crate::{
     hooks::use_service_context,
     i18n::use_translation,
 };
-use shared::model::ProxyUserCredentialsDto;
+use shared::model::{ProxyUserCredentialsDto, UserPlanDto};
 use std::rc::Rc;
 use yew::{platform::spawn_local, prelude::*};
 
@@ -47,9 +47,14 @@ fn upsert_user(
 pub fn UserEdit() -> Html {
     let translate = use_translation();
     let services_ctx = use_service_context();
-    let userlist_ctx = use_context::<UserlistContext>().expect("Userlist context not found");
-    let playlist_ctx = use_context::<PlaylistContext>().expect("Playlist context not found");
-    let config_ctx = use_context::<ConfigContext>().expect("Config context not found");
+    let userlist = use_context::<UserlistContext>();
+    let playlist = use_context::<PlaylistContext>();
+    let config = use_context::<ConfigContext>();
+    // Render a fallback instead of panicking when a provider is missing
+    let (Some(userlist_ctx), Some(playlist_ctx), Some(config_ctx)) = (userlist, playlist, config) else {
+        log::error!("UserEdit rendered without required context providers");
+        return html! {};
+    };
 
     let targets = use_memo(playlist_ctx.clone(), |playlist_ctx| match playlist_ctx.sources.as_ref() {
         None => vec![],
@@ -63,6 +68,20 @@ pub fn UserEdit() -> Html {
             Some(api_proxy) => api_proxy.server.to_vec(),
         },
     });
+
+    let plans = use_state(|| Rc::new(Vec::<UserPlanDto>::new()));
+    {
+        let plans = plans.clone();
+        let services = services_ctx.clone();
+        use_effect_with((), move |()| {
+            spawn_local(async move {
+                if let Some(cfg) = services.config.get_plans_config().await {
+                    plans.set(Rc::new(cfg.plans.clone()));
+                }
+            });
+            || ()
+        });
+    }
 
     let handle_cancel = {
         let userlist_ctx = userlist_ctx.clone();
@@ -138,7 +157,7 @@ pub fn UserEdit() -> Html {
         </div>
         <div class="tp__userlist-edit__body tp__list-create__body">
             <Card>
-               <ProxyUserCredentialsForm server={server.clone()} targets={targets.clone()} user={(*userlist_ctx.selected_user).clone()} on_save={handle_user_save} on_cancel={handle_cancel}/>
+               <ProxyUserCredentialsForm server={server.clone()} plans={(*plans).clone()} targets={targets.clone()} user={(*userlist_ctx.selected_user).clone()} on_save={handle_user_save} on_cancel={handle_cancel}/>
             </Card>
         </div>
       </div>

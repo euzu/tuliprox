@@ -1932,9 +1932,11 @@ mod tests {
         merge_preserved_stream_properties, needs_update_info_details,
         persist_input_xtream_playlist_cluster_to_disk, preserve_details_input_xtream_playlist_cluster_to_disk,
         preserve_details_with_injected_operation_failure, publish_staged_file_same_directory,
-        refresh_staging_path, DetailPreservationOperation, PreserveDetailsOutcome, XtreamRefreshLease,
+        DetailPreservationOperation, PreserveDetailsOutcome, XtreamRefreshLease,
         XtreamRefreshPaths,
     };
+    #[cfg(unix)]
+    use super::refresh_staging_path;
     use crate::model::{
         ApiProxyConfig, AppConfig, Config, ConfigInput, CustomStreamResponse, HdHomeRunConfig,
         MediaToolCapabilities, SourcesConfig,

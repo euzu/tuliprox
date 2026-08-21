@@ -27,13 +27,18 @@ pub fn parse_duration_seconds(value: &str, require_unit: bool) -> Option<u64> {
         return None;
     }
 
-    let (number_part, unit_part) = value.split_at(value.len() - 1);
+    // split_at panics on non-char boundaries; a multi-byte trailing char is never a valid unit
+    let split_pos = value.len() - 1;
+    if !value.is_char_boundary(split_pos) {
+        return None;
+    }
+    let (number_part, unit_part) = value.split_at(split_pos);
     let number = number_part.parse::<u64>().ok()?;
     match unit_part {
         "s" => Some(number),
-        "m" => Some(number.saturating_mul(60)),
-        "h" => Some(number.saturating_mul(60 * 60)),
-        "d" => Some(number.saturating_mul(24 * 60 * 60)),
+        "m" => number.checked_mul(60),
+        "h" => number.checked_mul(60 * 60),
+        "d" => number.checked_mul(24 * 60 * 60),
         _ => None,
     }
 }

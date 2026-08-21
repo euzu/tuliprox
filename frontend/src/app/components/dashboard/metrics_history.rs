@@ -111,6 +111,8 @@ mod tests {
             memory_total: 1_000,
             net_rx_bytes_per_sec,
             net_tx_bytes_per_sec,
+            net_rx_bytes_total: 0,
+            net_tx_bytes_total: 0,
             disk_total_bytes: 0,
             disk_free_bytes: 0,
         }
@@ -140,6 +142,8 @@ mod tests {
             memory_total: 0,
             net_rx_bytes_per_sec: 0.0,
             net_tx_bytes_per_sec: 0.0,
+            net_rx_bytes_total: 0,
+            net_tx_bytes_total: 0,
             disk_total_bytes: 1_000,
             disk_free_bytes: 250,
         };

@@ -277,6 +277,7 @@ impl M3uPlaylistIterator {
         let target_id = target.id;
         let proxy_type = user.proxy;
         let output_clusters = user.output_clusters;
+        let user_filter = user.t_filter.clone();
         let target_options = target.options.clone();
         let input_by_name: HashMap<Arc<str>, Arc<crate::model::ConfigInput>> =
             cfg.sources.load().inputs.iter().map(|input| (Arc::clone(&input.name), Arc::clone(input))).collect();
@@ -319,6 +320,15 @@ impl M3uPlaylistIterator {
 
                 if let Some(set) = &filter {
                     if !set.contains(item.group.as_ref()) {
+                        continue;
+                    }
+                }
+
+                // per-user content filter (plan AND user), applied post-cache
+                if let Some(user_filter) = &user_filter {
+                    let pli = shared::model::PlaylistItem::from(&item);
+                    let provider = shared::foundation::ValueProvider { pli: &pli, match_as_ascii: false };
+                    if !user_filter.filter(&provider) {
                         continue;
                     }
                 }

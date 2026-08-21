@@ -29,6 +29,11 @@ pub const EPG_TAG_DESC: &str = "desc";
 pub const EPG_TAG_CATEGORY: &str = "category";
 pub const EPG_TAG_LIVE: &str = "live";
 pub const EPG_TAG_NEW: &str = "new";
+/// XMLTV `<previously-shown>` flag. Required for the tri-state
+/// `AiringStatus` (`Unknown` / `New` / `Repeat`) used by
+/// new-episode rules. Never infer `Repeat` only from old
+/// `is_new == false`.
+pub const EPG_TAG_PREVIOUSLY_SHOWN: &str = "previously-shown";
 pub const EPG_ATTRIB_START: &str = "start";
 pub const EPG_ATTRIB_STOP: &str = "stop";
 pub const EPG_ATTRIB_CATCHUP_ID: &str = "catchup-id";
@@ -320,6 +325,11 @@ async fn parse_xmltv_for_web_ui<R: AsyncRead + Send + Unpin>(reader: R) -> Resul
                     EPG_TAG_NEW => {
                         if let Some(programme) = &mut current_programme {
                             programme.is_new = true;
+                        }
+                    }
+                    EPG_TAG_PREVIOUSLY_SHOWN => {
+                        if let Some(programme) = &mut current_programme {
+                            programme.is_new = false;
                         }
                     }
                     _ => {}

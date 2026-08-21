@@ -85,10 +85,11 @@ impl StreamHistoryWriter {
     pub async fn flush(&self) -> io::Result<()> {
         let Some(tx) = &self.tx else { return Ok(()) };
         let (resp_tx, resp_rx) = oneshot::channel();
-        let _ = tx.send(WriterCommand::Flush(resp_tx)).await;
+        if tx.send(WriterCommand::Flush(resp_tx)).await.is_err() {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "stream history writer is not running"));
+        }
         resp_rx.await.unwrap_or_else(|_| {
-            log::warn!("Stream history flush: worker channel closed");
-            Ok(())
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "stream history writer exited before confirming flush"))
         })
     }
 

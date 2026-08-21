@@ -1231,8 +1231,19 @@ Tuliprox supports the following filter expression types:
 * Use `NOT` for exclusion logic
 * Use `AND` / `OR` for boolean combinations
 * Type Comparison: `Type = vod` or `Type = live` or `Type = series`
-* Regular expression comparison: `([fieldanme]) ~ "regexp"` <br>
-  The `[fieldanme]` can be `Group`, `Title`, `Name`, `Caption`, `Url`, `Genre`, `Input` or `Type`.
+* Regular expression comparison: `([fieldname]) ~ "regexp"` <br>
+  The `[fieldname]` can be `Group`, `Title`, `Name`, `Caption`, `Url`, `Genre`, `Input`, `EpgId` or `Type`.
+* String comparison (case-insensitive, no regex needed):
+  * Exact: `Group = "Sports"` / negated: `Group != "Sports"`
+  * Substring: `Title CONTAINS "HD"`
+  * Prefix: `Caption STARTSWITH "DE:"`
+  * Case-insensitivity is ASCII-only: ASCII letters match regardless of case, non-ASCII characters must match
+    exactly. `Title CONTAINS "cinéma"` matches `Cinéma` but not `CINÉMA`.
+* Set membership (case-insensitive exact match against a list): `Group IN ["Sports", "News"]`
+* Numeric comparison on the channel number: `Chno = 5`, `Chno != 5`, `Chno > 100`, `Chno >= 100`, `Chno < 200`, `Chno <= 200`
+* Numeric comparison on the detected quality tier: `Quality >= 3` <br>
+  The tier is derived from quality tokens in the caption: `5` = 4K/UHD/2160p, `4` = QHD/1440p, `3` = FHD/1080p,
+  `2` = HD/720p, `1` = SD/480p/576p, `0` = no recognized quality token.
 * Filters don't have operator precedence, so please use parentheses
 * You can apply Morgan’s Law `NOT (A) AND NOT (B)`is the same as `NOT( A OR B)`
 
@@ -1343,16 +1354,21 @@ It has the following top-level attributes:
 
 Each sort rule supports the following entries:
 
-| Parameter  | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                    |
-|:-----------|:-------|:--------:|:--------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `target`   | Enum   |   Yes    |         | Defines whether the rule sorts `group` or `channel` entries. This changes whether Tuliprox reorders category containers or items within those categories.                                                        |
-| `field`    | String |   Yes    |         | Sort field. For `channel`: `title`, `name`, `caption`, or `url`. For `group`: `group`. This determines which final-state value Tuliprox uses for ordering.                                                       |
-| `filter`   | String |   Yes    |         | Filter expression defining which entries the rule applies to. This makes it possible to sort only selected subsets of the playlist instead of the entire target uniformly.                                       |
-| `order`    | Enum   |   Yes    |         | `asc`, `desc`, or `none`. `none` preserves source order for matched entries and is useful when provider order should remain untouched.                                                                           |
-| `sequence` | List   |    No    |         | Ordered regex list used for index-based sorting. When present, Tuliprox prioritizes regex sequence position over `order`, enabling explicit semantic ordering such as quality tiers or curated group precedence. |
+| Parameter  | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                               |
+|:-----------|:-------|:--------:|:--------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `target`   | Enum   |   Yes    |         | Defines whether the rule sorts `group` or `channel` entries. This changes whether Tuliprox reorders category containers or items within those categories.                                                                   |
+| `field`    | String |   Yes    |         | Sort field. For `channel`: `title`, `name`, `caption`, `url`, or `quality` (detected quality tier, best used with `order: desc`). For `group`: `group`. This determines which final-state value Tuliprox uses for ordering. |
+| `filter`   | String |   Yes    |         | Filter expression defining which entries the rule applies to. This makes it possible to sort only selected subsets of the playlist instead of the entire target uniformly.                                                  |
+| `order`    | Enum   |   Yes    |         | `asc`, `desc`, or `none`. `none` preserves source order for matched entries and is useful when provider order should remain untouched.                                                                                      |
+| `natural`  | Bool   |    No    | `false` | Natural sort: numbers embedded in values compare numerically instead of lexicographically, so `Channel 2` sorts before `Channel 10`. Applies to the rule's value and sequence capture comparisons.                          |
+| `sequence` | List   |    No    |         | Ordered regex list used for index-based sorting. When present, Tuliprox prioritizes regex sequence position over `order`, enabling explicit semantic ordering such as quality tiers or curated group precedence.            |
 
 > **Note:** Sort rules must be written with the configured `processing_order` in mind,
 > because sorting operates on the transformed state that exists at that point in the pipeline.
+>
+> **Multi-field sorting:** rules are applied in the order they are declared. When a rule compares
+> equal, the next rule decides — so a `channel` rule on `group` followed by one on `caption`
+> produces group-then-caption ordering.
 
 #### Sort Example
 
@@ -1429,19 +1445,24 @@ targets:
         hls: true
         mpeg_ts: true
       remove_duplicates: false
+      deduplicate:
+        match_by: caption
+        keep: best_quality
+        match_as_ascii: false
 ```
 
 #### Target Option Parameters
 
-| Parameter                                  | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                                                  |
-|:-------------------------------------------|:-----|:--------:|:--------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `ignore_logo`                              | Bool | No       | `false` | Ignores `tvg-logo` and `tvg-logo-small` attributes. This reduces downstream device-side logo caching and can keep generated M3U playlists leaner for clients with limited storage or poor cache invalidation behavior.                         |
-| `share_live_streams.hls`                   | Bool | No       | `false` | Enables HLS live sharing for the new HLS cache proxy path. This is a configuration switch for the HLS cache feature and is independent from MPEG-TS stream sharing.                                                                            |
-| `share_live_streams.mpeg_ts`               | Bool | No       | `false` | Allows Tuliprox to share MPEG-TS live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel.             |
-| `remove_duplicates`                        | Bool | No       | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output.                                                                                                |
-| `epg_output.lowercase_ids`                 | Bool | No       | `false` | Canonicalizes visible technical EPG IDs with ASCII lowercase across M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV channel/programme references, and EPG API responses. Changing this option requires a full target refresh.                     |
-| `epg_output.lowercase_xmltv_display_names` | Bool | No       | `false` | Applies Unicode lowercase exclusively to XMLTV `<display-name>` values during serialization. Playlist names, Xtream names, programme titles, and programme descriptions remain unchanged; persisted target data does not require rebuilding.   |
-| `force_redirect`                           | Bool | No       | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model.                                                                 |
+| Parameter                                  | Type | Required | Default | Technical Impact & Background                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+|:-------------------------------------------|:-----|:--------:|:--------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `ignore_logo`                              | Bool |    No    | `false` | Ignores `tvg-logo` and `tvg-logo-small` attributes. This reduces downstream device-side logo caching and can keep generated M3U playlists leaner for clients with limited storage or poor cache invalidation behavior.                                                                                                                                                                                                                                                                                                                                                                            |
+| `share_live_streams.hls`                   | Bool |    No    | `false` | Enables HLS live sharing for the new HLS cache proxy path. This is a configuration switch for the HLS cache feature and is independent from MPEG-TS stream sharing.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `share_live_streams.mpeg_ts`               | Bool |    No    | `false` | Allows Tuliprox to share MPEG-TS live stream connections in reverse proxy mode. This can reduce upstream provider connection usage when multiple clients watch the same channel, but it increases memory usage per shared channel.                                                                                                                                                                                                                                                                                                                                                                |
+| `remove_duplicates`                        | Bool |    No    | `false` | Attempts to remove duplicate entries by `url`. This improves playlist cleanliness and reduces confusing duplicates in the client-facing output.                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `deduplicate`                              | Map  |    No    | -       | Quality-aware duplicate removal. Channels whose match value is identical after stripping quality tokens (`4K`, `UHD`, `2160p`, `QHD`, `1440p`, `FHD`, `1080p`, `HD`, `720p`, `SD`, `480p`, `576p`) collapse to a single entry. Sub-keys: `match_by` (`caption` (default), `name`, `title`), `keep` (`best_quality` (default) keeps the highest quality tier, `first` keeps the first occurrence) and `match_as_ascii` (default `false`, normalizes accented characters in match keys so `Café HD` matches `Cafe FHD`). Matching is per cluster across all groups; ties keep the first occurrence. |
+| `epg_output.lowercase_ids`                 | Bool |    No    | `false` | Canonicalizes visible technical EPG IDs with ASCII lowercase across M3U `tvg-id`, Xtream `epg_channel_id`, XMLTV channel/programme references, and EPG API responses. Changing this option requires a full target refresh.                                                                                                                                                                                                                                                                                                                                                                        |
+| `epg_output.lowercase_xmltv_display_names` | Bool |    No    | `false` | Applies Unicode lowercase exclusively to XMLTV `<display-name>` values during serialization. Playlist names, Xtream names, programme titles, and programme descriptions remain unchanged; persisted target data does not require rebuilding.                                                                                                                                                                                                                                                                                                                                                      |
+| `force_redirect`                           | Bool |    No    | `false` | Optional redirect-related behavior switch. This influences how Tuliprox serves final stream delivery where redirect-style output handling is required by the deployment model.                                                                                                                                                                                                                                                                                                                                                                                                                    |
 
 > **Shared HLS:** `share_live_streams.hls` requires `reverse_proxy.hls_cache` in `config.yml`.
 > Start with [Shared HLS Sessions](./shared-hls-sessions.md) for the feature overview and
@@ -1454,6 +1475,30 @@ targets:
 > regardless of the number of connected clients.
 > If the reverse-proxy buffer size is increased above `1024`, memory usage increases accordingly.
 > Example: with a buffer size of `2048`, each shared channel consumes at least **24 MB**.
+
+#### Quality-Aware Deduplication Example
+
+Keep only the best-quality copy of every channel, collapsing entries like `News HD`, `News FHD`, and `NEWS [4K]`
+into the single `NEWS [4K]` entry:
+
+```yaml
+targets:
+  - name: clean_target
+    filter: 'Group ~ ".*"'
+    options:
+      deduplicate:
+        match_by: caption      # caption (default) | name | title
+        keep: best_quality     # best_quality (default) | first
+        match_as_ascii: false  # true: "Café HD" matches "Cafe FHD"
+    output:
+      - type: m3u
+```
+
+* Matching compares the selected field with quality tokens stripped and remaining words lowercased,
+  so unrelated channels never collapse.
+* `keep: first` keeps the first occurrence in playlist order instead of the highest quality tier
+  (useful when provider ordering already encodes your preference).
+* Deduplication runs after group merging and before sorting; groups left empty are removed.
 
 #### EPG Output Normalization
 

@@ -10,6 +10,7 @@ use crate::model::macros;
 pub struct ConfigSortRule {
     pub target: SortTarget,
     pub order: SortOrder,
+    pub natural: bool,
     pub field: ItemField,
     pub sequence: Option<Vec<Arc<Regex>>>,
     pub filter: Filter,
@@ -21,6 +22,7 @@ impl From<&ConfigSortRuleDto> for ConfigSortRule {
         Self {
             target: dto.target,
             order: dto.order,
+            natural: dto.natural,
             field: dto.field,
             sequence: dto.t_sequence.clone(),
             filter: dto.t_filter.clone().unwrap_or_default(),
@@ -33,6 +35,7 @@ impl From<&ConfigSortRule> for ConfigSortRuleDto {
         Self {
             target: instance.target,
             order: instance.order,
+            natural: instance.natural,
             field: instance.field,
             sequence: instance.sequence.as_ref().map(|l: &Vec<Arc<Regex>>| l.iter().map(ToString::to_string).collect()),
             filter: instance.filter.to_string(),

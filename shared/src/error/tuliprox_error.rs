@@ -127,6 +127,9 @@ pub enum TuliproxError {
     #[error("config stream history error: {0}")]
     ConfigStreamHistory(String),
 
+    #[error("config video download error: {0}")]
+    ConfigVideoDownload(String),
+
     #[error("config target error: {0}")]
     ConfigTarget(String),
 
@@ -229,6 +232,7 @@ impl TuliproxError {
             | Self::ConfigSource(msg)
             | Self::ConfigStream(msg)
             | Self::ConfigStreamHistory(msg)
+            | Self::ConfigVideoDownload(msg)
             | Self::ConfigTarget(msg)
             | Self::ConfigWebUi(msg)
             | Self::RepositoryEpg(msg)

@@ -68,6 +68,11 @@ pub enum LibraryContentType {
     Auto,
     Movie,
     Series,
+    /// DVR recordings form a distinct content category. The
+    /// catalog projection wires the rendering; later releases
+    /// attach the actual projection. The variant is added here so
+    /// the configuration schema can carry the new category today.
+    Recording,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]

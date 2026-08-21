@@ -2,7 +2,6 @@ use crate::{
     model::{PlaylistItemType, SearchRequest, StreamProperties, UiPlaylistItem, XtreamCluster},
     utils::{arc_str_option_serde, arc_str_serde},
 };
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{rc::Rc, sync::Arc};
 
@@ -90,53 +89,65 @@ pub struct UiPlaylistCategories {
     pub series: Option<Vec<Rc<UiPlaylistGroup>>>,
 }
 
-fn filter_channels(groups: Option<&Vec<Rc<UiPlaylistGroup>>>, text: &str) -> Option<Vec<Rc<UiPlaylistGroup>>> {
-    // normalize search text (lowercase)
-    let text = text.to_lowercase();
+pub const SEARCH_FIELD_GROUP: &str = "group";
+pub const SEARCH_FIELD_TITLE: &str = "title";
+pub const SEARCH_FIELD_NAME: &str = "name";
+pub const SEARCH_FIELD_URL: &str = "url";
 
-    groups.as_ref().map(|gs| {
-        gs.iter()
-            .filter_map(|group| {
-                let title_lower = group.title.to_lowercase();
-
-                if title_lower.contains(&text) {
-                    return Some(Rc::clone(group));
-                }
-
-                let filtered_channels: Vec<Rc<UiPlaylistItem>> = group
-                    .channels
-                    .iter()
-                    .filter(|c| c.title.to_lowercase().contains(&text) || c.name.to_lowercase().contains(&text))
-                    .cloned()
-                    .collect();
-
-                if filtered_channels.is_empty() {
-                    None
-                } else {
-                    Some(Rc::new(UiPlaylistGroup {
-                        id: group.id,
-                        title: group.title.clone(),
-                        channels: filtered_channels,
-                        xtream_cluster: group.xtream_cluster,
-                    }))
-                }
-            })
-            .collect::<Vec<_>>()
-    })
+#[derive(Debug, Clone, Copy)]
+struct SearchFieldMask {
+    group: bool,
+    title: bool,
+    name: bool,
+    url: bool,
 }
 
-fn filter_channels_re(groups: Option<&Vec<Rc<UiPlaylistGroup>>>, regex: &Regex) -> Option<Vec<Rc<UiPlaylistGroup>>> {
-    groups.as_ref().map(|gs| {
+impl SearchFieldMask {
+    // Legacy scope used when no fields are selected: group title + channel title/name.
+    const DEFAULT: Self = Self { group: true, title: true, name: true, url: false };
+
+    fn from_search_fields(fields: Option<&Vec<String>>) -> Self {
+        let Some(fields) = fields.filter(|f| !f.is_empty()) else {
+            return Self::DEFAULT;
+        };
+        let mut mask = Self { group: false, title: false, name: false, url: false };
+        for field in fields {
+            match field.as_str() {
+                SEARCH_FIELD_GROUP => mask.group = true,
+                SEARCH_FIELD_TITLE => mask.title = true,
+                SEARCH_FIELD_NAME => mask.name = true,
+                SEARCH_FIELD_URL => mask.url = true,
+                _ => {}
+            }
+        }
+        if mask.group || mask.title || mask.name || mask.url {
+            mask
+        } else {
+            Self::DEFAULT
+        }
+    }
+}
+
+fn filter_channels(
+    groups: Option<&Vec<Rc<UiPlaylistGroup>>>,
+    mask: SearchFieldMask,
+    matches: &dyn Fn(&str) -> bool,
+) -> Option<Vec<Rc<UiPlaylistGroup>>> {
+    groups.map(|gs| {
         gs.iter()
             .filter_map(|group| {
-                if regex.is_match(&group.title) {
+                if mask.group && matches(&group.title) {
                     return Some(Rc::clone(group));
                 }
 
                 let filtered_channels: Vec<Rc<UiPlaylistItem>> = group
                     .channels
                     .iter()
-                    .filter(|c| regex.is_match(&c.title) || regex.is_match(&c.name))
+                    .filter(|c| {
+                        (mask.title && matches(&c.title))
+                            || (mask.name && matches(&c.name))
+                            || (mask.url && matches(&c.url))
+                    })
                     .cloned()
                     .collect();
 
@@ -171,18 +182,22 @@ impl UiPlaylistCategories {
     pub fn filter(&self, search_req: &SearchRequest) -> Option<Self> {
         match search_req {
             SearchRequest::Clear => None,
-            SearchRequest::Text(text, _search_fields) => {
+            SearchRequest::Text(text, search_fields) => {
+                let mask = SearchFieldMask::from_search_fields(search_fields.as_deref());
                 let text_lc = text.to_lowercase();
-                let live = filter_channels(self.live.as_ref(), &text_lc);
-                let video = filter_channels(self.vod.as_ref(), &text_lc);
-                let series = filter_channels(self.series.as_ref(), &text_lc);
+                let matches = |value: &str| value.to_lowercase().contains(&text_lc);
+                let live = filter_channels(self.live.as_ref(), mask, &matches);
+                let video = filter_channels(self.vod.as_ref(), mask, &matches);
+                let series = filter_channels(self.series.as_ref(), mask, &matches);
                 build_result(live, video, series)
             }
-            SearchRequest::Regexp(text, _search_fields) => {
+            SearchRequest::Regexp(text, search_fields) => {
                 if let Ok(regex) = crate::model::REGEX_CACHE.get_or_compile(text) {
-                    let live = filter_channels_re(self.live.as_ref(), &regex);
-                    let video = filter_channels_re(self.vod.as_ref(), &regex);
-                    let series = filter_channels_re(self.series.as_ref(), &regex);
+                    let mask = SearchFieldMask::from_search_fields(search_fields.as_deref());
+                    let matches = |value: &str| regex.is_match(value);
+                    let live = filter_channels(self.live.as_ref(), mask, &matches);
+                    let video = filter_channels(self.vod.as_ref(), mask, &matches);
+                    let series = filter_channels(self.series.as_ref(), mask, &matches);
                     build_result(live, video, series)
                 } else {
                     None

@@ -35,10 +35,8 @@ pub fn Login() -> Html {
         let u_ref = username_ref.clone();
         let p_ref = password_ref.clone();
         use_async(async move {
-            let username_input: HtmlInputElement = u_ref.cast::<HtmlInputElement>().unwrap();
-            let password_input: HtmlInputElement = p_ref.cast::<HtmlInputElement>().unwrap();
-            let username = username_input.value();
-            let password = password_input.value();
+            let username = u_ref.cast::<HtmlInputElement>().map(|input| input.value()).unwrap_or_default();
+            let password = p_ref.cast::<HtmlInputElement>().map(|input| input.value()).unwrap_or_default();
             let result = services_ctx.auth.authenticate(username, password).await;
             match &result {
                 Ok(_token) => authorized_state.set(true),
@@ -53,7 +51,9 @@ pub fn Login() -> Html {
     let handle_login = {
         let authenticator = authenticate.clone();
         Callback::from(move |_: String| {
-            authenticator.run();
+            if !authenticator.loading {
+                authenticator.run();
+            }
         })
     };
 
@@ -63,7 +63,9 @@ pub fn Login() -> Html {
             if e.key() == "Enter" {
                 e.prevent_default();
                 e.stop_propagation();
-                authenticator.run();
+                if !authenticator.loading {
+                    authenticator.run();
+                }
             }
         })
     };
@@ -83,7 +85,7 @@ pub fn Login() -> Html {
         let input_ref = username_ref.clone();
         use_effect(move || {
             if let Some(input) = input_ref.cast::<HtmlInputElement>() {
-                input.focus().unwrap();
+                let _ = input.focus();
             }
         });
     }
@@ -103,11 +105,11 @@ pub fn Login() -> Html {
             <div class="tp__login-view__message">{translation.t("MESSAGES.LOGIN.MESSAGE")}</div>
             <form>
                 <div class="tp__login-view__form">
-                    <Input placeholder={translation.t("LABEL.USERNAME")} input_ref={username_ref} name="username" autocomplete={true} icon="User"/>
+                    <Input placeholder={translation.t("LABEL.USERNAME")} input_ref={username_ref} name="username" autocomplete={true} onkeydown={handle_key_down.clone()} icon="User"/>
                     <Input placeholder={translation.t("LABEL.PASSWORD")} input_ref={password_ref} name="password" hidden={true}  autocomplete={false} onkeydown={handle_key_down} icon="Lock"/>
                     <div class="tp__login-view__form-action">
-                        <TextButton class="primary" name="login" title={ translation.t("LABEL.LOGIN")} onclick={handle_login}></TextButton>
-                        <span class={if *auth_success { "tp__hidden" }  else { "tp__error-text" }}>{ "Failed to login" }</span>
+                        <TextButton class="primary" name="login" disabled={authenticate.loading} title={ translation.t("LABEL.LOGIN")} onclick={handle_login}></TextButton>
+                        <span role="alert" class={if *auth_success { "tp__hidden" }  else { "tp__error-text" }}>{ translation.t("MESSAGES.LOGIN.FAILED") }</span>
                     </div>
                 </div>
             </form>

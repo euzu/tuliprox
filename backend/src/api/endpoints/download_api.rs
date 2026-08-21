@@ -1,19 +1,27 @@
 use crate::{
+    api::endpoints::v1_api_playlist,
     api::model::{
-        AppState, ActiveProviderManager, ConnectionManager, DownloadControl, DownloadKind, DownloadQueue,
-        DownloadState, DownloadWaitOutcome, EventManager, EventMessage, FileDownload, FileDownloadRequest,
-        FileRecordingRequest,
-        RecordingExecutionResult, run_recording,
+        mutate, mutate_optional, AppState, ActiveProviderManager, ConnectionManager, DownloadControl, DownloadKind,
+        DownloadQueue, DownloadState, DownloadWaitOutcome, EventManager, EventMessage, FileDownload,
+        FileDownloadRequest, FileRecordingRequest, PersistedFileDownload, QueueMutationError,
+        RecordingExecutionResult, recording_partial_path, run_recording,
     },
-    model::{AppConfig, VideoDownloadConfig},
+    messaging::send_message,
+    model::{AppConfig, MessageContent, VideoDownloadConfig},
     utils::{async_file_writer, request, request::create_client, IO_BUFFER_SIZE},
 };
+use crate::api::model::recording_notification::LifecycleEvent;
+use crate::api::model::recording_notification_adapter::{DispatchDecision, build_marker, decide, message_for};
 use axum::response::IntoResponse;
 use futures::stream::TryStreamExt;
 use log::{debug, error, info, warn};
 use serde::Deserialize;
 use serde_json::json;
-use shared::{error::to_io_error, model::{DownloadsDelta, DownloadsResponse}, utils::bytes_to_megabytes};
+use shared::{
+    error::to_io_error,
+    model::{DownloadsDelta, DownloadsResponse, RecordingMetadata},
+    utils::bytes_to_megabytes,
+};
 use std::{collections::HashMap, ops::Deref, pin::Pin, sync::Arc};
 use tokio::{
     fs,
@@ -49,6 +57,29 @@ enum ProviderAcquireResult {
     Paused,
     Cancelled,
     Preempted,
+}
+
+fn recording_execution_download(app_config: &AppConfig, download: &FileDownload) -> Result<FileDownload, String> {
+    let source = download
+        .recording
+        .as_ref()
+        .and_then(|metadata| metadata.source.as_ref())
+        .ok_or_else(|| "Recording source metadata missing".to_string())?;
+    let virtual_id = source
+        .virtual_id
+        .parse::<u32>()
+        .map_err(|_| "Recording source virtual id invalid".to_string())?;
+    let url = v1_api_playlist::build_stable_recording_url(
+        app_config,
+        &source.target_id,
+        &source.input_name,
+        virtual_id,
+        source.cluster,
+    )
+    .ok_or_else(|| "Recording execution URL unavailable".to_string())?;
+    let mut execution_download = download.clone();
+    execution_download.url = reqwest::Url::parse(&url).map_err(|_| "Recording execution URL invalid".to_string())?;
+    Ok(execution_download)
 }
 
 fn classify_download_open_error(url: &reqwest::Url, err: &reqwest::Error) -> DownloadExecutionResult {
@@ -169,40 +200,41 @@ fn recording_deadline_reached(download: &FileDownload, now_ts: i64) -> bool {
             .is_some_and(|(start_at, duration_secs)| now_ts >= start_at.saturating_add(i64::try_from(duration_secs).unwrap_or(90)))
 }
 
+#[cfg(test)]
 async fn active_download_snapshot(active: &RwLock<Option<FileDownload>>) -> Option<FileDownload> { active.read().await.clone() }
 
-pub async fn download_queue_snapshot(download_queue: &DownloadQueue) -> DownloadsResponse {
-    let queue: Vec<shared::model::FileDownloadDto> = download_queue
-        .queue
-        .lock()
-        .await
-        .iter()
-        .map(shared::model::FileDownloadDto::from)
-        .collect();
-    let mut queue = queue;
-    queue.extend(
-        download_queue
-            .scheduled
-            .read()
-            .await
-            .iter()
-            .map(shared::model::FileDownloadDto::from),
-    );
-    let finished = download_queue
-        .finished
-        .read()
-        .await
-        .iter()
-        .map(shared::model::FileDownloadDto::from)
-        .collect();
-    let active = download_queue
-        .active
+async fn active_download_snapshot_for_worker(
+    active: &RwLock<Option<FileDownload>>,
+    worker_uuid: &str,
+) -> Option<FileDownload> {
+    active
         .read()
         .await
         .as_ref()
-        .map(shared::model::FileDownloadDto::from)
-        .into_iter()
-        .collect();
+        .filter(|download| download.uuid == worker_uuid)
+        .cloned()
+}
+
+async fn update_active_download_for_worker<F>(
+    active: &RwLock<Option<FileDownload>>,
+    worker_uuid: &str,
+    update: F,
+) -> bool
+where
+    F: FnOnce(&mut FileDownload) -> bool,
+{
+    let mut active = active.write().await;
+    let Some(download) = active.as_mut().filter(|download| download.uuid == worker_uuid) else {
+        return false;
+    };
+    update(download)
+}
+
+pub async fn download_queue_snapshot(download_queue: &DownloadQueue) -> DownloadsResponse {
+    let (queue, active, finished) = download_queue.committed_download_snapshot().await;
+    let queue = queue.iter().map(shared::model::FileDownloadDto::from).collect();
+    let finished = finished.iter().map(shared::model::FileDownloadDto::from).collect();
+    let active = active.as_ref().map(shared::model::FileDownloadDto::from).into_iter().collect();
 
     DownloadsResponse {
         queue,
@@ -215,38 +247,49 @@ async fn broadcast_download_queue_update(event_manager: &Arc<EventManager>, down
     if !event_manager.has_event_receivers() {
         return;
     }
-    let mut queue = download_queue
-        .queue
-        .lock()
-        .await
-        .iter()
-        .map(shared::model::FileDownloadDto::from)
-        .collect::<Vec<_>>();
-    queue.extend(
-        download_queue
-            .scheduled
-            .read()
-            .await
-            .iter()
-            .map(shared::model::FileDownloadDto::from),
-    );
-    let finished = download_queue
-        .finished
-        .read()
-        .await
-        .iter()
-        .map(shared::model::FileDownloadDto::from)
-        .collect::<Vec<_>>();
+    let (queue, active, finished) = download_queue.committed_download_snapshot().await;
+    let queue = queue.iter().map(shared::model::FileDownloadDto::from).collect();
+    let finished = finished.iter().map(shared::model::FileDownloadDto::from).collect();
     let _ = event_manager.send_event(EventMessage::DownloadsDeltaUpdate(DownloadsDelta::QueueReplaced { queue }));
     let _ = event_manager.send_event(EventMessage::DownloadsDeltaUpdate(DownloadsDelta::FinishedReplaced {
         finished,
     }));
-    if let Some(download) = download_queue.active.read().await.as_ref() {
+    if let Some(download) = active.as_ref() {
         let _ = event_manager.send_event(EventMessage::DownloadsDeltaUpdate(DownloadsDelta::ActivePatched(
             shared::model::FileDownloadDto::from(download),
         )));
     } else {
         let _ = event_manager.send_event(EventMessage::DownloadsDeltaUpdate(DownloadsDelta::ActiveCleared));
+    }
+    let _ = event_manager.send_event(EventMessage::RecordingChanged);
+}
+
+async fn broadcast_worker_mutation(
+    event_manager: &Arc<EventManager>,
+    download_queue: &DownloadQueue,
+    result: Result<bool, QueueMutationError>,
+    action: &str,
+) -> Result<bool, QueueMutationError> {
+    match result {
+        Ok(true) => {
+            broadcast_download_queue_update(event_manager, download_queue).await;
+            Ok(true)
+        }
+        Ok(false) => Ok(false),
+        Err(err) => Err(QueueMutationError::new(format!("{action}: {err}"))),
+    }
+}
+
+async fn broadcast_required_worker_mutation(
+    event_manager: &Arc<EventManager>,
+    download_queue: &DownloadQueue,
+    result: Result<bool, QueueMutationError>,
+    action: &str,
+) -> Result<(), QueueMutationError> {
+    if broadcast_worker_mutation(event_manager, download_queue, result, action).await? {
+        Ok(())
+    } else {
+        Err(QueueMutationError::new(format!("{action}: active task changed")))
     }
 }
 
@@ -263,23 +306,20 @@ async fn broadcast_active_download_delta(event_manager: &Arc<EventManager>, acti
 
 async fn refresh_recording_progress(
     active: &RwLock<Option<FileDownload>>,
+    worker_uuid: &str,
     file_path: &std::path::Path,
     event_manager: &Arc<EventManager>,
 ) {
     let current_size = tokio::fs::metadata(file_path).await.map_or(0, |metadata| metadata.len());
-    let changed = {
-        let mut active = active.write().await;
-        if let Some(download) = active.as_mut() {
-            if download.kind == DownloadKind::Recording && download.size != current_size {
-                download.size = current_size;
-                true
-            } else {
-                false
-            }
+    let changed = update_active_download_for_worker(active, worker_uuid, |download| {
+        if download.kind == DownloadKind::Recording && download.size != current_size {
+            download.size = current_size;
+            true
         } else {
             false
         }
-    };
+    })
+    .await;
     if changed {
         broadcast_active_download_delta(event_manager, active).await;
     }
@@ -288,16 +328,16 @@ async fn refresh_recording_progress(
 #[allow(clippy::too_many_lines)]
 async fn download_file(
     active: Arc<RwLock<Option<FileDownload>>>,
+    file_download: FileDownload,
     client: &reqwest::Client,
     control_signal: Arc<RwLock<DownloadControl>>,
     control_notify: Arc<Notify>,
     provider_cancel_token: Option<CancellationToken>,
     event_manager: Option<&Arc<EventManager>>,
-    download_queue: Option<&Arc<DownloadQueue>>,
 ) -> DownloadExecutionResult {
-    if let Some(file_download) = active_download_snapshot(&active).await {
-        let url = file_download.url.clone();
-        let file_path = file_download.file_path.clone();
+    let worker_uuid = file_download.uuid.as_str();
+    let url = file_download.url.clone();
+    let file_path = file_download.file_path.clone();
         // Check for existing partial file for resume
         let existing_size = tokio::fs::metadata(&file_path).await.map_or(0, |metadata| metadata.len());
 
@@ -306,9 +346,7 @@ async fn download_file(
             request_builder = request_builder.header("Range", format!("bytes={existing_size}-"));
         }
 
-        if let Some(result) =
-            handle_download_control_without_writer(&active, current_download_control(&control_signal)).await
-        {
+        if let Some(result) = handle_download_control_without_writer(current_download_control(&control_signal)) {
             return result;
         }
 
@@ -320,10 +358,9 @@ async fn download_file(
                     biased;
                     () = cancel_token.cancelled() => return DownloadExecutionResult::Preempted,
                     () = control_notify.notified() => {
-                        if let Some(result) = handle_download_control_without_writer(
-                            &active,
-                            *control_signal.read().await,
-                        ).await {
+                        if let Some(result) =
+                            handle_download_control_without_writer(*control_signal.read().await)
+                        {
                             return result;
                         }
                     }
@@ -333,10 +370,9 @@ async fn download_file(
                 tokio::select! {
                     biased;
                     () = control_notify.notified() => {
-                        if let Some(result) = handle_download_control_without_writer(
-                            &active,
-                            *control_signal.read().await,
-                        ).await {
+                        if let Some(result) =
+                            handle_download_control_without_writer(*control_signal.read().await)
+                        {
                             return result;
                         }
                     }
@@ -361,11 +397,15 @@ async fn download_file(
                 let total_size = compute_download_total_size(&response, existing_size);
 
                 if let Some(total) = total_size {
-                    if let Some(download) = active.write().await.as_mut() {
+                    let changed = update_active_download_for_worker(&active, worker_uuid, |download| {
                         download.total_size = Some(total);
-                    }
-                    if let Some(event_manager) = event_manager {
-                        broadcast_active_download_delta(event_manager, &active).await;
+                        true
+                    })
+                    .await;
+                    if changed {
+                        if let Some(event_manager) = event_manager {
+                            broadcast_active_download_delta(event_manager, &active).await;
+                        }
                     }
                 }
 
@@ -401,12 +441,6 @@ async fn download_file(
 
                                     loop {
                                         if deadline_at.is_some_and(|deadline| Instant::now() >= deadline) {
-                                            if let Some(lock) = active.write().await.as_mut() {
-                                                lock.paused = false;
-                                                lock.finished = true;
-                                                lock.state = DownloadState::Completed;
-                                                lock.error = None;
-                                            }
                                             if let Err(err) = buf_writer.flush().await {
                                                 return DownloadExecutionResult::Failed(err.to_string());
                                             }
@@ -568,10 +602,7 @@ async fn download_file(
                                                                     }
                                                                     last_progress_log_at = now;
                                                                     last_progress_logged_bytes = downloaded;
-                                                                if let (Some(event_manager), Some(download_queue)) =
-                                                                    (event_manager, download_queue)
-                                                                {
-                                                                    let _ = download_queue;
+                                                                if let Some(event_manager) = event_manager {
                                                                     broadcast_active_download_delta(event_manager, &active).await;
                                                                 }
                                                             }
@@ -583,10 +614,7 @@ async fn download_file(
                                                                 );
                                                                 last_progress_log_at = Instant::now();
                                                                 last_progress_logged_bytes = downloaded;
-                                                                if let (Some(event_manager), Some(download_queue)) =
-                                                                    (event_manager, download_queue)
-                                                                {
-                                                                    let _ = download_queue;
+                                                                if let Some(event_manager) = event_manager {
                                                                     broadcast_active_download_delta(event_manager, &active).await;
                                                                 }
                                                             }
@@ -596,9 +624,15 @@ async fn download_file(
                                                                 || Instant::now().duration_since(last_snapshot_update_at)
                                                                     >= DOWNLOAD_SNAPSHOT_UPDATE_INTERVAL;
                                                             if should_update_snapshot {
-                                                                if let Some(lock) = active.write().await.as_mut() {
-                                                                    lock.size = downloaded;
-                                                                }
+                                                                update_active_download_for_worker(
+                                                                    &active,
+                                                                    worker_uuid,
+                                                                    |download| {
+                                                                        download.size = downloaded;
+                                                                        true
+                                                                    },
+                                                                )
+                                                                .await;
                                                                 last_snapshot_update_at = Instant::now();
                                                                 last_snapshot_update_bytes = downloaded;
                                                             }
@@ -612,12 +646,15 @@ async fn download_file(
                                                 } else {
                                                     let megabytes = bytes_to_megabytes(downloaded);
                                                     info!("Downloaded {file_path_str}, filesize: {megabytes}MB");
-                                                    if let Some(lock) = active.write().await.as_mut() {
-                                                        lock.paused = false;
-                                                        lock.size = downloaded;
-                                                        lock.finished = true;
-                                                        lock.state = DownloadState::Completed;
-                                                    }
+                                                    update_active_download_for_worker(
+                                                        &active,
+                                                        worker_uuid,
+                                                        |download| {
+                                                            download.size = downloaded;
+                                                            true
+                                                        },
+                                                    )
+                                                    .await;
                                                     if let Err(err) = buf_writer.flush().await {
                                                         return DownloadExecutionResult::Failed(err.to_string());
                                                     }
@@ -646,9 +683,6 @@ async fn download_file(
             }
             Err(err) => classify_download_open_error(&url, &err),
         }
-    } else {
-        DownloadExecutionResult::Failed("No active file download".to_string())
-    }
 }
 
 fn current_download_control(control_signal: &RwLock<DownloadControl>) -> DownloadControl {
@@ -658,7 +692,7 @@ fn current_download_control(control_signal: &RwLock<DownloadControl>) -> Downloa
 fn should_exit_worker_after_preempt(control: DownloadControl) -> bool { control == DownloadControl::Restart }
 
 async fn handle_download_control<W>(
-    active: &Arc<RwLock<Option<FileDownload>>>,
+    _active: &Arc<RwLock<Option<FileDownload>>>,
     control: DownloadControl,
     buf_writer: &mut W,
 ) -> Option<DownloadExecutionResult>
@@ -667,10 +701,6 @@ where
 {
     match control {
         DownloadControl::Pause => {
-            if let Some(download) = active.write().await.as_mut() {
-                download.paused = true;
-                download.state = DownloadState::Paused;
-            }
             if let Err(err) = buf_writer.flush().await {
                 return Some(DownloadExecutionResult::Failed(err.to_string()));
             }
@@ -680,14 +710,6 @@ where
             Some(DownloadExecutionResult::Paused)
         }
         DownloadControl::Cancel => {
-            if let Some(download) = active.write().await.as_mut() {
-                download.finished = true;
-                download.paused = false;
-                download.state = DownloadState::Cancelled;
-                if download.error.is_none() {
-                    download.error = Some("Cancelled by user".to_string());
-                }
-            }
             if let Err(err) = buf_writer.flush().await {
                 return Some(DownloadExecutionResult::Failed(err.to_string()));
             }
@@ -709,29 +731,10 @@ where
     }
 }
 
-async fn handle_download_control_without_writer(
-    active: &Arc<RwLock<Option<FileDownload>>>,
-    control: DownloadControl,
-) -> Option<DownloadExecutionResult> {
+fn handle_download_control_without_writer(control: DownloadControl) -> Option<DownloadExecutionResult> {
     match control {
-        DownloadControl::Pause => {
-            if let Some(download) = active.write().await.as_mut() {
-                download.paused = true;
-                download.state = DownloadState::Paused;
-            }
-            Some(DownloadExecutionResult::Paused)
-        }
-        DownloadControl::Cancel => {
-            if let Some(download) = active.write().await.as_mut() {
-                download.finished = true;
-                download.paused = false;
-                download.state = DownloadState::Cancelled;
-                if download.error.is_none() {
-                    download.error = Some("Cancelled by user".to_string());
-                }
-            }
-            Some(DownloadExecutionResult::Cancelled)
-        }
+        DownloadControl::Pause => Some(DownloadExecutionResult::Paused),
+        DownloadControl::Cancel => Some(DownloadExecutionResult::Cancelled),
         DownloadControl::Restart => Some(DownloadExecutionResult::Preempted),
         DownloadControl::None => None,
     }
@@ -753,44 +756,338 @@ fn recording_deadline_instant(download: &FileDownload) -> Option<Instant> {
 
 async fn set_active_download_state(
     download_queue: &DownloadQueue,
+    uuid: &str,
     state: DownloadState,
     error: Option<String>,
     paused: bool,
-) -> bool {
-    let mut active = download_queue.active.write().await;
-    if let Some(download) = active.as_mut() {
+) -> Result<bool, QueueMutationError> {
+    Ok(mutate_optional(download_queue, |candidate| {
+        let Some(download) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
+            return Ok(None);
+        };
+        if download.state == state && download.error == error && download.paused == paused && !download.finished {
+            return Ok(None);
+        }
         download.state = state;
         download.error = error;
         download.paused = paused;
         download.finished = false;
-        true
-    } else {
-        false
+        Ok(Some(true))
+    })
+    .await?
+    .unwrap_or(false))
+}
+
+async fn commit_acquired_download(
+    download_queue: &DownloadQueue,
+    uuid: &str,
+) -> Result<Option<RecordingNotificationPlan>, QueueMutationError> {
+    mutate_optional(download_queue, |candidate| {
+        let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
+            return Ok(None);
+        };
+        active.state = DownloadState::Downloading;
+        active.error = None;
+        active.paused = false;
+        active.finished = false;
+        let notification = mark_recording_metadata_notification(
+            active.recording.as_mut(),
+            LifecycleEvent::Started,
+            None,
+        );
+        Ok(Some(notification))
+    })
+    .await
+}
+
+#[cfg(test)]
+fn mark_recording_notification(
+    download: &mut FileDownload,
+    event: LifecycleEvent,
+    failure_reason: Option<String>,
+) -> RecordingNotificationPlan {
+    mark_recording_metadata_notification(download.recording.as_mut(), event, failure_reason)
+}
+
+fn mark_recording_metadata_notification(
+    recording: Option<&mut RecordingMetadata>,
+    event: LifecycleEvent,
+    failure_reason: Option<String>,
+) -> RecordingNotificationPlan {
+    let Some(meta) = recording else {
+        return RecordingNotificationPlan::empty();
+    };
+    let is_admin_owner = match &meta.owner {
+        shared::model::recording::RecordingOwner::LegacyAdmin => true,
+        shared::model::recording::RecordingOwner::User(owner) => owner.is_builtin_admin(),
+    };
+    match decide(meta, event, chrono::Utc::now().timestamp(), is_admin_owner, failure_reason) {
+        DispatchDecision::PersistAndDeliver { payload, kind, attempted_at } => {
+            meta.notification_markers.push(build_marker(kind.clone(), attempted_at));
+            RecordingNotificationPlan {
+                message: Some(MessageContent::RecordingLifecycle(message_for(event, &payload))),
+                #[cfg(test)]
+                marker_kind: Some(kind),
+            }
+        }
+        DispatchDecision::AlreadyDelivered { .. } | DispatchDecision::Suppressed { .. } => RecordingNotificationPlan::empty(),
     }
 }
 
-async fn requeue_active_download_for_retry(download_queue: &DownloadQueue) {
-    if let Some(mut download) = download_queue.active.write().await.take() {
+/// Result of `mark_recording_notification`. `marker_kind` is set when a
+/// marker was added to the in-memory recording; the caller uses it to roll
+/// the marker back if the subsequent persist fails.
+struct RecordingNotificationPlan {
+    message: Option<MessageContent>,
+    #[cfg(test)]
+    marker_kind: Option<shared::model::recording::NotificationMarkerKind>,
+}
+
+impl RecordingNotificationPlan {
+    fn empty() -> Self {
+        Self {
+            message: None,
+            #[cfg(test)]
+            marker_kind: None,
+        }
+    }
+}
+
+#[cfg(test)]
+fn rollback_last_recording_marker(fd: &mut FileDownload, kind: &shared::model::recording::NotificationMarkerKind) {
+    if let Some(meta) = fd.recording.as_mut() {
+        if let Some(idx) = meta.notification_markers.iter().rposition(|marker| marker.kind == *kind) {
+            meta.notification_markers.remove(idx);
+        }
+    }
+}
+
+/// Hand a lifecycle notification off for delivery once its marker has
+/// been persisted.
+///
+/// The marker is written inside the queue-mutation boundary, so it is
+/// durable before this runs; delivery must be durable too. The
+/// notification outbox owns that: it persists the entry, retries per
+/// channel with backoff, and dead-letters what it cannot deliver. This
+/// used to `tokio::spawn(send_message(..))` directly, which meant a
+/// transient Telegram/Discord/REST error silently dropped the
+/// notification and a crash before the spawned task ran lost it too.
+///
+/// The direct send is kept as a fallback for the paths that run before
+/// the supervisor is installed (notably unit tests), so behaviour there
+/// is unchanged.
+fn spawn_recording_notification_after_persist(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    plan: RecordingNotificationPlan,
+    persisted: bool,
+) {
+    if !persisted {
+        return;
+    }
+    let Some(message) = plan.message else {
+        return;
+    };
+    // A full or closed outbox hands the message back; fall through to the
+    // direct send rather than dropping it outright.
+    let message = match crate::api::model::recording::recording_supervisor::notification_outbox() {
+        Some(outbox) => match outbox.enqueue(message) {
+            None => return,
+            Some(rejected) => rejected,
+        },
+        None => message,
+    };
+    let app_config = Arc::clone(app_config);
+    let client = client.clone();
+    tokio::spawn(async move {
+        send_message(&app_config, &client, message).await;
+    });
+}
+
+async fn requeue_active_download_for_retry(
+    download_queue: &DownloadQueue,
+    uuid: &str,
+    promote: bool,
+) -> Result<bool, QueueMutationError> {
+    Ok(mutate_optional(download_queue, |candidate| {
+        let Some(mut download) = candidate.active.take() else {
+            return Ok(None);
+        };
+        if download.uuid != uuid {
+            candidate.active = Some(download);
+            return Ok(None);
+        }
         download.finished = false;
         download.paused = false;
         download.error = None;
         download.state = DownloadState::Queued;
         download.next_retry_at = None;
-        download_queue.queue.lock().await.push_front(download);
-    }
-    let _ = download_queue.persist_to_disk().await;
+        candidate.queue.insert(0, download);
+        if promote {
+            candidate.active = Some(candidate.queue.remove(0));
+        }
+        Ok(Some(true))
+    })
+    .await?
+    .unwrap_or(false))
 }
 
-async fn requeue_active_download_for_capacity_wait(download_queue: &DownloadQueue, reason: &str) {
-    if let Some(mut download) = download_queue.active.write().await.take() {
+async fn requeue_active_download_for_capacity_wait(
+    download_queue: &DownloadQueue,
+    uuid: &str,
+    reason: &str,
+    promote: bool,
+    consumed_control: Option<DownloadControl>,
+) -> Result<bool, QueueMutationError> {
+    let mutation = |candidate: &mut crate::api::model::PersistedDownloadQueue| {
+        let Some(mut download) = candidate.active.take() else {
+            return Ok(None);
+        };
+        if download.uuid != uuid {
+            candidate.active = Some(download);
+            return Ok(None);
+        }
         download.finished = false;
         download.paused = false;
         download.error = Some(reason.to_string());
         download.state = DownloadState::WaitingForCapacity;
         download.next_retry_at = None;
-        download_queue.queue.lock().await.push_front(download);
-    }
-    let _ = download_queue.persist_to_disk().await;
+        candidate.queue.insert(0, download);
+        if promote {
+            candidate.active = Some(candidate.queue.remove(0));
+        }
+        Ok(Some(true))
+    };
+    let result = if let Some(control) = consumed_control {
+        download_queue
+            .mutate_optional_and_clear_control(control, mutation)
+            .await?
+    } else {
+        mutate_optional(download_queue, mutation).await?
+    };
+    Ok(result.unwrap_or(false))
+}
+
+async fn promote_next_download(download_queue: &DownloadQueue) -> Result<Option<(String, String)>, QueueMutationError> {
+    mutate_optional(download_queue, |candidate| {
+        if candidate.active.is_some() || candidate.queue.is_empty() {
+            return Ok(None);
+        }
+        let next = candidate.queue.remove(0);
+        let promoted = (next.uuid.clone(), next.filename.clone());
+        candidate.active = Some(next);
+        Ok(Some(promoted))
+    })
+    .await
+}
+
+async fn finish_active_and_promote<F>(
+    download_queue: &DownloadQueue,
+    uuid: &str,
+    finish: F,
+) -> Result<Option<RecordingNotificationPlan>, QueueMutationError>
+where
+    F: FnOnce(&mut PersistedFileDownload) -> RecordingNotificationPlan,
+{
+    mutate_optional(download_queue, |candidate| {
+        let Some(mut active) = candidate.active.take() else {
+            return Ok(None);
+        };
+        if active.uuid != uuid {
+            candidate.active = Some(active);
+            return Ok(None);
+        }
+        let notification = finish(&mut active);
+        candidate.finished.push(active);
+        if !candidate.queue.is_empty() {
+            candidate.active = Some(candidate.queue.remove(0));
+        }
+        Ok(Some(notification))
+    })
+    .await
+}
+
+async fn cancel_active_and_promote(
+    download_queue: &DownloadQueue,
+    uuid: &str,
+) -> Result<bool, QueueMutationError> {
+    Ok(download_queue
+        .mutate_optional_and_clear_control(DownloadControl::Cancel, |candidate| {
+        let Some(mut active) = candidate.active.take() else {
+            return Ok(None);
+        };
+        if active.uuid != uuid {
+            candidate.active = Some(active);
+            return Ok(None);
+        }
+        active.finished = true;
+        active.paused = false;
+        active.next_retry_at = None;
+        active.error.get_or_insert_with(|| "Cancelled by user".to_string());
+        active.state = DownloadState::Cancelled;
+        candidate.finished.push(active);
+        if !candidate.queue.is_empty() {
+            candidate.active = Some(candidate.queue.remove(0));
+        }
+        Ok(Some(true))
+    })
+    .await?
+    .unwrap_or(false))
+}
+
+enum RetryCommit {
+    Waiting { delay_secs: u64, attempts: u8 },
+    Failed(RecordingNotificationPlan),
+}
+
+async fn prepare_active_retry(
+    download_queue: &DownloadQueue,
+    uuid: &str,
+    download_cfg: &VideoDownloadConfig,
+) -> Result<Option<RetryCommit>, QueueMutationError> {
+    mutate_optional(download_queue, |candidate| {
+        let Some(active) = candidate.active.as_mut().filter(|active| active.uuid == uuid) else {
+            return Ok(None);
+        };
+        active.retry_attempts = active.retry_attempts.saturating_add(1);
+        let attempts = active.retry_attempts;
+        if attempts > download_cfg.retry_max_attempts {
+            let Some(mut failed) = candidate.active.take() else {
+                return Ok(None);
+            };
+            let error = format!("Retry limit reached after {} attempts", download_cfg.retry_max_attempts);
+            failed.finished = true;
+            failed.paused = false;
+            failed.next_retry_at = None;
+            failed.state = DownloadState::Failed;
+            failed.error = Some(error.clone());
+            let notification = mark_recording_metadata_notification(
+                failed.recording.as_mut(),
+                LifecycleEvent::Failed,
+                Some(error),
+            );
+            candidate.finished.push(failed);
+            if !candidate.queue.is_empty() {
+                candidate.active = Some(candidate.queue.remove(0));
+            }
+            return Ok(Some(RetryCommit::Failed(notification)));
+        }
+
+        let delay_secs = compute_download_retry_backoff_secs(attempts, download_cfg);
+        let next_retry_at = chrono::Utc::now()
+            .timestamp()
+            .saturating_add(i64::try_from(delay_secs).unwrap_or(i64::MAX));
+        active.next_retry_at = Some(next_retry_at);
+        active.state = DownloadState::RetryWaiting;
+        active.paused = false;
+        active.finished = false;
+        active.error = Some(format!(
+            "Retrying after transient failure in {delay_secs}s (attempt {attempts}/{})",
+            download_cfg.retry_max_attempts
+        ));
+        Ok(Some(RetryCommit::Waiting { delay_secs, attempts }))
+    })
+    .await
 }
 
 const DOWNLOAD_PREEMPTED_REASON: &str = "Preempted by higher-priority foreground stream";
@@ -821,15 +1118,15 @@ pub(in crate::api) async fn ensure_download_worker_running(
     *worker_running = true;
     drop(worker_running);
 
-    if download_queue.active.read().await.is_none() {
-        let next_download = download_queue.as_ref().queue.lock().await.pop_front();
-        if let Some(next_download) = next_download {
-            debug!(
-                "Promoting queued download {} ({}) to active",
-                next_download.uuid, next_download.filename
-            );
-            *download_queue.as_ref().active.write().await = Some(next_download);
+    match promote_next_download(download_queue).await {
+        Ok(Some((uuid, filename))) => {
+            debug!("Promoting queued download {uuid} ({filename}) to active");
             broadcast_download_queue_update(event_manager, download_queue).await;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            *download_queue.worker_running.write().await = false;
+            return Err(err.to_string());
         }
     }
 
@@ -849,6 +1146,7 @@ pub(in crate::api) async fn ensure_download_worker_running(
         let active_provider = Arc::clone(active_provider);
         let connection_manager = Arc::clone(connection_manager);
         let download_cfg = download_cfg.clone();
+        let app_config = Arc::new(cfg.clone());
 
         if let Ok(client) = create_client(cfg).default_headers(headers).build() {
                 if let Some(active) = dq.active.read().await.as_ref() {
@@ -858,13 +1156,16 @@ pub(in crate::api) async fn ensure_download_worker_running(
                     );
                 }
                 tokio::spawn(async move {
-                    loop {
+                    'worker: loop {
                         if dq.active.read().await.deref().is_some() {
                             if let Some(download) = dq.active.read().await.as_ref() {
                                 if download.paused {
                                     break;
                                 }
                             }
+                            let Some(worker_uuid) = dq.active.read().await.as_ref().map(|download| download.uuid.clone()) else {
+                                break;
+                            };
 
                             // Acquire a provider connection slot for this download.
                             // If the provider is at capacity, wait in the priority queue until signalled.
@@ -878,9 +1179,23 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                     loop {
                                         let capacities = active_provider.provider_capacities_for_input(&input_name).await;
                                         if background_download_should_wait(priority, &capacities, &download_cfg) {
-                                            if set_active_download_state(&dq, DownloadState::WaitingForCapacity, None, false).await {
-                                                let _ = dq.persist_to_disk().await;
-                                                broadcast_download_queue_update(&event_manager, &dq).await;
+                                            if let Err(err) = broadcast_worker_mutation(
+                                                &event_manager,
+                                                &dq,
+                                                set_active_download_state(
+                                                    &dq,
+                                                    &worker_uuid,
+                                                    DownloadState::WaitingForCapacity,
+                                                    None,
+                                                    false,
+                                                )
+                                                .await,
+                                                "waiting-for-capacity state",
+                                            )
+                                            .await
+                                            {
+                                                error!("Download worker commit failed: {err}");
+                                                break 'worker;
                                             }
                                             match dq
                                                 .slot_waiters
@@ -900,9 +1215,6 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                             continue;
                                         }
                                         if let Some(handle) = active_provider.acquire_connection_for_download(&input_name, priority).await {
-                                            let _ = set_active_download_state(&dq, DownloadState::Downloading, None, false).await;
-                                            let _ = dq.persist_to_disk().await;
-                                            broadcast_download_queue_update(&event_manager, &dq).await;
                                             break ProviderAcquireResult::Acquired(Some(handle));
                                         }
                                         if *control_signal.read().await == DownloadControl::Cancel {
@@ -914,9 +1226,23 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         if *control_signal.read().await == DownloadControl::Restart {
                                             break ProviderAcquireResult::Preempted;
                                         }
-                                        if set_active_download_state(&dq, DownloadState::WaitingForCapacity, None, false).await {
-                                            let _ = dq.persist_to_disk().await;
-                                            broadcast_download_queue_update(&event_manager, &dq).await;
+                                        if let Err(err) = broadcast_worker_mutation(
+                                            &event_manager,
+                                            &dq,
+                                            set_active_download_state(
+                                                &dq,
+                                                &worker_uuid,
+                                                DownloadState::WaitingForCapacity,
+                                                None,
+                                                false,
+                                            )
+                                            .await,
+                                            "waiting-for-capacity state",
+                                        )
+                                        .await
+                                        {
+                                            error!("Download worker commit failed: {err}");
+                                            break 'worker;
                                         }
                                         // Wait for highest-priority signal — no sleep, no polling.
                                         match dq
@@ -942,60 +1268,109 @@ pub(in crate::api) async fn ensure_download_worker_running(
 
                             let provider_handle = match provider_acquire_result {
                                 ProviderAcquireResult::Acquired(handle) => {
-                                    *control_signal.write().await = DownloadControl::None;
+                                    match commit_acquired_download(&dq, &worker_uuid).await {
+                                        Ok(Some(notification)) => {
+                                            spawn_recording_notification_after_persist(
+                                                &app_config,
+                                                &client,
+                                                notification,
+                                                true,
+                                            );
+                                            broadcast_download_queue_update(&event_manager, &dq).await;
+                                        }
+                                        Ok(None) => {
+                                            connection_manager.release_provider_handle(handle).await;
+                                            error!("Download worker active task changed after provider acquire");
+                                            break 'worker;
+                                        }
+                                        Err(err) => {
+                                            connection_manager.release_provider_handle(handle).await;
+                                            error!("Download worker commit failed after provider acquire: {err}");
+                                            break 'worker;
+                                        }
+                                    }
                                     handle
                                 }
                                 ProviderAcquireResult::Paused => {
-                                    let _ = dq.persist_to_disk().await;
-                                    broadcast_download_queue_update(&event_manager, &dq).await;
                                     break;
                                 }
                                 ProviderAcquireResult::Cancelled => {
-                                    if let Some(fd) = dq.active.write().await.take() {
-                                        let mut fd = fd;
-                                        fd.next_retry_at = None;
-                                        dq.finished.write().await.push(fd);
+                                    if let Err(err) = broadcast_required_worker_mutation(
+                                        &event_manager,
+                                        &dq,
+                                        cancel_active_and_promote(&dq, &worker_uuid).await,
+                                        "provider-wait cancellation",
+                                    )
+                                    .await
+                                    {
+                                        error!("Download worker commit failed: {err}");
+                                        break 'worker;
                                     }
-                                    *dq.control_signal.write().await = DownloadControl::None;
-                                    let _ = dq.persist_to_disk().await;
-                                    *dq.active.write().await = dq.queue.lock().await.pop_front();
-                                    let _ = dq.persist_to_disk().await;
-                                    broadcast_download_queue_update(&event_manager, &dq).await;
                                     continue;
                                 }
                                 ProviderAcquireResult::Preempted => {
-                                    *control_signal.write().await = DownloadControl::None;
-                                    requeue_active_download_for_capacity_wait(&dq, "Reloading download service configuration").await;
-                                    *dq.active.write().await = dq.queue.lock().await.pop_front();
-                                    let _ = dq.persist_to_disk().await;
-                                    broadcast_download_queue_update(&event_manager, &dq).await;
+                                    if let Err(err) = broadcast_required_worker_mutation(
+                                        &event_manager,
+                                        &dq,
+                                        requeue_active_download_for_capacity_wait(
+                                            &dq,
+                                            &worker_uuid,
+                                            "Reloading download service configuration",
+                                            true,
+                                            Some(DownloadControl::Restart),
+                                        )
+                                        .await,
+                                        "configuration-reload requeue",
+                                    )
+                                    .await
+                                    {
+                                        error!("Download worker commit failed: {err}");
+                                        break 'worker;
+                                    }
                                     break;
                                 }
                             };
 
                             let execution_result = {
-                                let active = dq.active.read().await;
-                                let Some(download) = active.as_ref().cloned() else {
-                                    break;
+                                let Some(download) = active_download_snapshot_for_worker(&dq.active, &worker_uuid).await
+                                else {
+                                    connection_manager.release_provider_handle(provider_handle).await;
+                                    break 'worker;
                                 };
-                                drop(active);
-                                match download.kind {
+                                match download.kind.clone() {
                                     DownloadKind::Download => download_file(
                                         Arc::clone(&dq.active),
+                                        download,
                                         &client,
                                         Arc::clone(&control_signal),
                                         Arc::clone(&control_notify),
                                         provider_handle.as_ref().and_then(|handle| handle.cancel_token.clone()),
                                         Some(&event_manager),
-                                        Some(&dq),
                                     )
                                     .await,
-                                    DownloadKind::Recording => {
+                                    DownloadKind::Recording => 'recording_execution: {
+                                        let execution_download = match recording_execution_download(&app_config, &download) {
+                                            Ok(execution_download) => execution_download,
+                                            Err(err) => break 'recording_execution DownloadExecutionResult::Failed(err),
+                                        };
+                                        let progress_path = recording_partial_path(&execution_download.file_path);
+                                        let container_format = app_config
+                                            .config
+                                            .load()
+                                            .video
+                                            .as_ref()
+                                            .and_then(|video| video.download.as_ref())
+                                            .and_then(|dl| dl.recording.as_ref())
+                                            .map_or_else(
+                                                shared::model::RecordingContainerFormat::default,
+                                                |recording| recording.container_format,
+                                            );
                                         let mut recording_future = Box::pin(run_recording(
-                                            &download,
+                                            &execution_download,
                                             &control_signal,
                                             &control_notify,
                                             provider_handle.as_ref().and_then(|handle| handle.cancel_token.as_ref()),
+                                            container_format,
                                         ));
                                         let mut progress_tick = time::interval(RECORDING_PROGRESS_UPDATE_INTERVAL);
                                         progress_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -1005,13 +1380,25 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                                 recording_result = &mut recording_future => break recording_result,
                                                 _ = progress_tick.tick() => {
                                                     if event_manager.has_event_receivers() {
-                                                        refresh_recording_progress(&dq.active, &download.file_path, &event_manager).await;
+                                                        refresh_recording_progress(
+                                                            &dq.active,
+                                                            &worker_uuid,
+                                                            &progress_path,
+                                                            &event_manager,
+                                                        )
+                                                        .await;
                                                     }
                                                 }
                                             }
                                         };
                                         if event_manager.has_event_receivers() {
-                                            refresh_recording_progress(&dq.active, &download.file_path, &event_manager).await;
+                                            refresh_recording_progress(
+                                                &dq.active,
+                                                &worker_uuid,
+                                                &progress_path,
+                                                &event_manager,
+                                            )
+                                            .await;
                                         }
 
                                         match result {
@@ -1030,35 +1417,80 @@ pub(in crate::api) async fn ensure_download_worker_running(
                             {
                                 DownloadExecutionResult::Completed => {
                                     connection_manager.release_provider_handle(provider_handle).await;
-                                    if let Some(fd) = &mut *dq.active.write().await {
+                                    let measured_bytes = {
+                                        let active = dq.active.read().await;
+                                        match active.as_ref() {
+                                            Some(fd) => tokio::fs::metadata(&fd.file_path)
+                                                .await
+                                                .map_or(fd.size, |metadata| metadata.len()),
+                                            None => 0,
+                                        }
+                                    };
+                                    let committed = finish_active_and_promote(&dq, &worker_uuid, |fd| {
                                         fd.finished = true;
+                                        fd.paused = false;
                                         fd.state = DownloadState::Completed;
+                                        fd.size = measured_bytes;
+                                        fd.error = None;
                                         fd.next_retry_at = None;
-                                        dq.finished.write().await.push(fd.clone());
+                                        if let Some(meta) = fd.recording.as_mut() {
+                                            meta.measured_bytes = measured_bytes;
+                                            meta.reserved_bytes = 0;
+                                            meta.completed_at = Some(chrono::Utc::now().timestamp());
+                                            meta.partial_relative_path = None;
+                                        }
+                                        mark_recording_metadata_notification(
+                                            fd.recording.as_mut(),
+                                            LifecycleEvent::Completed,
+                                            None,
+                                        )
+                                    })
+                                    .await;
+                                    match committed {
+                                        Ok(Some(notification)) => {
+                                            spawn_recording_notification_after_persist(
+                                                &app_config,
+                                                &client,
+                                                notification,
+                                                true,
+                                            );
+                                            broadcast_download_queue_update(&event_manager, &dq).await;
+                                        }
+                                        Ok(None) => {}
+                                        Err(err) => {
+                                            error!("Failed to persist completed download state: {err}");
+                                            break 'worker;
+                                        }
                                     }
-                                    let _ = dq.persist_to_disk().await;
-                                    *dq.active.write().await = dq.queue.lock().await.pop_front();
-                                    let _ = dq.persist_to_disk().await;
-                                    broadcast_download_queue_update(&event_manager, &dq).await;
                                 }
                                 DownloadExecutionResult::Paused => {
                                     connection_manager.release_provider_handle(provider_handle).await;
-                                    let _ = dq.persist_to_disk().await;
-                                    broadcast_download_queue_update(&event_manager, &dq).await;
+                                    if let Err(err) = broadcast_required_worker_mutation(
+                                        &event_manager,
+                                        &dq,
+                                        set_active_download_state(&dq, &worker_uuid, DownloadState::Paused, None, true).await,
+                                        "paused state",
+                                    )
+                                    .await
+                                    {
+                                        error!("Download worker commit failed: {err}");
+                                        break 'worker;
+                                    }
                                     break;
                                 }
                                 DownloadExecutionResult::Cancelled => {
                                     connection_manager.release_provider_handle(provider_handle).await;
-                                    if let Some(fd) = dq.active.write().await.take() {
-                                        let mut fd = fd;
-                                        fd.next_retry_at = None;
-                                        dq.finished.write().await.push(fd);
+                                    if let Err(err) = broadcast_required_worker_mutation(
+                                        &event_manager,
+                                        &dq,
+                                        cancel_active_and_promote(&dq, &worker_uuid).await,
+                                        "cancelled state",
+                                    )
+                                    .await
+                                    {
+                                        error!("Download worker commit failed: {err}");
+                                        break 'worker;
                                     }
-                                    *dq.control_signal.write().await = DownloadControl::None;
-                                    let _ = dq.persist_to_disk().await;
-                                    *dq.active.write().await = dq.queue.lock().await.pop_front();
-                                    let _ = dq.persist_to_disk().await;
-                                    broadcast_download_queue_update(&event_manager, &dq).await;
                                 }
                                 DownloadExecutionResult::Preempted => {
                                     connection_manager.release_provider_handle(provider_handle).await;
@@ -1067,7 +1499,6 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                         DownloadControl::Restart => warn!("Active transfer is restarting to apply updated download service configuration"),
                                         _ => warn!("Active transfer was preempted by a higher-priority stream"),
                                     }
-                                    *dq.control_signal.write().await = DownloadControl::None;
                                     let reason = {
                                         let active = dq.active.read().await;
                                         if control == DownloadControl::Restart {
@@ -1076,10 +1507,24 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                             active.as_ref().map_or(DOWNLOAD_PREEMPTED_REASON, preemption_reason_for)
                                         }
                                     };
-                                    requeue_active_download_for_capacity_wait(&dq, reason).await;
-                                    *dq.active.write().await = dq.queue.lock().await.pop_front();
-                                    let _ = dq.persist_to_disk().await;
-                                    broadcast_download_queue_update(&event_manager, &dq).await;
+                                    if let Err(err) = broadcast_required_worker_mutation(
+                                        &event_manager,
+                                        &dq,
+                                        requeue_active_download_for_capacity_wait(
+                                            &dq,
+                                            &worker_uuid,
+                                            reason,
+                                            true,
+                                            (control == DownloadControl::Restart).then_some(DownloadControl::Restart),
+                                        )
+                                        .await,
+                                        "preempted requeue",
+                                    )
+                                    .await
+                                    {
+                                        error!("Download worker commit failed: {err}");
+                                        break 'worker;
+                                    }
                                     if should_exit_worker_after_preempt(control) {
                                         break;
                                     }
@@ -1087,64 +1532,32 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 DownloadExecutionResult::Retryable(_err) => {
                                     connection_manager.release_provider_handle(provider_handle).await;
                                     warn!("Retrying active download after transient failure");
-                                    let retry_plan = {
-                                        let mut active = dq.active.write().await;
-                                        if let Some(download) = active.as_mut() {
-                                            download.retry_attempts = download.retry_attempts.saturating_add(1);
-                                            if download.retry_attempts > download_cfg.retry_max_attempts {
-                                                None
-                                            } else {
-                                                let retry_delay_secs =
-                                                    compute_download_retry_backoff_secs(download.retry_attempts, &download_cfg);
-                                                let next_retry_at = chrono::Utc::now()
-                                                    .timestamp()
-                                                    .saturating_add(i64::try_from(retry_delay_secs).unwrap_or(i64::MAX));
-                                                download.next_retry_at = Some(next_retry_at);
-                                                Some((retry_delay_secs, next_retry_at, download.retry_attempts))
+                                    let retry_commit = prepare_active_retry(&dq, &worker_uuid, &download_cfg).await;
+                                    let retry_delay_secs = match retry_commit {
+                                        Ok(Some(RetryCommit::Waiting { delay_secs, attempts })) => {
+                                            debug!("Download retry attempt {attempts} scheduled in {delay_secs}s");
+                                            broadcast_download_queue_update(&event_manager, &dq).await;
+                                            delay_secs
+                                        }
+                                        Ok(Some(RetryCommit::Failed(notification))) => {
+                                        spawn_recording_notification_after_persist(
+                                            &app_config,
+                                            &client,
+                                            notification,
+                                                true,
+                                        );
+                                            broadcast_download_queue_update(&event_manager, &dq).await;
+                                            if dq.active.read().await.is_some() {
+                                                continue;
                                             }
-                                        } else {
-                                            let retry_delay_secs = compute_download_retry_backoff_secs(1, &download_cfg);
-                                            let next_retry_at = chrono::Utc::now()
-                                                .timestamp()
-                                                .saturating_add(i64::try_from(retry_delay_secs).unwrap_or(i64::MAX));
-                                            Some((retry_delay_secs, next_retry_at, 1))
+                                            break;
+                                        }
+                                        Ok(None) => break,
+                                        Err(err) => {
+                                            error!("Failed to persist retry state: {err}");
+                                            break;
                                         }
                                     };
-                                    let Some((retry_delay_secs, _next_retry_at, retry_attempts)) = retry_plan else {
-                                        if let Some(fd) = &mut *dq.active.write().await {
-                                            fd.finished = true;
-                                            fd.paused = false;
-                                            fd.next_retry_at = None;
-                                            fd.state = DownloadState::Failed;
-                                            fd.error = Some(format!(
-                                                "Retry limit reached after {} attempts",
-                                                download_cfg.retry_max_attempts
-                                            ));
-                                            dq.finished.write().await.push(fd.clone());
-                                        }
-                                        let _ = dq.persist_to_disk().await;
-                                        *dq.active.write().await = dq.queue.lock().await.pop_front();
-                                        let _ = dq.persist_to_disk().await;
-                                        broadcast_download_queue_update(&event_manager, &dq).await;
-                                        if dq.active.read().await.is_some() {
-                                            continue;
-                                        }
-                                        break;
-                                    };
-                                    if set_active_download_state(
-                                        &dq,
-                                        DownloadState::RetryWaiting,
-                                        Some(format!(
-                                            "Retrying after transient failure in {retry_delay_secs}s (attempt {retry_attempts}/{})",
-                                            download_cfg.retry_max_attempts
-                                        )),
-                                        false,
-                                    )
-                                    .await
-                                    {
-                                        let _ = dq.persist_to_disk().await;
-                                        broadcast_download_queue_update(&event_manager, &dq).await;
-                                    }
                                     let mut retry_sleep = Box::pin(time::sleep(Duration::from_secs(retry_delay_secs)));
                                     let retry_wait_outcome = loop {
                                         tokio::select! {
@@ -1162,44 +1575,73 @@ pub(in crate::api) async fn ensure_download_worker_running(
 
                                     match retry_wait_outcome {
                                         DownloadExecutionResult::Retryable(_) => {
-                                            *dq.control_signal.write().await = DownloadControl::None;
-                                            requeue_active_download_for_retry(&dq).await;
-                                            *dq.active.write().await = dq.queue.lock().await.pop_front();
-                                            let _ = dq.persist_to_disk().await;
-                                            broadcast_download_queue_update(&event_manager, &dq).await;
+                                            if let Err(err) = broadcast_required_worker_mutation(
+                                                &event_manager,
+                                                &dq,
+                                                requeue_active_download_for_retry(&dq, &worker_uuid, true).await,
+                                                "retry requeue",
+                                            )
+                                            .await
+                                            {
+                                                error!("Download worker commit failed: {err}");
+                                                break 'worker;
+                                            }
                                         }
                                         DownloadExecutionResult::Paused => {
-                                            if let Some(download) = dq.active.write().await.as_mut() {
-                                                download.paused = true;
-                                                download.state = DownloadState::Paused;
-                                                download.next_retry_at = None;
+                                            if let Err(err) = broadcast_required_worker_mutation(
+                                                &event_manager,
+                                                &dq,
+                                                set_active_download_state(
+                                                    &dq,
+                                                    &worker_uuid,
+                                                    DownloadState::Paused,
+                                                    None,
+                                                    true,
+                                                )
+                                                .await,
+                                                "paused retry state",
+                                            )
+                                            .await
+                                            {
+                                                error!("Download worker commit failed: {err}");
+                                                break 'worker;
                                             }
-                                            let _ = dq.persist_to_disk().await;
-                                            broadcast_download_queue_update(&event_manager, &dq).await;
                                             break;
                                         }
                                         DownloadExecutionResult::Cancelled => {
-                                            if let Some(fd) = dq.active.write().await.take() {
-                                                let mut fd = fd;
-                                                fd.next_retry_at = None;
-                                                fd.error.get_or_insert_with(|| "Cancelled by user".to_string());
-                                                fd.state = DownloadState::Cancelled;
-                                                dq.finished.write().await.push(fd);
+                                            if let Err(err) = broadcast_required_worker_mutation(
+                                                &event_manager,
+                                                &dq,
+                                                cancel_active_and_promote(&dq, &worker_uuid).await,
+                                                "cancelled retry state",
+                                            )
+                                            .await
+                                            {
+                                                error!("Download worker commit failed: {err}");
+                                                break 'worker;
                                             }
-                                            *dq.control_signal.write().await = DownloadControl::None;
-                                            let _ = dq.persist_to_disk().await;
-                                            *dq.active.write().await = dq.queue.lock().await.pop_front();
-                                            let _ = dq.persist_to_disk().await;
-                                            broadcast_download_queue_update(&event_manager, &dq).await;
                                         }
                                         DownloadExecutionResult::Completed
                                         | DownloadExecutionResult::Failed(_) => {}
                                         DownloadExecutionResult::Preempted => {
-                                            *dq.control_signal.write().await = DownloadControl::None;
-                                            requeue_active_download_for_capacity_wait(&dq, "Reloading download service configuration").await;
-                                            *dq.active.write().await = dq.queue.lock().await.pop_front();
-                                            let _ = dq.persist_to_disk().await;
-                                            broadcast_download_queue_update(&event_manager, &dq).await;
+                                            if let Err(err) = broadcast_required_worker_mutation(
+                                                &event_manager,
+                                                &dq,
+                                                requeue_active_download_for_capacity_wait(
+                                                    &dq,
+                                                    &worker_uuid,
+                                                    "Reloading download service configuration",
+                                                    true,
+                                                    Some(DownloadControl::Restart),
+                                                )
+                                                .await,
+                                                "configuration-reload retry requeue",
+                                            )
+                                            .await
+                                            {
+                                                error!("Download worker commit failed: {err}");
+                                                break 'worker;
+                                            }
                                             break;
                                         }
                                     }
@@ -1207,18 +1649,35 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                 DownloadExecutionResult::Failed(err) => {
                                     connection_manager.release_provider_handle(provider_handle).await;
                                     warn!("Download failed permanently: {err}");
-                                    if let Some(fd) = &mut *dq.active.write().await {
+                                    let committed = finish_active_and_promote(&dq, &worker_uuid, |fd| {
                                         fd.finished = true;
                                         fd.paused = false;
                                         fd.next_retry_at = None;
-                                        fd.error = Some(err);
+                                        fd.error = Some(err.clone());
                                         fd.state = DownloadState::Failed;
-                                        dq.finished.write().await.push(fd.clone());
+                                        mark_recording_metadata_notification(
+                                            fd.recording.as_mut(),
+                                            LifecycleEvent::Failed,
+                                            Some(err),
+                                        )
+                                    })
+                                    .await;
+                                    match committed {
+                                        Ok(Some(notification)) => {
+                                            spawn_recording_notification_after_persist(
+                                                &app_config,
+                                                &client,
+                                                notification,
+                                                true,
+                                            );
+                                            broadcast_download_queue_update(&event_manager, &dq).await;
+                                        }
+                                        Ok(None) => {}
+                                        Err(commit_err) => {
+                                            error!("Failed to persist failed download state: {commit_err}");
+                                            break 'worker;
+                                        }
                                     }
-                                    let _ = dq.persist_to_disk().await;
-                                    *dq.active.write().await = dq.queue.lock().await.pop_front();
-                                    let _ = dq.persist_to_disk().await;
-                                    broadcast_download_queue_update(&event_manager, &dq).await;
                                 }
                             }
                         } else {
@@ -1394,8 +1853,18 @@ pub async fn queue_download_file(
                         "Queueing download {} ({}) from {}",
                         file_download.uuid, file_download.filename, file_download.url
                     );
-                    app_state.downloads.queue.lock().await.push_back(file_download.clone());
-                    let _ = app_state.downloads.persist_to_disk().await;
+                    if let Err(err) = mutate(&app_state.downloads, |candidate| {
+                        candidate.queue.push(DownloadQueue::to_persisted(&file_download));
+                        Ok(())
+                    })
+                    .await
+                    {
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(json!({"error": err.message()})),
+                        )
+                            .into_response();
+                    }
                     if app_state.downloads.active.read().await.is_none() {
                         match ensure_download_worker_running(
                             &app_state.app_config,
@@ -1479,8 +1948,18 @@ pub async fn queue_recording_file(
                         );
                         return axum::Json(shared::model::FileDownloadDto::from(&existing)).into_response();
                     }
-                    app_state.downloads.scheduled.write().await.push(recording.clone());
-                    let _ = app_state.downloads.persist_to_disk().await;
+                    if let Err(err) = mutate(&app_state.downloads, |candidate| {
+                        candidate.scheduled.push(DownloadQueue::to_persisted(&recording));
+                        Ok(())
+                    })
+                    .await
+                    {
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            axum::Json(json!({"error": err.message()})),
+                        )
+                            .into_response();
+                    }
                     broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
                     axum::Json(shared::model::FileDownloadDto::from(&recording)).into_response()
                 }
@@ -1509,25 +1988,29 @@ pub async fn pause_download(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<DownloadActionRequest>,
 ) -> impl axum::response::IntoResponse + Send {
-    let active = { app_state.downloads.active.read().await.clone() };
-    if let Some(active) = active {
-        if active.uuid == req.uuid {
-            app_state.downloads.pause_active().await;
+    match app_state.downloads.pause_active(&req.uuid).await {
+        Ok(true) => {
             broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
-            return axum::Json(json!({"success": true})).into_response();
+            axum::Json(json!({"success": true})).into_response()
+        }
+        Ok(false) => axum::Json(json!({"success": false})).into_response(),
+        Err(err) => {
+            error!("Failed to persist paused download state: {err}");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({"error": err.message()})),
+            )
+                .into_response()
         }
     }
-    axum::Json(json!({"success": false})).into_response()
 }
 
 pub async fn resume_download(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<DownloadActionRequest>,
 ) -> impl axum::response::IntoResponse + Send {
-    let active = { app_state.downloads.active.read().await.clone() };
-    if let Some(active) = active {
-        if active.uuid == req.uuid && active.paused {
-            app_state.downloads.resume_active().await;
+    match app_state.downloads.resume_active(&req.uuid).await {
+        Ok(true) => {
             let download_cfg = app_state
                 .app_config
                 .config
@@ -1560,38 +2043,30 @@ pub async fn resume_download(
                 });
             }
             broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
-            return axum::Json(json!({"success": true})).into_response();
+            axum::Json(json!({"success": true})).into_response()
+        }
+        Ok(false) => axum::Json(json!({"success": false})).into_response(),
+        Err(err) => {
+            error!("Failed to persist resumed download state: {err}");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({"error": err.message()})),
+            )
+                .into_response()
         }
     }
-    axum::Json(json!({"success": false})).into_response()
 }
 
 pub async fn cancel_download(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<DownloadActionRequest>,
 ) -> impl axum::response::IntoResponse + Send {
-    let active = { app_state.downloads.active.read().await.clone() };
-    if let Some(active) = active {
-        if active.uuid == req.uuid {
-            let was_paused = active.paused;
-            app_state.downloads.cancel_active().await;
+    match app_state.downloads.cancel_requested(&req.uuid).await {
+        Ok(Some(was_paused)) => {
             if was_paused {
-                if let Some(fd) = app_state.downloads.active.write().await.take() {
-                    let mut fd = fd;
-                    fd.next_retry_at = None;
-                    fd.finished = true;
-                    fd.paused = false;
-                    fd.state = DownloadState::Cancelled;
-                    fd.error.get_or_insert_with(|| "Cancelled by user".to_string());
-                    app_state.downloads.finished.write().await.push(fd);
-                }
-                *app_state.downloads.control_signal.write().await = DownloadControl::None;
-                let next_active = app_state.downloads.queue.lock().await.pop_front();
-                *app_state.downloads.active.write().await = next_active;
-                let _ = app_state.downloads.persist_to_disk().await;
                 let config = app_state.app_config.config.load();
                 if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()) {
-                    let _ = ensure_download_worker_running(
+                    if let Err(err) = ensure_download_worker_running(
                         &app_state.app_config,
                         download_cfg,
                         &app_state.downloads,
@@ -1599,38 +2074,73 @@ pub async fn cancel_download(
                         &app_state.active_provider,
                         &app_state.connection_manager,
                     )
-                    .await;
+                    .await
+                    {
+                        error!("Failed to start download worker after cancelling paused task: {err}");
+                    }
                 }
             }
             broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
-            return axum::Json(json!({"success": true})).into_response();
+            axum::Json(json!({"success": true})).into_response()
+        }
+        Ok(None) => {
+            match app_state.downloads.remove_from_queue(&req.uuid).await {
+                Ok(true) => {
+                    broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
+                    axum::Json(json!({"success": true})).into_response()
+                }
+                Ok(false) => axum::Json(json!({"success": false})).into_response(),
+                Err(err) => (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(json!({"error": err.message()})),
+                )
+                    .into_response(),
+            }
+        }
+        Err(err) => {
+            error!("Failed to persist cancelled download state: {err}");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({"error": err.message()})),
+            )
+                .into_response()
         }
     }
-    // Remove from queue
-    let found = app_state.downloads.remove_from_queue(&req.uuid).await;
-    if found {
-        broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
-    }
-    axum::Json(json!({"success": found})).into_response()
 }
 
 pub async fn remove_download(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<DownloadActionRequest>,
 ) -> impl axum::response::IntoResponse + Send {
-    let removed_from_finished = app_state.downloads.remove_finished(&req.uuid).await;
-    let removed_from_queue = app_state.downloads.remove_from_queue(&req.uuid).await;
-    if removed_from_finished || removed_from_queue {
-        broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
+    match app_state.downloads.remove(&req.uuid).await {
+        Ok(removed) => {
+            if removed {
+                broadcast_download_queue_update(&app_state.event_manager, &app_state.downloads).await;
+            }
+            axum::Json(json!({"success": removed})).into_response()
+        }
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({"error": err.message()})),
+        )
+            .into_response(),
     }
-    axum::Json(json!({"success": removed_from_finished || removed_from_queue})).into_response()
 }
 
 pub async fn retry_download(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(req): axum::extract::Json<DownloadActionRequest>,
 ) -> impl axum::response::IntoResponse + Send {
-    let retried = app_state.downloads.retry_finished(&req.uuid).await;
+    let retried = match app_state.downloads.retry_finished(&req.uuid).await {
+        Ok(retried) => retried,
+        Err(err) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(json!({"error": err.message()})),
+            )
+                .into_response();
+        }
+    };
     if retried {
         // Start the queue if not running
         let app_config = &app_state.app_config;
@@ -1658,24 +2168,41 @@ pub async fn retry_download(
 #[cfg(test)]
 mod tests {
     use super::{
-        active_download_snapshot, parse_content_range_total, pause_download, preemption_reason_for, recording_deadline_reached,
-        requeue_active_download_for_capacity_wait, requeue_active_download_for_retry, resume_download,
-        retryable_transport_error_message, set_active_download_state, should_exit_worker_after_preempt, DownloadActionRequest,
+        active_download_snapshot, active_download_snapshot_for_worker, broadcast_download_queue_update,
+        broadcast_required_worker_mutation, broadcast_worker_mutation, cancel_active_and_promote, cancel_download,
+        commit_acquired_download, finish_active_and_promote,
+        mark_recording_notification,
+        parse_content_range_total, pause_download, preemption_reason_for, recording_deadline_reached,
+        recording_execution_download,
+        refresh_recording_progress, requeue_active_download_for_capacity_wait,
+        requeue_active_download_for_retry, resume_download, rollback_last_recording_marker,
+        retryable_transport_error_message, set_active_download_state, should_exit_worker_after_preempt,
+        DownloadActionRequest,
         DOWNLOAD_PREEMPTED_REASON, RECORDING_PREEMPTED_REASON,
     };
     use crate::{
         api::model::{
             ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionManager, DownloadControl,
-            DownloadKind, DownloadQueue, DownloadState, EventManager, FileDownload, MetadataUpdateManager,
+            DownloadKind, DownloadQueue, DownloadState, EventManager, EventMessage, FileDownload, MetadataUpdateManager,
             PlaylistStorageState, SharedStreamManager, UpdateGuard,
         },
-        model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProcessTargets, SourcesConfig},
+        api::model::recording_notification::LifecycleEvent,
+        model::{
+            ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, MediaToolCapabilities,
+            MessageContent, ProcessTargets, SourcesConfig,
+        },
         utils::{FileLockManager, GeoIp},
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::response::IntoResponse;
     use reqwest::header::{HeaderMap, HeaderValue};
-    use shared::{model::{ConfigPaths, InputFetchMethod, InputType}, utils::Internable};
+    use shared::{
+        model::{
+            ConfigPaths, InputFetchMethod, InputType, RecordingMetadata, RecordingOwner, RecordingSource,
+            RecordingVisibility, UserId,
+        },
+        utils::Internable,
+    };
     use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
     use tokio::sync::mpsc;
     use tokio::sync::RwLock;
@@ -1700,7 +2227,88 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         }
+    }
+
+    fn attach_recording(download: &mut FileDownload, owner: RecordingOwner, visibility: RecordingVisibility) {
+        let mut metadata = RecordingMetadata::new(
+            owner,
+            visibility,
+            RecordingSource::new("1", "42", "input-a"),
+            1_000,
+            1_060,
+            0,
+            0,
+        );
+        metadata.program_title = Some("Programme".to_string());
+        metadata.channel_name = Some("Channel".to_string());
+        metadata.relative_path = Some("Channel/Programme.ts".to_string());
+        download.recording = Some(metadata);
+    }
+
+    #[test]
+    fn recording_notification_marker_is_at_most_once() {
+        let mut download = make_download(DownloadKind::Recording, DownloadState::Completed, Some(1_000), Some(60));
+        attach_recording(&mut download, RecordingOwner::LegacyAdmin, RecordingVisibility::Shared);
+
+        let first = mark_recording_notification(&mut download, LifecycleEvent::Completed, None);
+        let duplicate = mark_recording_notification(&mut download, LifecycleEvent::Completed, None);
+
+        assert!(matches!(first.message, Some(MessageContent::RecordingLifecycle(_))));
+        assert!(duplicate.message.is_none());
+        assert_eq!(
+            download
+                .recording
+                .as_ref()
+                .map_or(0, |metadata| metadata.notification_markers.len()),
+            1
+        );
+    }
+
+    #[test]
+    fn private_user_recording_notification_is_suppressed() {
+        let mut download = make_download(DownloadKind::Recording, DownloadState::Completed, Some(1_000), Some(60));
+        attach_recording(
+            &mut download,
+            RecordingOwner::User(UserId::from("web:alice")),
+            RecordingVisibility::Private,
+        );
+
+        let message = mark_recording_notification(&mut download, LifecycleEvent::Completed, None);
+
+        assert!(message.message.is_none());
+        assert_eq!(
+            download
+                .recording
+                .as_ref()
+                .map_or(0, |metadata| metadata.notification_markers.len()),
+            0
+        );
+    }
+
+    #[test]
+    fn rollback_last_recording_marker_removes_most_recent_matching_kind() {
+        let mut download = make_download(DownloadKind::Recording, DownloadState::Completed, Some(1_000), Some(60));
+        attach_recording(&mut download, RecordingOwner::LegacyAdmin, RecordingVisibility::Shared);
+
+        // Two distinct marker kinds end up in the same metadata after a
+        // successful Completed followed by a Failed on the same task — this
+        // mirrors what would happen in production across two persist rounds.
+        let first = mark_recording_notification(&mut download, LifecycleEvent::Completed, None);
+        let second = mark_recording_notification(&mut download, LifecycleEvent::Failed, Some("ffmpeg exited".to_string()));
+        assert!(first.marker_kind.is_some());
+        assert!(second.marker_kind.is_some());
+
+        let kind = second.marker_kind.unwrap();
+        rollback_last_recording_marker(&mut download, &kind);
+
+        let markers = &download.recording.as_ref().unwrap().notification_markers;
+        assert_eq!(markers.len(), 1, "only the Completed marker should remain");
+        assert!(matches!(
+            markers[0].kind,
+            shared::model::recording::NotificationMarkerKind::Completed
+        ));
     }
 
     #[test]
@@ -1713,16 +2321,59 @@ mod tests {
         assert!(!recording_deadline_reached(&normal, 1_060));
     }
 
+    #[test]
+    fn recording_execution_requires_metadata_source() {
+        let recording = make_download(DownloadKind::Recording, DownloadState::Downloading, Some(1_000), Some(60));
+
+        let result = recording_execution_download(&create_test_app_config(), &recording);
+
+        assert_eq!(result.as_ref().err().map(String::as_str), Some("Recording source metadata missing"));
+    }
+
+    #[test]
+    fn recording_execution_uses_fresh_token_without_mutating_persisted_descriptor() {
+        let mut recording = make_download(DownloadKind::Recording, DownloadState::Downloading, Some(1_000), Some(60));
+        recording.url = reqwest::Url::parse(
+            "tuliprox-recording://source?target_name=stable-target&input_name=provider_1&virtual_id=42&cluster=live",
+        )
+        .expect("valid descriptor");
+        attach_recording(&mut recording, RecordingOwner::LegacyAdmin, RecordingVisibility::Private);
+        let source = recording
+            .recording
+            .as_mut()
+            .and_then(|metadata| metadata.source.as_mut())
+            .expect("recording source");
+        source.target_id = "stable-target".to_string();
+        source.virtual_id = "42".to_string();
+        source.input_name = "provider_1".to_string();
+        let persisted_before = DownloadQueue::to_persisted(&recording);
+        let app_config = create_test_app_config();
+
+        let execution = recording_execution_download(&app_config, &recording).expect("execution download");
+        let token = execution
+            .url
+            .path_segments()
+            .and_then(|segments| segments.collect::<Vec<_>>().get(4).copied())
+            .expect("route token");
+
+        assert!(crate::auth::verify_access_token(token, &app_config.access_token_secret));
+        assert_eq!(recording.url.as_str(), persisted_before.url);
+        assert_eq!(DownloadQueue::to_persisted(&recording).url, persisted_before.url);
+        assert_ne!(execution.url, recording.url);
+    }
+
     #[tokio::test]
-    async fn retry_requeues_active_download_at_front() {
-        let queue = DownloadQueue::new();
+    async fn retry_requeues_active_download_at_front_in_one_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_file = dir.path().join("downloads_state.json");
+        let queue = DownloadQueue::new_with_state_file(Some(state_file.clone()));
         let queued = make_download(DownloadKind::Download, DownloadState::Queued, None, None);
         let active = make_download(DownloadKind::Download, DownloadState::Downloading, None, None);
 
         queue.queue.lock().await.push_back(queued);
         *queue.active.write().await = Some(active);
 
-        requeue_active_download_for_retry(&queue).await;
+        requeue_active_download_for_retry(&queue, "id", false).await.expect("requeue retry");
 
         assert!(queue.active.read().await.is_none());
         let queued_items = queue.queue.lock().await.iter().cloned().collect::<Vec<_>>();
@@ -1730,6 +2381,10 @@ mod tests {
         assert_eq!(queued_items[0].state, DownloadState::Queued);
         assert_eq!(queued_items[0].size, 128);
         assert!(queued_items[0].error.is_none());
+        assert_eq!(queue.revision.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let persisted: crate::api::model::PersistedDownloadQueue =
+            serde_json::from_slice(&std::fs::read(state_file).expect("read state")).expect("parse state");
+        assert_eq!(persisted.revision, shared::model::QueueRevision(1));
     }
 
     #[tokio::test]
@@ -1740,7 +2395,9 @@ mod tests {
         active.total_size = Some(2048);
         *queue.active.write().await = Some(active);
 
-        requeue_active_download_for_capacity_wait(&queue, DOWNLOAD_PREEMPTED_REASON).await;
+        requeue_active_download_for_capacity_wait(&queue, "id", DOWNLOAD_PREEMPTED_REASON, false, None)
+            .await
+            .expect("requeue capacity wait");
 
         assert!(queue.active.read().await.is_none());
         let queued_items = queue.queue.lock().await.iter().cloned().collect::<Vec<_>>();
@@ -1752,13 +2409,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_transition_finishes_active_and_promotes_next_in_one_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = DownloadQueue::new_with_state_file(Some(dir.path().join("downloads_state.json")));
+        *queue.active.write().await = Some(make_download(
+            DownloadKind::Download,
+            DownloadState::Downloading,
+            None,
+            None,
+        ));
+        let mut next = make_download(DownloadKind::Download, DownloadState::Queued, None, None);
+        next.uuid = "next".to_string();
+        queue.queue.lock().await.push_back(next);
+
+        finish_active_and_promote(&queue, "id", |finished| {
+            finished.finished = true;
+            finished.state = DownloadState::Completed;
+            super::RecordingNotificationPlan::empty()
+        })
+        .await
+        .expect("terminal commit");
+
+        assert_eq!(queue.revision.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(queue.finished.read().await.len(), 1);
+        assert_eq!(queue.active.read().await.as_ref().map(|active| active.uuid.as_str()), Some("next"));
+    }
+
+    #[tokio::test]
+    async fn worker_mutation_failure_keeps_memory_and_revision_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocking_dir = dir.path().join("state");
+        std::fs::create_dir_all(&blocking_dir).expect("create blocking dir");
+        let queue = DownloadQueue::new_with_state_file(Some(blocking_dir));
+        *queue.active.write().await = Some(make_download(
+            DownloadKind::Download,
+            DownloadState::Downloading,
+            None,
+            None,
+        ));
+
+        let result = requeue_active_download_for_retry(&queue, "id", false).await;
+
+        assert!(result.is_err());
+        assert_eq!(queue.revision.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(queue.queue.lock().await.is_empty());
+        assert_eq!(queue.active.read().await.as_ref().map(|active| active.state.clone()), Some(DownloadState::Downloading));
+    }
+
+    #[tokio::test]
     async fn preempted_active_recording_requeues_with_recording_specific_policy_message() {
         let queue = DownloadQueue::new();
         let mut active = make_download(DownloadKind::Recording, DownloadState::Downloading, Some(1_000), Some(600));
         active.size = 512;
         *queue.active.write().await = Some(active);
 
-        requeue_active_download_for_capacity_wait(&queue, RECORDING_PREEMPTED_REASON).await;
+        requeue_active_download_for_capacity_wait(&queue, "id", RECORDING_PREEMPTED_REASON, false, None)
+            .await
+            .expect("requeue recording");
 
         let queued_items = queue.queue.lock().await.iter().cloned().collect::<Vec<_>>();
         assert_eq!(queued_items.len(), 1);
@@ -1792,17 +2499,99 @@ mod tests {
 
         let changed = set_active_download_state(
             &queue,
+            "id",
             DownloadState::WaitingForCapacity,
             Some("waiting".to_string()),
             false,
         )
         .await;
 
-        assert!(changed);
+        assert!(changed.expect("set active state"));
         let active = queue.active.read().await.clone().expect("active download");
         assert_eq!(active.state, DownloadState::WaitingForCapacity);
         assert_eq!(active.error.as_deref(), Some("waiting"));
         assert!(!active.paused);
+    }
+
+    #[tokio::test]
+    async fn acquisition_without_provider_handle_commits_downloading_state() {
+        let queue = DownloadQueue::new();
+        *queue.active.write().await = Some(make_download(
+            DownloadKind::Download,
+            DownloadState::Queued,
+            None,
+            None,
+        ));
+
+        let notification = commit_acquired_download(&queue, "id").await.expect("acquired commit");
+
+        assert!(notification.is_some());
+        assert_eq!(queue.revision.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(queue.active.read().await.as_ref().map(|active| active.state.clone()), Some(DownloadState::Downloading));
+    }
+
+    #[tokio::test]
+    async fn acquired_transition_rejects_switched_active_task() {
+        let event_manager = Arc::new(EventManager::new());
+        let mut events = event_manager.get_event_channel();
+        let queue = DownloadQueue::new();
+        let mut switched = make_download(DownloadKind::Recording, DownloadState::Queued, None, None);
+        switched.uuid = "task-b".to_string();
+        attach_recording(&mut switched, RecordingOwner::LegacyAdmin, RecordingVisibility::Shared);
+        *queue.active.write().await = Some(switched);
+
+        let transition = commit_acquired_download(&queue, "task-a").await.map(|notification| notification.is_some());
+        let result = broadcast_required_worker_mutation(
+            &event_manager,
+            &queue,
+            transition,
+            "acquired downloading state",
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(queue.revision.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(queue.active.read().await.as_ref().map(|active| active.uuid.as_str()), Some("task-b"));
+        assert_eq!(
+            queue
+                .active
+                .read()
+                .await
+                .as_ref()
+                .and_then(|active| active.recording.as_ref())
+                .map_or(0, |recording| recording.notification_markers.len()),
+            0
+        );
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn post_acquire_snapshot_rejects_switched_active_task() {
+        let queue = DownloadQueue::new();
+        let mut switched = make_download(DownloadKind::Download, DownloadState::Downloading, None, None);
+        switched.uuid = "task-b".to_string();
+        *queue.active.write().await = Some(switched);
+
+        assert!(active_download_snapshot_for_worker(&queue.active, "task-a").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_worker_progress_does_not_update_switched_active_task() {
+        let queue = DownloadQueue::new();
+        let mut switched = make_download(DownloadKind::Recording, DownloadState::Downloading, None, None);
+        switched.uuid = "task-b".to_string();
+        switched.size = 10;
+        *queue.active.write().await = Some(switched);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let progress_path = dir.path().join("task-a.ts.part");
+        std::fs::write(&progress_path, [0_u8; 20]).expect("progress file");
+        let event_manager = Arc::new(EventManager::new());
+        let mut events = event_manager.get_event_channel();
+
+        refresh_recording_progress(&queue.active, "task-a", &progress_path, &event_manager).await;
+
+        assert_eq!(queue.active.read().await.as_ref().map(|active| active.size), Some(10));
+        assert!(events.try_recv().is_err());
     }
 
     #[test]
@@ -1821,6 +2610,7 @@ mod tests {
             retry_backoff_max_secs: 30,
             retry_backoff_jitter_percent: 0,
             retry_max_attempts: 5,
+            recording: None,
         };
 
         assert_eq!(super::compute_download_retry_backoff_secs(1, &download_cfg), 3);
@@ -1845,6 +2635,7 @@ mod tests {
             retry_backoff_max_secs: 30,
             retry_backoff_jitter_percent: 0,
             retry_max_attempts: 5,
+            recording: None,
         };
 
         let capacities = vec![(Arc::<str>::from("a"), 2, 5), (Arc::<str>::from("b"), 3, 5)];
@@ -1868,6 +2659,7 @@ mod tests {
             retry_backoff_max_secs: 30,
             retry_backoff_jitter_percent: 0,
             retry_max_attempts: 5,
+            recording: None,
         };
 
         let blocked = vec![(Arc::<str>::from("a"), 4, 5), (Arc::<str>::from("b"), 4, 5)];
@@ -1905,6 +2697,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         })));
         let snapshot = active_download_snapshot(&active).await;
         assert!(snapshot.is_some());
@@ -1946,7 +2739,18 @@ mod tests {
             config: Arc::new(ArcSwap::from_pointee(Config::default())),
             sources: Arc::new(ArcSwap::from_pointee(sources)),
             hdhomerun: Arc::new(ArcSwapOption::default()),
-            api_proxy: Arc::new(ArcSwapOption::default()),
+            api_proxy: Arc::new(ArcSwapOption::from(Some(Arc::new(ApiProxyConfig {
+                server: vec![ApiProxyServerInfo {
+                    name: "default".to_string(),
+                    protocol: "http".to_string(),
+                    host: "player.example".to_string(),
+                    port: None,
+                    timezone: "UTC".to_string(),
+                    message: String::new(),
+                    path: None,
+                }],
+                ..ApiProxyConfig::default()
+            })))),
             file_locks: Arc::new(FileLockManager::default()),
             paths: Arc::new(ArcSwap::from_pointee(ConfigPaths {
                 home_path: String::new(),
@@ -1968,7 +2772,7 @@ mod tests {
         }
     }
 
-    fn create_test_app_state() -> Arc<AppState> {
+    fn create_test_app_state_with_downloads(downloads: Arc<DownloadQueue>) -> Arc<AppState> {
         let app_cfg = Arc::new(create_test_app_config());
         let event_manager = Arc::new(EventManager::new());
         let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
@@ -2001,7 +2805,7 @@ mod tests {
             http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
             public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
-            downloads: Arc::new(DownloadQueue::new()),
+            downloads,
             cache: Arc::new(ArcSwapOption::default()),
             shared_stream_manager,
             hls_proxy: Arc::new(crate::api::model::HlsProxyManager::new()),
@@ -2017,6 +2821,195 @@ mod tests {
             metadata_manager,
             manual_update_sender,
         })
+    }
+
+    fn create_test_app_state() -> Arc<AppState> {
+        create_test_app_state_with_downloads(Arc::new(DownloadQueue::new()))
+    }
+
+    #[tokio::test]
+    async fn pause_persist_failure_returns_error_without_event_or_memory_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocking_dir = dir.path().join("state");
+        std::fs::create_dir_all(&blocking_dir).expect("create blocking dir");
+        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(blocking_dir)));
+        *downloads.active.write().await = Some(make_download(
+            DownloadKind::Download,
+            DownloadState::Downloading,
+            None,
+            None,
+        ));
+        let app_state = create_test_app_state_with_downloads(Arc::clone(&downloads));
+        let mut events = app_state.event_manager.get_event_channel();
+
+        let response = pause_download(
+            axum::extract::State(app_state),
+            axum::extract::Json(DownloadActionRequest { uuid: "id".to_string() }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(events.try_recv().is_err(), "failed mutation must not broadcast");
+        assert_eq!(downloads.revision.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let active = downloads.active.read().await;
+        assert_eq!(active.as_ref().map(|download| download.state.clone()), Some(DownloadState::Downloading));
+        assert_eq!(active.as_ref().map(|download| download.paused), Some(false));
+    }
+
+    #[tokio::test]
+    async fn resume_persist_failure_returns_error_without_event_or_memory_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocking_dir = dir.path().join("state");
+        std::fs::create_dir_all(&blocking_dir).expect("create blocking dir");
+        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(blocking_dir)));
+        let mut paused = make_download(DownloadKind::Download, DownloadState::Paused, None, None);
+        paused.paused = true;
+        *downloads.active.write().await = Some(paused);
+        let app_state = create_test_app_state_with_downloads(Arc::clone(&downloads));
+        let mut events = app_state.event_manager.get_event_channel();
+
+        let response = resume_download(
+            axum::extract::State(app_state),
+            axum::extract::Json(DownloadActionRequest { uuid: "id".to_string() }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(events.try_recv().is_err(), "failed mutation must not broadcast");
+        assert_eq!(downloads.revision.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let active = downloads.active.read().await;
+        assert_eq!(active.as_ref().map(|download| download.state.clone()), Some(DownloadState::Paused));
+        assert_eq!(active.as_ref().map(|download| download.paused), Some(true));
+    }
+
+    #[tokio::test]
+    async fn paused_cancel_persist_failure_returns_error_without_event_or_memory_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocking_dir = dir.path().join("state");
+        std::fs::create_dir_all(&blocking_dir).expect("create blocking dir");
+        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(blocking_dir)));
+        let mut paused = make_download(DownloadKind::Download, DownloadState::Paused, None, None);
+        paused.paused = true;
+        *downloads.active.write().await = Some(paused);
+        let app_state = create_test_app_state_with_downloads(Arc::clone(&downloads));
+        let mut events = app_state.event_manager.get_event_channel();
+
+        let response = cancel_download(
+            axum::extract::State(app_state),
+            axum::extract::Json(DownloadActionRequest { uuid: "id".to_string() }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(events.try_recv().is_err(), "failed mutation must not broadcast");
+        assert_eq!(downloads.revision.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(downloads.finished.read().await.is_empty());
+        let active = downloads.active.read().await;
+        assert_eq!(active.as_ref().map(|download| download.state.clone()), Some(DownloadState::Paused));
+        assert_eq!(active.as_ref().map(|download| download.paused), Some(true));
+    }
+
+    #[tokio::test]
+    async fn cancel_normalizes_active_and_promotes_next_in_one_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = DownloadQueue::new_with_state_file(Some(dir.path().join("downloads_state.json")));
+        let mut active = make_download(DownloadKind::Download, DownloadState::Paused, None, None);
+        active.paused = true;
+        active.next_retry_at = Some(42);
+        active.error = None;
+        *queue.active.write().await = Some(active);
+        let mut next = make_download(DownloadKind::Download, DownloadState::Queued, None, None);
+        next.uuid = "next".to_string();
+        queue.queue.lock().await.push_back(next);
+
+        let committed = cancel_active_and_promote(&queue, "id").await.expect("cancel commit");
+
+        assert!(committed);
+        assert_eq!(queue.revision.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let finished = queue.finished.read().await;
+        let cancelled = finished.first().expect("cancelled task");
+        assert!(cancelled.finished);
+        assert!(!cancelled.paused);
+        assert_eq!(cancelled.state, DownloadState::Cancelled);
+        assert_eq!(cancelled.error.as_deref(), Some("Cancelled by user"));
+        assert!(cancelled.next_retry_at.is_none());
+        assert_eq!(queue.active.read().await.as_ref().map(|download| download.uuid.as_str()), Some("next"));
+    }
+
+    #[tokio::test]
+    async fn cancel_uuid_mismatch_does_not_finish_or_promote_next_task() {
+        let queue = DownloadQueue::new();
+        *queue.active.write().await = Some(make_download(
+            DownloadKind::Download,
+            DownloadState::Paused,
+            None,
+            None,
+        ));
+        let mut next = make_download(DownloadKind::Download, DownloadState::Queued, None, None);
+        next.uuid = "next".to_string();
+        queue.queue.lock().await.push_back(next);
+
+        let committed = cancel_active_and_promote(&queue, "next").await.expect("cancel no-op");
+
+        assert!(!committed);
+        assert_eq!(queue.revision.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(queue.active.read().await.as_ref().map(|download| download.uuid.as_str()), Some("id"));
+        assert_eq!(queue.queue.lock().await.front().map(|download| download.uuid.as_str()), Some("next"));
+        assert!(queue.finished.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn worker_noop_mutation_does_not_broadcast() {
+        let event_manager = Arc::new(EventManager::new());
+        let mut events = event_manager.get_event_channel();
+        let queue = DownloadQueue::new();
+
+        let changed = broadcast_worker_mutation(
+            &event_manager,
+            &queue,
+            Ok(false),
+            "test no-op mutation",
+        )
+        .await;
+
+        assert!(!changed.expect("no-op result"));
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn worker_commit_error_is_propagated_without_clearing_control() {
+        let event_manager = Arc::new(EventManager::new());
+        let mut events = event_manager.get_event_channel();
+        let queue = DownloadQueue::new();
+        *queue.control_signal.write().await = DownloadControl::Cancel;
+
+        let result = broadcast_worker_mutation(
+            &event_manager,
+            &queue,
+            Err(crate::api::model::QueueMutationError::DiskFull),
+            "terminal transition",
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(*queue.control_signal.read().await, DownloadControl::Cancel);
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn required_worker_noop_is_an_error_without_broadcast() {
+        let event_manager = Arc::new(EventManager::new());
+        let mut events = event_manager.get_event_channel();
+        let queue = DownloadQueue::new();
+
+        let result =
+            broadcast_required_worker_mutation(&event_manager, &queue, Ok(false), "terminal transition").await;
+
+        assert!(result.is_err());
+        assert!(events.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -2041,6 +3034,7 @@ mod tests {
             priority: 0,
             retry_attempts: 0,
             next_retry_at: None,
+            recording: None,
         };
         *app_state.downloads.active.write().await = Some(active);
 
@@ -2070,5 +3064,22 @@ mod tests {
 
         let _ = pause_response.expect("pause response").into_response();
         let _ = resume_response.expect("resume response").into_response();
+    }
+
+    #[tokio::test]
+    async fn queue_update_notifies_recording_subscribers() {
+        let event_manager = Arc::new(EventManager::new());
+        let mut events = event_manager.get_event_channel();
+        let queue = DownloadQueue::new();
+
+        broadcast_download_queue_update(&event_manager, &queue).await;
+
+        let mut recording_changed = false;
+        while let Ok(event) = events.try_recv() {
+            if event == EventMessage::RecordingChanged {
+                recording_changed = true;
+            }
+        }
+        assert!(recording_changed);
     }
 }

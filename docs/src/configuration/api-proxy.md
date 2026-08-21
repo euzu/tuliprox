@@ -12,6 +12,7 @@ specific permissions, proxy modes, and priorities.
 auth_error_status: 403
 use_user_db: false
 server:
+plans:
 user:
 ```
 
@@ -22,6 +23,7 @@ user:
 | `auth_error_status` | Int  |    No    | `403`   | The HTTP status code Tuliprox returns when a player sends invalid credentials or tokens. (Only applies to [Xtream/M3U API Endpoints](#api-endpoints-for-clients-players), stream paths, and resource paths, NOT the Web UI / REST API).                                                                                                                                                                                         |
 | `use_user_db`       | Bool |    No    | `false` | If set to `true`, Tuliprox migrates all users from this YAML file into a highly performant SQLite database (`api_user.db`). **From then on, Tuliprox ignores the users in the YAML file!** You **must** subsequently manage users entirely via the Web UI Dashboard. Switching the option to `false` or `true` automatically migrates users back to the corresponding file (`false` → `api-proxy.yml`, `true` → `api_user.db`). |
 | `server`            | List |   Yes    | `[]`    | See [Server Definitions](#1-server-definitions-server) for how to define servers.                                                                                                                                                                                                                                                                                                                                               |
+| `plans`             | List |    No    | `[]`    | Reusable user capability tiers. See [User Plans](#3-user-plans-plans).                                                                                                                                                                                                                                                                                                                                                          |
 | `user`              | List |    No    | `[]`    | See [User Definitions](#2-user-definitions-user) for how to define users & permissions.                                                                                                                                                                                                                                                                                                                                         |
 
 ### Subsections (Object Keys)
@@ -30,6 +32,7 @@ user:
 |:---------|:------------------------------------------------------|:--------------------------------------------|
 | `server` | Virtual server endpoints exposed to clients.          | [See section](#1-server-definitions-server) |
 | `user`   | User credentials, proxy modes, and access management. | [See section](#2-user-definitions-user)     |
+| `plans`  | Reusable capability tiers referenced by users.        | [See section](#3-user-plans-plans)          |
 
 ---
 
@@ -128,6 +131,8 @@ in your `config.yml`. Without it, these fields are purely cosmetic!
 | `ui_enabled`            | Bool     |    No    | `true`     | Allows this specific user to log into the Web UI to manage their own favorites/bouquets.                                                                                                                                                                                                                                                                                                                                              |
 | `priority`              | Int (i8) |    No    | `0`        | Stream preemption priority. Priority range: `-128` to `127`, where `-128` has the highest priority. Negative numbers are explicitly allowed for top-tier access. (see [user priority](#user-priorities-priority) below)                                                                                                                                                                                                               |
 | `network_access`        | Block    |    No    | `None`     | Per-user network/country access restrictions. Uses OR logic — matching ANY `allowed_networks` (CIDR) OR ANY `allowed_countries` grants access. Requires GeoIP for country checks. Client IP from `X-Real-IP` / `X-Forwarded-For`. See [Network Access Restrictions](#network-access-restrictions) below.                                                                                                                              |
+| `plan`                  | String   |    No    | `None`     | Name of a [user plan](#3-user-plans-plans). Unset user values (`output_clusters`, `max_connections`, `soft_connections`) inherit from the plan; explicit user values always win. The plan's content `filter` is always applied.                                                                                                                                                                                                       |
+| `filter`                | String   |    No    | `None`     | Filter DSL expression restricting which content this user sees. AND-combined with the plan filter when both are set, so a user filter can only narrow a plan, never widen it.                                                                                                                                                                                                                                                         |
 
 ---
 
@@ -580,6 +585,60 @@ For timezone names, see: [IANA Time Zone Database](https://en.wikipedia.org/wiki
 
 **Note:** These settings only affect EPG (Electronic Program Guide) times. They do not change when streams are actually
 aired - that's controlled by your IPTV provider.
+
+---
+
+## 3. User Plans (`plans`)
+
+Plans are reusable capability tiers. Instead of repeating limits per user, define a plan once and reference it
+via the user's `plan` field. Plans can be managed in the Web UI (Config → API, edit mode) or directly in this file.
+
+```yaml
+plans:
+  - name: basic
+    output_clusters: [live]
+    max_connections: 1
+    filter: 'NOT Group ~ "^(VIP|PPV).*" AND Quality <= 3'
+    comment: Live-only starter tier, FHD max, no premium groups
+  - name: premium
+    output_clusters: [live, vod, series]
+    max_connections: 3
+
+user:
+  - target: main
+    credentials:
+      - username: joe
+        password: secret
+        plan: basic
+      - username: vip
+        password: secret2
+        plan: premium
+        max_connections: 5   # explicit user value overrides the plan
+```
+
+### Plan Parameters
+
+| Parameter          | Type   | Required | Default | Technical Impact & Background                                                                                                                                                                                                                             |
+|:-------------------|:-------|:--------:|:--------|:----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `name`             | String |   Yes    |         | Unique plan identifier referenced by `user[].credentials[].plan`.                                                                                                                                                                                         |
+| `output_clusters`  | List   |    No    | `None`  | Cluster tier (`live`, `vod`, `series`). Inherited by members that don't set their own `output_clusters`.                                                                                                                                                  |
+| `max_connections`  | Int    |    No    | `0`     | Concurrent stream limit for members whose own `max_connections` is `0`/unset. Enforcement still requires `user_access_control: true`.                                                                                                                     |
+| `soft_connections` | Int    |    No    | `0`     | Soft connection allowance inherited the same way.                                                                                                                                                                                                         |
+| `filter`           | String |    No    | `None`  | Filter DSL expression restricting the content visible to plan members (e.g. group allow/deny lists, `Quality <= 3` caps). AND-combined with a member's own `filter` if both exist.                                                                        |
+| `trial.duration`   | String |    No    | `None`  | Trial window with unit (`24h`, `7d`). When a **new** user is created on this plan without an explicit `exp_date`, the expiry is set to now + duration and the status defaults to `Trial`. Enforcement of the expiry requires `user_access_control: true`. |
+| `comment`          | String |    No    | `None`  | Free-form description.                                                                                                                                                                                                                                    |
+
+### Resolution Rules
+
+- Explicit user value > plan value > global default. "Unset" means `output_clusters` omitted or `max_connections`/`soft_connections` at `0`.
+- Filters combine as `(plan filter) AND (user filter)` — a user filter can only narrow the plan.
+- Templates (`!NAME!`) are **not** available in api-proxy filters; write the expression inline.
+- Trial windows apply only at user creation (Web UI/API); existing users and YAML-defined users are not modified.
+  After expiry the standard `exp_date` enforcement blocks the user; automatic downgrade to another plan is not supported.
+- Plan changes take effect on config reload for YAML users and on the next load for database users; running streams are not interrupted.
+- The content filter hides entries from playlists and stream lists, blocks direct stream access to filtered items,
+  hides categories whose content is fully filtered out from the Xtream category actions, and removes hidden channels
+  from the user's XMLTV output. The Web UI bouquet editor category list is not thinned.
 
 ---
 

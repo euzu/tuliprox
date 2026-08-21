@@ -58,6 +58,13 @@
            align-items: center;
            justify-content: center;
            cursor: pointer;
+           width: 100%;
+           background: transparent;
+           border: 0;
+           margin: 0;
+           padding: 0;
+           color: inherit;
+           font: inherit;
             svg,
            .svg-icon {
              display: block;

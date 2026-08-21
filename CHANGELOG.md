@@ -74,6 +74,37 @@
 
 ## 🌟 New Features
 
+- **DVR Feature**: a full digital video recorder built around a queue-mutation boundary with a typed `QueueMutationError`,
+  atomic edit/quota rollback, O(1) edit writes via a remembered `RecordingLocation`, server-side conflict preview
+  (`POST /api/v1/recording/conflicts/preview`), and a `ConflictSeverity` of `NoKnownConflict` / `PossibleCapacityWait` /
+  `LikelyMissedWindow`. Three background supervisors start once the HTTP listener is bound, honour the `downloads`
+  cancellation token, and re-read their config each tick so a reload applies without a restart:
+  - **Startup reconciliation** finishes or undoes deletions interrupted by a crash (tasks whose
+    `recording.deleting_previous_state` was set), and repairs queue/rule-store drift.
+  - **Retention** performs the age, count, and disk-watermark sweeps described in the operator guide
+    (`tuliprox/docs/src/operator/dvr.md`).
+  - **Notification outbox** delivers lifecycle notifications durably, retrying **per channel** with capped exponential
+    backoff and dead-lettering after `max_attempts`. A notification that reached Telegram but not Discord is retried
+    only against Discord, so retries stay compatible with the at-most-once contract.
+  - `GET /api/v1/recording/health` (administrator only) reports each supervisor's last-tick timestamp, the outbox
+    depth, and the dead-letter count.
+
+  Two WebSocket notifications carry the recording subsystem: `RecordingChanged` (any queue mutation) and
+  `RecordingRulesChanged` (rule-store mutation). The cancel-recording-task endpoint emits both because cancelling
+  future rule recordings mutates the queue as well as the rule store.
+
+  Authorization is gated by `Claims::is_system_principal`, which now requires both `username == "recording-supervisor"`
+  *and* `subject_id.is_builtin_admin()` so a web user registered with the sentinel name cannot forge the system bypass;
+  the supervisor is the only path that mints both.
+
+  Media opens for catalog, range, full-body, thumbnail and subtitle flows go through `no_follow_path_in_root`, which
+  walks every component from `recording_root` to the leaf with `symlink_metadata`. A symlink at any intermediate path
+  such as `<root>/users/alice` is rejected before `File::open` follows it, closing the `<recording_root>/users/alice -> /etc`
+  containment bypass.
+
+  `bin/dvr_doctor.sh` exposes supervisor health, the effective recording config block, the quota ledger and on-disk
+  state as one read-only dump suitable for a support ticket.
+
 - **Automatic Xtream Account Expiration Refresh**:
   - Server mode now refreshes missing or soon-expiring Xtream `exp_date` values directly through each account's
     `player_api.php` credentials, independently of playlist updates and reseller Panel API provisioning.
@@ -561,6 +592,56 @@
 
 ## 🐛 Fixes
 
+- **DVR: cancelling a recording could kill a different one.** `cancel_recording` read the active slot, compared the
+  uuid, then called the no-uuid `cancel_active()`. If ffmpeg finished in between and the queue promoted another
+  recording, that innocent recording was cancelled instead. Now cancels by uuid.
+- **DVR: a disk-pressure sweep deleted the entire recording library.** The stop condition compared a free-space
+  measurement taken once per pass against the low watermark, ignoring the bytes the pass had already reclaimed, so it
+  was constant for the whole pass — false on the first candidate and false forever. A single trigger therefore deleted
+  every completed recording instead of just enough of them. The projected free space now folds in what has been
+  reclaimed.
+- **DVR: the recording module did not build on Windows.** `utils::recording_paths` carried a blanket `#![cfg(unix)]`,
+  which erased the module and left every caller with unresolved imports. The gate is now scoped to the single
+  `O_NOFOLLOW` line it was needed for; the no-clobber and no-follow guarantees are carried by `create_new` and
+  `symlink_metadata`, which behave identically on all supported targets.
+- **DVR: `recording.enabled: false` was only half-honoured.** The REST routes refused requests while the rule
+  scheduler kept materializing tasks and the WebSocket kept streaming recording data. All four gates — routes,
+  scheduler, supervisors, socket — now share one predicate.
+- **DVR: WebSocket delta filtering dropped tasks under load.** The visible-id set was built with `try_lock`/`try_read`
+  on all four queue guards and silently skipped whichever was contended, so recordings vanished from the client until
+  the next full snapshot. It now waits for the same committed boundary the snapshot path uses.
+- **DVR: filenames were barely sanitized.** Only `/` and `\` were replaced, letting control characters,
+  Windows-reserved characters, trailing dots/spaces, and BiDi override codepoints reach the path the muxer opens.
+  Programme titles now pass through a single sanitizer that guarantees one safe path component.
+- **DVR: duplicate detection was bypassable.** The key was `(url, start_at, duration_secs)` OR `file_path`. The
+  `file_path` half was dead (paths are disambiguated with a `_N` suffix, so they never match) and `start_at` is
+  `now.max(scheduled_start)`, so every request for a currently-airing programme produced a different key and could be
+  booked repeatedly. Identity is now derived from the rule occurrence, or the programme and source per quota pool.
+- **DVR: a failed rule delete could lose upcoming recordings.** `DELETE /rules/{id}?future=cancel` cancelled the
+  occurrences first; if the rule store then failed, the rule stayed and its recordings were gone. The cancelled
+  occurrences are now restored from a pre-cancel snapshot.
+- **DVR: `recording_mut_at` could edit the wrong task.** The `Finished` arm returned element 0 rather than the located
+  index. Currently unreachable, but a latent trap for any future caller.
+- **DVR: a fatal ffmpeg error could loop until the window closed.** Retryability was decided by substring-matching the
+  whole stderr line, which includes the source URL, so a provider path containing e.g. `connection-refused` made every
+  failure look transient. URL-shaped tokens are now stripped before classification.
+- **DVR: deletion authorization and the state transition could disagree.** The task was looked up, authorized,
+  stamped, then looked up a second time, and the second lookup could see a different task. Authorization now runs
+  inside the same mutation boundary that stamps it.
+- **DVR: the `owner=` task filter accepted arbitrary values for non-administrators.** It returned an empty list rather
+  than refusing, which read as if cross-owner queries were supported. Now `403` unless the caller is an administrator.
+- **DVR: an ineligible edit reported a misleading reason.** Clearing rule provenance surfaced as
+  `recording_invalid_state`; it now has its own `recording_provenance_immutable` code.
+- **DVR: task status was rendered as Rust debug output.** The recording library showed `format!("{:?}", status)`,
+  untranslated and inconsistent with the downloads view. Both now share one localized status pill, and every recording
+  error code has a translated message in all shipped locales.
+- **DVR: the socket could not report an actionable refusal.** A token predating a permission-schema bump produced an
+  empty task list, indistinguishable from "you have no recordings", while REST correctly answered
+  `recording_token_refresh_required`. A new `RecordingWsError { code }` frame carries the reason.
+- **DVR: `NewEpisode` rules never matched anything.** The scheduler passes an empty EPG horizon to the planner, which
+  matches those rules by walking programmes, so only `WeeklyTimeslot` rules could materialize. The horizon is still
+  not wired, but the condition is now logged once per process instead of looking like a scheduler that found nothing.
+
 - **Mapper Regex Capture Results**:
   - Regex expressions now evaluate one complete match instead of flattening later matches into duplicate,
     unreachable capture keys.
@@ -650,6 +731,22 @@
     and applies uniformly without per-call-site changes.
 
 ## ⚙️ New Settings
+
+- **config.yml (`video.download.recording`)**:
+  - Added `enabled` (`bool`, default `true`): master switch for the DVR. When `false` the REST routes answer
+    `501 recording_disabled`, the rule scheduler and supervisors idle, the WebSocket serves no recording data, and the
+    sidebar entries are hidden. An absent `recording:` block still means "defaults", so upgrading never silently
+    disables a DVR that was already in use.
+  - Added `container_format` (`mpegts` | `matroska` | `mp4`, default `mpegts`): the muxer ffmpeg writes. Recordings
+    were previously hard-coded to MPEG-TS regardless of the source codecs. MPEG-TS remains the default because it
+    survives truncation — a recording killed mid-stream still plays.
+  - Added `retention.sweep_interval_secs` (`u64`, default `3600`): cadence of the age/count retention sweep,
+    independent of `disk.cleanup_interval_secs`, which paces the watermark check.
+  - Added a `notifications` block governing the new lifecycle-notification outbox: `outbox_buffer` (default `1024`,
+    fixed at startup), `max_attempts` (default `6`), `backoff_initial_secs` (default `5`), and `backoff_max_secs`
+    (default `900`).
+  - Startup now warns when the DVR is enabled with no retention policy, no disk watermarks, and no quota, since
+    nothing then bounds recording disk usage.
 
 - **source.yml (target `options.epg_output`)**:
   - Added optional `lowercase_ids` (`bool`, default `false`) to canonicalize technical EPG IDs with ASCII lowercase

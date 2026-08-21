@@ -2,6 +2,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::io;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use crate::api::api_utils::json_or_bin_response;
@@ -18,81 +19,20 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use shared::model::{
     PageRequestDto, PagedResponseDto, SearchMode, StreamHistoryEventType, StreamHistoryPageRequestDto,
-    StreamHistoryProviderSummaryDto, QosSnapshotRecordDto, StreamHistoryQueryRequestDto, StreamHistoryRecordDto,
+    StreamHistoryProviderSummaryDto, StreamHistorySearchField, QosSnapshotRecordDto, StreamHistoryQueryRequestDto,
+    StreamHistoryRecordDto,
 };
-
-// TODO make shared Search fields
+use strum::IntoEnumIterator;
 
 const MAX_STREAM_HISTORY_PAGE_HEAP_CAPACITY: usize = 100_000;
 
-#[derive(Clone, Copy)]
-enum SearchField {
-    EventTsUtc,
-    EventType,
-    Title,
-    Group,
-    ApiUsername,
-    ProviderName,
-    ProviderId,
-    BytesSent,
-    FirstByteLatencyMs,
-    UserAgent,
-    ItemType,
-    Container,
-    DisconnectReason,
-    SourceAddr,
-    Country,
-    Cluster,
-}
-
-impl SearchField {
-    const ALL: [Self; 16] = [
-        Self::EventTsUtc,
-        Self::EventType,
-        Self::Title,
-        Self::Group,
-        Self::ApiUsername,
-        Self::ProviderName,
-        Self::ProviderId,
-        Self::BytesSent,
-        Self::FirstByteLatencyMs,
-        Self::UserAgent,
-        Self::ItemType,
-        Self::Container,
-        Self::DisconnectReason,
-        Self::SourceAddr,
-        Self::Country,
-        Self::Cluster,
-    ];
-
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "event_ts_utc" => Some(Self::EventTsUtc),
-            "event_type" => Some(Self::EventType),
-            "title" => Some(Self::Title),
-            "group" => Some(Self::Group),
-            "api_username" => Some(Self::ApiUsername),
-            "provider_name" => Some(Self::ProviderName),
-            "provider_id" => Some(Self::ProviderId),
-            "bytes_sent" => Some(Self::BytesSent),
-            "first_byte_latency_ms" => Some(Self::FirstByteLatencyMs),
-            "user_agent" => Some(Self::UserAgent),
-            "item_type" => Some(Self::ItemType),
-            "container" => Some(Self::Container),
-            "disconnect_reason" => Some(Self::DisconnectReason),
-            "source_addr" => Some(Self::SourceAddr),
-            "country" => Some(Self::Country),
-            "cluster" => Some(Self::Cluster),
-            _ => None,
-        }
-    }
-}
-
-fn compile_search_fields(fields: Option<Vec<String>>) -> Result<Vec<SearchField>, String> {
+fn compile_search_fields(fields: Option<Vec<String>>) -> Result<Vec<StreamHistorySearchField>, String> {
     fields
         .unwrap_or_default()
         .into_iter()
-        .map(|field| SearchField::parse(&field).ok_or_else(|| format!("Unknown search_field: {field}")))
+        .map(|field| {
+            StreamHistorySearchField::from_str(&field).map_err(|_| format!("Unknown search_field: {field}"))
+        })
         .collect()
 }
 
@@ -152,39 +92,59 @@ fn compile_search_matcher(search: Option<&str>, mode: SearchMode) -> Result<Opti
     }
 }
 
-fn record_field_matches(record: &StreamHistoryRecord, field: SearchField, matcher: &Regex) -> bool {
+fn record_field_matches(record: &StreamHistoryRecord, field: StreamHistorySearchField, matcher: &Regex) -> bool {
     match field {
-        SearchField::EventTsUtc => matcher.is_match(&record.event_ts_utc.to_string()),
-        SearchField::EventType => matcher.is_match(&record.event_type.to_string()),
-        SearchField::Title => record.title.as_deref().is_some_and(|value| matcher.is_match(value)),
-        SearchField::Group => record.group.as_deref().is_some_and(|value| matcher.is_match(value)),
-        SearchField::ApiUsername => record.api_username.as_deref().is_some_and(|value| matcher.is_match(value)),
-        SearchField::ProviderName => record.provider_name.as_deref().is_some_and(|value| matcher.is_match(value)),
-        SearchField::ProviderId => record.provider_id.is_some_and(|value| matcher.is_match(&value.to_string())),
-        SearchField::BytesSent => record.bytes_sent.is_some_and(|value| matcher.is_match(&value.to_string())),
-        SearchField::FirstByteLatencyMs => record
+        StreamHistorySearchField::EventTsUtc => matcher.is_match(&record.event_ts_utc.to_string()),
+        StreamHistorySearchField::EventType => matcher.is_match(&record.event_type.to_string()),
+        StreamHistorySearchField::Title => record.title.as_deref().is_some_and(|value| matcher.is_match(value)),
+        StreamHistorySearchField::Group => record.group.as_deref().is_some_and(|value| matcher.is_match(value)),
+        StreamHistorySearchField::ApiUsername => {
+            record.api_username.as_deref().is_some_and(|value| matcher.is_match(value))
+        }
+        StreamHistorySearchField::ProviderName => {
+            record.provider_name.as_deref().is_some_and(|value| matcher.is_match(value))
+        }
+        StreamHistorySearchField::ProviderId => {
+            record.provider_id.is_some_and(|value| matcher.is_match(&value.to_string()))
+        }
+        StreamHistorySearchField::BytesSent => {
+            record.bytes_sent.is_some_and(|value| matcher.is_match(&value.to_string()))
+        }
+        StreamHistorySearchField::FirstByteLatencyMs => record
             .first_byte_latency_ms
             .is_some_and(|value| matcher.is_match(&value.to_string())),
-        SearchField::UserAgent => record.user_agent.as_deref().is_some_and(|value| matcher.is_match(value)),
-        SearchField::ItemType => record.item_type.as_ref().is_some_and(|value| matcher.is_match(&value.to_string())),
-        SearchField::Container => record.container.as_deref().is_some_and(|value| matcher.is_match(value)),
-        SearchField::DisconnectReason => record
+        StreamHistorySearchField::UserAgent => {
+            record.user_agent.as_deref().is_some_and(|value| matcher.is_match(value))
+        }
+        StreamHistorySearchField::ItemType => {
+            record.item_type.as_ref().is_some_and(|value| matcher.is_match(&value.to_string()))
+        }
+        StreamHistorySearchField::Container => {
+            record.container.as_deref().is_some_and(|value| matcher.is_match(value))
+        }
+        StreamHistorySearchField::DisconnectReason => record
             .disconnect_reason
             .as_ref()
             .is_some_and(|value| matcher.is_match(&value.to_string())),
-        SearchField::SourceAddr => record.source_addr.as_deref().is_some_and(|value| matcher.is_match(value)),
-        SearchField::Country => record.country.as_deref().is_some_and(|value| matcher.is_match(value)),
-        SearchField::Cluster => record.cluster.as_deref().is_some_and(|value| matcher.is_match(value)),
+        StreamHistorySearchField::SourceAddr => {
+            record.source_addr.as_deref().is_some_and(|value| matcher.is_match(value))
+        }
+        StreamHistorySearchField::Country => record.country.as_deref().is_some_and(|value| matcher.is_match(value)),
+        StreamHistorySearchField::Cluster => record.cluster.as_deref().is_some_and(|value| matcher.is_match(value)),
     }
 }
 
-fn record_matches_search(record: &StreamHistoryRecord, matcher: Option<&Regex>, fields: &[SearchField]) -> bool {
+fn record_matches_search(
+    record: &StreamHistoryRecord,
+    matcher: Option<&Regex>,
+    fields: &[StreamHistorySearchField],
+) -> bool {
     let Some(matcher) = matcher else {
         return true;
     };
 
     if fields.is_empty() {
-        return SearchField::ALL.into_iter().any(|field| record_field_matches(record, field, matcher));
+        return StreamHistorySearchField::iter().any(|field| record_field_matches(record, field, matcher));
     }
 
     fields.iter().copied().any(|field| record_field_matches(record, field, matcher))
@@ -353,7 +313,7 @@ impl TopHistoryPageCollector {
         })
     }
 
-    fn push(&mut self, record: StreamHistoryRecord, matcher: Option<&Regex>, fields: &[SearchField]) {
+    fn push(&mut self, record: StreamHistoryRecord, matcher: Option<&Regex>, fields: &[StreamHistorySearchField]) {
         if !record_matches_search(&record, matcher, fields) {
             return;
         }
@@ -397,7 +357,7 @@ fn push_hls_or_non_hls(
     hls_sessions: &mut HashMap<HlsKey, HlsSessionAccumulator>,
     collector: &mut TopHistoryPageCollector,
     matcher: Option<&Regex>,
-    fields: &[SearchField],
+    fields: &[StreamHistorySearchField],
 ) {
     let is_hls = matches!(record.container.as_deref(), Some("mpegts" | "fmp4" | "hls"));
     let is_hls_session_event = matches!(
@@ -422,7 +382,7 @@ fn paginate_stream_history_records<I>(
     records: I,
     batch_records: Vec<StreamHistoryRecord>,
     matcher: Option<&Regex>,
-    fields: &[SearchField],
+    fields: &[StreamHistorySearchField],
     page: u32,
     page_size: u16,
 ) -> Result<PagedResponseDto<StreamHistoryRecordDto>, String>
@@ -463,7 +423,7 @@ fn aggregate_hls_session(records: &[&StreamHistoryRecord]) -> Vec<StreamHistoryR
 fn paginate_aggregated_records(
     aggregated: Vec<StreamHistoryRecord>,
     matcher: Option<&Regex>,
-    fields: &[SearchField],
+    fields: &[StreamHistorySearchField],
     page: u32,
     page_size: u16,
 ) -> PagedResponseDto<StreamHistoryRecordDto> {
@@ -1040,8 +1000,8 @@ mod tests {
             .expect("text matcher should exist");
 
         assert!(record_matches_search(&record, Some(&matcher), &[]));
-        assert!(record_matches_search(&record, Some(&matcher), &[SearchField::Group]));
-        assert!(!record_matches_search(&record, Some(&matcher), &[SearchField::Title]));
+        assert!(record_matches_search(&record, Some(&matcher), &[StreamHistorySearchField::Group]));
+        assert!(!record_matches_search(&record, Some(&matcher), &[StreamHistorySearchField::Title]));
     }
 
     #[test]

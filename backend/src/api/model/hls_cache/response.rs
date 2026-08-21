@@ -95,11 +95,10 @@ fn build_finite_bytes_response(
     response
 }
 
-/// Serves immutable prepared bytes without attaching live-lease activity.
+/// Serves immutable prepared bytes without touching the live-lease state.
 ///
-/// This is used by finite standalone media and exact committed-plan replay,
-/// where the route itself is the authorization boundary and no live origin
-/// work may be extended.
+/// The route is the authorization boundary; callers do not get any
+/// upstream origin work on top of the response.
 pub(crate) fn finite_hls_immutable_media_response(
     bytes: Bytes,
     range_header: Option<&HeaderValue>,

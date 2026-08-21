@@ -1,7 +1,7 @@
 use crate::model::BusyStatus;
 use shared::model::{
     ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse, LibraryScanProgressEvent,
-    PlaylistUpdateProgressEvent, PlaylistUpdateState, StatusCheck, StreamMeterEntry, SystemInfo,
+    PlaylistUpdateProgressEvent, PlaylistUpdateState, StatusCheck, StreamMeterEntry, SystemInfo, TransferTaskDto,
 };
 use std::{rc::Rc, sync::Arc};
 
@@ -24,4 +24,19 @@ pub enum EventMessage {
     StreamMeterBatch(Vec<StreamMeterEntry>),
     DownloadsUpdate(Rc<DownloadsResponse>),
     DownloadsDeltaUpdate(Rc<DownloadsDelta>),
+    RecordingSnapshot {
+        revision: u64,
+        tasks: Rc<Vec<TransferTaskDto>>,
+    },
+    RecordingDelta {
+        revision: u64,
+        tasks: Rc<Vec<TransferTaskDto>>,
+    },
+    RecordingRulesChanged,
+    /// The socket refused to serve recordings for an actionable reason.
+    /// Carries the same stable code the REST routes use, so views map
+    /// both through one i18n table.
+    RecordingUnavailable {
+        code: String,
+    },
 }
