@@ -253,7 +253,8 @@ pub fn stable_episode_storage_id(series_id: u32, season_number: u32, episode_id:
 // shape without an explicit season (e.g. bare `Episode 5`), the season
 // defaults to `1` so the caller still receives a usable pair.
 //
-// The default pattern lives in `shared::defaults::DEFAULT_EPISODE_PATTERN`.
+// `crate::defaults::default_episode_pattern` exposes `EPISODE_PATTERN`
+// as the user-facing default.
 
 pub fn parse_season_episode(title: &str, pattern: &regex::Regex) -> Option<(u32, u32)> {
     let caps = pattern.captures(title)?;
@@ -305,7 +306,7 @@ fn parse_sxxeyy_fallback(token: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{utils::constants::EPISODE_PATTERN, utils::CONSTANTS};
+    use crate::utils::{constants::EPISODE_PATTERN, CONSTANTS};
     use regex::Regex;
 
     // ── extract_id_from_url ────────────────────────────────────────────

@@ -120,20 +120,21 @@ pub fn filesystem_capacity_for(path: &Path) -> Option<(u64, u64)> {
     {
         let cstr = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+
         // SAFETY: `cstr` is a valid NUL-terminated C string; `&raw mut stat`
         // is a writable pointer to a zeroed struct.
         let rc = unsafe { libc::statvfs(cstr.as_ptr(), &raw mut stat) };
         if rc != 0 {
             return None;
         }
-        #[cfg(target_pointer_width = "32")]
-        let bsize = u64::from(stat.f_frsize);
-        #[cfg(target_pointer_width = "64")]
-        let bsize = stat.f_frsize;
-        let total = stat.f_blocks.saturating_mul(bsize);
+
+        let bsize = stat.f_frsize as u64;
+        let total = (stat.f_blocks as u64).saturating_mul(bsize);
+
         // `f_bavail`, not `f_bfree`: the service user cannot use the
         // root-reserved blocks, so counting them would understate pressure.
-        let available = stat.f_bavail.saturating_mul(bsize);
+        let available = (stat.f_bavail as u64).saturating_mul(bsize);
+
         Some((total, available))
     }
     #[cfg(windows)]
@@ -177,20 +178,20 @@ pub fn free_bytes_for(path: &Path) -> Option<u64> {
     {
         let cstr = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+
         // SAFETY: `cstr` is a valid NUL-terminated C string; `&raw mut stat`
         // is a writable pointer to a zeroed struct.
         let rc = unsafe { libc::statvfs(cstr.as_ptr(), &raw mut stat) };
         if rc != 0 {
             return None;
         }
-        #[cfg(target_pointer_width = "32")]
-        let bsize = u64::from(stat.f_frsize);
-        #[cfg(target_pointer_width = "64")]
-        let bsize = stat.f_frsize;
+
+        let bsize = stat.f_frsize as u64;
+
         // `f_bavail` is the bytes available to a non-privileged
         // caller — the worker runs as the service user and is
         // subject to the same reservation as any other user.
-        Some(stat.f_bavail.saturating_mul(bsize))
+        Some((stat.f_bavail as u64).saturating_mul(bsize))
     }
     #[cfg(windows)]
     {
