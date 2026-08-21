@@ -478,11 +478,11 @@ pub fn metadata_cache_entry_to_xtream_series_info(
         release_date: release_date.map(Into::into),
         youtube_trailer: youtube_trailer.into(),
         tmdb: series.tmdb_id,
-        details: Some(SeriesStreamDetailProperties {
-            year: series.year,
-            seasons: Some(seasons),
+        details: Some(SeriesStreamDetailProperties::new(
+            series.year,
+            seasons,
             episodes,
-        }),
+        )),
     };
 
     Some(StreamProperties::Series(Box::new(properties)))

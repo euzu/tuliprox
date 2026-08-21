@@ -40,6 +40,11 @@ pub enum XtreamCluster {
 impl XtreamCluster {
     pub fn as_str(&self) -> &str { self.as_ref() }
 
+    /// True when this cluster is the Xtream `Series` cluster. Used in
+    /// bucket-key computations and dispatch sites that previously
+    /// spelled out `== XtreamCluster::Series` inline.
+    pub fn is_series(self) -> bool { matches!(self, Self::Series) }
+
     pub fn as_stream_type(&self) -> &str {
         match self {
             Self::Live => "live",

@@ -1,18 +1,41 @@
 use crate::model::{Config, ConfigInput};
 use crate::utils::request::DynReader;
+use regex::Regex;
 use shared::model::{
     CatchupAttribute, CatchupProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader,
     PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties,
     SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties, XtreamCluster,
 };
-use shared::utils::{extract_id_from_url, extract_numeric_id_from_url, Internable};
-use shared::defaults::{default_supported_video_extensions};
+use shared::utils::{
+    extract_id_from_url, extract_numeric_id_from_url, fnv1a_32_parts, get_provider_id, parse_season_episode,
+    Internable, CONSTANTS,
+};
+use shared::defaults::default_supported_video_extensions;
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use indexmap::IndexMap;
 use crate::repository::CategoryKey;
+
+/// User-configured episode pattern if set, else `CONSTANTS.re_episode_code`
+/// (`SxxEyy` / `NxNN` / "Season x Episode y" / "Episode y", compiled once at startup).
+/// The default is wrapped in `Arc<Regex>` once via `LazyLock` so repeated
+/// `build_series_info` calls do not re-clone the regex.
+fn resolve_episode_pattern(cfg: &Config) -> Arc<Regex> {
+    cfg.video
+        .as_ref()
+        .and_then(|v| v.download.as_ref())
+        .and_then(|d| d.episode_pattern.as_ref().map(Arc::clone))
+        .unwrap_or_else(default_episode_pattern_arc)
+}
+
+fn default_episode_pattern_arc() -> Arc<Regex> {
+    static DEFAULT: std::sync::OnceLock<Arc<Regex>> = std::sync::OnceLock::new();
+    DEFAULT
+        .get_or_init(|| Arc::new(CONSTANTS.re_episode_code.clone()))
+        .clone()
+}
 
 // other implementations like calculating text_distance on all titles took too much time
 // we keep it now as simple as possible and less memory intensive.
@@ -161,6 +184,7 @@ fn classify_possible_id(bytes: &[u8]) -> M3uToken {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn classify_token(t: &str) -> M3uToken {
     let bytes = t.as_bytes();
 
@@ -486,59 +510,6 @@ fn parse_extvlcopt_user_agent(line: &str) -> Option<&str> {
     Some(value.trim())
 }
 
-fn stable_u32(text: &str) -> u32 {
-    let mut hash = 0x811c9dc5_u32;
-    for byte in text.as_bytes() {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(0x01000193);
-    }
-    if hash == 0 { 1 } else { hash }
-}
-
-fn parse_episode_code(title: &str) -> Option<(u32, u32)> {
-    let bytes = title.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'S' || bytes[i] == b's' {
-            let season_start = i + 1;
-            let mut season_end = season_start;
-            while season_end < bytes.len() && bytes[season_end].is_ascii_digit() {
-                season_end += 1;
-            }
-            if season_end > season_start
-                && season_end < bytes.len()
-                && (bytes[season_end] == b'E' || bytes[season_end] == b'e')
-            {
-                let episode_start = season_end + 1;
-                let mut episode_end = episode_start;
-                while episode_end < bytes.len() && bytes[episode_end].is_ascii_digit() {
-                    episode_end += 1;
-                }
-                if episode_end > episode_start {
-                    let season = title[season_start..season_end].parse::<u32>().ok()?;
-                    let episode = title[episode_start..episode_end].parse::<u32>().ok()?;
-                    return Some((season, episode));
-                }
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-fn series_numeric_id(item: &PlaylistItem) -> u32 {
-    item.header
-        .epg_channel_id
-        .as_deref()
-        .and_then(|id| id.parse::<u32>().ok())
-        .filter(|id| *id > 0)
-        .unwrap_or_else(|| stable_u32(&format!("{}:{}", item.header.input_name, item.header.parent_code)))
-}
-
-fn episode_numeric_id(item: &PlaylistItem) -> u32 {
-    stable_u32(&format!("{}:{}", item.header.input_name, item.header.url))
-}
-
 pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInput, lines: DynReader, mut visit: F) {
     let mut header: Option<String> = None;
     let mut group: Option<Arc<str>> = None;
@@ -593,7 +564,7 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
             header.upstream_user_agent = upstream_user_agent.take();
             header.source_ordinal = ord_counter;
             ord_counter += 1;
-            if header.xtream_cluster == XtreamCluster::Series {
+            if header.xtream_cluster.is_series() {
                 let series_name = if header.group.is_empty() {
                     get_title_group(&header.title)
                 } else {
@@ -603,8 +574,7 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
                 header.group = group_value
                     .as_deref()
                     .filter(|value| !value.trim().is_empty())
-                    .map(Internable::intern)
-                    .unwrap_or_else(|| "Series".intern());
+                    .map_or_else(|| "Series".intern(), Internable::intern);
             } else if header.group.is_empty() {
                 if let Some(group_value) = group_value {
                     header.group = group_value;
@@ -617,50 +587,55 @@ pub async fn consume_m3u<F: FnMut(PlaylistItem)>(cfg: &Config, input: &ConfigInp
     }
 }
 
-fn build_series_info(items: Vec<PlaylistItem>) -> Option<PlaylistItem> {
+fn build_series_info(cfg: &Config, items: Vec<PlaylistItem>) -> Option<PlaylistItem> {
+    let episode_pattern = resolve_episode_pattern(cfg);
     let first = items.first()?;
     let series_name = first.header.parent_code.clone();
     let default_category = first.header.group.clone();
-    let series_id = series_numeric_id(first);
+    let series_id = get_provider_id(
+        first.header.epg_channel_id.as_deref().unwrap_or(""),
+        &first.header.url,
+    )
+    .unwrap_or_else(|| fnv1a_32_parts(&[first.header.input_name.as_ref(), first.header.parent_code.as_ref()]));
     let source_ordinal = first.header.source_ordinal;
     let logo = first.header.logo.clone();
     let input_name = first.header.input_name.clone();
 
     let mut episodes = Vec::with_capacity(items.len());
     let mut season_counts: HashMap<u32, u32> = HashMap::new();
+    let mut dropped = 0_usize;
+    let item_count = items.len();
 
     for item in items {
-        let Some((season, episode_num)) = parse_episode_code(&item.header.title) else {
+        let Some((season, episode_num)) = parse_season_episode(&item.header.title, &episode_pattern) else {
+            dropped += 1;
             continue;
         };
 
         *season_counts.entry(season).or_insert(0) += 1;
         episodes.push(SeriesStreamDetailEpisodeProperties {
-            id: episode_numeric_id(&item),
+            id: fnv1a_32_parts(&[item.header.input_name.as_ref(), item.header.url.as_ref()]),
             episode_num,
             season,
             title: item.header.title.clone(),
-            container_extension: "".intern(),
-            custom_sid: None,
-            added: "".intern(),
             direct_source: item.header.url.clone(),
-            tmdb: None,
-            release_date: "".intern(),
-            series_release_date: None,
-            plot: None,
-            crew: None,
-            duration_secs: 0,
-            duration: "".intern(),
             movie_image: item.header.logo.clone(),
-            bitrate: 0,
-            rating: None,
-            video: None,
-            audio: None,
+            ..Default::default()
         });
     }
 
     if episodes.is_empty() {
+        if dropped > 0 {
+            log::debug!(
+                "m3u series: dropped all {dropped} items in group {series_name:?} (no SxxEyy token)",
+            );
+        }
         return None;
+    }
+    if dropped > 0 {
+        log::debug!(
+            "m3u series: dropped {dropped} of {item_count} items in group {series_name:?} (no SxxEyy token)",
+        );
     }
 
     episodes.sort_by_key(|episode| (episode.season, episode.episode_num));
@@ -685,11 +660,7 @@ fn build_series_info(items: Vec<PlaylistItem>) -> Option<PlaylistItem> {
         name: series_name.clone(),
         series_id,
         cover: logo.clone(),
-        details: Some(SeriesStreamDetailProperties {
-            year: None,
-            seasons: Some(seasons),
-            episodes: Some(episodes),
-        }),
+        details: Some(SeriesStreamDetailProperties::new(None, seasons, Some(episodes))),
         ..SeriesStreamProperties::default()
     };
 
@@ -717,7 +688,7 @@ pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> V
     let mut series_map: IndexMap<(Arc<str>, Arc<str>), Vec<PlaylistItem>> = IndexMap::new();
 
     consume_m3u(cfg, input, lines, |item| {
-        if item.header.xtream_cluster == XtreamCluster::Series {
+        if item.header.xtream_cluster.is_series() {
             let key = (
                 shared::utils::deunicode_string(&item.header.group)
                     .to_lowercase()
@@ -739,7 +710,7 @@ pub async fn parse_m3u(cfg: &Config, input: &ConfigInput, lines: DynReader) -> V
     }).await;
 
     for ((_category, _series_name), items) in series_map {
-        if let Some(series_info) = build_series_info(items) {
+        if let Some(series_info) = build_series_info(cfg, items) {
             let normalized_group = shared::utils::deunicode_string(&series_info.header.group)
                 .to_lowercase()
                 .intern();
@@ -769,10 +740,11 @@ mod test {
     use crate::model::{Config, ConfigInput};
     use crate::utils::request::DynReader;
     use shared::{
-        model::{PlaylistItemType, StreamProperties, XtreamCluster},
-        utils::Internable,
+        model::{PlaylistItemType, REGEX_CACHE, StreamProperties, XtreamCluster},
+        utils::{fnv1a_32, parse_season_episode, Internable, CONSTANTS},
     };
-    use crate::processing::parser::m3u::{classify_token, parse_episode_code, parse_m3u, process_header, M3uToken};
+    use shared::defaults::default_episode_pattern;
+    use crate::processing::parser::m3u::{classify_token, parse_m3u, process_header, M3uToken};
     use tokio::io::AsyncWriteExt;
 
     fn make_reader(content: &str) -> DynReader {
@@ -871,9 +843,70 @@ mod test {
 
     #[test]
     fn test_parse_episode_code() {
-        assert_eq!(parse_episode_code("Show S02E05 [1080p]"), Some((2, 5)));
-        assert_eq!(parse_episode_code("Show s8e2"), Some((8, 2)));
-        assert_eq!(parse_episode_code("Show without episode"), None);
+        let pattern = REGEX_CACHE
+            .get_or_compile(&default_episode_pattern().unwrap_or_default())
+            .expect("default episode pattern must compile");
+        assert_eq!(parse_season_episode("Show S02E05 [1080p]", &pattern), Some((2, 5)));
+        assert_eq!(parse_season_episode("Show s8e2", &pattern), Some((8, 2)));
+        assert_eq!(parse_season_episode("Show without episode", &pattern), None);
+        // Module-level static is identical to the one we just built.
+        assert_eq!(
+            parse_season_episode("Show S02E05", &CONSTANTS.re_episode_code),
+            Some((2, 5)),
+        );
+    }
+
+    #[test]
+    fn test_fnv1a_32_is_deterministic() {
+        // Lock the contract: two parses of the same M3U produce
+        // identical series/episode IDs, so virtual-id persistence does
+        // not drift across reloads.
+        let a = fnv1a_32("input_a:Show Name:https://example.test/series/ep1");
+        let b = fnv1a_32("input_a:Show Name:https://example.test/series/ep1");
+        assert_eq!(a, b);
+        // Different inputs must collide to different IDs (smoke test
+        // only — collision rates are tested separately).
+        assert_ne!(a, fnv1a_32("input_a:Show Name:https://example.test/series/ep2"));
+        assert_ne!(a, fnv1a_32("input_b:Show Name:https://example.test/series/ep1"));
+        // Hash must never be zero (sentinel value).
+        assert!(fnv1a_32("") > 0);
+    }
+
+    #[tokio::test]
+    async fn test_series_group_drops_episodes_without_sxxeyy() {
+        // Pin the silent-drop behaviour: an episode whose title has
+        // no SxxEyy token is excluded from the synthesised series
+        // item, while the SxxEyy-tagged sibling survives.
+        let content = r#"#EXTM3U
+#EXTINF:0 tvg-type="series" tvg-id="156988" tvg-logo="https://example.test/poster.jpg" group-title="Example Show Name",Example Show Name S02E05
+https://example.test/series/user/pass/s02e05hash
+#EXTINF:0 tvg-type="series" tvg-id="156988" tvg-logo="https://example.test/poster.jpg" group-title="Example Show Name",Example Show Name Pilot
+https://example.test/series/user/pass/pilothash
+"#;
+
+        let groups = parse_m3u(&Config::default(), &test_input(), make_reader(content)).await;
+
+        let series = groups
+            .iter()
+            .flat_map(|group| group.channels.iter())
+            .find(|item| item.header.xtream_cluster.is_series())
+            .expect("expected one synthesised series item");
+        let episodes = match series
+            .header
+            .additional_properties
+            .as_ref()
+            .expect("series properties present")
+        {
+            shared::model::StreamProperties::Series(s) => s
+                .details
+                .as_ref()
+                .and_then(|d| d.episodes.as_ref())
+                .expect("series episodes present"),
+            _ => panic!("expected Series properties"),
+        };
+        assert_eq!(episodes.len(), 1, "the Pilot title has no SxxEyy and is dropped");
+        assert_eq!(episodes[0].episode_num, 5);
+        assert_eq!(episodes[0].season, 2);
     }
 
     #[tokio::test]
@@ -948,7 +981,7 @@ https://example.test/series/user/pass/episode-2
             panic!("expected series properties");
         };
         let details = props.details.as_ref().expect("series details");
-        assert_eq!(details.episodes.as_ref().map(|e| e.len()), Some(2));
+        assert_eq!(details.episodes.as_ref().map(Vec::len), Some(2));
     }
 
     #[test]

@@ -148,7 +148,7 @@ pub static CONSTANTS: LazyLock<Constants> = LazyLock::new(|| {
         re_classifier_year: Regex::new(r"[\(\[]?(\d{4})[\)\]]?").unwrap(),
         re_classifier_cleanup: Regex::new(r"(?i)[\s\._-]*(?:s\d+e\d+|\d+x\d+|season[\s\._-]*\d+|episode[\s\._-]*\d+).*$").unwrap(),
         re_episode_code: Regex::new(
-            r"(?i)\b(?:s\d{1,2}e\d{1,3}|\d{1,2}x\d{1,3}|season[\s._-]*\d{1,2}(?:[\s._-]*episode[\s._-]*\d{1,3})?|episode[\s._-]*\d{1,3})\b"
+            r"(?i)\b(?P<episode>s\d{1,2}e\d{1,3}|\d{1,2}x\d{1,3}|season[\s._-]*\d{1,2}(?:[\s._-]*episode[\s._-]*\d{1,3})?|episode[\s._-]*\d{1,3})\b"
         )
         .unwrap(),
         re_classifier_episode: Regex::new(r"(?i)(?:e|episode|x)[\s\._-]*(\d+)").unwrap(),
