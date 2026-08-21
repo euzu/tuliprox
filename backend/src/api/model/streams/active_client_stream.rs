@@ -214,6 +214,9 @@ struct ActiveClientStreamState {
     timed_stream_context: Option<TimedStreamContext>,
     preempt_cancelled: Option<Pin<Box<WaitForCancellationFutureOwned>>>,
     grace_task_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Cancels a panel-api provisioning probe spawned by the grace task; aborting the
+    /// grace task alone would leave the probe running to its own timeout.
+    provisioning_stop_signal: Option<CancellationToken>,
     provisionable: bool,
     custom_video: CustomVideoBuffers,
     meter: Option<Arc<StreamMeterHandle>>,
@@ -351,6 +354,9 @@ impl ActiveClientStreamState {
     fn stop_grace_task(&mut self) {
         if let Some(task) = self.grace_task_handle.take() {
             task.abort();
+        }
+        if let Some(token) = self.provisioning_stop_signal.take() {
+            token.cancel();
         }
     }
 
@@ -885,6 +891,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
 
     let provisioning_info = resolve_grace_period_provisioning(app_state, &stream_details);
     let has_provisioning = provisioning_info.is_some();
+    let provisioning_stop_signal = provisioning_info.as_ref().map(|info| info.stop_signal.clone());
     let hold_stream = stream_details.grace_period.hold_stream;
     let capacity_notify = app_state.connection_manager.capacity_notified();
     let pending_provider_version = if hold_stream {
@@ -990,6 +997,7 @@ pub(crate) async fn create_active_client_stream(request: ActiveClientStreamParam
         timed_stream_context,
         preempt_cancelled,
         grace_task_handle,
+        provisioning_stop_signal,
         provider_handle: provider_handle_preserved,
         send_custom_stream_flag,
         provisionable: has_provisioning,
@@ -1876,6 +1884,7 @@ mod tests {
             timed_stream_context: None,
             preempt_cancelled: None,
             grace_task_handle: None,
+            provisioning_stop_signal: None,
             provisionable,
             custom_video: CustomVideoBuffers {
                 user_exhausted: None,
@@ -2377,6 +2386,7 @@ mod tests {
             timed_stream_context: Some(TimedStreamContext { app_state, duration_secs: 1, virtual_id: 1 }),
             preempt_cancelled: None,
             grace_task_handle: None,
+            provisioning_stop_signal: None,
             provisionable: false,
             custom_video: CustomVideoBuffers {
                 user_exhausted: None,
@@ -2534,6 +2544,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
 
@@ -2951,7 +2962,7 @@ mod tests {
         let (tracked_provider, tracker) = track_provider_stream(gated_provider);
         let producer_cancel = CancellationToken::new();
         let buffered_provider =
-            BufferedStream::new(tracked_provider, 1, producer_cancel.clone(), "controlled-test-stream").boxed();
+            BufferedStream::new(tracked_provider, 1, 0, producer_cancel.clone(), "controlled-test-stream").boxed();
         let direct = create_test_active_direct_stream(TestDirectStreamParams {
             app_state: &app_state,
             username: "series-closed-consumer-user",

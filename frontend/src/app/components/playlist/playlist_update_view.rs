@@ -1,6 +1,6 @@
 use crate::{
     app::{
-        components::{Breadcrumbs, Card, PlaylistContext, TextButton},
+        components::{Breadcrumbs, Card, NoContent, PlaylistContext, TextButton},
         ConfigContext,
     },
     hooks::use_service_context,
@@ -74,6 +74,8 @@ pub fn PlaylistUpdateView() -> Html {
     let can_write_library = services_ctx.auth.has_permission(Permission::LibraryWrite);
     let breadcrumbs = use_state(|| Rc::new(vec![translate.t("LABEL.PLAYLISTS"), translate.t("LABEL.UPDATE")]));
     let selected_targets = use_list::<Rc<ConfigTargetDto>>(vec![]);
+    let updating = use_state(|| false);
+    let library_updating = use_state(|| false);
     let log_lines = use_reducer(|| LogLinesState { lines: Vec::new() });
     let log_container_ref = use_node_ref();
 
@@ -139,14 +141,17 @@ pub fn PlaylistUpdateView() -> Html {
         let services = services_ctx.clone();
         let selected_targets = selected_targets.clone();
         let log_lines = log_lines.clone();
+        let updating = updating.clone();
         Callback::from(move |_| {
-            if !can_write_playlist {
+            if !can_write_playlist || *updating {
                 return;
             }
+            updating.set(true);
             log_lines.dispatch(LogLinesAction::Clear);
             let selected_targets = selected_targets.clone();
             let services = services.clone();
             let translate = translate.clone();
+            let updating = updating.clone();
             spawn_local(async move {
                 let target_names = {
                     let targets = selected_targets.current();
@@ -158,6 +163,7 @@ pub fn PlaylistUpdateView() -> Html {
                 } else {
                     services.toastr.error(translate.t("MESSAGES.PLAYLIST_UPDATE.FAIL"));
                 }
+                updating.set(false);
             });
         })
     };
@@ -166,13 +172,15 @@ pub fn PlaylistUpdateView() -> Html {
         let services = services_ctx.clone();
         let translate = translate.clone();
         let log_lines = log_lines.clone();
+        let library_updating = library_updating.clone();
         Callback::from(move |name: String| {
-            if !can_write_library {
+            if !can_write_library || *library_updating {
                 return;
             }
             let services = services.clone();
             let translate = translate.clone();
             let log_lines = log_lines.clone();
+            let library_updating = library_updating.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let mode = match name.as_str() {
                     ACTION_UPDATE_LIBRARY => 1,
@@ -180,11 +188,13 @@ pub fn PlaylistUpdateView() -> Html {
                     _ => 0,
                 };
                 if mode > 0 {
+                    library_updating.set(true);
                     log_lines.dispatch(LogLinesAction::Clear);
                     match services.config.update_library(mode == 2).await {
                         Ok(()) => services.toastr.success(translate.t("MESSAGES.LIBRARY_UPDATE.SUCCESS")),
                         Err(_err) => services.toastr.error(translate.t("MESSAGES.LIBRARY_UPDATE.FAIL")),
                     }
+                    library_updating.set(false);
                 }
             });
         })
@@ -211,10 +221,12 @@ pub fn PlaylistUpdateView() -> Html {
                 <div class="tp__radio-button-group">
                 <TextButton class="tertiary" name={ACTION_UPDATE_LIBRARY}
                     icon="Refresh"
+                    disabled={*library_updating}
                     title={ translate.t(LABEL_UPDATE_LOCAL_LIBRARY)}
                     onclick={handle_update_content.clone()}></TextButton>
                 <TextButton class="tertiary" name={ACTION_UPDATE_LIBRARY_FORCE}
                     title={ translate.t(LABEL_FORCE)}
+                    disabled={*library_updating}
                     onclick={handle_update_content.clone()}></TextButton>
                 </div>
             })}
@@ -222,19 +234,22 @@ pub fn PlaylistUpdateView() -> Html {
         { html_if!(can_write_playlist, {
             <TextButton class="primary" name="playlist_update"
                    icon="Refresh"
+                   disabled={*updating}
                    title={ translate.t("LABEL.UPDATE")}
                    onclick={handle_update}></TextButton>
         })}
         </div>
         <Card>
          <div class="tp__playlist-update-view__body">
-            <TextButton class={if selected_targets.current().is_empty() { "active" } else {""}}
-                name={translate.t("LABEL.ALL")} title={translate.t("LABEL.ALL")} icon={"SelectAll"}
-                onclick={handle_all_select}/>
-
          {
-            if let Some(data) = playlist_ctx.sources.as_ref() {
-              data.iter().flat_map(|(_inputs, targets)| targets)
+            if let Some(data) = playlist_ctx.sources.as_ref().as_ref().filter(|data| data.iter().any(|(_, targets)| !targets.is_empty())) {
+              html! {
+                <>
+                <TextButton class={if selected_targets.current().is_empty() { "active" } else {""}}
+                    name={translate.t("LABEL.ALL")} title={translate.t("LABEL.ALL")} icon={"SelectAll"}
+                    onclick={handle_all_select}/>
+                {
+                  data.iter().flat_map(|(_inputs, targets)| targets)
                     .map(Rc::clone)
                     .map(|target| {
                         let handle_click = handle_target_select.clone();
@@ -245,9 +260,12 @@ pub fn PlaylistUpdateView() -> Html {
                             name={target_name.clone()} title={target_name} icon={"UpdateChecked"}
                              onclick={move |_| handle_click.emit(target.clone())}/>
                         }
-              }).collect::<Html>()
+                  }).collect::<Html>()
+                }
+                </>
+              }
             } else {
-              html! {<></>}
+              html! { <NoContent text={translate.t("MESSAGES.PLAYLIST_UPDATE.NO_TARGETS")}/> }
             }
          }
          </div>

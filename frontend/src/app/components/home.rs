@@ -1,7 +1,7 @@
 use crate::{
     app::{
         components::{
-            config::ConfigView,
+            config::{ConfigView, PlansView},
             loading_indicator::BusyIndicator,
             map_sources_to_playlist_rows,
             recording::{RecordingLibraryView, RecordingRulesView},
@@ -87,6 +87,7 @@ fn is_allowed_home_view(view: ViewType, access: HomeViewAccess) -> bool {
         ViewType::Streams => access.show_streams_page && access.can_read_system_status,
         ViewType::Downloads => access.can_read_downloads,
         ViewType::Users => access.can_read_users,
+        ViewType::Plans => access.can_read_config,
         ViewType::Config => access.can_read_config,
         ViewType::SourceEditor => access.can_read_sources,
         ViewType::PlaylistUpdate => access.can_write_playlist,
@@ -108,6 +109,7 @@ fn first_allowed_home_view(access: HomeViewAccess) -> ViewType {
         ViewType::Downloads,
         ViewType::Config,
         ViewType::Users,
+        ViewType::Plans,
         ViewType::SourceEditor,
         ViewType::PlaylistUpdate,
         ViewType::PlaylistSettings,
@@ -591,6 +593,13 @@ pub fn Home() -> Html {
                                        <Panel class="tp__full-width" value={ViewType::Users.intern()} active={view_page.clone()}>
                                           <ErrorBoundary name={translate.t("LABEL.USER")}>
                                             <UserlistView/>
+                                          </ErrorBoundary>
+                                       </Panel>
+                                       })}
+                                       { html_if!(can_read_config, {
+                                       <Panel class="tp__full-width" value={ViewType::Plans.intern()} active={view_page.clone()}>
+                                          <ErrorBoundary name={translate.t("LABEL.PLANS")}>
+                                            <PlansView/>
                                           </ErrorBoundary>
                                        </Panel>
                                        })}

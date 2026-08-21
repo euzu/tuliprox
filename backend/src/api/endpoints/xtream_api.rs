@@ -33,7 +33,7 @@ use crate::{
         xtream::{self, create_vod_info_from_item},
     },
     model::{
-        xtream_mapping_option_from_target_options, Config, ConfigInput, ConfigInputFlags, ConfigTarget, InputSource,
+        xtream_mapping_option_from_target_options, ConfigInput, ConfigInputFlags, ConfigTarget, InputSource,
         ProxyUserCredentials,
     },
     repository::{
@@ -315,11 +315,11 @@ async fn xtream_player_api_stream(
         .map_or(stream_ext, |input| override_live_hls_extension(stream_req.context, input, stream_ext));
     let is_hls_manifest_request = stream_ext == Some(HLS_EXT);
 
-    let output_allowed = if stream_req.context == ApiStreamContext::Timeshift {
+    let output_allowed = (if stream_req.context == ApiStreamContext::Timeshift {
         user.allows_cluster(XtreamCluster::Live)
     } else {
         user.allows_item_type(pli.item_type)
-    };
+    }) && (user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli)));
     if !output_allowed {
         if is_hls_manifest_request {
             return hls_custom_video_manifest_response(
@@ -1049,7 +1049,9 @@ async fn xtream_player_api_resource(
         format!("Failed to read xtream item for stream id {req_virtual_id}")
     );
 
-    if !user.allows_item_type(pli.item_type) {
+    if !user.allows_item_type(pli.item_type)
+        || !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli)))
+    {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
 
@@ -1279,6 +1281,11 @@ pub async fn xtream_get_stream_info_response(
         return empty_stream_info_response(cluster);
     };
 
+    // Content filter: hidden items expose no metadata either
+    if !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli))) {
+        return empty_stream_info_response(cluster);
+    }
+
     let input = app_state.app_config.get_input_by_name(&pli.input_name);
     let is_media_server = input.as_ref().is_some_and(|i| i.input_type.is_media_server());
     // handle local items and media server
@@ -1375,6 +1382,10 @@ async fn xtream_get_short_epg(
         };
 
         if let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, app_state, target, None).await {
+            // Content filter: hidden items expose no EPG either
+            if !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli))) {
+                return axum::Json(json!(ShortEpgResultDto::default())).into_response();
+            }
             let config = &app_state.app_config.config.load();
             let has_archive = pli_supports_archive(app_state, &pli);
             if let (Some(epg_path), Some(channel_id)) = (
@@ -1449,8 +1460,8 @@ async fn xtream_get_short_epg(
 }
 
 async fn xtream_player_api_handle_content_action(
-    config: &Config,
-    target_name: &str,
+    app_state: &Arc<AppState>,
+    target: &ConfigTarget,
     action: &str,
     category_id: Option<u32>,
     user: &ProxyUserCredentials,
@@ -1465,16 +1476,31 @@ async fn xtream_player_api_handle_content_action(
     if !user.allows_cluster(cluster) {
         return Some(api_utils::empty_json_list_response().into_response());
     }
-    if let Ok(file_path) = xtream_get_collection_path(config, target_name, collection) {
+    let config = app_state.app_config.config.load();
+    let target_name = target.name.as_str();
+    if let Ok(file_path) = xtream_get_collection_path(&config, target_name, collection) {
         match tokio::fs::read_to_string(&file_path).await {
             Ok(content) => {
                 let filter =
-                    user_get_bouquet_filter(config, &user.username, category_id, TargetType::Xtream, cluster).await;
+                    user_get_bouquet_filter(&config, &user.username, category_id, TargetType::Xtream, cluster).await;
 
                 match serde_json::from_str::<Vec<XtreamCategoryEntry>>(&content) {
                     Ok(mut categories) => {
                         if let Some(fltr) = filter {
                             categories.retain(|c| fltr.contains(&c.category_id));
+                        }
+                        // Hide categories fully filtered out by the user's content filter.
+                        if let Some(visible) = crate::api::endpoints::user_visibility::collect_visible_category_ids(
+                            &app_state.app_config,
+                            target,
+                            cluster,
+                            user,
+                        )
+                        .await
+                        {
+                            categories.retain(|c| {
+                                c.category_id.parse::<u32>().is_ok_and(|id| visible.contains(&id))
+                            });
                         }
                         return Some(axum::Json(categories).into_response());
                     }
@@ -1745,8 +1771,8 @@ async fn xtream_player_api(
     let category_id = api_req.category_id.trim().parse::<u32>().ok();
     // Handle general content actions
     if let Some(response) = xtream_player_api_handle_content_action(
-        &app_state.app_config.config.load(),
-        &target.name,
+        app_state,
+        &target,
         action,
         category_id,
         &user,

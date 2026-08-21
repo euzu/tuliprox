@@ -85,13 +85,23 @@ pub fn Table<T: PartialEq + Clone + 'static>(props: &TableProps<T>) -> Html {
                                 Callback::from(move |_| on_header_click.emit(col_index))
                             };
 
+                            // Enter/Space activate sorting for keyboard users
+                            let on_key_col = {
+                                let on_header_click = on_header_click.clone();
+                                Callback::from(move |event: KeyboardEvent| {
+                                    let key = event.key();
+                                    if key == "Enter" || key == " " {
+                                        event.prevent_default();
+                                        on_header_click.emit(col_index);
+                                    }
+                                })
+                            };
+
                             html!{
                                <th
                                  class={classes!(format!("tp__table__th--{}", col_index+1),
                                      if sortable { Some("tp__table__th--sortable") } else { None }
                                  )}
-                                 onclick={if sortable { Some(on_click_col) } else { None }}
-                                 role={if sortable { Some("button") } else { None }}
                                  aria-sort={
                                      if let Some((c, order)) = &*sort_state {
                                          if *c == col_index {
@@ -104,10 +114,19 @@ pub fn Table<T: PartialEq + Clone + 'static>(props: &TableProps<T>) -> Html {
                                      } else { Some("none".to_string()) }
                                  }
                                >
-                                  <span class="tp__table-header">
-                                   {render_header_cell.emit(col_index)}
-                                   {icon_html}
-                                  </span>
+                                  // Sortable headers expose a real button so the <th> keeps its columnheader semantics
+                                  if sortable {
+                                      <button type="button" class="tp__table-header"
+                                          onclick={on_click_col} onkeydown={on_key_col}>
+                                       {render_header_cell.emit(col_index)}
+                                       {icon_html}
+                                      </button>
+                                  } else {
+                                      <span class="tp__table-header">
+                                       {render_header_cell.emit(col_index)}
+                                       {icon_html}
+                                      </span>
+                                  }
                                </th>
                             }
                         })

@@ -4,7 +4,7 @@ use crate::model::{
 use crate::processing::processor::PlaylistProcessingContext;
 use crate::repository::get_input_storage_path;
 use crate::utils::{add_prefix_to_filename, prepare_file_path, request};
-use log::debug;
+use log::{debug, warn};
 use shared::concat_string;
 use shared::error::TuliproxError;
 use shared::utils::{sanitize_sensitive_info, short_hash};
@@ -202,8 +202,11 @@ pub async fn get_xmltv(
                 }
             }
 
-            let _ = cleanup_unlisted_epg_files(&ctx.config.file_locks, &stored_file_paths, "_epg.xml").await;
-            let _ = cleanup_unlisted_epg_files(&ctx.config.file_locks, &stored_file_paths, "_epg.ics").await;
+            for suffix in ["_epg.xml", "_epg.ics"] {
+                if let Err(err) = cleanup_unlisted_epg_files(&ctx.config.file_locks, &stored_file_paths, suffix).await {
+                    warn!("Failed to clean up stale {suffix} files: {err}");
+                }
+            }
 
             if file_paths.is_empty() {
                 (None, errors)

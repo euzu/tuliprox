@@ -1,5 +1,5 @@
 use crate::app::components::{menu_item::MenuItem, popup_menu::PopupMenu, theme::Theme, IconButton};
-use web_sys::MouseEvent;
+use web_sys::{FocusEvent, MouseEvent};
 use yew::{component, html, use_state, Callback, Html, NodeRef, Properties};
 
 #[derive(Properties, Clone, PartialEq)]
@@ -30,7 +30,12 @@ pub fn ThemePicker(props: &ThemePickerProps) -> Html {
 
     let handle_popup_close = {
         let popup_is_open = popup_is_open.clone();
-        Callback::from(move |()| popup_is_open.set(false))
+        let current_theme = props.theme;
+        Callback::from(move |()| {
+            // Undo any hover preview when the menu closes without a selection
+            current_theme.preview();
+            popup_is_open.set(false)
+        })
     };
 
     let handle_theme_select = {
@@ -57,14 +62,20 @@ pub fn ThemePicker(props: &ThemePickerProps) -> Html {
             />
             <PopupMenu is_open={*popup_is_open} anchor_ref={(*popup_anchor_ref).clone()} on_close={handle_popup_close}>
                 {
-                    for Theme::all().iter().copied().map(|theme| html! {
-                        <MenuItem
-                            name={theme.to_string()}
-                            label={theme.label()}
-                            icon={if theme.is_light() { "Sun".to_owned() } else { "Moon".to_owned() }}
-                            class={if theme == props.theme { "tp__theme-picker__item active".to_owned() } else { "tp__theme-picker__item".to_owned() }}
-                            onclick={handle_theme_select.clone()}
-                        />
+                    for Theme::all().iter().copied().map(|theme| {
+                        let preview = Callback::from(move |_: MouseEvent| theme.preview());
+                        let preview_focus = Callback::from(move |_: FocusEvent| theme.preview());
+                        html! {
+                            <span onmouseenter={preview} onfocusin={preview_focus}>
+                                <MenuItem
+                                    name={theme.to_string()}
+                                    label={theme.label()}
+                                    icon={if theme.is_light() { "Sun".to_owned() } else { "Moon".to_owned() }}
+                                    class={if theme == props.theme { "tp__theme-picker__item active".to_owned() } else { "tp__theme-picker__item".to_owned() }}
+                                    onclick={handle_theme_select.clone()}
+                                />
+                            </span>
+                        }
                     })
                 }
             </PopupMenu>

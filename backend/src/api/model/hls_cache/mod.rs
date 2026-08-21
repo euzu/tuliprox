@@ -43,6 +43,9 @@ mod critical_handoff;
 mod cutover;
 mod deadline;
 mod deterministic_conflict;
+
+/// Redirect-following cap shared by manifest, resource and endpoint fetchers.
+pub(crate) const MAX_MANUAL_REDIRECTS: usize = 10;
 mod gc;
 mod headers;
 mod ids;

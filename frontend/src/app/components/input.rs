@@ -33,6 +33,10 @@ pub struct InputProps {
     pub hint_key: Option<String>,
     #[prop_or_default]
     pub aria_label: Option<String>,
+    #[prop_or_default]
+    pub required: bool,
+    #[prop_or_default]
+    pub error: Option<String>,
 }
 
 #[component]
@@ -77,7 +81,8 @@ pub fn Input(props: &InputProps) -> Html {
         if props.label.is_some() { None } else { props.aria_label.clone().or_else(|| props.placeholder.clone()) };
 
     html! {
-        <FieldWrapper label={props.label.clone()} field_id={resolved_field_id.clone()} hint_key={props.hint_key.clone()}>
+        <FieldWrapper label={props.label.clone()} field_id={resolved_field_id.clone()} hint_key={props.hint_key.clone()}
+            required={props.required} error={props.error.clone()}>
             { html_if!(props.icon.is_some(), {
                 <AppIcon name={props.icon.as_ref().unwrap().clone()} />
             })}
@@ -91,6 +96,8 @@ pub fn Input(props: &InputProps) -> Html {
                 oninput={handle_oninput}
                 placeholder={props.placeholder.clone()}
                 aria-label={aria_label}
+                aria-required={props.required.then(|| "true".to_string())}
+                aria-invalid={props.error.as_ref().map(|_| "true".to_string())}
                 />
             { html_if!(props.hidden, {
                  <IconButton name="hide" icon="Visibility" class={if !*hide_content {"active"} else {""}} onclick={handle_hide_content} />

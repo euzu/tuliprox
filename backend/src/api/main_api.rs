@@ -12,6 +12,7 @@ use crate::{
             v1_api::v1_api_register,
             web_index::{index_register_with_path, index_register_without_path},
             websocket_api::ws_api_register,
+            log_ws_api::log_ws_api_register,
             xmltv_api::xmltv_api_register,
             xtream_api::xtream_api_register,
         },
@@ -662,7 +663,8 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     let mut router = axum::Router::new()
         .route("/healthcheck", axum::routing::get(healthcheck))
         .nest_service("/.well-known", ServeDir::new(web_dir_path.join("static/.well-known")))
-        .merge(ws_api_register(web_auth_enabled, web_ui_path.as_str()));
+        .merge(ws_api_register(web_auth_enabled, web_ui_path.as_str()))
+        .merge(log_ws_api_register(web_auth_enabled, web_ui_path.as_str()));
     if web_ui_enabled {
         router = router
             .nest_service(

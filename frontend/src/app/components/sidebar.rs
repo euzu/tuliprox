@@ -240,6 +240,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                       {html_if!(auth.has_permission(Permission::UserRead), {
                           <MenuItem class={if active_menu == ViewType::Users { "active" } else {""}} icon="UserOutline" name={ViewType::Users.to_string()} label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></MenuItem>
                       })}
+                      {html_if!(auth.has_permission(Permission::ConfigRead), {
+                          <MenuItem class={if active_menu == ViewType::Plans { "active" } else {""}} icon="Group" name={ViewType::Plans.to_string()} label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></MenuItem>
+                      })}
                       {html_if!(auth.has_permission(Permission::SourceRead), {
                           <>
                           <MenuItem class={if active_menu == ViewType::SourceEditor { "active" } else {""}} icon="SourceEditor" name={ViewType::SourceEditor.to_string()} label={translate.t("LABEL.SOURCE_EDITOR")}  onclick={&handle_menu_click}></MenuItem>
@@ -309,6 +312,9 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
             })}
             {html_if!(auth.has_permission(Permission::UserRead), {
                 <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Users, if active_menu == ViewType::Users { " active" } else {""})} icon="UserOutline" name={ViewType::Users.to_string()} hint={translate.t("LABEL.USER")} aria_label={translate.t("LABEL.USER")} onclick={&handle_menu_click}></IconButton>
+            })}
+            {html_if!(auth.has_permission(Permission::ConfigRead), {
+                <IconButton class={format!("tp__app-sidebar-menu--{}{}", ViewType::Plans, if active_menu == ViewType::Plans { " active" } else {""})} icon="Group" name={ViewType::Plans.to_string()} hint={translate.t("LABEL.PLANS")} aria_label={translate.t("LABEL.PLANS")} onclick={&handle_menu_click}></IconButton>
             })}
             {html_if!(auth.has_permission(Permission::SourceRead), {
                 <>

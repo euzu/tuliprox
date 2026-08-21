@@ -65,7 +65,8 @@ use crate::{
             HlsOriginResourceFetchError, HlsOriginSource, HlsOriginSourceKind, HlsOriginWorkClass,
             HlsMasterBandwidth, HlsMasterBandwidthSelection,
             HlsPanelProvisioningRedirectPaths, HlsPlaybackFamilyKey, HlsProvisioningStatus, HlsQosMeterInit,
-            HlsQosRuntimeConfig, HlsResourceServeFailure, HlsResourceServeOutcome, HlsSegmentFile, HlsSession,
+            HlsQosRuntimeConfig, HlsResourceFetchAttempt, HlsResourceServeFailure, HlsResourceServeOutcome,
+            HlsSegmentFile, HlsSession,
             HlsSessionHandle, HlsSessionKey, HlsSessionMode, HlsSessionStoreOutcome, HlsTerminalSegmentPath,
             HlsRuntimeCustomTailOutcome, HlsRuntimeCustomTailReason, HlsRuntimeCustomTailRequest,
             HlsTransientCacheCommitContext,
@@ -74,7 +75,8 @@ use crate::{
             HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard, LiveHlsOriginEntry, OriginRefreshRequest,
             OriginSegmentKey, ProviderAllocation, ProviderConfig as RuntimeProviderConfig, ProviderHandle,
             ProxySessionId, RetryPolicy, SegmentCacheKey, SegmentCacheStatus, SegmentDemandFetchOutcome,
-            SegmentFetchContext, SegmentFetchPolicy, StreamMeterHandle, TransientObjectUnavailableState,
+            SegmentFetchContext, SegmentFetchPolicy, StreamMeterHandle,
+            TransientObjectUnavailableState,
             TransientResourceFile, TransientResourceRef, TransportStreamBuffer, UserSession,
             HlsSingleVariantMasterPlaylist, trigger_origin_refresh_sync,
             HLS_ACCESS_LEASE_ID_PLACEHOLDER, HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH,
@@ -123,9 +125,13 @@ use shared::{
 use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Duration};
 use url::Url;
 
-const MAX_MANUAL_REDIRECTS: usize = 10;
 const HLS_TEMPORARY_RESOURCE_RETRY_AFTER_SECS: u64 = 1;
 const HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS: u64 = HLS_TEMPORARY_RESOURCE_RETRY_AFTER_SECS * 1_000;
+/// Poll interval while waiting for a canonical manifest commit. Lower values
+/// reduce time-to-first-manifest at the cost of more wakeups per waiting client.
+const HLS_MANIFEST_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+use crate::api::model::MAX_MANUAL_REDIRECTS;
 
 /// Recover archive EPG reference from `m3u-catchup|...|archive|{start}|{duration}` session keys.
 ///
@@ -607,8 +613,8 @@ fn hls_access_lease_ttl_ms(app_state: &Arc<AppState>) -> u64 { app_state.hls_pro
 
 fn duration_to_millis_saturating(duration: Duration) -> u64 { u64::try_from(duration.as_millis()).unwrap_or(u64::MAX) }
 
-fn hls_pending_bootstrap_window_ms() -> u64 {
-    duration_to_millis_saturating(hls_initial_manifest_decision_wait_timeout())
+fn hls_pending_bootstrap_window_ms(app_state: &Arc<AppState>) -> u64 {
+    duration_to_millis_saturating(hls_initial_manifest_decision_wait_timeout(app_state))
 }
 
 async fn hls_access_lease_timing_for_session(
@@ -1628,19 +1634,45 @@ async fn fetch_transient_origin_response_with_provider_io(
         log_identity,
     };
     let runtime_prepare_error = Arc::new(tokio::sync::Mutex::new(None));
-    let app_state_for_prepare = Arc::clone(request.app_state);
-    let session_for_prepare = Arc::clone(request.session);
-    let access_context_for_prepare = request.access_context.clone();
-    let fingerprint_for_prepare = request.fingerprint.clone();
-    let headers_for_prepare = request.headers.clone();
-    let runtime_prepare_error_for_prepare = Arc::clone(&runtime_prepare_error);
-    let result = fetch_hls_transient_origin_response_with_attempt_prepare(fetch_request, move |_attempt| {
-        let app_state = Arc::clone(&app_state_for_prepare);
-        let session = Arc::clone(&session_for_prepare);
-        let access_context = access_context_for_prepare.clone();
-        let fingerprint = fingerprint_for_prepare.clone();
-        let headers = headers_for_prepare.clone();
-        let runtime_prepare_error = Arc::clone(&runtime_prepare_error_for_prepare);
+    let prepare_attempt = hls_transient_origin_prepare_closure(
+        request.app_state,
+        request.session,
+        request.access_context,
+        request.fingerprint,
+        request.headers,
+        &runtime_prepare_error,
+    );
+    let result = fetch_hls_transient_origin_response_with_attempt_prepare(fetch_request, prepare_attempt).await;
+    let runtime_prepare_error = *runtime_prepare_error.lock().await;
+    HlsTransientOriginFetchResult { result, runtime_prepare_error }
+}
+
+/// Builds the shared per-attempt prepare closure for transient origin fetches.
+/// Runtime acquire failures are captured in `runtime_prepare_error` and mapped
+/// to a provider-unavailable fetch error so the retry loop can proceed uniformly.
+fn hls_transient_origin_prepare_closure(
+    app_state: &Arc<AppState>,
+    session: &HlsSessionHandle,
+    access_context: &HlsAccessContext,
+    fingerprint: &Fingerprint,
+    headers: &HeaderMap,
+    runtime_prepare_error: &Arc<tokio::sync::Mutex<Option<HlsOriginRuntimeAcquireError>>>,
+) -> impl FnMut(
+    HlsResourceFetchAttempt,
+) -> futures::future::BoxFuture<'static, Result<Option<HlsTransientOriginIoGuard>, HlsOriginResourceFetchError>> {
+    let app_state = Arc::clone(app_state);
+    let session = Arc::clone(session);
+    let access_context = access_context.clone();
+    let fingerprint = fingerprint.clone();
+    let headers = headers.clone();
+    let runtime_prepare_error = Arc::clone(runtime_prepare_error);
+    move |_attempt| {
+        let app_state = Arc::clone(&app_state);
+        let session = Arc::clone(&session);
+        let access_context = access_context.clone();
+        let fingerprint = fingerprint.clone();
+        let headers = headers.clone();
+        let runtime_prepare_error = Arc::clone(&runtime_prepare_error);
         async move {
             match prepare_hls_transient_origin_io_for_authorized_resource_work(
                 &app_state,
@@ -1660,10 +1692,7 @@ async fn fetch_transient_origin_response_with_provider_io(
             }
         }
         .boxed()
-    })
-    .await;
-    let runtime_prepare_error = *runtime_prepare_error.lock().await;
-    HlsTransientOriginFetchResult { result, runtime_prepare_error }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2453,7 +2482,7 @@ async fn hls_manifest_access_context_and_state(
             now_ms,
             None,
             Some(HlsAccessLeasePendingDeadline::Bootstrap {
-                deadline_ms: now_ms.saturating_add(hls_pending_bootstrap_window_ms()),
+                deadline_ms: now_ms.saturating_add(hls_pending_bootstrap_window_ms(app_state)),
             }),
             hls_access_lease_ttl_ms(app_state),
         )
@@ -2553,44 +2582,18 @@ async fn fetch_and_cache_transient_origin_response(
             cache_duration_ms: context.cache_duration_ms,
         },
     };
-    let app_state_for_prepare = Arc::clone(context.app_state);
-    let session_for_prepare = Arc::clone(context.session);
-    let access_context = context.access_context.clone();
-    let fingerprint_for_prepare = context.fingerprint.clone();
-    let headers_for_prepare = context.headers.clone();
     let runtime_prepare_error = Arc::new(tokio::sync::Mutex::new(None));
-    let runtime_prepare_error_for_prepare = Arc::clone(&runtime_prepare_error);
+    let prepare_attempt = hls_transient_origin_prepare_closure(
+        context.app_state,
+        context.session,
+        context.access_context,
+        context.fingerprint,
+        context.headers,
+        &runtime_prepare_error,
+    );
     let final_failure = match fetch_and_commit_hls_transient_origin_response_with_attempt_prepare(
         cache_fetch_request,
-        move |_attempt| {
-            let app_state = Arc::clone(&app_state_for_prepare);
-            let session = Arc::clone(&session_for_prepare);
-            let access_context = access_context.clone();
-            let fingerprint = fingerprint_for_prepare.clone();
-            let headers = headers_for_prepare.clone();
-            let runtime_prepare_error = Arc::clone(&runtime_prepare_error_for_prepare);
-            async move {
-                match prepare_hls_transient_origin_io_for_authorized_resource_work(
-                    &app_state,
-                    &session,
-                    &access_context,
-                    &fingerprint,
-                    &headers,
-                    current_time_millis(),
-                )
-                .await
-                {
-                    Ok(guard) => Ok(guard),
-                    Err(err) => {
-                        *runtime_prepare_error.lock().await = Some(err);
-                        Err(HlsOriginResourceFetchError::ProviderUnavailable(
-                            HlsBoundAccountAcquireErrorKind::Unavailable,
-                        ))
-                    }
-                }
-            }
-            .boxed()
-        },
+        prepare_attempt,
     )
     .await
     {
@@ -4492,7 +4495,7 @@ async fn create_hls_cache_entry_master_playlist_response(
         origin_source.stream_ref.clone(),
         virtual_id,
         now_ms,
-        hls_pending_bootstrap_window_ms(),
+        hls_pending_bootstrap_window_ms(app_state),
     )
     .with_known_bitrate_bps(known_bitrate_bps)
     .with_archive_playback(
@@ -6005,7 +6008,7 @@ async fn try_hls_cache_canonical_manifest_response(
         }
     };
     let manifest_boundary_rendered_at_ms = handoff_previous_rendered_at_ms.unwrap_or(previous_manifest_rendered_at_ms);
-    let wait_timeout = hls_manifest_wait_timeout_for_requirement(&session, manifest_commit_requirement).await;
+    let wait_timeout = hls_manifest_wait_timeout_for_requirement(app_state, &session, manifest_commit_requirement).await;
     let cached_manifest_options = hls_cached_manifest_options_for_requirement(
         wait_timeout,
         manifest_commit_requirement,
@@ -6279,15 +6282,22 @@ async fn try_hls_cache_canonical_manifest_response(
     )
 }
 
-fn hls_initial_manifest_decision_wait_timeout() -> Duration { Duration::from_secs(90) }
+fn hls_initial_manifest_decision_wait_timeout(app_state: &Arc<AppState>) -> Duration {
+    Duration::from_secs(app_state.hls_proxy.initial_manifest_wait_timeout_secs())
+}
 
 async fn hls_manifest_wait_timeout_for_requirement(
+    app_state: &Arc<AppState>,
     session: &HlsSessionHandle,
     requirement: HlsManifestCommitRequirement,
 ) -> Duration {
     match requirement {
-        HlsManifestCommitRequirement::FreshCommitRequired { .. } => hls_initial_manifest_decision_wait_timeout(),
-        HlsManifestCommitRequirement::CommittedManifestAllowed => hls_initial_manifest_wait_timeout(session).await,
+        HlsManifestCommitRequirement::FreshCommitRequired { .. } => {
+            hls_initial_manifest_decision_wait_timeout(app_state)
+        }
+        HlsManifestCommitRequirement::CommittedManifestAllowed => {
+            hls_initial_manifest_wait_timeout(app_state, session).await
+        }
     }
 }
 
@@ -6303,7 +6313,7 @@ async fn touch_initial_manifest_access_lease_window(
         return;
     }
     let wait_timeout_ms = duration_to_millis_saturating(wait_timeout);
-    let deadline_ms = now_ms.saturating_add(wait_timeout_ms.max(hls_pending_bootstrap_window_ms()));
+    let deadline_ms = now_ms.saturating_add(wait_timeout_ms.max(hls_pending_bootstrap_window_ms(app_state)));
     let touch = app_state
         .hls_proxy
         .touch_manifest_access_lease(
@@ -6329,13 +6339,13 @@ async fn touch_initial_manifest_access_lease_window(
     );
 }
 
-async fn hls_initial_manifest_wait_timeout(session: &HlsSessionHandle) -> Duration {
+async fn hls_initial_manifest_wait_timeout(app_state: &Arc<AppState>, session: &HlsSessionHandle) -> Duration {
     let session = session.read().await;
     if matches!(
         session.account_binding_protection(current_time_millis()),
         HlsAccountBindingProtection::NoMediaYet | HlsAccountBindingProtection::Expired
     ) {
-        hls_initial_manifest_decision_wait_timeout()
+        hls_initial_manifest_decision_wait_timeout(app_state)
     } else {
         Duration::ZERO
     }
@@ -6848,7 +6858,7 @@ async fn try_hls_cached_manifest_response(
             return None;
         }
         let remaining = options.wait_timeout.saturating_sub(started_at.elapsed());
-        tokio::time::sleep(remaining.min(Duration::from_millis(25))).await;
+        tokio::time::sleep(remaining.min(HLS_MANIFEST_WAIT_POLL_INTERVAL)).await;
     }
 }
 
@@ -7521,14 +7531,17 @@ async fn hls_api_stream(
     axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse + Send {
     let api_proxy_user = create_api_proxy_user(&app_state);
-    let (user, target) = if params.username == api_proxy_user.username && params.password == api_proxy_user.password {
+    let (user, target) = if params.username == api_proxy_user.username
+        && crate::auth::constant_time_eq(params.password.as_bytes(), api_proxy_user.password.as_bytes())
+    {
         let Some(target) = app_state.app_config.get_target_by_id(params.target_id) else {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
         };
         (Arc::new(api_proxy_user), target)
     } else {
         let Some((user, target)) = app_state.app_config.get_target_for_user(&params.username, &params.password) else {
-            return axum::http::StatusCode::BAD_REQUEST.into_response();
+            // Credential failure is an auth error, not a malformed request
+            return app_state.app_config.get_auth_error_status().into_response();
         };
         if target.id != params.target_id {
             return axum::http::StatusCode::BAD_REQUEST.into_response();
@@ -9423,8 +9436,21 @@ mod tests {
     }
 
     #[test]
-    fn hls_initial_manifest_decision_wait_timeout_is_ninety_seconds() {
-        assert_eq!(super::hls_initial_manifest_decision_wait_timeout(), Duration::from_secs(90));
+    fn hls_custom_video_manifest_body_is_none_for_non_provisioning() {
+        let user = hls_custom_video_test_user();
+        let manifest = build_hls_custom_video_manifest_body(
+            "https://example.test/iptv/",
+            &user,
+            CustomVideoStreamType::UserConnectionsExhausted,
+        );
+
+        assert!(manifest.is_none(), "non-provisioning custom video types have no static manifest body");
+    }
+
+    #[tokio::test]
+    async fn hls_initial_manifest_decision_wait_timeout_defaults_to_ninety_seconds() {
+        let app_state = test_app_state();
+        assert_eq!(super::hls_initial_manifest_decision_wait_timeout(&app_state), Duration::from_secs(90));
     }
 
     #[tokio::test]
@@ -16584,7 +16610,7 @@ mod tests {
                     now_ms,
                     None,
                     Some(super::HlsAccessLeasePendingDeadline::Bootstrap {
-                        deadline_ms: now_ms.saturating_add(super::hls_pending_bootstrap_window_ms()),
+                        deadline_ms: now_ms.saturating_add(super::hls_pending_bootstrap_window_ms(&app_state)),
                     }),
                     super::hls_access_lease_ttl_ms(&app_state),
                 )

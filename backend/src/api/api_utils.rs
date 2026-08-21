@@ -506,6 +506,13 @@ pub fn get_server_time() -> String {
     chrono::offset::Local::now().with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z").to_string()
 }
 
+static PROCESS_START: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
+
+/// Anchors the uptime clock; call once at process startup.
+pub fn init_uptime_clock() { let _ = *PROCESS_START; }
+
+pub fn get_uptime_secs() -> u64 { PROCESS_START.elapsed().as_secs() }
+
 pub fn get_build_time() -> Option<String> {
     BUILD_TIMESTAMP
         .to_string()
@@ -729,6 +736,7 @@ pub struct StreamOptions {
     pub stream_retry: bool,
     pub buffer_enabled: bool,
     pub buffer_size: usize,
+    pub buffer_max_bytes: usize,
     pub pipe_provider_stream: bool,
 }
 
@@ -774,20 +782,26 @@ pub struct ForceStreamRequestContext<'a> {
 ///
 /// Returns a `StreamOptions` instance with the resolved configuration.
 pub(in crate::api) fn get_stream_options(app_state: &Arc<AppState>) -> StreamOptions {
-    let (stream_retry, buffer_enabled, buffer_size) = app_state
+    let (stream_retry, buffer_enabled, buffer_size, buffer_max_bytes) = app_state
         .app_config
         .config
         .load()
         .reverse_proxy
         .as_ref()
         .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
-        .map_or((true, false, 0), |stream| {
-            let (buffer_enabled, buffer_size) =
-                stream.buffer.as_ref().map_or((false, 0), |buffer| (buffer.enabled, buffer.size));
-            (stream.retry, buffer_enabled, buffer_size)
+        .map_or((true, false, 0, crate::api::model::MAX_BUFFER_BYTES), |stream| {
+            let (buffer_enabled, buffer_size, buffer_max_bytes) = stream.buffer.as_ref().map_or(
+                (false, 0, crate::api::model::MAX_BUFFER_BYTES),
+                |buffer| {
+                    let max_bytes = usize::try_from(buffer.max_bytes_mb.saturating_mul(1024 * 1024))
+                        .unwrap_or(crate::api::model::MAX_BUFFER_BYTES);
+                    (buffer.enabled, buffer.size, max_bytes)
+                },
+            );
+            (stream.retry, buffer_enabled, buffer_size, buffer_max_bytes)
         });
     let pipe_provider_stream = !stream_retry && !buffer_enabled;
-    StreamOptions { stream_retry, buffer_enabled, buffer_size, pipe_provider_stream }
+    StreamOptions { stream_retry, buffer_enabled, buffer_size, buffer_max_bytes, pipe_provider_stream }
 }
 
 /// Metadata capturing which grace strategy was chosen and the original connection kind,
@@ -4593,6 +4607,15 @@ pub fn create_api_proxy_user(app_state: &Arc<AppState>) -> ProxyUserCredentials 
         soft_priority: 0,
         t_is_api_user: true,
         network_access: None,
+        plan: None,
+        filter: None,
+        raw_output_clusters: None,
+        raw_max_connections: 0,
+        raw_soft_connections: 0,
+        raw_proxy: Some(ProxyType::Reverse(None)),
+        t_filter: None,
+        t_has_unresolved_plan: false,
+        t_has_invalid_filter: false,
     }
 }
 
@@ -6248,6 +6271,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
         });
         let addr: SocketAddr = "127.0.0.1:55220".parse().unwrap_or_else(|_| unreachable!());
@@ -6334,6 +6358,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
         });
         let addr: SocketAddr = "127.0.0.1:55221".parse().unwrap_or_else(|_| unreachable!());
@@ -6405,6 +6430,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
         });
         let addr: SocketAddr = "127.0.0.1:55230".parse().unwrap_or_else(|_| unreachable!());
@@ -6479,6 +6505,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
         let addr: SocketAddr = "127.0.0.1:55231".parse().unwrap_or_else(|_| unreachable!());
@@ -6553,6 +6580,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserSameIpOldest]),
         });
         let addr: SocketAddr = "127.0.0.1:55222".parse().unwrap_or_else(|_| unreachable!());
@@ -6605,6 +6633,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
         let addr: SocketAddr = "127.0.0.1:55223".parse().unwrap_or_else(|_| unreachable!());
@@ -6649,6 +6678,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
         let addr: SocketAddr = "127.0.0.1:55224".parse().unwrap_or_else(|_| unreachable!());
@@ -6727,6 +6757,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         };
         let mut app_cfg = create_test_app_config();
@@ -6832,6 +6863,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: None,
         };
         let mut app_cfg = create_test_app_config();
@@ -6952,6 +6984,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: None,
         });
 
@@ -6975,6 +7008,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![]),
         });
 
@@ -6997,6 +7031,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![
                 AdmissionStrategy::EvictUserSameIpOldest,
                 AdmissionStrategy::GraceHoldStream,
@@ -7098,6 +7133,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest]),
         });
 
@@ -7197,6 +7233,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![
                 AdmissionStrategy::GraceHoldStream,
                 AdmissionStrategy::EvictUserSameIpOldest,
@@ -7293,6 +7330,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
 
@@ -7346,6 +7384,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
 
@@ -7406,6 +7445,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(strategies_for_config),
         });
 
@@ -7504,6 +7544,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream]),
         });
 
@@ -7562,6 +7603,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::GraceInstantStream]),
         });
 
@@ -7656,6 +7698,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::GraceHoldStream, AdmissionStrategy::EvictUserOldest]),
         });
 
@@ -7848,6 +7891,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
         });
 
@@ -7944,6 +7988,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
         });
 
@@ -8068,6 +8113,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
         });
 
@@ -8192,6 +8238,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![AdmissionStrategy::EvictUserOldest]),
         });
 
@@ -9095,6 +9142,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![
                 AdmissionStrategy::EvictUserSameIpOldest,
                 AdmissionStrategy::EvictUserSameIpLatest,
@@ -9378,6 +9426,7 @@ mod tests {
                     throttle_str: None,
                     throttle_kbps: 0,
                     shared_burst_buffer_mb: 1,
+                    shared_subscriber_idle_timeout_secs: 300,
                     admission_strategies: Some(vec![
                         AdmissionStrategy::EvictUserSameIpOldest,
                         AdmissionStrategy::EvictUserSameIpLatest,
@@ -9803,6 +9852,15 @@ mod tests {
             soft_priority: 0,
             t_is_api_user: false,
             network_access,
+            plan: None,
+            filter: None,
+            raw_output_clusters: None,
+            raw_max_connections: 0,
+            raw_soft_connections: 0,
+            raw_proxy: Some(ProxyType::default()),
+            t_filter: None,
+            t_has_unresolved_plan: false,
+            t_has_invalid_filter: false,
         }
     }
 

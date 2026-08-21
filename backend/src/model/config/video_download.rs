@@ -3,6 +3,9 @@ use chrono_tz::Tz;
 use regex::Regex;
 use shared::defaults::DEFAULT_DOWNLOAD_DIR;
 use shared::model::{
+    default_recording_notification_backoff_initial_secs,
+    default_recording_notification_backoff_max_secs,
+    default_recording_notification_max_attempts, default_recording_notification_outbox_buffer,
     RecordingConfigDto, RecordingContainerFormat, RecordingDiskConfigDto,
     RecordingNotificationConfigDto, RecordingQuotaConfigDto, RecordingRetentionConfigDto,
     VideoConfigDto, VideoDownloadConfigDto,
@@ -122,6 +125,18 @@ impl Default for RecordingNotificationConfig {
     }
 }
 
+impl RecordingNotificationConfig {
+    /// True when every field still equals the documented default —
+    /// `RecordingConfigDto::is_empty` and `VideoConfigDto::clean`
+    /// use the same check to omit a defaulted notifications block.
+    pub fn is_empty(&self) -> bool {
+        self.outbox_buffer == default_recording_notification_outbox_buffer()
+            && self.max_attempts == default_recording_notification_max_attempts()
+            && self.backoff_initial_secs == default_recording_notification_backoff_initial_secs()
+            && self.backoff_max_secs == default_recording_notification_backoff_max_secs()
+    }
+}
+
 macros::from_impl!(RecordingNotificationConfig);
 impl From<&RecordingNotificationConfigDto> for RecordingNotificationConfig {
     fn from(dto: &RecordingNotificationConfigDto) -> Self {
@@ -208,7 +223,7 @@ impl From<&RecordingConfig> for RecordingConfigDto {
             retention: instance.retention.as_ref().map(Into::into),
             disk: instance.disk.as_ref().map(Into::into),
             quota: instance.quota.as_ref().map(Into::into),
-            notifications: Some((&instance.notifications).into()),
+            notifications: if instance.notifications.is_empty() { None } else { Some((&instance.notifications).into()) },
             fallback_bytes_per_minute: instance.fallback_bytes_per_minute,
         }
     }

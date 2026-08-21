@@ -104,6 +104,7 @@ struct HlsProxyRuntimeConfig {
     cache_duration_seconds: u64,
     strip: StripConfig,
     origin_manifest_timeout_ms: u64,
+    initial_manifest_wait_timeout_secs: u64,
     manifest_recovery_burst: HlsManifestRecoveryBurstConfig,
     transient_resource_ttl_ms: u64,
     gc_policy: GarbageCollectionPolicy,
@@ -458,6 +459,7 @@ impl HlsProxyRuntimeConfig {
             cache_duration_seconds: config.cache_duration,
             strip: config.strip.clone(),
             origin_manifest_timeout_ms: config.origin_manifest_timeout_ms,
+            initial_manifest_wait_timeout_secs: config.initial_manifest_wait_timeout_secs,
             manifest_recovery_burst: config.manifest_recovery_burst.clone(),
             transient_resource_ttl_ms: config.cache_duration.saturating_mul(1_000),
             gc_policy: GarbageCollectionPolicy::from_config(config),
@@ -813,6 +815,10 @@ impl HlsProxyManager {
     pub fn strip(&self) -> StripConfig { self.runtime_config.load().strip.clone() }
 
     pub fn origin_manifest_timeout_ms(&self) -> u64 { self.runtime_config.load().origin_manifest_timeout_ms }
+
+    pub fn initial_manifest_wait_timeout_secs(&self) -> u64 {
+        self.runtime_config.load().initial_manifest_wait_timeout_secs
+    }
 
     pub fn manifest_recovery_burst(&self) -> HlsManifestRecoveryBurstConfig {
         self.runtime_config.load().manifest_recovery_burst.clone()

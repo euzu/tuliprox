@@ -35,7 +35,7 @@ impl AuthBearer {
 
         let split = authorization.split_once(' ');
         match split {
-            Some(("Bearer", contents)) => Ok(Self::from_header(contents)),
+            Some((scheme, contents)) if scheme.eq_ignore_ascii_case("bearer") => Ok(Self::from_header(contents)),
             _ => Err((StatusCode::FORBIDDEN, "`Authorization` header must be a bearer token")),
         }
     }

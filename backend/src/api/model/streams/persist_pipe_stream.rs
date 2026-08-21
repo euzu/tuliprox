@@ -28,6 +28,7 @@ where
     tokio::spawn(async move {
         let mut total_size = 0usize;
         let mut writer_active = true;
+        let mut receiver_active = true;
         let mut write_err: Option<StreamError> = None;
         let mut write_counter = 0usize;
 
@@ -63,10 +64,24 @@ where
                                 }
                             }
 
-                            let _ = tx.send(Ok(bytes)).await;
+                            if receiver_active && tx.send(Ok(bytes)).await.is_err() {
+                                receiver_active = false;
+                            }
+                            // Keep persisting for the cache after a client disconnect, but stop
+                            // pulling from upstream once neither consumer can use the data
+                            if !writer_active && !receiver_active {
+                                debug!("Persist pipe stream has no writer and no receiver, closing");
+                                break;
+                            }
                         }
                         Some(Err(e)) => {
-                            let _ = tx.send(Err(e)).await;
+                            if receiver_active && tx.send(Err(e)).await.is_err() {
+                                receiver_active = false;
+                            }
+                            if !writer_active && !receiver_active {
+                                debug!("Persist pipe stream has no writer and no receiver, closing");
+                                break;
+                            }
                         }
                         None => {
                             debug_if_enabled!("Persist pipe stream ended. Closing {}", resource_path.display());

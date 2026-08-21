@@ -664,6 +664,8 @@
       "EPG_TIMESHIFT": "TimeZone or offset (e.g. +2:00, Europe/Berlin) to adjust EPG times for this user.",
       "EXP_DATE": "Unix timestamp or 'YYYY-MM-DD' when this user access expires.",
       "MAX_CONNECTIONS": "Limit of simultaneous streams for this user. 0 = unlimited.",
+      "PLAN": "Optional capability tier. Unset values (clusters, connection limits) inherit from the plan; the plan's content filter is always applied.",
+      "FILTER": "Optional filter DSL expression restricting which content this user sees. Combined with the plan filter using AND.",
       "SOFT_CONNECTIONS": "Additional provider slots above max_connections. Soft connections can be preempted by any normal connection or by a higher-priority soft connection.",
       "SOFT_PRIORITY": "Priority used while this user's connection is consuming a soft slot. Once promoted back to a normal slot, the regular priority applies again.",
       "PASSWORD": "Access password for this user's playlist and streams.",
@@ -676,6 +678,15 @@
       "TOKEN": "Unique API token that can be used instead of username/password.",
       "UI_ENABLED": "If true, this user can log into the simplified WebUI bouquet editor (default true).",
       "PRIORITY": "Connection priority assigned to this user proxy context. Default = 0, lowest priority = 127, highest priority = -128."
+    },
+    "USER_PLAN": {
+      "NAME": "Unique plan name. Users reference it via their Plan field to inherit these settings.",
+      "PROXY": "Proxy access mode (Redirect or Reverse) inherited by plan members.",
+      "MAX_CONNECTIONS": "Simultaneous stream limit inherited by plan members whose own value is 0/unset. 0 = unlimited. Enforcement requires user_access_control.",
+      "SOFT_CONNECTIONS": "Additional preemptible provider slots inherited by plan members whose own value is 0/unset.",
+      "FILTER": "Filter DSL expression restricting the content visible to plan members. Combined with a member's own filter using AND, so it can only narrow, never widen.",
+      "TRIAL": "Optional trial window with a unit, e.g. 24h, 7d, 30d. When set, users newly created on this plan without their own expiry get an automatic trial expiry and Trial status. Applied only at user creation; enforcement requires user_access_control. Leave empty for no trial.",
+      "COMMENT": "Optional free-form description of this plan."
     },
     "RATE_LIMIT_CONFIG": {
       "BURST_SIZE": "Defines the initial number of available connections before throttling applies (e.g. 10).",
@@ -907,6 +918,7 @@
     "ADD_QUALITY_TO_FILENAME": "Quality",
     "USE_METADATA": "Use metadata",
     "ADD_SERVER": "Add Server",
+    "ADD_PLAN": "Add Plan",
     "ADD_STRIP_ENTRY": "Add Strip Entry",
     "ADD_TRAKT_CHART": "Add a Trakt chart",
     "ADD_TRAKT_LIST": "Add a Trakt list",
@@ -923,6 +935,13 @@
     "ALIASES": "Aliases",
     "ALIAS_NAME": "Alias Name",
     "ALL": "All",
+    "DESELECTED": "Deselected",
+    "MOVE_UP": "Move up",
+    "MOVE_DOWN": "Move down",
+    "NOT_AVAILABLE": "n/a",
+    "ADD_KEY": "Add key",
+    "ADD_VALUE": "Add value",
+    "AUTOMATIC_CODEC_TRIGGER_POLICY": "automatic codec trigger policy",
     "ALLOWED_COUNTRIES": "Allowed Countries",
     "ALLOWED_NETWORKS": "Allowed Networks",
     "ACCOUNT_TOKEN": "Account token",
@@ -1150,6 +1169,17 @@
     "LIVE_STREAM_WITHOUT_EXTENSION": "Without ext.",
     "DISABLE_HLS_STREAMING": "Force MPEG-TS",
     "LOG": "Log",
+    "LOGS": "Logs",
+    "LIVE_LOGS": "Live Logs",
+    "AUTO_SCROLL": "Auto Scroll",
+    "CLEAR_LOGS": "Clear",
+    "COPY_LOGS": "Copy",
+    "PAUSE_SCROLL": "Pause Scroll",
+    "RESUME_SCROLL": "Resume Scroll",
+    "SEARCH_LOGS": "Filter logs...",
+    "NO_LOGS": "No log records found",
+    "LOGS_COPIED": "Logs copied to clipboard",
+    "LOADING": "Loading…",
     "LOGIN": "Login",
     "LOGOUT": "Logout",
     "LOGO_OVERRIDE": "logo Override",
@@ -1280,6 +1310,9 @@
     "PERIOD_MILLIS": "Period Millis",
     "PERSIST": "Persist",
     "PLAYER_SERVER": "Player Server",
+    "PLAN": "Plan",
+    "PLANS": "Plans",
+    "TRIAL": "Trial",
     "PLAYLIST": "Playlist",
     "PLAYLISTS": "Playlists",
     "PLAYLIST_BROWSER": "Playlist Browser",
@@ -1501,6 +1534,7 @@
     "HEALTH_PROVIDERS": "Provider capacity",
     "HEALTH_CONNECTED": "Connected",
     "HEALTH_DISCONNECTED": "Disconnected",
+    "IDLE": "Idle",
     "HEALTH_PROVIDERS_OK": "All healthy",
     "HEALTH_PROVIDERS_NONE": "No active providers",
     "STREAM": "Stream",
@@ -1587,6 +1621,7 @@
     "UPDATE_GEOIP_DB": "Update Geo-IP db",
     "UPDATE_LOCAL_LIBRARY": "Update Local Library",
     "UPDATE_ON_BOOT": "Update on boot",
+    "UPTIME": "Uptime",
     "URL": "Url",
     "URL_IPV4": "Url IPv4",
     "URL_IPV6": "Url IPv6",
@@ -1733,6 +1768,7 @@
   },
   "MESSAGES": {
     "CLIPBOARD_NOT_SUPPORTED": "Clipboard not supported.\nYour browser or current context does not allow clipboard access.\nPlease use HTTPS or localhost.",
+    "COPIED_TO_CLIPBOARD": "Copied to clipboard.",
     "CONFIG_CHANGED": "Configuration on server changed.",
     "CONFIRM_DELETE": "You really want to delete it?",
     "CONFIRM_SOURCES_SAVE": "Do you really want to save?",
@@ -1775,7 +1811,8 @@
       "SUCCESS": "Successfully started library update!"
     },
     "LOGIN": {
-      "MESSAGE": "Enter Your Credentials"
+      "MESSAGE": "Enter Your Credentials",
+      "FAILED": "Failed to login"
     },
     "SESSION": {
       "EXPIRED": "Your session has expired. Please log in again."
@@ -1789,7 +1826,9 @@
       "SCHEDULES_TITLE": "No schedules",
       "SCHEDULES_HINT": "Add a schedule to run playlist updates automatically at the times you choose.",
       "API_PROXY_SERVER_TITLE": "No server endpoints",
-      "API_PROXY_SERVER_HINT": "Add a server entry to define the host and ports your clients use to reach the playlists."
+      "API_PROXY_SERVER_HINT": "Add a server entry to define the host and ports your clients use to reach the playlists.",
+      "API_PROXY_PLANS_TITLE": "No plans",
+      "API_PROXY_PLANS_HINT": "Add a plan to define reusable capability tiers (clusters, connection limits, content filters) for your users."
     },
     "PLAYLIST": {
       "WEBPLAYER_URL_COPY_TO_CLIPBOARD": "The copied WebPlayer url is valid for 30 seconds."
@@ -1856,6 +1895,7 @@
     },
     "PLAYLIST_UPDATE": {
       "FAIL": "Playlist update failed!",
+      "NO_TARGETS": "No playlists configured. Create sources and targets in the source editor first.",
       "FAIL_FINISH": "Playlist update failed!",
       "PARTIAL_FINISH": "Playlist update is incomplete and will continue from its saved checkpoint.",
       "SUCCESS": "Successfully started playlist update!",
@@ -1867,6 +1907,7 @@
       "API_PROXY_CONFIG": {
         "FAIL": "Failed to save the ApiProxy config!",
         "NON_UNIQUE_SERVER_NAME": "Server info name \"{name}\" already exists.",
+        "NON_UNIQUE_PLAN_NAME": "User plan name \"{name}\" already exists.",
         "SUCCESS": "ApiProxy config saved!"
       },
       "BOUQUET": {
@@ -1915,7 +1956,8 @@
     "USER_DELETED": "User successfully deleted",
     "VALIDATION": {
       "NETWORK_ACCESS_COUNTRIES": "Enter one 2-letter ISO country code per entry, for example DE.",
-      "NETWORK_ACCESS_NETWORKS": "Enter one CIDR per entry, for example 192.168.0.0/16 or 2001:db8::/32."
+      "NETWORK_ACCESS_NETWORKS": "Enter one CIDR per entry, for example 192.168.0.0/16 or 2001:db8::/32.",
+      "REQUIRED": "This field is required."
     }
   },
   "SETUP": {

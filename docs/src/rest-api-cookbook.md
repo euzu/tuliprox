@@ -256,6 +256,35 @@ Notes:
 - Runtime refresh only produces `http`/`https` playback URLs; Stalker `rtmp://` / `rtsp://` commands are rejected explicitly rather
   than proxied half-supported.
 
+## Example 10: Dry-run a filter expression against a target
+
+```bash
+#!/bin/bash
+
+BASE_URL="http://localhost:8901"
+TOKEN="PUT_YOUR_TOKEN_HERE"
+
+curl -s -X POST "$BASE_URL/api/v1/playlist/filter/preview" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    --data-raw '{"target": 1, "filter": "Group ~ \"^DE.*\" AND NOT Title CONTAINS \"Shopping\"", "limit": 10}' | jq .
+```
+
+Typical use:
+
+- test a filter DSL expression against a target's stored playlist before writing it into `source.yml`
+- see matched/total counts overall and per cluster (live/vod/series)
+- inspect sample matched and excluded channels to verify the expression does what you expect
+
+Notes:
+
+- `target` is the numeric target id (same id the playlist explorer uses).
+- `filter` supports the full filter DSL including `!TEMPLATE!` references from your configured templates.
+- Optional `limit` caps the sample lists (default 25, max 50); optional `match_as_ascii` mirrors the target option.
+- An invalid filter expression returns HTTP 422 with `{"error": "...", "line": n, "column": n}`; `line`/`column`
+  are `null` for semantic errors without a source position (e.g. an invalid regex value).
+- The preview reads the target's already-processed playlist; it never contacts providers or triggers an update.
+
 ## Available `/api/v1` Endpoints
 
 This is a compact operator-oriented overview of the `/api/v1` REST API groups currently registered by the backend.
@@ -337,6 +366,7 @@ major version**. It returns `recording_forbidden` for non-admin principals. New 
 | `POST` | `/api/v1/playlist/epg` | Query EPG data for the Web UI |
 | `POST` | `/api/v1/playlist/series_info/{virtual_id}/{provider_id}` | Series metadata lookup |
 | `POST` | `/api/v1/playlist/series/episode/{virtual_id}` | Episode item lookup |
+| `POST` | `/api/v1/playlist/filter/preview` | Dry-run a filter DSL expression against a target's stored playlist |
 | `GET` | `/api/v1/playlist/resource/{resource}` | Public resource access for playlist-related assets |
 
 ### Configuration

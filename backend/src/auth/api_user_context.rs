@@ -29,7 +29,11 @@ impl From<ProxyUserPermissionDenyReason> for PermissionDenyReason {
             }
             ProxyUserPermissionDenyReason::Disabled => PermissionDenyReason::Disabled,
             ProxyUserPermissionDenyReason::Banned => PermissionDenyReason::Banned,
-            ProxyUserPermissionDenyReason::Inactive => PermissionDenyReason::Inactive,
+            ProxyUserPermissionDenyReason::Inactive
+            | ProxyUserPermissionDenyReason::UnresolvedPlan
+            | ProxyUserPermissionDenyReason::InvalidFilter => {
+                PermissionDenyReason::Inactive
+            }
         }
     }
 }

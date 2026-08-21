@@ -263,6 +263,11 @@ async fn serve_epg_with_rewrites(
 
     let limit = limit.unwrap_or_default();
 
+    // EPG ids visible under the user's content filter; None = no filtering.
+    let visible_epg_ids =
+        crate::api::endpoints::user_visibility::collect_visible_epg_channel_ids(&app_state.app_config, target, user)
+            .await;
+
     let bg_lock = app_state.app_config.file_locks.read_lock(epg_path).await;
     let epg_path = epg_path.to_path_buf();
     let (channel_tx, mut channel_rx) = mpsc::channel::<Result<EpgChannel, String>>(256);
@@ -327,6 +332,11 @@ async fn serve_epg_with_rewrites(
                     return;
                 }
             };
+            if let Some(visible) = &visible_epg_ids {
+                if !visible.contains(&channel.id.to_lowercase()) {
+                    continue;
+                }
+            }
             let programmes = if limit > 0 {
                 channel.get_programme_with_limit(limit)
             } else {

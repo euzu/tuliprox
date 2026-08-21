@@ -247,13 +247,18 @@ A crash at any point is recoverable:
 
 The quota ledger charges the bytes below per `DownloadState`:
 
-| State                                                          |                                            Charged bytes |
-|----------------------------------------------------------------|---------------------------------------------------------:|
-| `Scheduled` / `Queued` / `WaitingForCapacity` / `RetryWaiting` |                                       `reserved_bytes`   |
-| `Downloading`                                                  |                    `max(reserved_bytes, measured_bytes)` |
-| `Completed`                                                    |                                   final `measured_bytes` |
-| `Failed` / `Cancelled` with partial file                       |                                 partial `measured_bytes` |
-| `Deleting`                                                     | charge of the saved terminal state until removal commits |
+| State                                                                     |                                            Charged bytes |
+|---------------------------------------------------------------------------|---------------------------------------------------------:|
+| `Scheduled` / `Queued` / `WaitingForCapacity` / `RetryWaiting` / `Paused` |                                       `reserved_bytes`   |
+| `Downloading`                                                             |                    `max(reserved_bytes, measured_bytes)` |
+| `Completed`                                                               |                                   final `measured_bytes` |
+| `Failed` / `Cancelled` with partial file                                  |                                 partial `measured_bytes` |
+
+A task that is mid-deletion carries `deleting_previous_state = Some(prior)` and is charged the
+same bytes as the prior terminal state (`reserved_bytes` or `measured_bytes` depending on what
+`prior` was); the field replaces the historical `DownloadState::Deleting` variant, which the
+runtime no longer carries. The charge drops to zero only when `finalize_deletion` removes the
+task from the queue.
 
 A task is counted exactly once. Private pools key on `RecordingOwner::User(uid)`; shared pools key
 on `RecordingVisibility::Shared`; `LegacyAdmin` recordings count toward the shared pool. Per-user
@@ -290,23 +295,28 @@ active reservation is serialized through the queue-mutation boundary.
 
 ## 7. Safe deletion guarantees
 
-Deletions use a persisted two-phase operation:
+Deletions use a persisted two-phase operation. The runtime carries the deletion intent in
+`recording.deleting_previous_state: Option<DeletingPreviousState>` rather than as a
+`DownloadState` variant — every terminal task that is mid-deletion stays in its prior state
+(`Completed` / `Failed` / `Cancelled`) but carries the marker, which is what the rest of this
+section means by "the task is in the deleting phase".
 
 1. **`begin_deletion`** runs inside the queue-mutation boundary. It stamps
-   `recording.deleting_previous_state = Some(prior)` (the prior terminal state from
-   `Completed` / `Failed` / `Cancelled`) and zeros the byte counts.
+   `recording.deleting_previous_state = Some(prior)` (the prior terminal state) and zeros the
+   byte counts.
 2. **`execute_deletion`** runs **after** the boundary. It inspects the path with
    `symlink_metadata` (never `metadata`), so a symlink is seen as a symlink and refused rather
    than dereferenced, and removes the file. Missing files are idempotent success.
 3. **`finalize_deletion`** runs inside a fresh boundary. It removes the task from the queue and
    clears `deleting_previous_state`.
 
-Startup recovery:
+Startup recovery (any task whose `deleting_previous_state` is `Some(_)`):
 
-- `Deleting` + missing file → finish task removal.
-- `Deleting` + existing valid regular file → restore previous state, clear the marker.
-- `Deleting` + unsafe path or non-regular file → restore previous state, log a security-category
-  error.
+- `deleting_previous_state = Some(_)` + missing file → finish task removal.
+- `deleting_previous_state = Some(_)` + existing valid regular file inside the recording root
+  → restore the prior terminal state, clear the marker.
+- `deleting_previous_state = Some(_)` + unsafe path or non-regular file → restore the prior
+  state, log `recording_reconciliation_unsafe_path`, leave the file alone.
 
 ### 7.1 Portability of the path guarantees
 
@@ -422,11 +432,21 @@ DELETE /api/v1/recording/rules/{id}?future=retain|cancel
 ```
 
 The `tasks` payload is a per-session filtered snapshot. The WebSocket protocol carries
-`RecordingSnapshotRequest`, `RecordingSnapshotResponse { revision, tasks }`, and
-`RecordingDeltaResponse { revision, tasks }`. The `revision` field is the monotonic
+`RecordingSnapshotRequest` and `RecordingSnapshotResponse { revision, tasks }`; there is no
+recording delta message — every recording change goes out as a `RecordingChanged` event, and the
+client re-requests a filtered snapshot in response. The `revision` field is the monotonic
 `QueueRevision`; clients that detect a revision gap must request a fresh filtered snapshot.
-A dedicated `RecordingRulesChanged` notification (no payload) is broadcast on every rule
-mutation so the rules view can refresh without polling.
+
+Two notifications exist for the recording subsystem:
+
+- `RecordingChanged` (no payload) — broadcast whenever a task mutates the queue (create, edit,
+  cancel, delete, finalize, retry). Triggers a filtered snapshot refresh on every subscribed
+  client that holds `recording.read`.
+- `RecordingRulesChanged` (no payload) — broadcast on every rule mutation (create, edit,
+  delete, retain/cancel). Used by the rules view to refresh without polling.
+
+The cancel-recording-task endpoint emits **both** events because cancelling future rule
+recordings mutates the queue as well as the rule store.
 
 Filtering is server-side: private events go only to the owner session, shared events go to anyone
 with `recording.read`, `LegacyAdmin` events go only to administrator sessions. Generic download

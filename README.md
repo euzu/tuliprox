@@ -201,10 +201,12 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Dashboard**: System status, active streams, CPU usage, provider connections in real-time via WebSocket
 - **Source Editor**: Dedicated forms for M3U, Xtream, Stalker, Plex, Emby, Jellyfin and local-library inputs, with
   drag & drop, block selection and batch mode
-- **Playlist Explorer**: Tree and gallery view for channels with EPG timeline and search
+- **Playlist Explorer**: Tree and gallery view for channels with EPG timeline and search — text or regex, optionally
+  scoped to specific fields (group, title, name, url)
 - **Download & Recording Manager**: Provider-aware VOD downloads and live recordings with retries, fairness, and RBAC-controlled actions
 - **Config Editor**: Direct editing of config.yml, source.yml, mapping.yml in the browser
-- **User Management**: API users with category selection, priority, soft-priority, normal/soft connection limits, auto-generated credentials
+- **User Management**: API users with category selection, priority, soft-priority, normal/soft connection limits, auto-generated credentials,
+  and reusable **plans** (capability tiers with cluster access, connection limits, and admin-enforced content filters)
 - **Network Access Policy UI**: API-user network restrictions can be configured with CIDR and GeoIP country rules, including
   the global GeoIP-unavailable `deny`/`allow` policy.
 - **RBAC Admin Panel**: Tabbed user/group management, permission checkbox grid, write-without-read warnings

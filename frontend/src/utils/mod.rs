@@ -33,7 +33,11 @@ where
     F: FnOnce() + 'static,
 {
     let cb = Closure::once_into_js(Box::new(callback) as Box<dyn FnOnce()>);
-    window().unwrap().set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), millis).unwrap();
+    if let Some(win) = window() {
+        if let Err(err) = win.set_timeout_with_callback_and_timeout_and_arguments_0(cb.unchecked_ref(), millis) {
+            log::error!("Failed to register timeout: {err:?}");
+        }
+    }
 }
 
 pub fn t_safe(i18n: &YewI18n, key: &str) -> Option<String> {

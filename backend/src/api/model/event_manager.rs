@@ -80,6 +80,9 @@ impl EventManager {
         stream_meter_subscriber_count: Arc<AtomicUsize>,
         cancel_token: CancellationToken,
     ) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(STREAM_METER_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

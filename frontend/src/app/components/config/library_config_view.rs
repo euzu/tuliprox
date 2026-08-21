@@ -15,13 +15,15 @@ use crate::{
     config_field, config_field_bool, config_field_child, edit_field_bool, edit_field_list, edit_field_number_u32,
     edit_field_text, generate_form_reducer,
     i18n::use_translation,
+    model::DialogResult,
+    services::DialogService,
 };
 use shared::model::{
     LibraryConfigDto, LibraryContentType, LibraryMetadataConfigDto, LibraryMetadataFormat,
     LibraryMetadataReadConfigDto, LibraryPlaylistConfigDto, LibraryScanDirectoryDto, ThumbnailConfigDto,
 };
 use std::rc::Rc;
-use yew::prelude::*;
+use yew::{platform::spawn_local, prelude::*};
 
 const LABEL_ENABLED: &str = "LABEL.ENABLED";
 const LABEL_SCAN_DIRECTORIES: &str = "LABEL.SCAN_DIRECTORIES";
@@ -105,6 +107,7 @@ pub fn LibraryConfigView() -> Html {
     let translate = use_translation();
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
+    let dialog = use_context::<DialogService>().expect("Dialog service not found");
 
     let form_state: UseReducerHandle<LibraryConfigFormState> =
         use_reducer(|| LibraryConfigFormState { form: LibraryConfigDto::default(), modified: false });
@@ -272,13 +275,23 @@ pub fn LibraryConfigView() -> Html {
 
     let handle_remove_directory = {
         let form_state = form_state.clone();
+        let dialog = dialog.clone();
+        let translator = translate.clone();
         Callback::from(move |idx: usize| {
-            let mut current_list = form_state.form.scan_directories.clone();
-            if idx >= current_list.len() {
-                return;
-            }
-            current_list.remove(idx);
-            form_state.dispatch(LibraryConfigFormAction::ScanDirectories(current_list));
+            let form_state = form_state.clone();
+            let dialog = dialog.clone();
+            let translator = translator.clone();
+            spawn_local(async move {
+                if dialog.confirm(&translator.t("MESSAGES.CONFIRM_DELETE")).await != DialogResult::Ok {
+                    return;
+                }
+                let mut current_list = form_state.form.scan_directories.clone();
+                if idx >= current_list.len() {
+                    return;
+                }
+                current_list.remove(idx);
+                form_state.dispatch(LibraryConfigFormAction::ScanDirectories(current_list));
+            });
         })
     };
 

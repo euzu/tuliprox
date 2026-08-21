@@ -4,11 +4,11 @@ use crate::{
             menu_item::MenuItem,
             popup_menu::PopupMenu,
             recording::{target_name_for_id, PaddingBounds, RecordingForm, RecordingFormPrefill},
-            AppIcon, Chip, IconButton, NoContent, Panel, Search,
+            AppIcon, Chip, DropDownOption, IconButton, NoContent, Panel, Search,
         },
         context::{ConfigContext, PlaylistExplorerContext},
     },
-    hooks::use_service_context,
+    hooks::{use_clipboard_copy, use_service_context},
     html_if,
     i18n::use_translation,
     model::{BusyStatus, DialogAction, DialogActions, DialogResult, EventMessage},
@@ -26,13 +26,13 @@ use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc, str::FromSt
 use wasm_bindgen::JsCast;
 use web_sys::HtmlInputElement;
 use yew::{platform::spawn_local, prelude::*};
-use yew_hooks::use_clipboard;
 
 const COPY_LINK_TULIPROX_VIRTUAL_ID: &str = "copy_link_tuliprox_virtual_id";
 const COPY_LINK_TULIPROX_WEBPLAYER_URL: &str = "copy_link_tuliprox_webplayer_url";
 const COPY_LINK_PROVIDER_URL: &str = "copy_link_provider_url";
 const DOWNLOAD_ITEM: &str = "download_item";
 const RECORD_ITEM: &str = "record_item";
+const TP_EXPLORER_SEARCH_FIELDS_KEY: &str = "tp-explorer-search-fields";
 
 #[derive(Clone)]
 struct ChannelSelection {
@@ -148,10 +148,15 @@ enum ExplorerLevel {
 
 #[component]
 pub fn PlaylistExplorer() -> Html {
-    let context = use_context::<PlaylistExplorerContext>().expect("PlaylistExplorer context not found");
-    let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
-    let dialog = use_context::<DialogService>().expect("Dialog service not found");
+    let explorer_ctx = use_context::<PlaylistExplorerContext>();
+    let cfg_ctx = use_context::<ConfigContext>();
+    let dialog_ctx = use_context::<DialogService>();
     let translate = use_translation();
+    // Render a fallback instead of panicking when a provider is missing
+    let (Some(context), Some(config_ctx), Some(dialog)) = (explorer_ctx, cfg_ctx, dialog_ctx) else {
+        log::error!("PlaylistExplorer rendered without required context providers");
+        return html! { <NoContent text={translate.t("LABEL.NO_CONTENT")} /> };
+    };
     let service_ctx = use_service_context();
     let can_write_downloads = service_ctx.auth.has_permission(Permission::DownloadWrite);
     let can_write_recordings = service_ctx.auth.has_permission(Permission::RecordingWrite);
@@ -179,10 +184,42 @@ pub fn PlaylistExplorer() -> Html {
     let recording_padding = Rc::new(recording_padding);
     let current_item = use_state(|| ExplorerLevel::Categories);
     let playlist = use_state(|| (*context.playlist).clone());
+    let search_fields = use_memo((), |_| {
+        let persisted: Vec<String> = crate::utils::get_local_storage_item(TP_EXPLORER_SEARCH_FIELDS_KEY)
+            .map(|value| value.split(',').filter(|id| !id.is_empty()).map(str::to_string).collect())
+            .unwrap_or_default();
+        let is_selected = |id: &str| persisted.iter().any(|p| p == id);
+        vec![
+            DropDownOption::new(
+                shared::model::SEARCH_FIELD_GROUP,
+                html! { translate.t("LABEL.GROUP") },
+                is_selected(shared::model::SEARCH_FIELD_GROUP),
+            ),
+            DropDownOption::new(
+                shared::model::SEARCH_FIELD_TITLE,
+                html! { translate.t("LABEL.TITLE") },
+                is_selected(shared::model::SEARCH_FIELD_TITLE),
+            ),
+            DropDownOption::new(
+                shared::model::SEARCH_FIELD_NAME,
+                html! { translate.t("LABEL.NAME") },
+                is_selected(shared::model::SEARCH_FIELD_NAME),
+            ),
+            DropDownOption::new(
+                shared::model::SEARCH_FIELD_URL,
+                html! { translate.t("LABEL.URL") },
+                is_selected(shared::model::SEARCH_FIELD_URL),
+            ),
+        ]
+    });
+    let handle_search_fields_change = Callback::from(move |fields: Option<Rc<Vec<String>>>| {
+        let value = fields.as_ref().map(|f| f.join(",")).unwrap_or_default();
+        crate::utils::set_local_storage_item(TP_EXPLORER_SEARCH_FIELDS_KEY, &value);
+    });
     let selected_channel = use_state(|| None::<ChannelSelection>);
     let popup_anchor_ref = use_state(|| None::<web_sys::Element>);
     let popup_is_open = use_state(|| false);
-    let clipboard = use_clipboard();
+    let copy_to_clipboard = use_clipboard_copy();
     let cluster_visible = use_state(|| XtreamCluster::Live);
 
     let handle_cluster_change = {
@@ -296,23 +333,6 @@ pub fn PlaylistExplorer() -> Html {
             || {}
         });
     }
-
-    let copy_to_clipboard: Callback<String> = {
-        let clipboard = clipboard.clone();
-        let dialog = dialog.clone();
-        Callback::from(move |text: String| {
-            if *clipboard.is_supported {
-                clipboard.write_text(text);
-            } else {
-                let dlg = dialog.clone();
-                spawn_local(async move {
-                    let _result = dlg
-                        .content(html! {<input value={text} readonly={true} class="tp__copy-input"/>}, None, false)
-                        .await;
-                });
-            }
-        })
-    };
 
     let handle_menu_click = {
         let services = service_ctx.clone();
@@ -731,6 +751,11 @@ pub fn PlaylistExplorer() -> Html {
             .collect::<Html>()
     };
 
+    let render_cluster_panel = |cluster: XtreamCluster, list: Option<&Vec<Rc<UiPlaylistGroup>>>| match list {
+        Some(list) if !list.is_empty() => render_cluster(cluster, list),
+        _ => html! { <NoContent text={translate.t("LABEL.NO_CONTENT")} /> },
+    };
+
     let render_categories = || {
         if playlist.is_none() {
             html! {
@@ -751,29 +776,17 @@ pub fn PlaylistExplorer() -> Html {
                 <div class="tp__playlist-explorer__categories-content">
                     <Panel class="tp__full-width" value={XtreamCluster::Live.intern()} active={active_cluster.clone()}>
                         <div class="tp__playlist-explorer__categories-list">
-                            { playlist.as_ref()
-                                .and_then(|response| response.live.as_ref())
-                                .map(|list| render_cluster(XtreamCluster::Live, list))
-                                .unwrap_or_default()
-                            }
+                            { render_cluster_panel(XtreamCluster::Live, playlist.as_ref().and_then(|response| response.live.as_ref())) }
                             </div>
                     </Panel>
                     <Panel class="tp__full-width" value={XtreamCluster::Video.intern()} active={active_cluster.clone()}>
                         <div class="tp__playlist-explorer__categories-list">
-                            { playlist.as_ref()
-                                .and_then(|response| response.vod.as_ref())
-                                .map(|list| render_cluster(XtreamCluster::Video, list))
-                                .unwrap_or_default()
-                            }
+                            { render_cluster_panel(XtreamCluster::Video, playlist.as_ref().and_then(|response| response.vod.as_ref())) }
                             </div>
                     </Panel>
                     <Panel class="tp__full-width" value={XtreamCluster::Series.intern()} active={active_cluster}>
                         <div class="tp__playlist-explorer__categories-list">
-                            { playlist.as_ref()
-                                .and_then(|response| response.series.as_ref())
-                                .map(|list| render_cluster(XtreamCluster::Series, list))
-                                .unwrap_or_default()
-                            }
+                            { render_cluster_panel(XtreamCluster::Series, playlist.as_ref().and_then(|response| response.series.as_ref())) }
                         </div>
                     </Panel>
                 </div>
@@ -865,7 +878,8 @@ pub fn PlaylistExplorer() -> Html {
             virtual_id: chan.id,
             cluster: XtreamCluster::Series,
             downloadable: true,
-            url: String::new(), // TODO provider url
+            // Falls back to the episode fetch path in the menu handler when empty
+            url: chan.direct_source.to_string(),
             title: chan.title.to_string(),
             input_name: String::new(),
         };
@@ -900,7 +914,11 @@ pub fn PlaylistExplorer() -> Html {
             <div class="tp__playlist-explorer__group">
               <div class={format!("tp__playlist-explorer__group-list tp__playlist-explorer__group-list-{}", group.xtream_cluster.to_string().to_lowercase())}>
               {
-                  group.channels.iter().map(render_channel).collect::<Html>()
+                  if group.channels.is_empty() {
+                      html! { <NoContent text={translate.t("LABEL.NO_CONTENT")} /> }
+                  } else {
+                      group.channels.iter().map(render_channel).collect::<Html>()
+                  }
               }
               </div>
             </div>
@@ -1019,7 +1037,7 @@ pub fn PlaylistExplorer() -> Html {
                   }
                 </div>
                 <div class="tp__playlist-explorer__header-toolbar-search">
-                  <Search onsearch={handle_search}/>
+                  <Search onsearch={handle_search} options={search_fields.clone()} on_fields_change={handle_search_fields_change}/>
                 </div>
             </div>
         </div>

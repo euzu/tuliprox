@@ -12,7 +12,7 @@ use shared::{
     foundation::{get_filter, prepare_templates, MapperScript},
     model::{
         permission::Permission, ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputDto, IpCheckDto,
-        LibraryScanRequest, OperationRunAccepted, SourcesConfigDto, TargetOutputDto, XtreamLoginInfo,
+        LibraryScanRequest, OperationRunAccepted, PlansConfigDto, SourcesConfigDto, TargetOutputDto, XtreamLoginInfo,
         XtreamLoginRequest,
     },
     utils::{
@@ -64,6 +64,7 @@ pub struct ConfigService {
     is_fetching: AtomicBool,
     config_path: String,
     api_proxy_config_path: String,
+    plans_config_path: String,
     sources_path: String,
     ip_check_path: String,
     batch_input_content_path: String,
@@ -91,6 +92,7 @@ impl ConfigService {
             is_fetching: AtomicBool::new(false),
             config_path: config_path.clone(),
             api_proxy_config_path: api_config("apiproxy"),
+            plans_config_path: api_config("plans"),
             sources_path: api_config("sources"),
             batch_input_content_path: api_config("batchContent"),
             xtream_login_info_path: api_config("xtream/login-info"),
@@ -287,6 +289,29 @@ impl ConfigService {
         self.api_proxy_config_channel.set(api_proxy_result);
         self.revisions.replace(revisions);
         self.is_fetching.store(false, Ordering::Release);
+    }
+
+    pub async fn get_plans_config(&self) -> Option<Rc<PlansConfigDto>> {
+        match request_get::<PlansConfigDto>(&self.plans_config_path, None, None).await {
+            Ok(dto) => dto.map(Rc::new),
+            Err(err) => {
+                error!("{err}");
+                None
+            }
+        }
+    }
+
+    pub async fn save_plans_config(&self, dto: PlansConfigDto) -> Result<(), Error> {
+        self.event_service.set_config_change_message_blocked(true);
+        let result = request_put_meta::<PlansConfigDto, ()>(&self.plans_config_path, dto, None, None, None, &[]).await;
+        self.event_service.set_config_change_message_blocked(false);
+        match result {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                error!("{err}");
+                Err(err)
+            }
+        }
     }
 
     pub async fn get_ip_info(&self) -> Option<IpCheckDto> {

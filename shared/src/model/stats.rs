@@ -29,13 +29,20 @@ where
         s.trim_end_matches(" secs").parse::<u64>().map_err(serde::de::Error::custom)
     } else if s.ends_with(" mins") {
         let parts: Vec<&str> = s.trim_end_matches(" mins").split(':').collect();
-        if parts.len() == 2 {
-            let mins = parts[0].parse::<u64>().map_err(serde::de::Error::custom)?;
-            let secs = parts[1].parse::<u64>().map_err(serde::de::Error::custom)?;
-            Ok(mins * 60 + secs)
-        } else {
-            // Fallback if no colon (e.g. just "5 mins")
-            parts[0].parse::<u64>().map(|m| m * 60).map_err(serde::de::Error::custom)
+        match parts.as_slice() {
+            [mins, secs] => {
+                let mins = mins.parse::<u64>().map_err(serde::de::Error::custom)?;
+                let secs = secs.parse::<u64>().map_err(serde::de::Error::custom)?;
+                mins.checked_mul(60)
+                    .and_then(|m| m.checked_add(secs))
+                    .ok_or_else(|| serde::de::Error::custom("elapsed time overflow"))
+            }
+            [mins] => {
+                // Fallback if no colon (e.g. just "5 mins")
+                let mins = mins.parse::<u64>().map_err(serde::de::Error::custom)?;
+                mins.checked_mul(60).ok_or_else(|| serde::de::Error::custom("elapsed time overflow"))
+            }
+            _ => Err(serde::de::Error::custom(format!("invalid elapsed time: {s}"))),
         }
     } else {
         s.parse::<u64>().map_err(serde::de::Error::custom)

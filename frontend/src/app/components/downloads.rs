@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{IconButton, Table, TableDefinition, TaskStatusBadge, TextButton},
+    app::components::{IconButton, LoadingIndicator, Table, TableDefinition, TaskStatusBadge, TextButton},
     hooks::use_service_context,
     i18n::use_translation,
     model::{DialogResult, EventMessage},
@@ -108,6 +108,24 @@ fn format_download_progress(download: &FileDownloadDto) -> String {
         }
     }
     format_bytes(download.downloaded_bytes)
+}
+
+fn render_download_progress(download: &FileDownloadDto) -> Html {
+    let text = format_download_progress(download);
+    let bar = download.total_bytes.filter(|total| *total > 0).map(|total| {
+        html! {
+            <progress class="tp__downloads-table__progress-bar"
+                aria-label={text.clone()}
+                max={total.to_string()}
+                value={download.downloaded_bytes.to_string()} />
+        }
+    });
+    html! {
+        <span class="tp__table__nowrap tp__downloads-table__progress">
+            { bar }
+            <span>{ text }</span>
+        </span>
+    }
 }
 
 fn format_download_start(download: &FileDownloadDto) -> String {
@@ -279,6 +297,8 @@ pub fn downloads_view() -> Html {
     let active_download = use_state(|| Rc::new(Vec::<Rc<FileDownloadDto>>::new()));
     let table_items = use_state(|| None::<Rc<Vec<Rc<FileDownloadDto>>>>);
     let sort_state = use_state(|| None::<(usize, SortOrder)>);
+    // Distinguishes "still waiting for the first snapshot" from "queue is empty"
+    let initial_loaded = use_state(|| false);
 
     let request_downloads = {
         let services = services.clone();
@@ -293,13 +313,16 @@ pub fn downloads_view() -> Html {
         let active_download = active_download.clone();
         let services = services.clone();
         let request_downloads_effect = request_downloads.clone();
+        let initial_loaded = initial_loaded.clone();
         use_effect_with((), move |_| {
             request_downloads_effect.emit(());
             let sub_id = services.event.subscribe(move |msg| match msg {
                 crate::model::EventMessage::DownloadsUpdate(snapshot) => {
+                    initial_loaded.set(true);
                     apply_download_snapshot(&snapshot, &queue_state, &finished_state, &active_download);
                 }
                 crate::model::EventMessage::DownloadsDeltaUpdate(delta) => {
+                    initial_loaded.set(true);
                     apply_download_delta(&delta, &queue_state, &finished_state, &active_download);
                 }
                 crate::model::EventMessage::WebSocketStatus(true) => {
@@ -526,7 +549,7 @@ pub fn downloads_view() -> Html {
                 3 => {
                     html! { <TaskStatusBadge status={dto.status.clone()} kind={dto.kind.clone()} detail={dto.error.clone()} /> }
                 }
-                4 => html! { <span class="tp__table__nowrap">{format_download_progress(&dto)}</span> },
+                4 => render_download_progress(&dto),
                 5 => {
                     html! { <span class="tp__table__nowrap">{dto.total_bytes.map_or_else(String::new, format_bytes)}</span> }
                 }
@@ -589,7 +612,11 @@ pub fn downloads_view() -> Html {
                         </div>
                     </div>
                     <div class="tp__downloads-list__body tp__list-list__body">
-                        <Table::<FileDownloadDto> definition={table_definition} />
+                        if *initial_loaded {
+                            <Table::<FileDownloadDto> definition={table_definition} />
+                        } else {
+                            <LoadingIndicator loading={true} />
+                        }
                     </div>
                 </div>
             </div>
