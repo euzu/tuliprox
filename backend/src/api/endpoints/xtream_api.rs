@@ -1538,6 +1538,12 @@ async fn xtream_get_catchup_response(
         xtream_get_item_for_stream_id(req_virtual_id, app_state, target, Some(XtreamCluster::Live)).await
     );
 
+    // Content filter: hidden items expose no catch-up table either, so a
+    // plan-tier-restricted user cannot probe hidden channels via catchup.
+    if !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli))) {
+        return axum::Json(json!(ShortEpgResultDto::default())).into_response();
+    }
+
     let input = try_option_bad_request!(app_state.app_config.get_input_by_name(&pli.input_name));
 
     let mut info_url = try_option_bad_request!(xtream::get_xtream_player_api_action_url(

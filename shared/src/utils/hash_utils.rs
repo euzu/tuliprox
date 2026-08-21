@@ -247,15 +247,54 @@ pub fn stable_episode_storage_id(series_id: u32, season_number: u32, episode_id:
 
 // === Season/episode extraction from a configured regex. ===
 //
-// The regex must expose a named `episode` capture covering `SxxEyy` (or
-// `sxxeyy`, case-insensitive). The default pattern lives in
-// `shared::defaults::DEFAULT_EPISODE_PATTERN`.
+// The regex must expose named `season` and `episode` captures. Supported
+// shapes include the compact `SxxEyy` / `NxNN` forms and the verbose
+// `Season X Episode Y` / `Episode Y` forms. When the regex matches a
+// shape without an explicit season (e.g. bare `Episode 5`), the season
+// defaults to `1` so the caller still receives a usable pair.
+//
+// The default pattern lives in `shared::defaults::DEFAULT_EPISODE_PATTERN`.
 
 pub fn parse_season_episode(title: &str, pattern: &regex::Regex) -> Option<(u32, u32)> {
     let caps = pattern.captures(title)?;
-    let m = caps.name("episode")?.as_str();
-    // Pattern is `Sxx(?...)Eyy` — strip the leading letter, find the E/e position, split.
-    let after_s = m.strip_prefix(|c: char| c.is_ascii_alphabetic()).unwrap_or(m);
+    // The CONSTANTS pattern uses branch-specific capture names
+    // (`season_s`/`episode_s`, `season_n`/`episode_n`,
+    // `season_v`/`episode_vf`/`episode_vo`); the simpler DEFAULT
+    // pattern uses `season`/`episode`. Whichever branch matched,
+    // pick the first populated capture.
+    let episode_str = caps
+        .name("episode")
+        .or_else(|| caps.name("episode_s"))
+        .or_else(|| caps.name("episode_n"))
+        .or_else(|| caps.name("episode_vf"))
+        .or_else(|| caps.name("episode_vo"))?
+        .as_str()
+        .trim();
+    let season_str = caps
+        .name("season")
+        .or_else(|| caps.name("season_s"))
+        .or_else(|| caps.name("season_n"))
+        .or_else(|| caps.name("season_v"))
+        .map(|m| m.as_str().trim());
+
+    // New-format patterns expose season and episode as separate
+    // numeric captures. For legacy user-configured patterns that
+    // still wrap `SxxEyy` inside a single named capture (e.g.
+    // `(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2})`), fall back to
+    // splitting the captured string.
+    let (season, episode) = match (season_str, episode_str.parse::<u32>()) {
+        (Some(s), Ok(e)) => (s.parse::<u32>().ok()?, e),
+        (None, Ok(e)) => (1, e),
+        (_, Err(_)) => parse_sxxeyy_fallback(episode_str)?,
+    };
+    Some((season, episode))
+}
+
+/// Legacy fallback: a user-configured pattern may still expose the
+/// whole `SxxEyy` token under one named capture. Strip the leading
+/// `S`/`s`, find the next letter, and parse the digit runs around it.
+fn parse_sxxeyy_fallback(token: &str) -> Option<(u32, u32)> {
+    let after_s = token.strip_prefix(|c: char| c.is_ascii_alphabetic()).unwrap_or(token);
     let e_idx = after_s.find(|c: char| c.is_ascii_alphabetic())?;
     let (s_str, e_str) = after_s.split_at(e_idx);
     let season = s_str.trim().parse().ok()?;
@@ -266,7 +305,7 @@ pub fn parse_season_episode(title: &str, pattern: &regex::Regex) -> Option<(u32,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::defaults::DEFAULT_EPISODE_PATTERN;
+    use crate::{utils::constants::EPISODE_PATTERN, utils::CONSTANTS};
     use regex::Regex;
 
     // ── extract_id_from_url ────────────────────────────────────────────
@@ -795,11 +834,37 @@ mod tests {
 
     #[test]
     fn parse_season_episode_extracts_with_default_pattern() {
-        let pattern = Regex::new(DEFAULT_EPISODE_PATTERN).unwrap();
+        let pattern = Regex::new(EPISODE_PATTERN).unwrap();
         assert_eq!(parse_season_episode("Show S02E05 [1080p]", &pattern), Some((2, 5)));
         assert_eq!(parse_season_episode("Show s8e2", &pattern), Some((8, 2)));
         assert_eq!(parse_season_episode("Show without episode", &pattern), None);
         // Pattern only matches the digits grouped after S and E.
+        assert_eq!(parse_season_episode("Pilot", &pattern), None);
+    }
+
+    #[test]
+    fn parse_season_episode_legacy_user_pattern_with_wrapped_episode_capture() {
+        // A user-configured pattern that still wraps the whole
+        // `SxxEyy` token inside a single named capture (the
+        // pre-refactor format) must keep working — the function
+        // falls back to splitting the captured string.
+        let legacy = Regex::new(r".*(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2}).*").unwrap();
+        assert_eq!(parse_season_episode("Show S02E05 [1080p]", &legacy), Some((2, 5)));
+        assert_eq!(parse_season_episode("Show s8e2", &legacy), Some((8, 2)));
+    }
+
+    #[test]
+    fn parse_season_episode_handles_verbose_and_fallback_shapes() {
+        // The CONSTANTS regex covers the four historical shapes.
+        let pattern = Regex::new(CONSTANTS.re_episode_code.as_str()).unwrap();
+        // Verbose `Season X Episode Y`
+        assert_eq!(parse_season_episode("Show - Season 2 Episode 5", &pattern), Some((2, 5)),);
+        assert_eq!(parse_season_episode("Show Season 02 Episode 05", &pattern), Some((2, 5)),);
+        // `NxNN`
+        assert_eq!(parse_season_episode("Show 1x05", &pattern), Some((1, 5)));
+        // Bare `Episode Y` falls back to season 1.
+        assert_eq!(parse_season_episode("Show Episode 7", &pattern), Some((1, 7)));
+        // No match → None.
         assert_eq!(parse_season_episode("Pilot", &pattern), None);
     }
 }
