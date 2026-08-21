@@ -17,6 +17,76 @@ fn is_enabled(kind: MsgKind, cfg: &MessagingConfig) -> bool {
     cfg.notify_on.contains(&kind)
 }
 
+/// One configured outbound messaging channel.
+///
+/// The notification outbox retries per channel, not per message: a
+/// message that reached Telegram but not Discord must be re-sent only to
+/// Discord, or the retry would deliver a duplicate. Serialized into the
+/// outbox file, so the variant names are part of that file's format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagingChannel {
+    Telegram,
+    Rest,
+    Pushover,
+    Discord,
+}
+
+/// Result of one channel send. `None` means "nothing to do" — the
+/// channel is not configured, or this message kind is filtered out — and
+/// must never be retried.
+pub type ChannelOutcome = Option<bool>;
+
+/// The channels currently configured for `kind`, in a stable order.
+pub fn configured_channels(app_config: &Arc<AppConfig>, kind: MsgKind) -> Vec<MessagingChannel> {
+    let cfg = app_config.config.load();
+    let Some(messaging) = cfg.messaging.as_ref() else {
+        return Vec::new();
+    };
+    if !is_enabled(kind, messaging) {
+        return Vec::new();
+    }
+    let mut channels = Vec::with_capacity(4);
+    if messaging.telegram.is_some() {
+        channels.push(MessagingChannel::Telegram);
+    }
+    if messaging.rest.is_some() {
+        channels.push(MessagingChannel::Rest);
+    }
+    if messaging.pushover.is_some() {
+        channels.push(MessagingChannel::Pushover);
+    }
+    if messaging.discord.is_some() {
+        channels.push(MessagingChannel::Discord);
+    }
+    channels
+}
+
+/// Send `content` to exactly one channel and report whether it landed.
+///
+/// `send_message` fans out to every channel and swallows the outcome,
+/// which is fine for fire-and-forget notifications but leaves a
+/// recording-lifecycle event unrecoverable after a transient provider
+/// error. This is the entry point the outbox worker drives.
+pub async fn send_message_to_channel(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    content: &MessageContent,
+    channel: MessagingChannel,
+) -> ChannelOutcome {
+    let cfg = app_config.config.load();
+    let messaging = cfg.messaging.as_ref()?;
+    if !is_enabled(content.kind(), messaging) {
+        return None;
+    }
+    match channel {
+        MessagingChannel::Telegram => send_telegram_message(app_config, client, content, messaging).await,
+        MessagingChannel::Rest => send_rest_message(app_config, client, content, messaging).await,
+        MessagingChannel::Pushover => send_pushover_message(app_config, client, content, messaging).await,
+        MessagingChannel::Discord => send_discord_message(app_config, client, content, messaging).await,
+    }
+}
+
 /// Default fallback string for a disk alert when no template is configured.
 fn default_disk_alert_text(alert: &DiskAlert) -> String {
     format!(
@@ -54,6 +124,7 @@ async fn render_template(app_config: &Arc<AppConfig>, http_client: &reqwest::Cli
         watch: None,
         processing: None,
         disk: None,
+        recording: None,
         flat_stats: None,
     };
 
@@ -81,6 +152,15 @@ async fn render_template(app_config: &Arc<AppConfig>, http_client: &reqwest::Cli
         MessageContent::DiskAlert(alert) => {
             template_context.disk = Some(alert);
         }
+        MessageContent::RecordingLifecycle(recording) => {
+            template_context.recording = Some(recording);
+            template_context.message = Some(match recording.event {
+                MsgKind::RecordingStarted => "Recording started",
+                MsgKind::RecordingCompleted => "Recording completed",
+                MsgKind::RecordingFailed => "Recording failed",
+                _ => "Recording lifecycle event",
+            });
+        }
     }
 
     match template {
@@ -105,10 +185,26 @@ fn default_text_for(content: &MessageContent) -> String {
         MessageContent::Watch(w) => serde_json::to_string(w).unwrap_or_default(),
         MessageContent::ProcessingStats(ps) => serde_json::to_string(ps).unwrap_or_default(),
         MessageContent::DiskAlert(alert) => default_disk_alert_text(alert),
+        MessageContent::RecordingLifecycle(recording) => default_recording_lifecycle_text(recording),
     }
 }
 
-async fn send_rest_message(app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) {
+fn default_recording_lifecycle_text(recording: &crate::model::RecordingLifecycleMessage) -> String {
+    let label = match recording.event {
+        MsgKind::RecordingStarted => "Recording started",
+        MsgKind::RecordingCompleted => "Recording completed",
+        MsgKind::RecordingFailed => "Recording failed",
+        _ => "Recording lifecycle event",
+    };
+    let title = recording.programme_title.as_deref().unwrap_or("Untitled");
+    let channel = recording.channel.as_deref().unwrap_or("unknown channel");
+    match recording.failure_reason.as_deref() {
+        Some(reason) => format!("{label}: {title} on {channel} ({reason})"),
+        None => format!("{label}: {title} on {channel}"),
+    }
+}
+
+async fn send_rest_message(app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) -> ChannelOutcome {
     if let Some(rest) = &messaging.rest {
         let kind = content.kind();
         let template = rest.templates.get(&kind).map(String::as_str);
@@ -130,16 +226,23 @@ async fn send_rest_message(app_config: &Arc<AppConfig>, client: &reqwest::Client
             Ok(response) => {
                 if response.status().is_success() {
                     debug!("Message sent successfully to rest api");
+                    Some(true)
                 } else {
                     error!("Failed to send message to rest api, status code {}", response.status());
+                    Some(false)
                 }
             }
-            Err(e) => error!("Message wasn't sent to rest api because of: {e}"),
+            Err(e) => {
+                error!("Message wasn't sent to rest api because of: {e}");
+                Some(false)
+            }
         }
+    } else {
+        None
     }
 }
 
-async fn send_discord_message(app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) {
+async fn send_discord_message(app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) -> ChannelOutcome {
     if let Some(discord) = &messaging.discord {
         let kind = content.kind();
         let template = discord.templates.get(&kind).map(String::as_str);
@@ -162,16 +265,23 @@ async fn send_discord_message(app_config: &Arc<AppConfig>, client: &reqwest::Cli
             Ok(response) => {
                 if response.status().is_success() {
                     debug!("Message sent successfully to Discord");
+                    Some(true)
                 } else {
                     error!("Failed to send message to Discord, status code {}", response.status());
+                    Some(false)
                 }
             }
-            Err(e) => error!("Message wasn't sent to Discord because of: {e}"),
+            Err(e) => {
+                error!("Message wasn't sent to Discord because of: {e}");
+                Some(false)
+            }
         }
+    } else {
+        None
     }
 }
 
-async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) {
+async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) -> ChannelOutcome {
     if let Some(telegram) = &messaging.telegram {
         let kind = content.kind();
         let template = telegram.templates.get(&kind).map(String::as_str);
@@ -192,6 +302,7 @@ async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
                      serialized
                  }
                  MessageContent::DiskAlert(alert) => default_disk_alert_text(alert),
+                 MessageContent::RecordingLifecycle(recording) => default_recording_lifecycle_text(recording),
             }
         };
 
@@ -212,22 +323,33 @@ async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
             }
         };
 
+        // A single failed chat id fails the channel: the outbox retries
+        // the whole channel, which is the coarsest granularity the
+        // Telegram config exposes.
+        let mut all_delivered = true;
         for chat_id in &telegram.chat_ids {
             let bot = telegram_create_instance(&telegram.bot_token, chat_id);
             let send_result = telegram_send_message(app_config, client, &bot, &message, options.as_ref()).await;
-            if telegram.markdown && has_template && send_result.parse_error && !send_result.delivered {
+            let mut delivered = send_result.delivered;
+            if telegram.markdown && has_template && send_result.parse_error && !delivered {
                 // Template output can include dynamic fields that break MarkdownV2. Retry once escaped.
                 let escaped = escape_markdown_v2(&msg);
                 let escaped_options = SendMessageOption {
                     parse_mode: SendMessageParseMode::MarkdownV2,
                 };
-                let _ = telegram_send_message(app_config, client, &bot, &escaped, Some(&escaped_options)).await;
+                delivered = telegram_send_message(app_config, client, &bot, &escaped, Some(&escaped_options))
+                    .await
+                    .delivered;
             }
+            all_delivered &= delivered;
         }
+        Some(all_delivered)
+    } else {
+        None
     }
 }
 
-async fn send_pushover_message(_app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) {
+async fn send_pushover_message(_app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) -> ChannelOutcome {
     if let Some(pushover) = &messaging.pushover {
         let msg = default_text_for(content);
 
@@ -246,12 +368,19 @@ async fn send_pushover_message(_app_config: &Arc<AppConfig>, client: &reqwest::C
             Ok(response) => {
                 if response.status().is_success() {
                     debug!("Text message sent successfully to PUSHOVER, status code {}", response.status());
+                    Some(true)
                 } else {
                     error!("Failed to send text message to PUSHOVER, status code {}", response.status());
+                    Some(false)
                 }
             }
-            Err(e) => error!("Text message wasn't sent to PUSHOVER api because of: {e}"),
+            Err(e) => {
+                error!("Text message wasn't sent to PUSHOVER api because of: {e}");
+                Some(false)
+            }
         }
+    } else {
+        None
     }
 }
 
@@ -261,7 +390,7 @@ async fn dispatch_send_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
     if let Some(messaging) = msg_cfg {
         let kind = content.kind();
         if is_enabled(kind, messaging) {
-            tokio::join!(
+            let _ = tokio::join!(
                 send_telegram_message(app_config, client, &content, messaging),
                 send_rest_message(app_config, client, &content, messaging),
                 send_pushover_message(app_config, client, &content, messaging),

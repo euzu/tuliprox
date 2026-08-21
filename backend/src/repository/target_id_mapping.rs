@@ -164,8 +164,9 @@ impl TargetIdMapping {
                 // Check against in-memory record
                 let needs_update = match self.mem_by_virtual_id.get(&virtual_id) {
                     Some(record) => {
-                        record.provider_id == provider_id &&
-                            (record.item_type != item_type || record.parent_virtual_id != parent_virtual_id)
+                        record.provider_id != provider_id
+                            || record.item_type != item_type
+                            || record.parent_virtual_id != parent_virtual_id
                     }
                     None => false, // Should not happen if maps are consistent
                 };

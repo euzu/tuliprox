@@ -3,6 +3,7 @@
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::return_self_not_must_use)]
 #![allow(clippy::missing_errors_doc)]
+#![allow(clippy::large_futures)]
 
 // #[cfg(target_os = "linux")]
 // #[global_allocator]
@@ -148,6 +149,7 @@ const BUILD_TIMESTAMP: &str = env!("VERGEN_BUILD_TIMESTAMP");
 
 #[tokio::main]
 async fn main() {
+    api::api_utils::init_uptime_clock();
     let args = Args::parse();
 
     db_viewer(&args.db_viewer_args());

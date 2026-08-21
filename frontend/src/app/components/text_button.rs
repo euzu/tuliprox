@@ -14,6 +14,11 @@ pub struct TextButtonProps {
     pub autofocus: bool,
     #[prop_or_default]
     pub disabled: bool,
+    /// Accessible name, when the visible `title` is not enough on its
+    /// own. A column of identical "Delete" buttons needs to say *what*
+    /// each one deletes; the visible label stays short.
+    #[prop_or(None)]
+    pub aria_label: Option<String>,
 }
 
 #[component]
@@ -32,6 +37,7 @@ pub fn TextButton(props: &TextButtonProps) -> Html {
             autofocus={props.autofocus}
             disabled={props.disabled}
             onclick={handle_click}
+            aria-label={props.aria_label.clone()}
             class={classes!("tp__text-button", props.class.clone())}>
          if !props.icon.is_empty() {
             <AppIcon name={props.icon.clone()}></AppIcon>

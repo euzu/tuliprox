@@ -146,6 +146,69 @@ pub fn longest<'a>(a: &'a Arc<str>, b: &'a Arc<str>) -> &'a Arc<str> {
     }
 }
 
+fn trim_leading_zeros(digits: &[u8]) -> &[u8] {
+    let start = digits.iter().position(|b| *b != b'0').unwrap_or(digits.len().saturating_sub(1));
+    &digits[start..]
+}
+
+/// Compare strings with embedded ascii integers numerically ("Chan 2" < "Chan 10").
+pub fn natural_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let l = left.as_bytes();
+    let r = right.as_bytes();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < l.len() && j < r.len() {
+        if l[i].is_ascii_digit() && r[j].is_ascii_digit() {
+            let li = i;
+            while i < l.len() && l[i].is_ascii_digit() {
+                i += 1;
+            }
+            let rj = j;
+            while j < r.len() && r[j].is_ascii_digit() {
+                j += 1;
+            }
+            let ls = trim_leading_zeros(&l[li..i]);
+            let rs = trim_leading_zeros(&r[rj..j]);
+            let ord = ls.len().cmp(&rs.len()).then_with(|| ls.cmp(rs));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            // equal numeric value: fewer leading zeros first for determinism
+            let ord = (i - li).cmp(&(j - rj));
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        } else {
+            let ord = l[i].cmp(&r[j]);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+            i += 1;
+            j += 1;
+        }
+    }
+    (l.len() - i).cmp(&(r.len() - j))
+}
+
+/// Quality tier of a single word-boundary token, best first.
+pub fn token_quality(token: &str) -> Option<u8> {
+    const TIERS: &[(&[&str], u8)] = &[
+        (&["4K", "UHD", "2160P"], 5),
+        (&["QHD", "1440P"], 4),
+        (&["FHD", "1080P"], 3),
+        (&["HD", "720P"], 2),
+        (&["SD", "480P", "576P"], 1),
+    ];
+    TIERS.iter().find_map(|(tokens, rank)| tokens.iter().any(|t| token.eq_ignore_ascii_case(t)).then_some(*rank))
+}
+
+pub fn quality_tokens(value: &str) -> impl Iterator<Item = &str> {
+    value.split(|c: char| !c.is_alphanumeric()).filter(|token| !token.is_empty())
+}
+
+/// Best quality tier found in `value` (5=UHD/4K .. 1=SD); 0 when no known token is present.
+pub fn quality_rank(value: &str) -> u8 { quality_tokens(value).filter_map(token_quality).max().unwrap_or(0) }
+
 // ------------------------------------------------------------
 // Generic string concatenation macro with optional capacity hint
 // Usage:
@@ -175,10 +238,30 @@ macro_rules! concat_string {
 
 #[cfg(test)]
 mod test {
-    use super::{clean_playlist_title, generate_random_string};
+    use super::{clean_playlist_title, generate_random_string, natural_cmp, quality_rank};
     use crate as shared; // allow path-based macro call in tests
     use crate::utils::Capitalize;
-    use std::collections::HashSet;
+    use std::{cmp::Ordering, collections::HashSet};
+
+    #[test]
+    fn test_natural_cmp_basics() {
+        assert_eq!(natural_cmp("Chan 2", "Chan 10"), Ordering::Less);
+        assert_eq!(natural_cmp("Chan 10", "Chan 2"), Ordering::Greater);
+        assert_eq!(natural_cmp("Chan 2", "Chan 2"), Ordering::Equal);
+        assert_eq!(natural_cmp("Chan 2", "Chan 02"), Ordering::Less);
+        assert_eq!(natural_cmp("abc", "abd"), Ordering::Less);
+        assert_eq!(natural_cmp("abc", "abc def"), Ordering::Less);
+        assert_eq!(natural_cmp("00", "0"), Ordering::Greater);
+    }
+
+    #[test]
+    fn test_quality_rank_tokens() {
+        assert_eq!(quality_rank("News [UHD]"), 5);
+        assert_eq!(quality_rank("News 1080p"), 3);
+        assert_eq!(quality_rank("News HD"), 2);
+        assert_eq!(quality_rank("News"), 0);
+        assert_eq!(quality_rank("HDTV News"), 0); // no partial token match
+    }
 
     #[test]
     fn test_generate_random_string() {

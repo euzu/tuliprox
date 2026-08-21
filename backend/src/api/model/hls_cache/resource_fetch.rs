@@ -24,8 +24,9 @@ use std::{
 };
 use url::Url;
 
-const MAX_MANUAL_REDIRECTS: usize = 10;
 const STORAGE_FULL_RAW_OS_ERRORS: &[i32] = &[28, 112, 122];
+
+use super::MAX_MANUAL_REDIRECTS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HlsResourceStatusClass {

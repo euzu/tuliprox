@@ -13,6 +13,15 @@ pub enum MsgKind {
     Watch,
     #[serde(rename = "disk_alert")]
     DiskAlert,
+    /// A recording started.
+    #[serde(rename = "recording_started")]
+    RecordingStarted,
+    /// A recording completed.
+    #[serde(rename = "recording_completed")]
+    RecordingCompleted,
+    /// A recording failed.
+    #[serde(rename = "recording_failed")]
+    RecordingFailed,
 }
 impl MsgKind {
     /// Stable snake_case wire name. Matches the `#[serde(rename = "...")]`
@@ -26,10 +35,18 @@ impl MsgKind {
             MsgKind::Error => "error",
             MsgKind::Watch => "watch",
             MsgKind::DiskAlert => "disk_alert",
+            MsgKind::RecordingStarted => "recording_started",
+            MsgKind::RecordingCompleted => "recording_completed",
+            MsgKind::RecordingFailed => "recording_failed",
         }
     }
 
     pub fn template_filename(&self, prefix: &str) -> String { concat_string!(prefix, "_", self.wire_name(), ".templ") }
+
+    /// `true` for the recording lifecycle kinds.
+    pub fn is_recording_lifecycle(&self) -> bool {
+        matches!(self, MsgKind::RecordingStarted | MsgKind::RecordingCompleted | MsgKind::RecordingFailed)
+    }
 }
 
 impl fmt::Display for MsgKind {
@@ -40,6 +57,9 @@ impl fmt::Display for MsgKind {
             MsgKind::Error => "Error",
             MsgKind::Watch => "Watch",
             MsgKind::DiskAlert => "DiskAlert",
+            MsgKind::RecordingStarted => "RecordingStarted",
+            MsgKind::RecordingCompleted => "RecordingCompleted",
+            MsgKind::RecordingFailed => "RecordingFailed",
         };
         write!(f, "{s}")
     }
@@ -59,6 +79,12 @@ impl FromStr for MsgKind {
             Ok(Self::Watch)
         } else if s.eq_ignore_ascii_case("disk_alert") {
             Ok(Self::DiskAlert)
+        } else if s.eq_ignore_ascii_case("recording_started") {
+            Ok(Self::RecordingStarted)
+        } else if s.eq_ignore_ascii_case("recording_completed") {
+            Ok(Self::RecordingCompleted)
+        } else if s.eq_ignore_ascii_case("recording_failed") {
+            Ok(Self::RecordingFailed)
         } else {
             Err(TuliproxError::Config(format!("Unknown MsgKind: {s}")))
         }

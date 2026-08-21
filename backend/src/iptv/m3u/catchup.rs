@@ -91,8 +91,10 @@ fn parse_template(template: &str) -> Vec<TemplateSegment> {
         };
 
         let Some((placeholder_start, open_len)) = start else {
-            current.push(bytes[idx] as char);
-            idx += 1;
+            // Push the full char; pushing single bytes as chars corrupts multi-byte UTF-8
+            let ch_len = template[idx..].chars().next().map_or(1, char::len_utf8);
+            current.push_str(&template[idx..idx + ch_len]);
+            idx += ch_len;
             continue;
         };
 

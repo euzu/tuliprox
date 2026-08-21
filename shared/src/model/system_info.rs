@@ -13,6 +13,12 @@ pub struct SystemInfo {
     pub net_rx_bytes_per_sec: f64,
     /// Network transmit bytes per second (system-wide)
     pub net_tx_bytes_per_sec: f64,
+    /// Cumulative network bytes received since process start (system-wide)
+    #[serde(default)]
+    pub net_rx_bytes_total: u64,
+    /// Cumulative network bytes transmitted since process start (system-wide)
+    #[serde(default)]
+    pub net_tx_bytes_total: u64,
     /// Total size of the filesystem hosting the process working directory, in bytes.
     /// `0` if the platform sampler could not determine the disk usage.
     pub disk_total_bytes: u64,

@@ -256,6 +256,35 @@ Notes:
 - Runtime refresh only produces `http`/`https` playback URLs; Stalker `rtmp://` / `rtsp://` commands are rejected explicitly rather
   than proxied half-supported.
 
+## Example 10: Dry-run a filter expression against a target
+
+```bash
+#!/bin/bash
+
+BASE_URL="http://localhost:8901"
+TOKEN="PUT_YOUR_TOKEN_HERE"
+
+curl -s -X POST "$BASE_URL/api/v1/playlist/filter/preview" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    --data-raw '{"target": 1, "filter": "Group ~ \"^DE.*\" AND NOT Title CONTAINS \"Shopping\"", "limit": 10}' | jq .
+```
+
+Typical use:
+
+- test a filter DSL expression against a target's stored playlist before writing it into `source.yml`
+- see matched/total counts overall and per cluster (live/vod/series)
+- inspect sample matched and excluded channels to verify the expression does what you expect
+
+Notes:
+
+- `target` is the numeric target id (same id the playlist explorer uses).
+- `filter` supports the full filter DSL including `!TEMPLATE!` references from your configured templates.
+- Optional `limit` caps the sample lists (default 25, max 50); optional `match_as_ascii` mirrors the target option.
+- An invalid filter expression returns HTTP 422 with `{"error": "...", "line": n, "column": n}`; `line`/`column`
+  are `null` for semantic errors without a source position (e.g. an invalid regex value).
+- The preview reads the target's already-processed playlist; it never contacts providers or triggers an update.
+
 ## Available `/api/v1` Endpoints
 
 This is a compact operator-oriented overview of the `/api/v1` REST API groups currently registered by the backend.
@@ -275,16 +304,55 @@ This is a compact operator-oriented overview of the `/api/v1` REST API groups cu
 
 ### Downloads and recordings
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/api/v1/file/download/info` | Inspect remote file/download info |
-| `POST` | `/api/v1/file/download` | Queue a file download |
-| `POST` | `/api/v1/file/record` | Queue a live recording |
-| `POST` | `/api/v1/file/download/pause` | Pause a queued or active download |
-| `POST` | `/api/v1/file/download/resume` | Resume a paused download |
-| `POST` | `/api/v1/file/download/cancel` | Cancel a queued or active download |
-| `POST` | `/api/v1/file/download/remove` | Remove a task from the download database |
-| `POST` | `/api/v1/file/download/retry` | Retry a failed download |
+| Method   | Path                                                 | Purpose                                                                         |
+| -------- |------------------------------------------------------|---------------------------------------------------------------------------------|
+| `GET`    | `/api/v1/file/download/info`                         | Inspect remote file/download info                                               |
+| `POST`   | `/api/v1/file/download`                              | Queue a file download                                                           |
+| `POST`   | `/api/v1/file/record`                                | Queue a live recording                                                          |
+| `POST`   | `/api/v1/file/download/pause`                        | Pause a queued or active download                                               |
+| `POST`   | `/api/v1/file/download/resume`                       | Resume a paused download                                                        |
+| `POST`   | `/api/v1/file/download/cancel`                       | Cancel a queued or active download                                              |
+| `POST`   | `/api/v1/file/download/remove`                       | Remove a task from the download database                                        |
+| `POST`   | `/api/v1/file/download/retry`                        | Retry a failed download                                                         |
+| `GET`    | `/api/v1/recording/tasks`                            | List visible DVR tasks                                                          |
+| `POST`   | `/api/v1/recording/tasks`                            | Create a DVR recording task from server-owned source ids                        |
+| `PATCH`  | `/api/v1/recording/tasks/{id}`                       | Edit an upcoming DVR recording                                                  |
+| `POST`   | `/api/v1/recording/tasks/{id}/cancel`                | Cancel an active, queued, or scheduled DVR recording                            |
+| `DELETE` | `/api/v1/recording/tasks/{id}`                       | Delete a finished DVR recording through the safe deletion lifecycle             |
+| `POST`   | `/api/v1/recording/conflicts/preview`                | Advisory conflict preview (severity, optional provider scope, overlap segments) |
+| `GET`    | `/api/v1/recording/quota`                            | Read the caller's private quota and shared DVR usage                            |
+| `GET`    | `/api/v1/recording/rules`                            | List visible recurring recording rules                                          |
+| `POST`   | `/api/v1/recording/rules`                            | Create a weekly recurring recording rule                                        |
+| `PATCH`  | `/api/v1/recording/rules/{id}`                       | Edit a recurring recording rule                                                 |
+| `DELETE` | `/api/v1/recording/rules/{id}?future=retain\|cancel` | Delete a recurring recording rule                                               |
+
+#### DVR WebSocket protocol
+
+The DVR layer ships its own scoped protocol messages on the same WebSocket connection as the rest of the
+backend. The frontend sends `ProtocolMessage::RecordingSnapshotRequest` to subscribe and receives:
+
+- `ProtocolMessage::RecordingSnapshotResponse { revision, tasks }` — the full filtered task list for the
+  caller's session, sent on connect and after every mutation the session is permitted to see.
+- `ProtocolMessage::RecordingDeltaResponse { revision, tasks }` — a smaller diff when only a few tasks
+  changed.
+
+The frontend never polls. After a successful `POST /api/v1/recording/tasks` it relies on the next
+`RecordingSnapshotResponse` to update its view. Rule lists are refreshed by hooking into
+`EventMessage::RecordingSnapshot` and re-calling `GET /api/v1/recording/rules`; a dedicated
+`RecordingRulesChanged` event is a planned follow-up but not currently shipped.
+
+#### DVR conflict preview
+
+`POST /api/v1/recording/conflicts/preview` is **advisory only** — the response carries a severity bucket
+(`none` / `soft` / `hard`) plus optional provider scope and overlap segments, but the server does not
+reject the create call based on it. The frontend renders the preview as a hint next to the recording
+form's scheduled interval, never as a hard block.
+
+#### `POST /api/v1/file/record` (deprecated)
+
+The legacy `POST /api/v1/file/record` endpoint is admin-gated and **scheduled for removal in the next
+major version**. It returns `recording_forbidden` for non-admin principals. New code should call
+`POST /api/v1/recording/tasks` with a `CreateRecordingTaskBody` payload.
 
 ### Playlist and web-player helpers
 
@@ -298,6 +366,7 @@ This is a compact operator-oriented overview of the `/api/v1` REST API groups cu
 | `POST` | `/api/v1/playlist/epg` | Query EPG data for the Web UI |
 | `POST` | `/api/v1/playlist/series_info/{virtual_id}/{provider_id}` | Series metadata lookup |
 | `POST` | `/api/v1/playlist/series/episode/{virtual_id}` | Episode item lookup |
+| `POST` | `/api/v1/playlist/filter/preview` | Dry-run a filter DSL expression against a target's stored playlist |
 | `GET` | `/api/v1/playlist/resource/{resource}` | Public resource access for playlist-related assets |
 
 ### Configuration
@@ -360,5 +429,11 @@ With Web UI authentication enabled, many endpoints require matching permissions 
 - `library.write`
 - `download.read`
 - `download.write`
+- `recording.read`
+- `recording.write`
 
 If a request is rejected, verify the logged-in Web UI user's RBAC group assignments first.
+
+> **See also:** the full [DVR Operator Reference](./operator/dvr.md) for the authorization matrix, identity-registry
+> bootstrap, token refresh, recurring-rule matching + DST, cross-store reconciliation, at-most-once notification
+> protocol, and the migration checklist.

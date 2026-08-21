@@ -2,9 +2,9 @@ use crate::{api::{
     api_utils::{internal_server_error, try_unwrap_body},
     config_file::ConfigFile,
     model::AppState,
-}, auth::{permission_layer, verify_token, AuthBearer}, iptv::xtream::{get_xtream_stream_url_base, xtream_login}, model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource}, utils, utils::{
-    persist_messaging_templates, prepare_sources_batch, prepare_users, read_api_proxy_file,
-    request::download_text_content,
+}, auth::{permission_layer, verify_token, AuthBearer}, iptv::xtream::{get_xtream_stream_url_base, xtream_login}, model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource, UserPlan}, utils, utils::{
+    persist_messaging_templates, plans_file_path, prepare_sources_batch, prepare_users, read_api_proxy_file,
+    read_plans_file, save_plans, request::download_text_content,
 }};
 use axum::{
     http::{header::IF_MATCH, HeaderMap, HeaderName, HeaderValue, StatusCode},
@@ -17,7 +17,7 @@ use shared::model::InputFetchMethod;
 use shared::{
     error::TuliproxError,
     model::permission::{Permission, PermissionSet},
-    model::{ApiProxyConfigDto, ConfigDto, SourcesConfigDto, XtreamLoginRequest},
+    model::{ApiProxyConfigDto, ConfigDto, PlansConfigDto, SourcesConfigDto, XtreamLoginRequest},
     utils::{
         parse_provider_scheme_url_parts, HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION,
         HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH, PROVIDER_SCHEME_PREFIX,
@@ -349,9 +349,18 @@ async fn save_config_api_proxy_config(
         ..base
     };
 
+    // Full-config validation: catches duplicate server names, duplicate usernames/tokens
+    // and users referencing missing servers, which per-row validate() cannot see
+    let stored_plans = updated_api_proxy.plans.clone();
+    let mut updated_api_proxy_dto = ApiProxyConfigDto::from(&updated_api_proxy);
+    if let Err(err) = updated_api_proxy_dto.prepare() {
+        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()})))
+            .into_response();
+    }
+
     if let Some(err) = intern_save_config_api_proxy(
         &backup_dir,
-        &ApiProxyConfigDto::from(&updated_api_proxy),
+        &updated_api_proxy_dto,
         &api_proxy_file_path,
     )
         .await
@@ -359,8 +368,11 @@ async fn save_config_api_proxy_config(
         return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
             .into_response();
     }
-    // Persist succeeded — now update in‑memory state
-    app_state.app_config.api_proxy.store(Some(Arc::new(updated_api_proxy)));
+    // Persist succeeded — now update in‑memory state with the prepared config.
+    // Plans live in plans.yml, so re-inject them (the DTO round-trip drops them).
+    let mut stored_api_proxy = ApiProxyConfig::from(&updated_api_proxy_dto);
+    stored_api_proxy.set_plans(stored_plans);
+    app_state.app_config.api_proxy.store(Some(Arc::new(stored_api_proxy)));
 
     let updated_revision = match read_file_revision(&api_proxy_file_path).await {
         Ok(revision) => revision,
@@ -603,6 +615,53 @@ fn build_xtream_login_input_source(
     })
 }
 
+async fn get_config_plans(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse + Send {
+    let plans_path = {
+        let paths = app_state.app_config.paths.load();
+        plans_file_path(paths.api_proxy_file_path.as_str())
+    };
+    let plans_path_str = plans_path.to_string_lossy().to_string();
+    match read_plans_file(&plans_path_str, true) {
+        Ok(Some(dto)) => axum::response::Json(dto).into_response(),
+        Ok(None) => axum::response::Json(PlansConfigDto::default()).into_response(),
+        Err(err) => {
+            error!("Failed to read plans config: {err}");
+            internal_server_error!()
+        }
+    }
+}
+
+async fn save_config_plans(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::Json(mut req_plans): axum::extract::Json<PlansConfigDto>,
+) -> impl IntoResponse + Send {
+    if let Err(err) = req_plans.prepare() {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
+    }
+    let (plans_path_str, backup_dir) = {
+        let paths = app_state.app_config.paths.load();
+        let config = app_state.app_config.config.load();
+        (
+            plans_file_path(paths.api_proxy_file_path.as_str()).to_string_lossy().to_string(),
+            config.get_backup_dir().to_string(),
+        )
+    };
+    let _lock = app_state.app_config.file_locks.write_lock(Path::new(&plans_path_str)).await;
+    if let Err(err) = save_plans(&plans_path_str, &backup_dir, &req_plans).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()}))).into_response();
+    }
+    // Re-resolve users against the new plans without a restart.
+    if let Some(api_proxy) = app_state.app_config.api_proxy.load().as_deref() {
+        let mut updated = api_proxy.clone();
+        let plans = req_plans.plans.iter().map(|plan| Arc::new(UserPlan::from(plan))).collect();
+        updated.set_plans(plans);
+        app_state.app_config.api_proxy.store(Some(Arc::new(updated)));
+    }
+    StatusCode::OK.into_response()
+}
+
 pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
     router
         .route("/config", axum::routing::get(config_unprotected))
@@ -617,6 +676,10 @@ pub fn v1_api_config_register_with_permissions(app_state: &Arc<AppState>) -> Rou
         .route("/config", axum::routing::get(config))
         .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config));
 
+    let config_read = Router::new()
+        .route("/config/plans", axum::routing::get(get_config_plans))
+        .layer(permission_layer!(app_state, Permission::ConfigRead));
+
     // 2. Source Domain (Read & Write)
     let source_read = Router::new()
         .route("/config/batchContent/{input_id}", axum::routing::get(config_batch_content))
@@ -630,10 +693,12 @@ pub fn v1_api_config_register_with_permissions(app_state: &Arc<AppState>) -> Rou
     let config_write = Router::new()
         .route("/config/main", axum::routing::post(save_config_main))
         .route("/config/apiproxy", axum::routing::put(save_config_api_proxy_config))
+        .route("/config/plans", axum::routing::put(save_config_plans))
         .layer(permission_layer!(app_state, Permission::ConfigWrite));
 
     Router::new()
         .merge(base_read)
+        .merge(config_read)
         .merge(source_read)
         .merge(source_write)
         .merge(config_write)

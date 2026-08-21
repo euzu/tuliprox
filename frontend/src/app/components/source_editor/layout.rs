@@ -89,8 +89,9 @@ fn build_input_target_maps(blocks: &[Block], connections: &[Connection]) -> Inpu
     let mut adjacency: EdgeMap = HashMap::new();
 
     for con in connections {
-        let from = &blocks[con.from as usize - 1];
-        let to = &blocks[con.to as usize - 1];
+        // Skip connections referencing missing blocks instead of panicking
+        let Some(from) = usize::from(con.from).checked_sub(1).and_then(|i| blocks.get(i)) else { continue };
+        let Some(to) = usize::from(con.to).checked_sub(1).and_then(|i| blocks.get(i)) else { continue };
 
         if from.block_type.is_input() && to.block_type.is_target() {
             push_unique(&mut input_to_targets, con.from, con.to);
@@ -403,9 +404,13 @@ pub fn barycentric_sort(
     let mut target_to_inputs: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
 
     for con in connections {
-        if blocks[con.from as usize - 1].block_type.is_input() && blocks[con.to as usize - 1].block_type.is_target() {
-            input_to_targets.entry(con.from).or_default().push(con.to);
-            target_to_inputs.entry(con.to).or_default().push(con.from);
+        let from = usize::from(con.from).checked_sub(1).and_then(|i| blocks.get(i));
+        let to = usize::from(con.to).checked_sub(1).and_then(|i| blocks.get(i));
+        if let (Some(from), Some(to)) = (from, to) {
+            if from.block_type.is_input() && to.block_type.is_target() {
+                input_to_targets.entry(con.from).or_default().push(con.to);
+                target_to_inputs.entry(con.to).or_default().push(con.from);
+            }
         }
     }
 
@@ -413,16 +418,12 @@ pub fn barycentric_sort(
     for _ in 0..iterations {
         // sort inputs by middle value of targets
         input_order.sort_by(|&a, &b| {
-            barycenter(a, &input_to_targets, &target_order)
-                .partial_cmp(&barycenter(b, &input_to_targets, &target_order))
-                .unwrap()
+            barycenter(a, &input_to_targets, &target_order).total_cmp(&barycenter(b, &input_to_targets, &target_order))
         });
 
         // sort targets by middle value of inputs
         target_order.sort_by(|&a, &b| {
-            barycenter(a, &target_to_inputs, &input_order)
-                .partial_cmp(&barycenter(b, &target_to_inputs, &input_order))
-                .unwrap()
+            barycenter(a, &target_to_inputs, &input_order).total_cmp(&barycenter(b, &target_to_inputs, &input_order))
         });
     }
 

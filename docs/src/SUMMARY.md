@@ -27,5 +27,6 @@
   - [template.yml (Macros & Regex)](./configuration/template.md)
   - [mapping.yml (Mapper DSL & Logic)](./configuration/mapping-dsl.md)
 - [Operations & Debugging (CLI & DB Dumps)](./operations-debugging.md)
+- [DVR Operator Reference](./operator/dvr.md)
 - [Examples,Recipes & Ecosystem Stacks](./examples-recipes.md)
 - [Troubleshooting & Resilience](./troubleshooting.md)

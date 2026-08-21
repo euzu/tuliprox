@@ -119,10 +119,12 @@ reverse_proxy:
 | `retry` | Bool | `true` | Retries connecting to the upstream provider during the initial stream open when the provider returns a transient failure or no usable stream. Once a stream has started, Tuliprox does not transparently replace that live upstream inside the same client response. |
 | `buffer.enabled` | Bool | `false` | Enables an asynchronous ring-buffer in RAM between the provider download stream and the client upload stream. Necessary if the provider stream is faster than the consumer can process. |
 | `buffer.size` | Int | `0` | The size of the buffer in *Chunks* (1 Chunk = 8192 Bytes). A value of `1024` equals approximately 8 Megabytes of RAM per active stream. |
+| `buffer.max_bytes_mb` | Int | `5` | Byte-level backpressure cap of the buffer in Megabytes. The producer stops reading from the provider once this many bytes are queued for the client, regardless of chunk count. Increase for high-bitrate streams with slow consumers; decrease on memory-constrained hosts. |
 | `throttle_kbps` | Int | `0` | **Background:** Some players download VODs (Movies) at maximum line speed ("Bursting"). Providers often view this as abuse or scraping and will ban the IP. By throttling (e.g., to `12500` kbps), you force the download into a constant, inconspicuous flow. Supports units like `KB/s`, `MB/s`, `kbps`, `Mibps`. |
 | `metrics_enabled` | Bool | `false` | **Monitoring:** If active, Tuliprox samples the live bandwidth (in kbps) and transferred bytes for every active reverse-proxied stream and pushes them via WebSockets to the Web UI. It adds a tiny bit of CPU overhead but is invaluable for debugging buffering issues. |
 | `grace_period_millis` | Int | `2000` | The exact time window in ms where a temporary over-allocation is allowed (see notes on [The VLC Seek Problem](#the-vlc-seek-problem--grace-periods) for details). |
 | `grace_period_timeout_secs` | Int | `4` | A hard timeout limit for overlapping "ghost sessions" to expire. |
+| `shared_subscriber_idle_timeout_secs` | Int | `300` | How long a subscriber of a shared (multi-client) stream may consume no data before it is dropped. Lower values reclaim slots from stalled clients faster; higher values tolerate longer player pauses. |
 | `grace_period_hold_stream` | Bool | `true` | Tuliprox artificially holds back video data to the client, waiting for grace check to finish, so it doesn't trigger provider prematurely. |
 | `hls_session_ttl_secs` | Int | `15` | Keeps virtual provider slot open between HLS segment (`.ts`) requests to prevent provider bans for "Account Hopping". |
 | `catchup_session_ttl_secs` | Int | `45` | Same session-holding principle applied to Archive/Catchup TV. See notes on section [Session TTLs for HLS & Catchup](#session-ttls-for-hls-m3u8--catchup) for details. |
@@ -276,6 +278,7 @@ reverse_proxy:
 | `max_concurrent_segment_fetches_global` | Int | `64` | Maximum concurrent future segment fetches across all HLS sessions. |
 | `origin_manifest_timeout_ms` | Milliseconds | `3000` | Timeout for future Origin manifest fetches. |
 | `origin_segment_timeout_ms` | Milliseconds | `10000` | Timeout for future Origin segment fetches. |
+| `initial_manifest_wait_timeout_secs` | Seconds | `90` | How long a client may wait for the initial manifest decision (session bootstrap window). Lower values fail unhealthy sessions faster; higher values tolerate slow providers. |
 | `session_idle_timeout` | Seconds | `300` | Idle timeout before a future HLS cache session may be collected. |
 | `segment_repair.max_level` | String | `off` | Maximum repair level allowed by the codec-aware MPEG-TS segment repair policy (`off`, `low`, `medium`, `high`). |
 | `segment_repair.apply_to_first_segments` | Int | `1` | Number of visible TS objects checked per access-lease activation. |

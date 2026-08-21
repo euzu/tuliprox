@@ -84,10 +84,9 @@ pub fn is_default_epg_name_prefix_separator(v: &Option<Vec<char>>) -> bool {
     current == &default_separator
 }
 
-pub const DEFAULT_EPISODE_PATTERN: &str = r".*(?P<episode>[Ss]\d{1,2}(.*?)[Ee]\d{1,2}).*";
-
-pub fn default_episode_pattern() -> Option<String> { Some(DEFAULT_EPISODE_PATTERN.to_string()) }
+pub fn default_episode_pattern() -> Option<String> { Some(crate::utils::constants::EPISODE_PATTERN.to_string()) }
 
 pub fn is_blank_or_default_episode_pattern(path: &Option<String>) -> bool {
-    path.as_ref().is_none_or(|value| value.trim().is_empty() || value.trim() == DEFAULT_EPISODE_PATTERN)
+    path.as_ref()
+        .is_none_or(|value| value.trim().is_empty() || value.trim() == crate::utils::constants::EPISODE_PATTERN)
 }

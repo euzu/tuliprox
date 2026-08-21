@@ -130,6 +130,9 @@ pub fn get_field_value(pli: &PlaylistItem, field: ItemField) -> Arc<str> {
                 $(ItemField::$variant => Arc::clone(&header.$prop),)+
                 ItemField::Genre => get_genre!(header).unwrap_or_else(|| "".intern()),
                 ItemField::Type => header.item_type.interned_label(),
+                ItemField::EpgId => header.epg_channel_id.clone().unwrap_or_else(|| "".intern()),
+                ItemField::Chno => header.chno.to_string().intern(),
+                ItemField::Quality => header_quality_rank(header).to_string().intern(),
                 ItemField::Caption => {
                     if header.title.is_empty() {
                         Arc::clone(&header.name)
@@ -158,7 +161,12 @@ pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: &str) ->
                     header.title = value.intern();
                     header.name = header.title.clone();
                 }
-                ItemField::Type => {}
+                ItemField::EpgId => header.epg_channel_id = Some(value.intern()),
+                ItemField::Chno => match value.parse::<u32>() {
+                    Ok(chno) => header.chno = chno,
+                    Err(_) => return false,
+                },
+                ItemField::Type | ItemField::Quality => {}
             }
         };
     }
@@ -167,14 +175,27 @@ pub fn set_field_value(pli: &mut PlaylistItem, field: ItemField, value: &str) ->
     true
 }
 
+fn header_quality_rank(header: &crate::model::PlaylistItemHeader) -> u8 {
+    let caption = if header.title.is_empty() { &header.name } else { &header.title };
+    crate::utils::quality_rank(caption)
+}
+
 pub struct ValueProvider<'a> {
     pub pli: &'a PlaylistItem,
     pub match_as_ascii: bool,
 }
 
 impl ValueProvider<'_> {
+    pub fn quality_rank(&self) -> u8 { header_quality_rank(&self.pli.header) }
+
     pub(crate) fn get_filter_value(&self, field: ItemField) -> Option<Cow<'_, str>> {
         let header = &self.pli.header;
+        if field == ItemField::Chno {
+            return Some(Cow::Owned(header.chno.to_string()));
+        }
+        if field == ItemField::Quality {
+            return Some(Cow::Owned(header_quality_rank(header).to_string()));
+        }
         let value = match field {
             ItemField::Group => header.group.as_ref(),
             ItemField::Name => header.name.as_ref(),
@@ -187,6 +208,8 @@ impl ValueProvider<'_> {
             ItemField::Url => header.url.as_ref(),
             ItemField::Input => header.input_name.as_ref(),
             ItemField::Type => header.item_type.as_str(),
+            ItemField::EpgId => header.epg_channel_id.as_deref()?,
+            ItemField::Chno | ItemField::Quality => unreachable!("handled above"),
             ItemField::Caption => {
                 if header.title.is_empty() {
                     header.name.as_ref()
@@ -200,6 +223,10 @@ impl ValueProvider<'_> {
     }
 
     pub fn get(&self, field: &str) -> Option<Arc<str>> {
+        // Virtual field: quality tier derived from the caption, not stored on the header.
+        if field.eq_ignore_ascii_case("quality") {
+            return Some(header_quality_rank(&self.pli.header).to_string().intern());
+        }
         let val = self.pli.header.get_field(field)?;
         if self.match_as_ascii {
             return Some(deunicode_string(&val).into_owned().into());

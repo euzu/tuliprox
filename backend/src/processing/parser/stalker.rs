@@ -17,7 +17,7 @@ use shared::model::stalker::{
     StalkerCommandVariantDto, StalkerPlaybackDescriptorDto, StalkerPlaybackMode, StalkerStreamKind,
 };
 use shared::model::stalker_item::StalkerPlaylistItem;
-use shared::utils::Internable;
+use shared::utils::{fnv1a_32, stable_episode_storage_id, Internable};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -417,18 +417,6 @@ fn map_stalker_episode(
         season_id: Some(season_number),
         episode_id,
     }
-}
-
-fn stable_episode_storage_id(series_id: u32, season_number: u32, episode_id: &str, episode_number: u32) -> u32 {
-    let key = format!("{series_id}:{season_number}:{episode_id}:{episode_number}");
-    fnv1a_32(&key)
-}
-
-fn fnv1a_32(key: &str) -> u32 {
-    let hash = key.bytes().fold(2_166_136_261_u32, |hash, byte| {
-        (hash ^ u32::from(byte)).wrapping_mul(16_777_619)
-    });
-    hash.max(1)
 }
 
 /// Collision-safe variant of [`stable_episode_storage_id`]: when the hashed id is

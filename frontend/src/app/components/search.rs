@@ -1,6 +1,8 @@
 use crate::{
     app::components::{AppIcon, DropDownIconButton, DropDownOption, DropDownSelection, IconButton},
+    hooks::{is_text_input_focused, use_key_down},
     html_if,
+    i18n::use_translation,
 };
 use gloo_timers::callback::Timeout;
 use shared::model::SearchRequest;
@@ -25,16 +27,43 @@ pub struct SearchProps {
     #[prop_or_default]
     pub options: Option<Rc<Vec<DropDownOption>>>,
     pub onsearch: Option<Callback<SearchRequest>>,
+    #[prop_or_default]
+    pub on_fields_change: Option<Callback<Option<Rc<Vec<String>>>>>,
     #[prop_or(3)]
     pub min_length: usize,
 }
 
 #[component]
 pub fn Search(props: &SearchProps) -> Html {
-    let search_fields = use_state(|| None::<Rc<Vec<String>>>);
+    let translate = use_translation();
+    let search_fields = use_state(|| {
+        // Preselected options (e.g. restored from local storage) apply immediately.
+        props.options.as_ref().and_then(|options| {
+            let selected: Vec<String> =
+                options.iter().filter(|option| option.selected).map(|option| option.id.clone()).collect();
+            if selected.is_empty() {
+                None
+            } else {
+                Some(Rc::new(selected))
+            }
+        })
+    });
     let input_ref = use_node_ref();
     let invalid_search = use_state(|| false);
     let regex_active = use_state(|| RegexState::Inactive);
+
+    // Global '/' shortcut focuses the search input
+    {
+        let input = input_ref.clone();
+        use_key_down((), move |event: &KeyboardEvent| {
+            if event.key() == "/" && !is_text_input_focused(event) {
+                if let Some(input) = input.cast::<HtmlInputElement>() {
+                    event.prevent_default();
+                    let _ = input.focus();
+                }
+            }
+        });
+    }
 
     let handle_regex_click = {
         let regex_active = regex_active.clone();
@@ -114,21 +143,18 @@ pub fn Search(props: &SearchProps) -> Html {
     let handle_options_click = {
         let search_fields = search_fields.clone();
         let emit_search = emit_search.clone();
-        Callback::from(move |(_name, selections)| match selections {
-            DropDownSelection::Empty => {
-                search_fields.set(None);
-                emit_search(None);
+        let on_fields_change = props.on_fields_change.clone();
+        Callback::from(move |(_name, selections)| {
+            let selected = match selections {
+                DropDownSelection::Empty => None,
+                DropDownSelection::Multi(options) => Some(Rc::new(options)),
+                DropDownSelection::Single(option) => Some(Rc::new(vec![option])),
+            };
+            search_fields.set(selected.clone());
+            if let Some(cb_fields) = on_fields_change.as_ref() {
+                cb_fields.emit(selected.clone());
             }
-            DropDownSelection::Multi(options) => {
-                let selected = Rc::new(options);
-                search_fields.set(Some(selected.clone()));
-                emit_search(Some(selected));
-            }
-            DropDownSelection::Single(option) => {
-                let selected = Rc::new(vec![option]);
-                search_fields.set(Some(selected.clone()));
-                emit_search(Some(selected));
-            }
+            emit_search(selected);
         })
     };
 
@@ -139,18 +165,26 @@ pub fn Search(props: &SearchProps) -> Html {
                 <input ref={input_ref.clone()} type="text"
                     name="search"
                     autocomplete={"on"}
+                    placeholder={translate.t("LABEL.SEARCH")}
+                    aria-label={translate.t("LABEL.SEARCH")}
+                    aria-invalid={(*invalid_search || matches!(*regex_active, RegexState::Invalid)).to_string()}
                     onkeydown={handle_key_down}
                     />
                 <IconButton class={match *regex_active {
                     RegexState::Active => "option-active",
                     RegexState::Invalid => "option-invalid",
                     RegexState::Inactive => ""}}
-                 name="regex" icon="Regexp" onclick={handle_regex_click} />
+                 name="regex" icon="Regexp"
+                 hint={translate.t("LABEL.REGEXP")}
+                 aria_label={translate.t("LABEL.REGEXP")}
+                 onclick={handle_regex_click} />
                 {
                   html_if!(
                     props.options.is_some(),
                      {
-                      <DropDownIconButton multi_select={true} options={props.options.as_ref().unwrap().clone()} name="fields" icon="Popup" on_select={handle_options_click} />
+                      <DropDownIconButton multi_select={true}
+                        class={if search_fields.as_ref().is_some_and(|fields| !fields.is_empty()) { "option-active" } else { "" }}
+                        options={props.options.as_ref().unwrap().clone()} name="fields" icon="Popup" on_select={handle_options_click} />
                      }
                   )
                 }

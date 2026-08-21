@@ -8,6 +8,7 @@ use crate::model::macros;
 pub struct StreamBufferConfig {
     pub enabled: bool,
     pub size: usize,
+    pub max_bytes_mb: u64,
 }
 
 macros::from_impl!(StreamBufferConfig);
@@ -16,6 +17,7 @@ impl From<&StreamBufferConfigDto> for StreamBufferConfig {
         Self {
             enabled: dto.enabled,
             size: dto.size,
+            max_bytes_mb: dto.max_bytes_mb,
         }
     }
 }
@@ -25,6 +27,7 @@ impl From<&StreamBufferConfig> for StreamBufferConfigDto {
         Self {
             enabled: dto.enabled,
             size: dto.size,
+            max_bytes_mb: dto.max_bytes_mb,
         }
     }
 }
@@ -43,6 +46,7 @@ pub struct StreamConfig {
     pub throttle_str: Option<String>,
     pub throttle_kbps: u64,
     pub shared_burst_buffer_mb: u64,
+    pub shared_subscriber_idle_timeout_secs: u64,
     pub admission_strategies: Option<Vec<AdmissionStrategy>>,
 }
 
@@ -61,6 +65,7 @@ impl Default for StreamConfig {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 12,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: None,
         }
     }
@@ -79,6 +84,7 @@ impl From<&StreamConfigDto> for StreamConfig {
             throttle_str: dto.throttle.clone(),
             throttle_kbps: dto.throttle.as_ref().map_or(0u64, |throttle| parse_to_kbps(throttle).unwrap_or(0u64)),
             shared_burst_buffer_mb: dto.shared_burst_buffer_mb,
+            shared_subscriber_idle_timeout_secs: dto.shared_subscriber_idle_timeout_secs,
             admission_strategies: dto.admission_strategies.clone(),
         }
     }
@@ -98,6 +104,7 @@ impl From<&StreamConfig> for StreamConfigDto {
             throttle: instance.throttle_str.clone(),
             throttle_kbps: instance.throttle_kbps,
             shared_burst_buffer_mb: instance.shared_burst_buffer_mb,
+            shared_subscriber_idle_timeout_secs: instance.shared_subscriber_idle_timeout_secs,
             admission_strategies: instance.admission_strategies.clone(),
         }
     }
@@ -137,6 +144,7 @@ mod tests {
             throttle_str: None,
             throttle_kbps: 0,
             shared_burst_buffer_mb: 1,
+            shared_subscriber_idle_timeout_secs: 300,
             admission_strategies: Some(vec![
                 AdmissionStrategy::EvictUserOldest,
                 AdmissionStrategy::GraceHoldStream,

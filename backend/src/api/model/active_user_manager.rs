@@ -4604,6 +4604,15 @@ mod tests {
             soft_priority: 0,
             t_is_api_user: false,
             network_access: None,
+            plan: None,
+            filter: None,
+            raw_output_clusters: None,
+            raw_max_connections: 0,
+            raw_soft_connections: 0,
+            raw_proxy: Some(ProxyType::default()),
+            t_filter: None,
+            t_has_unresolved_plan: false,
+            t_has_invalid_filter: false,
         }
     }
 

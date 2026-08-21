@@ -101,6 +101,10 @@ async fn get_thumbnail(
     axum::extract::Path(id): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
+    // ids/hashes are hex-like tokens; anything else could traverse the storage path
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
     let config_snapshot = app_state.app_config.config.load();
     let Some(library_config) = config_snapshot.library.as_ref().filter(|l| l.enabled) else {
         return axum::http::StatusCode::NOT_FOUND.into_response();

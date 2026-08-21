@@ -2,9 +2,11 @@ use crate::{
     app::components::{config::use_emit_reducer_state, Card, CollapsePanel, TextButton},
     config_field, edit_field_number_u16, edit_field_number_u8, edit_field_text, generate_form_reducer, html_if,
     i18n::use_translation,
+    model::DialogResult,
+    services::DialogService,
 };
 use shared::model::HdHomeRunDeviceConfigDto;
-use yew::prelude::*;
+use yew::{platform::spawn_local, prelude::*};
 
 generate_form_reducer!(
     state: HdHomeRunDeviceConfigFormState { form: Box<HdHomeRunDeviceConfigDto> },
@@ -37,6 +39,7 @@ pub struct HdHomerunDeviceViewProps {
 #[component]
 pub fn HdHomerunDeviceView(props: &HdHomerunDeviceViewProps) -> Html {
     let translate = use_translation();
+    let dialog = use_context::<DialogService>().expect("Dialog service not found");
 
     let form_state: UseReducerHandle<HdHomeRunDeviceConfigFormState> =
         use_reducer(|| HdHomeRunDeviceConfigFormState { form: Box::new(props.device.clone()), modified: false });
@@ -51,8 +54,17 @@ pub fn HdHomerunDeviceView(props: &HdHomerunDeviceViewProps) -> Html {
     let handle_remove_device = {
         let device_id = props.device_id;
         let onremove = props.on_remove.clone();
+        let dialog = dialog.clone();
+        let translator = translate.clone();
         Callback::from(move |_| {
-            onremove.emit(device_id);
+            let dialog = dialog.clone();
+            let translator = translator.clone();
+            let onremove = onremove.clone();
+            spawn_local(async move {
+                if dialog.confirm(&translator.t("MESSAGES.CONFIRM_DELETE")).await == DialogResult::Ok {
+                    onremove.emit(device_id);
+                }
+            });
         })
     };
 

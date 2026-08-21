@@ -336,7 +336,7 @@ pub struct SeriesStreamDetailSeasonProperties {
     pub duration: Option<Arc<str>>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct SeriesStreamDetailEpisodeProperties {
     #[serde(default, deserialize_with = "deserialize_number_from_string_or_zero")]
     pub id: u32,
@@ -396,6 +396,18 @@ pub struct SeriesStreamDetailProperties {
     pub seasons: Option<Vec<SeriesStreamDetailSeasonProperties>>,
     #[serde(default)]
     pub episodes: Option<Vec<SeriesStreamDetailEpisodeProperties>>,
+}
+
+impl SeriesStreamDetailProperties {
+    /// Builds a `SeriesStreamDetailProperties`. Empty `seasons` is normalized to
+    /// `None` so downstream code can short-circuit; `episodes` is kept as-is.
+    pub fn new(
+        year: Option<u32>,
+        seasons: Vec<SeriesStreamDetailSeasonProperties>,
+        episodes: Option<Vec<SeriesStreamDetailEpisodeProperties>>,
+    ) -> Self {
+        Self { year, seasons: if seasons.is_empty() { None } else { Some(seasons) }, episodes }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, PartialEq)]

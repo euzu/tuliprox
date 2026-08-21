@@ -12,6 +12,7 @@ use crate::{
             v1_api::v1_api_register,
             web_index::{index_register_with_path, index_register_without_path},
             websocket_api::ws_api_register,
+            log_ws_api::log_ws_api_register,
             xmltv_api::xmltv_api_register,
             xtream_api::xtream_api_register,
         },
@@ -25,6 +26,8 @@ use crate::{
             ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState, HlsProvisioningState,
             HlsProxyManager, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
             UpdateGuard, exec_qos_aggregation,
+            recording_rule_scheduler::spawn_recording_rule_scheduler,
+            recording_supervisor::start_recording_supervisors,
         },
         panel_api::sync_panel_api_exp_dates_on_boot,
         tasks::{exec_interner_prune, exec_scheduler, exec_xtream_expiry_sync},
@@ -113,6 +116,17 @@ async fn recover_persisted_downloads_state_for_startup(downloads: &DownloadQueue
 
 async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &crate::model::VideoDownloadConfig) {
     spawn_download_services(app_state.as_ref(), &app_state.cancel_tokens.load().downloads);
+    // Reconcile the DVR state the previous process left behind *before*
+    // the rule scheduler can plan against it, then start the retention
+    // and notification supervisors. Without this the queue keeps tasks
+    // stuck in `Deleting` forever, retention never runs so the recording
+    // disk grows unbounded, and a lifecycle notification lost to a
+    // transient provider error is never retried.
+    // Cloned out of the `ArcSwap` guard first: the guard must not be held
+    // across the await below.
+    let downloads_cancel = app_state.cancel_tokens.load().downloads.clone();
+    start_recording_supervisors(app_state, &downloads_cancel).await;
+    spawn_recording_rule_scheduler(app_state, &downloads_cancel);
     if let Err(err) = resume_download_worker_if_needed(app_state.as_ref(), download_cfg).await {
         error!("Failed to resume persisted downloads during startup; continuing with downloads paused: {err}");
     }
@@ -649,7 +663,8 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     let mut router = axum::Router::new()
         .route("/healthcheck", axum::routing::get(healthcheck))
         .nest_service("/.well-known", ServeDir::new(web_dir_path.join("static/.well-known")))
-        .merge(ws_api_register(web_auth_enabled, web_ui_path.as_str()));
+        .merge(ws_api_register(web_auth_enabled, web_ui_path.as_str()))
+        .merge(log_ws_api_register(web_auth_enabled, web_ui_path.as_str()));
     if web_ui_enabled {
         router = router
             .nest_service(

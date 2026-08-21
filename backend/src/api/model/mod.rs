@@ -5,7 +5,7 @@ mod app_state;
 mod byte_range;
 mod connection_manager;
 mod download;
-mod event_manager;
+pub mod event_manager;
 mod hls_cache;
 mod hls_provisioning;
 mod metadata_update_manager;
@@ -16,7 +16,7 @@ mod provider_dns_manager;
 mod provider_lineup_manager;
 mod proxy;
 mod qos_aggregation_manager;
-mod recording_worker;
+pub(in crate::api) mod recording;
 mod request;
 mod stream;
 mod stream_error;
@@ -30,9 +30,11 @@ pub(in crate::api) use self::hls_provisioning::{
 };
 pub use self::{
     active_provider_manager::*, app_state::*, connection_manager::*, event_manager::*, hls_cache::*,
-    hls_provisioning::HlsProvisioningState, metadata_update_manager::*, playlist_mem_cache::*, provider_dns_manager::*,
-    provider_lineup_manager::*, proxy::*, stream::*, update_guard::*,
+    hls_provisioning::HlsProvisioningState, metadata_update_manager::*, playlist_mem_cache::*,
+    provider_dns_manager::*, provider_lineup_manager::*, proxy::*, recording::*, stream::*,
+    update_guard::*,
 };
+pub use self::download::{DownloadKind, DownloadState};
 pub(in crate::api) use self::{
     active_user_manager::*,
     admission_strategy::{evaluate_strategy, AdmissionDecision, EvictionCandidate, GraceMode, StrategyContext},
@@ -48,7 +50,6 @@ pub(in crate::api) use self::{
     model_utils::*,
     provider_config::*,
     qos_aggregation_manager::*,
-    recording_worker::*,
     request::*,
     stream_error::*,
     xtream::*,

@@ -9,4 +9,6 @@ mod user_status;
 mod user_table;
 mod userlist_view;
 
-pub use self::{max_connections::*, page::*, proxy_type_view::*, user_status::*, userlist_view::*};
+pub use self::{
+    max_connections::*, page::*, proxy_type_input::*, proxy_type_view::*, user_status::*, userlist_view::*,
+};

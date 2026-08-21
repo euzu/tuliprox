@@ -48,17 +48,13 @@ async fn token(
                     if verify_password(hash, password.as_bytes()) {
                         let pwd_version = WebAuthConfig::pwd_version_from_hash(hash);
                         let permissions = web_auth.resolve_permissions(username);
-                        let is_admin = web_auth
+                        let user_entry = web_auth
                             .t_users
                             .as_ref()
-                            .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(username)))
-                            .is_some_and(|user| user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin")));
-                        let user_groups = web_auth
-                            .t_users
-                            .as_ref()
-                            .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(username)))
-                            .map(|user| user.groups.clone())
-                            .unwrap_or_default();
+                            .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(username)));
+                        let is_admin =
+                            user_entry.is_some_and(|user| user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin")));
+                        let user_groups = user_entry.map(|user| user.groups.clone()).unwrap_or_default();
                         debug!(
                             "Web login success candidate: username='{username}', groups={user_groups:?}, is_admin={is_admin}, permissions={permissions}",
                         );
@@ -74,7 +70,7 @@ async fn token(
                     }
                 }
                 if let Some(credentials) = app_state.app_config.get_user_credentials(username) {
-                    if credentials.password == password {
+                    if crate::auth::constant_time_eq(credentials.password.as_bytes(), password.as_bytes()) {
                         if !api_user_can_access_web_ui(credentials.ui_enabled) {
                             req.zeroize();
                             return axum::http::StatusCode::FORBIDDEN.into_response();
@@ -369,6 +365,9 @@ pub fn index_register_with_path(web_dir_path: &Path, web_ui_path: &str) -> axum:
                 if path.starts_with(&path_prefix) {
                     path = path[path_prefix.len()..].to_string();
                 }
+                if path.is_empty() {
+                    path = "/".to_string();
+                }
 
                 let mut builder = axum::http::Uri::builder();
                 if let Some(scheme) = req.uri().scheme() {
@@ -377,10 +376,22 @@ pub fn index_register_with_path(web_dir_path: &Path, web_ui_path: &str) -> axum:
                 if let Some(authority) = req.uri().authority() {
                     builder = builder.authority(authority.clone());
                 }
-                let new_uri = builder.path_and_query(path).build().unwrap();
-
-                let new_req =
-                    axum::http::Request::builder().method(req.method()).uri(new_uri).body(req.into_body()).unwrap();
+                // A malformed rewritten path must not panic the connection task; serve the original request instead
+                let new_req = match builder.path_and_query(path).build() {
+                    Ok(new_uri) => {
+                        match axum::http::Request::builder().method(req.method()).uri(new_uri).body(req.into_body()) {
+                            Ok(new_req) => new_req,
+                            Err(err) => {
+                                log::warn!("Failed to rebuild web ui fallback request: {err}");
+                                return serve_dir.call(axum::http::Request::new(axum::body::Body::empty()));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!("Failed to rebuild web ui fallback uri: {err}");
+                        return serve_dir.call(axum::http::Request::new(axum::body::Body::empty()));
+                    }
+                };
 
                 serve_dir.call(new_req)
             }

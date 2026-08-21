@@ -26,6 +26,8 @@ $epg-border-size: 4px;
       box-sizing: border-box;
       width: 100%;
       justify-content: flex-end;
+      align-items: center;
+      gap: var(--gap-default);
     }
   }
 
@@ -200,6 +202,30 @@ $epg-border-size: 4px;
       color: var(--epg-program-active-color);
       .tp__epg__program-time {
         color: var(--epg-program-active-time-color);
+      }
+    }
+
+    &-menu.tp__icon-button {
+      position: absolute;
+      top: 2px;
+      right: 2px;
+      width: 18px;
+      height: 18px;
+      min-width: 18px;
+      min-height: 18px;
+      padding: 0;
+      background-color: var(--background-color);
+      border-radius: var(--border-radius);
+      color: var(--text-color);
+      opacity: 0.85;
+
+      &:hover, &:focus {
+        opacity: 1;
+      }
+
+      .svg-icon {
+        width: 16px;
+        height: 16px;
       }
     }
 

@@ -103,6 +103,8 @@ struct ProviderResolveLoadedItem {
     cluster: XtreamCluster,
     url: Arc<str>,
     input_name: Arc<str>,
+    /// Whether the user's compiled content filter permits this item.
+    content_allowed: bool,
 }
 
 async fn load_provider_resolve_item(
@@ -111,6 +113,7 @@ async fn load_provider_resolve_item(
     decoded_cluster: XtreamCluster,
     app_state: &Arc<AppState>,
     target: &ConfigTarget,
+    user: &ProxyUserCredentials,
 ) -> Result<ProviderResolveLoadedItem, TuliproxError> {
     match output_kind {
         ProviderResolveOutputKind::Xtream => xtream_get_item_for_stream_id(
@@ -124,6 +127,8 @@ async fn load_provider_resolve_item(
             virtual_id: item.virtual_id,
             item_type: item.item_type,
             cluster: item.xtream_cluster,
+            content_allowed: user.t_filter.is_none()
+                || user.allows_content(&shared::model::PlaylistItem::from(&item)),
             url: item.url,
             input_name: item.input_name,
         })
@@ -142,6 +147,8 @@ async fn load_provider_resolve_item(
                 virtual_id: item.virtual_id,
                 item_type: item.item_type,
                 cluster: decoded_cluster,
+                content_allowed: user.t_filter.is_none()
+                    || user.allows_content(&shared::model::PlaylistItem::from(&item)),
                 url: item.url,
                 input_name: item.input_name,
             })
@@ -185,14 +192,14 @@ async fn provider_resolve(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
 
-    let item = match load_provider_resolve_item(output_kind, decoded.virtual_id, decoded.cluster, &app_state, &target).await {
+    let item = match load_provider_resolve_item(output_kind, decoded.virtual_id, decoded.cluster, &app_state, &target, &user).await {
         Ok(item) => item,
         Err(err) => {
             debug!("Provider resolve item lookup failed: {err}");
             return axum::http::StatusCode::NOT_FOUND.into_response();
         }
     };
-    if !user.allows_item_type(item.item_type) {
+    if !user.allows_item_type(item.item_type) || !item.content_allowed {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
     let Some(input) = app_state.app_config.get_input_by_name(&item.input_name) else {

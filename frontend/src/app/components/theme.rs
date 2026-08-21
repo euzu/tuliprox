@@ -188,6 +188,9 @@ impl Theme {
         self.set_body_theme();
     }
 
+    /// Applies the theme visually without persisting it (used for live previews).
+    pub fn preview(&self) { self.set_body_theme(); }
+
     fn save_to_local_storage(&self) {
         match self {
             Theme::Dark => remove_local_storage_item(TP_THEME_KEY),

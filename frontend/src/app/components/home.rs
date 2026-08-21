@@ -1,10 +1,14 @@
 use crate::{
     app::{
         components::{
-            config::ConfigView, loading_indicator::BusyIndicator, map_sources_to_playlist_rows, theme::Theme, AppIcon,
-            DashboardView, DownloadsView, EpgView, ErrorBoundary, HealthBanner, IconButton, LanguagePicker, NoAccess,
-            Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView, RbacView,
-            Setup, Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView,
+            config::{ConfigView, PlansView},
+            loading_indicator::BusyIndicator,
+            map_sources_to_playlist_rows,
+            recording::{RecordingLibraryView, RecordingRulesView},
+            theme::Theme,
+            AppIcon, DashboardView, DownloadsView, EpgView, ErrorBoundary, HealthBanner, IconButton, LanguagePicker,
+            NoAccess, Panel, ParticleFlowBackground, PlaylistExplorerView, PlaylistSettingsView, PlaylistUpdateView,
+            RbacView, Setup, Sidebar, SourceEditor, StatsView, StreamHistoryView, StreamsView, ThemePicker, ToastrView,
             UserlistView, WebsocketStatus,
         },
         context::{ConfigContext, PlaylistContext, StatusContext},
@@ -48,6 +52,7 @@ struct HomeViewAccess {
     can_read_playlist: bool,
     can_read_epg: bool,
     can_read_downloads: bool,
+    can_read_recordings: bool,
     is_admin: bool,
 }
 
@@ -82,12 +87,16 @@ fn is_allowed_home_view(view: ViewType, access: HomeViewAccess) -> bool {
         ViewType::Streams => access.show_streams_page && access.can_read_system_status,
         ViewType::Downloads => access.can_read_downloads,
         ViewType::Users => access.can_read_users,
+        ViewType::Plans => access.can_read_config,
         ViewType::Config => access.can_read_config,
         ViewType::SourceEditor => access.can_read_sources,
         ViewType::PlaylistUpdate => access.can_write_playlist,
         ViewType::PlaylistSettings | ViewType::PlaylistExplorer => access.can_read_playlist,
         ViewType::PlaylistEpg => access.can_read_epg,
         ViewType::Rbac => access.is_admin,
+        ViewType::RecordingLibrary | ViewType::RecordingRules | ViewType::RecordingRuleForm => {
+            access.can_read_recordings
+        }
     }
 }
 
@@ -100,12 +109,15 @@ fn first_allowed_home_view(access: HomeViewAccess) -> ViewType {
         ViewType::Downloads,
         ViewType::Config,
         ViewType::Users,
+        ViewType::Plans,
         ViewType::SourceEditor,
         ViewType::PlaylistUpdate,
         ViewType::PlaylistSettings,
         ViewType::PlaylistExplorer,
         ViewType::PlaylistEpg,
         ViewType::Rbac,
+        ViewType::RecordingLibrary,
+        ViewType::RecordingRules,
     ]
     .into_iter()
     .map(|view| normalize_requested_home_view(view, access))
@@ -236,6 +248,7 @@ pub fn Home() -> Html {
     let can_read_playlist = services.auth.has_permission(Permission::PlaylistRead);
     let can_read_epg = services.auth.has_permission(Permission::EpgRead);
     let can_read_downloads = services.auth.has_permission(Permission::DownloadRead);
+    let can_read_recordings = services.auth.has_permission(Permission::RecordingRead);
     let is_admin = services.auth.is_admin();
     let _ = use_server_status(status.clone(), system_info.clone(), !setup_mode && can_read_system_status);
 
@@ -301,6 +314,7 @@ pub fn Home() -> Html {
         can_read_playlist,
         can_read_epg,
         can_read_downloads,
+        can_read_recordings,
         is_admin,
     };
     let configured_landing_page = config_context.config.as_ref().map(|app_cfg| {
@@ -582,6 +596,13 @@ pub fn Home() -> Html {
                                           </ErrorBoundary>
                                        </Panel>
                                        })}
+                                       { html_if!(can_read_config, {
+                                       <Panel class="tp__full-width" value={ViewType::Plans.intern()} active={view_page.clone()}>
+                                          <ErrorBoundary name={translate.t("LABEL.PLANS")}>
+                                            <PlansView/>
+                                          </ErrorBoundary>
+                                       </Panel>
+                                       })}
                                        { html_if!(can_read_sources, {
                                        <Panel class="tp__full-width tp__full-height" value={ViewType::SourceEditor.intern()} active={view_page.clone()}>
                                           <ErrorBoundary name={translate.t("LABEL.SOURCE_EDITOR")}>
@@ -618,9 +639,23 @@ pub fn Home() -> Html {
                                        </Panel>
                                        })}
                                        { html_if!(is_admin, {
-                                           <Panel class="tp__full-width" value={ViewType::Rbac.intern()} active={view_page}>
+                                           <Panel class="tp__full-width" value={ViewType::Rbac.intern()} active={view_page.clone()}>
                                                <ErrorBoundary name={translate.t("LABEL.RBAC")}>
                                                  <RbacView />
+                                               </ErrorBoundary>
+                                           </Panel>
+                                       })}
+                                       { html_if!(can_read_recordings, {
+                                           <Panel class="tp__full-width" value={ViewType::RecordingLibrary.intern()} active={view_page.clone()}>
+                                               <ErrorBoundary name={translate.t("LABEL.RECORDING_LIBRARY")}>
+                                                 <RecordingLibraryView />
+                                               </ErrorBoundary>
+                                           </Panel>
+                                       })}
+                                       { html_if!(can_read_recordings, {
+                                           <Panel class="tp__full-width" value={ViewType::RecordingRules.intern()} active={view_page.clone()}>
+                                               <ErrorBoundary name={translate.t("LABEL.RECORDING_RULES")}>
+                                                 <RecordingRulesView />
                                                </ErrorBoundary>
                                            </Panel>
                                        })}
@@ -655,6 +690,7 @@ mod tests {
             can_read_playlist: true,
             can_read_epg: true,
             can_read_downloads: true,
+            can_read_recordings: true,
             is_admin: true,
         }
     }

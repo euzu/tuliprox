@@ -4,9 +4,47 @@ use chrono::{Local, Offset, SecondsFormat};
 use env_logger::{Builder, Logger, Target};
 use log::{info, LevelFilter, Log, Metadata, Record, SetLoggerError};
 use parking_lot::RwLock;
+use shared::model::LogEntry;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
 use std::sync::OnceLock;
+
+pub const LOG_BUFFER_CAPACITY: usize = 1000;
+const BROADCAST_CAPACITY: usize = 2048;
+
+static LOG_BUFFER: OnceLock<RwLock<VecDeque<LogEntry>>> = OnceLock::new();
+static LOG_BROADCASTER: OnceLock<tokio::sync::broadcast::Sender<LogEntry>> = OnceLock::new();
+
+fn get_log_buffer() -> &'static RwLock<VecDeque<LogEntry>> {
+    LOG_BUFFER.get_or_init(|| RwLock::new(VecDeque::with_capacity(LOG_BUFFER_CAPACITY)))
+}
+
+fn get_log_broadcaster() -> &'static tokio::sync::broadcast::Sender<LogEntry> {
+    LOG_BROADCASTER.get_or_init(|| {
+        let (tx, _rx) = tokio::sync::broadcast::channel(BROADCAST_CAPACITY);
+        tx
+    })
+}
+
+pub fn push_log_entry(entry: LogEntry) {
+    {
+        let mut buffer = get_log_buffer().write();
+        if buffer.len() >= LOG_BUFFER_CAPACITY {
+            buffer.pop_front();
+        }
+        buffer.push_back(entry.clone());
+    }
+    let _ = get_log_broadcaster().send(entry);
+}
+
+pub fn get_log_history() -> Vec<LogEntry> {
+    get_log_buffer().read().iter().cloned().collect()
+}
+
+pub fn subscribe_logs() -> tokio::sync::broadcast::Receiver<LogEntry> {
+    get_log_broadcaster().subscribe()
+}
 
 const LOG_ERROR_LEVEL_MOD: &[&str] = &[
     "reqwest",
@@ -66,6 +104,16 @@ impl Log for ReloadableLogger {
 
     fn log(&self, record: &Record<'_>) {
         self.inner.read().log(record);
+
+        let now = Local::now();
+        let timestamp = now.to_rfc3339_opts(SecondsFormat::Secs, now.offset().fix().local_minus_utc() == 0);
+        let entry = LogEntry {
+            timestamp,
+            level: record.level().into(),
+            target: record.target().to_string(),
+            message: record.args().to_string(),
+        };
+        push_log_entry(entry);
     }
 
     fn flush(&self) {
@@ -236,5 +284,44 @@ mod tests {
         reloadable.replace(info_logger);
 
         assert!(reloadable.enabled(&metadata));
+    }
+
+    #[test]
+    fn test_log_buffer_eviction_and_history() {
+        for i in 0..LOG_BUFFER_CAPACITY + 10 {
+            push_log_entry(LogEntry::new("ts", shared::model::LogLevel::Info, "target", format!("msg {i}")));
+        }
+        let history = get_log_history();
+        assert_eq!(history.len(), LOG_BUFFER_CAPACITY);
+        assert_eq!(history.last().unwrap().message, format!("msg {}", LOG_BUFFER_CAPACITY + 9));
+        assert_eq!(history.first().unwrap().message, "msg 10");
+    }
+
+    #[tokio::test]
+    async fn test_log_broadcast_subscription() {
+        // The broadcast channel is process-global; parallel tests that
+        // push entries (e.g. `test_log_buffer_eviction_and_history`
+        // flooding 3 600 messages) can land ahead of ours on the
+        // shared `Receiver`. Mark our entry uniquely and drain until
+        // we see it.
+        let mut rx = subscribe_logs();
+        let test_entry = LogEntry::new(
+            "ts",
+            shared::model::LogLevel::Warn,
+            "test_target",
+            "broadcast test unique marker",
+        );
+        push_log_entry(test_entry.clone());
+
+        let mut attempts = 0;
+        let received = loop {
+            let entry = rx.recv().await.expect("broadcast channel closed");
+            if entry.message == test_entry.message {
+                break entry;
+            }
+            attempts += 1;
+            assert!(attempts < 10_000, "test entry never arrived on the broadcast channel");
+        };
+        assert_eq!(received, test_entry);
     }
 }

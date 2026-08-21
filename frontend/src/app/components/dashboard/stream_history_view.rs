@@ -15,7 +15,7 @@ use shared::{
     defaults::default_page_size,
     model::{
         PagedResponseDto, QosSnapshotRecordDto, QosSnapshotWindowDto, SearchRequest, StreamHistoryEventType,
-        StreamHistoryPageRequestDto, StreamHistoryProviderSummaryDto, StreamHistoryRecordDto,
+        StreamHistoryPageRequestDto, StreamHistoryProviderSummaryDto, StreamHistoryRecordDto, StreamHistorySearchField,
     },
 };
 use std::rc::Rc;
@@ -225,28 +225,29 @@ pub fn StreamHistoryView() -> Html {
     let search_options: Rc<Vec<DropDownOption>> = {
         let translate = translate.clone();
         use_memo(translate, move |translate| {
-            vec![
-                DropDownOption::new("event_ts_utc", html! { translate.t("LABEL.STREAM_HISTORY_TIME") }, false),
-                DropDownOption::new("event_type", html! { translate.t("LABEL.STREAM_HISTORY_EVENT") }, false),
-                DropDownOption::new("title", html! { translate.t("LABEL.TITLE") }, false),
-                DropDownOption::new("group", html! { translate.t("LABEL.GROUP") }, false),
-                DropDownOption::new("api_username", html! { translate.t("LABEL.USERNAME") }, false),
-                DropDownOption::new("provider_name", html! { translate.t("LABEL.PROVIDER") }, false),
-                DropDownOption::new("provider_id", html! { translate.t("LABEL.PROVIDER_ID") }, false),
-                DropDownOption::new("bytes_sent", html! { translate.t("LABEL.STREAM_HISTORY_BYTES") }, false),
-                DropDownOption::new(
-                    "first_byte_latency_ms",
-                    html! { translate.t("LABEL.STREAM_HISTORY_FIRST_BYTE") },
-                    false,
-                ),
-                DropDownOption::new("user_agent", html! { translate.t("LABEL.USER_AGENT") }, false),
-                DropDownOption::new("item_type", html! { translate.t("LABEL.TYPE") }, false),
-                DropDownOption::new("container", html! { translate.t("LABEL.CONTAINER") }, false),
-                DropDownOption::new("disconnect_reason", html! { translate.t("LABEL.STREAM_HISTORY_REASON") }, false),
-                DropDownOption::new("source_addr", html! { translate.t("LABEL.STREAM_HISTORY_IP") }, false),
-                DropDownOption::new("country", html! { translate.t("LABEL.COUNTRY") }, false),
-                DropDownOption::new("cluster", html! { translate.t("LABEL.CLUSTER") }, false),
-            ]
+            // Ids come from the shared enum so backend parsing can never drift.
+            let label_key = |field: StreamHistorySearchField| match field {
+                StreamHistorySearchField::EventTsUtc => "LABEL.STREAM_HISTORY_TIME",
+                StreamHistorySearchField::EventType => "LABEL.STREAM_HISTORY_EVENT",
+                StreamHistorySearchField::Title => "LABEL.TITLE",
+                StreamHistorySearchField::Group => "LABEL.GROUP",
+                StreamHistorySearchField::ApiUsername => "LABEL.USERNAME",
+                StreamHistorySearchField::ProviderName => "LABEL.PROVIDER",
+                StreamHistorySearchField::ProviderId => "LABEL.PROVIDER_ID",
+                StreamHistorySearchField::BytesSent => "LABEL.STREAM_HISTORY_BYTES",
+                StreamHistorySearchField::FirstByteLatencyMs => "LABEL.STREAM_HISTORY_FIRST_BYTE",
+                StreamHistorySearchField::UserAgent => "LABEL.USER_AGENT",
+                StreamHistorySearchField::ItemType => "LABEL.TYPE",
+                StreamHistorySearchField::Container => "LABEL.CONTAINER",
+                StreamHistorySearchField::DisconnectReason => "LABEL.STREAM_HISTORY_REASON",
+                StreamHistorySearchField::SourceAddr => "LABEL.STREAM_HISTORY_IP",
+                StreamHistorySearchField::Country => "LABEL.COUNTRY",
+                StreamHistorySearchField::Cluster => "LABEL.CLUSTER",
+            };
+            use strum::IntoEnumIterator;
+            StreamHistorySearchField::iter()
+                .map(|field| DropDownOption::new(field.as_ref(), html! { translate.t(label_key(field)) }, false))
+                .collect::<Vec<_>>()
         })
     };
 
