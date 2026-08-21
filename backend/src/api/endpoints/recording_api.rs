@@ -30,23 +30,24 @@ fn error_response(status: StatusCode, error: &'static str) -> axum::response::Re
 }
 
 fn service_error_response(err: &ServiceError) -> axum::response::Response {
-    let (status, _) = service_error_status(err);
-    error_response(status, err.code())
+    error_response(service_error_status(err), err.code())
 }
 
-fn service_error_status(err: &ServiceError) -> (StatusCode, &'static str) {
-    let status = match err {
+/// HTTP status for a service error. The wire code always comes from
+/// `ServiceError::code`, so it is not duplicated here.
+fn service_error_status(err: &ServiceError) -> StatusCode {
+    match err {
         ServiceError::UnknownOwner => StatusCode::UNAUTHORIZED,
         ServiceError::InvalidSource
         | ServiceError::InvalidInterval
         | ServiceError::PaddingLimitExceeded
         | ServiceError::InvalidState
+        | ServiceError::ProvenanceImmutable
         | ServiceError::QuotaExceeded => StatusCode::BAD_REQUEST,
         ServiceError::Forbidden | ServiceError::SharedCreationNotAdministrator => StatusCode::FORBIDDEN,
         ServiceError::UnknownRecording => StatusCode::NOT_FOUND,
         ServiceError::PersistenceFailed | ServiceError::IoError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    (status, err.code())
+    }
 }
 
 /// GET /api/v1/recording/tasks
@@ -56,6 +57,14 @@ pub async fn list_recording_tasks(
     AuthClaims(claims): AuthClaims,
 ) -> impl IntoResponse {
     if !claims.permissions.contains(Permission::RecordingRead) {
+        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
+    }
+    // Filtering by an arbitrary owner is an administrator capability.
+    // The visibility filter below already prevents a regular user from
+    // *seeing* another owner's private tasks, but accepting the
+    // parameter and silently returning an empty list made the API read
+    // as if cross-owner queries were supported. Reject it explicitly.
+    if params.owner.is_some() && !is_admin(&claims) {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
     let (revision, mut tasks) = recording_ws::recording_snapshot(&app_state.downloads, &claims).await;
@@ -259,11 +268,16 @@ pub async fn delete_recording_task(
 }
 
 /// POST /api/v1/recording/conflicts/preview
+///
+/// Errors use the same `{"error": "<code>"}` envelope as every other
+/// recording route. It used to return a bare status/string pair, so a
+/// client could not map a preview failure through the shared error
+/// handling the rest of the API uses.
 pub async fn preview_recording_conflicts(
     AuthClaims(claims): AuthClaims,
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(body): axum::extract::Json<PreviewConflictsBody>,
-) -> Result<Json<PreviewConflictsResponse>, (StatusCode, String)> {
+) -> axum::response::Response {
     let source = crate::api::model::recording_service::RecordingSourceInput {
         target_id: body.source.target_name,
         virtual_id: body.source.virtual_id,
@@ -281,12 +295,9 @@ pub async fn preview_recording_conflicts(
     let service = crate::api::model::recording_service::RecordingService::from_app_state(&state);
     let preview = match service.preview_conflicts(&claims, &request).await {
         Ok(preview) => preview,
-        Err(err) => {
-            let (status, code) = service_error_status(&err);
-            return Err((status, code.to_string()));
-        }
+        Err(err) => return service_error_response(&err),
     };
-    Ok(Json(PreviewConflictsResponse {
+    Json(PreviewConflictsResponse {
         severity: preview.severity.as_wire().to_string(),
         provider_scope: preview.provider_scope,
         overlap_segments: preview
@@ -294,7 +305,8 @@ pub async fn preview_recording_conflicts(
             .into_iter()
             .map(|s| OverlapSegmentDto { start: s.start, end: s.end, peak_demand: s.peak_demand })
             .collect(),
-    }))
+    })
+    .into_response()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -379,6 +391,57 @@ pub struct RecordingQuotaResponse {
     pub shared_used_bytes: u64,
     pub shared_limit_bytes: Option<u64>,
     pub revision: u64,
+}
+
+/// GET /api/v1/recording/health
+///
+/// Liveness of the DVR supervisors. Administrator-only: the tick
+/// timestamps and the outbox depth describe server internals, not the
+/// caller's recordings.
+///
+/// A supervisor whose `last_*` field is `null` has never completed a
+/// pass. Combined with the configured interval, an operator can tell a
+/// healthy supervisor from one that died without reading the log.
+pub async fn get_recording_health(
+    State(app_state): State<Arc<AppState>>,
+    AuthClaims(claims): AuthClaims,
+) -> impl IntoResponse {
+    if !is_admin(&claims) {
+        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
+    }
+    let health = crate::api::model::recording::recording_supervisor::supervisor_health();
+    let config = app_state.app_config.config.load();
+    let recording = config
+        .video
+        .as_ref()
+        .and_then(|video| video.download.as_ref())
+        .and_then(|download| download.recording.as_ref());
+    Json(RecordingHealthResponse {
+        enabled: recording.is_none_or(|cfg| cfg.enabled),
+        server_time: chrono::Utc::now().timestamp(),
+        reconciliation_last_run: health.reconciliation_last_run(),
+        retention_last_tick: health.retention_last_tick(),
+        retention_sweep_interval_secs: recording
+            .and_then(|cfg| cfg.retention.as_ref().map(|r| r.sweep_interval_secs)),
+        notification_last_drain: health.notification_last_drain(),
+        notification_outbox_depth: health.notification_outbox_depth(),
+        notification_dead_lettered: health.notification_dead_lettered(),
+        queue_revision: app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordingHealthResponse {
+    pub enabled: bool,
+    pub server_time: i64,
+    pub reconciliation_last_run: Option<i64>,
+    pub retention_last_tick: Option<i64>,
+    pub retention_sweep_interval_secs: Option<u64>,
+    pub notification_last_drain: Option<i64>,
+    pub notification_outbox_depth: i64,
+    pub notification_dead_lettered: i64,
+    pub queue_revision: u64,
 }
 
 fn rule_error_response(err: &crate::api::model::recording_rule_service::RuleServiceError) -> axum::response::Response {
@@ -758,17 +821,27 @@ pub async fn delete_recording_rule(
     ) {
         return rule_error_response(&err);
     }
+    // Deleting a rule with `future=cancel` writes to two stores: the
+    // queue (cancel the upcoming occurrences) and the rule repository
+    // (drop the rule). They cannot commit together, so the queue side
+    // hands back everything it cancelled and this handler replays it if
+    // the rule store then fails. Without the compensation the operator
+    // was left with the rule still present and its upcoming recordings
+    // silently gone.
+    let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
+    let mut cancelled = Vec::new();
     if future == DeleteFuture::Cancel {
-        let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
-        if service
+        match service
             .cancel_future_rule_recordings(&claims, &id, chrono::Utc::now().timestamp())
             .await
-            .is_err()
         {
-            return rule_error_response(&RuleServiceError::PartialOperation {
-                primary: "rule_retained".to_string(),
-                secondary: "future_cancel_failed".to_string(),
-            });
+            Ok(tasks) => cancelled = tasks,
+            Err(_) => {
+                return rule_error_response(&RuleServiceError::PartialOperation {
+                    primary: "rule_retained".to_string(),
+                    secondary: "future_cancel_failed".to_string(),
+                });
+            }
         }
     }
     match repo.delete(&id).await {
@@ -776,12 +849,76 @@ pub async fn delete_recording_rule(
             let _ = app_state.event_manager.send_event(EventMessage::RecordingRulesChanged);
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(false) => rule_error_response(&RuleServiceError::UnknownRule),
-        Err(_) if future == DeleteFuture::Cancel => rule_error_response(&RuleServiceError::PartialOperation {
-            primary: "future_cancelled".to_string(),
-            secondary: "rule_delete_failed".to_string(),
-        }),
-        Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed"),
+        Ok(false) => {
+            // Nothing was deleted, so nothing should have been cancelled.
+            restore_or_report_partial(&service, &cancelled, &app_state, || {
+                rule_error_response(&RuleServiceError::UnknownRule)
+            })
+            .await
+        }
+        Err(_) => {
+            restore_or_report_partial(&service, &cancelled, &app_state, || {
+                error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed")
+            })
+            .await
+        }
+    }
+}
+
+/// Undo a rule-delete's queue-side cancel and report `on_restored`. If
+/// the undo itself fails there is nothing left to try: report the
+/// partial operation so the operator knows the two stores disagree and
+/// which side won.
+async fn restore_or_report_partial<F>(
+    service: &RecordingService,
+    cancelled: &[crate::api::model::recording_service::CancelledRuleRecording],
+    app_state: &Arc<AppState>,
+    on_restored: F,
+) -> axum::response::Response
+where
+    F: FnOnce() -> axum::response::Response,
+{
+    if cancelled.is_empty() {
+        return on_restored();
+    }
+    match service.restore_cancelled_rule_recordings(cancelled).await {
+        Ok(()) => {
+            let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
+            on_restored()
+        }
+        Err(err) => {
+            log::error!(
+                "failed to restore {} cancelled rule recordings after a failed rule delete: {err}",
+                cancelled.len()
+            );
+            rule_error_response(&RuleServiceError::PartialOperation {
+                primary: "future_cancelled".to_string(),
+                secondary: "rule_delete_failed".to_string(),
+            })
+        }
+    }
+}
+
+/// Reject every recording route while the DVR is switched off.
+///
+/// `video.download.recording.enabled: false` has to mean more than
+/// "supervisors idle": a client that keeps calling the routes would
+/// otherwise keep creating recordings nothing will ever run. One layer
+/// on the nested router covers every route, so a route added later is
+/// gated automatically.
+///
+/// `501 Not Implemented` with the stable code `recording_disabled`
+/// distinguishes "switched off here" from `403` (not allowed) and `404`
+/// (does not exist).
+pub async fn require_recording_enabled(
+    State(app_state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if crate::api::model::recording::recording_supervisor::recording_enabled(app_state.as_ref()) {
+        next.run(request).await
+    } else {
+        error_response(StatusCode::NOT_IMPLEMENTED, "recording_disabled")
     }
 }
 
@@ -801,6 +938,7 @@ pub fn recording_api_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
         .route("/tasks/{id}/cancel", post(cancel_recording_task))
         .route("/conflicts/preview", post(preview_recording_conflicts))
         .route("/quota", get(get_recording_quota))
+        .route("/health", get(get_recording_health))
         .route("/rules", get(list_recording_rules).post(create_recording_rule))
         .route(
             "/rules/{id}",
@@ -809,6 +947,22 @@ pub fn recording_api_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
 
     router.nest("/recording", recording_routes)
 }
+
+/// The `recording.enabled` gate as a router layer.
+///
+/// A macro rather than a function so the caller never has to name the
+/// opaque `FromFnLayer<..>` type — the same reason `permission_layer!`
+/// is a macro.
+#[macro_export]
+macro_rules! recording_enabled_layer {
+    ($app_state:expr) => {{
+        let app_state = ::std::sync::Arc::clone($app_state);
+        ::axum::middleware::from_fn_with_state(app_state, move |state, request, next| {
+            $crate::api::endpoints::recording_api::require_recording_enabled(state, request, next)
+        })
+    }};
+}
+pub use recording_enabled_layer;
 
 #[cfg(test)]
 mod tests {

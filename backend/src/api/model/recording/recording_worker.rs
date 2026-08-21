@@ -1,5 +1,6 @@
 use crate::api::model::{DownloadControl, FileDownload};
 use log::debug;
+use shared::model::RecordingContainerFormat;
 use std::path::{Path, PathBuf};
 use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -30,38 +31,75 @@ fn stderr_summary(stderr: &[u8]) -> String {
         .map_or_else(|| "ffmpeg failed".to_string(), |line| line.trim().to_string())
 }
 
+/// Substrings in an ffmpeg stderr line that mean "the source was
+/// briefly unavailable, try again inside the window" rather than "this
+/// recording cannot succeed".
+///
+/// Kept as a `const` so the entries stay lowercase by construction: the
+/// matcher lowercases the haystack once, so an upper-case entry added
+/// here would silently never match.
+const RETRYABLE_FFMPEG_PHRASES: &[&str] = &[
+    "connection timed out",
+    "timed out",
+    "temporarily unavailable",
+    "temporary failure",
+    "resource temporarily unavailable",
+    "connection reset",
+    "connection refused",
+    "connection closed",
+    "broken pipe",
+    "unexpected eof",
+    "end of file",
+    "network is unreachable",
+    "no route to host",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "could not resolve host",
+    "could not resolve",
+    "failed to resolve hostname",
+    "server returned 5",
+    "http error 5",
+    "http error 429",
+    "429 too many requests",
+    "503 service unavailable",
+    "502 bad gateway",
+    "504 gateway timeout",
+    "500 internal server error",
+    "tls handshake",
+    "tls timeout",
+    "tls: handshake",
+    "i/o error",
+];
+
+/// Strip URL-shaped tokens out of a stderr line.
+///
+/// ffmpeg echoes the input URL in most of its error lines, so a
+/// provider whose path or query happens to contain e.g.
+/// `connection_refused` would flip every fatal error into a retryable
+/// one and the worker would spin until the recording window closed.
+/// The classifier must only see ffmpeg's own words.
+fn strip_url_tokens(message: &str) -> String {
+    message
+        .split_whitespace()
+        .filter(|token| {
+            let lowered = token.to_ascii_lowercase();
+            !(lowered.starts_with("http://")
+                || lowered.starts_with("https://")
+                || lowered.starts_with("rtmp://")
+                || lowered.starts_with("rtsp://")
+                || lowered.starts_with("udp://")
+                || lowered.starts_with("srt://")
+                || lowered.starts_with("file://"))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn is_retryable_ffmpeg_failure_message(message: &str) -> bool {
-    let msg = message.to_ascii_lowercase();
-    msg.contains("connection timed out")
-        || msg.contains("timed out")
-        || msg.contains("temporarily unavailable")
-        || msg.contains("temporary failure")
-        || msg.contains("resource temporarily unavailable")
-        || msg.contains("connection reset")
-        || msg.contains("connection refused")
-        || msg.contains("connection closed")
-        || msg.contains("broken pipe")
-        || msg.contains("unexpected eof")
-        || msg.contains("end of file")
-        || msg.contains("network is unreachable")
-        || msg.contains("no route to host")
-        || msg.contains("name or service not known")
-        || msg.contains("temporary failure in name resolution")
-        || msg.contains("could not resolve host")
-        || msg.contains("could not resolve")
-        || msg.contains("failed to resolve hostname")
-        || msg.contains("server returned 5")
-        || msg.contains("http error 5")
-        || msg.contains("http error 429")
-        || msg.contains("429 too many requests")
-        || msg.contains("503 service unavailable")
-        || msg.contains("502 bad gateway")
-        || msg.contains("504 gateway timeout")
-        || msg.contains("500 internal server error")
-        || msg.contains("tls handshake")
-        || msg.contains("tls timeout")
-        || msg.contains("tls: handshake")
-        || msg.contains("i/o error")
+    let msg = strip_url_tokens(message).to_ascii_lowercase();
+    RETRYABLE_FFMPEG_PHRASES
+        .iter()
+        .any(|phrase| msg.contains(phrase))
 }
 
 fn classify_ffmpeg_failure(stderr: &[u8]) -> RecordingExecutionResult {
@@ -76,22 +114,20 @@ fn classify_ffmpeg_failure(stderr: &[u8]) -> RecordingExecutionResult {
 pub fn remaining_recording_duration_secs(download: &FileDownload, now_ts: i64) -> Option<u64> {
     match (download.start_at, download.duration_secs) {
         (_, None) => None,
+        // No scheduled start: the whole duration is still ahead.
         (None, Some(duration_secs)) => Some(duration_secs),
         (Some(start_at), Some(duration_secs)) => {
-            let duration_i64 = i64::try_from(duration_secs).unwrap_or(i64::MAX);
-            let end_at = start_at.saturating_add(duration_i64);
-            if now_ts >= end_at {
-                None
-            } else if now_ts <= start_at {
-                Some(duration_secs)
-            } else {
-                u64::try_from(end_at.saturating_sub(now_ts)).ok()
-            }
+            super::recording_math::remaining_window_secs(start_at, duration_secs, now_ts)
         }
     }
 }
 
-pub fn build_recording_args(download: &FileDownload, effective_duration_secs: u64, output_path: &Path) -> Vec<String> {
+pub fn build_recording_args(
+    download: &FileDownload,
+    effective_duration_secs: u64,
+    output_path: &Path,
+    container_format: RecordingContainerFormat,
+) -> Vec<String> {
     vec![
         "-nostdin".to_string(),
         "-hide_banner".to_string(),
@@ -106,9 +142,11 @@ pub fn build_recording_args(download: &FileDownload, effective_duration_secs: u6
         // Recording filenames may have no extension (sanitized title-only
         // names from `render_filename_preview`), so we force the output
         // muxer explicitly to avoid ffmpeg failing format detection with
-        // `Invalid argument` on paths like `foo.partial`.
+        // `Invalid argument` on paths like `foo.partial`. Which muxer is
+        // an operator choice: MPEG-TS survives truncation, but an
+        // H.265/AAC source may need Matroska or MP4.
         "-f".to_string(),
-        "mpegts".to_string(),
+        container_format.ffmpeg_format().to_string(),
         // Overwrite any stale `.partial` from a previous failed attempt.
         // Without this, a leftover file (from a crash, retry-with-same-path,
         // or startup-recovery race) would either block the new run via
@@ -138,7 +176,9 @@ pub fn recording_start_missed_window(download: &FileDownload, now_ts: i64) -> bo
     download
         .start_at
         .zip(download.duration_secs)
-        .is_some_and(|(start_at, duration_secs)| now_ts >= start_at.saturating_add(i64::try_from(duration_secs).unwrap_or(i64::MAX)))
+        .is_some_and(|(start_at, duration_secs)| {
+            super::recording_math::window_elapsed(start_at, duration_secs, now_ts)
+        })
 }
 
 async fn run_recording_with_binary(
@@ -147,6 +187,7 @@ async fn run_recording_with_binary(
     control_signal: &RwLock<DownloadControl>,
     control_notify: &Notify,
     cancel_token: Option<&CancellationToken>,
+    container_format: RecordingContainerFormat,
 ) -> RecordingExecutionResult {
     let now_ts = chrono::Utc::now().timestamp();
     if recording_start_missed_window(download, now_ts) {
@@ -168,7 +209,7 @@ async fn run_recording_with_binary(
     }
 
     let partial_path = recording_partial_path(&download.file_path);
-    let args = build_recording_args(download, effective_duration_secs, &partial_path);
+    let args = build_recording_args(download, effective_duration_secs, &partial_path, container_format);
     debug!(
         "recording spawn: {} {}",
         ffmpeg_binary.display(),
@@ -234,8 +275,17 @@ pub async fn run_recording(
     control_signal: &RwLock<DownloadControl>,
     control_notify: &Notify,
     cancel_token: Option<&CancellationToken>,
+    container_format: RecordingContainerFormat,
 ) -> RecordingExecutionResult {
-    run_recording_with_binary(Path::new("ffmpeg"), download, control_signal, control_notify, cancel_token).await
+    run_recording_with_binary(
+        Path::new("ffmpeg"),
+        download,
+        control_signal,
+        control_notify,
+        cancel_token,
+        container_format,
+    )
+    .await
 }
 
 /// Compute the partial-file path the worker uses for safe no-clobber
@@ -341,7 +391,7 @@ mod tests {
     fn build_recording_args_maps_duration_and_output_path() {
         let recording = make_recording(1_000, 5400);
         let output = recording_partial_path(&recording.file_path);
-        let args = build_recording_args(&recording, 5400, &output);
+        let args = build_recording_args(&recording, 5400, &output, RecordingContainerFormat::default());
 
         assert!(args.contains(&"-y".to_string()));
         assert!(args.windows(2).any(|pair| pair == ["-t", "5400"]));
@@ -402,6 +452,35 @@ mod tests {
     }
 
     #[test]
+    fn classify_ffmpeg_failure_ignores_phrases_inside_the_source_url() {
+        // ffmpeg echoes the input URL in its error lines. A provider path
+        // that happens to contain a transient-sounding phrase must not
+        // turn a fatal error into an endless retry loop.
+        let result = classify_ffmpeg_failure(
+            b"http://host/live/connection-refused/1.ts: Invalid data found when processing input\n",
+        );
+        assert!(
+            matches!(result, RecordingExecutionResult::Failed(_)),
+            "url-borne phrase must not make a fatal error retryable: {result:?}"
+        );
+        // ffmpeg's own words still classify as retryable even when the
+        // line also carries the URL.
+        let result = classify_ffmpeg_failure(b"http://host/live/1.ts: Connection refused\n");
+        assert!(matches!(result, RecordingExecutionResult::Retryable(_)), "{result:?}");
+    }
+
+    #[test]
+    fn retryable_phrases_are_lowercase_so_the_matcher_can_find_them() {
+        for phrase in RETRYABLE_FFMPEG_PHRASES {
+            assert_eq!(
+                *phrase,
+                phrase.to_ascii_lowercase(),
+                "phrase must be lowercase to match the lowercased haystack"
+            );
+        }
+    }
+
+    #[test]
     fn classify_ffmpeg_failure_marks_only_transient_tls_failures_retryable() {
         let retryable = classify_ffmpeg_failure(b"Last message\ntls handshake timeout\n");
         let certificate = classify_ffmpeg_failure(b"Last message\ncertificate verify failed\n");
@@ -459,7 +538,7 @@ mod tests {
         let control_notify = Notify::new();
         let recording = make_recording(chrono::Utc::now().timestamp(), 5);
 
-        let result = run_recording_with_binary(&script, &recording, &control_signal, &control_notify, None).await;
+        let result = run_recording_with_binary(&script, &recording, &control_signal, &control_notify, None, RecordingContainerFormat::default()).await;
 
         assert_eq!(result, RecordingExecutionResult::Completed);
         assert_eq!(tokio::fs::read(&recording.file_path).await.expect("read output"), b"recorded");
@@ -479,7 +558,7 @@ mod tests {
         let control_notify = Notify::new();
         let recording = make_recording(chrono::Utc::now().timestamp(), 5);
 
-        let result = run_recording_with_binary(&script, &recording, &control_signal, &control_notify, None).await;
+        let result = run_recording_with_binary(&script, &recording, &control_signal, &control_notify, None, RecordingContainerFormat::default()).await;
 
         assert_eq!(
             result,
@@ -506,7 +585,7 @@ mod tests {
             notify_cancel.cancel();
         });
 
-        let result = run_recording_with_binary(&script, &recording, &control_signal, &control_notify, Some(&cancel_token)).await;
+        let result = run_recording_with_binary(&script, &recording, &control_signal, &control_notify, Some(&cancel_token), RecordingContainerFormat::default()).await;
         cancel_task.await.expect("cancel task");
 
         assert_eq!(result, RecordingExecutionResult::Preempted);
@@ -528,7 +607,7 @@ mod tests {
         fs::create_dir_all(&recording.file_dir).expect("create recording dir");
         fs::write(recording_partial_path(&recording.file_path), b"partial").expect("write partial output");
 
-        let result = run_recording_with_binary(&script, &recording, &control_signal, &control_notify, None).await;
+        let result = run_recording_with_binary(&script, &recording, &control_signal, &control_notify, None, RecordingContainerFormat::default()).await;
 
         assert_eq!(
             result,
@@ -594,6 +673,11 @@ mod tests {
         assert_eq!(decision, RecoveryDecision::FailedNoFile);
     }
 
+    // Windows symlink creation needs developer mode or elevation, so the
+    // symlink-specific assertion is Unix-only. The behaviour it covers —
+    // `no_follow_existing` not following a link — is provided by
+    // `symlink_metadata` on both platforms.
+    #[cfg(unix)]
     #[tokio::test]
     async fn recovery_decision_for_treats_symlinked_final_as_completed() {
         // The no-follow check returns None for symlinks; the helper

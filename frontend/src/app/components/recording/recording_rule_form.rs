@@ -326,6 +326,7 @@ pub fn recording_rule_form(props: &RuleFormProps) -> Html {
             let on_done = on_done.clone();
             let existing_id_for_async = existing_id.clone();
             let existing_channel_id = existing_channel_id.clone();
+            let translate_for_save = translate.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let res = if let Some(id) = existing_id_for_async {
                     let (channel_id, clear_channel_id) =
@@ -348,12 +349,16 @@ pub fn recording_rule_form(props: &RuleFormProps) -> Html {
                 };
                 match res {
                     Ok(_) => {
-                        svc.toastr.success("Rule saved");
+                        // Covers both create and edit: this handler drives both.
+                        svc.toastr.success(translate_for_save.t("MESSAGES.RECORDING.RULE_SAVED"));
                         if let Some(cb) = on_done {
                             cb.emit(());
                         }
                     }
-                    Err(e) => svc.toastr.error(format!("Save failed: {}", e)),
+                    Err(error) => {
+                        log::warn!("recording rule save failed: {error}");
+                        svc.toastr.error(translate_for_save.t(error.i18n_key()));
+                    }
                 }
             });
         })

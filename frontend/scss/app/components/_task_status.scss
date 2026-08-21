@@ -1,0 +1,65 @@
+// Task-state pill, shared by the downloads view and the DVR library.
+//
+// The four families map to what the state means to the user rather than
+// giving every variant its own hue: pending, in flight, finished, and
+// gone. Colours come from existing theme tokens, so a theme that
+// redefines them redefines these too, and every one keeps a border as
+// well as a fill so the state survives a colour-blind palette.
+.tp__task-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  padding: var(--padding-micro) var(--padding-mini);
+  border-radius: var(--tag-border-radius);
+  border: 1px solid var(--border-color);
+  color: var(--modest-text-color);
+  background-color: transparent;
+  font-size: var(--font-size-sm);
+
+  &--pending {
+    color: var(--tag-status-pending-color);
+    background-color: var(--tag-status-pending-background-color);
+    border-color: var(--tag-status-pending-border-color);
+  }
+
+  &--waiting {
+    color: var(--warn-color);
+    background-color: var(--warn-background-color);
+    border-color: var(--warn-color);
+  }
+
+  // In flight. Given the strongest contrast: it is the state an
+  // operator scans a long list for.
+  &--active {
+    color: var(--active-color);
+    background-color: var(--success-background-color);
+    border-color: var(--active-color);
+    font-weight: bold;
+  }
+
+  &--paused {
+    color: var(--modest-text-color);
+    border-color: var(--modest-text-color);
+  }
+
+  &--done {
+    color: var(--success-color);
+    background-color: var(--success-background-color);
+    border-color: var(--ok-color);
+  }
+
+  &--failed {
+    color: var(--error-color);
+    background-color: var(--error-background-color);
+    border-color: var(--error-color);
+  }
+
+  &--cancelled {
+    color: var(--modest-text-color);
+    border-color: var(--border-color);
+    // Struck through so a cancelled task reads as gone even where the
+    // colour difference from `--paused` is subtle.
+    text-decoration: line-through;
+  }
+}

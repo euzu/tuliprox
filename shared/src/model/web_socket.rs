@@ -117,6 +117,19 @@ pub enum ProtocolMessage {
     /// re-fetches `/api/v1/recording/rules` on receipt. No payload
     /// — the rule list is small and the GET is cheap.
     RecordingRulesChanged,
+    /// The socket cannot serve recordings to this session, and the reason
+    /// is actionable.
+    ///
+    /// Without this frame the socket answered every refusal with an empty
+    /// task list, so a client whose token predated a permission-schema
+    /// bump could not tell "you have no recordings" from "your token is
+    /// too old to be trusted" — and sat on an empty library forever.
+    /// `code` is the same stable code the REST routes return
+    /// (`recording_token_refresh_required`, `recording_disabled`), so the
+    /// frontend maps both surfaces through one table.
+    RecordingWsError {
+        code: String,
+    },
 }
 
 impl ProtocolMessage {

@@ -47,6 +47,7 @@ mod select_helpers;
 mod sidebar;
 mod svg_icon;
 mod table;
+mod task_status_badge;
 mod tabset;
 mod tag_list;
 mod text_button;
@@ -83,7 +84,7 @@ pub(crate) use self::{
     icon_button::*, key_value_editor::*, language_picker::*, loading_screen::*, login::*, no_access::*, no_content::*,
     panel::*, particle_flow_background::*, playlist::*, radio_button_group::*, rbac::*, reveal_content::*,
     role_based_content::*, search::*, select::*, select_helpers::*, setup::*, sidebar::*, source_editor::*,
-    svg_icon::*, table::*, tabset::*, tag_list::*, text_button::*, textarea::*, theme_picker::*, title_card::*,
+    svg_icon::*, table::*, tabset::*, task_status_badge::*, tag_list::*, text_button::*, textarea::*, theme_picker::*, title_card::*,
     toastr::*, toggle_switch::*, userlist::*, websocket_status::*,
 };
 pub use self::{confirm_dialog::*, content_dialog::*};

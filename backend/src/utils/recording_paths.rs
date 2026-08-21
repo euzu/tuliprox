@@ -1,15 +1,21 @@
 //! Secure recording-path and file-operation helpers.
 //!
-//! Linux-only: uses `openat2`/`unlinkat`-equivalent semantics via the
-//! `O_NOFOLLOW`/`O_EXCL` open flags and atomic rename. The strict
-//! `openat2` with `RESOLVE_BENEATH`/`RESOLVE_NO_SYMLINKS` is not
-//! portable; this module
-//! implements the same security properties using the more portable
-//! open-flag equivalents plus `symlink_metadata` for no-follow inspection.
-//! A future task can swap `safe_unlink`/`finalize_no_replace` for direct
-//! `openat2` calls without changing callers.
-
-#![cfg(unix)]
+//! The security properties this module guarantees — no symlink is ever
+//! followed, no existing file is ever clobbered, the final rename is
+//! atomic, and nothing escapes the recording root — are built from
+//! portable primitives: `symlink_metadata` for no-follow inspection,
+//! `create_new` for exclusive creation, and `rename` for the atomic
+//! publish. The strict `openat2` with
+//! `RESOLVE_BENEATH`/`RESOLVE_NO_SYMLINKS` would be Linux-only, so it is
+//! deliberately not used.
+//!
+//! Portability: only [`open_partial_no_clobber`] has a platform-specific
+//! branch, and only for defense in depth — see its docs. Everything else
+//! compiles and behaves identically on every supported target. This
+//! module used to carry a blanket `#![cfg(unix)]`, which erased it
+//! wholesale on Windows and left every caller (`recording_deletion`,
+//! `recording_media_api`, `recording_worker`) with unresolved imports —
+//! i.e. the DVR did not build on Windows at all.
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
@@ -125,15 +131,29 @@ pub async fn no_follow_regular_file(path: &Path) -> Option<std::fs::Metadata> {
 }
 
 /// Open a new partial file with no-clobber, no-follow semantics suitable
-/// for ffmpeg to write into. The call uses `O_CREAT | O_EXCL | O_NOFOLLOW`
-/// so a pre-existing file or symlinked path is rejected.
+/// for ffmpeg to write into.
+///
+/// `create_new(true)` carries the security property on every platform: it
+/// maps to `O_CREAT | O_EXCL` on Unix and `CREATE_NEW` on Windows, and
+/// both fail when *anything* already exists at the path — including a
+/// symlink, even a dangling one. So a pre-existing file and an
+/// attacker-planted symlink are both rejected without any
+/// platform-specific code.
+///
+/// On Unix we additionally pass `O_NOFOLLOW`. That is defense in depth,
+/// not the mechanism: it makes the kernel refuse the open outright rather
+/// than relying on the exclusivity check, so a future edit that weakens
+/// `create_new` cannot silently open through a link.
 pub async fn open_partial_no_clobber(path: &Path) -> Result<tokio::fs::File, RecordingPathError> {
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .await?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        // `libc` is a `cfg(unix)` dependency, so this cannot be written
+        // as a cross-platform expression.
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).await?;
     Ok(file)
 }
 
@@ -236,8 +256,21 @@ fn validate_owner_id(owner_id: &str) -> Result<(), RecordingPathError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
     use tempfile::TempDir;
+
+    /// Create a symlink at `link` pointing at `target`.
+    ///
+    /// Only the symlink-specific tests are Unix-gated; the rest of the
+    /// suite is portable and must keep running on Windows. Creating a
+    /// symlink on Windows needs either developer mode or elevation, so
+    /// gating the assertions is the honest option — the behaviour they
+    /// cover (`symlink_metadata` not following links, `create_new`
+    /// refusing an existing entry) is provided by the standard library on
+    /// both platforms.
+    #[cfg(unix)]
+    fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
 
     #[test]
     fn validate_relative_path_accepts_simple_path() {
@@ -281,6 +314,7 @@ mod tests {
         assert!(no_follow_regular_file(&missing).await.is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn no_follow_regular_file_rejects_symlink() {
         let dir = TempDir::new().expect("tempdir");
@@ -315,8 +349,14 @@ mod tests {
         let result = open_partial_no_clobber(&path).await;
         assert!(result.is_err(), "open must fail on existing file");
         assert!(matches!(result.unwrap_err(), RecordingPathError::Io(err) if err.kind() == io::ErrorKind::AlreadyExists));
+        // A refused open must not have truncated what was there. This is
+        // the portable half of the no-clobber guarantee: `create_new`
+        // carries it on every target, which is why the `O_NOFOLLOW` flag
+        // can be Unix-only without weakening the contract.
+        assert_eq!(tokio::fs::read(&path).await.expect("read"), b"already here");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn open_partial_no_clobber_fails_when_path_is_symlink() {
         let dir = TempDir::new().expect("tempdir");
@@ -352,6 +392,7 @@ mod tests {
         assert_eq!(tokio::fs::read(&final_path).await.expect("read"), b"existing");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn finalize_no_replace_refuses_when_final_is_symlink() {
         // An externally created symlink at the final path counts

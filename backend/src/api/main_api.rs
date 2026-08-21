@@ -26,6 +26,7 @@ use crate::{
             HlsProxyManager, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
             UpdateGuard, exec_qos_aggregation,
             recording_rule_scheduler::spawn_recording_rule_scheduler,
+            recording_supervisor::start_recording_supervisors,
         },
         panel_api::sync_panel_api_exp_dates_on_boot,
         tasks::{exec_interner_prune, exec_scheduler, exec_xtream_expiry_sync},
@@ -114,7 +115,17 @@ async fn recover_persisted_downloads_state_for_startup(downloads: &DownloadQueue
 
 async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &crate::model::VideoDownloadConfig) {
     spawn_download_services(app_state.as_ref(), &app_state.cancel_tokens.load().downloads);
-    spawn_recording_rule_scheduler(app_state, &app_state.cancel_tokens.load().downloads);
+    // Reconcile the DVR state the previous process left behind *before*
+    // the rule scheduler can plan against it, then start the retention
+    // and notification supervisors. Without this the queue keeps tasks
+    // stuck in `Deleting` forever, retention never runs so the recording
+    // disk grows unbounded, and a lifecycle notification lost to a
+    // transient provider error is never retried.
+    // Cloned out of the `ArcSwap` guard first: the guard must not be held
+    // across the await below.
+    let downloads_cancel = app_state.cancel_tokens.load().downloads.clone();
+    start_recording_supervisors(app_state, &downloads_cancel).await;
+    spawn_recording_rule_scheduler(app_state, &downloads_cancel);
     if let Err(err) = resume_download_worker_if_needed(app_state.as_ref(), download_cfg).await {
         error!("Failed to resume persisted downloads during startup; continuing with downloads paused: {err}");
     }

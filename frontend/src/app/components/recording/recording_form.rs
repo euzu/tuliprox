@@ -9,13 +9,22 @@
 use crate::{
     app::components::{number_input::NumberInput, DateTimeInput, RadioButtonGroup},
     i18n::use_translation,
-    services::{CreateRecordingTaskRequest, RecordingSourceInput},
+    services::{
+        ConflictSeverity, CreateRecordingTaskRequest, PreviewCandidateDto, PreviewConflictsRequest,
+        PreviewSourceDto, RecordingConflictPreview, RecordingService, RecordingSourceInput,
+    },
 };
 #[cfg(test)]
 use shared::model::permission::Permission;
+use gloo_timers::future::TimeoutFuture;
 use shared::model::recording::EpgEpisodeMetadata;
 use std::rc::Rc;
 use yew::prelude::*;
+
+/// How long the form waits after the last edit before asking the server
+/// for a conflict preview. Long enough that dragging a duration spinner
+/// does not fire a request per keystroke; short enough to feel live.
+const CONFLICT_PREVIEW_DEBOUNCE_MS: u32 = 400;
 
 /// Configured padding bounds. Mirrors the `RecordingConfigDto` fields
 /// the server already validates. The frontend uses the upper bound for
@@ -399,6 +408,98 @@ pub fn RecordingForm(props: &RecordingFormProps) -> Html {
     let preview_filename = render_filename_preview(prefill, *pre_state, *post_state);
     let padding_error = validate_padding(*pre_state, *post_state, &prefill.padding).err();
 
+    // Live conflict preview. The endpoint existed but nothing called it,
+    // so users scheduled blind and only found out a recording had lost
+    // its provider slot after it failed. The request is debounced and
+    // keyed on the padded interval, so editing the form is cheap.
+    let conflict = use_state(|| None::<RecordingConflictPreview>);
+    let conflict_pending = use_state(|| false);
+    {
+        let conflict = conflict.clone();
+        let conflict_pending = conflict_pending.clone();
+        let source = prefill.source.clone();
+        let pre = *pre_state;
+        let post = *post_state;
+        use_effect_with((scheduled_start, scheduled_end, pre, post), move |_| {
+            // Set on teardown, checked after the debounce and after the
+            // response: an edit that supersedes this one must not let a
+            // stale answer land.
+            let cancelled = Rc::new(std::cell::Cell::new(false));
+            if scheduled_end <= scheduled_start {
+                // Interval not valid yet — nothing to preview.
+                conflict.set(None);
+                conflict_pending.set(false);
+            } else {
+                conflict_pending.set(true);
+                let superseded = cancelled.clone();
+                let request = PreviewConflictsRequest {
+                    source: PreviewSourceDto {
+                        target_name: source.target_id.clone(),
+                        virtual_id: source.virtual_id.clone(),
+                        input_name: source.input_name.clone(),
+                    },
+                    candidate: PreviewCandidateDto {
+                        padded_start: scheduled_start,
+                        padded_end: scheduled_end,
+                        pre_roll_secs: pre,
+                        post_roll_secs: post,
+                        priority: 0,
+                    },
+                };
+                wasm_bindgen_futures::spawn_local(async move {
+                    TimeoutFuture::new(CONFLICT_PREVIEW_DEBOUNCE_MS).await;
+                    if superseded.get() {
+                        return;
+                    }
+                    let result = RecordingService::new().preview_conflicts(&request).await;
+                    if superseded.get() {
+                        return;
+                    }
+                    conflict_pending.set(false);
+                    match result {
+                        Ok(preview) => conflict.set(Some(preview)),
+                        // Advisory only: a failed preview must never block
+                        // the form or shout at the user. Drop the badge.
+                        Err(error) => {
+                            log::debug!("conflict preview unavailable: {error}");
+                            conflict.set(None);
+                        }
+                    }
+                });
+            }
+            move || cancelled.set(true)
+        });
+    }
+    let conflict_badge = if *conflict_pending {
+        html! {
+            <span class="tp__conflict-badge tp__conflict-badge--pending">
+                { translate.t("LABEL.CONFLICT_CHECKING") }
+            </span>
+        }
+    } else if let Some(preview) = conflict.as_ref() {
+        let label = translate.t(severity_i18n_key(&preview.severity));
+        // The tooltip names how many other recordings overlap, never
+        // which ones: the preview is anonymized server-side and must
+        // stay that way.
+        let overlaps = preview.overlap_segments.len();
+        let detail = if overlaps > 0 {
+            translate.t("LABEL.CONFLICT_OVERLAP_COUNT").replace("{count}", &overlaps.to_string())
+        } else {
+            label.clone()
+        };
+        html! {
+            <span
+                class={classes!("tp__conflict-badge", severity_modifier(&preview.severity))}
+                title={detail}
+                aria-label={label.clone()}
+            >
+                { label }
+            </span>
+        }
+    } else {
+        html! { <></> }
+    };
+
     let programme_label = translate.t("LABEL.PROGRAMME");
     let original_label = translate.t("LABEL.ORIGINAL_INTERVAL");
     let scheduled_label = translate.t("LABEL.SCHEDULED_INTERVAL");
@@ -444,6 +545,7 @@ pub fn RecordingForm(props: &RecordingFormProps) -> Html {
                 <div class="tp__recording-form__row">
                     <span class="tp__label">{ scheduled_label }</span>
                     <span class="tp__value">{ scheduled_interval_value }</span>
+                    { conflict_badge }
                 </div>
             </div>
             <NumberInput
@@ -533,16 +635,27 @@ pub fn epg_programme_to_prefill(input: EpgProgrammePrefillInput) -> RecordingFor
     prefill
 }
 
-/// Map the wire-level conflict severity to a stable i18n key. The
-/// frontend's `RecordingError::code` covers error codes; conflict
-/// previews are advisory, so this is a different surface.
-#[cfg(test)]
-pub fn severity_to_i18n_key(severity: &str) -> &'static str {
+/// i18n key for a conflict severity.
+///
+/// Conflict previews are advisory, so they are a separate surface from
+/// `RecordingError`: a conflict never blocks a submission, it only warns
+/// that the recording may wait for a slot or miss its window.
+pub fn severity_i18n_key(severity: &ConflictSeverity) -> &'static str {
     match severity {
-        "no_known_conflict" => "MESSAGES.RECORDING.CONFLICT_NONE",
-        "possible_capacity_wait" => "MESSAGES.RECORDING.CONFLICT_POSSIBLE_WAIT",
-        "likely_missed_window" => "MESSAGES.RECORDING.CONFLICT_LIKELY_MISS",
-        _ => "MESSAGES.RECORDING.CONFLICT_UNKNOWN",
+        ConflictSeverity::NoKnownConflict => "LABEL.CONFLICT_NO_KNOWN_CONFLICT",
+        ConflictSeverity::PossibleCapacityWait => "LABEL.CONFLICT_POSSIBLE_CAPACITY_WAIT",
+        ConflictSeverity::LikelyMissedWindow => "LABEL.CONFLICT_LIKELY_MISSED_WINDOW",
+    }
+}
+
+/// CSS modifier for a conflict severity. Reuses the task-status pill
+/// families so a "likely to miss" badge looks like the failure states
+/// elsewhere in the UI rather than inventing a third palette.
+pub fn severity_modifier(severity: &ConflictSeverity) -> &'static str {
+    match severity {
+        ConflictSeverity::NoKnownConflict => "tp__conflict-badge--ok",
+        ConflictSeverity::PossibleCapacityWait => "tp__conflict-badge--warn",
+        ConflictSeverity::LikelyMissedWindow => "tp__conflict-badge--danger",
     }
 }
 
@@ -798,10 +911,36 @@ mod tests {
     }
 
     #[test]
-    fn severity_to_i18n_key_maps_wire_strings() {
-        assert_eq!(severity_to_i18n_key("no_known_conflict"), "MESSAGES.RECORDING.CONFLICT_NONE");
-        assert_eq!(severity_to_i18n_key("possible_capacity_wait"), "MESSAGES.RECORDING.CONFLICT_POSSIBLE_WAIT");
-        assert_eq!(severity_to_i18n_key("likely_missed_window"), "MESSAGES.RECORDING.CONFLICT_LIKELY_MISS");
-        assert_eq!(severity_to_i18n_key("something_else"), "MESSAGES.RECORDING.CONFLICT_UNKNOWN");
+    fn every_severity_has_a_distinct_key_and_modifier() {
+        // The old mapper took a wire *string* and had a catch-all arm, so
+        // a renamed severity silently rendered "unknown". Matching on the
+        // typed enum makes a new variant a compile error instead.
+        let all = [
+            ConflictSeverity::NoKnownConflict,
+            ConflictSeverity::PossibleCapacityWait,
+            ConflictSeverity::LikelyMissedWindow,
+        ];
+        let mut keys: Vec<&str> = all.iter().map(severity_i18n_key).collect();
+        let mut modifiers: Vec<&str> = all.iter().map(severity_modifier).collect();
+        let total = all.len();
+        keys.sort_unstable();
+        keys.dedup();
+        modifiers.sort_unstable();
+        modifiers.dedup();
+        assert_eq!(keys.len(), total, "two severities share an i18n key");
+        assert_eq!(modifiers.len(), total, "two severities share a colour");
+    }
+
+    #[test]
+    fn severity_deserializes_from_the_wire_names() {
+        for (wire, expected) in [
+            ("no_known_conflict", ConflictSeverity::NoKnownConflict),
+            ("possible_capacity_wait", ConflictSeverity::PossibleCapacityWait),
+            ("likely_missed_window", ConflictSeverity::LikelyMissedWindow),
+        ] {
+            let parsed: ConflictSeverity =
+                serde_json::from_str(&format!("\"{wire}\"")).expect("severity deserializes");
+            assert_eq!(parsed, expected);
+        }
     }
 }

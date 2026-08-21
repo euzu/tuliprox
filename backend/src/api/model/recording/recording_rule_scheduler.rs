@@ -211,15 +211,36 @@ pub fn spawn_recording_rule_scheduler(app_state: &Arc<AppState>, cancel_token: &
 }
 
 async fn materialize_due_rules(app_state: &Arc<AppState>) -> Result<(), String> {
+    // `recording.enabled: false` has to stop the scheduler too. Without
+    // this the routes refuse every request while this loop keeps quietly
+    // materializing tasks the worker will then run — the worst of both
+    // states, and invisible to the operator who just switched the DVR
+    // off. Checked per tick, not at spawn time, so a config reload takes
+    // effect without a restart.
+    if !super::recording_supervisor::recording_enabled(app_state.as_ref()) {
+        return Ok(());
+    }
     let storage_dir = app_state.app_config.config.load().storage_dir.clone();
     let file = RecordingRuleRepository::new(storage_dir)
         .load()
         .await
         .map_err(|err| err.to_string())?;
     let tasks = reconcilable_tasks(app_state).await;
+    // The EPG horizon this tick. `plan_materializations` matches
+    // `NewEpisode` rules by walking programmes, so an empty slice means no
+    // `NewEpisode` rule can ever produce a candidate — only
+    // `WeeklyTimeslot` rules, which need no EPG, still work.
+    //
+    // Nothing supplies the horizon yet: the runner has no resolution path
+    // from a rule's `(target_id, virtual_id)` to that channel's stored
+    // programmes. Until one exists, say so out loud rather than looking
+    // like a scheduler that simply found nothing — a silently inert rule
+    // is indistinguishable from a rule that matched no programmes.
+    let epg_programmes: &[EpgProgramme] = &[];
+    warn_about_inert_new_episode_rules(&file.rules, epg_programmes);
     let candidates = plan_materializations(
         &file.rules,
-        &[],
+        epg_programmes,
         &tasks,
         &file.tombstones,
         Utc::now().timestamp(),
@@ -264,7 +285,38 @@ async fn materialize_due_rules(app_state: &Arc<AppState>) -> Result<(), String> 
     Ok(())
 }
 
-async fn reconcilable_tasks(app_state: &AppState) -> Vec<ReconcilableTask> {
+/// Summarize every queue-resident recording for the reconciliation and
+/// materialization planners. Shared with
+/// [`recording_supervisor`](super::recording_supervisor), which needs the
+/// same view at startup.
+/// Warn when the operator has enabled `NewEpisode` rules that cannot
+/// fire because no EPG horizon is available.
+///
+/// Rate-limited to once per process: this runs every tick, and a warning
+/// per minute per rule would bury the log it is trying to make visible.
+fn warn_about_inert_new_episode_rules(rules: &[RecordingRule], epg_programmes: &[EpgProgramme]) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !epg_programmes.is_empty() {
+        return;
+    }
+    let inert = rules
+        .iter()
+        .filter(|rule| rule.enabled && matches!(rule.body, RuleBody::NewEpisode { .. }))
+        .count();
+    if inert == 0 {
+        return;
+    }
+    if WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    log::warn!(
+        "{inert} enabled NewEpisode recording rule(s) cannot match: the scheduler has no EPG \
+         horizon, so only WeeklyTimeslot rules materialize. Use a WeeklyTimeslot rule, or record \
+         individual programmes from the EPG view, until the EPG horizon is wired into the scheduler."
+    );
+}
+
+pub async fn reconcilable_tasks(app_state: &AppState) -> Vec<ReconcilableTask> {
     let mut tasks = Vec::new();
     for task in app_state.downloads.queue.lock().await.iter() {
         push_reconcilable(&mut tasks, task);

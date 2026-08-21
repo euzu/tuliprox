@@ -243,6 +243,30 @@ pub fn compute_totals<V: QuotaRecordingTaskView>(tasks: &[V]) -> QuotaTotals {
     totals
 }
 
+/// Sum the charge for a single pool over borrowed tasks.
+///
+/// `compute_totals` allocates a `HashMap<UserId, u64>` covering every
+/// pool in the queue; admission checks read exactly one entry out of it
+/// and run inside the queue mutation boundary, so the map and the
+/// clones it implies are pure waste there. This is the fast path: one
+/// pass, no allocation, borrowed input.
+pub fn used_bytes_in_pool<'a, V, I>(tasks: I, pool: &QuotaPool) -> u64
+where
+    V: QuotaRecordingTaskView + 'a,
+    I: IntoIterator<Item = &'a V>,
+{
+    let mut total = 0u64;
+    for task in tasks {
+        let Some(task_pool) = quota_pool_for_task(task) else {
+            continue;
+        };
+        if &task_pool == pool {
+            total = total.saturating_add(charge_for_task(task));
+        }
+    }
+    total
+}
+
 /// Build the regular-user DTO. `subject_id` is the user asking.
 /// Other users' private totals are never included.
 pub fn regular_user_dto<V: QuotaRecordingTaskView>(

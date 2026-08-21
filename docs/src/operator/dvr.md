@@ -1,7 +1,7 @@
 # DVR Operator Reference
 
-This guide covers everything an operator needs to know to deploy, configure, and migrate to the
-extended DVR. It is the single source of truth for the documentation that
+This guide covers everything an operator needs to know to deploy, configure, and manage the
+DVR. It is the single source of truth for the documentation that
 [`config.md`](../configuration/config.md) and [`rest-api-cookbook.md`](../rest-api-cookbook.md)
 consume.
 
@@ -14,7 +14,9 @@ defaults match the recommended values.
 video:
   download:
     recording:
-      directory: recordings/         # default: <download-dir>/recordings
+      enabled: true                   # default: true; false stops every DVR supervisor
+      container_format: mpegts        # mpegts (default) | matroska | mp4
+      directory: recordings/          # default: <download-dir>/recordings
       timezone: Europe/Berlin         # default: UTC (IANA required)
       filename_template: "{channel}_{program_title}_{start_time}"
       default_pre_roll_secs: 0        # 0..=max_pre_roll_secs
@@ -24,18 +26,68 @@ video:
       retention:
         keep_last_per_channel: 10     # > 0 when set
         delete_after_days: 30         # > 0 when set
+        sweep_interval_secs: 3600     # default 3600; age/count sweep cadence
       disk:
         high_water_percent: 85        # 0..=100
         low_water_percent: 70         # 0..=100 and < high_water_percent
-        cleanup_interval_secs: 3600   # > 0
+        cleanup_interval_secs: 3600   # > 0; watermark-check cadence
         safety_bytes: 1073741824      # > 0 (1 GiB)
       quota:
         default_private_bytes: 53687091200   # 50 GiB
         per_user_bytes:
           "web:user-uuid-1": 107374182400    # 100 GiB
         shared_bytes: 536870912000           # 500 GiB
+      notifications:
+        outbox_buffer: 1024           # default 1024; in-memory queue depth
+        max_attempts: 6               # default 6; then dead-lettered
+        backoff_initial_secs: 5       # default 5
+        backoff_max_secs: 900         # default 900 (15 min)
       fallback_bytes_per_minute: 8388608     # 8 MiB/min, > 0
 ```
+
+| Field | Default | Range | Restart required | Effect |
+|---|---|---|---|---|
+| `enabled` | `true` | bool | no | `false` skips reconciliation, retention, and the notification outbox at startup, makes running supervisors idle on their next tick, answers every `/api/v1/recording/**` route with `501 recording_disabled`, and hides the DVR entries from the web UI navigation. |
+| `container_format` | `mpegts` | `mpegts`, `matroska`, `mp4` | no | The `-f` muxer ffmpeg writes. `mpegts` survives truncation, so a recording killed mid-stream still plays — prefer it unless the source codecs need another container. Applies to recordings that start after the change. |
+| `retention.sweep_interval_secs` | `3600` | > 0 | no | Cadence of the age/count sweep. Independent of `disk.cleanup_interval_secs`. |
+| `disk.cleanup_interval_secs` | `3600` | > 0 | no | Cadence of the supervisor's tick, and therefore of the watermark check. Measurements are floored at one per 30 s. |
+| `notifications.outbox_buffer` | `1024` | ≥ 1 | **yes** | Channel capacity between the recorder and the outbox worker. Fixed when the worker starts. |
+| `notifications.max_attempts` | `6` | ≥ 1 | no | Delivery attempts per notification before it is dead-lettered. |
+| `notifications.backoff_initial_secs` | `5` | ≥ 1 | no | First retry delay; doubles per attempt. |
+| `notifications.backoff_max_secs` | `900` | ≥ `backoff_initial_secs` | no | Ceiling for the doubling. |
+
+Choosing values:
+
+- **Private-only home use** — leave `quota` unset, set `retention.keep_last_per_channel` to taste,
+  and leave `disk` unset if the recording filesystem is dedicated.
+- **Shared family install** — set `quota.shared_bytes` and `disk.{high,low}_water_percent` so a
+  full disk degrades into retention rather than failed recordings.
+- **Multi-tenant** — set `quota.default_private_bytes` plus per-user overrides, and keep
+  `notifications.max_attempts` low so a broken webhook does not accumulate a backlog.
+
+### 1.0.1 ⚠️ Retention policy warning
+
+**Retention deletes recordings.** If you are upgrading an existing install or reconfiguring
+retention, whatever `retention` and `disk` values are in your config take effect on the next
+supervisor sweep. If they were set optimistically or copied from an example, the first sweep may
+delete recordings you expected to keep.
+
+Before restarting after a configuration change:
+
+1. **Read back your effective policy.** Check `video.download.recording.retention` and
+   `video.download.recording.disk` in `config.yml`.
+2. **Work out what would be deleted.** `keep_last_per_channel: N` keeps the *N most recent*
+   recordings per (owner, channel) and deletes the rest. `delete_after_days: N` deletes anything
+   whose `completed_at` is more than N days old. The two are a **union**, not an intersection —
+   a recording matching either policy is deleted.
+3. **If you are unsure, start with retention off.** Remove the `retention` block (or the
+   individual keys) and set `enabled: true` with no policy. Nothing is deleted, and you can
+   enable a policy deliberately once you have looked at the library.
+4. **Back up** `downloads_state.json` and the recording directory.
+
+There is no dry-run mode. Deletions are logged under the `recording::audit` target with a
+`recording_retention_delete` line and a reason (`Age`, `Count`, or `watermark`), so
+`grep recording_retention_delete` after the first sweep tells you exactly what went.
 
 ### 1.1 Validation rules
 
@@ -61,6 +113,75 @@ used-space ≥ `high_water_percent`, the worker deletes oldest completed recordi
 used-space ≤ `low_water_percent` (or the eligible list is exhausted). `cleanup_interval_secs` is
 the wall-clock interval between passes; the worker uses a cancellation-aware Tokio interval and
 will not overlap.
+
+Free space is measured **once per pass**, not once per deletion. The stop condition folds in the
+bytes the pass has already reclaimed, so a pass deletes just enough recordings to reach the low
+watermark and then stops. Only the recording root's own filesystem is measured — never
+`storage_dir` or the generic download directory, which may sit on a different mount.
+
+### 1.3 What changed: supervisors now run
+
+Three background supervisors now actually execute their work. They existed as decision layers
+before but were never started, so the DVR worked on the happy path and silently skipped
+everything else. The consequences of switching them on are all things this guide describes, but
+they happen now where they did not before:
+
+| Supervisor | What now happens |
+|---|---|
+| Startup reconciliation | Recordings stuck in `Deleting` from an earlier crash are finished or restored on boot. Orphaned rule tombstones are repaired. |
+| Retention | Age, count, and disk-watermark deletion begin. See the retention warning above. |
+| Notification outbox | Lifecycle notifications are retried and persisted instead of being dropped on transient error. |
+
+### 1.4 Supervisors
+
+Three background supervisors implement the behaviour described in the rest of this document. All
+three are started once the HTTP listener is bound, and all three honour the `downloads`
+cancellation token, so a config reload stops and restarts them cleanly.
+
+| Supervisor | Cadence | Responsibility |
+|---|---|---|
+| Startup reconciliation | once at boot, before the rule scheduler | Finishes or undoes deletions interrupted by a crash; repairs queue/rule-store drift. |
+| Retention | `disk.cleanup_interval_secs` tick, policy sweep every `retention.sweep_interval_secs` | Age, count, and watermark deletion — all through the single `system_retention_delete` path. |
+| Notification outbox | event-driven, with per-entry retry timers | Durable lifecycle-notification delivery with per-channel retry and dead-lettering. |
+
+Passes never overlap: a tick that arrives while the previous pass is still deleting is skipped.
+
+`GET /api/v1/recording/health` (administrator only) reports each supervisor's last-tick timestamp,
+the outbox depth, and the dead-letter count, so liveness can be checked without reading the log:
+
+```json
+{
+  "enabled": true,
+  "server_time": 1700003600,
+  "reconciliation_last_run": 1700000000,
+  "retention_last_tick": 1700003400,
+  "retention_sweep_interval_secs": 3600,
+  "notification_last_drain": 1700003100,
+  "notification_outbox_depth": 0,
+  "notification_dead_lettered": 0,
+  "queue_revision": 412
+}
+```
+
+A `null` timestamp means that supervisor has never completed a pass. Compare `retention_last_tick`
+against `server_time` and `disk.cleanup_interval_secs` to detect a stalled sweep.
+
+### 1.5 Support diagnostics
+
+`bin/dvr_doctor.sh` collects everything above plus the on-disk state into one dump suitable for a
+support ticket. It is read-only and never touches config, the queue, or a recording.
+
+```bash
+bin/dvr_doctor.sh --token "$ADMIN_TOKEN"
+bin/dvr_doctor.sh --url https://tuliprox.example --token "$ADMIN_TOKEN" --storage-dir /opt/tuliprox/data
+```
+
+It reports supervisor health, the effective `recording` config block, quota, and aggregate
+summaries of `downloads_state.json`, `recording_rules.json`, and the notification outbox —
+including a `stuck_deleting` count and the set of channels the outbox is still retrying. The
+summaries are deliberately aggregate: no titles, filenames, or owner ids are printed, because a
+diagnostics dump gets pasted into tickets. The health and config sections need an administrator
+token; the on-disk sections work without one.
 
 ## 2. Recording directory layout and immutable IDs
 
@@ -174,9 +295,9 @@ Deletions use a persisted two-phase operation:
 1. **`begin_deletion`** runs inside the queue-mutation boundary. It stamps
    `recording.deleting_previous_state = Some(prior)` (the prior terminal state from
    `Completed` / `Failed` / `Cancelled`) and zeros the byte counts.
-2. **`execute_deletion`** runs **after** the boundary. It inspects the file with `O_NOFOLLOW`
-   (no symlink dereference) and refuses any path that is not a safe regular file. It removes the
-   file. Missing files are idempotent success.
+2. **`execute_deletion`** runs **after** the boundary. It inspects the path with
+   `symlink_metadata` (never `metadata`), so a symlink is seen as a symlink and refused rather
+   than dereferenced, and removes the file. Missing files are idempotent success.
 3. **`finalize_deletion`** runs inside a fresh boundary. It removes the task from the queue and
    clears `deleting_previous_state`.
 
@@ -187,9 +308,29 @@ Startup recovery:
 - `Deleting` + unsafe path or non-regular file → restore previous state, log a security-category
   error.
 
-The runtime uses the strongest available primitives on each platform. On Linux the helper uses
-`O_NOFOLLOW` for descriptor-relative containment. On other platforms the helper falls back to
-no-follow metadata checks; the race window is documented in the rustdoc and the source.
+### 7.1 Portability of the path guarantees
+
+The four guarantees — no symlink is followed, no existing file is clobbered, the publish is
+atomic, nothing escapes the recording root — are built from portable primitives and hold
+identically on every supported target:
+
+| Guarantee | Primitive | Portable? |
+|---|---|---|
+| No symlink followed on inspection | `symlink_metadata` (never `metadata`) | yes |
+| No existing file clobbered | `create_new` → `O_CREAT\|O_EXCL` / `CREATE_NEW`; both fail on an existing entry *including a dangling symlink* | yes |
+| Atomic publish | `rename`, after a no-follow existence check on the destination | yes |
+| Contained in the recording root | component validation plus an owner-id component check, before any syscall | yes |
+
+Only one call has a platform-specific branch: `open_partial_no_clobber` additionally passes
+`O_NOFOLLOW` on Unix. That is **defense in depth, not the mechanism** — the no-clobber property
+already comes from `create_new`. `openat2` with `RESOLVE_BENEATH` / `RESOLVE_NO_SYMLINKS` would be
+Linux-only and is deliberately not used.
+
+Earlier revisions carried a blanket `#![cfg(unix)]` on the path helper, which removed the module
+wholesale on Windows and left every caller with unresolved imports — the DVR did not build on
+Windows at all. The gate is now scoped to the single `O_NOFOLLOW` line. Tests that need to
+*create* a symlink stay Unix-only (Windows requires developer mode or elevation for that); the
+behaviour they cover is asserted portably by the no-clobber tests.
 
 ## 8. Authorization matrix
 
@@ -348,6 +489,24 @@ Tombstones are retained for the longer of the EPG horizon and the 14-day minimum
 (`MIN_TOMBSTONE_HORIZON_SECS`). The fixed cross-store lock order is
 `queue mutation boundary → rule repository mutation`.
 
+The reconciliation pass runs at startup, before the rule scheduler's first tick, so the scheduler
+never plans against half-repaired state. Two notes on how the actions are applied:
+
+- `Materialize` cannot be executed literally — an `occurrence_key` cannot be turned back into a
+  programme window. The orphan `Scheduled` tombstone is dropped instead, which lets the scheduler
+  re-plan that occurrence from the rule and the EPG on its next tick.
+- `ConflictingIntent` is only logged (`recording::audit`, `warn`). An active recording is never
+  cancelled because of a stale intent.
+
+Deletions interrupted by a crash are repaired in the same pass. For each task still carrying
+`deleting_previous_state`, the physical file decides:
+
+| File state | Action |
+|---|---|
+| Gone | Finish the deletion — remove the task from the queue. |
+| Present, inside the recording root | Restore the prior terminal state and clear the marker. |
+| Present, outside the recording root | Restore the prior state, leave the file alone, and log `recording_reconciliation_unsafe_path` (`recording::audit`, `warn`). Dropping the task instead would orphan a file nothing tracks. |
+
 ### 14.4 Delete with retain / cancel
 
 `DELETE /api/v1/recording/rules/{id}?future=retain|cancel`:
@@ -358,18 +517,41 @@ Tombstones are retained for the longer of the EPG horizon and the 14-day minimum
 - `cancel` — same as `retain` plus cancel only future inactive occurrences. Active recordings
   are **never** auto-cancelled by rule deletion; the operator must resolve manually.
 
-## 15. Best-effort at-most-once notification attempts
+`cancel` touches two stores — the queue and the rule repository — and they cannot commit together.
+The queue side runs first and hands back a snapshot of every occurrence it cancelled; if the rule
+delete then fails, those occurrences are **restored** from that snapshot (original state and
+`reserved_bytes` included) before the error is returned. So a failed `future=cancel` leaves the
+rule in place *and* its upcoming recordings intact. Only if the restore itself fails does the API
+report `PartialOperation { primary: "future_cancelled", secondary: "rule_delete_failed" }`, which
+tells the operator exactly which side won.
+
+## 15. At-most-once notification delivery
 
 The notification adapter follows the at-most-once protocol:
 
 1. The queue-mutation boundary persists a `NotificationMarker` for the lifecycle event
    (`Started` / `Completed` / `Failed`) in the same transaction as the state transition.
-2. After the transaction commits, the adapter enqueues a post-commit dispatch.
-3. Delivery is attempted at most once per marker.
-4. After restart, the adapter checks the markers; if the marker is already present, no further
-   action is taken.
-5. A crash after marker commit and before delivery may lose the notification. This is
-   acceptable.
+2. After the transaction commits, the adapter hands the notification to the **notification
+   outbox** instead of delivering it inline. The recorder never blocks on, or waits for, a
+   messaging provider.
+3. The outbox worker persists the entry to `storage_dir/recording_notification_outbox.json`,
+   then attempts delivery **per channel**.
+4. A channel that fails is retried with capped exponential backoff
+   (`notifications.backoff_initial_secs`, doubling, clamped to `backoff_max_secs`). A channel
+   that succeeded is removed from the entry, so a retry can never deliver a duplicate to a
+   channel that already got the message — this is what keeps retries compatible with
+   at-most-once.
+5. After `notifications.max_attempts` the entry is dead-lettered: it is dropped from the outbox
+   and logged at `error` level under the `recording::audit` target with the event kind, the
+   attempt count, the channels that never accepted it, and the original enqueue time.
+6. On restart the outbox file is reloaded and the backlog resumes from where it stopped. A
+   corrupt outbox file is logged and skipped rather than blocking startup.
+7. A crash between the marker commit and the outbox write can still lose a notification. The
+   window is one file write wide, and the marker prevents a duplicate on the next boot.
+
+If the in-memory channel to the worker is full (`notifications.outbox_buffer` entries pending),
+the notification falls back to a single best-effort direct send. A recording is never delayed
+because a messaging provider is down.
 
 The routing decision:
 
@@ -458,3 +640,55 @@ The acceptance scenarios the operator should verify before declaring the migrati
 If a command or scenario fails, the operator records the exact command and output, fixes the
 smallest root cause, reruns the focused test, and then the full relevant phase gate. Unexplained
 known failures do not count as completion.
+
+## 18. Rollback
+
+The DVR is a feature flag, so a rollback does not require a binary downgrade:
+
+```yaml
+video:
+  download:
+    recording:
+      enabled: false
+```
+
+That stops the supervisors and the rule scheduler, answers `501 recording_disabled` on the
+recording routes, serves no recording data over the WebSocket, and hides the sidebar entries.
+Existing recordings and the queue are left untouched, so re-enabling resumes where you left off.
+
+Keep the previous binary available as well: the notification outbox writes
+`storage_dir/recording_notification_outbox.json`, which an older binary does not know about. It is
+ignored rather than misread — an unknown file in `storage_dir` is harmless — but the queued
+notifications in it are not delivered until the newer binary runs again.
+
+## 19. Verifying the installation
+
+After deployment or configuration changes, verify supervisor health:
+
+```bash
+# Supervisor liveness. Administrator token required.
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8901/api/v1/recording/health | jq
+```
+
+A healthy install shows a non-null `reconciliation_last_run` (stamped once at boot) and a
+`retention_last_tick` no older than `disk.cleanup_interval_secs`. A `null` value means that
+supervisor has never completed a pass.
+
+`bin/dvr_doctor.sh --token "$ADMIN_TOKEN"` wraps this up with the on-disk state — in particular a
+`stuck_deleting` count, which should be `0` after a clean boot.
+
+Then check the log for the two lines worth reacting to:
+
+- `recording is enabled with no retention, no disk watermarks, and no quota` — nothing bounds
+  recording disk usage. Intentional on a dedicated filesystem; a mistake otherwise.
+- `enabled NewEpisode recording rule(s) cannot match` — see the limitation below.
+
+### 19.1 Known limitation: `NewEpisode` rules
+
+`NewEpisode` rules do not currently match anything. The scheduler matches them by walking EPG
+programmes, and no EPG horizon is supplied to it yet, so only `WeeklyTimeslot` rules materialize.
+The condition is logged once per process rather than failing quietly.
+
+Until this is wired, record a recurring programme with a `WeeklyTimeslot` rule, or record
+individual programmes from the EPG view.

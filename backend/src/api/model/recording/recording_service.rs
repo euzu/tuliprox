@@ -14,7 +14,8 @@ use crate::auth::{
     authorize, authorize_orphan, RecordingAction, RecordingDecision, RecordingSubject, TerminalState,
 };
 use crate::api::model::recording_deletion::{
-    begin_deletion, execute_deletion, finalize_deletion, rollback_deletion,
+    begin_deletion_authorized, execute_deletion_target, finalize_deletion, rollback_deletion,
+    DeletionError,
 };
 use crate::model::AppConfig;
 use shared::model::recording::{
@@ -98,6 +99,10 @@ pub enum ServiceError {
     IoError(String),
     /// Configured recording quota would be exceeded.
     QuotaExceeded,
+    /// The patch would clear `rule_id` / `occurrence_key`. Both are
+    /// immutable provenance; surfacing this as `InvalidState` hid the
+    /// real reason from the client.
+    ProvenanceImmutable,
 }
 
 impl std::fmt::Display for ServiceError {
@@ -123,6 +128,7 @@ impl ServiceError {
             Self::PersistenceFailed => "recording_persistence_failed",
             Self::IoError(_) => "recording_io_error",
             Self::QuotaExceeded => "recording_quota_exceeded",
+            Self::ProvenanceImmutable => "recording_provenance_immutable",
         }
     }
 }
@@ -180,7 +186,26 @@ fn map_edit_validation_error(error: &EditError) -> ServiceError {
     match error {
         EditError::InvalidInterval => ServiceError::InvalidInterval,
         EditError::PaddingLimitExceeded => ServiceError::PaddingLimitExceeded,
-        _ => ServiceError::InvalidState,
+        EditError::ProvenanceCleared => ServiceError::ProvenanceImmutable,
+        EditError::StateNotEditable | EditError::ChannelChangedWithoutProgramme => {
+            ServiceError::InvalidState
+        }
+    }
+}
+
+fn map_deletion_error(error: DeletionError) -> ServiceError {
+    match error {
+        DeletionError::Forbidden => ServiceError::Forbidden,
+        DeletionError::NotTerminal => ServiceError::InvalidState,
+        DeletionError::UnknownTask | DeletionError::NotARecording => ServiceError::UnknownRecording,
+        DeletionError::DeleteFailed(err) => ServiceError::IoError(err.to_string()),
+        DeletionError::BeginFailed(err) | DeletionError::FinalizeFailed(err) => {
+            if err.source_io().is_some() {
+                ServiceError::PersistenceFailed
+            } else {
+                ServiceError::UnknownRecording
+            }
+        }
     }
 }
 
@@ -278,7 +303,7 @@ impl RecordingService {
 
         let duration_secs = window.remaining_duration_secs;
         let priority = download_cfg.recording_priority;
-        let filename = render_filename_preview(claims, input);
+        let filename = render_filename_preview(input);
         let input_name: Option<Arc<str>> = (!input.source.input_name.trim().is_empty())
             .then(|| Arc::from(input.source.input_name.as_str()));
         let mut recording = FileDownload::new_recording(
@@ -339,22 +364,7 @@ impl RecordingService {
             Ok(())
         })
         .await
-        .map_err(|err| match err {
-            QueueMutationError::QuotaExceeded => ServiceError::QuotaExceeded,
-            QueueMutationError::Io(_) => ServiceError::PersistenceFailed,
-            QueueMutationError::Duplicate
-            | QueueMutationError::InvalidQuotaPool
-            | QueueMutationError::InvalidPath
-            | QueueMutationError::Forbidden
-            | QueueMutationError::UnknownRecording
-            | QueueMutationError::StateNotEditable
-            | QueueMutationError::InvalidInterval
-            | QueueMutationError::PaddingLimitExceeded
-            | QueueMutationError::NotInTerminalState
-            | QueueMutationError::DiskFull
-            | QueueMutationError::MutationSkipped
-            | QueueMutationError::Other(_) => ServiceError::InvalidState,
-        })?;
+        .map_err(map_queue_error)?;
 
         Ok(RecordingTaskView {
             uuid: view_task.uuid,
@@ -408,11 +418,22 @@ impl RecordingService {
             if !location.is_in_editable_list() {
                 return Err(QueueMutationError::StateNotEditable);
             }
+            // `is_in_editable_list` already excluded these; the arm below
+            // exists only so the match stays exhaustive if a new location
+            // is added. A debug build fails loudly instead of silently
+            // returning a misleading error.
+            debug_assert!(
+                matches!(
+                    location,
+                    RecordingLocation::Scheduled(_) | RecordingLocation::Queue(_)
+                ),
+                "edit reached a non-editable location past the state gate"
+            );
             let snapshot = {
                 let task = match location {
                     RecordingLocation::Scheduled(i) => &candidate.scheduled[i],
                     RecordingLocation::Queue(i) => &candidate.queue[i],
-                    RecordingLocation::Active | RecordingLocation::Finished => {
+                    RecordingLocation::Active | RecordingLocation::Finished(_) => {
                         return Err(QueueMutationError::StateNotEditable);
                     }
                 };
@@ -540,22 +561,7 @@ impl RecordingService {
             Ok(())
         })
         .await
-        .map_err(|err| match err {
-            QueueMutationError::UnknownRecording => ServiceError::UnknownRecording,
-            QueueMutationError::Forbidden => ServiceError::Forbidden,
-            QueueMutationError::InvalidInterval => ServiceError::InvalidInterval,
-            QueueMutationError::PaddingLimitExceeded => ServiceError::PaddingLimitExceeded,
-            QueueMutationError::QuotaExceeded => ServiceError::QuotaExceeded,
-            QueueMutationError::Io(_) => ServiceError::PersistenceFailed,
-            QueueMutationError::StateNotEditable
-            | QueueMutationError::Duplicate
-            | QueueMutationError::InvalidQuotaPool
-            | QueueMutationError::InvalidPath
-            | QueueMutationError::NotInTerminalState
-            | QueueMutationError::DiskFull
-            | QueueMutationError::MutationSkipped
-            | QueueMutationError::Other(_) => ServiceError::InvalidState,
-        })?;
+        .map_err(map_queue_error)?;
         out.ok_or(ServiceError::UnknownRecording)
     }
 
@@ -569,24 +575,33 @@ impl RecordingService {
     ) -> Result<(), ServiceError> {
         let owner_id = Self::subject_id(claims)?;
         let active = self.downloads.active.read().await.clone();
-        if let Some(active) = active {
-            if active.uuid == uuid {
-                let meta = active
-                    .recording
-                    .clone()
-                    .ok_or(ServiceError::UnknownRecording)?;
-                let subject = RecordingSubject::new(Some(&meta), TerminalState::Active, true);
-                if matches!(
-                    authorize(claims, &owner_id, RecordingAction::Cancel, &subject),
-                    RecordingDecision::Allow
-                ) {
-                    if let Err(err) = self.downloads.cancel_active().await {
-                        log::error!("cancel_active failed for {uuid}: {err}");
-                        return Err(ServiceError::PersistenceFailed);
-                    }
-                    return Ok(());
-                }
+        if let Some(active) = active.filter(|active| active.uuid == uuid) {
+            let meta = active
+                .recording
+                .clone()
+                .ok_or(ServiceError::UnknownRecording)?;
+            let subject = RecordingSubject::new(Some(&meta), TerminalState::Active, true);
+            if !matches!(
+                authorize(claims, &owner_id, RecordingAction::Cancel, &subject),
+                RecordingDecision::Allow
+            ) {
                 return Err(ServiceError::Forbidden);
+            }
+            // Cancel by uuid, never `cancel_active()`. Between the read
+            // above and this call ffmpeg can finish and the queue can
+            // promote a *different* recording into the active slot; the
+            // no-uuid variant would then kill that innocent recording.
+            match self.downloads.cancel_active_matching(uuid).await {
+                Ok(true) => return Ok(()),
+                // The task left the active slot in the meantime. Fall
+                // through to the inactive path: it either finds the task
+                // in `scheduled`/`queue` (a re-promotion) or reports
+                // `UnknownRecording`, which is the truthful answer.
+                Ok(false) => {}
+                Err(err) => {
+                    log::error!("cancel_active_matching failed for {uuid}: {err}");
+                    return Err(ServiceError::PersistenceFailed);
+                }
             }
         }
         mutate(&self.downloads, |candidate| {
@@ -614,59 +629,66 @@ impl RecordingService {
             Ok(())
         })
         .await
-        .map_err(|err| match err {
-            QueueMutationError::UnknownRecording => ServiceError::UnknownRecording,
-            QueueMutationError::Forbidden => ServiceError::Forbidden,
-            QueueMutationError::Io(_) => ServiceError::PersistenceFailed,
-            QueueMutationError::StateNotEditable
-            | QueueMutationError::InvalidInterval
-            | QueueMutationError::PaddingLimitExceeded
-            | QueueMutationError::QuotaExceeded
-            | QueueMutationError::Duplicate
-            | QueueMutationError::InvalidQuotaPool
-            | QueueMutationError::InvalidPath
-            | QueueMutationError::NotInTerminalState
-            | QueueMutationError::DiskFull
-            | QueueMutationError::MutationSkipped
-            | QueueMutationError::Other(_) => ServiceError::InvalidState,
-        })
+        .map_err(map_queue_error)
     }
 
     /// Cancel future inactive recordings that were materialized from a
     /// recurring rule. Active recordings are intentionally left untouched.
+    /// Returns the pre-cancel snapshots of everything it cancelled. The
+    /// caller is mid-way through a two-store operation (cancel the
+    /// occurrences, then delete the rule) that cannot be made atomic, so
+    /// it keeps these to undo the queue side if the rule store fails —
+    /// see [`Self::restore_cancelled_rule_recordings`].
     pub async fn cancel_future_rule_recordings(
         &self,
         claims: &shared::model::Claims,
         rule_id: &str,
         now_secs: i64,
-    ) -> Result<usize, ServiceError> {
+    ) -> Result<Vec<CancelledRuleRecording>, ServiceError> {
         let _ = Self::subject_id(claims)?;
         if !claims.permissions.contains(shared::model::Permission::RecordingWrite) {
             return Err(ServiceError::Forbidden);
         }
-        let mut cancelled_count = 0;
+        let mut cancelled = Vec::new();
         mutate(&self.downloads, |candidate| {
-            cancelled_count = cancel_future_rule_recordings_in_candidate(candidate, rule_id, now_secs);
+            cancelled = cancel_future_rule_recordings_in_candidate(candidate, rule_id, now_secs);
             Ok(())
         })
         .await
-        .map_err(|err| match err {
-            QueueMutationError::Io(_) => ServiceError::PersistenceFailed,
-            QueueMutationError::UnknownRecording
-            | QueueMutationError::StateNotEditable
-            | QueueMutationError::Forbidden
-            | QueueMutationError::InvalidInterval
-            | QueueMutationError::PaddingLimitExceeded
-            | QueueMutationError::QuotaExceeded
-            | QueueMutationError::Duplicate
-            | QueueMutationError::InvalidQuotaPool
-            | QueueMutationError::InvalidPath
-            | QueueMutationError::NotInTerminalState
-            | QueueMutationError::DiskFull
-            | QueueMutationError::MutationSkipped
-            | QueueMutationError::Other(_) => ServiceError::InvalidState,
-        })?;
-        Ok(cancelled_count)
+        .map_err(map_queue_error)?;
+        Ok(cancelled)
+    }
+
+    /// Compensating transaction for [`Self::cancel_future_rule_recordings`].
+    ///
+    /// Moves each task back out of `finished` into the list it came from,
+    /// restoring the exact record that was captured before the cancel
+    /// (including `reserved_bytes`, which the cancel zeroed). A uuid that
+    /// something else has since claimed is left alone: a real
+    /// create/edit always wins over an undo.
+    pub async fn restore_cancelled_rule_recordings(
+        &self,
+        cancelled: &[CancelledRuleRecording],
+    ) -> Result<(), ServiceError> {
+        if cancelled.is_empty() {
+            return Ok(());
+        }
+        mutate(&self.downloads, |candidate| {
+            for entry in cancelled {
+                let uuid = entry.task.uuid.as_str();
+                candidate.finished.retain(|task| task.uuid != uuid);
+                if locate_recording(candidate, uuid).is_some() {
+                    continue;
+                }
+                match entry.origin {
+                    CancelOrigin::Scheduled => candidate.scheduled.push(entry.task.clone()),
+                    CancelOrigin::Queue => candidate.queue.push(entry.task.clone()),
+                }
+            }
+            Ok(())
+        })
+        .await
+        .map_err(map_queue_error)
     }
 
     /// Delete a finished recording via the three-step service.
@@ -678,30 +700,32 @@ impl RecordingService {
         uuid: &str,
     ) -> Result<(), ServiceError> {
         let owner_id = Self::subject_id(claims)?;
+        self.run_deletion(uuid, |meta| {
+            let subject = RecordingSubject::new(Some(meta), TerminalState::Completed, true);
+            matches!(
+                authorize(claims, &owner_id, RecordingAction::Delete, &subject),
+                RecordingDecision::Allow
+            )
+        })
+        .await
+    }
+
+    /// The three-phase deletion, shared by the user-facing delete and the
+    /// retention worker. `permit` runs *inside* the same mutation
+    /// boundary that stamps the task as deleting, so there is no window
+    /// in which the authorized metadata and the stamped task can differ:
+    /// the previous implementation looked the task up, authorized it,
+    /// stamped it, then looked it up a second time and could act on a
+    /// stale copy.
+    async fn run_deletion<F>(&self, uuid: &str, permit: F) -> Result<(), ServiceError>
+    where
+        F: FnOnce(&RecordingMetadata) -> bool,
+    {
         let queue = self.downloads.clone();
-
-        let decision = {
-            let recording = lookup_recording(&queue, uuid)
-                .await
-                .ok_or(ServiceError::UnknownRecording)?;
-            let meta = recording
-                .recording
-                .clone()
-                .ok_or(ServiceError::UnknownRecording)?;
-            let subject = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
-            authorize(claims, &owner_id, RecordingAction::Delete, &subject)
-        };
-        if !matches!(decision, RecordingDecision::Allow) {
-            return Err(ServiceError::Forbidden);
-        }
-
-        begin_deletion(&queue, uuid)
+        let target = begin_deletion_authorized(&queue, uuid, permit)
             .await
-            .map_err(|_| ServiceError::UnknownRecording)?;
-        let recording = lookup_recording(&queue, uuid)
-            .await
-            .ok_or(ServiceError::UnknownRecording)?;
-        if let Err(err) = execute_deletion(&recording, None).await {
+            .map_err(map_deletion_error)?;
+        if let Err(err) = execute_deletion_target(&target).await {
             // File removal failed: undo the deletion transition so the
             // recording stays visible in its prior state instead of
             // being silently lost when finalize_deletion runs.
@@ -727,42 +751,19 @@ impl RecordingService {
         uuid: &str,
     ) -> Result<(), ServiceError> {
         let owner_id = Self::subject_id(claims)?;
-        let queue = self.downloads.clone();
-
-        let decision = {
-            let recording = lookup_recording(&queue, uuid)
-                .await
-                .ok_or(ServiceError::UnknownRecording)?;
-            let meta = recording
-                .recording
-                .clone()
-                .ok_or(ServiceError::UnknownRecording)?;
-            let subject = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
-            authorize(claims, &owner_id, RecordingAction::SystemRetentionDelete, &subject)
-        };
-        if !matches!(decision, RecordingDecision::Allow) {
-            return Err(ServiceError::Forbidden);
-        }
-
-        begin_deletion(&queue, uuid)
-            .await
-            .map_err(|_| ServiceError::UnknownRecording)?;
-        let recording = lookup_recording(&queue, uuid)
-            .await
-            .ok_or(ServiceError::UnknownRecording)?;
-        if let Err(err) = execute_deletion(&recording, None).await {
-            let uuid_owned = uuid.to_string();
-            let _ = mutate(&self.downloads, |candidate| {
-                rollback_deletion(candidate, &uuid_owned);
-                Ok(())
-            })
-            .await;
-            return Err(ServiceError::IoError(err.to_string()));
-        }
-        finalize_deletion(&queue, uuid)
-            .await
-            .map_err(|_| ServiceError::UnknownRecording)?;
-        Ok(())
+        self.run_deletion(uuid, |meta| {
+            let subject = RecordingSubject::new(Some(meta), TerminalState::Completed, true);
+            matches!(
+                authorize(
+                    claims,
+                    &owner_id,
+                    RecordingAction::SystemRetentionDelete,
+                    &subject,
+                ),
+                RecordingDecision::Allow
+            )
+        })
+        .await
     }
 
     /// Re-export the orphan policy for callers that need it.
@@ -842,51 +843,117 @@ impl RecordingService {
     }
 }
 
-/// Look up a recording in the queue by uuid. Awaits each guard in turn so
-/// callers do not silently see `None` under transient lock contention.
-async fn lookup_recording(queue: &Arc<crate::api::model::download::DownloadQueue>, uuid: &str) -> Option<FileDownload> {
-    if let Some(d) = queue
-        .queue
-        .lock()
-        .await
-        .iter()
-        .find(|d| d.uuid == uuid)
-        .cloned()
-    {
-        return Some(d);
+/// Maximum bytes in a single sanitized filename component. Well under
+/// the 255-byte limit every supported filesystem enforces, leaving room
+/// for the `_N` disambiguation suffix and the `.partial` extension the
+/// worker appends.
+const MAX_FILENAME_COMPONENT_BYTES: usize = 200;
+
+/// Substitute for a title that sanitizes down to nothing.
+const FILENAME_FALLBACK: &str = "recording";
+
+/// Characters that are illegal in a path component on at least one
+/// supported platform. `/` and `\` are separators where it matters; the
+/// rest are Windows-reserved but are equally unwelcome in a
+/// URL-addressed media path.
+const FILENAME_FORBIDDEN_CHARS: &[char] = &['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+
+/// Windows reserved device names. A component whose stem matches one of
+/// these (case-insensitively) cannot be created on Windows, with or
+/// without an extension.
+const WINDOWS_RESERVED_STEMS: &[&str] = &[
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// Turn arbitrary programme text into one safe path component.
+///
+/// The previous implementation replaced only the two path separators,
+/// which let control characters, Windows-reserved characters, trailing
+/// dots/spaces, and BiDi override codepoints through into the path the
+/// muxer opens and the media API re-validates. This is the single
+/// chokepoint: everything that lands in `filename` goes through here.
+///
+/// Guarantees on the returned string:
+/// - exactly one path component (no separator survives),
+/// - no ASCII control characters and no Unicode BiDi / invisible
+///   formatting codepoints,
+/// - no leading or trailing whitespace or `.`,
+/// - never empty, never `.` or `..`, never a Windows device name,
+/// - at most `MAX_FILENAME_COMPONENT_BYTES` bytes, truncated on a
+///   character boundary,
+/// - idempotent: sanitizing an already-sanitized value is a no-op.
+pub fn sanitize_filename_component(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut last_was_underscore = false;
+    for ch in raw.chars() {
+        // Invisible formatting codepoints can reorder the rendered
+        // filename so it does not match the bytes on disk. Drop them
+        // outright rather than substituting, so they leave no trace.
+        if is_invisible_formatting(ch) {
+            continue;
+        }
+        if ch.is_control() || FILENAME_FORBIDDEN_CHARS.contains(&ch) {
+            // Collapse runs so `a///b` becomes `a_b`, not `a___b`.
+            if !last_was_underscore {
+                out.push('_');
+                last_was_underscore = true;
+            }
+            continue;
+        }
+        out.push(ch);
+        last_was_underscore = ch == '_';
     }
-    if let Some(d) = queue
-        .scheduled
-        .read()
-        .await
-        .iter()
-        .find(|d| d.uuid == uuid)
-        .cloned()
-    {
-        return Some(d);
+
+    // Trailing dots and spaces are silently stripped by Windows, which
+    // would desync the persisted `relative_path` from the real file.
+    let trimmed = out.trim_matches(|ch: char| ch.is_whitespace() || ch == '.');
+    let mut result = truncate_on_char_boundary(trimmed, MAX_FILENAME_COMPONENT_BYTES)
+        .trim_end_matches(|ch: char| ch.is_whitespace() || ch == '.')
+        .to_string();
+
+    if result.is_empty() || is_windows_reserved_stem(&result) {
+        result = FILENAME_FALLBACK.to_string();
     }
-    if let Some(d) = queue
-        .active
-        .read()
-        .await
-        .as_ref()
-        .filter(|d| d.uuid == uuid)
-        .cloned()
-    {
-        return Some(d);
-    }
-    queue
-        .finished
-        .read()
-        .await
-        .iter()
-        .find(|d| d.uuid == uuid)
-        .cloned()
+    result
 }
 
-fn render_filename_preview(claims: &shared::model::Claims, input: &CreateRecordingInput) -> String {
-    let _ = claims;
-    input.program_title.replace(['/', '\\'], "_")
+/// BiDi controls, zero-width characters, and the other invisible
+/// formatting codepoints that make a filename render differently from
+/// what it actually contains.
+fn is_invisible_formatting(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{200b}'..='\u{200f}'      // zero-width space .. RLM
+            | '\u{202a}'..='\u{202e}' // embedding / override
+            | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
+            | '\u{2066}'..='\u{2069}' // directional isolates
+            | '\u{feff}'              // BOM / zero-width no-break space
+    )
+}
+
+/// Truncate to at most `max_bytes`, never splitting a character.
+fn truncate_on_char_boundary(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+/// `true` when the component's stem is a Windows device name.
+fn is_windows_reserved_stem(value: &str) -> bool {
+    let stem = value.split('.').next().unwrap_or(value);
+    WINDOWS_RESERVED_STEMS
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+}
+
+fn render_filename_preview(input: &CreateRecordingInput) -> String {
+    sanitize_filename_component(&input.program_title)
 }
 
 fn authorize_create_recording(
@@ -912,6 +979,32 @@ fn authorize_create_recording(
     }
 }
 
+/// Map a queue-mutation failure onto the service error surface.
+///
+/// Every call site used to enumerate all twelve `QueueMutationError`
+/// variants inline, so adding a variant meant editing four or more
+/// matches. The variants that carry no site-specific meaning collapse
+/// here; a site that needs a different mapping for one variant still
+/// handles it before delegating.
+fn map_queue_error(err: QueueMutationError) -> ServiceError {
+    match err {
+        QueueMutationError::Io(_) => ServiceError::PersistenceFailed,
+        QueueMutationError::UnknownRecording => ServiceError::UnknownRecording,
+        QueueMutationError::Forbidden => ServiceError::Forbidden,
+        QueueMutationError::InvalidInterval => ServiceError::InvalidInterval,
+        QueueMutationError::PaddingLimitExceeded => ServiceError::PaddingLimitExceeded,
+        QueueMutationError::QuotaExceeded => ServiceError::QuotaExceeded,
+        QueueMutationError::StateNotEditable
+        | QueueMutationError::Duplicate
+        | QueueMutationError::InvalidQuotaPool
+        | QueueMutationError::InvalidPath
+        | QueueMutationError::NotInTerminalState
+        | QueueMutationError::DiskFull
+        | QueueMutationError::MutationSkipped
+        | QueueMutationError::Other(_) => ServiceError::InvalidState,
+    }
+}
+
 fn quota_limits_from_config(config: Option<&crate::model::RecordingQuotaConfig>) -> QuotaLimits {
     let mut per_user_bytes = HashMap::new();
     if let Some(config) = config {
@@ -928,42 +1021,48 @@ fn quota_limits_from_config(config: Option<&crate::model::RecordingQuotaConfig>)
     }
 }
 
+/// Every task in the candidate snapshot, borrowed. Admission checks run
+/// inside `mutate`, so this must not allocate a clone per task — the
+/// previous implementation built a `Vec<PersistedFileDownload>` of the
+/// entire queue on every create and every edit.
+fn candidate_tasks<'a>(
+    candidate: &'a PersistedDownloadQueue,
+) -> impl Iterator<Item = &'a PersistedFileDownload> + 'a {
+    candidate
+        .queue
+        .iter()
+        .chain(candidate.scheduled.iter())
+        .chain(candidate.active.iter())
+        .chain(candidate.finished.iter())
+}
+
+/// Bytes charged against a single quota pool. Only the pool the caller
+/// asked about is summed; the previous implementation built the full
+/// per-user `HashMap` and then read one entry out of it.
 fn used_bytes_for_pool(candidate: &PersistedDownloadQueue, pool: &QuotaPool) -> u64 {
-    let mut tasks = Vec::with_capacity(
-        candidate.queue.len()
-            + candidate.scheduled.len()
-            + candidate.finished.len()
-            + usize::from(candidate.active.is_some()),
-    );
-    tasks.extend(candidate.queue.iter().cloned());
-    tasks.extend(candidate.scheduled.iter().cloned());
-    if let Some(active) = &candidate.active {
-        tasks.push(active.clone());
-    }
-    tasks.extend(candidate.finished.iter().cloned());
-    let totals = recording_quota::compute_totals(&tasks);
-    match pool {
-        QuotaPool::Private(uid) => totals.private.get(uid).copied().unwrap_or(0),
-        QuotaPool::Shared => totals.shared,
-    }
+    recording_quota::used_bytes_in_pool(candidate_tasks(candidate), pool)
 }
 
 fn reserve_recording_relative_path(
     candidate: &PersistedDownloadQueue,
     task: &mut PersistedFileDownload,
 ) -> Result<(), QueueMutationError> {
-    let mut existing = Vec::new();
-    collect_existing_relative_paths(candidate, &mut existing);
-    let (stem, ext) = split_filename(&task.filename);
+    // Borrowed set, built once. The old code walked a `Vec<String>` of
+    // cloned filenames once per `_N` candidate, so reserving the
+    // (N+1)-th recording of a title cost O(N^2) string comparisons.
+    let existing: std::collections::HashSet<&str> =
+        collect_existing_relative_paths(candidate).collect();
     let mut filename = task.filename.clone();
-    if existing.iter().any(|path| path == &filename) {
+    if existing.contains(filename.as_str()) {
+        let (stem, ext) = split_filename(&task.filename);
+        // Linear probe over indices; each probe is one hash lookup.
         for index in 1.. {
             filename = if ext.is_empty() {
                 format!("{stem}_{index}")
             } else {
                 format!("{stem}_{index}.{ext}")
             };
-            if !existing.iter().any(|path| path == &filename) {
+            if !existing.contains(filename.as_str()) {
                 break;
             }
         }
@@ -977,23 +1076,17 @@ fn reserve_recording_relative_path(
     Ok(())
 }
 
-fn collect_existing_relative_paths(candidate: &PersistedDownloadQueue, out: &mut Vec<String>) {
-    for task in candidate.queue.iter().chain(candidate.scheduled.iter()).chain(candidate.finished.iter()) {
-        collect_task_relative_path(task, out);
-    }
-    if let Some(task) = &candidate.active {
-        collect_task_relative_path(task, out);
-    }
+fn collect_existing_relative_paths<'a>(
+    candidate: &'a PersistedDownloadQueue,
+) -> impl Iterator<Item = &'a str> + 'a {
+    candidate_tasks(candidate).map(task_relative_path)
 }
 
-fn collect_task_relative_path(task: &PersistedFileDownload, out: &mut Vec<String>) {
-    if let Some(meta) = &task.recording {
-        if let Some(path) = &meta.relative_path {
-            out.push(path.clone());
-            return;
-        }
-    }
-    out.push(task.filename.clone());
+fn task_relative_path(task: &PersistedFileDownload) -> &str {
+    task.recording
+        .as_ref()
+        .and_then(|meta| meta.relative_path.as_deref())
+        .unwrap_or(task.filename.as_str())
 }
 
 fn split_filename(filename: &str) -> (String, String) {
@@ -1003,18 +1096,122 @@ fn split_filename(filename: &str) -> (String, String) {
     (stem.to_string(), ext.to_string())
 }
 
-fn candidate_has_duplicate_recording(candidate: &crate::api::model::download::PersistedDownloadQueue, task: &FileDownload) -> bool {
-    fn same(candidate: &crate::api::model::download::PersistedFileDownload, task: &FileDownload) -> bool {
-        candidate.kind == DownloadKind::Recording
-            && ((candidate.url == task.url.as_str()
-                && candidate.start_at == task.start_at
-                && candidate.duration_secs == task.duration_secs)
-                || candidate.file_path == task.file_path)
+/// What makes two recording requests "the same thing".
+///
+/// The previous key was `(url, start_at, duration_secs)` OR `file_path`,
+/// and neither half worked:
+/// - `file_path` is disambiguated with a `_N` suffix by
+///   `reserve_recording_relative_path`, so it *never* matches an
+///   existing task and the whole disjunct was dead.
+/// - `start_at` is `now.max(scheduled_start)`, so for a
+///   currently-airing programme every request inside the window
+///   produces a different value and the same programme could be
+///   booked over and over.
+///
+/// The identity is now derived from what the user actually asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecordingIdentity {
+    /// Materialization of one rule occurrence. Two tasks with the same
+    /// `(rule_id, occurrence_key)` are the same recording by
+    /// definition, whatever their window looks like.
+    Occurrence {
+        rule_id: String,
+        occurrence_key: String,
+    },
+    /// A concrete programme on a concrete source, per quota pool. The
+    /// pool dimension is deliberate: a shared copy and a private copy of
+    /// the same programme are two different recordings that charge two
+    /// different quotas.
+    Programme {
+        target_id: String,
+        virtual_id: String,
+        program_start: i64,
+        program_end: i64,
+        owner: RecordingOwner,
+        visibility: RecordingVisibility,
+    },
+    /// No programme metadata at all. Fall back to the resolved URL plus
+    /// the *scheduled* (padded) window, which — unlike `start_at` — is
+    /// stable across requests inside a currently-airing window.
+    Url {
+        url: String,
+        scheduled_start: Option<i64>,
+        scheduled_end: Option<i64>,
+    },
+}
+
+fn recording_identity(meta: &RecordingMetadata, url: &str) -> RecordingIdentity {
+    if let (Some(rule_id), Some(occurrence_key)) = (
+        meta.provenance.rule_id.as_deref(),
+        meta.provenance.occurrence_key.as_deref(),
+    ) {
+        return RecordingIdentity::Occurrence {
+            rule_id: rule_id.to_string(),
+            occurrence_key: occurrence_key.to_string(),
+        };
     }
-    candidate.queue.iter().any(|d| same(d, task))
-        || candidate.scheduled.iter().any(|d| same(d, task))
-        || candidate.active.as_ref().is_some_and(|d| same(d, task))
-        || candidate.finished.iter().any(|d| same(d, task))
+    if let (Some(source), Some(program_start), Some(program_end)) =
+        (meta.source.as_ref(), meta.program_start, meta.program_end)
+    {
+        return RecordingIdentity::Programme {
+            target_id: source.target_id.clone(),
+            virtual_id: source.virtual_id.clone(),
+            program_start,
+            program_end,
+            owner: meta.owner.clone(),
+            visibility: meta.visibility,
+        };
+    }
+    RecordingIdentity::Url {
+        url: url.to_string(),
+        scheduled_start: meta.scheduled_start,
+        scheduled_end: meta.scheduled_end,
+    }
+}
+
+fn persisted_recording_identity(
+    task: &PersistedFileDownload,
+) -> Option<RecordingIdentity> {
+    if task.kind != DownloadKind::Recording {
+        return None;
+    }
+    task.recording
+        .as_ref()
+        .map(|meta| recording_identity(meta, &task.url))
+}
+
+fn candidate_has_duplicate_recording(
+    candidate: &PersistedDownloadQueue,
+    task: &FileDownload,
+) -> bool {
+    let Some(meta) = task.recording.as_ref() else {
+        return false;
+    };
+    let identity = recording_identity(meta, task.url.as_str());
+    // Pending and active tasks are duplicates of anything matching.
+    let pending_match = candidate
+        .queue
+        .iter()
+        .chain(candidate.scheduled.iter())
+        .chain(candidate.active.iter())
+        .filter_map(persisted_recording_identity)
+        .any(|existing| existing == identity);
+    if pending_match {
+        return true;
+    }
+    // Terminal tasks do not block a fresh request: after a failed or
+    // cancelled attempt the user must be able to try again, and after a
+    // successful one they may legitimately want a second copy. The one
+    // exception is a rule occurrence — re-materializing an occurrence
+    // that already ran would duplicate it on every scheduler tick.
+    if !matches!(identity, RecordingIdentity::Occurrence { .. }) {
+        return false;
+    }
+    candidate
+        .finished
+        .iter()
+        .filter_map(persisted_recording_identity)
+        .any(|existing| existing == identity)
 }
 
 /// Where a recording lives in the candidate snapshot. The first scan
@@ -1025,7 +1222,7 @@ enum RecordingLocation {
     Scheduled(usize),
     Queue(usize),
     Active,
-    Finished,
+    Finished(usize),
 }
 
 impl RecordingLocation {
@@ -1051,8 +1248,8 @@ fn locate_recording(candidate: &PersistedDownloadQueue, uuid: &str) -> Option<Re
     if candidate.active.as_ref().is_some_and(matches_uuid) {
         return Some(RecordingLocation::Active);
     }
-    if candidate.finished.iter().any(matches_uuid) {
-        return Some(RecordingLocation::Finished);
+    if let Some(i) = candidate.finished.iter().position(matches_uuid) {
+        return Some(RecordingLocation::Finished(i));
     }
     None
 }
@@ -1068,7 +1265,9 @@ fn recording_mut_at(
         RecordingLocation::Scheduled(i) => candidate.scheduled.get_mut(i),
         RecordingLocation::Queue(i) => candidate.queue.get_mut(i),
         RecordingLocation::Active => candidate.active.as_mut(),
-        RecordingLocation::Finished => candidate.finished.first_mut(),
+        // Must be the located index, not element 0: returning the first
+        // finished task would silently edit an unrelated recording.
+        RecordingLocation::Finished(i) => candidate.finished.get_mut(i),
     }
 }
 
@@ -1169,29 +1368,22 @@ async fn collect_demand_points_for_provider(
     // Pending and active recordings are real capacity consumers.
     // Finished recordings no longer claim slots, so they would only
     // inflate the conflict preview's `peak_demand`.
-    let mut points = Vec::new();
-    for task in queue.scheduled.read().await.iter() {
-        if matches(task, target_id, input_name) {
-            if let Some(point) = to_demand_point(task) {
-                points.push(point);
-            }
-        }
+    fn claims_a_slot(task: &FileDownload) -> bool {
+        !matches!(
+            task.state,
+            DownloadState::Completed | DownloadState::Failed | DownloadState::Cancelled
+        )
     }
-    for task in queue.queue.lock().await.iter() {
-        if matches(task, target_id, input_name) {
-            if let Some(point) = to_demand_point(task) {
-                points.push(point);
-            }
-        }
-    }
-    if let Some(active) = queue.active.read().await.as_ref() {
-        if matches(active, target_id, input_name) {
-            if let Some(point) = to_demand_point(active) {
-                points.push(point);
-            }
-        }
-    }
-    points
+    // One committed snapshot rather than three sequential guards. Reading
+    // `scheduled`, then `queue`, then `active` in turn let a task that
+    // moved between two of those reads be counted twice or not at all,
+    // which silently shifted the reported severity.
+    let (_revision, tasks) = queue.committed_snapshot().await;
+    tasks
+        .iter()
+        .filter(|task| claims_a_slot(task) && matches(task, target_id, input_name))
+        .filter_map(to_demand_point)
+        .collect()
 }
 
 fn remove_inactive_recording(candidate: &mut PersistedDownloadQueue, uuid: &str) -> Option<PersistedFileDownload> {
@@ -1202,29 +1394,63 @@ fn remove_inactive_recording(candidate: &mut PersistedDownloadQueue, uuid: &str)
     Some(candidate.queue.remove(index))
 }
 
+/// Which pending list a cancelled rule recording came from, so the
+/// compensating restore puts it back where it belongs.
+#[derive(Debug, Clone, Copy)]
+enum CancelOrigin {
+    Scheduled,
+    Queue,
+}
+
+/// A rule-materialized recording exactly as it was before the cancel.
+#[derive(Debug, Clone)]
+pub struct CancelledRuleRecording {
+    origin: CancelOrigin,
+    task: PersistedFileDownload,
+}
+
 fn cancel_future_rule_recordings_in_candidate(
     candidate: &mut PersistedDownloadQueue,
     rule_id: &str,
     now_secs: i64,
-) -> usize {
-    let mut cancelled = Vec::new();
-    drain_future_rule_recordings(&mut candidate.scheduled, rule_id, now_secs, &mut cancelled);
-    drain_future_rule_recordings(&mut candidate.queue, rule_id, now_secs, &mut cancelled);
-    let count = cancelled.len();
-    candidate.finished.extend(cancelled);
-    count
+) -> Vec<CancelledRuleRecording> {
+    let mut undo = Vec::new();
+    let mut moved = Vec::new();
+    drain_future_rule_recordings(
+        &mut candidate.scheduled,
+        CancelOrigin::Scheduled,
+        rule_id,
+        now_secs,
+        &mut undo,
+        &mut moved,
+    );
+    drain_future_rule_recordings(
+        &mut candidate.queue,
+        CancelOrigin::Queue,
+        rule_id,
+        now_secs,
+        &mut undo,
+        &mut moved,
+    );
+    candidate.finished.extend(moved);
+    undo
 }
 
 fn drain_future_rule_recordings(
     tasks: &mut Vec<PersistedFileDownload>,
+    origin: CancelOrigin,
     rule_id: &str,
     now_secs: i64,
+    undo: &mut Vec<CancelledRuleRecording>,
     out: &mut Vec<PersistedFileDownload>,
 ) {
     let mut index = 0;
     while index < tasks.len() {
         if is_future_rule_recording(&tasks[index], rule_id, now_secs) {
             let mut task = tasks.remove(index);
+            // Snapshot before the cancel mutates it: the undo has to
+            // restore `reserved_bytes`, which is zeroed just below.
+            undo.push(CancelledRuleRecording { origin, task: task.clone() });
             task.state = DownloadState::Cancelled;
             task.finished = true;
             task.error = Some("cancelled".to_string());
@@ -1717,6 +1943,91 @@ mod tests {
         assert_eq!(ServiceError::InvalidInterval.code(), "recording_invalid_interval");
         assert_eq!(ServiceError::UnknownRecording.code(), "recording_unknown");
         assert_eq!(ServiceError::PersistenceFailed.code(), "recording_persistence_failed");
+        assert_eq!(
+            ServiceError::ProvenanceImmutable.code(),
+            "recording_provenance_immutable"
+        );
+    }
+
+    #[test]
+    fn provenance_cleared_does_not_masquerade_as_invalid_state() {
+        assert_eq!(
+            map_edit_validation_error(&EditError::ProvenanceCleared),
+            ServiceError::ProvenanceImmutable
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_strips_separators_and_reserved_characters() {
+        assert_eq!(
+            sanitize_filename_component("a/b\\c:d*e?f\"g<h>i|j"),
+            "a_b_c_d_e_f_g_h_i_j"
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_collapses_runs_and_drops_control_chars() {
+        assert_eq!(sanitize_filename_component("a///b"), "a_b");
+        assert_eq!(sanitize_filename_component("a\u{7}\u{1}b"), "a_b");
+    }
+
+    #[test]
+    fn sanitize_filename_drops_invisible_formatting() {
+        // A right-to-left override renders the name differently from the
+        // bytes on disk; it must leave no trace at all.
+        assert_eq!(sanitize_filename_component("news\u{202e}sj.ts"), "newssj.ts");
+        assert_eq!(sanitize_filename_component("a\u{200b}b"), "ab");
+    }
+
+    #[test]
+    fn sanitize_filename_rejects_traversal_and_empty_results() {
+        assert_eq!(sanitize_filename_component(""), "recording");
+        assert_eq!(sanitize_filename_component("."), "recording");
+        assert_eq!(sanitize_filename_component(".."), "recording");
+        assert_eq!(sanitize_filename_component("   "), "recording");
+        // A lone separator becomes the substitute character, which is
+        // itself a perfectly valid component.
+        assert_eq!(sanitize_filename_component("/"), "_");
+    }
+
+    #[test]
+    fn sanitize_filename_rejects_windows_device_names() {
+        assert_eq!(sanitize_filename_component("CON"), "recording");
+        assert_eq!(sanitize_filename_component("nul.ts"), "recording");
+        assert_eq!(sanitize_filename_component("lpt9"), "recording");
+        // Not reserved: only an exact stem match counts.
+        assert_eq!(sanitize_filename_component("console"), "console");
+    }
+
+    #[test]
+    fn sanitize_filename_trims_trailing_dots_and_spaces() {
+        assert_eq!(sanitize_filename_component("Show. "), "Show");
+        assert_eq!(sanitize_filename_component(" .Show"), "Show");
+    }
+
+    #[test]
+    fn sanitize_filename_is_idempotent_and_bounded() {
+        let long = "\u{e9}".repeat(400);
+        let once = sanitize_filename_component(&long);
+        assert!(once.len() <= MAX_FILENAME_COMPONENT_BYTES);
+        // Truncation never splits a character.
+        assert!(once.chars().all(|ch| ch == '\u{e9}'));
+        assert_eq!(sanitize_filename_component(&once), once);
+        for raw in ["a/b", "CON", "", "Show. ", "news\u{202e}sj.ts"] {
+            let first = sanitize_filename_component(raw);
+            assert_eq!(sanitize_filename_component(&first), first, "not idempotent: {raw}");
+        }
+    }
+
+    #[test]
+    fn sanitized_filename_is_always_a_single_valid_component() {
+        let very_long = "x".repeat(500);
+        let cases = ["a/b/c", "..", "\u{0}x", "CON", "  ", "../../etc/passwd", &very_long];
+        for raw in cases {
+            let sanitized = sanitize_filename_component(raw);
+            validate_reserved_filename(&sanitized)
+                .unwrap_or_else(|err| panic!("{raw:?} sanitized to invalid component: {err}"));
+        }
     }
 
     #[test]
@@ -1729,7 +2040,7 @@ mod tests {
 
         let cancelled = cancel_future_rule_recordings_in_candidate(&mut queue, "rule-1", now);
 
-        assert_eq!(cancelled, 1);
+        assert_eq!(cancelled.len(), 1);
         assert_eq!(queue.scheduled.len(), 1);
         assert_eq!(queue.queue.len(), 1);
         assert_eq!(queue.finished.len(), 1);

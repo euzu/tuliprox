@@ -6,16 +6,19 @@
 use super::recording_rule_form::RecordingRuleForm;
 use crate::{
     app::{
-        components::{text_button::TextButton, Table, TableDefinition},
+        components::{text_button::TextButton, Table, TableDefinition, ToggleSwitch},
         ConfigContext,
     },
     hooks::use_service_context,
-    i18n::use_translation,
+    i18n::{use_translation, YewI18n},
     model::{DialogResult, EventMessage},
-    services::{DialogService, RecordingRuleResponse, RecordingRuleSnapshot, RecordingService},
+    services::{
+        DialogService, EditRecordingRuleRequest, RecordingError, RecordingRuleResponse, RecordingRuleSnapshot,
+        RecordingService,
+    },
 };
 use shared::model::{recording_rule::RuleBody, ConfigSourceDto, SortOrder};
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 use yew::prelude::*;
 
 /// Permission gate: may the principal see the recurring-rule
@@ -131,21 +134,39 @@ pub fn rule_summary(rule: &RecordingRuleResponse) -> String {
     format!("{} / {} / {}", s.target_id, s.virtual_id, s.input_name)
 }
 
-pub fn rule_visibility_label(rule: &RecordingRuleResponse) -> &'static str {
+/// i18n key for a rule's visibility. The label used to be a hardcoded
+/// English literal, so it stayed in English whatever the UI language.
+pub fn rule_visibility_key(rule: &RecordingRuleResponse) -> &'static str {
     use shared::model::recording_rule::RuleVisibility;
     match rule.rule.visibility {
-        RuleVisibility::Shared => "Shared",
-        RuleVisibility::Private => "Private",
+        RuleVisibility::Shared => "LABEL.RECORDING_VISIBILITY_SHARED",
+        RuleVisibility::Private => "LABEL.RECORDING_VISIBILITY_PRIVATE",
     }
 }
 
-pub fn rule_schedule_label(rule: &RecordingRuleResponse) -> String {
+pub fn rule_visibility_label(translate: &YewI18n, rule: &RecordingRuleResponse) -> String {
+    translate.t(rule_visibility_key(rule))
+}
+
+/// The language-independent part of a weekly rule's schedule: weekday
+/// number, local start time, and duration in whole minutes. Split out of
+/// [`rule_schedule_label`] so it can be tested without an i18n context.
+pub fn rule_weekly_schedule_text(weekday: u8, local_start_time: &str, duration_secs: u64) -> String {
+    format!("W{weekday} {local_start_time} ({}m)", duration_secs / 60)
+}
+
+pub fn rule_schedule_label(translate: &YewI18n, rule: &RecordingRuleResponse) -> String {
     match &rule.rule.body {
-        RuleBody::NewEpisode { .. } => "New episodes".to_string(),
+        RuleBody::NewEpisode { .. } => translate.t("LABEL.RECORDING_RULE_KIND_NEW_EPISODE"),
         RuleBody::WeeklyTimeslot { weekday, local_start_time, duration_secs, .. } => {
-            format!("W{} {} ({}m)", weekday, local_start_time, duration_secs / 60)
+            rule_weekly_schedule_text(*weekday, local_start_time, *duration_secs)
         }
     }
+}
+
+/// Translate a rule-service failure for display.
+fn error_message(translate: &YewI18n, error: &RecordingError) -> String {
+    translate.t(error.i18n_key())
 }
 
 #[function_component(RecordingRulesView)]
@@ -225,24 +246,108 @@ pub fn recording_rules_view() -> Html {
         }
     };
 
+    // Deleting a rule is two decisions, not one: drop the rule, and
+    // decide what happens to the occurrences it already scheduled. The
+    // backend has supported `future=retain|cancel` all along but the UI
+    // hardcoded `retain`, so there was no way to stop upcoming recordings
+    // from a deleted rule. The dialog now asks.
     let delete_id_click = {
         let rules_outer = rules.clone();
         let dialog_outer = dialog.clone();
+        let services_outer = services.clone();
+        let translate_outer = translate.clone();
         move |id: String| {
             let rules = rules_outer.clone();
             let dialog = dialog_outer.clone();
+            let services = services_outer.clone();
+            let translate = translate_outer.clone();
             Callback::from(move |_: String| {
                 let Some(dialog) = dialog.clone() else { return };
                 let id = id.clone();
                 let rules = rules.clone();
+                let services = services.clone();
+                let translate = translate.clone();
                 wasm_bindgen_futures::spawn_local(async move {
-                    if dialog.confirm("Delete this rule?").await != DialogResult::Ok {
+                    // Shared with the checkbox in the dialog body: the
+                    // dialog itself only reports Ok/Cancel, so the policy
+                    // travels out of band.
+                    let cancel_future = Rc::new(Cell::new(false));
+                    let content = {
+                        let cancel_future = cancel_future.clone();
+                        let on_change = Callback::from(move |value: bool| cancel_future.set(value));
+                        html! {
+                            <div class="tp__recording-rule-delete">
+                                <p>{ translate.t("LABEL.RECORDING_FORM_RULE_DELETE_CONFIRM") }</p>
+                                <label class="tp__recording-rule-delete__option">
+                                    <ToggleSwitch value={false} on_change={on_change} />
+                                    <span>{ translate.t("LABEL.RECORDING_RULE_DELETE_CANCEL") }</span>
+                                </label>
+                                <p class="tp__recording-rule-delete__hint">
+                                    { translate.t("LABEL.RECORDING_RULE_DELETE_RETAIN") }
+                                </p>
+                            </div>
+                        }
+                    };
+                    if dialog.content(content, None, true).await != DialogResult::Ok {
                         return;
                     }
-                    if let Err(e) = RecordingService::new().delete_rule(&id, "retain").await {
-                        log::error!("Rule delete failed: {e}");
+                    let future = if cancel_future.get() { "cancel" } else { "retain" };
+                    let service = RecordingService::new();
+                    match service.delete_rule(&id, future).await {
+                        Ok(()) => services.toastr.success(translate.t("MESSAGES.RECORDING.RULE_DELETED")),
+                        Err(error) => {
+                            log::error!("rule delete failed ({future}): {error}");
+                            services.toastr.error(error_message(&translate, &error));
+                        }
                     }
-                    if let Ok(r) = RecordingService::new().list_rules().await {
+                    if let Ok(r) = service.list_rules().await {
+                        rules.set(Rc::new(r));
+                    }
+                });
+            })
+        }
+    };
+
+    // Enabling / disabling a rule was only possible by opening the edit
+    // form; the list now carries the switch. Disabling is the reversible
+    // way to stop a rule, so it should be the cheapest action available.
+    let toggle_enabled_click = {
+        let rules_outer = rules.clone();
+        let services_outer = services.clone();
+        let translate_outer = translate.clone();
+        move |id: String, enabled: bool| {
+            let rules = rules_outer.clone();
+            let services = services_outer.clone();
+            let translate = translate_outer.clone();
+            Callback::from(move |_: bool| {
+                let id = id.clone();
+                let rules = rules.clone();
+                let services = services.clone();
+                let translate = translate.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let request = EditRecordingRuleRequest {
+                        body: None,
+                        channel_id: None,
+                        clear_channel_id: false,
+                        pre_roll_secs: None,
+                        post_roll_secs: None,
+                        visibility: None,
+                        enabled: Some(!enabled),
+                    };
+                    let service = RecordingService::new();
+                    match service.edit_rule(&id, request).await {
+                        // The switch moves optimistically, so success and
+                        // failure look the same for a moment. Say which
+                        // one happened.
+                        Ok(()) => services.toastr.success(translate.t("MESSAGES.RECORDING.RULE_UPDATED")),
+                        Err(error) => {
+                            log::error!("rule enable toggle failed: {error}");
+                            services.toastr.error(error_message(&translate, &error));
+                        }
+                    }
+                    // Refetch either way: on failure the switch has to
+                    // snap back to the server's answer.
+                    if let Ok(r) = service.list_rules().await {
                         rules.set(Rc::new(r));
                     }
                 });
@@ -297,25 +402,46 @@ pub fn recording_rules_view() -> Html {
         html! { <>{ col_text }</> }
     });
 
-    let is_sortable = Callback::from(|col: usize| matches!(col, 0..=3));
+    // The enabled column is a switch, not text: sorting by it would
+    // reorder rows under the pointer mid-click.
+    let is_sortable = Callback::from(|col: usize| matches!(col, 0..=2));
     let on_sort = Callback::from(|_: Option<(usize, SortOrder)>| {});
 
     let rules_items: Rc<Vec<Rc<RecordingRuleResponse>>> = Rc::new((*rules).iter().cloned().map(Rc::new).collect());
+    let is_empty = rules_items.is_empty();
     let render_data = {
         let translate = translate.clone();
         Callback::from(move |(col, _idx, rule): (usize, usize, Rc<RecordingRuleResponse>)| match col {
             0 => html! { <>{ rule_summary(&rule) }</> },
-            1 => html! { <>{ rule_visibility_label(&rule) }</> },
-            2 => html! { <>{ rule_schedule_label(&rule) }</> },
-            3 => html! { <>{ if rule.rule.enabled { "✓" } else { "—" } }</> },
+            1 => html! { <>{ rule_visibility_label(&translate, &rule) }</> },
+            2 => html! { <>{ rule_schedule_label(&translate, &rule) }</> },
+            3 => {
+                let enabled = rule.rule.enabled;
+                let on_change = toggle_enabled_click(rule.rule.id.clone(), enabled);
+                let label = translate.t(if enabled {
+                    "LABEL.RECORDING_RULE_ACTION_DISABLE"
+                } else {
+                    "LABEL.RECORDING_RULE_ACTION_ENABLE"
+                });
+                html! {
+                    <span class="tp__recording-rule-enabled" title={label.clone()} aria-label={label}>
+                        <ToggleSwitch value={enabled} compact={true} on_change={on_change} />
+                    </span>
+                }
+            }
             _ => {
                 let id = rule.rule.id.clone();
                 let on_edit = edit_id_click(id.clone());
                 let on_delete = delete_id_click(id.clone());
+                let edit_label = translate.t("LABEL.RECORDING_ACTION_EDIT");
+                let delete_label = translate.t("LABEL.RECORDING_ACTION_DELETE");
+                let row = rule_summary(&rule);
                 html! {
                     <div class="tp__recording-rule-row-actions">
-                        <TextButton name="rule_edit" icon="" title={translate.t("LABEL.RECORDING_ACTION_EDIT")} onclick={on_edit} />
-                        <TextButton name="rule_delete" icon="" class="tp__button--danger" title={translate.t("LABEL.RECORDING_ACTION_DELETE")} onclick={on_delete} />
+                        <TextButton name="rule_edit" icon="" title={edit_label.clone()}
+                            aria_label={format!("{edit_label}: {row}")} onclick={on_edit} />
+                        <TextButton name="rule_delete" icon="" class="tp__button--danger" title={delete_label.clone()}
+                            aria_label={format!("{delete_label}: {row}")} onclick={on_delete} />
                     </div>
                 }
             }
@@ -341,7 +467,13 @@ pub fn recording_rules_view() -> Html {
                     </div>
                     <div class="tp__recording-rules__body tp__list-list__body">
                         { form }
-                        <Table::<RecordingRuleResponse> definition={table_def} />
+                        if is_empty {
+                            <p class="tp__recording-list__empty">
+                                { translate.t("MESSAGES.RECORDING.EMPTY_RULES") }
+                            </p>
+                        } else {
+                            <Table::<RecordingRuleResponse> definition={table_def} />
+                        }
                     </div>
                 </div>
             </div>
@@ -495,35 +627,24 @@ mod tests {
             RuleVisibility::Private,
             true,
         );
-        assert_eq!(rule_visibility_label(&r_shared), "Shared");
-        assert_eq!(rule_visibility_label(&r_priv), "Private");
+        // Assert on the i18n key, not the rendered text: the text is
+        // whatever the active language says, the key is the contract.
+        assert_eq!(rule_visibility_key(&r_shared), "LABEL.RECORDING_VISIBILITY_SHARED");
+        assert_eq!(rule_visibility_key(&r_priv), "LABEL.RECORDING_VISIBILITY_PRIVATE");
+        assert_ne!(rule_visibility_key(&r_shared), rule_visibility_key(&r_priv));
     }
 
     #[test]
     fn rule_schedule_label_weekly_format() {
-        let r = dummy_rule(
-            RuleBody::WeeklyTimeslot {
-                weekday: 3,
-                local_start_time: "21:30".into(),
-                duration_secs: 1800,
-                timezone: "UTC".into(),
-            },
-            RuleVisibility::Private,
-            true,
-        );
-        let s = rule_schedule_label(&r);
+        let s = rule_weekly_schedule_text(3, "21:30", 1800);
         assert!(s.contains("W3"), "missing weekday: {s}");
         assert!(s.contains("21:30"), "missing start: {s}");
         assert!(s.contains("30m"), "missing duration: {s}");
     }
 
     #[test]
-    fn rule_schedule_label_new_episode_is_label() {
-        let r = dummy_rule(
-            RuleBody::NewEpisode { series_id: Some("s1".into()), title_pattern: None, exclude_repeat: true },
-            RuleVisibility::Private,
-            true,
-        );
-        assert_eq!(rule_schedule_label(&r), "New episodes");
+    fn rule_weekly_schedule_rounds_down_to_whole_minutes() {
+        assert!(rule_weekly_schedule_text(1, "20:00", 90).contains("(1m)"));
+        assert!(rule_weekly_schedule_text(1, "20:00", 59).contains("(0m)"));
     }
 }

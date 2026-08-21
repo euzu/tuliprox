@@ -3,7 +3,8 @@ use chrono_tz::Tz;
 use regex::Regex;
 use shared::defaults::DEFAULT_DOWNLOAD_DIR;
 use shared::model::{
-    RecordingConfigDto, RecordingDiskConfigDto, RecordingQuotaConfigDto, RecordingRetentionConfigDto,
+    RecordingConfigDto, RecordingContainerFormat, RecordingDiskConfigDto,
+    RecordingNotificationConfigDto, RecordingQuotaConfigDto, RecordingRetentionConfigDto,
     VideoConfigDto, VideoDownloadConfigDto,
 };
 use std::collections::HashMap;
@@ -75,6 +76,8 @@ impl From<&VideoDownloadConfig> for VideoDownloadConfigDto {
 /// Backend domain type for DVR recording configuration.
 #[derive(Debug, Clone)]
 pub struct RecordingConfig {
+    pub enabled: bool,
+    pub container_format: RecordingContainerFormat,
     pub directory: String,
     pub timezone: Tz,
     pub filename_template: String,
@@ -85,13 +88,63 @@ pub struct RecordingConfig {
     pub retention: Option<RecordingRetentionConfig>,
     pub disk: Option<RecordingDiskConfig>,
     pub quota: Option<RecordingQuotaConfig>,
+    pub notifications: RecordingNotificationConfig,
     pub fallback_bytes_per_minute: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RecordingRetentionConfig {
     pub keep_last_per_channel: Option<u32>,
     pub delete_after_days: Option<u32>,
+    pub sweep_interval_secs: u64,
+}
+
+impl Default for RecordingRetentionConfig {
+    fn default() -> Self {
+        Self::from(&RecordingRetentionConfigDto::default())
+    }
+}
+
+/// Runtime notification-delivery knobs. Always present: an absent
+/// `notifications:` block means "use the documented defaults", not
+/// "deliver nothing".
+#[derive(Debug, Clone)]
+pub struct RecordingNotificationConfig {
+    pub outbox_buffer: usize,
+    pub max_attempts: u32,
+    pub backoff_initial_secs: u64,
+    pub backoff_max_secs: u64,
+}
+
+impl Default for RecordingNotificationConfig {
+    fn default() -> Self {
+        Self::from(&RecordingNotificationConfigDto::default())
+    }
+}
+
+macros::from_impl!(RecordingNotificationConfig);
+impl From<&RecordingNotificationConfigDto> for RecordingNotificationConfig {
+    fn from(dto: &RecordingNotificationConfigDto) -> Self {
+        Self {
+            // A zero-capacity channel would make every enqueue block the
+            // recorder; clamp to at least one slot.
+            outbox_buffer: dto.outbox_buffer.max(1),
+            max_attempts: dto.max_attempts.max(1),
+            backoff_initial_secs: dto.backoff_initial_secs.max(1),
+            backoff_max_secs: dto.backoff_max_secs.max(dto.backoff_initial_secs.max(1)),
+        }
+    }
+}
+
+impl From<&RecordingNotificationConfig> for RecordingNotificationConfigDto {
+    fn from(instance: &RecordingNotificationConfig) -> Self {
+        Self {
+            outbox_buffer: instance.outbox_buffer,
+            max_attempts: instance.max_attempts,
+            backoff_initial_secs: instance.backoff_initial_secs,
+            backoff_max_secs: instance.backoff_max_secs,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -118,6 +171,8 @@ impl From<&RecordingConfigDto> for RecordingConfig {
             .and_then(|s| s.parse::<Tz>().ok())
             .unwrap_or_else(|| "UTC".parse::<Tz>().expect("UTC must parse"));
         Self {
+            enabled: dto.enabled,
+            container_format: dto.container_format,
             directory: dto.directory.clone().unwrap_or_default(),
             timezone,
             filename_template: dto.filename_template.clone().unwrap_or_default(),
@@ -128,6 +183,11 @@ impl From<&RecordingConfigDto> for RecordingConfig {
             retention: dto.retention.as_ref().map(Into::into),
             disk: dto.disk.as_ref().map(Into::into),
             quota: dto.quota.as_ref().map(Into::into),
+            notifications: dto
+                .notifications
+                .as_ref()
+                .map(Into::into)
+                .unwrap_or_default(),
             fallback_bytes_per_minute: dto.fallback_bytes_per_minute,
         }
     }
@@ -136,6 +196,8 @@ impl From<&RecordingConfigDto> for RecordingConfig {
 impl From<&RecordingConfig> for RecordingConfigDto {
     fn from(instance: &RecordingConfig) -> Self {
         Self {
+            enabled: instance.enabled,
+            container_format: instance.container_format,
             directory: Some(instance.directory.clone()),
             timezone: Some(instance.timezone.name().to_string()),
             filename_template: Some(instance.filename_template.clone()),
@@ -146,6 +208,7 @@ impl From<&RecordingConfig> for RecordingConfigDto {
             retention: instance.retention.as_ref().map(Into::into),
             disk: instance.disk.as_ref().map(Into::into),
             quota: instance.quota.as_ref().map(Into::into),
+            notifications: Some((&instance.notifications).into()),
             fallback_bytes_per_minute: instance.fallback_bytes_per_minute,
         }
     }
@@ -157,6 +220,13 @@ impl From<&RecordingRetentionConfigDto> for RecordingRetentionConfig {
         Self {
             keep_last_per_channel: dto.keep_last_per_channel,
             delete_after_days: dto.delete_after_days,
+            // A zero interval would spin the sweep loop; fall back to the
+            // documented default instead of busy-looping.
+            sweep_interval_secs: if dto.sweep_interval_secs == 0 {
+                shared::model::default_recording_retention_sweep_interval_secs()
+            } else {
+                dto.sweep_interval_secs
+            },
         }
     }
 }
@@ -166,6 +236,7 @@ impl From<&RecordingRetentionConfig> for RecordingRetentionConfigDto {
         Self {
             keep_last_per_channel: instance.keep_last_per_channel,
             delete_after_days: instance.delete_after_days,
+            sweep_interval_secs: instance.sweep_interval_secs,
         }
     }
 }

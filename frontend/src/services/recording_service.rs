@@ -285,6 +285,19 @@ pub enum RecordingError {
     /// `recording_quota_exceeded` — owner or shared quota would be
     /// exceeded.
     QuotaExceeded,
+    /// `recording_padding_limit_exceeded` — pre-roll or post-roll is
+    /// above the configured maximum. Distinct from `InvalidInterval`:
+    /// the programme window is fine, only the padding is not.
+    PaddingLimitExceeded,
+    /// `recording_provenance_immutable` — the patch would clear the
+    /// rule provenance of a rule-materialized recording.
+    ProvenanceImmutable,
+    /// `recording_not_terminal` — deletion was attempted on a
+    /// recording that has not finished yet.
+    NotTerminal,
+    /// `recording_disabled` — the DVR is switched off on this server
+    /// (`video.download.recording.enabled: false`).
+    Disabled,
     /// Catch-all for unrecognised codes so the frontend does not
     /// panic on a backend change.
     Other(String),
@@ -306,7 +319,10 @@ impl RecordingError {
             "recording_forbidden" | "recording_rule_forbidden" | "recording_rule_not_owner" => Self::Forbidden,
             "recording_invalid_state" => Self::InvalidState,
             "recording_invalid_interval" => Self::InvalidInterval,
-            "recording_invalid_padding" => Self::InvalidInterval,
+            "recording_invalid_padding" | "recording_padding_limit_exceeded" => Self::PaddingLimitExceeded,
+            "recording_provenance_immutable" => Self::ProvenanceImmutable,
+            "recording_not_terminal" => Self::NotTerminal,
+            "recording_disabled" => Self::Disabled,
             "recording_unknown" | "recording_rule_unknown" => Self::UnknownRecording,
             "recording_duplicate" => Self::Duplicate,
             "recording_path_reservation_failed" => Self::PathReservationFailed,
@@ -333,8 +349,46 @@ impl RecordingError {
             Self::Duplicate => "recording_duplicate",
             Self::PathReservationFailed => "recording_path_reservation_failed",
             Self::QuotaExceeded => "recording_quota_exceeded",
+            Self::PaddingLimitExceeded => "recording_padding_limit_exceeded",
+            Self::ProvenanceImmutable => "recording_provenance_immutable",
+            Self::NotTerminal => "recording_not_terminal",
+            Self::Disabled => "recording_disabled",
             Self::Other(_) => "recording_other",
             Self::Network(_) => "recording_network_error",
+        }
+    }
+
+    /// The i18n key for a user-facing message.
+    ///
+    /// Error codes used to reach the user as raw strings like
+    /// `recording_invalid_state`, or as hand-rolled English in a
+    /// `format!`. Every variant now resolves to a key under
+    /// `MESSAGES.RECORDING.ERROR`, so the message is translated and a
+    /// new backend code degrades to the generic `OTHER` entry rather
+    /// than leaking a wire code into the UI.
+    pub fn i18n_key(&self) -> &'static str {
+        match self {
+            Self::TokenRefreshRequired => "MESSAGES.RECORDING.ERROR.TOKEN_REFRESH_REQUIRED",
+            Self::InvalidSource => "MESSAGES.RECORDING.ERROR.INVALID_SOURCE",
+            Self::SharedCreationNotAdministrator => "MESSAGES.RECORDING.ERROR.SHARED_NOT_ADMINISTRATOR",
+            Self::Forbidden => "MESSAGES.RECORDING.ERROR.FORBIDDEN",
+            Self::InvalidPath => "MESSAGES.RECORDING.ERROR.INVALID_PATH",
+            Self::InvalidState => "MESSAGES.RECORDING.ERROR.INVALID_STATE",
+            Self::InvalidInterval => "MESSAGES.RECORDING.ERROR.INVALID_INTERVAL",
+            Self::PaddingLimitExceeded => "MESSAGES.RECORDING.ERROR.PADDING_LIMIT_EXCEEDED",
+            Self::ProvenanceImmutable => "MESSAGES.RECORDING.ERROR.PROVENANCE_IMMUTABLE",
+            Self::NotTerminal => "MESSAGES.RECORDING.ERROR.NOT_TERMINAL",
+            Self::Disabled => "MESSAGES.RECORDING.ERROR.DISABLED",
+            Self::UnknownRecording => "MESSAGES.RECORDING.ERROR.UNKNOWN",
+            Self::Duplicate => "MESSAGES.RECORDING.ERROR.DUPLICATE",
+            Self::PathReservationFailed => "MESSAGES.RECORDING.ERROR.PATH_RESERVATION_FAILED",
+            Self::QuotaExceeded => "MESSAGES.RECORDING.ERROR.QUOTA_EXCEEDED",
+            Self::Network(_) => "MESSAGES.RECORDING.ERROR.NETWORK",
+            Self::Other(code) => match code.as_str() {
+                "recording_io_error" => "MESSAGES.RECORDING.ERROR.IO_ERROR",
+                "recording_persistence_failed" => "MESSAGES.RECORDING.ERROR.PERSISTENCE_FAILED",
+                _ => "MESSAGES.RECORDING.ERROR.OTHER",
+            },
         }
     }
 }

@@ -1,5 +1,5 @@
 use crate::{
-    app::components::{IconButton, Table, TableDefinition, TextButton},
+    app::components::{IconButton, Table, TableDefinition, TaskStatusBadge, TextButton},
     hooks::use_service_context,
     i18n::use_translation,
     model::{DialogResult, EventMessage},
@@ -97,20 +97,6 @@ fn format_download_kind(translate: &crate::i18n::YewI18n, kind: &TaskKindDto) ->
     match kind {
         TaskKindDto::Recording => translate.t("LABEL.RECORD"),
         TaskKindDto::Download => translate.t("LABEL.DOWNLOAD"),
-    }
-}
-
-fn format_download_state(translate: &crate::i18n::YewI18n, state: &TransferStatusDto) -> String {
-    match state {
-        TransferStatusDto::Queued => translate.t("LABEL.DOWNLOAD_STATE_QUEUED"),
-        TransferStatusDto::Scheduled => translate.t("LABEL.DOWNLOAD_STATE_SCHEDULED"),
-        TransferStatusDto::Running => translate.t("LABEL.DOWNLOAD_STATE_DOWNLOADING"),
-        TransferStatusDto::Paused => translate.t("LABEL.DOWNLOAD_STATE_PAUSED"),
-        TransferStatusDto::Completed => translate.t("LABEL.DOWNLOAD_STATE_COMPLETED"),
-        TransferStatusDto::Failed => translate.t("LABEL.DOWNLOAD_STATE_FAILED"),
-        TransferStatusDto::Cancelled => translate.t("LABEL.DOWNLOAD_CANCEL"),
-        TransferStatusDto::WaitingForCapacity => translate.t("LABEL.DOWNLOAD_STATE_WAITING_FOR_CAPACITY"),
-        TransferStatusDto::RetryWaiting => translate.t("LABEL.DOWNLOAD_STATE_RETRY_WAITING"),
     }
 }
 
@@ -537,7 +523,7 @@ pub fn downloads_view() -> Html {
                 }
                 1 => html! { <span class="tp__table__nowrap">{dto.title.clone()}</span> },
                 2 => html! { format_download_kind(&translate, &dto.kind) },
-                3 => html! { format_download_state(&translate, &dto.status) },
+                3 => html! { <TaskStatusBadge status={dto.status.clone()} kind={dto.kind.clone()} detail={dto.error.clone()} /> },
                 4 => html! { <span class="tp__table__nowrap">{format_download_progress(&dto)}</span> },
                 5 => {
                     html! { <span class="tp__table__nowrap">{dto.total_bytes.map_or_else(String::new, format_bytes)}</span> }

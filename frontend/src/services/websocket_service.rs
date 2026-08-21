@@ -414,6 +414,9 @@ fn handle_socket_protocol_msg(
                     ProtocolMessage::RecordingRulesChanged => {
                         event_service.broadcast(EventMessage::RecordingRulesChanged);
                     }
+                    ProtocolMessage::RecordingWsError { code } => {
+                        event_service.broadcast(EventMessage::RecordingUnavailable { code });
+                    }
                 }
             }
             Err(err) => error!("Failed to decode websocket message: {err}"),

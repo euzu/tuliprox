@@ -269,10 +269,7 @@ async fn handle_protocol_message(
             }
             Ok(ProtocolMessage::RecordingSnapshotRequest) => {
                 if let Some(claims) = websocket_claims(mem) {
-                    let (revision, tasks) =
-                        crate::api::model::recording::recording_ws::recording_snapshot(&app_state.downloads, &claims)
-                            .await;
-                    Some(ProtocolMessage::RecordingSnapshotResponse { revision, tasks })
+                    Some(recording_frame_for_session(app_state, &claims).await)
                 } else {
                     Some(ProtocolMessage::Unauthorized)
                 }
@@ -384,20 +381,45 @@ async fn handle_incoming_message(
     }
 }
 
+/// The frame to send a session that asked for recordings.
+///
+/// Three outcomes, and the distinction is the point:
+///
+/// - the DVR is switched off, or the token is too old to trust →
+///   `RecordingWsError { code }`, so the client can act. Both used to
+///   come back as an empty task list, indistinguishable from "you have
+///   no recordings";
+/// - the principal has no `recording.read` → an empty snapshot, which is
+///   the honest answer and needs no error;
+/// - otherwise → the session-filtered snapshot.
+async fn recording_frame_for_session(app_state: &AppState, claims: &Claims) -> ProtocolMessage {
+    use crate::api::model::recording::recording_ws::{recording_view_denial, RecordingViewDenial};
+
+    // `recording.enabled: false` gates the REST routes and the
+    // schedulers; the socket has to agree, or a client would keep
+    // receiving live recording data while every REST call answered
+    // `501 recording_disabled`.
+    if !crate::api::model::recording::recording_supervisor::recording_enabled(app_state) {
+        return ProtocolMessage::RecordingWsError { code: "recording_disabled".to_string() };
+    }
+    if let Some(RecordingViewDenial::TokenRefreshRequired) = recording_view_denial(claims) {
+        return ProtocolMessage::RecordingWsError {
+            code: RecordingViewDenial::TokenRefreshRequired.code().to_string(),
+        };
+    }
+    let (revision, tasks) =
+        crate::api::model::recording::recording_ws::recording_snapshot(&app_state.downloads, claims).await;
+    ProtocolMessage::RecordingSnapshotResponse { revision, tasks }
+}
+
 async fn send_recording_snapshot_event(
     app_state: &AppState,
     socket: &mut WebSocket,
     mem: &ProtocolHandlerMemory,
 ) -> Result<(), WebSocketApiError> {
     if let Some(claims) = websocket_claims(mem) {
-        let (revision, tasks) =
-            crate::api::model::recording::recording_ws::recording_snapshot(&app_state.downloads, &claims).await;
-        send_event_response(
-            socket,
-            ProtocolMessage::RecordingSnapshotResponse { revision, tasks },
-            "Recording snapshot event",
-        )
-        .await?;
+        let frame = recording_frame_for_session(app_state, &claims).await;
+        send_event_response(socket, frame, "Recording snapshot event").await?;
     }
     Ok(())
 }

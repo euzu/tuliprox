@@ -38,6 +38,10 @@ pub enum DeletionError {
     /// The matched task is not in a terminal state, so deletion cannot
     /// begin.
     NotTerminal,
+    /// The caller is not permitted to delete this recording. Reported
+    /// from inside the mutation boundary so authorization and the state
+    /// transition observe the same task.
+    Forbidden,
     /// Marking the recording as `Deleting` failed.
     BeginFailed(QueueMutationError),
     /// File deletion failed in a way that is not safe to
@@ -53,6 +57,7 @@ impl std::fmt::Display for DeletionError {
             Self::UnknownTask => f.write_str("recording not found"),
             Self::NotARecording => f.write_str("task is not a recording"),
             Self::NotTerminal => f.write_str("recording is not in a terminal state"),
+            Self::Forbidden => f.write_str("recording deletion forbidden"),
             Self::BeginFailed(err) => write!(f, "begin deletion failed: {err}"),
             Self::DeleteFailed(err) => write!(f, "physical delete failed: {err}"),
             Self::FinalizeFailed(err) => write!(f, "finalize deletion failed: {err}"),
@@ -118,15 +123,51 @@ fn prior_terminal_state(download: &FileDownload) -> Option<DeletionPreviousState
     }
 }
 
-/// Mark the recording as `Deleting` under the queue mutation
-/// boundary. The candidate is persisted atomically with the new
-/// `deleting_previous_state`; on success, the in-memory queue reflects
+/// Everything the out-of-boundary unlink step needs, captured by the
+/// same `mutate` that stamped the task. Carrying it forward removes the
+/// second `lookup_recording` the caller used to perform, and with it the
+/// window in which the two lookups could disagree.
+#[derive(Debug, Clone)]
+pub struct DeletionTarget {
+    pub uuid: String,
+    pub file_path: PathBuf,
+    pub previous_state: DeletionPreviousState,
+}
+
+impl DeletionTarget {
+    /// The single file this deletion owns. `Completed` recordings own
+    /// their final file; `Failed` / `Cancelled` ones never reached
+    /// finalization, so they own the `.partial`.
+    pub fn path_to_unlink(&self) -> PathBuf {
+        match self.previous_state {
+            DeletionPreviousState::Completed => self.file_path.clone(),
+            DeletionPreviousState::Failed | DeletionPreviousState::Cancelled => {
+                crate::api::model::recording_worker::recording_partial_path(&self.file_path)
+            }
+        }
+    }
+}
+
+/// Mark the recording as `Deleting` under the queue mutation boundary,
+/// with `permit` deciding — inside that same boundary — whether the
+/// caller may do so. The candidate is persisted atomically with the new
+/// `deleting_previous_state`; on success the in-memory queue reflects
 /// `Deleting` and the on-disk file is unchanged.
-pub async fn begin_deletion(queue: &DownloadQueue, uuid: &str) -> Result<(), DeletionError> {
+pub async fn begin_deletion_authorized<F>(
+    queue: &DownloadQueue,
+    uuid: &str,
+    permit: F,
+) -> Result<DeletionTarget, DeletionError>
+where
+    F: FnOnce(&RecordingMetadata) -> bool,
+{
     crate::api::model::download::mutate(queue, |candidate| {
         let Some(meta) = read_meta(candidate, uuid) else {
             return Err(QueueMutationError::UnknownRecording);
         };
+        if !permit(&meta) {
+            return Err(QueueMutationError::Forbidden);
+        }
         let Some((bucket, idx)) = locate(candidate, uuid) else {
             return Err(QueueMutationError::UnknownRecording);
         };
@@ -153,15 +194,31 @@ pub async fn begin_deletion(queue: &DownloadQueue, uuid: &str) -> Result<(), Del
         // present. Measured/reserved bytes are kept as-is so quota
         // accounting survives a failed or interrupted deletion; they are
         // released when the task is removed in `finalize_deletion`.
+        let target = DeletionTarget {
+            uuid: uuid.to_string(),
+            file_path: task.file_path.clone(),
+            previous_state: prior,
+        };
         let mut new_meta = meta;
         new_meta.deleting_previous_state = Some(prior);
         apply_meta(candidate, bucket, idx, new_meta);
         set_task_state(candidate, bucket, idx, DownloadState::Cancelled);
-        Ok(())
+        Ok(target)
     })
     .await
-    .map_err(DeletionError::BeginFailed)?;
-    Ok(())
+    .map_err(|err| match err {
+        QueueMutationError::Forbidden => DeletionError::Forbidden,
+        QueueMutationError::NotInTerminalState => DeletionError::NotTerminal,
+        QueueMutationError::UnknownRecording => DeletionError::UnknownTask,
+        other => DeletionError::BeginFailed(other),
+    })
+}
+
+/// Unconditional variant, kept for callers that have already
+/// authorized (and for the unit tests, which exercise the state
+/// machine rather than the policy).
+pub async fn begin_deletion(queue: &DownloadQueue, uuid: &str) -> Result<DeletionTarget, DeletionError> {
+    begin_deletion_authorized(queue, uuid, |_| true).await
 }
 
 fn prior_terminal_state_runtime(download: &PersistedFileDownload) -> Option<DeletionPreviousState> {
@@ -286,6 +343,26 @@ pub fn file_path_for_deletion(
     }
 }
 
+/// Unlink the file owned by a `DeletionTarget`. Missing files count as
+/// success. Returns the path that was unlinked, or `None` if no
+/// physical file was present.
+pub async fn execute_deletion_target(
+    target: &DeletionTarget,
+) -> Result<Option<PathBuf>, DeletionError> {
+    unlink_owned_file(&target.path_to_unlink()).await
+}
+
+async fn unlink_owned_file(path: &Path) -> Result<Option<PathBuf>, DeletionError> {
+    if no_follow_existing(path).await.is_none() {
+        return Ok(None);
+    }
+    safe_unlink(path)
+        .await
+        .map_err(std::io::Error::from)
+        .map_err(DeletionError::DeleteFailed)?;
+    Ok(Some(path.to_path_buf()))
+}
+
 /// Unlink the recorded file. Missing files count as
 /// success. Returns the path that was unlinked, or `None` if no
 /// physical file was present.
@@ -293,11 +370,7 @@ pub async fn execute_deletion(download: &FileDownload, recording_root: Option<&P
     let Some(path) = file_path_for_deletion(download, recording_root) else {
         return Ok(None);
     };
-    if no_follow_existing(&path).await.is_none() {
-        return Ok(None);
-    }
-    safe_unlink(&path).await.map_err(std::io::Error::from).map_err(DeletionError::DeleteFailed)?;
-    Ok(Some(path))
+    unlink_owned_file(&path).await
 }
 
 /// Remove the task from the queue under a new mutation
@@ -614,12 +687,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn begin_deletion_authorized_rejects_when_the_permit_declines() {
+        // Authorization runs inside the same mutation boundary that stamps
+        // the task, so a decline must leave the task untouched.
+        let dir = TempDir::new().expect("tempdir");
+        let state_file = dir.path().join("downloads_state.json");
+        let queue = DownloadQueue::new_with_state_file(Some(state_file));
+        let mut task = finished_with_state("r", DownloadState::Completed, None);
+        task.file_path = dir.path().join("r.ts");
+        let persisted = DownloadQueue::to_persisted(&task);
+        mutate(&queue, |c| {
+            c.finished.push(persisted);
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        let result = begin_deletion_authorized(&queue, "r", |_| false).await;
+
+        assert!(matches!(result, Err(DeletionError::Forbidden)));
+        let finished = queue.finished.read().await;
+        assert_eq!(finished[0].state, DownloadState::Completed);
+        assert!(finished[0]
+            .recording
+            .as_ref()
+            .is_none_or(|meta| meta.deleting_previous_state.is_none()));
+    }
+
+    #[tokio::test]
     async fn begin_deletion_rejects_unknown_task() {
         let dir = TempDir::new().expect("tempdir");
         let state_file = dir.path().join("downloads_state.json");
         let queue = DownloadQueue::new_with_state_file(Some(state_file));
         let result = begin_deletion(&queue, "missing").await;
-        assert!(matches!(result, Err(DeletionError::BeginFailed(_))));
+        // Reported as its own variant now, not folded into the opaque
+        // `BeginFailed`, so the service layer can map it to a 404.
+        assert!(matches!(result, Err(DeletionError::UnknownTask)));
     }
 
     #[tokio::test]
@@ -637,7 +740,7 @@ mod tests {
         .await
         .expect("seed");
         let result = begin_deletion(&queue, "r").await;
-        assert!(matches!(result, Err(DeletionError::BeginFailed(_))));
+        assert!(matches!(result, Err(DeletionError::NotTerminal)));
     }
 
     #[tokio::test]

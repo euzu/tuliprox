@@ -78,6 +78,12 @@
   }
 }
 
+.tp__recording-list__empty {
+  padding: var(--padding-default);
+  color: var(--modest-text-color);
+  text-align: center;
+}
+
 .tp__recording-row-actions {
   display: flex;
   flex-flow: row;
@@ -145,6 +151,42 @@
   }
 }
 
+// Rule-delete dialog: the destructive choice (also cancel upcoming
+// recordings) is an explicit opt-in, with the default spelled out below
+// it so neither outcome is a surprise.
+.tp__recording-rule-delete {
+  display: flex;
+  flex-flow: column;
+  gap: var(--gap-default);
+  padding: var(--padding-default);
+
+  &__option {
+    display: flex;
+    flex-flow: row;
+    align-items: center;
+    gap: var(--gap-default);
+    cursor: pointer;
+  }
+
+  &__hint {
+    margin: 0;
+    font-size: var(--font-size-sm);
+    color: var(--modest-text-color);
+  }
+}
+
+.tp__recording-rule-enabled {
+  display: inline-flex;
+  align-items: center;
+}
+
+.tp__recording-rule-row-actions {
+  display: flex;
+  flex-flow: row;
+  gap: var(--gap-small);
+  flex-wrap: wrap;
+}
+
 .tp__recording-rules-view {
   display: flex;
   flex-flow: column;
@@ -178,4 +220,53 @@
     white-space: nowrap;
     color: var(--modest-text-color);
   }
+}
+
+// Advisory conflict badge in the recording form. Colours mirror the task
+// status families: a conflict is a warning about the same lifecycle the
+// status pill reports on, so it should not read as a new vocabulary.
+.tp__conflict-badge {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  padding: var(--padding-micro) var(--padding-mini);
+  border-radius: var(--tag-border-radius);
+  border: 1px solid var(--border-color);
+  color: var(--modest-text-color);
+  font-size: var(--font-size-sm);
+
+  &--pending {
+    font-style: italic;
+  }
+
+  &--ok {
+    color: var(--success-color);
+    background-color: var(--success-background-color);
+    border-color: var(--ok-color);
+  }
+
+  &--warn {
+    color: var(--warn-color);
+    background-color: var(--warn-background-color);
+    border-color: var(--warn-color);
+  }
+
+  &--danger {
+    color: var(--error-color);
+    background-color: var(--error-background-color);
+    border-color: var(--error-color);
+  }
+}
+
+// The library could not be served — a stale token, or the DVR switched
+// off server-side. Styled as an alert rather than as the empty state:
+// the two mean different things and the user acts differently on each.
+.tp__recording-list__unavailable {
+  padding: var(--padding-default);
+  margin: var(--gap-default);
+  text-align: center;
+  color: var(--error-color);
+  background-color: var(--error-background-color);
+  border: 1px solid var(--error-color);
+  border-radius: var(--border-radius);
 }

@@ -957,7 +957,13 @@ impl DownloadQueue {
             && download
                 .start_at
                 .zip(download.duration_secs)
-                .is_some_and(|(start_at, duration_secs)| now_ts >= start_at.saturating_add(i64::try_from(duration_secs).unwrap_or(i64::MAX)))
+                .is_some_and(|(start_at, duration_secs)| {
+                    crate::api::model::recording::recording_math::window_elapsed(
+                        start_at,
+                        duration_secs,
+                        now_ts,
+                    )
+                })
     }
 
     pub fn new() -> Self {

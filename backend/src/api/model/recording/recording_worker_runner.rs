@@ -121,54 +121,41 @@ fn candidate_charge(cand: &RetentionCandidate) -> u64 {
     0
 }
 
-/// Run a disk-pressure pass: after the policy pass, measure
-/// the recording-root filesystem. If used% is at or above the
-/// high water mark, keep deleting oldest eligible completed
-/// recordings until used% falls at or below the low water mark
-/// or the candidate set is exhausted.
+/// Pure: the ordered candidate set for a disk-pressure pass, or `None`
+/// when no pass is warranted.
 ///
-/// `used_percent` is the current used-space percentage of the
-/// recording-root FS, in `0..=100`. `total_bytes` and
-/// `free_bytes` are the values returned by `free_bytes_for` on
-/// the recording root (the kernel-resolved mount; never from a
-/// different FS).
+/// `None` covers three cases: the measurement is not from the
+/// recording-root filesystem, the watermarks are unset or inverted, or
+/// there is no pressure (`used_percent` below the high mark).
 ///
-/// The `is_pressure` parameter gates the pass: only run when the
-/// caller is on the recording-root FS. This is the
-/// "filesystem selection" guard: a caller that accidentally
-/// passes a measurement from `storage_dir` (a different
-/// filesystem) is rejected by the type system or by a runtime
-/// check.
-pub fn run_disk_pressure<V: QuotaRecordingTaskView>(
+/// `used_percent` is the used-space percentage of the recording-root
+/// filesystem, in `0..=100`. `is_recording_root_fs` is the
+/// filesystem-selection guard: a caller that measured `storage_dir` or
+/// the generic download directory — potentially a different mount — must
+/// pass `false` rather than let a foreign measurement authorize
+/// deletions.
+///
+/// Split out of [`run_disk_pressure`] so an async caller can drive the
+/// same decision without needing a blocking delete callback.
+pub fn disk_pressure_candidates<V: QuotaRecordingTaskView>(
     tasks: &[V],
     disk: &DiskConfig,
     used_percent: u8,
-    free_bytes: u64,
-    total_bytes: u64,
     is_recording_root_fs: bool,
-    delete: &mut DeleteFn<'_>,
-) -> RunStats {
-    let mut stats = RunStats::default();
+) -> Option<Vec<RetentionCandidate>> {
     if !is_recording_root_fs {
         // Never reuse a measurement from another filesystem.
-        // Skip the pass entirely when the caller cannot prove the
-        // measurement is on the recording-root FS.
-        return stats;
+        return None;
     }
-    let (Some(high), Some(low)) = (disk.high_water_percent, disk.low_water_percent) else {
-        return stats;
-    };
+    let (high, low) = (disk.high_water_percent?, disk.low_water_percent?);
     if high <= low {
-        // Invalid config: high water must be strictly above low water. Treat
-        // any inversion as "no pressure pass".
-        return stats;
+        // Invalid config: high water must be strictly above low water.
+        // Treat any inversion as "no pressure pass".
+        return None;
     }
     if used_percent < high {
-        return stats;
+        return None;
     }
-    stats.disk_pressure_triggered = true;
-    // Build the candidate set: every Completed recording on
-    // the recording-root FS, ordered oldest first.
     let mut candidates: Vec<RetentionCandidate> = Vec::new();
     for task in tasks {
         let Some(meta) = task.recording() else {
@@ -203,12 +190,43 @@ pub fn run_disk_pressure<V: QuotaRecordingTaskView>(
             .cmp(&b.completed_at)
             .then_with(|| a.uuid.cmp(&b.uuid))
     });
+    Some(candidates)
+}
+
+/// Bytes charged to the task with this uuid, i.e. what deleting it would
+/// reclaim.
+pub fn reclaimable_bytes_for<V: QuotaRecordingTaskView>(tasks: &[V], uuid: &str) -> u64 {
+    charge_for_task(&cand_uuid_view(tasks, uuid))
+}
+
+/// Run a disk-pressure pass: keep deleting oldest eligible completed
+/// recordings until the projected used% falls to or below the low water
+/// mark, or the candidate set is exhausted.
+///
+/// See [`disk_pressure_candidates`] for the admission conditions.
+pub fn run_disk_pressure<V: QuotaRecordingTaskView>(
+    tasks: &[V],
+    disk: &DiskConfig,
+    used_percent: u8,
+    free_bytes: u64,
+    total_bytes: u64,
+    is_recording_root_fs: bool,
+    delete: &mut DeleteFn<'_>,
+) -> RunStats {
+    let mut stats = RunStats::default();
+    let Some(candidates) = disk_pressure_candidates(tasks, disk, used_percent, is_recording_root_fs) else {
+        return stats;
+    };
+    let Some(low) = disk.low_water_percent else {
+        return stats;
+    };
+    stats.disk_pressure_triggered = true;
+    stats.candidates = candidates.len() as u64;
     for cand in &candidates {
-        if used_percent_below(total_bytes, free_bytes, low) {
+        if pressure_relieved(total_bytes, free_bytes, stats.reclaimed_bytes, low) {
             break;
         }
-        let view = cand_uuid_view(tasks, &cand.uuid);
-        let reclaim = charge_for_task(&view);
+        let reclaim = reclaimable_bytes_for(tasks, &cand.uuid);
         match delete(&cand.uuid) {
             DeleteOutcome::Ok => {
                 stats.deleted += 1;
@@ -225,14 +243,30 @@ pub fn run_disk_pressure<V: QuotaRecordingTaskView>(
     stats
 }
 
-/// `used_percent` derived from `free_bytes` and `total_bytes`,
-/// compared against `low`. `false` if the underlying math would
-/// underflow (e.g. `total_bytes == 0`).
-fn used_percent_below(total_bytes: u64, free_bytes: u64, low_percent: u8) -> bool {
+/// Has enough been reclaimed for used% to reach the low watermark?
+///
+/// `reclaimed_bytes` is what this pass has already freed. Folding it in
+/// is what terminates the loop: the free-space measurement is taken once
+/// per pass, so a stop condition that ignored the running total would be
+/// constant for the whole pass — it would evaluate to `false` on the
+/// first candidate (pressure is by definition above the high watermark,
+/// which is above the low one) and stay `false`, so a single trigger
+/// would delete *every* completed recording rather than just enough of
+/// them.
+///
+/// `true` when `total_bytes == 0`: an unmeasurable filesystem must not
+/// authorize deletions.
+pub fn pressure_relieved(
+    total_bytes: u64,
+    free_bytes: u64,
+    reclaimed_bytes: u64,
+    low_percent: u8,
+) -> bool {
     if total_bytes == 0 {
         return true;
     }
-    let used = total_bytes.saturating_sub(free_bytes);
+    let projected_free = free_bytes.saturating_add(reclaimed_bytes).min(total_bytes);
+    let used = total_bytes.saturating_sub(projected_free);
     let pct = (used.saturating_mul(100)).saturating_div(total_bytes);
     pct <= u64::from(low_percent)
 }
@@ -475,12 +509,9 @@ mod tests {
             low_water_percent: Some(50),
             safety_bytes: None,
         };
-        // 90% used → triggers; low = 50%; keep deleting until
-        // 50% would be reached. With 3 candidates totaling
-        // 600 bytes of reclaimed, we delete until used% ≤ 50.
-        // The test simulates the post-delete free by re-checking
-        // `used_percent_below`. We pass `free_bytes` that is
-        // already at 50% so the loop exits immediately.
+        // `used_percent` (90) is above the high watermark, so a pass is
+        // warranted — but the measured free space already satisfies the
+        // low watermark, so the pass must delete nothing.
         let total = 1_000u64;
         let free = 500u64; // 50% used
         let deleted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
@@ -514,16 +545,10 @@ mod tests {
             safety_bytes: None,
         };
         let total = 1_000u64;
-        // Start at 95% used; the loop deletes candidates until
-        // used% would be ≤ 50%. The pure runner does not
-        // re-measure; the test models the post-delete free by
-        // passing a "starting free" that requires all three
-        // candidates to be deleted. We approximate by passing
-        // free=10% (very low) and trusting the loop to stop at
-        // the first iteration because used% is then ≤ 50% only
-        // after enough deletes; the pure runner does not
-        // re-measure mid-loop, so it deletes ALL eligible
-        // candidates.
+        // 95% used with only 600 bytes of reclaimable recordings: even
+        // deleting all three leaves the projected free space (650) short
+        // of nothing — it reaches 65% used, still above the 50% low
+        // watermark — so every candidate is consumed.
         let free = 50u64; // 95% used
         let deleted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
         let mut delete = count_delete(deleted.clone(), std::rc::Rc::new(vec![]));
@@ -536,9 +561,48 @@ mod tests {
             true,
             &mut delete,
         );
-        // All 3 are deleted (the pure runner does not re-measure)
         assert_eq!(stats.deleted, 3);
         assert_eq!(deleted.borrow().len(), 3);
+        assert_eq!(stats.reclaimed_bytes, 600);
+    }
+
+    #[test]
+    fn disk_pressure_stops_as_soon_as_the_low_water_mark_is_reached() {
+        // Regression guard: the stop condition ignored the bytes already
+        // reclaimed by the pass, so it was constant for the whole loop and
+        // a single trigger deleted the entire recording library instead of
+        // just enough of it.
+        let tasks = vec![
+            completed("a", "c1", 1_000, 300),
+            completed("b", "c1", 2_000, 300),
+            completed("c", "c1", 3_000, 300),
+        ];
+        let disk = DiskConfig {
+            high_water_percent: Some(80),
+            low_water_percent: Some(50),
+            safety_bytes: None,
+        };
+        let deleted = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let mut delete = count_delete(deleted.clone(), std::rc::Rc::new(vec![]));
+        // 90% used of 1000 bytes. Deleting the two oldest reclaims 600,
+        // taking projected free to 700 (30% used) — past the 50% low
+        // watermark — so the third must survive.
+        let stats = run_disk_pressure(&tasks, &disk, 90, 100, 1_000, true, &mut delete);
+        assert!(stats.disk_pressure_triggered);
+        assert_eq!(stats.deleted, 2, "pass must stop at the low watermark");
+        assert_eq!(*deleted.borrow(), vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn pressure_relieved_folds_in_what_the_pass_already_freed() {
+        // 90% used: not relieved yet.
+        assert!(!pressure_relieved(1_000, 100, 0, 50));
+        // Reclaiming 400 more takes free to 500 → exactly at the mark.
+        assert!(pressure_relieved(1_000, 100, 400, 50));
+        // Reclaiming more than the disk holds cannot report a negative use.
+        assert!(pressure_relieved(1_000, 100, u64::MAX, 50));
+        // An unmeasurable filesystem never authorizes deletions.
+        assert!(pressure_relieved(0, 0, 0, 50));
     }
 
     #[test]

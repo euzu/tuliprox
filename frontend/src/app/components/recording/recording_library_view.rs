@@ -6,17 +6,22 @@
 
 use super::recording_edit_view::{EditingTaskId, RecordingEditView};
 use crate::{
-    app::components::{text_button::TextButton, Table, TableDefinition},
+    app::components::{
+        task_status_badge::TaskStatusBadge,
+        text_button::TextButton,
+        Table, TableDefinition,
+    },
     hooks::use_service_context,
-    i18n::use_translation,
+    i18n::{use_translation, YewI18n},
     model::{DialogResult, EventMessage},
-    services::{DialogService, RecordingQuota, RecordingService, RecordingTaskResponse},
+    services::{DialogService, RecordingError, RecordingQuota, RecordingService, RecordingTaskResponse},
+    utils::format_bytes,
 };
 use shared::model::{
     permission::Permission,
     recording::{RecordingOwner, RecordingVisibility},
     web_socket::ProtocolMessage,
-    SortOrder, UserId,
+    SortOrder, TransferStatusDto, UserId,
 };
 use std::rc::Rc;
 use yew::prelude::*;
@@ -58,14 +63,28 @@ pub fn is_visible_recording_task(
 }
 
 /// Format a byte count for the human-readable quota display.
-/// The frontend already has a human-readable helper
-/// (`humanize_bytes`); this is a small wrapper that returns
-/// `unlimited` for `None` so the view does not need to special-
-/// case the absence of a configured limit.
+/// Returns a human-readable size, and `unlimited` for `None`, so the
+/// view does not need to special-case an absent configured limit.
 pub fn quota_line(used: u64, limit: Option<u64>) -> String {
     match limit {
-        Some(limit) => format!("{used} / {limit} bytes"),
-        None => format!("{used} bytes (unlimited)"),
+        Some(limit) => format!("{} / {}", format_bytes(used), format_bytes(limit)),
+        None => format!("{} (unlimited)", format_bytes(used)),
+    }
+}
+
+/// Bytes transferred so far, with the total and a percentage when the
+/// total is known. The recording rows used to show no progress at all,
+/// so an in-flight recording looked identical to a scheduled one.
+pub fn task_progress(task: &RecordingTaskResponse) -> String {
+    match task.total_bytes {
+        Some(total) if total > 0 => {
+            let percent = (task.downloaded_bytes.saturating_mul(100)) / total;
+            format!("{} / {} ({percent}%)", format_bytes(task.downloaded_bytes), format_bytes(total))
+        }
+        // A live recording has no known total — the duration is the
+        // bound, not a content length — so show what has landed so far.
+        _ if task.downloaded_bytes > 0 => format_bytes(task.downloaded_bytes),
+        _ => "—".to_string(),
     }
 }
 
@@ -75,6 +94,7 @@ enum LibraryColumn {
     Title,
     Schedule,
     Status,
+    Progress,
     Visibility,
     Actions,
 }
@@ -84,9 +104,25 @@ const HEADERS: &[&str] = &[
     "LABEL.RECORDING_COLUMN_TITLE",
     "LABEL.RECORDING_COLUMN_SCHEDULE",
     "LABEL.RECORDING_COLUMN_STATUS",
+    "LABEL.RECORDING_COLUMN_PROGRESS",
     "LABEL.RECORDING_COLUMN_VISIBILITY",
     "LABEL.RECORDING_COLUMN_ACTIONS",
 ];
+
+/// Column index → column. One place to change when a column moves;
+/// previously the mapping was written out three times (render, sort
+/// predicate, and the sortable check) and could drift.
+fn column_at(index: usize) -> LibraryColumn {
+    match index {
+        0 => LibraryColumn::Channel,
+        1 => LibraryColumn::Title,
+        2 => LibraryColumn::Schedule,
+        3 => LibraryColumn::Status,
+        4 => LibraryColumn::Progress,
+        5 => LibraryColumn::Visibility,
+        _ => LibraryColumn::Actions,
+    }
+}
 
 fn task_channel(task: &RecordingTaskResponse) -> String {
     task.recording.as_ref().and_then(|r| r.channel_name.clone()).unwrap_or_else(|| "—".to_string())
@@ -113,15 +149,24 @@ fn format_ts(ts: i64) -> String {
         .unwrap_or_else(|| ts.to_string())
 }
 
-fn task_visibility(task: &RecordingTaskResponse) -> &'static str {
+/// i18n key for a task's visibility, or `None` for a task with no
+/// recording metadata.
+fn task_visibility_key(task: &RecordingTaskResponse) -> Option<&'static str> {
     match task.recording.as_ref().map(|r| &r.visibility) {
-        Some(RecordingVisibility::Shared) => "Shared",
-        Some(RecordingVisibility::Private) => "Private",
-        None => "—",
+        Some(RecordingVisibility::Shared) => Some("LABEL.RECORDING_VISIBILITY_SHARED"),
+        Some(RecordingVisibility::Private) => Some("LABEL.RECORDING_VISIBILITY_PRIVATE"),
+        None => None,
     }
 }
 
-fn task_status(task: &RecordingTaskResponse) -> String { format!("{:?}", task.status) }
+fn task_visibility(translate: &YewI18n, task: &RecordingTaskResponse) -> String {
+    task_visibility_key(task).map_or_else(|| "—".to_string(), |key| translate.t(key))
+}
+
+/// Sort key for the status column. Ordering follows the lifecycle
+/// (`TransferStatusDto`'s own `Ord`) rather than the localized text, so
+/// the order does not change with the UI language.
+fn task_status_order(task: &RecordingTaskResponse) -> &TransferStatusDto { &task.status }
 
 #[allow(dead_code)]
 fn compare_tasks(
@@ -133,13 +178,24 @@ fn compare_tasks(
         LibraryColumn::Channel => task_channel(a).cmp(&task_channel(b)),
         LibraryColumn::Title => task_title(a).cmp(&task_title(b)),
         LibraryColumn::Schedule => task_schedule(a).cmp(&task_schedule(b)),
-        LibraryColumn::Status => task_status(a).cmp(&task_status(b)),
-        LibraryColumn::Visibility => task_visibility(a).cmp(task_visibility(b)),
+        LibraryColumn::Status => task_status_order(a).cmp(task_status_order(b)),
+        LibraryColumn::Progress => a.downloaded_bytes.cmp(&b.downloaded_bytes),
+        LibraryColumn::Visibility => task_visibility_key(a).cmp(&task_visibility_key(b)),
         LibraryColumn::Actions => std::cmp::Ordering::Equal,
     }
 }
 
 fn is_sortable_col(col: LibraryColumn) -> bool { !matches!(col, LibraryColumn::Actions) }
+
+/// Translate a service error for display.
+///
+/// Every failure path in this view used to render `format!("Cancel
+/// failed: {}", e)` — untranslated English with a raw wire code
+/// appended. The code still reaches the browser console; the user sees
+/// a sentence in their own language.
+fn error_message(translate: &YewI18n, error: &RecordingError) -> String {
+    translate.t(error.i18n_key())
+}
 
 #[function_component(RecordingLibraryView)]
 pub fn recording_library_view() -> Html {
@@ -154,16 +210,59 @@ pub fn recording_library_view() -> Html {
     let tasks = use_state(|| Rc::new(Vec::<RecordingTaskResponse>::new()));
     let quota = use_state(|| None::<RecordingQuota>);
     let editing_task_id = use_state(|| Rc::new(None::<String>));
+    // Revision of the snapshot currently rendered, so an out-of-order
+    // delivery cannot replace newer data with older data.
+    let last_revision = use_state(|| None::<u64>);
+    // Set when the socket reports an actionable refusal. Distinguishes an
+    // empty library from an unusable one.
+    let unavailable = use_state(|| None::<RecordingError>);
+    let translate_for_events = translate.clone();
 
     // Subscribe to WS-driven updates. Backend broadcasts RecordingChanged
     // after every mutation; each session's WS handler then re-runs the
     // per-session filtered snapshot and pushes it back. Live, no polling.
     {
         let tasks = tasks.clone();
+        let last_revision = last_revision.clone();
+        let unavailable = unavailable.clone();
         let svc = services.clone();
         use_effect_with((), move |_| {
+            let toastr = svc.toastr.clone();
+            let translate = translate_for_events.clone();
             let sid = svc.event.subscribe(move |msg| {
-                if let EventMessage::RecordingSnapshot { tasks: incoming, .. } = msg {
+                // The socket refused for an actionable reason — a stale
+                // token or a server-side DVR switch-off. Both used to
+                // arrive as an empty task list, so the user stared at an
+                // empty library with nothing to act on.
+                if let EventMessage::RecordingUnavailable { code } = &msg {
+                    let error = RecordingError::from_code(code);
+                    log::warn!("recording socket unavailable: {code}");
+                    toastr.error(error_message(&translate, &error));
+                    unavailable.set(Some(error));
+                    return;
+                }
+                if let EventMessage::RecordingSnapshot { revision, tasks: incoming } = msg {
+                    unavailable.set(None);
+                    // The revision guard exists for ordering, not for
+                    // completeness: `RecordingSnapshot` is a *full* list,
+                    // so a snapshot that skips revisions is still current
+                    // and needs no re-request. What it must not do is
+                    // overwrite newer data — two events racing through the
+                    // socket would otherwise leave the older list on
+                    // screen until the next mutation.
+                    //
+                    // A gap does matter the moment the backend starts
+                    // sending incremental changes; it is logged so that
+                    // change has a hook to build on.
+                    if let Some(previous) = *last_revision {
+                        if revision < previous {
+                            return;
+                        }
+                        if revision > previous.saturating_add(1) {
+                            log::debug!("recording snapshot skipped revisions {previous} -> {revision}");
+                        }
+                    }
+                    last_revision.set(Some(revision));
                     tasks.set(Rc::new(incoming.iter().map(|t| RecordingTaskResponse::from(t.clone())).collect()));
                 }
             });
@@ -177,12 +276,17 @@ pub fn recording_library_view() -> Html {
     {
         let tasks = tasks.clone();
         let quota = quota.clone();
+        let last_revision = last_revision.clone();
         use_effect_with((), move |_| {
             wasm_bindgen_futures::spawn_local(async move {
-                if let Ok(s) = RecordingService::new().list_tasks().await {
-                    tasks.set(Rc::new(s.tasks));
+                // One service instance: each `new()` builds its own HTTP
+                // client, and two were being constructed for two calls.
+                let service = RecordingService::new();
+                if let Ok(snapshot) = service.list_tasks().await {
+                    last_revision.set(Some(snapshot.revision));
+                    tasks.set(Rc::new(snapshot.tasks));
                 }
-                if let Ok(q) = RecordingService::new().get_quota().await {
+                if let Ok(q) = service.get_quota().await {
                     quota.set(Some(q));
                 }
             });
@@ -190,52 +294,51 @@ pub fn recording_library_view() -> Html {
         });
     }
 
-    let filtered: Vec<Rc<RecordingTaskResponse>> = (*tasks)
-        .iter()
-        .filter(|t| {
-            let rec = t.recording.as_ref();
-            let owner = rec.and_then(|r| r.owner_id.clone().map(RecordingOwner::User));
-            is_visible_recording_task(owner.as_ref(), rec.map(|r| &r.visibility), false)
-        })
-        .cloned()
-        .map(Rc::new)
-        .collect();
+    // Recomputed only when the task list actually changes, not on every
+    // render: the filter clones an owner id and allocates an `Rc` per row.
+    let filtered = use_memo((*tasks).clone(), |tasks| {
+        tasks
+            .iter()
+            .filter(|t| {
+                let rec = t.recording.as_ref();
+                let owner = rec.and_then(|r| r.owner_id.clone().map(RecordingOwner::User));
+                is_visible_recording_task(owner.as_ref(), rec.map(|r| &r.visibility), false)
+            })
+            .cloned()
+            .map(Rc::new)
+            .collect::<Vec<Rc<RecordingTaskResponse>>>()
+    });
 
-    let translate_for_render = translate.clone();
     let headers: Vec<String> = HEADERS.iter().map(|h| translate.t(h)).collect();
     let translate_for_render_actions = translate.clone();
     let translate_for_quota = translate.clone();
-    let translate_for_header = translate.clone();
 
-    let table_items = Rc::new(filtered);
+    let table_items = Rc::new((*filtered).clone());
+    let is_empty = table_items.is_empty();
 
     let render_header = Callback::from(move |col: usize| {
-        let headers = headers.clone();
         let col_text = headers.get(col).cloned().unwrap_or_default();
         html! { <>{ col_text }</> }
     });
-    let _ = translate_for_render;
-    let _ = translate_for_header;
 
     let render_data = {
         let svc = services.clone();
         let translate = translate_for_render_actions;
         let editing_for_actions = editing_task_id.clone();
         Callback::from(move |(col, _idx, task): (usize, usize, Rc<RecordingTaskResponse>)| {
-            let col = match col {
-                0 => LibraryColumn::Channel,
-                1 => LibraryColumn::Title,
-                2 => LibraryColumn::Schedule,
-                3 => LibraryColumn::Status,
-                4 => LibraryColumn::Visibility,
-                _ => LibraryColumn::Actions,
-            };
-            match col {
+            match column_at(col) {
                 LibraryColumn::Channel => html! { <>{ task_channel(&task) }</> },
                 LibraryColumn::Title => html! { <>{ task_title(&task) }</> },
                 LibraryColumn::Schedule => html! { <>{ task_schedule(&task) }</> },
-                LibraryColumn::Status => html! { <>{ task_status(&task) }</> },
-                LibraryColumn::Visibility => html! { <>{ task_visibility(&task) }</> },
+                LibraryColumn::Status => html! {
+                    <TaskStatusBadge
+                        status={task.status.clone()}
+                        kind={task.kind.clone()}
+                        detail={task.error.clone()}
+                    />
+                },
+                LibraryColumn::Progress => html! { <span class="tp__table__nowrap">{ task_progress(&task) }</span> },
+                LibraryColumn::Visibility => html! { <>{ task_visibility(&translate, &task) }</> },
                 LibraryColumn::Actions => {
                     let is_owner = {
                         let current_user = UserId::from(services.auth.get_username().as_str());
@@ -258,38 +361,61 @@ pub fn recording_library_view() -> Html {
                     };
                     let id_for_cancel = task.id.clone();
                     let svc_for_cancel = svc.clone();
+                    let translate_for_cancel = translate.clone();
                     let on_cancel_click = Callback::from(move |_: String| {
                         let id = id_for_cancel.clone();
                         let svc = svc_for_cancel.clone();
+                        let translate = translate_for_cancel.clone();
                         wasm_bindgen_futures::spawn_local(async move {
                             match RecordingService::new().cancel_task(&id).await {
-                                Ok(()) => svc.toastr.success("Task cancelled"),
-                                Err(e) => svc.toastr.error(format!("Cancel failed: {}", e)),
+                                Ok(()) => svc.toastr.success(translate.t("MESSAGES.RECORDING.TASK_CANCELLED")),
+                                Err(error) => {
+                                    // The wire code stays in the console for
+                                    // support; the user gets a sentence.
+                                    log::warn!("recording cancel failed: {error}");
+                                    svc.toastr.error(error_message(&translate, &error));
+                                }
                             }
                         });
                     });
                     let id_for_delete = task.id.clone();
                     let svc_for_delete = svc.clone();
                     let dialog_for_delete = dialog.clone();
+                    let translate_for_delete = translate.clone();
                     let on_delete_click = Callback::from(move |_: String| {
                         let id = id_for_delete.clone();
                         let svc = svc_for_delete.clone();
                         let dialog = dialog_for_delete.clone();
+                        let translate = translate_for_delete.clone();
                         wasm_bindgen_futures::spawn_local(async move {
-                            if dialog.confirm("Delete this recording?").await != DialogResult::Ok {
+                            let prompt = translate.t("LABEL.RECORDING_FORM_DELETE_CONFIRM");
+                            if dialog.confirm(&prompt).await != DialogResult::Ok {
                                 return;
                             }
                             match RecordingService::new().delete_task(&id).await {
-                                Ok(()) => svc.toastr.success("Task deleted"),
-                                Err(e) => svc.toastr.error(format!("Delete failed: {}", e)),
+                                Ok(()) => svc.toastr.success(translate.t("MESSAGES.RECORDING.TASK_DELETED")),
+                                Err(error) => {
+                                    log::warn!("recording delete failed: {error}");
+                                    svc.toastr.error(error_message(&translate, &error));
+                                }
                             }
                         });
                     });
+                    let edit_label = translate.t("LABEL.RECORDING_ACTION_EDIT");
+                    let cancel_label = translate.t("LABEL.RECORDING_ACTION_CANCEL");
+                    let delete_label = translate.t("LABEL.RECORDING_ACTION_DELETE");
+                    // Row actions carry the recording title in their
+                    // accessible name: nine identical "Delete" buttons in a
+                    // column are indistinguishable to a screen reader.
+                    let row_title = task_title(&task);
                     html! {
                         <div class="tp__recording-row-actions">
-                            <TextButton name="task_edit" icon="" title={translate.t("LABEL.RECORDING_ACTION_EDIT")} onclick={on_edit_click} />
-                            <TextButton name="task_cancel" icon="" title={translate.t("LABEL.RECORDING_ACTION_CANCEL")} onclick={on_cancel_click} />
-                            <TextButton name="task_delete" icon="" class="tp__button--danger" title={translate.t("LABEL.RECORDING_ACTION_DELETE")} onclick={on_delete_click} />
+                            <TextButton name="task_edit" icon="" title={edit_label.clone()}
+                                aria_label={format!("{edit_label}: {row_title}")} onclick={on_edit_click} />
+                            <TextButton name="task_cancel" icon="" title={cancel_label.clone()}
+                                aria_label={format!("{cancel_label}: {row_title}")} onclick={on_cancel_click} />
+                            <TextButton name="task_delete" icon="" class="tp__button--danger" title={delete_label.clone()}
+                                aria_label={format!("{delete_label}: {row_title}")} onclick={on_delete_click} />
                         </div>
                     }
                 }
@@ -297,16 +423,7 @@ pub fn recording_library_view() -> Html {
         })
     };
 
-    let is_sortable = Callback::from(|col: usize| {
-        is_sortable_col(match col {
-            0 => LibraryColumn::Channel,
-            1 => LibraryColumn::Title,
-            2 => LibraryColumn::Schedule,
-            3 => LibraryColumn::Status,
-            4 => LibraryColumn::Visibility,
-            _ => LibraryColumn::Actions,
-        })
-    });
+    let is_sortable = Callback::from(|col: usize| is_sortable_col(column_at(col)));
 
     let on_sort = Callback::from(|_: Option<(usize, SortOrder)>| {});
 
@@ -351,7 +468,7 @@ pub fn recording_library_view() -> Html {
                         name="task_edit_cancel"
                         icon=""
                         class="tp__button--secondary"
-                        title="Close"
+                        title={translate.t("LABEL.RECORDING_EDIT_CLOSE")}
                         onclick={on_done.reform(|_: String| ())}
                     />
                 </div>
@@ -370,7 +487,22 @@ pub fn recording_library_view() -> Html {
                         { quota_view.unwrap_or_else(|| html! { <></> }) }
                     </div>
                     <div class="tp__recording-list__body tp__list-list__body">
-                        <Table::<RecordingTaskResponse> definition={table_def} />
+                        if let Some(error) = unavailable.as_ref() {
+                            // Not an empty library — an unusable one. Say
+                            // which, so the user knows whether to wait,
+                            // reload, or ask an administrator.
+                            <p class="tp__recording-list__unavailable" role="alert">
+                                { error_message(&translate, error) }
+                            </p>
+                        } else if is_empty {
+                            // An empty table reads as "something failed".
+                            // Say what the list is for and where to start.
+                            <p class="tp__recording-list__empty">
+                                { translate.t("MESSAGES.RECORDING.EMPTY_LIBRARY") }
+                            </p>
+                        } else {
+                            <Table::<RecordingTaskResponse> definition={table_def} />
+                        }
                         { edit_view }
                     </div>
                 </div>
@@ -409,49 +541,97 @@ mod tests {
 
     #[test]
     fn quota_line_handles_unlimited() {
-        assert_eq!(quota_line(100, Some(1000)), "100 / 1000 bytes");
-        assert_eq!(quota_line(100, None), "100 bytes (unlimited)");
+        assert_eq!(quota_line(100, Some(1000)), format!("{} / {}", format_bytes(100), format_bytes(1000)));
+        assert_eq!(quota_line(100, None), format!("{} (unlimited)", format_bytes(100)));
+    }
+
+    #[test]
+    fn task_progress_reports_percentage_only_with_a_known_total() {
+        let mut task = task_with_channel("Alpha");
+        assert_eq!(task_progress(&task), "—");
+
+        // A live recording has no content length; show what has landed.
+        Rc::get_mut(&mut task).expect("unique").downloaded_bytes = 2048;
+        let progress = task_progress(&task);
+        assert!(!progress.contains('%'), "{progress}");
+        assert!(progress.contains(&format_bytes(2048)), "{progress}");
+
+        Rc::get_mut(&mut task).expect("unique").total_bytes = Some(4096);
+        assert!(task_progress(&task).contains("(50%)"), "{}", task_progress(&task));
+    }
+
+    #[test]
+    fn task_progress_does_not_divide_by_zero() {
+        let mut task = task_with_channel("Alpha");
+        {
+            let task = Rc::get_mut(&mut task).expect("unique");
+            task.total_bytes = Some(0);
+            task.downloaded_bytes = 10;
+        }
+        assert_eq!(task_progress(&task), format_bytes(10));
+    }
+
+    #[test]
+    fn status_sorts_by_lifecycle_not_by_localized_text() {
+        // "Completed" sorts before "Failed" alphabetically in English but
+        // the lifecycle order is what must hold, in every language.
+        let mut running = task_with_channel("a");
+        Rc::get_mut(&mut running).expect("unique").status = TransferStatusDto::Running;
+        let mut completed = task_with_channel("a");
+        Rc::get_mut(&mut completed).expect("unique").status = TransferStatusDto::Completed;
+        assert_eq!(compare_tasks(&running, &completed, LibraryColumn::Status), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn every_header_maps_to_a_column() {
+        // A header added without a matching `column_at` arm would silently
+        // render as the actions column.
+        assert_eq!(HEADERS.len(), 7);
+        assert!(matches!(column_at(0), LibraryColumn::Channel));
+        assert!(matches!(column_at(4), LibraryColumn::Progress));
+        assert!(matches!(column_at(HEADERS.len() - 1), LibraryColumn::Actions));
+        assert!(!is_sortable_col(column_at(HEADERS.len() - 1)));
+    }
+
+    fn task_with_channel(channel: &str) -> Rc<RecordingTaskResponse> {
+        Rc::new(RecordingTaskResponse {
+            id: "1".to_string(),
+            title: "t".to_string(),
+            kind: shared::model::TaskKindDto::Recording,
+            priority: shared::model::TaskPriorityDto::Normal,
+            status: TransferStatusDto::Scheduled,
+            retry_attempts: 0,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            next_retry_at: None,
+            scheduled_start_at: None,
+            duration_secs: None,
+            error: None,
+            recording: Some(shared::model::recording::RecordingTaskDto {
+                owner_id: None,
+                visibility: RecordingVisibility::Private,
+                channel_id: None,
+                channel_name: Some(channel.to_string()),
+                program_title: None,
+                program_start: None,
+                program_end: None,
+                scheduled_start: None,
+                scheduled_end: None,
+                pre_roll_secs: 0,
+                post_roll_secs: 0,
+                completed_at: None,
+                filename: None,
+                epg: None,
+                rule_id: None,
+                occurrence_key: None,
+            }),
+        })
     }
 
     #[test]
     fn compare_tasks_sorts_by_channel() {
-        let mk = |channel: &str| {
-            let r = RecordingTaskResponse {
-                id: "1".to_string(),
-                title: "t".to_string(),
-                kind: shared::model::TaskKindDto::Recording,
-                priority: shared::model::TaskPriorityDto::Normal,
-                status: shared::model::TransferStatusDto::Scheduled,
-                retry_attempts: 0,
-                downloaded_bytes: 0,
-                total_bytes: None,
-                next_retry_at: None,
-                scheduled_start_at: None,
-                duration_secs: None,
-                error: None,
-                recording: Some(shared::model::recording::RecordingTaskDto {
-                    owner_id: None,
-                    visibility: RecordingVisibility::Private,
-                    channel_id: None,
-                    channel_name: Some(channel.to_string()),
-                    program_title: None,
-                    program_start: None,
-                    program_end: None,
-                    scheduled_start: None,
-                    scheduled_end: None,
-                    pre_roll_secs: 0,
-                    post_roll_secs: 0,
-                    completed_at: None,
-                    filename: None,
-                    epg: None,
-                    rule_id: None,
-                    occurrence_key: None,
-                }),
-            };
-            Rc::new(r)
-        };
-        let a = mk("Alpha");
-        let b = mk("Beta");
+        let a = task_with_channel("Alpha");
+        let b = task_with_channel("Beta");
         assert_eq!(compare_tasks(&a, &b, LibraryColumn::Channel), std::cmp::Ordering::Less);
     }
 }

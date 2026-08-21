@@ -862,21 +862,46 @@ fn rollback_last_recording_marker(fd: &mut FileDownload, kind: &shared::model::r
     }
 }
 
+/// Hand a lifecycle notification off for delivery once its marker has
+/// been persisted.
+///
+/// The marker is written inside the queue-mutation boundary, so it is
+/// durable before this runs; delivery must be durable too. The
+/// notification outbox owns that: it persists the entry, retries per
+/// channel with backoff, and dead-letters what it cannot deliver. This
+/// used to `tokio::spawn(send_message(..))` directly, which meant a
+/// transient Telegram/Discord/REST error silently dropped the
+/// notification and a crash before the spawned task ran lost it too.
+///
+/// The direct send is kept as a fallback for the paths that run before
+/// the supervisor is installed (notably unit tests), so behaviour there
+/// is unchanged.
 fn spawn_recording_notification_after_persist(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
     plan: RecordingNotificationPlan,
     persisted: bool,
 ) {
-    if persisted {
-        if let Some(message) = plan.message {
-            let app_config = Arc::clone(app_config);
-            let client = client.clone();
-            tokio::spawn(async move {
-                send_message(&app_config, &client, message).await;
-            });
-        }
+    if !persisted {
+        return;
     }
+    let Some(message) = plan.message else {
+        return;
+    };
+    // A full or closed outbox hands the message back; fall through to the
+    // direct send rather than dropping it outright.
+    let message = match crate::api::model::recording::recording_supervisor::notification_outbox() {
+        Some(outbox) => match outbox.enqueue(message) {
+            None => return,
+            Some(rejected) => rejected,
+        },
+        None => message,
+    };
+    let app_config = Arc::clone(app_config);
+    let client = client.clone();
+    tokio::spawn(async move {
+        send_message(&app_config, &client, message).await;
+    });
 }
 
 async fn requeue_active_download_for_retry(
@@ -1329,11 +1354,23 @@ pub(in crate::api) async fn ensure_download_worker_running(
                                             Err(err) => break 'recording_execution DownloadExecutionResult::Failed(err),
                                         };
                                         let progress_path = recording_partial_path(&execution_download.file_path);
+                                        let container_format = app_config
+                                            .config
+                                            .load()
+                                            .video
+                                            .as_ref()
+                                            .and_then(|video| video.download.as_ref())
+                                            .and_then(|dl| dl.recording.as_ref())
+                                            .map_or_else(
+                                                shared::model::RecordingContainerFormat::default,
+                                                |recording| recording.container_format,
+                                            );
                                         let mut recording_future = Box::pin(run_recording(
                                             &execution_download,
                                             &control_signal,
                                             &control_notify,
                                             provider_handle.as_ref().and_then(|handle| handle.cancel_token.as_ref()),
+                                            container_format,
                                         ));
                                         let mut progress_tick = time::interval(RECORDING_PROGRESS_UPDATE_INTERVAL);
                                         progress_tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);

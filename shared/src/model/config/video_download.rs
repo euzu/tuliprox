@@ -33,7 +33,46 @@ const DEFAULT_RECORDING_MAX_POST_ROLL_SECS: u64 = 30 * 60; // 30 minutes
 const DEFAULT_RECORDING_CLEANUP_INTERVAL_SECS: u64 = 60 * 60; // 1 hour
 const DEFAULT_RECORDING_DISK_SAFETY_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 const DEFAULT_RECORDING_FALLBACK_BYTES_PER_MINUTE: u64 = 8 * 1024 * 1024; // 8 MiB
+const DEFAULT_RECORDING_RETENTION_SWEEP_INTERVAL_SECS: u64 = 60 * 60; // 1 hour
+const DEFAULT_RECORDING_NOTIFICATION_OUTBOX_BUFFER: usize = 1024;
+const DEFAULT_RECORDING_NOTIFICATION_MAX_ATTEMPTS: u32 = 6;
+const DEFAULT_RECORDING_NOTIFICATION_BACKOFF_INITIAL_SECS: u64 = 5;
+const DEFAULT_RECORDING_NOTIFICATION_BACKOFF_MAX_SECS: u64 = 900; // 15 minutes
 const MAX_FILENAME_TEMPLATE_BYTES: usize = 240;
+
+/// Container the recorder muxes into. Recordings used to be hard-coded
+/// to MPEG-TS regardless of the source codecs; operators recording
+/// H.265 or AAC-only channels want a container that can hold them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingContainerFormat {
+    /// MPEG-TS. Robust against truncation, so a recording killed
+    /// mid-stream still plays — which is why it is the default.
+    #[default]
+    Mpegts,
+    Matroska,
+    Mp4,
+}
+
+impl RecordingContainerFormat {
+    /// The `-f` argument for the muxer.
+    pub fn ffmpeg_format(self) -> &'static str {
+        match self {
+            Self::Mpegts => "mpegts",
+            Self::Matroska => "matroska",
+            Self::Mp4 => "mp4",
+        }
+    }
+
+    /// The extension recordings in this container get, without the dot.
+    pub fn file_extension(self) -> &'static str {
+        match self {
+            Self::Mpegts => "ts",
+            Self::Matroska => "mkv",
+            Self::Mp4 => "mp4",
+        }
+    }
+}
 
 pub fn default_recording_directory(download_dir: &str) -> String {
     format!("{download_dir}/{DEFAULT_RECORDING_DIRECTORY_SUFFIX}")
@@ -49,8 +88,44 @@ pub const fn default_recording_fallback_bytes_per_minute() -> u64 { DEFAULT_RECO
 
 fn is_default_recording_max_pre_roll_secs(value: &u64) -> bool { *value == default_recording_max_pre_roll_secs() }
 fn is_default_recording_max_post_roll_secs(value: &u64) -> bool { *value == default_recording_max_post_roll_secs() }
+pub const fn default_recording_retention_sweep_interval_secs() -> u64 {
+    DEFAULT_RECORDING_RETENTION_SWEEP_INTERVAL_SECS
+}
+pub const fn default_recording_notification_outbox_buffer() -> usize {
+    DEFAULT_RECORDING_NOTIFICATION_OUTBOX_BUFFER
+}
+pub const fn default_recording_notification_max_attempts() -> u32 {
+    DEFAULT_RECORDING_NOTIFICATION_MAX_ATTEMPTS
+}
+pub const fn default_recording_notification_backoff_initial_secs() -> u64 {
+    DEFAULT_RECORDING_NOTIFICATION_BACKOFF_INITIAL_SECS
+}
+pub const fn default_recording_notification_backoff_max_secs() -> u64 {
+    DEFAULT_RECORDING_NOTIFICATION_BACKOFF_MAX_SECS
+}
+pub const fn default_recording_enabled() -> bool { true }
+
 fn is_default_recording_fallback_bytes_per_minute(value: &u64) -> bool {
     *value == default_recording_fallback_bytes_per_minute()
+}
+fn is_default_recording_retention_sweep_interval_secs(value: &u64) -> bool {
+    *value == default_recording_retention_sweep_interval_secs()
+}
+fn is_default_recording_notification_outbox_buffer(value: &usize) -> bool {
+    *value == default_recording_notification_outbox_buffer()
+}
+fn is_default_recording_notification_max_attempts(value: &u32) -> bool {
+    *value == default_recording_notification_max_attempts()
+}
+fn is_default_recording_notification_backoff_initial_secs(value: &u64) -> bool {
+    *value == default_recording_notification_backoff_initial_secs()
+}
+fn is_default_recording_notification_backoff_max_secs(value: &u64) -> bool {
+    *value == default_recording_notification_backoff_max_secs()
+}
+fn is_recording_enabled(value: &bool) -> bool { *value }
+fn is_default_recording_container_format(value: &RecordingContainerFormat) -> bool {
+    *value == RecordingContainerFormat::default()
 }
 // `skip_serializing_if` predicates that distinguish "field absent" from
 // "field present with a zero value". An explicit `Some(0)` is a real
@@ -118,9 +193,18 @@ impl VideoDownloadConfigDto {
 }
 
 /// DVR recording configuration block.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RecordingConfigDto {
+    /// Master switch for the whole DVR feature. `false` stops the
+    /// supervisors, so nothing is materialized, swept, or notified.
+    #[serde(default = "default_recording_enabled", skip_serializing_if = "is_recording_enabled")]
+    pub enabled: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "is_default_recording_container_format"
+    )]
+    pub container_format: RecordingContainerFormat,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -147,6 +231,8 @@ pub struct RecordingConfigDto {
     pub disk: Option<RecordingDiskConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota: Option<RecordingQuotaConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<RecordingNotificationConfigDto>,
     #[serde(
         default = "default_recording_fallback_bytes_per_minute",
         skip_serializing_if = "is_default_recording_fallback_bytes_per_minute"
@@ -154,9 +240,37 @@ pub struct RecordingConfigDto {
     pub fallback_bytes_per_minute: u64,
 }
 
+/// Hand-written so `Default` agrees with the serde defaults. A derived
+/// `Default` would produce `enabled: false` and zero padding limits —
+/// i.e. a silently disabled DVR — which is the opposite of what an
+/// absent `recording:` block means.
+impl Default for RecordingConfigDto {
+    fn default() -> Self {
+        Self {
+            enabled: default_recording_enabled(),
+            container_format: RecordingContainerFormat::default(),
+            directory: None,
+            timezone: None,
+            filename_template: None,
+            default_pre_roll_secs: None,
+            max_pre_roll_secs: default_recording_max_pre_roll_secs(),
+            default_post_roll_secs: None,
+            max_post_roll_secs: default_recording_max_post_roll_secs(),
+            retention: None,
+            disk: None,
+            quota: None,
+            notifications: None,
+            fallback_bytes_per_minute: default_recording_fallback_bytes_per_minute(),
+        }
+    }
+}
+
 impl RecordingConfigDto {
     pub fn is_empty(&self) -> bool {
-        self.directory.is_none()
+        self.enabled == default_recording_enabled()
+            && is_default_recording_container_format(&self.container_format)
+            && self.notifications.is_none()
+            && self.directory.is_none()
             && self.timezone.is_none()
             && self.filename_template.is_none()
             && self.default_pre_roll_secs.is_none()
@@ -170,17 +284,84 @@ impl RecordingConfigDto {
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RecordingRetentionConfigDto {
     #[serde(default, skip_serializing_if = "is_zero_u32_opt")]
     pub keep_last_per_channel: Option<u32>,
     #[serde(default, skip_serializing_if = "is_zero_u32_opt")]
     pub delete_after_days: Option<u32>,
+    /// How often the age/count sweep runs. Independent of
+    /// `disk.cleanup_interval_secs`, which paces the watermark check.
+    #[serde(
+        default = "default_recording_retention_sweep_interval_secs",
+        skip_serializing_if = "is_default_recording_retention_sweep_interval_secs"
+    )]
+    pub sweep_interval_secs: u64,
+}
+
+impl Default for RecordingRetentionConfigDto {
+    fn default() -> Self {
+        Self {
+            keep_last_per_channel: None,
+            delete_after_days: None,
+            sweep_interval_secs: default_recording_retention_sweep_interval_secs(),
+        }
+    }
 }
 
 impl RecordingRetentionConfigDto {
-    pub fn is_empty(&self) -> bool { self.keep_last_per_channel.is_none() && self.delete_after_days.is_none() }
+    pub fn is_empty(&self) -> bool {
+        self.keep_last_per_channel.is_none()
+            && self.delete_after_days.is_none()
+            && is_default_recording_retention_sweep_interval_secs(&self.sweep_interval_secs)
+    }
+}
+
+/// Lifecycle-notification delivery. The outbox worker owns these; the
+/// recorder itself never blocks on a notification.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RecordingNotificationConfigDto {
+    /// Bounded in-memory queue between the recorder and the outbox
+    /// worker. A full channel drops the newest entry rather than
+    /// stalling a recording.
+    #[serde(
+        default = "default_recording_notification_outbox_buffer",
+        skip_serializing_if = "is_default_recording_notification_outbox_buffer"
+    )]
+    pub outbox_buffer: usize,
+    /// Delivery attempts before an entry is dead-lettered.
+    #[serde(
+        default = "default_recording_notification_max_attempts",
+        skip_serializing_if = "is_default_recording_notification_max_attempts"
+    )]
+    pub max_attempts: u32,
+    #[serde(
+        default = "default_recording_notification_backoff_initial_secs",
+        skip_serializing_if = "is_default_recording_notification_backoff_initial_secs"
+    )]
+    pub backoff_initial_secs: u64,
+    #[serde(
+        default = "default_recording_notification_backoff_max_secs",
+        skip_serializing_if = "is_default_recording_notification_backoff_max_secs"
+    )]
+    pub backoff_max_secs: u64,
+}
+
+impl Default for RecordingNotificationConfigDto {
+    fn default() -> Self {
+        Self {
+            outbox_buffer: default_recording_notification_outbox_buffer(),
+            max_attempts: default_recording_notification_max_attempts(),
+            backoff_initial_secs: default_recording_notification_backoff_initial_secs(),
+            backoff_max_secs: default_recording_notification_backoff_max_secs(),
+        }
+    }
+}
+
+impl RecordingNotificationConfigDto {
+    pub fn is_empty(&self) -> bool { *self == Self::default() }
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -450,6 +631,45 @@ fn prepare_recording_config(recording: &mut RecordingConfigDto, download_dir: &s
                 ));
             }
         }
+        if retention.sweep_interval_secs == 0 {
+            return Err(TuliproxError::ConfigVideoDownload(
+                "recording.retention.sweep_interval_secs must be > 0".to_string(),
+            ));
+        }
+        if retention.keep_last_per_channel.is_none() && retention.delete_after_days.is_none() {
+            // A retention block that expresses no policy reads as
+            // "retention is configured" while nothing is ever deleted.
+            log::warn!(
+                "recording.retention has neither keep_last_per_channel nor delete_after_days; \
+                 no recording will ever be deleted by policy"
+            );
+        }
+    }
+
+    // notifications: an outbox that cannot hold or retry anything would
+    // silently drop every lifecycle notification.
+    if let Some(notifications) = recording.notifications.as_ref() {
+        if notifications.outbox_buffer == 0 {
+            return Err(TuliproxError::ConfigVideoDownload(
+                "recording.notifications.outbox_buffer must be > 0".to_string(),
+            ));
+        }
+        if notifications.max_attempts == 0 {
+            return Err(TuliproxError::ConfigVideoDownload(
+                "recording.notifications.max_attempts must be > 0".to_string(),
+            ));
+        }
+        if notifications.backoff_initial_secs == 0 {
+            return Err(TuliproxError::ConfigVideoDownload(
+                "recording.notifications.backoff_initial_secs must be > 0".to_string(),
+            ));
+        }
+        if notifications.backoff_max_secs < notifications.backoff_initial_secs {
+            return Err(TuliproxError::ConfigVideoDownload(format!(
+                "recording.notifications.backoff_max_secs ({}) must be >= backoff_initial_secs ({})",
+                notifications.backoff_max_secs, notifications.backoff_initial_secs
+            )));
+        }
     }
 
     // disk: percentages in 0..=100, low < high, cleanup > 0, safety non-zero.
@@ -492,6 +712,26 @@ fn prepare_recording_config(recording: &mut RecordingConfigDto, download_dir: &s
     // quota: fallback bytes per minute must be > 0.
     if recording.fallback_bytes_per_minute == 0 {
         return Err(TuliproxError::ConfigVideoDownload("recording.fallback_bytes_per_minute must be > 0".to_string()));
+    }
+
+    // Nothing bounds recording disk use unless at least one of the three
+    // policies is set. Worth a warning, not an error: a dedicated
+    // filesystem is a legitimate reason to run without any of them.
+    let has_policy_retention = recording.retention.as_ref().is_some_and(|retention| {
+        retention.keep_last_per_channel.is_some() || retention.delete_after_days.is_some()
+    });
+    let has_watermarks = recording
+        .disk
+        .as_ref()
+        .is_some_and(|disk| disk.high_water_percent.is_some() && disk.low_water_percent.is_some());
+    let has_quota = recording.quota.as_ref().is_some_and(|quota| {
+        quota.default_private_bytes.is_some() || quota.shared_bytes.is_some() || !quota.per_user_bytes.is_empty()
+    });
+    if recording.enabled && !has_policy_retention && !has_watermarks && !has_quota {
+        log::warn!(
+            "recording is enabled with no retention, no disk watermarks, and no quota; \
+             recording disk usage is unbounded"
+        );
     }
 
     Ok(())
@@ -675,19 +915,65 @@ mod tests {
     // --- Recording config tests ---
 
     fn make_recording_config() -> RecordingConfigDto {
-        RecordingConfigDto {
-            directory: None,
-            timezone: None,
-            filename_template: None,
-            default_pre_roll_secs: None,
-            max_pre_roll_secs: default_recording_max_pre_roll_secs(),
-            default_post_roll_secs: None,
-            max_post_roll_secs: default_recording_max_post_roll_secs(),
-            retention: None,
-            disk: None,
-            quota: None,
-            fallback_bytes_per_minute: default_recording_fallback_bytes_per_minute(),
-        }
+        RecordingConfigDto::default()
+    }
+
+    #[test]
+    fn recording_config_default_matches_the_serde_defaults() {
+        // A derived `Default` would produce `enabled: false` and zero
+        // padding limits — a silently disabled DVR. Deserializing an empty
+        // mapping and calling `default()` must agree.
+        let deserialized: RecordingConfigDto =
+            serde_json::from_str("{}").expect("empty recording block deserializes");
+        assert_eq!(deserialized, RecordingConfigDto::default());
+        assert!(RecordingConfigDto::default().enabled);
+        assert!(RecordingConfigDto::default().is_empty());
+        assert_eq!(
+            RecordingRetentionConfigDto::default().sweep_interval_secs,
+            default_recording_retention_sweep_interval_secs()
+        );
+    }
+
+    #[test]
+    fn recording_container_format_round_trips_and_defaults_to_mpegts() {
+        assert_eq!(RecordingContainerFormat::default(), RecordingContainerFormat::Mpegts);
+        assert_eq!(RecordingContainerFormat::Mpegts.ffmpeg_format(), "mpegts");
+        assert_eq!(RecordingContainerFormat::Matroska.file_extension(), "mkv");
+        let parsed: RecordingConfigDto = serde_json::from_str(r#"{"container_format":"matroska"}"#)
+            .expect("parse container format");
+        assert_eq!(parsed.container_format, RecordingContainerFormat::Matroska);
+    }
+
+    #[test]
+    fn recording_notification_block_rejects_impossible_values() {
+        let mut recording = make_recording_config();
+        recording.notifications = Some(RecordingNotificationConfigDto {
+            max_attempts: 0,
+            ..RecordingNotificationConfigDto::default()
+        });
+        let mut video = make_recording_video_config(recording);
+        assert!(video.prepare().is_err());
+
+        let mut recording = make_recording_config();
+        recording.notifications = Some(RecordingNotificationConfigDto {
+            backoff_initial_secs: 60,
+            backoff_max_secs: 10,
+            ..RecordingNotificationConfigDto::default()
+        });
+        let mut video = make_recording_video_config(recording);
+        assert!(video.prepare().is_err());
+    }
+
+    #[test]
+    fn recording_retention_rejects_a_zero_sweep_interval() {
+        let mut recording = make_recording_config();
+        recording.retention = Some(RecordingRetentionConfigDto {
+            keep_last_per_channel: Some(5),
+            sweep_interval_secs: 0,
+            ..RecordingRetentionConfigDto::default()
+        });
+        let mut video = make_recording_video_config(recording);
+        assert!(video.prepare().is_err());
     }
 
     fn make_recording_video_config(recording: RecordingConfigDto) -> VideoConfigDto {
@@ -843,7 +1129,7 @@ mod tests {
     fn recording_retention_zero_keep_last_is_rejected() {
         let mut recording = make_recording_config();
         recording.retention =
-            Some(RecordingRetentionConfigDto { keep_last_per_channel: Some(0), delete_after_days: None });
+            Some(RecordingRetentionConfigDto { keep_last_per_channel: Some(0), ..RecordingRetentionConfigDto::default() });
         let mut video = make_recording_video_config(recording);
         let err = video.prepare().expect_err("zero keep_last should fail");
         assert!(err.to_string().contains("keep_last_per_channel"), "error: {err}");
@@ -853,7 +1139,7 @@ mod tests {
     fn recording_retention_zero_delete_after_days_is_rejected() {
         let mut recording = make_recording_config();
         recording.retention =
-            Some(RecordingRetentionConfigDto { keep_last_per_channel: None, delete_after_days: Some(0) });
+            Some(RecordingRetentionConfigDto { delete_after_days: Some(0), ..RecordingRetentionConfigDto::default() });
         let mut video = make_recording_video_config(recording);
         let err = video.prepare().expect_err("zero delete_after_days should fail");
         assert!(err.to_string().contains("delete_after_days"), "error: {err}");

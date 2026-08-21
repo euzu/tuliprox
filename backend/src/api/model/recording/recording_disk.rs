@@ -108,6 +108,67 @@ where
 /// to its mount. The caller must pass the canonical recording
 /// root, not e.g. `storage_dir` or the
 /// generic download directory.
+/// Total and available bytes on the filesystem that contains `path`,
+/// as `(total, available)`.
+///
+/// The disk-pressure sweep needs both numbers to compute a used
+/// percentage, and both must come from the *same* syscall: measuring
+/// total and free separately can straddle a write and produce a
+/// percentage that never existed.
+pub fn filesystem_capacity_for(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        let cstr = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `cstr` is a valid NUL-terminated C string; `&raw mut stat`
+        // is a writable pointer to a zeroed struct.
+        let rc = unsafe { libc::statvfs(cstr.as_ptr(), &raw mut stat) };
+        if rc != 0 {
+            return None;
+        }
+        #[cfg(target_pointer_width = "32")]
+        let bsize = u64::from(stat.f_frsize);
+        #[cfg(target_pointer_width = "64")]
+        let bsize = stat.f_frsize;
+        let total = stat.f_blocks.saturating_mul(bsize);
+        // `f_bavail`, not `f_bfree`: the service user cannot use the
+        // root-reserved blocks, so counting them would understate pressure.
+        let available = stat.f_bavail.saturating_mul(bsize);
+        Some((total, available))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut free_bytes_available: u64 = 0;
+        let mut total_bytes: u64 = 0;
+        let mut total_free_bytes: u64 = 0;
+        // SAFETY: `wide` is a NUL-terminated UTF-16 path; the three output
+        // pointers are valid mutable u64 references.
+        let ok = unsafe {
+            winapi::um::fileapi::GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut free_bytes_available,
+                &mut total_bytes,
+                &mut total_free_bytes,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        Some((total_bytes, free_bytes_available))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 pub fn free_bytes_for(path: &Path) -> Option<u64> {
     #[cfg(unix)]
     {
