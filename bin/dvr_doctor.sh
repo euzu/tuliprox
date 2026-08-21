@@ -116,13 +116,17 @@ outbox_file="${STORAGE_DIR}/recording_notification_outbox.json"
 #   Prints the file's modification time as `YYYY-MM-DDTHH:MM:SSZ`, or
 #   `unknown` if neither `stat` flavour works. GNU `stat -c %Y` and BSD
 #   / macOS `stat -f %m` both yield an mtime epoch; GNU `date -d @N`
-#   and BSD `date -r @N` both format it.
+#   accepts the `@`-prefixed epoch and formats it, BSD/macOS `date -r
+#   N` accepts the raw epoch directly (no `@` prefix).
 mtime_as_iso8601_utc() {
   local f="$1" ts
   if ts=$(stat -c %Y -- "${f}" 2>/dev/null); then
     date -u -d "@${ts}" '+%Y-%m-%dT%H:%M:%SZ'
   elif ts=$(stat -f %m -- "${f}" 2>/dev/null); then
-    date -u -r "@${ts}" '+%Y-%m-%dT%H:%M:%SZ'
+    # BSD/macOS `date -r` reads the raw epoch as a numeric argument;
+    # the `@N` form is GNU-only and would fail with "No such file or
+    # directory" because date would try to stat a file named `@<ts>`.
+    date -u -r "${ts}" '+%Y-%m-%dT%H:%M:%SZ'
   else
     echo unknown
   fi

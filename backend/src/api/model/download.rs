@@ -330,10 +330,20 @@ fn strip_prefix(path: &Path, root: &Path) -> Option<String> {
     if root.as_os_str().is_empty() {
         return None;
     }
-    // `Path::strip_prefix` already enforces the same component-level
-    // boundary as `starts_with`, so a separate `path_is_contained`
-    // check would be redundant.
-    path.strip_prefix(root).ok().map(path_to_unix_string)
+    // `Path::strip_prefix` enforces the component-level boundary, but
+    // `..` is still a valid relative-path component: a legacy path
+    // like `<root>/../etc/passwd` strips cleanly to `../etc/passwd`,
+    // and a downstream `join(root)` would resolve back outside the
+    // root. Reject anything other than `Component::Normal` so a
+    // traversal in the stored path cannot escape the recording root.
+    let stripped = path.strip_prefix(root).ok()?;
+    if !stripped
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(path_to_unix_string(stripped))
 }
 
 /// Render a path with `/` as the separator regardless of platform. The
@@ -3223,5 +3233,25 @@ mod tests {
         assert_eq!(active.state, DownloadState::Paused);
         assert!(active.next_retry_at.is_none());
         assert_eq!(queue.revision.load(Ordering::SeqCst), prior_revision + 1);
+    }
+
+    #[test]
+    fn derive_legacy_relative_path_rejects_parent_dir_traversal() {
+        // `<root>/../downloads/old.ts` strips cleanly under
+        // `Path::strip_prefix`, but the remaining `../downloads/old.ts`
+        // would let a downstream `join(root)` resolve back outside the
+        // recording root. The fix rejects anything other than
+        // `Component::Normal` after the strip.
+        let root = Path::new("/data/recordings");
+        let traversal = Path::new("/data/recordings/../downloads/old.ts");
+        assert!(derive_legacy_relative_path(traversal, Some(root), None).is_none());
+
+        // Sanity: a path that genuinely lives under the root still
+        // produces its relative form.
+        let inside = Path::new("/data/recordings/2026-08/rec.ts");
+        assert_eq!(
+            derive_legacy_relative_path(inside, Some(root), None).as_deref(),
+            Some("2026-08/rec.ts"),
+        );
     }
 }
