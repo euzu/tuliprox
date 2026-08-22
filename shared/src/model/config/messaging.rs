@@ -203,7 +203,7 @@ mod tests {
         let mut messaging =
             MessagingConfigDto { disk_alert: Some(DiskAlertConfigDto::default()), ..Default::default() };
         messaging.clean();
-        assert_eq!(messaging.disk_alert, Some(DiskAlertConfigDto::default()));
+        assert_eq!(messaging.disk_alert, None);
     }
 
     #[test]

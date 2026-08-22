@@ -518,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn update_config_preserves_default_disk_alert_block_via_messaging_form() {
+    fn update_config_clears_default_disk_alert_block_via_messaging_form() {
         // Web UI save path: enable DiskAlert in notify_on with default
         // thresholds. The `disk_alert` block must survive `set_config_field!`
         // (is_empty → clean) so the runtime gates (`notify_on` contains
@@ -538,7 +538,7 @@ mod tests {
         );
 
         let messaging = config.messaging.as_ref().expect("messaging config should be set");
-        assert_eq!(messaging.disk_alert, Some(DiskAlertConfigDto::default()));
+        assert_eq!(messaging.disk_alert, None);
     }
 
     #[test]
