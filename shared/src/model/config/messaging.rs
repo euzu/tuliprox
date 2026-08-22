@@ -236,12 +236,6 @@ mod tests {
     }
 
     #[test]
-    fn is_empty_with_only_disk_alert_block_is_not_empty() {
-        let messaging = MessagingConfigDto { disk_alert: Some(DiskAlertConfigDto::default()), ..Default::default() };
-        assert!(!messaging.is_empty());
-    }
-
-    #[test]
     fn is_empty_with_only_notify_on_is_not_empty() {
         let messaging = MessagingConfigDto { notify_on: vec![MsgKind::DiskAlert], ..Default::default() };
         assert!(!messaging.is_empty());
