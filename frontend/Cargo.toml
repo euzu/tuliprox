@@ -7,9 +7,9 @@ rust-version.workspace = true
 [dependencies]
 shared = { version = "3.3.88", path = "../shared" }
 chrono.workspace = true
-yew = "0.22.1"
-yew-router = "0.19.0"
-yew-hooks = "0.5.0"
+yew = "0.23.0"
+yew-router = "0.20.0"
+yew-hooks = "0.6.4"
 i18nrs = "0.1.9"
 serde_json.workspace = true
 serde.workspace = true
