@@ -210,6 +210,22 @@
 - **Status Health Banner**:
   - A single green/amber/red health indicator in the header aggregates the realtime connection, backend status,
     and provider connection capacity, with a hover breakdown and click-through to the Stats view.
+  - The banner now switches to amber ("degraded") only when **every** input group is exhausted. A busy provider
+    with available fallback capacity (another enabled alias or input in the same group) stays green, matching
+    the `/ready` endpoint. The per-provider 80% warning threshold still colors the individual provider rows in
+    the hover breakdown.
+
+- **Readiness Probe Endpoint (`/ready`)**:
+  - New `GET /ready` endpoint for load balancers and container orchestration: answers `200`
+    (`{"status":"ready"}`) while at least one input group has spare connection capacity, and `503`
+    (`{"status":"exhausted"}`) once every input group is fully used. Before provider connections are
+    registered it answers `503` (`{"status":"initializing"}`).
+  - Capacity is evaluated per input group: an input and its enabled aliases form one group, so a saturated
+    primary account still counts as ready while any of its aliases (or any other group) has a free slot.
+    Disabled inputs and aliases contribute no capacity.
+  - The container-template `docker-compose.yml` documents the probe split: Docker keeps the liveness check via
+    `/healthcheck` (restarts on crash, not on transient capacity exhaustion), while orchestrators (k8s, swarm)
+    should point their readiness probe at `/ready`. `/api/v1/status` remains the detailed status payload.
 
 - **Live Metric Sparklines**:
   - The Stats cards now show interactive time-series sparklines for CPU, memory, network throughput, active users,
@@ -590,6 +606,18 @@
   channel ids across two sources to exercise the priority-override `Occupied` branch and
   fails loudly if it ever breaks.
 
+- **Readiness hot path trimmed for frequent polling**: `/ready` is typically polled every few seconds by load
+  balancers. The member→group lookup table is now derived once when the source config loads
+  (`SourcesConfig.group_lookup`) instead of being rebuilt on every request; the saturation check consumes an
+  iterator of provider slots and accumulates the few groups in a linear `Vec` scan instead of allocating a
+  `HashMap` per call; and the response is a typed `ReadyResponse` struct instead of a `serde_json::json!` DOM
+  tree. The only remaining per-request work is the live connection walk, which cannot be cached.
+
+- **Health banner render allocations**: provider rows now hold shared `Arc<str>` names instead of freshly
+  allocated `String`s, and the saturation check iterates the rows instead of cloning them into an intermediate
+  `Vec` on every render. Backend and frontend share one `CapacityGroup`/`build_group_lookup` implementation in
+  the `shared` crate, so `/ready` and the banner can no longer drift apart in how they group inputs and aliases.
+
 ## 🐛 Fixes
 
 - **DVR: cancelling a recording could kill a different one.** `cancel_recording` read the active slot, compared the
@@ -729,6 +757,19 @@
   - The default `true` is unchanged behaviour: the configured fallback video is still served.
   - All 6 factories are routed through a single helper (`create_video_stream`) so the new behavior is centralized
     and applies uniformly without per-call-site changes.
+- **Readiness counted disabled providers as free capacity.** `/ready` and the health banner included disabled
+  inputs and aliases in the capacity calculation — for example accounts that expired and were switched off during
+  config preparation. A fully used setup could therefore still report spare slots through members that cannot
+  accept connections. Readiness now only considers enabled inputs and aliases, matching the provider lineups that
+  actually accept connections.
+- **`/ready` could report phantom readiness with unusable capacity.** When no enabled input was left, the
+  endpoint answered `initializing` or even `ready` instead of `503 exhausted`; an empty enabled-provider slot
+  list is now always treated as exhausted. The group capacity accumulator was also widened from `u16` to `usize`,
+  so groups whose members sum beyond 65 535 connections can no longer overflow into a wrong state.
+- **Health banner marked groups saturated although a fallback was idle.** The banner derived its saturation
+  slots only from providers with active connections, so an enabled alias without connections was invisible and
+  its spare capacity ignored. Slots are now derived from the configured enabled members (missing live counts
+  default to zero), matching the `/ready` endpoint.
 
 ## ⚙️ New Settings
 

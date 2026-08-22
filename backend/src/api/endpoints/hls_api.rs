@@ -8167,10 +8167,11 @@ mod tests {
     use http_body_util::BodyExt;
     use shared::{
         model::{
-            ConfigPaths, ConfigProviderDto, ConfigTargetDto, ConfigTargetOptions, ConfigTargetShareLiveStreams,
-            HlsCacheConfigDto, HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevel,
-            HlsSegmentRepairMode, HlsStripConfigDto, HlsStripMode, InputType, M3uPlaylistItem, M3uTargetOutputDto,
-            PlaylistItem, PlaylistItemHeader, PlaylistItemType, ProviderUrlSelectionPolicy, ReverseProxyConfigDto,
+            provider_saturation::build_group_lookup, ConfigPaths, ConfigProviderDto, ConfigTargetDto,
+            ConfigTargetOptions, ConfigTargetShareLiveStreams, HlsCacheConfigDto,
+            HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode,
+            HlsStripConfigDto, HlsStripMode, InputType, M3uPlaylistItem, M3uTargetOutputDto, PlaylistItem,
+            PlaylistItemHeader, PlaylistItemType, ProviderUrlSelectionPolicy, ReverseProxyConfigDto,
             StreamConfigDto, StreamProperties, TargetOutputDto, UserConnectionPermission, XtreamCluster,
             XtreamTargetOutputDto,
         },
@@ -8972,13 +8973,7 @@ mod tests {
                 custom_stream_response_enabled: true,
                 ..Default::default()
             })),
-            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig {
-                batch_files: vec![],
-                provider: vec![],
-                inputs: vec![],
-                sources: vec![],
-                templates: None,
-            })),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
             hdhomerun: Arc::new(ArcSwapOption::empty()),
             api_proxy: Arc::new(ArcSwapOption::from(Some(Arc::new(api_proxy)))),
             file_locks: Arc::new(crate::utils::FileLockManager::default()),
@@ -9401,13 +9396,14 @@ mod tests {
         .is_none());
     }
 
-    #[allow(dead_code)]
     fn store_test_sources_with_target(app_state: &Arc<AppState>, input: ConfigInput, target: ConfigTarget) {
         let input = Arc::new(input);
+        let inputs = vec![Arc::clone(&input)];
         app_state.app_config.sources.store(Arc::new(SourcesConfig {
             batch_files: vec![],
             provider: vec![],
-            inputs: vec![Arc::clone(&input)],
+            group_lookup: build_group_lookup(&inputs),
+            inputs,
             sources: vec![ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![Arc::new(target)] }],
             templates: None,
         }));
@@ -12454,6 +12450,7 @@ mod tests {
             app_config.sources.store(Arc::new(SourcesConfig {
                 batch_files: vec![],
                 provider: vec![],
+                group_lookup: build_group_lookup(&inputs),
                 inputs,
                 sources: vec![],
                 templates: None,

@@ -293,6 +293,8 @@ This is a compact operator-oriented overview of the `/api/v1` REST API groups cu
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `GET` | `/healthcheck` | Liveness probe — 200 while the process is running. Used by Docker via the `--healthcheck` CLI flag. |
+| `GET` | `/ready` | Readiness probe — 200 when at least one input group has spare connection capacity; 503 when every input group is exhausted. |
 | `GET` | `/api/v1/status` | Server status, version, active users, provider connections, cache state |
 | `GET` | `/api/v1/streams` | Current active streams |
 | `GET` | `/api/v1/ipinfo` | External IPv4/IPv6 check if configured |

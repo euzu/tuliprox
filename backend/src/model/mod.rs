@@ -3,6 +3,7 @@ mod mapping;
 mod xmltv;
 mod xtream;
 mod healthcheck;
+pub mod readiness;
 mod config;
 mod input_source;
 pub mod messaging;

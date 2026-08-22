@@ -271,6 +271,35 @@ fn create_healthcheck() -> Healthcheck {
 
 async fn healthcheck() -> impl axum::response::IntoResponse { axum::Json(create_healthcheck()) }
 
+#[derive(serde::Serialize)]
+struct ReadyResponse {
+    status: &'static str,
+}
+
+async fn ready(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl axum::response::IntoResponse {
+    use crate::model::readiness::build_provider_slots;
+    use shared::model::provider_saturation::is_exhausted;
+    let sources = app_state.app_config.sources.load();
+    let Some(connections) = app_state.active_provider.active_connections().await else {
+        // No live connections yet: either the lineups are still warming up, or
+        // there is no enabled input that could ever carry one.
+        let status = if sources.inputs.iter().any(|input| input.enabled) { "initializing" } else { "exhausted" };
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(ReadyResponse { status }));
+    };
+    let slots = build_provider_slots(&sources.inputs, &connections);
+    // No enabled input or alias left means no capacity can ever be served.
+    let exhausted = slots.is_empty() || is_exhausted(slots, &sources.group_lookup);
+    let status_label = if exhausted { "exhausted" } else { "ready" };
+    let status_code = if exhausted {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        axum::http::StatusCode::OK
+    };
+    (status_code, axum::Json(ReadyResponse { status: status_label }))
+}
+
 async fn create_shared_data(
     app_config: &Arc<AppConfig>,
     forced_targets: &Arc<ProcessTargets>,
@@ -662,6 +691,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     // Web Server
     let mut router = axum::Router::new()
         .route("/healthcheck", axum::routing::get(healthcheck))
+        .route("/ready", axum::routing::get(ready))
         .nest_service("/.well-known", ServeDir::new(web_dir_path.join("static/.well-known")))
         .merge(ws_api_register(web_auth_enabled, web_ui_path.as_str()))
         .merge(log_ws_api_register(web_auth_enabled, web_ui_path.as_str()));
@@ -944,6 +974,182 @@ mod tests {
 
         for path in matching_corrupt_paths {
             let _ = std::fs::remove_file(path);
+        }
+    }
+
+    mod ready_endpoint {
+        use super::super::ready;
+        use crate::{
+            api::model::{
+                ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionKind, ConnectionManager,
+                DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, ManualPlaylistUpdateRequest,
+                MetadataUpdateManager, PlaylistStorageState, ProviderHandle, SharedStreamManager, UpdateGuard,
+            },
+            model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProcessTargets, SourcesConfig},
+            utils::{FileLockManager, GeoIp},
+        };
+        use arc_swap::{ArcSwap, ArcSwapOption};
+        use axum::response::IntoResponse;
+        use shared::{defaults::default_user_priority, model::provider_saturation::build_group_lookup};
+        use std::{net::SocketAddr, sync::Arc};
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+
+        fn test_input(name: &'static str, max_connections: u16, enabled: bool) -> Arc<ConfigInput> {
+            Arc::new(ConfigInput {
+                name: name.into(),
+                input_type: shared::model::InputType::Xtream,
+                url: format!("http://{name}.example"),
+                username: Some("user".to_string()),
+                password: Some("pass".to_string()),
+                enabled,
+                max_connections,
+                ..ConfigInput::default()
+            })
+        }
+
+        fn test_app_config(inputs: Vec<Arc<ConfigInput>>) -> Arc<AppConfig> {
+            let sources = SourcesConfig {
+                batch_files: vec![],
+                templates: None,
+                provider: vec![],
+                group_lookup: build_group_lookup(&inputs),
+                inputs,
+                sources: vec![],
+            };
+            Arc::new(AppConfig {
+                config: Arc::new(ArcSwap::from_pointee(Config::default())),
+                sources: Arc::new(ArcSwap::from_pointee(sources)),
+                hdhomerun: Arc::new(ArcSwapOption::empty()),
+                api_proxy: Arc::new(ArcSwapOption::empty()),
+                file_locks: Arc::new(FileLockManager::default()),
+                paths: Arc::new(ArcSwap::from_pointee(shared::model::ConfigPaths {
+                    home_path: String::new(),
+                    config_path: String::new(),
+                    storage_path: String::new(),
+                    config_file_path: String::new(),
+                    sources_file_path: String::new(),
+                    mapping_file_path: None,
+                    mapping_files_used: None,
+                    template_file_path: None,
+                    template_files_used: None,
+                    api_proxy_file_path: String::new(),
+                    custom_stream_response_path: None,
+                })),
+                custom_stream_response: Arc::new(ArcSwapOption::empty()),
+                access_token_secret: [0; 32],
+                encrypt_secret: [0; 16],
+                media_tools: Arc::new(MediaToolCapabilities::default()),
+            })
+        }
+
+        fn test_app_state(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
+            let event_manager = Arc::new(EventManager::new());
+            let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+            let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
+            active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+            let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+            let config = app_cfg.config.load();
+            let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
+            let connection_manager = Arc::new(ConnectionManager::new(
+                &active_users,
+                &active_provider,
+                &shared_stream_manager,
+                &event_manager,
+                None,
+            ));
+            let tokens = CancelTokens {
+                scheduler: CancellationToken::new(),
+                hdhomerun: CancellationToken::new(),
+                file_watch: CancellationToken::new(),
+                provider_dns: CancellationToken::new(),
+                metadata: CancellationToken::new(),
+                qos_aggregation: CancellationToken::new(),
+                downloads: CancellationToken::new(),
+                hls_cache: CancellationToken::new(),
+            };
+            let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
+            let (manual_update_sender, _) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
+            Arc::new(AppState {
+                forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
+                    enabled: false,
+                    inputs: Vec::new(),
+                    targets: Vec::new(),
+                    target_names: Vec::new(),
+                })),
+                app_config: app_cfg,
+                http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+                http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+                public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+                downloads: Arc::new(DownloadQueue::new()),
+                cache: Arc::new(ArcSwapOption::default()),
+                shared_stream_manager,
+                hls_proxy: Arc::new(HlsProxyManager::new()),
+                hls_provisioning: Arc::new(HlsProvisioningState::new()),
+                active_users,
+                active_provider,
+                connection_manager,
+                event_manager,
+                cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+                playlists: Arc::new(PlaylistStorageState::new()),
+                geoip,
+                update_guard: UpdateGuard::new(),
+                metadata_manager,
+                manual_update_sender,
+            })
+        }
+
+        async fn call_ready(state: Arc<AppState>) -> (axum::http::StatusCode, String) {
+            let response = ready(axum::extract::State(state)).await.into_response();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("response body");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+            (status, body["status"].as_str().expect("status label").to_string())
+        }
+
+        async fn acquire(state: &Arc<AppState>, input: &'static str, addr: &'static str) -> ProviderHandle {
+            let addr: SocketAddr = addr.parse().expect("socket addr");
+            state
+                .active_provider
+                .acquire_connection(&input.into(), &addr, default_user_priority(), ConnectionKind::Normal)
+                .await
+                .expect("connection allocation")
+        }
+
+        #[tokio::test]
+        async fn ready_is_initializing_before_first_connection() {
+            let state = test_app_state(test_app_config(vec![test_input("prov", 4, true)]));
+            let (status, label) = call_ready(state).await;
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(label, "initializing");
+        }
+
+        #[tokio::test]
+        async fn ready_is_exhausted_without_enabled_inputs() {
+            let state = test_app_state(test_app_config(vec![test_input("prov", 4, false)]));
+            let (status, label) = call_ready(state).await;
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(label, "exhausted");
+        }
+
+        #[tokio::test]
+        async fn ready_is_ready_while_capacity_remains() {
+            let state = test_app_state(test_app_config(vec![test_input("prov", 2, true)]));
+            let allocation = acquire(&state, "prov", "127.0.0.1:45101").await;
+            let (status, label) = call_ready(state).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            assert_eq!(label, "ready");
+            drop(allocation);
+        }
+
+        #[tokio::test]
+        async fn ready_is_exhausted_when_all_groups_are_full() {
+            let state = test_app_state(test_app_config(vec![test_input("prov", 1, true)]));
+            let allocation = acquire(&state, "prov", "127.0.0.1:45102").await;
+            let (status, label) = call_ready(state).await;
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(label, "exhausted");
+            drop(allocation);
         }
     }
 }

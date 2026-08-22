@@ -2,6 +2,7 @@ use crate::model::{macros, ConfigInput, ConfigTarget, ProcessTargets};
 use indexmap::IndexMap;
 use parking_lot::RwLock;
 use shared::error::TuliproxError;
+use shared::model::provider_saturation::build_group_lookup;
 use shared::model::{
     ConfigProviderDto, ConfigSourceDto, DnsPrefer, DnsScheme, OnConnectErrorPolicy, OnResolveErrorPolicy, PatternTemplate,
     ProviderUrlSelectionPolicy, SourcesConfigDto,
@@ -408,6 +409,9 @@ pub struct SourcesConfig {
     pub provider: Vec<Arc<ConfigProvider>>,
     pub inputs: Vec<Arc<ConfigInput>>,
     pub sources: Vec<ConfigSource>,
+    /// Member name (input or alias) mapped to its main input name. Derived
+    /// from `inputs` when the config is loaded; rebuild it after changing `inputs`.
+    pub group_lookup: HashMap<Arc<str>, Arc<str>>,
 }
 
 macros::try_from_impl!(SourcesConfig);
@@ -443,6 +447,7 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
         }
 
         let inputs: Vec<Arc<ConfigInput>> = inputs.into_iter().map(Arc::new).collect();
+        let group_lookup = build_group_lookup(&inputs);
 
         let mut sources = Vec::new();
         for source_dto in &dto.sources {
@@ -461,6 +466,7 @@ impl TryFrom<&SourcesConfigDto> for SourcesConfig {
             provider,
             inputs,
             sources,
+            group_lookup,
         })
     }
 }

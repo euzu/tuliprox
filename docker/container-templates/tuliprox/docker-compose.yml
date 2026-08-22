@@ -17,6 +17,12 @@ services:
     environment:
       - TZ=America/Chicago
     healthcheck:
+      # Liveness probe — exits 0 whenever the HTTP /healthcheck endpoint returns
+      # {"status":"ok"}, i.e. the process is running. Container restarts only on
+      # crash, not on transient capacity exhaustion. For readiness gating in an
+      # orchestrator (k8s, swarm), point `readinessProbe` at the `/ready` HTTP
+      # endpoint instead — 200 when at least one input group has spare capacity,
+      # 503 when every group is exhausted.
       test: ["CMD", "/app", "-p", "/app/config", "--healthcheck"]
       interval: 30s
       timeout: 10s
