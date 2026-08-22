@@ -91,10 +91,10 @@ struct DialogHostProps {
 /// Only this component re-renders when the stack changes.
 #[component]
 fn DialogHost(props: &DialogHostProps) -> Html {
-    // Ab Yew 0.23 rendert `use_reducer` nicht, wenn der Reducer dieselbe
-    // `Rc` zurückgibt. Ein No-op-Pop (siehe `reduce`) bleibt damit
-    // konsequenzlos; ein neues `Rc` löst genau dann einen Render aus, wenn
-    // sich der Stack tatsächlich geändert hat.
+    // Since Yew 0.23, `use_reducer` does not re-render when the reducer
+    // returns the same `Rc`. Therefore, a no-op `Pop` (see `reduce`) has
+    // no effect. Every actual stack change returns a new `Rc` and triggers
+    // the required re-render.
     let dialog_stack = use_reducer(DialogStack::default);
 
     {
