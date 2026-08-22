@@ -620,6 +620,11 @@
 
 ## 🐛 Fixes
 
+- **Web UI: disk-space alerts could not be enabled from Config → Messaging.** The messaging form only included the
+  `messaging.disk_alert` block when a threshold field was touched, and the save-time cleanup dropped the block whenever
+  all thresholds still equalled their defaults — even though the block's presence is what enables the alerts. The
+  `DiskAlert` entry in `notify_on` is now the on/off switch: checking it writes the block (default thresholds when
+  untouched), unchecking removes it, and default-valued blocks are no longer stripped on save.
 - **DVR: cancelling a recording could kill a different one.** `cancel_recording` read the active slot, compared the
   uuid, then called the no-uuid `cancel_active()`. If ffmpeg finished in between and the queue promoted another
   recording, that innocent recording was cancelled instead. Now cancels by uuid.

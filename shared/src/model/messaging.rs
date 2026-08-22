@@ -69,6 +69,8 @@ impl FromStr for MsgKind {
     type Err = TuliproxError;
 
     fn from_str(s: &str) -> Result<Self, TuliproxError> {
+        // Accepts both the snake_case wire name and the CamelCase variant
+        // name so values produced by `Display`/`to_string` round-trip.
         if s.eq_ignore_ascii_case("info") {
             Ok(Self::Info)
         } else if s.eq_ignore_ascii_case("stats") {
@@ -77,13 +79,13 @@ impl FromStr for MsgKind {
             Ok(Self::Error)
         } else if s.eq_ignore_ascii_case("watch") {
             Ok(Self::Watch)
-        } else if s.eq_ignore_ascii_case("disk_alert") {
+        } else if s.eq_ignore_ascii_case("disk_alert") || s.eq_ignore_ascii_case("diskalert") {
             Ok(Self::DiskAlert)
-        } else if s.eq_ignore_ascii_case("recording_started") {
+        } else if s.eq_ignore_ascii_case("recording_started") || s.eq_ignore_ascii_case("recordingstarted") {
             Ok(Self::RecordingStarted)
-        } else if s.eq_ignore_ascii_case("recording_completed") {
+        } else if s.eq_ignore_ascii_case("recording_completed") || s.eq_ignore_ascii_case("recordingcompleted") {
             Ok(Self::RecordingCompleted)
-        } else if s.eq_ignore_ascii_case("recording_failed") {
+        } else if s.eq_ignore_ascii_case("recording_failed") || s.eq_ignore_ascii_case("recordingfailed") {
             Ok(Self::RecordingFailed)
         } else {
             Err(TuliproxError::Config(format!("Unknown MsgKind: {s}")))
@@ -117,5 +119,28 @@ mod tests {
         assert_eq!(MsgKind::DiskAlert.template_filename("discord"), "discord_disk_alert.templ");
         assert_eq!(MsgKind::DiskAlert.template_filename("rest"), "rest_disk_alert.templ");
         assert_eq!(MsgKind::DiskAlert.template_filename("pushover"), "pushover_disk_alert.templ");
+    }
+
+    #[test]
+    fn display_round_trips_through_from_str() {
+        // Regression test: `Display` emitted `DiskAlert` while `FromStr`
+        // only accepted `disk_alert`, so the frontend notify_on radio
+        // group silently dropped the selection on the way back.
+        let kinds = [
+            MsgKind::Info,
+            MsgKind::Stats,
+            MsgKind::Error,
+            MsgKind::Watch,
+            MsgKind::DiskAlert,
+            MsgKind::RecordingStarted,
+            MsgKind::RecordingCompleted,
+            MsgKind::RecordingFailed,
+        ];
+        for kind in kinds {
+            assert!(
+                kind.to_string().parse::<MsgKind>().is_ok_and(|parsed| parsed == kind),
+                "round-trip failed for {kind}"
+            );
+        }
     }
 }

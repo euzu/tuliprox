@@ -5,6 +5,12 @@
     margin: 0;
   }
 
+  &__selected, &__selected:focus {
+    background-color: var(--text-button-active-background-color);
+    color: var(--text-button-active-color);
+    border-color: var(--text-button-active-border-color);
+  }
+
   button:not(:first-child) {
     border-top-left-radius: 0;
     border-bottom-left-radius: 0;

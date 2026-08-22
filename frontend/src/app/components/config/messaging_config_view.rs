@@ -159,13 +159,13 @@ pub fn MessagingConfigView() -> Html {
                 form.rest = Some(r);
                 form.pushover = Some(p);
                 form.discord = Some(d);
-                // `disk_alert` is opt-in: only set when the user has touched
-                // the form. Persisting the always-default struct on every
-                // edit would silently overwrite the user's empty
-                // (i.e. disabled) config on save.
-                if dam {
-                    form.disk_alert = Some(da);
-                }
+                // The `DiskAlert` entry in `notify_on` is the on/off switch
+                // for disk alerts: the runtime only fires alerts when
+                // `notify_on` contains `DiskAlert` AND a `disk_alert` block
+                // exists. Keep both in sync so checking the chip enables
+                // alerts (default thresholds when untouched) and unchecking
+                // removes the block.
+                form.disk_alert = if form.notify_on.contains(&MsgKind::DiskAlert) { Some(da) } else { None };
 
                 let modified = mm || tm || rm || pm || dm || dam;
                 ConfigForm::Messaging(modified, form)
@@ -470,10 +470,11 @@ pub fn MessagingConfigView() -> Html {
             <>
             <div class="tp__messaging-config-view__header tp__config-view-page__header">
                 { config_field_child!(translate.t("LABEL.NOTIFY_ON"), "MESSAGING_CONFIG.NOTIFY_ON", {
+                   let dispatch_handle = msg_state.clone();
                    html! { <RadioButtonGroup
                         multi_select={true} none_allowed={true}
                         on_select={Callback::from(move |selections: Rc<Vec<String>>| {
-                            msg_state.dispatch(MessagingConfigFormAction::NotifyOn(
+                            dispatch_handle.dispatch(MessagingConfigFormAction::NotifyOn(
                                 selections.iter().filter_map(|s| MsgKind::from_str(s).ok()).collect()));
                         })}
                         options={notify_on_options_text.clone()}
