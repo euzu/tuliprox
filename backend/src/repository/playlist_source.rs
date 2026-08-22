@@ -1495,13 +1495,7 @@ mod tests {
     fn test_app_config() -> Arc<AppConfig> {
         Arc::new(AppConfig {
             config: Arc::new(ArcSwap::from_pointee(Config::default())),
-            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig {
-                batch_files: Vec::new(),
-                templates: None,
-                provider: Vec::new(),
-                inputs: Vec::new(),
-                sources: Vec::new(),
-            })),
+            sources: Arc::new(ArcSwap::from_pointee(SourcesConfig::default())),
             hdhomerun: Arc::new(ArcSwapOption::empty()),
             api_proxy: Arc::new(ArcSwapOption::empty()),
             file_locks: Arc::new(FileLockManager::default()),

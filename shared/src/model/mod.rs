@@ -22,6 +22,7 @@ mod playlist_info_document;
 mod playlist_request;
 mod processing_order;
 mod progress;
+pub mod provider_saturation;
 pub mod recording;
 pub mod recording_catalog;
 pub mod recording_rule;

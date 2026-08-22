@@ -1273,8 +1273,9 @@ mod tests {
     use shared::{
         foundation::Filter,
         model::{
-            ConfigPaths, ConfigProviderDto, EpgChannel, EpgConfigDto, EpgProgramme, EpgSourceDto, EpgSourceTypeDto,
-            IcsDummyConfigDto, IcsEpgSourceConfigDto, InputType, PlaylistRequest, ProcessingOrder, XtreamCluster,
+            provider_saturation::build_group_lookup, ConfigPaths, ConfigProviderDto, EpgChannel, EpgConfigDto,
+            EpgProgramme, EpgSourceDto, EpgSourceTypeDto, IcsDummyConfigDto, IcsEpgSourceConfigDto, InputType,
+            PlaylistRequest, ProcessingOrder, XtreamCluster,
         },
         utils::Internable,
     };
@@ -1357,10 +1358,12 @@ mod tests {
     }
 
     fn test_app_config(input: Arc<ConfigInput>, source: ConfigSource) -> AppConfig {
+        let inputs = vec![input];
         let sources = SourcesConfig {
             batch_files: vec![],
             provider: vec![],
-            inputs: vec![input],
+            group_lookup: build_group_lookup(&inputs),
+            inputs,
             sources: vec![source],
             templates: None,
         };
@@ -1411,18 +1414,22 @@ mod tests {
             watch: None,
             use_memory_cache: false,
         });
-        let sources = |later_target_id| SourcesConfig {
-            batch_files: vec![],
-            provider: vec![],
-            inputs: vec![Arc::clone(&input_a), Arc::clone(&input_b)],
-            sources: vec![
-                ConfigSource { inputs: vec!["input-a".intern()], targets: vec![target(11, "target-a")] },
-                ConfigSource {
-                    inputs: vec!["input-b".intern()],
-                    targets: vec![target(later_target_id, "stable-target")],
-                },
-            ],
-            templates: None,
+        let sources = |later_target_id| {
+            let inputs = vec![Arc::clone(&input_a), Arc::clone(&input_b)];
+            SourcesConfig {
+                batch_files: vec![],
+                provider: vec![],
+                group_lookup: build_group_lookup(&inputs),
+                inputs,
+                sources: vec![
+                    ConfigSource { inputs: vec!["input-a".intern()], targets: vec![target(11, "target-a")] },
+                    ConfigSource {
+                        inputs: vec!["input-b".intern()],
+                        targets: vec![target(later_target_id, "stable-target")],
+                    },
+                ],
+                templates: None,
+            }
         };
         let mut app_config = test_app_config(
             Arc::new(ConfigInput { id: 0, name: "unused".intern(), ..Default::default() }),
@@ -1726,10 +1733,12 @@ mod tests {
         });
         let source =
             ConfigSource { inputs: vec![Arc::clone(&input_a.name), Arc::clone(&input_b.name)], targets: vec![target] };
+        let inputs = vec![input_a, input_b];
         let sources = SourcesConfig {
             batch_files: vec![],
             provider: vec![],
-            inputs: vec![input_a, input_b],
+            group_lookup: build_group_lookup(&inputs),
+            inputs,
             sources: vec![source],
             templates: None,
         };

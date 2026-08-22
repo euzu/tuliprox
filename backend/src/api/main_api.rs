@@ -271,6 +271,34 @@ fn create_healthcheck() -> Healthcheck {
 
 async fn healthcheck() -> impl axum::response::IntoResponse { axum::Json(create_healthcheck()) }
 
+#[derive(serde::Serialize)]
+struct ReadyResponse {
+    status: &'static str,
+}
+
+async fn ready(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl axum::response::IntoResponse {
+    use crate::model::readiness::build_provider_slots;
+    use shared::model::provider_saturation::is_exhausted;
+    let sources = app_state.app_config.sources.load();
+    let Some(connections) = app_state.active_provider.active_connections().await else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(ReadyResponse { status: "initializing" }),
+        );
+    };
+    let slots = build_provider_slots(&sources.inputs, &connections);
+    let exhausted = sources.inputs.is_empty() || is_exhausted(slots, &sources.group_lookup);
+    let status_label = if exhausted { "exhausted" } else { "ready" };
+    let status_code = if exhausted {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        axum::http::StatusCode::OK
+    };
+    (status_code, axum::Json(ReadyResponse { status: status_label }))
+}
+
 async fn create_shared_data(
     app_config: &Arc<AppConfig>,
     forced_targets: &Arc<ProcessTargets>,
@@ -662,6 +690,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     // Web Server
     let mut router = axum::Router::new()
         .route("/healthcheck", axum::routing::get(healthcheck))
+        .route("/ready", axum::routing::get(ready))
         .nest_service("/.well-known", ServeDir::new(web_dir_path.join("static/.well-known")))
         .merge(ws_api_register(web_auth_enabled, web_ui_path.as_str()))
         .merge(log_ws_api_register(web_auth_enabled, web_ui_path.as_str()));

@@ -337,7 +337,10 @@ Generate all four formats simultaneously from the same source — one setup, eve
 - **Disk-based processing**: Playlist processing from disk instead of RAM — massively reduced memory consumption
 - **CLI mode**: One-shot processing without a server — ideal for scripting and CI/CD
 - **Server mode**: Long-running HTTP server with background tasks
-- **Healthcheck endpoint**: `/api/v1/status` for Docker/uptime monitoring
+- **Healthcheck endpoints**:
+  - `/healthcheck` — liveness probe (HTTP 200 while the process is running). Used by Docker via the `--healthcheck` CLI flag.
+  - `/ready` — readiness probe (HTTP 200 when at least one input group has spare connection capacity; 503 when every input group is exhausted).
+  - `/api/v1/status` — detailed status payload (counts, version, build time) — not intended for Docker.
 - **SSDP discovery**: HDHomeRun auto-discovery via SSDP and proprietary UDP protocol (port 65001)
 - **Database viewer**: CLI flags to inspect internal databases
 - **Environment variables**: `${env:VAR}` interpolation in all config files

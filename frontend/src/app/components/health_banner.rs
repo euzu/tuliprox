@@ -6,7 +6,7 @@ use crate::{
     utils::set_location_hash,
 };
 use gloo_timers::callback::Interval;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use yew::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,48 +49,55 @@ impl Signal {
 const CAPACITY_WARN_RATIO: f64 = 0.8;
 
 struct ProviderRow {
-    name: String,
+    name: Arc<str>,
     current: usize,
     max: u16,
     signal: Signal,
 }
 
-fn compute_health(
-    ws_connected: Option<bool>,
-    has_status: bool,
-    backend_ok: bool,
-    saturated: bool,
-    worst_ratio: f64,
-) -> Health {
+fn compute_health(ws_connected: Option<bool>, has_status: bool, backend_ok: bool, saturated: bool) -> Health {
     if ws_connected == Some(false) {
         Health::Unhealthy
     } else if ws_connected.is_none() || !has_status {
         Health::Unknown
-    } else if !backend_ok || saturated {
+    } else if !backend_ok {
         Health::Unhealthy
-    } else if worst_ratio >= CAPACITY_WARN_RATIO {
+    } else if saturated {
         Health::Degraded
     } else {
         Health::Healthy
     }
 }
 
-fn build_provider_capacity_lookup(config_ctx: &Option<ConfigContext>) -> HashMap<String, u16> {
+fn build_provider_capacity_lookup(config_ctx: &Option<ConfigContext>) -> HashMap<Arc<str>, u16> {
     config_ctx
         .as_ref()
         .and_then(|ctx| ctx.config.as_ref())
         .map(|cfg| {
             let mut map = HashMap::new();
             for input in &cfg.sources.inputs {
-                map.insert(input.name.to_string(), input.max_connections);
+                if !input.enabled {
+                    continue;
+                }
+                map.insert(input.name.clone(), input.max_connections);
                 if let Some(aliases) = &input.aliases {
                     for alias in aliases {
-                        map.insert(alias.name.to_string(), alias.max_connections);
+                        if alias.enabled {
+                            map.insert(alias.name.clone(), alias.max_connections);
+                        }
                     }
                 }
             }
             map
         })
+        .unwrap_or_default()
+}
+
+fn build_input_group_lookup(config_ctx: &Option<ConfigContext>) -> HashMap<Arc<str>, Arc<str>> {
+    config_ctx
+        .as_ref()
+        .and_then(|ctx| ctx.config.as_ref())
+        .map(|cfg| shared::model::provider_saturation::build_group_lookup(&cfg.sources.inputs))
         .unwrap_or_default()
 }
 
@@ -135,10 +142,12 @@ pub fn HealthBanner() -> Html {
         let config_ctx = config_ctx.clone();
         use_memo(config_ctx, build_provider_capacity_lookup)
     };
+    let group_lookup = {
+        let config_ctx = config_ctx.clone();
+        use_memo(config_ctx, build_input_group_lookup)
+    };
 
     let mut provider_rows: Vec<ProviderRow> = Vec::new();
-    let mut worst_ratio = 0.0_f64;
-    let mut saturated = false;
     let backend_ok = match &status {
         Some(stats) => {
             if let Some(map) = &stats.active_provider_connections {
@@ -151,11 +160,7 @@ pub fn HealthBanner() -> Html {
                         Signal::Ok
                     } else {
                         let ratio = *current as f64 / f64::from(max);
-                        if ratio > worst_ratio {
-                            worst_ratio = ratio;
-                        }
                         if ratio >= 1.0 {
-                            saturated = true;
                             Signal::Bad
                         } else if ratio >= CAPACITY_WARN_RATIO {
                             Signal::Warn
@@ -163,15 +168,23 @@ pub fn HealthBanner() -> Html {
                             Signal::Ok
                         }
                     };
-                    provider_rows.push(ProviderRow { name: name.to_string(), current: *current, max, signal });
+                    provider_rows.push(ProviderRow { name: name.clone(), current: *current, max, signal });
                 }
             }
             stats.status == "ok"
         }
         None => true,
     };
+    let saturated = shared::model::provider_saturation::is_exhausted(
+        provider_rows.iter().map(|r| shared::model::provider_saturation::ProviderSlot {
+            name: r.name.clone(),
+            max_connections: r.max,
+            current: r.current,
+        }),
+        &group_lookup,
+    );
 
-    let health = compute_health(ws_status, has_status, backend_ok, saturated, worst_ratio);
+    let health = compute_health(ws_status, has_status, backend_ok, saturated);
 
     let last_change = use_state(js_sys::Date::now);
     {
@@ -277,7 +290,7 @@ pub fn HealthBanner() -> Html {
             html! {
                 <div class="tp__health-banner__provider">
                     <span class={classes!("tp__health-banner__signal", row.signal.modifier())} aria-hidden="true" />
-                    <span class="tp__health-banner__provider-name">{ row.name.clone() }</span>
+                    <span class="tp__health-banner__provider-name">{ row.name.to_string() }</span>
                     <span class="tp__health-banner__bar" aria-hidden="true">
                         <span class="tp__health-banner__bar-fill" style={format!("width:{:.0}%", ratio * 100.0)} />
                     </span>
@@ -338,20 +351,30 @@ pub fn HealthBanner() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_health, Health, CAPACITY_WARN_RATIO};
+    use super::{compute_health, Health};
 
     #[test]
     fn compute_health_starts_unknown_without_websocket_status() {
-        assert_eq!(compute_health(None, true, true, false, 0.0), Health::Unknown);
+        assert_eq!(compute_health(None, true, true, false), Health::Unknown);
     }
 
     #[test]
     fn compute_health_marks_websocket_disconnect_unhealthy() {
-        assert_eq!(compute_health(Some(false), true, true, false, 0.0), Health::Unhealthy);
+        assert_eq!(compute_health(Some(false), true, true, false), Health::Unhealthy);
     }
 
     #[test]
-    fn compute_health_marks_capacity_warn_degraded() {
-        assert_eq!(compute_health(Some(true), true, true, false, CAPACITY_WARN_RATIO), Health::Degraded);
+    fn compute_health_marks_backend_down_unhealthy() {
+        assert_eq!(compute_health(Some(true), true, false, false), Health::Unhealthy);
+    }
+
+    #[test]
+    fn compute_health_marks_all_groups_exhausted_degraded() {
+        assert_eq!(compute_health(Some(true), true, true, true), Health::Degraded);
+    }
+
+    #[test]
+    fn compute_health_primary_busy_with_available_fallback_is_healthy() {
+        assert_eq!(compute_health(Some(true), true, true, false), Health::Healthy);
     }
 }
