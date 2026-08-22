@@ -193,3 +193,57 @@ impl MessagingConfigDto {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_preserves_disk_alert_with_default_values() {
+        let mut messaging =
+            MessagingConfigDto { disk_alert: Some(DiskAlertConfigDto::default()), ..Default::default() };
+        messaging.clean();
+        assert_eq!(messaging.disk_alert, Some(DiskAlertConfigDto::default()));
+    }
+
+    #[test]
+    fn clean_preserves_disk_alert_with_non_default_values() {
+        let custom = DiskAlertConfigDto { warn_percent: 70.0, critical_percent: 90.0, repeat_interval_secs: 600 };
+        let mut messaging = MessagingConfigDto { disk_alert: Some(custom.clone()), ..Default::default() };
+        messaging.clean();
+        assert_eq!(messaging.disk_alert, Some(custom));
+    }
+
+    #[test]
+    fn clean_strips_empty_subconfigs() {
+        let mut messaging = MessagingConfigDto {
+            telegram: Some(TelegramMessagingConfigDto::default()),
+            rest: Some(RestMessagingConfigDto::default()),
+            pushover: Some(PushoverMessagingConfigDto::default()),
+            discord: Some(DiscordMessagingConfigDto::default()),
+            ..Default::default()
+        };
+        messaging.clean();
+        assert!(messaging.telegram.is_none());
+        assert!(messaging.rest.is_none());
+        assert!(messaging.pushover.is_none());
+        assert!(messaging.discord.is_none());
+    }
+
+    #[test]
+    fn is_empty_default_messaging() {
+        assert!(MessagingConfigDto::default().is_empty());
+    }
+
+    #[test]
+    fn is_empty_with_only_disk_alert_block_is_not_empty() {
+        let messaging = MessagingConfigDto { disk_alert: Some(DiskAlertConfigDto::default()), ..Default::default() };
+        assert!(!messaging.is_empty());
+    }
+
+    #[test]
+    fn is_empty_with_only_notify_on_is_not_empty() {
+        let messaging = MessagingConfigDto { notify_on: vec![MsgKind::DiskAlert], ..Default::default() };
+        assert!(!messaging.is_empty());
+    }
+}

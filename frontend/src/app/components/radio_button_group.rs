@@ -79,7 +79,7 @@ pub fn RadioButtonGroup(props: &RadioButtonGroupProps) -> Html {
         <div class="tp__radio-button-group">
             { for props.options.iter().map(|option| {
                 let is_selected = (*selections).contains(option);
-                let class = if is_selected { "primary" } else { "" };
+                let class = if is_selected { "tp__radio-button-group__selected" } else { "" };
                 let onclick = on_click.clone();
                 let label = display_label(option);
                 html! {

@@ -149,9 +149,9 @@ mod tests {
     use super::update_config;
     use crate::app::components::config::config_page::ConfigForm;
     use shared::model::{
-        view_type::ViewType, ConfigDto, ContentSecurityPolicyConfigDto, HdHomeRunConfigDto, HdHomeRunDeviceConfigDto,
-        LibraryConfigDto, LibraryScanDirectoryDto, MetadataUpdateConfigDto, ProxyConfigDto, StreamInfoConfigDto,
-        WebAuthConfigDto, WebUiConfigDto,
+        view_type::ViewType, ConfigDto, ContentSecurityPolicyConfigDto, DiskAlertConfigDto, HdHomeRunConfigDto,
+        HdHomeRunDeviceConfigDto, LibraryConfigDto, LibraryScanDirectoryDto, MessagingConfigDto,
+        MetadataUpdateConfigDto, MsgKind, ProxyConfigDto, StreamInfoConfigDto, WebAuthConfigDto, WebUiConfigDto,
     };
 
     #[test]
@@ -515,5 +515,52 @@ mod tests {
         assert!(web_ui.player_server.is_none());
         assert_eq!(web_ui.kick_secs, WebUiConfigDto::default().kick_secs);
         assert!(web_ui.auth.is_none());
+    }
+
+    #[test]
+    fn update_config_preserves_default_disk_alert_block_via_messaging_form() {
+        // Web UI save path: enable DiskAlert in notify_on with default
+        // thresholds. The `disk_alert` block must survive `set_config_field!`
+        // (is_empty → clean) so the runtime gates (`notify_on` contains
+        // DiskAlert AND `disk_alert` is Some) fire.
+        let mut config = ConfigDto::default();
+
+        update_config(
+            &mut config,
+            vec![ConfigForm::Messaging(
+                true,
+                MessagingConfigDto {
+                    notify_on: vec![MsgKind::DiskAlert],
+                    disk_alert: Some(DiskAlertConfigDto::default()),
+                    ..Default::default()
+                },
+            )],
+        );
+
+        let messaging = config.messaging.as_ref().expect("messaging config should be set");
+        assert_eq!(messaging.disk_alert, Some(DiskAlertConfigDto::default()));
+    }
+
+    #[test]
+    fn update_config_preserves_non_default_disk_alert_block_via_messaging_form() {
+        // Non-default thresholds must round-trip verbatim through
+        // `set_config_field!`, matching the default-threshold case above.
+        let mut config = ConfigDto::default();
+        let disk_alert = DiskAlertConfigDto { warn_percent: 70.0, critical_percent: 90.0, repeat_interval_secs: 600 };
+
+        update_config(
+            &mut config,
+            vec![ConfigForm::Messaging(
+                true,
+                MessagingConfigDto {
+                    notify_on: vec![MsgKind::DiskAlert],
+                    disk_alert: Some(disk_alert.clone()),
+                    ..Default::default()
+                },
+            )],
+        );
+
+        let messaging = config.messaging.as_ref().expect("messaging config should be set");
+        assert_eq!(messaging.disk_alert, Some(disk_alert));
     }
 }
