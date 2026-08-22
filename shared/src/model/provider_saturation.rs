@@ -70,8 +70,9 @@ where
     Group: Hash + Eq,
 {
     // Only a handful of input groups is ever configured, so a linear scan is
-    // cheaper than allocating a map on every call.
-    let mut groups: Vec<(&Group, usize, u16, bool)> = Vec::new();
+    // cheaper than allocating a map on every call. Capacity sums in usize so
+    // groups whose members add up beyond u16::MAX cannot overflow.
+    let mut groups: Vec<(&Group, usize, usize, bool)> = Vec::new();
     for slot in slots {
         let Some(group) = group_of.get(&slot.name) else { continue };
         let index = match groups.iter().position(|(member, ..)| *member == group) {
@@ -86,11 +87,10 @@ where
             *unlimited = true;
         } else {
             *current += slot.current;
-            *max += slot.max_connections;
+            *max += usize::from(slot.max_connections);
         }
     }
-    !groups.is_empty()
-        && groups.iter().all(|(_, current, max, unlimited)| !*unlimited && *max > 0 && *current >= usize::from(*max))
+    !groups.is_empty() && groups.iter().all(|(_, current, max, unlimited)| !*unlimited && *max > 0 && *current >= *max)
 }
 
 #[cfg(test)]
@@ -150,6 +150,16 @@ mod tests {
     fn unknown_slot_is_ignored() {
         let g = lookup(&[]);
         let slots = [slot("orphan", 10, 10)];
+        assert!(!is_exhausted(slots, &g));
+    }
+
+    #[test]
+    fn aggregate_capacity_beyond_u16_max_does_not_overflow() {
+        let g = lookup(&[("a", "main"), ("b", "main")]);
+        // Aggregate capacity 65535 + 1 = 65536 > u16::MAX.
+        let slots = [slot("a", u16::MAX, usize::from(u16::MAX)), slot("b", 1, 1)];
+        assert!(is_exhausted(slots, &g));
+        let slots = [slot("a", u16::MAX, usize::from(u16::MAX) - 1), slot("b", 1, 0)];
         assert!(!is_exhausted(slots, &g));
     }
 

@@ -762,6 +762,14 @@
   config preparation. A fully used setup could therefore still report spare slots through members that cannot
   accept connections. Readiness now only considers enabled inputs and aliases, matching the provider lineups that
   actually accept connections.
+- **`/ready` could report phantom readiness with unusable capacity.** When no enabled input was left, the
+  endpoint answered `initializing` or even `ready` instead of `503 exhausted`; an empty enabled-provider slot
+  list is now always treated as exhausted. The group capacity accumulator was also widened from `u16` to `usize`,
+  so groups whose members sum beyond 65 535 connections can no longer overflow into a wrong state.
+- **Health banner marked groups saturated although a fallback was idle.** The banner derived its saturation
+  slots only from providers with active connections, so an enabled alias without connections was invisible and
+  its spare capacity ignored. Slots are now derived from the configured enabled members (missing live counts
+  default to zero), matching the `/ready` endpoint.
 
 ## ⚙️ New Settings
 

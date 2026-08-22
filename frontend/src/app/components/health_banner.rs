@@ -6,7 +6,10 @@ use crate::{
     utils::set_location_hash,
 };
 use gloo_timers::callback::Interval;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 use yew::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +56,24 @@ struct ProviderRow {
     current: usize,
     max: u16,
     signal: Signal,
+}
+
+/// Slots are built from the configured enabled members, not from the live
+/// connection rows: an idle fallback still offers capacity and must keep its
+/// group from being marked saturated.
+fn compute_saturated(
+    capacity_lookup: &HashMap<Arc<str>, u16>,
+    connections: Option<&BTreeMap<Arc<str>, usize>>,
+    group_lookup: &HashMap<Arc<str>, Arc<str>>,
+) -> bool {
+    shared::model::provider_saturation::is_exhausted(
+        capacity_lookup.iter().map(|(name, max)| shared::model::provider_saturation::ProviderSlot {
+            name: name.clone(),
+            max_connections: *max,
+            current: connections.and_then(|map| map.get(name)).copied().unwrap_or(0),
+        }),
+        group_lookup,
+    )
 }
 
 fn compute_health(ws_connected: Option<bool>, has_status: bool, backend_ok: bool, saturated: bool) -> Health {
@@ -175,12 +196,9 @@ pub fn HealthBanner() -> Html {
         }
         None => true,
     };
-    let saturated = shared::model::provider_saturation::is_exhausted(
-        provider_rows.iter().map(|r| shared::model::provider_saturation::ProviderSlot {
-            name: r.name.clone(),
-            max_connections: r.max,
-            current: r.current,
-        }),
+    let saturated = compute_saturated(
+        &max_lookup,
+        status.as_ref().and_then(|stats| stats.active_provider_connections.as_ref()),
         &group_lookup,
     );
 
@@ -351,7 +369,11 @@ pub fn HealthBanner() -> Html {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_health, Health};
+    use super::{compute_health, compute_saturated, Health};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        sync::Arc,
+    };
 
     #[test]
     fn compute_health_starts_unknown_without_websocket_status() {
@@ -376,5 +398,19 @@ mod tests {
     #[test]
     fn compute_health_primary_busy_with_available_fallback_is_healthy() {
         assert_eq!(compute_health(Some(true), true, true, false), Health::Healthy);
+    }
+
+    #[test]
+    fn idle_fallback_capacity_keeps_group_from_saturating() {
+        let capacity = HashMap::from([(Arc::from("main"), 1u16), (Arc::from("fallback"), 5u16)]);
+        let groups =
+            HashMap::from([(Arc::from("main"), Arc::from("main")), (Arc::from("fallback"), Arc::from("main"))]);
+        // Only "main" carries a connection; "fallback" is idle and absent from
+        // the live connection map.
+        let mut connections = BTreeMap::new();
+        connections.insert(Arc::from("main"), 1usize);
+        assert!(!compute_saturated(&capacity, Some(&connections), &groups));
+        connections.insert(Arc::from("fallback"), 5usize);
+        assert!(compute_saturated(&capacity, Some(&connections), &groups));
     }
 }
