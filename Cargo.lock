@@ -1208,7 +1208,7 @@ checksum = "431a4c31778fde52b4400de34975f219eeca55cc829a9de157cd743a5b230ecb"
 
 [[package]]
 name = "frontend"
-version = "3.3.88"
+version = "3.3.89"
 dependencies = [
  "base64 0.23.1",
  "brotli",
@@ -3784,7 +3784,7 @@ dependencies = [
 
 [[package]]
 name = "shared"
-version = "3.3.88"
+version = "3.3.89"
 dependencies = [
  "base64 0.23.1",
  "bitflags 2.13.0",
@@ -4375,7 +4375,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tuliprox"
-version = "3.3.88"
+version = "3.3.89"
 dependencies = [
  "aes",
  "arc-swap",
@@ -5347,9 +5347,9 @@ dependencies = [
 
 [[package]]
 name = "yew"
-version = "0.22.1"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94b446be974884d87d58548f1662bc50c051996203a17d2558f8d6c56942b6ac"
+checksum = "2c154fadfa97eabdd3f3b79345ceeb9c05ee8f13f76d3d881d17fba618bf558d"
 dependencies = [
  "console_error_panic_hook",
  "futures",
@@ -5372,9 +5372,9 @@ dependencies = [
 
 [[package]]
 name = "yew-hooks"
-version = "0.5.0"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14b46ac200ea3b129df1826aee9a1328df1c1a061b91399638cf52565bf85819"
+checksum = "bc57e40d6cae633bc2ebc2c297db2eb405bc5362288e5ab8b739ce7864ca50b9"
 dependencies = [
  "gloo",
  "js-sys",
@@ -5390,9 +5390,9 @@ dependencies = [
 
 [[package]]
 name = "yew-macro"
-version = "0.22.1"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a708a4027c143be6ca160a341700b59f9ecc36a7ebd95e3c477018de8cf71c75"
+checksum = "c08b883d84a035f57519d057f65a2a07ae25f1884ad485e1a9a523c9d880c1ad"
 dependencies = [
  "prettyplease",
  "proc-macro-error",
@@ -5404,9 +5404,9 @@ dependencies = [
 
 [[package]]
 name = "yew-router"
-version = "0.19.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "415cb628900ddf1eaf55ebd04163adf1ea80d3f5a9832a876554f9c0fdd4c282"
+checksum = "870bd2a1aa6d608c0c789c122654e25f4927bb6bfe344cc0da3b630ac3c73260"
 dependencies = [
  "gloo",
  "js-sys",
@@ -5423,9 +5423,9 @@ dependencies = [
 
 [[package]]
 name = "yew-router-macro"
-version = "0.19.0"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e87a3ce33434ab66a700edbaf2cc8a417d9b89f00a6fd8216fd6ac83b0e7b1c"
+checksum = "8399f1d134ab8e69abc7cded19f114621d520bd9c79c5a0f34091bf664d7325b"
 dependencies = [
  "proc-macro2",
  "quote",
