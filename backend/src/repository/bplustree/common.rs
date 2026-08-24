@@ -185,6 +185,43 @@ pub(crate) fn remove_file_if_exists(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Extension of the sorted-index sidecar that accompanies a published database.
+///
+/// The sidecar name is derived from the database name by the storage engine, not
+/// by the application: a reader that opens `x.db` has to find `x.idx` beside it.
+pub(crate) const FILE_SUFFIX_INDEX: &str = "idx";
+
+/// Path of the sorted-index sidecar belonging to `db_path`.
+pub fn get_file_path_for_db_index(db_path: &Path) -> PathBuf {
+    db_path.with_extension(FILE_SUFFIX_INDEX)
+}
+
+/// Buffer size for the engine's own buffered readers and writers.
+pub(crate) const IO_BUFFER_SIZE: usize = 256 * 1024;
+
+/// Only the v2 write path buffers writes, and that path is test-only.
+#[cfg(test)]
+pub(crate) fn file_writer<W: io::Write>(w: W) -> io::BufWriter<W> {
+    io::BufWriter::with_capacity(IO_BUFFER_SIZE, w)
+}
+
+pub(crate) fn file_reader<R: io::Read>(r: R) -> io::BufReader<R> {
+    io::BufReader::with_capacity(IO_BUFFER_SIZE, r)
+}
+
+/// Move `src` onto `dest`, degrading to a copy when the rename fails.
+///
+/// This is the semantics the v2 writer has always relied on: a rename that
+/// cannot be performed (for example across a filesystem boundary) falls back to
+/// a copy, and the source file is left in place for the caller to clean up.
+#[cfg(test)]
+pub(crate) fn rename_or_copy(src: &Path, dest: &Path) -> io::Result<()> {
+    if fs::rename(src, dest).is_err() {
+        fs::copy(src, dest)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn parent_or_dot(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())

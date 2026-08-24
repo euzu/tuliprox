@@ -1,3 +1,4 @@
+pub(crate) mod codec;
 pub(crate) mod common;
 mod migration;
 pub(super) mod sorted_index;

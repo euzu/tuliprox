@@ -13,9 +13,9 @@ use super::{
     },
     BPlusTreeMetadata,
 };
-use crate::{
-    repository::bplustree::common::{mmap_with_advice, read_exact_at_offset, write_all_at_offset, Advice, BPlusTreeError},
-    utils::{binary_deserialize, binary_serialize, binary_serialize_into},
+use crate::repository::bplustree::{
+    codec::{binary_deserialize, binary_serialize, binary_serialize_into},
+    common::{mmap_with_advice, read_exact_at_offset, write_all_at_offset, Advice, BPlusTreeError},
 };
 use memmap2::Mmap;
 use parking_lot::Mutex;
@@ -905,7 +905,7 @@ where
         entries.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
         drop(query);
 
-        let index_path = crate::repository::storage::get_file_path_for_db_index(filepath);
+        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(filepath);
         let temporary = temporary_path(&index_path)?;
         let prepared = (|| {
             let mut writer = crate::repository::bplustree::sorted_index::v4::Writer::new(&temporary, database_id, generation)?;
@@ -3727,7 +3727,7 @@ mod tests {
                 encode_free_page, encode_overflow_page, page_open_count, reset_page_open_count, SlottedPage,
             },
         },
-        utils::binary_serialize,
+        repository::bplustree::codec::binary_serialize,
     };
     use std::{
         fs, io,
@@ -4480,7 +4480,7 @@ mod tests {
     fn immediate_commit_clears_wal_then_invalidates_sorted_index() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("immediate.db");
-        let index_path = crate::repository::storage::get_file_path_for_db_index(&path);
+        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
         let mut tree = BPlusTree::new();
         tree.insert(1u32, String::from("old"));
         tree.store(&path)?;
@@ -4520,7 +4520,7 @@ mod tests {
     fn missing_delete_and_empty_commit_are_true_noops() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("no-op.db");
-        let index_path = crate::repository::storage::get_file_path_for_db_index(&path);
+        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
         let mut tree = BPlusTree::new();
         tree.insert(1u32, String::from("one"));
         tree.store(&path)?;
@@ -4558,7 +4558,7 @@ mod tests {
     fn store_with_index_publishes_an_identity_bound_sorted_snapshot() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("indexed.db");
-        let index_path = crate::repository::storage::get_file_path_for_db_index(&path);
+        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
         let mut tree = BPlusTree::new();
         tree.insert(1u32, String::from("ccc"));
         tree.insert(2u32, String::from("a"));
@@ -4585,7 +4585,7 @@ mod tests {
     fn compact_rebuilds_only_live_data_with_a_fresh_identity() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("compact.db");
-        let index_path = crate::repository::storage::get_file_path_for_db_index(&path);
+        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
         let mut tree = BPlusTree::new();
         for key in 0..100u32 {
             tree.insert(
@@ -4626,7 +4626,7 @@ mod tests {
     fn compact_read_failure_preserves_database_and_index() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("compact-corrupt.db");
-        let index_path = crate::repository::storage::get_file_path_for_db_index(&path);
+        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
         let mut tree = BPlusTree::new();
         tree.insert(1u32, String::from("one"));
         tree.store(&path)?;
@@ -5970,7 +5970,7 @@ mod tests {
     fn store_sync_failure_after_rename_invalidates_previous_sorted_index() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let destination = dir.path().join("database.db");
-        let index = crate::repository::storage::get_file_path_for_db_index(&destination);
+        let index = crate::repository::bplustree::common::get_file_path_for_db_index(&destination);
         let mut old = BPlusTree::new();
         old.insert(1u32, String::from("old"));
         let _ = old.store_with_index(&destination, String::clone)?;
@@ -5998,7 +5998,7 @@ mod tests {
     fn store_reports_sync_and_index_invalidation_failures_together() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let destination = dir.path().join("database.db");
-        let index = crate::repository::storage::get_file_path_for_db_index(&destination);
+        let index = crate::repository::bplustree::common::get_file_path_for_db_index(&destination);
         let mut old = BPlusTree::new();
         old.insert(1u32, String::from("old"));
         let _ = old.store(&destination)?;

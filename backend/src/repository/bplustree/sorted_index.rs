@@ -1,7 +1,7 @@
 pub(crate) mod v4 {
-    use crate::{
-        repository::bplustree::v3::{BPlusTreeQuery, Locator},
-        utils::{binary_deserialize, binary_serialize},
+    use crate::repository::bplustree::{
+        codec::{binary_deserialize, binary_serialize},
+        v3::{BPlusTreeQuery, Locator},
     };
     use serde::{Deserialize, Serialize};
     use std::{
@@ -345,7 +345,7 @@ pub(crate) mod v4 {
 mod tests {
     use super::*;
     use crate::repository::bplustree::v3::{BPlusTree as V3Tree, BPlusTreeQuery as V3Query, Locator};
-    use crate::utils::binary_serialize;
+    use crate::repository::bplustree::codec::binary_serialize;
     use std::{fs, io, io::Write};
     use tempfile::tempdir;
 

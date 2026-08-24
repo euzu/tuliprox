@@ -667,7 +667,7 @@ fn bplustree_v2_v3_comparison() -> std::io::Result<()> {
         black_box(values.len());
         Ok(())
     })?;
-    let index_path = crate::repository::storage::get_file_path_for_db_index(&v3_path);
+    let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&v3_path);
     comparison_runs("v3 locator sorted full scan", || {
         let query = super::v3::BPlusTreeQuery::<String, ComparisonValue>::try_new(&v3_path)?;
         let iterator = super::sorted_index::v4::OwnedIterator::<String, ComparisonValue, u32>::open(query, &index_path)?;

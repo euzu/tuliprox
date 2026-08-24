@@ -1,6 +1,5 @@
 pub const FILE_EPG: &str = "epg.xml";
 pub(in crate::repository) const FILE_SUFFIX_DB: &str = "db";
-pub(in crate::repository) const FILE_SUFFIX_INDEX: &str = "idx";
 pub(in crate::repository) const FILE_ID_MAPPING: &str = "id_mapping.db";
 pub(in crate::repository) const FILE_STRM: &str = "strm";
 pub(in crate::repository) const FILE_M3U: &str = "m3u";

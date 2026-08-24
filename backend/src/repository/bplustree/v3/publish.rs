@@ -5,12 +5,9 @@ use super::{
         ExclusiveSidecarGuard,
     },
 };
-use crate::repository::{
-    bplustree::common::{
-        ensure_distinct_sidecar_lock_domains, remove_file_if_exists, require_same_parent_directory,
-        resolved_path_identity, sidecar_lock_path,
-    },
-    storage::get_file_path_for_db_index,
+use crate::repository::bplustree::common::{
+    ensure_distinct_sidecar_lock_domains, get_file_path_for_db_index, remove_file_if_exists,
+    require_same_parent_directory, resolved_path_identity, sidecar_lock_path,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
@@ -240,7 +237,9 @@ mod tests {
         publish_staged_database_with_directory_sync, BPlusTreeArtifactPaths, BPlusTreeStagingArtifacts,
     };
     use super::super::wal::{leave_uncommitted_test_wal_after_database_write, wal_path};
-    use crate::repository::{get_file_path_for_db_index, BPlusTree, BPlusTreeError, BPlusTreeQuery};
+    use crate::repository::{
+        bplustree::common::get_file_path_for_db_index, BPlusTree, BPlusTreeError, BPlusTreeQuery,
+    };
     use std::{
         env, fs, io,
         process::{Child, Command, ExitStatus, Stdio},

@@ -580,7 +580,7 @@ pub(super) fn sync_parent_directory(_path: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn invalidate_sorted_index(database: &Path) -> io::Result<()> {
-    let index = crate::repository::storage::get_file_path_for_db_index(database);
+    let index = crate::repository::bplustree::common::get_file_path_for_db_index(database);
     if index == database {
         return Ok(());
     }
@@ -1674,7 +1674,7 @@ mod tests {
     #[test]
     fn committed_recovery_invalidates_sorted_index_before_clearing_wal() -> io::Result<()> {
         let (_directory, path, original, _) = create_database("committed-index-recovery.db")?;
-        let index_path = crate::repository::storage::get_file_path_for_db_index(&path);
+        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
         fs::write(&index_path, b"stale sorted index")?;
         let prepared = [(0, prepared_header_page(&original)?)];
 

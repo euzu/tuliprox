@@ -125,7 +125,7 @@ where
         |tree, destination| tree.store_with_index_verified(destination, sort_key),
         |destination, entries| {
             let query = super::BPlusTreeQuery::<K, V>::try_new(destination)?;
-            let index = crate::repository::storage::get_file_path_for_db_index(destination);
+            let index = crate::repository::bplustree::common::get_file_path_for_db_index(destination);
             let mut iterator = crate::repository::bplustree::sorted_index::v4::OwnedIterator::<K, V, SortKey>::open(query, &index)?;
             let indexed_entries = iterator.try_fold(0usize, |count, entry| {
                 let _ = entry?;
@@ -180,7 +180,7 @@ where
     let normalized_source = migration_source(source, version)?;
     let read_path = normalized_source.as_deref().unwrap_or(source);
     let destination = migration_destination(source)?;
-    let destination_index = crate::repository::storage::get_file_path_for_db_index(&destination);
+    let destination_index = crate::repository::bplustree::common::get_file_path_for_db_index(&destination);
     let converted = (|| {
         let mut legacy = v2::BPlusTreeQuery::<K, SourceV>::try_new(read_path)?;
         let metadata = legacy_metadata(read_path)?;
@@ -223,7 +223,7 @@ where
         drop(query);
         validate(&destination, entries)?;
         if indexed {
-            publish(&destination_index, &crate::repository::storage::get_file_path_for_db_index(source))?;
+            publish(&destination_index, &crate::repository::bplustree::common::get_file_path_for_db_index(source))?;
         }
         publish(&destination, source)?;
         Ok(MigrationValidation { entries, database_id, generation })
@@ -248,7 +248,7 @@ fn publish(temporary: &Path, destination: &Path) -> io::Result<()> {
 
 fn cleanup_destination(destination: &Path) {
     let _ = std::fs::remove_file(destination);
-    let _ = std::fs::remove_file(crate::repository::storage::get_file_path_for_db_index(destination));
+    let _ = std::fs::remove_file(crate::repository::bplustree::common::get_file_path_for_db_index(destination));
     let _ = std::fs::remove_file(crate::repository::bplustree::common::sidecar_lock_path(destination));
 }
 
@@ -400,7 +400,7 @@ mod tests {
         let validation = migrate_v2_typed_with_index::<u32, String, usize, _>(&path, String::len)?;
         assert_eq!(validation.entries, 2);
         let query = super::super::BPlusTreeQuery::<u32, String>::try_new(&path)?;
-        let index = crate::repository::storage::get_file_path_for_db_index(&path);
+        let index = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
         let values = crate::repository::bplustree::sorted_index::v4::OwnedIterator::<u32, String, usize>::open(query, &index)
             ?.collect::<io::Result<Vec<_>>>()?;
         assert_eq!(values, vec![(2, String::from("a")), (1, String::from("bbb"))]);

@@ -5,22 +5,21 @@
 //! rewrite of existing repositories. The future v3 storage line is expected to
 //! live behind an explicit version boundary and a typed migration path.
 
-use crate::{
-    repository::bplustree::common::{mmap_with_advice, read_exact_at_offset, Advice},
-    utils,
-    utils::binary_deserialize,
+use crate::repository::bplustree::{
+    codec::binary_deserialize,
+    common::{file_reader, mmap_with_advice, read_exact_at_offset, Advice},
 };
+// The v2 write path exists only to build fixtures for the migration tests.
+#[cfg(test)]
+use crate::repository::bplustree::common::{file_writer, rename_or_copy};
 pub(crate) use crate::repository::bplustree::common::BPlusTreeError;
 #[cfg(test)]
-use crate::utils::binary_serialize_into;
+use crate::repository::bplustree::codec::binary_serialize_into;
 #[cfg(test)]
 use log::error;
 use memmap2::Mmap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use shared::error::to_io_error;
-#[cfg(test)]
-use shared::error::string_to_io_error;
 use smallvec::{smallvec, SmallVec};
 use std::{
     collections::HashSet,
@@ -156,7 +155,7 @@ type TraversalStack = SmallVec<[(u64, usize); 8]>;
 */
 
 #[inline]
-fn u32_from_bytes(bytes: &[u8]) -> io::Result<u32> { Ok(u32::from_le_bytes(bytes.try_into().map_err(to_io_error)?)) }
+fn u32_from_bytes(bytes: &[u8]) -> io::Result<u32> { Ok(u32::from_le_bytes(bytes.try_into().map_err(io::Error::other)?)) }
 
 #[inline]
 fn node_flag_to_is_leaf(flag: u8) -> io::Result<bool> {
@@ -418,13 +417,13 @@ where
         file.seek(SeekFrom::Start(offset))?;
 
         // Write count
-        let count = u32::try_from(values.len()).map_err(to_io_error)?;
+        let count = u32::try_from(values.len()).map_err(io::Error::other)?;
         buffer[0..4].copy_from_slice(&count.to_le_bytes());
         let mut pos = 4;
 
         // Write each value: length + data
         for (_, value_bytes) in values {
-            let len = u32::try_from(value_bytes.len()).map_err(to_io_error)?;
+            let len = u32::try_from(value_bytes.len()).map_err(io::Error::other)?;
             buffer[pos..pos + 4].copy_from_slice(&len.to_le_bytes());
             pos += 4;
             buffer[pos..pos + value_bytes.len()].copy_from_slice(value_bytes);
@@ -481,13 +480,13 @@ where
     ) -> io::Result<u64> {
         serial_buf.clear();
         binary_serialize_into(&mut *serial_buf, &self.keys)?;
-        let keys_len = u32::try_from(serial_buf.len()).map_err(to_io_error)?;
+        let keys_len = u32::try_from(serial_buf.len()).map_err(io::Error::other)?;
 
         if self.is_leaf {
             let keys_end = serial_buf.len();
             // Append info_encoded to serial_buf to avoid second allocation
             binary_serialize_into(&mut *serial_buf, &self.value_info)?;
-            let info_len = u32::try_from(serial_buf.len() - keys_end).map_err(to_io_error)?;
+            let info_len = u32::try_from(serial_buf.len() - keys_end).map_err(io::Error::other)?;
             let info_slice = &serial_buf[keys_end..];
 
             let content_size = FLAG_SIZE + LEN_SIZE + keys_len as usize + LEN_SIZE + info_len as usize;
@@ -545,7 +544,7 @@ where
             // Append pointers to serial_buf
             let keys_end = serial_buf.len();
             binary_serialize_into(&mut *serial_buf, &pointers)?;
-            let pointers_len = u32::try_from(serial_buf.len() - keys_end).map_err(to_io_error)?;
+            let pointers_len = u32::try_from(serial_buf.len() - keys_end).map_err(io::Error::other)?;
             let pointers_slice = &serial_buf[keys_end..];
 
             file.seek(SeekFrom::Start(parent_start))?;
@@ -630,7 +629,7 @@ where
                             if current_pack_size + entry_size <= PAGE_SIZE_USIZE {
                                 node.value_info.push(ValueInfo {
                                     mode: ValueStorageMode::Packed(u64::from(pack_count), current_pack_index),
-                                    length: u32::try_from(size).map_err(to_io_error)?,
+                                    length: u32::try_from(size).map_err(io::Error::other)?,
                                     cache: Mutex::new(None),
                                 });
                                 current_pack_index += 1;
@@ -642,7 +641,7 @@ where
 
                                 node.value_info.push(ValueInfo {
                                     mode: ValueStorageMode::Packed(u64::from(pack_count), 0),
-                                    length: u32::try_from(size).map_err(to_io_error)?,
+                                    length: u32::try_from(size).map_err(io::Error::other)?,
                                     cache: Mutex::new(None),
                                 });
                             }
@@ -658,7 +657,7 @@ where
 
                             node.value_info.push(ValueInfo {
                                 mode: ValueStorageMode::Single(u64::MAX),
-                                length: u32::try_from(stored_size).map_err(to_io_error)?,
+                                length: u32::try_from(stored_size).map_err(io::Error::other)?,
                                 cache: Mutex::new(cache),
                             });
                         }
@@ -907,14 +906,14 @@ where
 
         // Write keys length and data
         buffer[write_pos..write_pos + LEN_SIZE]
-            .copy_from_slice(&u32::try_from(keys_len).map_err(to_io_error)?.to_le_bytes());
+            .copy_from_slice(&u32::try_from(keys_len).map_err(io::Error::other)?.to_le_bytes());
         write_pos += LEN_SIZE;
         buffer[write_pos..write_pos + keys_len].copy_from_slice(&serial_buf[0..keys_end]);
         write_pos += keys_len;
 
         // Write pointers length and data
         buffer[write_pos..write_pos + LEN_SIZE]
-            .copy_from_slice(&u32::try_from(pointer_len).map_err(to_io_error)?.to_le_bytes());
+            .copy_from_slice(&u32::try_from(pointer_len).map_err(io::Error::other)?.to_le_bytes());
         write_pos += LEN_SIZE;
         buffer[write_pos..write_pos + pointer_len].copy_from_slice(&serial_buf[keys_end..]);
 
@@ -1026,7 +1025,7 @@ where
         offset: u64,
         nested: bool,
     ) -> io::Result<(Self, Option<Vec<u64>>)> {
-        let start = usize::try_from(offset).map_err(to_io_error)?;
+        let start = usize::try_from(offset).map_err(io::Error::other)?;
         let header_end = start
             .checked_add(FLAG_SIZE + LEN_SIZE)
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Mmap offset overflow"))?;
@@ -1269,7 +1268,7 @@ where
                 ));
             }
 
-            let len = u32::from_le_bytes(block_buffer[pos..pos + 4].try_into().map_err(to_io_error)?) as usize;
+            let len = u32::from_le_bytes(block_buffer[pos..pos + 4].try_into().map_err(io::Error::other)?) as usize;
             pos += 4;
 
             if i == value_index {
@@ -1431,7 +1430,7 @@ where
             let temp_dir = tempfile::env::temp_dir();
             NamedTempFile::new_in(&temp_dir)?
         };
-        let mut file = utils::file_writer(&tempfile);
+        let mut file = file_writer(&tempfile);
         let mut buffer = vec![0u8; PAGE_SIZE_USIZE];
 
         // Write header block 0
@@ -1467,8 +1466,8 @@ where
 
                 file.flush()?;
                 drop(file);
-                if let Err(err) = utils::rename_or_copy(tempfile.path(), filepath, false) {
-                    return Err(string_to_io_error(format!(
+                if let Err(err) = rename_or_copy(tempfile.path(), filepath) {
+                    return Err(io::Error::other(format!(
                         "Temp file rename/copy did not work {} {err}",
                         tempfile.path().to_string_lossy()
                     )));
@@ -1603,11 +1602,11 @@ where
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("Metadata too large: {metadata_len}")));
         }
 
-        let mut validation_file = utils::file_reader(file.try_clone()?);
+        let mut validation_file = file_reader(file.try_clone()?);
         validate_legacy_tree::<K, V>(mmap.as_ref(), &mut validation_file, root_offset, file_len)?;
 
         Ok(Self {
-            file: if mmap.is_some() { None } else { Some(utils::file_reader(file)) },
+            file: if mmap.is_some() { None } else { Some(file_reader(file)) },
             mmap,
             has_tombstones,
             buffer: vec![0u8; PAGE_SIZE_USIZE],

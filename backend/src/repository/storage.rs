@@ -394,9 +394,10 @@ pub fn get_geoip_path(storage_dir: &str) -> PathBuf {
     Path::new(storage_dir).join("geoip.db")
 }
 
-pub fn get_file_path_for_db_index(db_path: &Path) -> PathBuf {
-    db_path.with_extension(storage_const::FILE_SUFFIX_INDEX)
-}
+// The sorted-index sidecar name is part of the B+Tree on-disk layout, so the
+// engine owns it. Re-exported here because every repository already reaches for
+// it through `repository::storage`.
+pub use super::bplustree::common::get_file_path_for_db_index;
 
 #[cfg(test)]
 mod tests {
