@@ -2,7 +2,8 @@ use crate::{
     app::{
         components::{
             recording::{
-                epg_programme_to_prefill, target_name_for_id, EpgProgrammePrefillInput, PaddingBounds, RecordingForm,
+                ensure_recording_available, epg_programme_to_prefill, target_name_for_id, EpgProgrammePrefillInput,
+                PaddingBounds, RecordingForm,
             },
             EpgSourceSelector, IconButton, NoContent, Search,
         },
@@ -895,12 +896,7 @@ pub fn EpgView() -> Html {
             let translate = translate.clone();
             let padding: PaddingBounds = (*recording_padding).clone();
             spawn_local(async move {
-                // Same preflight as the playlist explorer: the form
-                // is pointless if the DVR block is absent, and the
-                // 501 i18n message already names the toggle the
-                // operator needs.
-                if let Err(error) = RecordingService::new().ensure_available().await {
-                    services.toastr.error(translate.t(error.i18n_key()));
+                if !ensure_recording_available(&services, &translate).await {
                     return;
                 }
                 let source = RecordingSourceInput {

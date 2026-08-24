@@ -361,15 +361,9 @@ pub fn recording_rules_view() -> Html {
             let creating = creating.clone();
             let services = services.clone();
             let translate = translate.clone();
-            // Preflight before opening the create-rule form. The
-            // rule-create POST is gated on the backend too, but
-            // mounting an empty form against an unreachable DVR just
-            // hides the actionable message behind an opaque submission
-            // failure.
             wasm_bindgen_futures::spawn_local(async move {
-                match RecordingService::new().ensure_available().await {
-                    Ok(()) => creating.set(true),
-                    Err(error) => services.toastr.error(error_message(&translate, &error)),
+                if super::ensure_recording_available(&services, &translate).await {
+                    creating.set(true);
                 }
             });
         })
