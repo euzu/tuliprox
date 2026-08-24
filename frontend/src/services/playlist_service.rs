@@ -104,7 +104,7 @@ impl PlaylistService {
     pub async fn resolve_url(&self, request: PlaylistUrlResolveRequest) -> Option<String> {
         if let PlaylistUrlResolveRequest::Provider { url, .. } = &request {
             if !url.starts_with(shared::utils::PROVIDER_SCHEME_PREFIX) {
-                return Some(url.to_string());
+                return Some(url.clone());
             }
         }
 
@@ -139,7 +139,7 @@ impl PlaylistService {
     }
 
     /// Fetches per-stream EPG data for the UI "now playing" / "up next" display.
-    /// Accepts a batch of epg_channel_ids and returns programme data for each,
+    /// Accepts a batch of `epg_channel_ids` and returns programme data for each,
     /// filtered to an 8h window with user timeshift applied server-side.
     pub async fn get_stream_epg(&self, items: Vec<StreamEpgItemRequest>) -> Option<StreamEpgResponse> {
         let request = StreamEpgRequest { items };

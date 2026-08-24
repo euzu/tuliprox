@@ -20,7 +20,7 @@ struct StrictSniResolver {
 
 impl fmt::Debug for StrictSniResolver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StrictSniResolver").field("expected_host", &self.expected_host).finish()
+        f.debug_struct("StrictSniResolver").field("expected_host", &self.expected_host).finish_non_exhaustive()
     }
 }
 

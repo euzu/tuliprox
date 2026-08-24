@@ -91,8 +91,8 @@ pub fn TabSet(props: &TabSetProps) -> Html {
             html! {
                 <div key={tab.id.clone()} role="presentation" class={classes!(
                     "tp__tab-set__tab",
-                    if is_active { tab.active_class.as_ref().map_or("tp__tab-set__tab--active".to_string(), |s| s.clone())
-                    } else {  tab.inactive_class.as_ref().map_or_else(String::new, |s| s.clone())  }
+                    if is_active { tab.active_class.as_ref().map_or("tp__tab-set__tab--active".to_string(), std::clone::Clone::clone)
+                    } else {  tab.inactive_class.as_ref().map_or_else(String::new, std::clone::Clone::clone)  }
                 )}>
                     // Desktop: TextButton
                     <TextButton

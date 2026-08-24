@@ -469,7 +469,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
                 input_form_state.dispatch(ConfigInputFormAction::SetAll(input.as_ref().clone()));
 
                 input_options_state.dispatch(ConfigInputOptionsFormAction::SetAll(
-                    input.options.as_ref().map_or_else(ConfigInputOptionsDto::default, |d| d.clone()),
+                    input.options.as_ref().map_or_else(ConfigInputOptionsDto::default, std::clone::Clone::clone),
                 ));
 
                 // Load headers
@@ -572,7 +572,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
     let handle_close_add_epg_item = {
         let show_epg_form = show_epg_form_state.clone();
         let edit_epg_source = edit_epg_source.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             show_epg_form.set(false);
             edit_epg_source.set(None);
         })
@@ -735,7 +735,7 @@ pub fn ConfigInputView(props: &ConfigInputViewProps) -> Html {
 
     let handle_close_smart_match_form = {
         let show_smart_match_form = show_smart_match_form_state.clone();
-        Callback::from(move |_| show_smart_match_form.set(false))
+        Callback::from(move |()| show_smart_match_form.set(false))
     };
 
     let handle_show_smart_match_form = {

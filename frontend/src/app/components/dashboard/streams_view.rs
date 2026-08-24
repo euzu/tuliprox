@@ -36,7 +36,7 @@ pub fn StreamsView(props: &StreamsViewProps) -> Html {
     {
         let services = service_ctx.clone();
         let provider_connections = provider_connections.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             let services = services.clone();
             let subid = services.event.subscribe(move |msg| {
                 if let EventMessage::ActiveProviderCount(count) = msg {
@@ -52,10 +52,10 @@ pub fn StreamsView(props: &StreamsViewProps) -> Html {
         let provider_connections = provider_connections.clone();
         use_effect_with(status_ctx.status, move |status| {
             let count = status.as_ref().map_or(0, |status| {
-                status.active_provider_connections.as_ref().map(|map| map.values().sum::<usize>()).unwrap_or(0)
+                status.active_provider_connections.as_ref().map_or(0, |map| map.values().sum::<usize>())
             });
             provider_connections.set(count);
-        })
+        });
     }
 
     html! {

@@ -1,4 +1,4 @@
-//! HDHomerun device defaults.
+//! `HDHomerun` device defaults.
 
 const DEFAULT_FRIENDLY_NAME: &str = "TuliproxTV";
 const DEFAULT_MANUFACTURER: &str = "Silicondust";

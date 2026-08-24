@@ -21,7 +21,7 @@ const DEFAULT_MAX_LOG_LINES: usize = 2000;
 
 fn reconnect_delay(attempt: u16) -> i32 {
     if attempt < 6 {
-        let d = WS_RECONNECT_BASE_MS * (attempt as i32 + 1);
+        let d = WS_RECONNECT_BASE_MS * (i32::from(attempt) + 1);
         d.min(WS_RECONNECT_MAX_MS)
     } else {
         WS_RECONNECT_MAX_MS
@@ -62,7 +62,7 @@ pub fn use_log_stream(options: UseLogStreamOptions) -> UseLogStreamHandle {
     // Clear callback
     let clear = {
         let logs = logs.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             logs.set(Rc::new(Vec::new()));
         })
     };

@@ -266,7 +266,7 @@ pub enum RecordingError {
     /// permission for the requested action.
     Forbidden,
     /// Path / kind validation failed (e.g., a partial path on a
-    /// Completed recording, a foreign relative_path, or a missing
+    /// Completed recording, a foreign `relative_path`, or a missing
     /// owner).
     InvalidPath,
     /// The recording is in an ineligible state for the requested
@@ -496,7 +496,7 @@ impl RecordingService {
     }
 
     /// POST /recording/conflicts/preview. Advisory only — the backend
-    /// reads only the candidate fields plus provider_scope; `others`
+    /// reads only the candidate fields plus `provider_scope`; `others`
     /// and `capacity` are server-derived or echoed from the request.
     pub async fn preview_conflicts(
         &self,

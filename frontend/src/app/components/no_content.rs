@@ -41,7 +41,7 @@ pub fn NoContent(props: &NoContentProps) -> Html {
     };
 
     html! {
-        <div class={classes!("tp__no_content", props.class.to_string())} role="status">
+        <div class={classes!("tp__no_content", props.class.clone())} role="status">
             <div class="tp__no_content__indicator">
                <AppIcon name={icon.to_string()} />
             </div>

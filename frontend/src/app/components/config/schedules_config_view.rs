@@ -167,7 +167,7 @@ pub fn SchedulesConfigView() -> Html {
                 match Schedule::from_str(schedule) {
                     Ok(_) => {
                         let dto = ScheduleConfigDto { schedule: schedule.clone(), task_type, targets };
-                        let mut new_schedules = form_state.data().schedules.as_ref().cloned().unwrap_or_default();
+                        let mut new_schedules = form_state.data().schedules.clone().unwrap_or_default();
                         let edited_index = *editing_index;
 
                         let exists = new_schedules.iter().enumerate().any(|(idx, s)| {

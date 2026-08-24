@@ -55,7 +55,7 @@ pub fn Authentication(props: &AuthenticationProps) -> Html {
                     }
                     future::ready(())
                 })
-                .await
+                .await;
         });
     }
 

@@ -33,7 +33,7 @@ impl PageRequestDto {
         }
     }
 
-    /// Clamps page_size to the allowed range [25, 200] and snaps to nearest valid value.
+    /// Clamps `page_size` to the allowed range [25, 200] and snaps to nearest valid value.
     pub fn normalize_page_size(&mut self) {
         let mut size = self.page_size;
         if size < VALID_PAGE_SIZES[0] {
@@ -71,7 +71,8 @@ impl<T: PartialEq> PagedResponseDto<T> {
     /// Constructs a paged response from a full items vec and pagination parameters.
     /// `all_items` is the complete filtered+aggregated result set (already sorted).
     pub fn new(items: Vec<T>, page: u32, page_size: u16, total_items: u64) -> Self {
-        let total_pages = if total_items == 0 { 0 } else { ((total_items as f64) / (page_size as f64)).ceil() as u32 };
+        let total_pages =
+            if total_items == 0 { 0 } else { ((total_items as f64) / f64::from(page_size)).ceil() as u32 };
         let has_prev = page > 1;
         let has_next = total_items > 0 && page < total_pages;
         Self { items, page, page_size, total_items, total_pages, has_prev, has_next }
@@ -82,13 +83,13 @@ impl<T: PartialEq> PagedResponseDto<T> {
         if self.total_items == 0 {
             0
         } else {
-            ((self.page - 1) * self.page_size as u32) as u64 + 1
+            u64::from((self.page - 1) * u32::from(self.page_size)) + 1
         }
     }
 
     /// Returns the 1-based end index of the current page.
     pub fn range_end(&self) -> u64 {
-        let end = (self.page as u64) * self.page_size as u64;
+        let end = u64::from(self.page) * u64::from(self.page_size);
         end.min(self.total_items)
     }
 }

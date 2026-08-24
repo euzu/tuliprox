@@ -228,7 +228,7 @@ pub fn LogConsole(props: &LogConsoleProps) -> Html {
                                 {
                                     for filtered_logs.iter().enumerate().map(|(idx, entry)| {
                                         let level_str = entry.level.as_str();
-                                        let level_cls = format!("tp__log-console__level--{}", level_str);
+                                        let level_cls = format!("tp__log-console__level--{level_str}");
                                         let msg_cls = match entry.level {
                                             LogLevel::Error => "tp__log-console__message--error",
                                             LogLevel::Warn => "tp__log-console__message--warn",

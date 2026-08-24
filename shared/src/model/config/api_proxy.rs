@@ -190,7 +190,7 @@ impl ApiProxyConfigDto {
                 if usernames.contains(&user.username) {
                     errors.push(format!("Non unique username found {}", user.username));
                 } else {
-                    usernames.insert(user.username.to_string());
+                    usernames.insert(user.username.clone());
                 }
                 if let Some(token) = &user.token {
                     if token.is_empty() {
@@ -202,7 +202,7 @@ impl ApiProxyConfigDto {
                             user.username
                         ));
                     } else {
-                        tokens.insert(token.to_string());
+                        tokens.insert(token.clone());
                     }
                 }
 

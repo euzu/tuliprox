@@ -129,11 +129,11 @@ pub fn filesystem_capacity_for(path: &Path) -> Option<(u64, u64)> {
         }
 
         let bsize = stat.f_frsize as u64;
-        let total = (stat.f_blocks as u64).saturating_mul(bsize);
+        let total = u64::from(stat.f_blocks).saturating_mul(bsize);
 
         // `f_bavail`, not `f_bfree`: the service user cannot use the
         // root-reserved blocks, so counting them would understate pressure.
-        let available = (stat.f_bavail as u64).saturating_mul(bsize);
+        let available = u64::from(stat.f_bavail).saturating_mul(bsize);
 
         Some((total, available))
     }
@@ -191,7 +191,7 @@ pub fn free_bytes_for(path: &Path) -> Option<u64> {
         // `f_bavail` is the bytes available to a non-privileged
         // caller — the worker runs as the service user and is
         // subject to the same reservation as any other user.
-        Some((stat.f_bavail as u64).saturating_mul(bsize))
+        Some(u64::from(stat.f_bavail).saturating_mul(bsize))
     }
     #[cfg(windows)]
     {

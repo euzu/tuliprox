@@ -21,7 +21,7 @@ pub struct ActionProps {
 #[component]
 pub fn ActionCard(props: &ActionProps) -> Html {
     html! {
-        <div class={classes!("tp__action-card", if props.classname.is_empty() {String::new()} else {props.classname.to_string()})}>
+        <div class={classes!("tp__action-card", if props.classname.is_empty() {String::new()} else {props.classname.clone()})}>
           <div class="tp__action-card__icon">
             <AppIcon name={props.icon.clone()} />
           </div>
@@ -33,10 +33,10 @@ pub fn ActionCard(props: &ActionProps) -> Html {
                 <span class="tp__action-card__content">
                     { props.subtitle.clone() }
                     {
-                        if !props.subtitle_html.is_empty() {
-                            Html::from_html_unchecked(AttrValue::from((*props.subtitle_html).to_string()))
-                        } else {
+                        if props.subtitle_html.is_empty() {
                             Html::default()
+                        } else {
+                            Html::from_html_unchecked(AttrValue::from((*props.subtitle_html).to_string()))
                         }
                     }
                 </span>

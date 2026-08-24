@@ -99,7 +99,8 @@ pub fn VideoConfigView() -> Html {
             if let Some(video) = video_cfg {
                 video_state.dispatch(VideoConfigFormAction::SetAll(video.clone()));
                 download_configured.set(video.download.is_some());
-                let download_form = video.download.as_ref().map_or_else(VideoDownloadConfigDto::default, |d| d.clone());
+                let download_form =
+                    video.download.as_ref().map_or_else(VideoDownloadConfigDto::default, std::clone::Clone::clone);
                 download_state.dispatch(VideoDownloadConfigFormAction::SetAll(download_form));
                 recording_form.set((false, recording_config_for_video(Some(video))));
             } else {

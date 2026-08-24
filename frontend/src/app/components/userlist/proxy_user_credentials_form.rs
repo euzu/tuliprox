@@ -179,7 +179,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
         server_list
             .iter()
             .map(|s| DropDownOption {
-                id: s.name.to_string(),
+                id: s.name.clone(),
                 label: html! { s.name.clone() },
                 selected: user_server.as_ref() == Some(&s.name),
             })
@@ -292,7 +292,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                 services.toastr.error(translate_clone.t("MESSAGES.SAVE.USER.FAIL"));
                 return;
             }
-            if let Some(target_name) = (*target).as_ref().cloned() {
+            if let Some(target_name) = (*target).clone() {
                 let original_target = original.as_ref().map(|u| u.target.clone()).unwrap_or_default();
                 let target_changed = target_name != original_target;
                 let countries_value = countries.iter().map(|tag| tag.label.clone()).collect::<Vec<_>>();
@@ -333,7 +333,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                                     nothing_to_save();
                                 }
                             }
-                        };
+                        }
                     }
                 } else {
                     nothing_to_save();
@@ -437,7 +437,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                             autocomplete={true}
                             required={true}
                             error={field_errors.username.clone()}
-                            value={form_state.data().username.to_string()}
+                            value={form_state.data().username.clone()}
                             on_change={{
                                 let form_state = form_state.clone();
                                 Callback::from(move |value: String| form_state.dispatch(UserFormAction::Username(value)))
@@ -457,7 +457,7 @@ pub fn ProxyUserCredentialsForm(props: &ProxyUserCredentialsFormProps) -> Html {
                             autocomplete={false}
                             required={true}
                             error={field_errors.password.clone()}
-                            value={form_state.data().password.to_string()}
+                            value={form_state.data().password.clone()}
                             on_change={{
                                 let form_state = form_state.clone();
                                 Callback::from(move |value: String| form_state.dispatch(UserFormAction::Password(value)))

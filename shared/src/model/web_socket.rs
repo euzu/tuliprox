@@ -134,13 +134,12 @@ pub enum ProtocolMessage {
 
 impl ProtocolMessage {
     pub fn to_bytes(&self) -> io::Result<Bytes> {
-        match self {
-            ProtocolMessage::Version(version) => Ok(Bytes::from(vec![*version])),
-            _ => {
-                //let encoded = bincode_serialize(self)?;
-                let json = serde_json::to_string(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                Ok(Bytes::from(json.into_bytes()))
-            }
+        if let ProtocolMessage::Version(version) = self {
+            Ok(Bytes::from(vec![*version]))
+        } else {
+            //let encoded = bincode_serialize(self)?;
+            let json = serde_json::to_string(self).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            Ok(Bytes::from(json.into_bytes()))
         }
     }
 

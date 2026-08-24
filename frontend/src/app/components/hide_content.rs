@@ -22,7 +22,7 @@ pub fn HideContent(props: &HideContentProps) -> Html {
     };
 
     html! {
-        <div class={classes!("tp__hide-content", if !*hidden {"active"} else {""})} onclick={handle_click}>
+        <div class={classes!("tp__hide-content", if *hidden {""} else {"active"})} onclick={handle_click}>
           <span class={"tp__hide-content__text"}>
           {
             if *hidden {
@@ -32,7 +32,7 @@ pub fn HideContent(props: &HideContentProps) -> Html {
             }
           }
           </span>
-          <AppIcon name={if props.icon.is_empty() { "Visibility".to_string() } else {props.icon.to_string()} } />
+          <AppIcon name={if props.icon.is_empty() { "Visibility".to_string() } else {props.icon.clone()} } />
         </div>
     }
 }

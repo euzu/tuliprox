@@ -60,7 +60,7 @@ pub fn BlockView(props: &BlockProps) -> Html {
                 }
             }
             e.stop_propagation();
-            on_block_mouse_down.emit((block_id, e))
+            on_block_mouse_down.emit((block_id, e));
         })
     };
 
@@ -78,7 +78,7 @@ pub fn BlockView(props: &BlockProps) -> Html {
                 }
             }
             e.stop_propagation();
-            on_block_touch_start.emit((block_id, e))
+            on_block_touch_start.emit((block_id, e));
         })
     };
     let last_touch_end_ts = use_mut_ref(|| None::<f64>);
@@ -131,7 +131,7 @@ pub fn BlockView(props: &BlockProps) -> Html {
                     (if dto.name.is_empty() { a[0].name.to_string() } else { dto.name.to_string() }, true, true)
                 }
             }),
-            BlockInstance::Target(dto) => (dto.name.to_string(), true, false),
+            BlockInstance::Target(dto) => (dto.name.clone(), true, false),
             BlockInstance::Output(_output) => (translate.t(&format!("SOURCE_EDITOR.BRICK_{block_type}")), false, false),
         };
         if dto_title.is_empty() {
@@ -179,7 +179,7 @@ pub fn BlockView(props: &BlockProps) -> Html {
                         Callback::from(move |e: MouseEvent| {
                            e.prevent_default();
                            e.stop_propagation();
-                           on_connection_drop.emit(to_id)
+                           on_connection_drop.emit(to_id);
                        })
                     }} />
                 })}

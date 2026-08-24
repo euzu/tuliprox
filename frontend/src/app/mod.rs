@@ -64,7 +64,7 @@ fn resolve_effective_language(languages: &[LanguageInfo], active_language: &str)
     if languages.iter().any(|language| language.code == active_language) {
         active_language.to_string()
     } else {
-        languages.first().map(|language| language.code.clone()).unwrap_or_else(|| "en".to_string())
+        languages.first().map_or_else(|| "en".to_string(), |language| language.code.clone())
     }
 }
 
@@ -129,8 +129,7 @@ pub fn App() -> Html {
                 let dir = languages
                     .iter()
                     .find(|l| l.code == effective_language)
-                    .map(|l| l.dir.clone())
-                    .unwrap_or_else(|| "ltr".to_string());
+                    .map_or_else(|| "ltr".to_string(), |l| l.dir.clone());
                 if let Some(root) = window().and_then(|w| w.document()).and_then(|d| d.document_element()) {
                     let _ = root.set_attribute("dir", &dir);
                     let _ = root.set_attribute("lang", &effective_language);
@@ -181,7 +180,7 @@ pub fn App() -> Html {
                     Err(err) => {
                         // Fallback: proceed with an empty icon set
                         icon_state.set(Some(Vec::new()));
-                        error!("Failed to load icons {err}")
+                        error!("Failed to load icons {err}");
                     }
                 }
                 Ok(())

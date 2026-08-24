@@ -21,7 +21,7 @@ pub fn ToastrView() -> Html {
         use_mount(move || {
             service_ctx.toastr.subscribe(move |new_toasts| {
                 toasts.set(new_toasts);
-            })
+            });
         });
     }
 

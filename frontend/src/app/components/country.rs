@@ -3,7 +3,7 @@ use yew::{classes, component, html, AttrValue, Html, Properties};
 
 pub fn display_country_code(code: Option<&str>) -> Option<String> {
     let normalized = code?.trim().to_ascii_uppercase();
-    let is_iso_country = normalized.len() == 2 && normalized.as_bytes().iter().all(|byte| byte.is_ascii_alphabetic());
+    let is_iso_country = normalized.len() == 2 && normalized.as_bytes().iter().all(u8::is_ascii_alphabetic);
     if is_iso_country {
         Some(normalized)
     } else {

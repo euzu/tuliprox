@@ -99,22 +99,21 @@ pub fn Sparkline(props: &SparklineProps) -> Html {
         };
     }
 
-    let (lo, hi) = match props.max {
-        Some(m) => (0.0, m.max(f64::EPSILON)),
-        None => {
-            let mut data_min = f64::INFINITY;
-            let mut data_max = f64::NEG_INFINITY;
-            for v in props.series.iter().flat_map(|s| s.values.iter().copied()) {
-                data_min = data_min.min(v);
-                data_max = data_max.max(v);
-            }
-            if !data_min.is_finite() || !data_max.is_finite() {
-                (0.0, 1.0)
-            } else {
-                let span = (data_max - data_min).max(f64::EPSILON);
-                let pad = span * 0.15;
-                ((data_min - pad).max(0.0), data_max + pad)
-            }
+    let (lo, hi) = if let Some(m) = props.max {
+        (0.0, m.max(f64::EPSILON))
+    } else {
+        let mut data_min = f64::INFINITY;
+        let mut data_max = f64::NEG_INFINITY;
+        for v in props.series.iter().flat_map(|s| s.values.iter().copied()) {
+            data_min = data_min.min(v);
+            data_max = data_max.max(v);
+        }
+        if !data_min.is_finite() || !data_max.is_finite() {
+            (0.0, 1.0)
+        } else {
+            let span = (data_max - data_min).max(f64::EPSILON);
+            let pad = span * 0.15;
+            ((data_min - pad).max(0.0), data_max + pad)
         }
     };
 

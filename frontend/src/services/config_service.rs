@@ -110,7 +110,7 @@ impl ConfigService {
         F: FnMut(Option<Rc<AppConfigDto>>) -> U,
     {
         let fut = self.config_channel.signal_cloned().for_each(callback);
-        fut.await
+        fut.await;
     }
 
     pub async fn api_proxy_config_subscribe<F, U>(&self, callback: &mut F)
@@ -119,7 +119,7 @@ impl ConfigService {
         F: FnMut(Option<Rc<ApiProxyConfigDto>>) -> U,
     {
         let fut = self.api_proxy_config_channel.signal_cloned().for_each(callback);
-        fut.await
+        fut.await;
     }
 
     pub async fn get_server_config(&self) -> (Option<Rc<AppConfigDto>>, Option<Rc<ApiProxyConfigDto>>) {
@@ -205,39 +205,39 @@ impl ConfigService {
                         }
                     };
 
-                    for source in app_config.sources.sources.iter_mut() {
-                        for target in source.targets.iter_mut() {
+                    for source in &mut app_config.sources.sources {
+                        for target in &mut source.targets {
                             let prepared_templates = templates.as_deref();
                             target.t_filter = get_filter(target.filter.as_str(), prepared_templates).ok();
                             if let Some(sort) = target.sort.as_mut() {
-                                for rule in sort.rules.iter_mut() {
+                                for rule in &mut sort.rules {
                                     rule.t_filter = get_filter(&rule.filter, prepared_templates)
                                         .map_err(|e| error!("Failed to parse sort rule filter: {e}"))
                                         .ok();
                                 }
                             }
-                            for output in target.output.iter_mut() {
+                            for output in &mut target.output {
                                 match output {
                                     TargetOutputDto::Xtream(o) => {
                                         o.t_filter = o.filter.as_ref().and_then(|flt| {
                                             get_filter(flt, prepared_templates)
                                                 .map_err(|e| error!("Failed to parse Xtream output filter: {e}"))
                                                 .ok()
-                                        })
+                                        });
                                     }
                                     TargetOutputDto::M3u(o) => {
                                         o.t_filter = o.filter.as_ref().and_then(|flt| {
                                             get_filter(flt, prepared_templates)
                                                 .map_err(|e| error!("Failed to parse M3U output filter: {e}"))
                                                 .ok()
-                                        })
+                                        });
                                     }
                                     TargetOutputDto::Strm(o) => {
                                         o.t_filter = o.filter.as_ref().and_then(|flt| {
                                             get_filter(flt, prepared_templates)
                                                 .map_err(|e| error!("Failed to parse Strm output filter: {e}"))
                                                 .ok()
-                                        })
+                                        });
                                     }
                                     TargetOutputDto::HdHomeRun(_) => {}
                                 }
@@ -246,7 +246,7 @@ impl ConfigService {
                     }
 
                     if let Some(mappings) = app_config.mappings.as_mut() {
-                        for mapping in mappings.mappings.mapping.iter_mut() {
+                        for mapping in &mut mappings.mappings.mapping {
                             let templates = mapping.templates.as_deref();
                             if let Some(mappers) = mapping.mapper.as_mut() {
                                 for mapper in mappers.iter_mut() {
@@ -333,7 +333,7 @@ impl ConfigService {
     pub async fn get_xtream_login_info(&self, request: &XtreamLoginRequest) -> Result<XtreamLoginInfo, Error> {
         request_post::<&XtreamLoginRequest, XtreamLoginInfo>(&self.xtream_login_info_path, request, None, None)
             .await
-            .map(|response| response.unwrap_or_default())
+            .map(std::option::Option::unwrap_or_default)
     }
 
     pub async fn save_config(&self, dto: ConfigDto) -> Result<(), Error> {

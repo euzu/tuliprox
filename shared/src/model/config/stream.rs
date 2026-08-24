@@ -170,8 +170,8 @@ impl StreamConfigDto {
     pub fn is_empty(&self) -> bool {
         self.retry
             && !self.metrics_enabled
-            && (self.buffer.is_none() || self.buffer.as_ref().is_some_and(|b| b.is_empty()))
-            && (self.throttle.is_none() || self.throttle.as_ref().is_some_and(|t| t.is_empty()))
+            && (self.buffer.is_none() || self.buffer.as_ref().is_some_and(StreamBufferConfigDto::is_empty))
+            && (self.throttle.is_none() || self.throttle.as_ref().is_some_and(std::string::String::is_empty))
             && self.grace_period_millis == default_grace_period_millis()
             && self.grace_period_timeout_secs == default_grace_period_timeout_secs()
             && self.throttle_kbps == 0
@@ -229,7 +229,7 @@ impl StreamConfigDto {
 
 fn validate_admission_strategies(strategies: &[AdmissionStrategy], grace_period_millis: u64) -> Result<(), String> {
     use std::collections::HashSet;
-    use AdmissionStrategy::*;
+    use AdmissionStrategy::{GraceHoldStream, GraceInstantStream};
 
     let mut seen = HashSet::new();
     for s in strategies {
@@ -261,7 +261,7 @@ pub fn is_valid_admission_strategy_order(strategies: &[AdmissionStrategy]) -> bo
 }
 
 pub fn validate_admission_strategy_order(strategies: &[AdmissionStrategy]) -> Result<(), String> {
-    use AdmissionStrategy::*;
+    use AdmissionStrategy::{EvictUserLatest, EvictUserOldest, EvictUserSameIpLatest, EvictUserSameIpOldest};
 
     fn strategy_index(strategies: &[AdmissionStrategy], strategy: AdmissionStrategy) -> Option<usize> {
         strategies.iter().position(|candidate| *candidate == strategy)

@@ -375,12 +375,12 @@ mod tests {
         admit(&mut file, lifecycle());
         file.entries[0].next_attempt_at = 1_000;
         file.entries[1].next_attempt_at = 400;
-        assert_eq!(next_wakeup(&file, 100), Duration::from_secs(300));
+        assert_eq!(next_wakeup(&file, 100), Duration::from_mins(5));
     }
 
     #[test]
     fn next_wakeup_on_an_empty_outbox_is_a_long_idle_sleep() {
-        assert_eq!(next_wakeup(&OutboxFile::default(), 0), Duration::from_secs(3600));
+        assert_eq!(next_wakeup(&OutboxFile::default(), 0), Duration::from_hours(1));
     }
 
     #[test]

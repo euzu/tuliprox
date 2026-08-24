@@ -77,7 +77,7 @@ where
             Some(None) if normalized.is_some() => {
                 comments.insert(username, normalized);
             }
-            Some(Some(_)) | Some(None) => {}
+            Some(Some(_) | None) => {}
         }
     }
 
@@ -108,7 +108,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
         })
     });
 
-    use_effect_with((), move |_| {
+    use_effect_with((), move |()| {
         let interval = Interval::new(1000, update_timestamps);
         move || drop(interval)
     });
@@ -124,7 +124,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
 
     {
         let cleanup_now_secs = cleanup_now_secs.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             let interval = Interval::new(ADAPTIVE_STREAM_CLEANUP_INTERVAL_MILLIS, move || {
                 cleanup_now_secs.set(shared::utils::current_time_secs());
             });
@@ -216,8 +216,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
             .config
             .as_ref()
             .and_then(|app_cfg| app_cfg.config.web_ui.as_ref())
-            .map(|web_ui| web_ui.kick_secs)
-            .unwrap_or_else(default_kick_secs);
+            .map_or_else(default_kick_secs, |web_ui| web_ui.kick_secs);
         Callback::from(move |(name, _): (String, _)| {
             if let Ok(action) = StreamDisplayAction::from_str(&name) {
                 if let Some(dto) = (*selected_dto).as_ref() {

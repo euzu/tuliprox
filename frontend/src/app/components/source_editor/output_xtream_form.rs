@@ -373,23 +373,7 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
 
     let render_output = || {
         let output_form_state_1 = output_form_state.clone();
-        if !props.allow_write {
-            html! {
-                <Card class="tp__config-view__card">
-                    <TitledCard title={translate.t(LABEL_SKIP_DIRECT_SOURCE)}>
-                        <div class="tp__config-view__cols-3">
-                            { config_field_bool!(output_form_state.form, translate.t(LABEL_LIVE), skip_live_direct_source) }
-                            { config_field_bool!(output_form_state.form, translate.t(LABEL_VOD), skip_video_direct_source) }
-                            { config_field_bool!(output_form_state.form, translate.t(LABEL_SERIES), skip_series_direct_source) }
-                        </div>
-                    </TitledCard>
-                    { config_field_custom!(
-                        translate.t(LABEL_FILTER),
-                        output_form_state.form.filter.clone().unwrap_or_default()
-                    ) }
-                </Card>
-            }
-        } else {
+        if props.allow_write {
             html! {
                 <Card class="tp__config-view__card">
                     <TitledCard title={translate.t(LABEL_SKIP_DIRECT_SOURCE)}>
@@ -406,6 +390,22 @@ pub fn XtreamTargetOutputView(props: &XtreamTargetOutputViewProps) -> Html {
                                 })} />
                            }
                     })}
+                </Card>
+            }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                    <TitledCard title={translate.t(LABEL_SKIP_DIRECT_SOURCE)}>
+                        <div class="tp__config-view__cols-3">
+                            { config_field_bool!(output_form_state.form, translate.t(LABEL_LIVE), skip_live_direct_source) }
+                            { config_field_bool!(output_form_state.form, translate.t(LABEL_VOD), skip_video_direct_source) }
+                            { config_field_bool!(output_form_state.form, translate.t(LABEL_SERIES), skip_series_direct_source) }
+                        </div>
+                    </TitledCard>
+                    { config_field_custom!(
+                        translate.t(LABEL_FILTER),
+                        output_form_state.form.filter.clone().unwrap_or_default()
+                    ) }
                 </Card>
             }
         }

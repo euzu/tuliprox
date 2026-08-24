@@ -27,7 +27,7 @@ pub fn UserActionCard() -> Html {
                     authenticated_user.set(services_ctx.auth.get_username());
                     future::ready(())
                 })
-                .await
+                .await;
         });
     }
 

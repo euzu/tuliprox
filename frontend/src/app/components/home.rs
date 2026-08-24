@@ -204,7 +204,7 @@ pub fn Home() -> Html {
     {
         let services_ctx = services.clone();
         let translate_clone = translate.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             let services_ctx = services_ctx.clone();
             let services_ctx_clone = services_ctx.clone();
             let translate_clone = translate_clone.clone();
@@ -221,13 +221,13 @@ pub fn Home() -> Html {
                 }
                 EventMessage::PlaylistUpdate(update_state) => match update_state {
                     PlaylistUpdateState::Success => {
-                        services_ctx_clone.toastr.success(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS_FINISH"))
+                        services_ctx_clone.toastr.success(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS_FINISH"));
                     }
                     PlaylistUpdateState::Failure => {
-                        services_ctx_clone.toastr.error(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.FAIL_FINISH"))
+                        services_ctx_clone.toastr.error(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.FAIL_FINISH"));
                     }
                     PlaylistUpdateState::Partial => {
-                        services_ctx_clone.toastr.warning(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.PARTIAL_FINISH"))
+                        services_ctx_clone.toastr.warning(translate_clone.t("MESSAGES.PLAYLIST_UPDATE.PARTIAL_FINISH"));
                     }
                 },
                 EventMessage::LibraryScanProgress(progress) => match progress.summary.status {
@@ -263,7 +263,7 @@ pub fn Home() -> Html {
                     config_state.set(cfg.clone());
                     future::ready(())
                 })
-                .await
+                .await;
         });
 
         let services_ctx = services.clone();
@@ -275,7 +275,7 @@ pub fn Home() -> Html {
                     api_proxy_config_state.set(cfg.clone());
                     future::ready(())
                 })
-                .await
+                .await;
         });
     }
 
@@ -301,8 +301,7 @@ pub fn Home() -> Html {
         .config
         .as_ref()
         .and_then(|app_cfg| app_cfg.config.web_ui.as_ref())
-        .map(|web_ui| !web_ui.combine_views_stats_streams)
-        .unwrap_or(true);
+        .is_none_or(|web_ui| !web_ui.combine_views_stats_streams);
     let home_access = HomeViewAccess {
         setup_mode,
         show_streams_page,

@@ -5,14 +5,14 @@
 //! imports keep working unchanged.
 //!
 //! The 14 leaf files in this directory are flat by external-service name
-//! (auth, epg, hdhomerun, hls, library, media_server, metadata, monitoring,
-//! network, paths, primitives, stream_history, tmdb, trakt). To answer
+//! (auth, epg, hdhomerun, hls, library, `media_server`, metadata, monitoring,
+//! network, paths, primitives, `stream_history`, tmdb, trakt). To answer
 //! "what is the default for HLS?" in one grep, the same items are also
 //! re-exported under three logical groups:
 //!
-//! - [`config`]  — streaming-side defaults: auth, hls, hdhomerun, library, media_server
+//! - [`config`]  — streaming-side defaults: auth, hls, hdhomerun, library, `media_server`
 //! - [`integrations`]  — external-service defaults: epg, metadata, tmdb, trakt
-//! - [`runtime`]  — runtime/infrastructure defaults: monitoring, network, paths, primitives, stream_history
+//! - [`runtime`]  — runtime/infrastructure defaults: monitoring, network, paths, primitives, `stream_history`
 //!
 //! New defaults can be added to either the flat layout or a group module;
 //! both are re-exported at the crate root.
@@ -94,7 +94,7 @@ pub use self::{
     paths::*, primitives::*, qos::*, stream_history::*, tmdb::*, trakt::*,
 };
 
-/// Streaming-side defaults (auth, hls, hdhomerun, library, media_server).
+/// Streaming-side defaults (auth, hls, hdhomerun, library, `media_server`).
 /// Re-exports the flat items under a logical group so callers asking
 /// "what is the default for HLS?" can grep one place.
 pub mod config {
@@ -106,7 +106,7 @@ pub mod integrations {
     pub use super::{epg::*, metadata::*, tmdb::*, trakt::*};
 }
 
-/// Runtime/infrastructure defaults (monitoring, network, paths, primitives, QoS, stream history).
+/// Runtime/infrastructure defaults (monitoring, network, paths, primitives, `QoS`, stream history).
 pub mod runtime {
     pub use super::{monitoring::*, network::*, paths::*, primitives::*, qos::*, stream_history::*};
 }

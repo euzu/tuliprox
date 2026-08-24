@@ -44,10 +44,10 @@ pub fn WelcomeStep() -> Html {
         SetupStep::total(),
         translate.t(SetupStep::Welcome.description_key())
     );
-    let next_title = SetupStep::Welcome
-        .next()
-        .map(|next_step| format!("{}: {}", translate.t("SETUP.LABEL.NEXT"), translate.t(next_step.title_key())))
-        .unwrap_or_else(|| translate.t("SETUP.LABEL.NEXT"));
+    let next_title = SetupStep::Welcome.next().map_or_else(
+        || translate.t("SETUP.LABEL.NEXT"),
+        |next_step| format!("{}: {}", translate.t("SETUP.LABEL.NEXT"), translate.t(next_step.title_key())),
+    );
 
     html! {
         <div class="tp__setup__step tp__setup__step-welcome">
@@ -64,7 +64,7 @@ pub fn WelcomeStep() -> Html {
                     <div class="tp__config-view-page">
                         <Input
                             name="setup_username"
-                            label={Some(translate.t(LABEL_SETUP_WEBUI_USERNAME).to_string())}
+                            label={Some(translate.t(LABEL_SETUP_WEBUI_USERNAME).clone())}
                             value={(*setup_ctx.setup_username).clone()}
                             on_change={Some({
                                 let setup_ctx = setup_ctx.clone();
@@ -73,7 +73,7 @@ pub fn WelcomeStep() -> Html {
                         />
                         <Input
                             name="setup_password"
-                            label={Some(translate.t(LABEL_SETUP_WEBUI_PASSWORD).to_string())}
+                            label={Some(translate.t(LABEL_SETUP_WEBUI_PASSWORD).clone())}
                             hidden={true}
                             value={(*setup_ctx.setup_password).clone()}
                             on_change={Some({
@@ -83,7 +83,7 @@ pub fn WelcomeStep() -> Html {
                         />
                         <Input
                             name="setup_password_repeat"
-                            label={Some(translate.t(LABEL_SETUP_WEBUI_PASSWORD_REPEAT).to_string())}
+                            label={Some(translate.t(LABEL_SETUP_WEBUI_PASSWORD_REPEAT).clone())}
                             hidden={true}
                             value={(*setup_ctx.setup_password_repeat).clone()}
                             on_change={Some({

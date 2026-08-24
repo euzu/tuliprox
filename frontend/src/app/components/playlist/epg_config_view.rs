@@ -32,7 +32,7 @@ pub fn EpgConfigView(props: &EpgConfigViewProps) -> Html {
             } else {
                 html! {
                   for entry in sources.iter() {
-                    <Card key={entry.url.to_string()} class="tp__config-view__card">
+                    <Card key={entry.url.clone()} class="tp__config-view__card">
                         <h1>{translate.t("LABEL.SOURCE")}</h1>
                         { config_field!(entry, translate.t("LABEL.URL"), url) }
                         { config_field!(entry, translate.t("LABEL.PRIORITY"), priority) }

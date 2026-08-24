@@ -23,7 +23,7 @@ pub fn RadioButtonGroup(props: &RadioButtonGroupProps) -> Html {
         let set_selections = selections.clone();
         use_effect_with(props.selected.clone(), move |selected| {
             set_selections.set(selected.clone());
-        })
+        });
     }
 
     let on_click = {

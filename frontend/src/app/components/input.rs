@@ -100,7 +100,7 @@ pub fn Input(props: &InputProps) -> Html {
                 aria-invalid={props.error.as_ref().map(|_| "true".to_string())}
                 />
             { html_if!(props.hidden, {
-                 <IconButton name="hide" icon="Visibility" class={if !*hide_content {"active"} else {""}} onclick={handle_hide_content} />
+                 <IconButton name="hide" icon="Visibility" class={if *hide_content {""} else {"active"}} onclick={handle_hide_content} />
             })}
         </FieldWrapper>
     }

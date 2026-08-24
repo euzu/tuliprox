@@ -270,6 +270,9 @@ pub struct SchedulesConfigDto {
 }
 
 impl SchedulesConfigDto {
+    // Clippy's method-path suggestion here names a private module and does not
+    // compile; the closure is kept deliberately.
+    #[allow(clippy::redundant_closure_for_method_calls)]
     pub fn is_empty(&self) -> bool { self.schedules.as_deref().is_none_or(|s| s.is_empty()) }
 }
 
@@ -421,7 +424,7 @@ impl ConfigDto {
     pub fn get_hdhr_device_overview(&self) -> Option<HdHomeRunDeviceOverview> {
         self.hdhomerun.as_ref().map(|hdhr| HdHomeRunDeviceOverview {
             enabled: hdhr.enabled,
-            devices: hdhr.devices.iter().map(|d| d.name.to_string()).collect::<Vec<String>>(),
+            devices: hdhr.devices.iter().map(|d| d.name.clone()).collect::<Vec<String>>(),
         })
     }
 
@@ -704,7 +707,7 @@ mod tests {
 
     #[test]
     fn stream_history_deserializes_under_reverse_proxy() {
-        let raw = r#"
+        let raw = r"
 api:
   host: 127.0.0.1
   port: 8901
@@ -716,7 +719,7 @@ reverse_proxy:
     stream_history_batch_size: 64
     stream_history_retention_days: 14
     stream_history_directory: /var/lib/tuliprox/history
-"#;
+";
 
         let cfg: ConfigDto = serde_saphyr::from_str(raw).expect("config should deserialize");
         let reverse_proxy = cfg.reverse_proxy.expect("reverse_proxy should deserialize");
@@ -730,12 +733,12 @@ reverse_proxy:
 
     #[test]
     fn stream_history_missing_values_keep_disabled_without_reverse_proxy() {
-        let raw = r#"
+        let raw = r"
 api:
   host: 127.0.0.1
   port: 8901
   web_root: ./web
-"#;
+";
 
         let cfg: ConfigDto = serde_saphyr::from_str(raw).expect("config should deserialize");
 

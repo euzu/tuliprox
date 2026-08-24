@@ -83,7 +83,7 @@ where
     let value: Value = serde::Deserialize::deserialize(deserializer)?;
 
     match &value {
-        Value::String(s) => Ok(s.to_string()),
+        Value::String(s) => Ok(s.clone()),
         Value::Number(s) => Ok(s.to_string()),
         Value::Null => Ok(String::new()),
         _ => Ok(value.to_string()),
@@ -144,7 +144,7 @@ where
             };
 
             let start = match last_non_ws {
-                Some((i, '-')) | Some((i, '+')) => i,
+                Some((i, '-' | '+')) => i,
                 _ => num_i,
             };
             let mut it = s[start..].chars().peekable();
@@ -358,7 +358,7 @@ where
                 }
             }
         }
-        Some(Value::Null) | Some(Value::Number(_)) | Some(Value::Bool(_)) => Ok(None),
+        Some(Value::Null | Value::Number(_) | Value::Bool(_)) => Ok(None),
         Some(v) => Ok(Some(serde_json::to_string(&v).map_err(D::Error::custom)?.into())),
     }
 }
@@ -446,7 +446,7 @@ mod tests {
     use serde_json::Number;
 
     /// The stack buffer must hold every number `serde_json` can render. If a future
-    /// serde_json bump changes the float formatting, this fails instead of silently
+    /// `serde_json` bump changes the float formatting, this fails instead of silently
     /// turning large values into `None`.
     #[test]
     fn parse_number_matches_to_string_roundtrip_at_the_extremes() {

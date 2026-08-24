@@ -220,7 +220,7 @@ pub fn recording_rule_form(props: &RuleFormProps) -> Html {
     let services = use_service_context();
     let translate = use_translation();
 
-    let initial = props.existing.as_ref().map(dto_from_existing).unwrap_or_else(dto_defaults);
+    let initial = props.existing.as_ref().map_or_else(dto_defaults, dto_from_existing);
     let form_state: UseReducerHandle<RuleFormState> = use_reducer(|| RuleFormState { form: initial, modified: false });
 
     let inputs = use_memo(props.sources.clone(), |sources| all_input_names(sources));
@@ -246,7 +246,7 @@ pub fn recording_rule_form(props: &RuleFormProps) -> Html {
             targets
                 .iter()
                 .map(|t| {
-                    let name_str: String = t.name.to_string();
+                    let name_str: String = t.name.clone();
                     DropDownOption {
                         id: name_str.clone(),
                         label: html! { name_str.clone() },

@@ -30,11 +30,11 @@ pub fn TargetRename(props: &TargetRenameProps) -> Html {
                     </div>
                     <div class="tp__target-rename__section tp__target-rename__row">
                         <span class="tp__target-rename__label">{ translator.t("LABEL.PATTERN") }</span>
-                        <span>{ rename.pattern.to_string() }</span>
+                        <span>{ rename.pattern.clone() }</span>
                     </div>
                     <div class="tp__target-rename__section tp__target-rename__row">
                         <span class="tp__target-rename__label">{ translator.t("LABEL.NEW_NAME") }</span>
-                        <span>{ rename.new_name.to_string() }</span>
+                        <span>{ rename.new_name.clone() }</span>
                     </div>
                 </div>
             }

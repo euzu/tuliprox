@@ -139,10 +139,7 @@ fn task_schedule(task: &RecordingTaskResponse) -> String {
 
 fn format_ts(ts: i64) -> String {
     use chrono::{TimeZone, Utc};
-    Utc.timestamp_opt(ts, 0)
-        .single()
-        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| ts.to_string())
+    Utc.timestamp_opt(ts, 0).single().map_or_else(|| ts.to_string(), |dt| dt.format("%Y-%m-%d %H:%M").to_string())
 }
 
 /// i18n key for a task's visibility, or `None` for a task with no
@@ -216,7 +213,7 @@ pub fn recording_library_view() -> Html {
         let tasks = tasks.clone();
         let last_revision = last_revision.clone();
         let svc = services.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             let translate = translate_for_events.clone();
             let sid = svc.event.subscribe(move |msg| {
                 // The socket may report an unavailable backend (stale
@@ -286,7 +283,7 @@ pub fn recording_library_view() -> Html {
         let tasks = tasks.clone();
         let quota = quota.clone();
         let last_revision = last_revision.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             wasm_bindgen_futures::spawn_local(async move {
                 // One service instance: each `new()` builds its own HTTP
                 // client, and two were being constructed for two calls.
@@ -351,11 +348,7 @@ pub fn recording_library_view() -> Html {
                 LibraryColumn::Actions => {
                     let is_owner = {
                         let current_user = UserId::from(services.auth.get_username().as_str());
-                        task.recording
-                            .as_ref()
-                            .and_then(|r| r.owner_id.as_ref())
-                            .map(|o| o == &current_user)
-                            .unwrap_or(false)
+                        task.recording.as_ref().and_then(|r| r.owner_id.as_ref()).is_some_and(|o| o == &current_user)
                     };
                     let can_mutate = can_mutate_task(has_recordings_write, is_admin, is_owner);
                     if !can_mutate {
@@ -462,7 +455,7 @@ pub fn recording_library_view() -> Html {
     let edit_view: Html = if editing_task_id.is_some() {
         let on_done = {
             let editing_task_id = editing_task_id.clone();
-            Callback::from(move |_: ()| {
+            Callback::from(move |(): ()| {
                 editing_task_id.set(Rc::new(None));
             })
         };

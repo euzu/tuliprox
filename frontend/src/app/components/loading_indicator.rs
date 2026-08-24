@@ -13,14 +13,14 @@ pub struct LoadingIndicatorProps {
 
 #[component]
 pub fn LoadingIndicator(props: &LoadingIndicatorProps) -> Html {
-    if !props.loading {
-        html! {<div class={classes!("tp__loading-bar-placeholder", props.class.clone())}></div> }
-    } else {
+    if props.loading {
         html! {
          <div class={classes!("tp__loading-bar-container", props.class.clone())}>
             <div class="tp__loading-bar"></div>
           </div>
         }
+    } else {
+        html! {<div class={classes!("tp__loading-bar-placeholder", props.class.clone())}></div> }
     }
 }
 
@@ -33,7 +33,7 @@ pub fn BusyIndicator() -> Html {
         let services = service_ctx.clone();
         let loading = loading.clone();
         let counter = counter.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             let sub_id = services.event.subscribe(move |msg| {
                 if let EventMessage::Busy(status) = msg {
                     match status {

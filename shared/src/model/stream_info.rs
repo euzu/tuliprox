@@ -351,7 +351,7 @@ impl StreamInfo {
             ts: now,
             started_at: now,
             country_code: params.country_code,
-            session_token: params.session_token.map(|token| token.to_string()),
+            session_token: params.session_token.map(std::string::ToString::to_string),
             preserved: false,
             previous_session_id: None,
         }

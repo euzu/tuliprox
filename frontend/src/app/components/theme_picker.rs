@@ -34,7 +34,7 @@ pub fn ThemePicker(props: &ThemePickerProps) -> Html {
         Callback::from(move |()| {
             // Undo any hover preview when the menu closes without a selection
             current_theme.preview();
-            popup_is_open.set(false)
+            popup_is_open.set(false);
         })
     };
 

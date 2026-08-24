@@ -3,7 +3,6 @@ use shared::foundation::{
     AssignmentTarget, BuiltInFunction, ExprId, Expression, ForEachExpr, ForEachKey, MapCase, MapCaseKey, MapKey,
     MapperScript, MatchCase, MatchCaseKey, RegexSource, Statement,
 };
-use std::ops::Deref;
 use yew::prelude::*;
 
 #[derive(Properties, PartialEq, Clone)]
@@ -335,9 +334,9 @@ fn render_regexp(field: &RegexSource, pattern: &String, _regex: &Regex) -> Html 
 }
 
 fn render_expression(expr_id: &ExprId, script: &MapperScript, format_params: &mut FormatParams) -> Html {
-    script
-        .get_expr_by_id(*expr_id.deref())
-        .map(|expression| match expression {
+    script.get_expr_by_id(**expr_id).map_or_else(
+        || html! { <span class="expr-not-found">{"ExprNotFound"}</span> },
+        |expression| match expression {
             Expression::Identifier(ident) => render_identifier(ident),
             Expression::StringLiteral(literal) => render_literal(literal),
             Expression::NumberLiteral(num) => render_num_literal(num),
@@ -351,8 +350,8 @@ fn render_expression(expr_id: &ExprId, script: &MapperScript, format_params: &mu
             Expression::ForEachBlock { key, expr } => render_for_each_block(key, expr, script, format_params),
             Expression::NullValue => render_null_value(),
             Expression::Block(expr_ids) => render_block(expr_ids, script, format_params),
-        })
-        .unwrap_or_else(|| html! { <span class="expr-not-found">{"ExprNotFound"}</span> })
+        },
+    )
 }
 
 fn render_script(script: &MapperScript, pretty: bool, level: usize /*, do_indent: bool, p_count: usize*/) -> Html {

@@ -58,19 +58,7 @@ pub fn M3uTargetOutputView(props: &M3uTargetOutputViewProps) -> Html {
 
     let render_output = || {
         let output_form_state_1 = output_form_state.clone();
-        if !props.allow_write {
-            html! {
-                <Card class="tp__config-view__card">
-                    { config_field_optional!(output_form_state.form, translate.t(LABEL_FILENAME), filename) }
-                    { config_field_bool!(output_form_state.form, translate.t(LABEL_INCLUDE_TYPE_IN_URL), include_type_in_url) }
-                    { config_field_bool!(output_form_state.form, translate.t(LABEL_MASK_REDIRECT_URL), mask_redirect_url) }
-                    { config_field_custom!(
-                        translate.t(LABEL_FILTER),
-                        output_form_state.form.filter.clone().unwrap_or_default()
-                    ) }
-                </Card>
-            }
-        } else {
+        if props.allow_write {
             html! {
                 <Card class="tp__config-view__card">
                     { edit_field_text_option!(output_form_state, translate.t(LABEL_FILENAME), filename, M3uTargetOutputFormAction::Filename) }
@@ -83,6 +71,18 @@ pub fn M3uTargetOutputView(props: &M3uTargetOutputViewProps) -> Html {
                                 })} />
                            }
                     })}
+                </Card>
+            }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                    { config_field_optional!(output_form_state.form, translate.t(LABEL_FILENAME), filename) }
+                    { config_field_bool!(output_form_state.form, translate.t(LABEL_INCLUDE_TYPE_IN_URL), include_type_in_url) }
+                    { config_field_bool!(output_form_state.form, translate.t(LABEL_MASK_REDIRECT_URL), mask_redirect_url) }
+                    { config_field_custom!(
+                        translate.t(LABEL_FILTER),
+                        output_form_state.form.filter.clone().unwrap_or_default()
+                    ) }
                 </Card>
             }
         }

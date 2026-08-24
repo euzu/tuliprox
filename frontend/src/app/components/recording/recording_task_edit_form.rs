@@ -28,8 +28,8 @@ pub fn task_edit_form(props: &TaskEditFormProps) -> Html {
     let task = props.task.clone();
     let program_start = use_state(|| task.recording.as_ref().and_then(|r| r.program_start).unwrap_or(0));
     let program_end = use_state(|| task.recording.as_ref().and_then(|r| r.program_end).unwrap_or(0));
-    let pre_roll = use_state(|| task.recording.as_ref().map(|r| r.pre_roll_secs).unwrap_or(0));
-    let post_roll = use_state(|| task.recording.as_ref().map(|r| r.post_roll_secs).unwrap_or(0));
+    let pre_roll = use_state(|| task.recording.as_ref().map_or(0, |r| r.pre_roll_secs));
+    let post_roll = use_state(|| task.recording.as_ref().map_or(0, |r| r.post_roll_secs));
 
     let id = task.id.clone();
 

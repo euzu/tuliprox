@@ -7,7 +7,7 @@ pub(super) fn build_source_type_options(
     source_types: &Option<Vec<ExplorerSourceType>>,
     default: &[ExplorerSourceType],
 ) -> Vec<String> {
-    source_types.as_ref().map(Vec::as_slice).unwrap_or(default).iter().map(ToString::to_string).collect()
+    source_types.as_ref().map_or(default, Vec::as_slice).iter().map(ToString::to_string).collect()
 }
 
 pub(super) fn source_selection_callback(

@@ -1013,8 +1013,9 @@ impl ConfigInputDto {
                 .aliases
                 .as_ref()
                 .and_then(|aliases| aliases.iter().find(|a| a.enabled))
-                .map(|alias| (alias.username.clone(), alias.password.clone(), Some(alias.url.clone())))
-                .unwrap_or((None, None, None));
+                .map_or((None, None, None), |alias| {
+                    (alias.username.clone(), alias.password.clone(), Some(alias.url.clone()))
+                });
 
             if u.is_some() && p.is_some() && r.is_some() {
                 return (u, p, r);
@@ -1025,14 +1026,13 @@ impl ConfigInputDto {
                 return (u, p, Some(self.url.clone()));
             }
 
-            self.aliases
-                .as_ref()
-                .and_then(|aliases| aliases.iter().find(|a| a.enabled))
-                .map(|alias| {
+            self.aliases.as_ref().and_then(|aliases| aliases.iter().find(|a| a.enabled)).map_or(
+                (None, None, None),
+                |alias| {
                     let (u, p) = get_credentials_from_url_str(alias.url.as_str());
                     (u, p, Some(alias.url.clone()))
-                })
-                .unwrap_or((None, None, None))
+                },
+            )
         };
 
         let (username, password, base_url) = get_creds();
@@ -1739,7 +1739,7 @@ mod tests {
         let mut dto = ConfigInputDto {
             name: "xtream_missing_root_url".intern(),
             input_type: InputType::Xtream,
-            url: "".to_string(),
+            url: String::new(),
             username: Some("root_user".to_string()),
             password: Some("root_pass".to_string()),
             aliases: Some(vec![ConfigInputAliasDto {

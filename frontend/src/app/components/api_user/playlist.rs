@@ -110,7 +110,7 @@ pub fn ApiUserPlaylist() -> Html {
     let categories = use_state(|| None as Option<Rc<PlaylistCategoriesDto>>);
     let bouquets = use_state(|| None as Option<Rc<PlaylistBouquetDto>>);
     let active_tab = use_state(|| ApiUserPlaylistPage::Xtream);
-    let playlist_types = use_memo((), |_| {
+    let playlist_types = use_memo((), |()| {
         [ApiUserPlaylistPage::Xtream, ApiUserPlaylistPage::M3u].iter().map(ToString::to_string).collect::<Vec<String>>()
     });
 
@@ -122,7 +122,7 @@ pub fn ApiUserPlaylist() -> Html {
         Callback::from(move |page_selection: Rc<Vec<String>>| {
             if let Some(page_selection_str) = page_selection.first() {
                 if let Ok(page) = ApiUserPlaylistPage::from_str(page_selection_str) {
-                    active_tab_clone.set(page)
+                    active_tab_clone.set(page);
                 }
             }
         })
@@ -135,7 +135,7 @@ pub fn ApiUserPlaylist() -> Html {
         let services = service_ctx.clone();
         let translate = translate.clone();
 
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             wasm_bindgen_futures::spawn_local(async move {
                 services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
                 let result =
@@ -172,8 +172,8 @@ pub fn ApiUserPlaylist() -> Html {
             let selections = selections.clone();
             let services = services.clone();
             let translate = translate.clone();
-            let xtream_categories = categories.as_ref().and_then(|plc| plc.xtream.as_ref().cloned());
-            let m3u_categories = categories.as_ref().and_then(|plc| plc.m3u.as_ref().cloned());
+            let xtream_categories = categories.as_ref().and_then(|plc| plc.xtream.clone());
+            let m3u_categories = categories.as_ref().and_then(|plc| plc.m3u.clone());
 
             wasm_bindgen_futures::spawn_local(async move {
                 services.event.broadcast(EventMessage::Busy(BusyStatus::Show));
@@ -237,14 +237,14 @@ pub fn ApiUserPlaylist() -> Html {
                     <Panel value={ApiUserPlaylistPage::Xtream.intern()} active={active_page.clone()}>
                         <UserTargetPlaylist
                             categories={categories.as_ref().and_then(|c| c.xtream.clone())}
-                            bouquet={bouquets.as_ref().and_then(|b| b.xtream.as_ref().cloned())}
+                            bouquet={bouquets.as_ref().and_then(|b| b.xtream.clone())}
                             on_change={handle_xtream_change.clone()}
                             ></UserTargetPlaylist>
                     </Panel>
                     <Panel value={ApiUserPlaylistPage::M3u.intern()} active={active_page}>
                        <UserTargetPlaylist
                             categories={categories.as_ref().and_then(|c| c.m3u.clone())}
-                            bouquet={bouquets.as_ref().and_then(|b| b.m3u.as_ref().cloned())}
+                            bouquet={bouquets.as_ref().and_then(|b| b.m3u.clone())}
                             on_change={handle_m3u_change.clone()}
                             ></UserTargetPlaylist>
                     </Panel>

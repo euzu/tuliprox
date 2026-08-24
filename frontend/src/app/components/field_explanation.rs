@@ -70,22 +70,19 @@ pub fn show_field_explanation(
         // Caller is expected to pass a normalized key-compatible field_id.
         let candidates = explanation_key_candidates(field_id);
         let looked_up = candidates.iter().map(|key| (key.clone(), t_safe(translate, key))).collect::<Vec<_>>();
-        let (_matched_key, matched_explanation) = match looked_up
-            .iter()
-            .find_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone())))
+        let (_matched_key, matched_explanation) = if let Some(found) =
+            looked_up.iter().find_map(|(k, v)| v.as_ref().map(|v| (k.clone(), v.clone())))
         {
-            Some(found) => (Some(found.0), found.1),
-            None => {
-                // Log the requested field_id and every candidate key that was tried
-                // so missing i18n entries are easy to spot during development.
-                // The "DEFAULT" candidate is also listed for transparency.
-                let tried = looked_up.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ");
-                web_sys::console::warn_1(
-                    &format!("[field_explanation] no EXPLANATION found for field_id={field_id:?}; tried: [{tried}]")
-                        .into(),
-                );
-                (None, "No explanation available for this field.".to_string())
-            }
+            (Some(found.0), found.1)
+        } else {
+            // Log the requested field_id and every candidate key that was tried
+            // so missing i18n entries are easy to spot during development.
+            // The "DEFAULT" candidate is also listed for transparency.
+            let tried = looked_up.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ");
+            web_sys::console::warn_1(
+                &format!("[field_explanation] no EXPLANATION found for field_id={field_id:?}; tried: [{tried}]").into(),
+            );
+            (None, "No explanation available for this field.".to_string())
         };
         explanation = Some(matched_explanation);
     }

@@ -244,7 +244,10 @@ pub enum Expression {
 
 impl PartialEq for Expression {
     fn eq(&self, other: &Self) -> bool {
-        use Expression::*;
+        use Expression::{
+            Assignment, Block, FieldAccess, ForEachBlock, FunctionCall, Identifier, MapBlock, MatchBlock, NullValue,
+            NumberLiteral, RegexExpr, StringLiteral, VarAccess,
+        };
         match (self, other) {
             (Identifier(a), Identifier(b)) => a == b,
             (StringLiteral(a), StringLiteral(b)) => a == b,
@@ -783,7 +786,7 @@ impl<'a> MapperContext<'a> {
             Expression::Assignment { target, expr } => {
                 match target {
                     AssignmentTarget::Identifier(ident) => {
-                        identifiers.insert(ident.to_string());
+                        identifiers.insert(ident.clone());
                     }
                     AssignmentTarget::Field(_) => {}
                 }
@@ -1174,7 +1177,7 @@ impl Expression {
                     Named(values) => {
                         for (key, val) in values {
                             if key == field {
-                                return Value(val.to_string());
+                                return Value(val.clone());
                             }
                         }
                         Failure(format!("Variable with name {name} has no field {field}."))
@@ -1299,7 +1302,7 @@ impl Expression {
                             Some(value) => match value {
                                 Named(values) => match values.first() {
                                     None => Undefined,
-                                    Some((_key, val)) => Value(val.to_string()),
+                                    Some((_key, val)) => Value(val.clone()),
                                 },
                                 _ => value.clone(),
                             },
@@ -1506,7 +1509,7 @@ impl Expression {
                             Named(values) => {
                                 for (key, val) in values {
                                     if key == field {
-                                        let mut res_val = val.to_string();
+                                        let mut res_val = val.clone();
                                         if accessor.match_as_ascii {
                                             res_val = deunicode_string(&res_val).into_owned();
                                         }
@@ -1784,7 +1787,7 @@ mod tests {
             }
         "#;
         let mapper = MapperScript::parse(script, None).expect("Parsing failed");
-        println!("Program: {mapper:?}")
+        println!("Program: {mapper:?}");
     }
 
     #[test]

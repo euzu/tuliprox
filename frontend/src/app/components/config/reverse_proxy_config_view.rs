@@ -148,7 +148,7 @@ generate_form_reducer!(
     }
 );
 
-/// Simple wrapper for failover patterns to use Vec<String> directly with edit_field_list
+/// Simple wrapper for failover patterns to use Vec<String> directly with `edit_field_list`
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FailoverPatternsDto {
     pub patterns: Vec<String>,
@@ -409,7 +409,7 @@ fn clamp_usize_min(value: Option<i64>, min_value: usize) -> usize {
 }
 
 fn clamp_u8_range(value: Option<i64>, min_value: u8, max_value: u8) -> u8 {
-    value.and_then(|value| u8::try_from(value).ok()).map(|value| value.clamp(min_value, max_value)).unwrap_or(min_value)
+    value.and_then(|value| u8::try_from(value).ok()).map_or(min_value, |value| value.clamp(min_value, max_value))
 }
 
 #[component]
@@ -590,11 +590,11 @@ pub fn ReverseProxyConfigView() -> Html {
                     || qos_aggregation_modified;
                 let next_form = ConfigForm::ReverseProxy(modified, form);
                 let mut last_form = last_emitted_form.borrow_mut();
-                if last_form.as_ref() != Some(&next_form) {
+                if last_form.as_ref() == Some(&next_form) {
+                    None
+                } else {
                     *last_form = Some(next_form);
                     last_form.clone()
-                } else {
-                    None
                 }
             },
         );
@@ -626,40 +626,41 @@ pub fn ReverseProxyConfigView() -> Html {
                 let target_disabled_header = rp
                     .disabled_header
                     .as_ref()
-                    .map_or_else(ReverseProxyDisabledHeaderConfigDto::default, |d| d.clone());
+                    .map_or_else(ReverseProxyDisabledHeaderConfigDto::default, std::clone::Clone::clone);
                 if disabled_header_state.form != target_disabled_header {
                     disabled_header_state
                         .dispatch(ReverseProxyDisabledHeaderConfigFormAction::SetAll(target_disabled_header));
                 }
 
-                let target_cache = rp.cache.as_ref().map_or_else(CacheConfigDto::default, |c| c.clone());
+                let target_cache = rp.cache.as_ref().map_or_else(CacheConfigDto::default, std::clone::Clone::clone);
                 if cache_state.form != target_cache {
                     cache_state.dispatch(CacheConfigFormAction::SetAll(target_cache));
                 }
 
                 let target_rate_limit =
-                    rp.rate_limit.as_ref().map_or_else(RateLimitConfigDto::default, |rl| rl.clone());
+                    rp.rate_limit.as_ref().map_or_else(RateLimitConfigDto::default, std::clone::Clone::clone);
                 if rate_limit_state.form != target_rate_limit {
                     rate_limit_state.dispatch(RateLimitConfigFormAction::SetAll(target_rate_limit));
                 }
 
                 let target_resource_retry =
-                    rp.resource_retry.as_ref().map_or_else(ResourceRetryConfigDto::default, |rr| rr.clone());
+                    rp.resource_retry.as_ref().map_or_else(ResourceRetryConfigDto::default, std::clone::Clone::clone);
                 if resource_retry_state.form != target_resource_retry {
                     resource_retry_state.dispatch(ResourceRetryConfigFormAction::SetAll(target_resource_retry));
                 }
 
-                let target_stream = rp.stream.as_ref().map_or_else(StreamConfigDto::default, |s| s.clone());
+                let target_stream = rp.stream.as_ref().map_or_else(StreamConfigDto::default, std::clone::Clone::clone);
                 if stream_state.form != target_stream {
                     stream_state.dispatch(StreamConfigFormAction::SetAll(target_stream));
                 }
 
-                let target_geoip = rp.geoip.as_ref().map_or_else(GeoIpConfigDto::default, |s| s.clone());
+                let target_geoip = rp.geoip.as_ref().map_or_else(GeoIpConfigDto::default, std::clone::Clone::clone);
                 if geoip_state.form != target_geoip {
                     geoip_state.dispatch(GeoIpConfigFormAction::SetAll(target_geoip));
                 }
 
-                let target_hls_cache = rp.hls_cache.as_ref().map_or_else(HlsCacheConfigDto::default, |h| h.clone());
+                let target_hls_cache =
+                    rp.hls_cache.as_ref().map_or_else(HlsCacheConfigDto::default, std::clone::Clone::clone);
                 if hls_cache_state.form != target_hls_cache {
                     hls_cache_state.dispatch(HlsCacheConfigFormAction::SetAll(target_hls_cache.clone()));
                 }
@@ -694,13 +695,13 @@ pub fn ReverseProxyConfigView() -> Html {
                 }
 
                 let target_stream_history =
-                    rp.stream_history.as_ref().map_or_else(StreamHistoryConfigDto::default, |s| s.clone());
+                    rp.stream_history.as_ref().map_or_else(StreamHistoryConfigDto::default, std::clone::Clone::clone);
                 if stream_history_state.form != target_stream_history {
                     stream_history_state.dispatch(StreamHistoryConfigFormAction::SetAll(target_stream_history));
                 }
 
                 let target_qos_aggregation =
-                    rp.qos_aggregation.as_ref().map_or_else(QosAggregationConfigDto::default, |q| q.clone());
+                    rp.qos_aggregation.as_ref().map_or_else(QosAggregationConfigDto::default, std::clone::Clone::clone);
                 if qos_aggregation_state.form != target_qos_aggregation {
                     qos_aggregation_state.dispatch(QosAggregationConfigFormAction::SetAll(target_qos_aggregation));
                 }

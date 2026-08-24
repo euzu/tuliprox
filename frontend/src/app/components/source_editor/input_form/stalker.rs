@@ -117,20 +117,20 @@ pub(super) fn StalkerInputForm(props: &StalkerInputFormProps) -> Html {
     let endpoint_options =
         use_memo(config.endpoint_preference, |selected| enum_options::<StalkerEndpointPreference>(*selected));
 
-    let extra = if !props.allow_write {
-        html! {
-            <>
-                { config_field!(config_value, translate.t("LABEL.STALKER_AUTH_MODE"), auth_mode) }
-                { config_field!(config_value, translate.t("LABEL.STALKER_MAG_PRESET"), mag_preset) }
-                { config_field!(config_value, translate.t("LABEL.STALKER_ENDPOINT_PREFERENCE"), endpoint_preference) }
-            </>
-        }
-    } else {
+    let extra = if props.allow_write {
         html! {
             <>
                 { select_field(&config, translate.t("LABEL.STALKER_AUTH_MODE"), "stalker_auth_mode", "STALKER_INPUT_CONFIG.AUTH_MODE", auth_options, |config, value| config.auth_mode = value) }
                 { select_field(&config, translate.t("LABEL.STALKER_MAG_PRESET"), "stalker_mag_preset", "STALKER_INPUT_CONFIG.MAG_PRESET", preset_options, |config, value| config.mag_preset = value) }
                 { select_field(&config, translate.t("LABEL.STALKER_ENDPOINT_PREFERENCE"), "stalker_endpoint_preference", "STALKER_INPUT_CONFIG.ENDPOINT_PREFERENCE", endpoint_options, |config, value| config.endpoint_preference = value) }
+            </>
+        }
+    } else {
+        html! {
+            <>
+                { config_field!(config_value, translate.t("LABEL.STALKER_AUTH_MODE"), auth_mode) }
+                { config_field!(config_value, translate.t("LABEL.STALKER_MAG_PRESET"), mag_preset) }
+                { config_field!(config_value, translate.t("LABEL.STALKER_ENDPOINT_PREFERENCE"), endpoint_preference) }
             </>
         }
     };

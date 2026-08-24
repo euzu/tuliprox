@@ -12,7 +12,7 @@ pub fn DocumentationActionCard() -> Html {
     let translate = use_translation();
 
     let handle_url = {
-        let docu_link = services.config.ui_config.documentation.to_string();
+        let docu_link = services.config.ui_config.documentation.clone();
         Callback::from(move |_| {
             let _ = window().open_with_url_and_target(&docu_link, "_blank");
         })

@@ -386,7 +386,7 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
 
             let filter_state_handle = filter_state.clone();
             let filter_state_selections =
-                Rc::new(vec![filter_state.get(&cluster).cloned().unwrap_or(FilterState::All).to_string()]);
+                Rc::new(vec![filter_state.get(&cluster).copied().unwrap_or(FilterState::All).to_string()]);
             let title_content = if *collapse_state.get(&cluster).unwrap_or(&true) {
                 html! {
                 <div class="tp__api-user-target-playlist__section-header">
@@ -408,7 +408,7 @@ pub fn UserTargetPlaylist(props: &UserTargetPlaylistProps) -> Html {
                                        filter_state_handle.set(cluster_state);
                                     }
                                 })}
-                                options={Rc::new([FilterState::All, FilterState::Selected, FilterState::Deselected].iter().map(|s| s.to_string()).collect::<Vec<String>>())}
+                                options={Rc::new([FilterState::All, FilterState::Selected, FilterState::Deselected].iter().map(std::string::ToString::to_string).collect::<Vec<String>>())}
                                 labels={Rc::new(vec![translate.t("LABEL.ALL"), translate.t("LABEL.SELECTED"), translate.t("LABEL.DESELECTED")])}
                                 selected={filter_state_selections}
                         />

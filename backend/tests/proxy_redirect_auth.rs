@@ -162,26 +162,15 @@ async fn proxy_auth_lost_on_redirect_repro() {
     assert_eq!(
         status,
         StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-        "Expected 407 when proxy auth is lost on redirect. missing_auth={}, uris={:?}",
-        missing_auth,
-        uris
+        "Expected 407 when proxy auth is lost on redirect. missing_auth={missing_auth}, uris={uris:?}"
     );
-    assert!(
-        missing_auth > 0,
-        "Expected missing proxy auth on redirect. missing_auth={}, uris={:?}",
-        missing_auth,
-        uris
-    );
+    assert!(missing_auth > 0, "Expected missing proxy auth on redirect. missing_auth={missing_auth}, uris={uris:?}");
 }
 
 #[cfg(feature = "proxy-auth-regression")]
 #[tokio::test]
 async fn proxy_auth_survives_redirect_regression() {
     let (status, missing_auth, uris) = run_proxy_flow(true).await;
-    assert_eq!(status, StatusCode::OK, "Expected 200 OK after fix. missing_auth={}, uris={:?}", missing_auth, uris);
-    assert_eq!(
-        missing_auth, 0,
-        "Expected no missing proxy auth after fix. missing_auth={}, uris={:?}",
-        missing_auth, uris
-    );
+    assert_eq!(status, StatusCode::OK, "Expected 200 OK after fix. missing_auth={missing_auth}, uris={uris:?}");
+    assert_eq!(missing_auth, 0, "Expected no missing proxy auth after fix. missing_auth={missing_auth}, uris={uris:?}");
 }

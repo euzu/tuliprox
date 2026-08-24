@@ -129,7 +129,7 @@ pub fn MessagingConfigView() -> Html {
         use_reducer(|| MessagingConfigFormState { form: MessagingConfigDto::default(), modified: false });
 
     let notify_on_options =
-        use_memo((), |_| vec![MsgKind::Info, MsgKind::Stats, MsgKind::Error, MsgKind::Watch, MsgKind::DiskAlert]);
+        use_memo((), |()| vec![MsgKind::Info, MsgKind::Stats, MsgKind::Error, MsgKind::Watch, MsgKind::DiskAlert]);
 
     let notify_on_options_text = use_memo((*notify_on_options).clone(), |options: &Vec<MsgKind>| {
         options.iter().map(ToString::to_string).collect::<Vec<String>>()
@@ -183,35 +183,39 @@ pub fn MessagingConfigView() -> Html {
             .config
             .as_ref()
             .and_then(|c| c.config.messaging.as_ref())
-            .map_or_else(MessagingConfigDto::default, |m| m.clone());
+            .map_or_else(MessagingConfigDto::default, std::clone::Clone::clone);
 
-        let telegram_cfg = msg_config.telegram.as_ref().map_or_else(TelegramMessagingConfigDto::default, |t| t.clone());
+        let telegram_cfg =
+            msg_config.telegram.as_ref().map_or_else(TelegramMessagingConfigDto::default, std::clone::Clone::clone);
         use_effect_with((telegram_cfg, *config_view_ctx.edit_mode), move |(telegram_cfg, _mode)| {
             t_state.dispatch(TelegramMessagingConfigFormAction::SetAll(telegram_cfg.clone()));
             || ()
         });
 
-        let rest_cfg = msg_config.rest.as_ref().map_or_else(RestMessagingConfigDto::default, |t| t.clone());
+        let rest_cfg = msg_config.rest.as_ref().map_or_else(RestMessagingConfigDto::default, std::clone::Clone::clone);
         use_effect_with((rest_cfg, *config_view_ctx.edit_mode), move |(rest_cfg, _mode)| {
             r_state.dispatch(RestMessagingConfigFormAction::SetAll(rest_cfg.clone()));
             || ()
         });
 
-        let pushover_cfg = msg_config.pushover.as_ref().map_or_else(PushoverMessagingConfigDto::default, |t| t.clone());
+        let pushover_cfg =
+            msg_config.pushover.as_ref().map_or_else(PushoverMessagingConfigDto::default, std::clone::Clone::clone);
         use_effect_with((pushover_cfg, *config_view_ctx.edit_mode), move |(pushover_cfg, _mode)| {
             p_state.dispatch(PushoverMessagingConfigFormAction::SetAll(pushover_cfg.clone()));
             || ()
         });
 
         let discord_state = discord_state.clone();
-        let discord_cfg = msg_config.discord.as_ref().map_or_else(DiscordMessagingConfigDto::default, |t| t.clone());
+        let discord_cfg =
+            msg_config.discord.as_ref().map_or_else(DiscordMessagingConfigDto::default, std::clone::Clone::clone);
         use_effect_with((discord_cfg, *config_view_ctx.edit_mode), move |(discord_cfg, _mode)| {
             discord_state.dispatch(DiscordMessagingConfigFormAction::SetAll(discord_cfg.clone()));
             || ()
         });
 
         let disk_alert_state = disk_alert_state.clone();
-        let disk_alert_cfg = msg_config.disk_alert.as_ref().map_or_else(DiskAlertConfigDto::default, |d| d.clone());
+        let disk_alert_cfg =
+            msg_config.disk_alert.as_ref().map_or_else(DiskAlertConfigDto::default, std::clone::Clone::clone);
         use_effect_with((disk_alert_cfg, *config_view_ctx.edit_mode), move |(disk_alert_cfg, _mode)| {
             disk_alert_state.dispatch(DiskAlertConfigFormAction::SetAll(disk_alert_cfg.clone()));
             || ()

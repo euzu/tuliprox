@@ -105,7 +105,7 @@ fn intern_string(s: String) -> Arc<str> { intern_impl!(s.as_str(), Arc::from(s))
 
 /// Returns the current number of strings held in the interning pool.
 /// Uses a read lock and is safe to call on hot paths for threshold checks.
-pub fn interner_len() -> usize { INTERNER.read().map(|g| g.len()).unwrap_or(0) }
+pub fn interner_len() -> usize { INTERNER.read().map_or(0, |g| g.len()) }
 
 /// Garbage collection: removes strings that are only referenced by the cache.
 pub fn interner_gc() -> usize {
@@ -243,6 +243,10 @@ impl<'de> Visitor<'de> for OptionArcStrVisitor {
 }
 
 pub mod arc_str_vec_serde {
+    // These serde helper modules deliberately re-use the parent module's imports.
+    // Clippy's expansion of this glob names private sibling modules and does not
+    // compile, so the glob is kept.
+    #[allow(clippy::wildcard_imports)]
     use super::*;
     use serde::ser::SerializeSeq;
 
@@ -262,11 +266,15 @@ pub mod arc_str_vec_serde {
         D: Deserializer<'de>,
     {
         let vec = Vec::<String>::deserialize(deserializer)?;
-        Ok(vec.into_iter().map(|s| s.intern()).collect())
+        Ok(vec.into_iter().map(super::Internable::intern).collect())
     }
 }
 
 pub mod arc_str_serde {
+    // These serde helper modules deliberately re-use the parent module's imports.
+    // Clippy's expansion of this glob names private sibling modules and does not
+    // compile, so the glob is kept.
+    #[allow(clippy::wildcard_imports)]
     use super::*;
 
     pub fn serialize<S>(value: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error>
@@ -291,6 +299,10 @@ pub mod arc_str_serde {
 }
 
 pub mod arc_str_option_serde {
+    // These serde helper modules deliberately re-use the parent module's imports.
+    // Clippy's expansion of this glob names private sibling modules and does not
+    // compile, so the glob is kept.
+    #[allow(clippy::wildcard_imports)]
     use super::*;
 
     pub fn serialize<S>(value: &Option<Arc<str>>, serializer: S) -> Result<S::Ok, S::Error>
@@ -352,6 +364,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    // These serde helper modules deliberately re-use the parent module's imports.
+    // Clippy's expansion of this glob names private sibling modules and does not
+    // compile, so the glob is kept.
+    #[allow(clippy::wildcard_imports)]
     use super::*;
 
     #[derive(Debug, serde::Deserialize)]

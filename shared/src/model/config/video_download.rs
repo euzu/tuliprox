@@ -477,7 +477,7 @@ impl VideoConfigDto {
     pub fn is_empty(&self) -> bool {
         (self.extensions.is_empty() || is_default_supported_video_extensions(&self.extensions))
             && is_blank_optional_str(self.web_search.as_deref())
-            && (self.download.is_none() || self.download.as_ref().is_some_and(|d| d.is_empty()))
+            && (self.download.is_none() || self.download.as_ref().is_some_and(VideoDownloadConfigDto::is_empty))
     }
 
     pub fn clean(&mut self) {
@@ -490,7 +490,7 @@ impl VideoConfigDto {
                     recording.notifications.take().filter(|notifications| !notifications.is_empty());
             }
         }
-        if self.download.as_ref().is_some_and(|d| d.is_empty()) {
+        if self.download.as_ref().is_some_and(VideoDownloadConfigDto::is_empty) {
             self.download = None;
         }
     }
@@ -1083,7 +1083,7 @@ mod tests {
     #[test]
     fn recording_template_empty_is_rejected() {
         let mut recording = make_recording_config();
-        recording.filename_template = Some("".to_string());
+        recording.filename_template = Some(String::new());
         let mut video = make_recording_video_config(recording);
         let err = video.prepare().expect_err("empty template should fail");
         assert!(err.to_string().contains("empty"), "error: {err}");

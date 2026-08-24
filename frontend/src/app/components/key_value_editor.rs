@@ -118,7 +118,7 @@ pub fn KeyValueEditor(props: &KeyValueEditorProps) -> Html {
         let new_value = new_value.clone();
         let entry_state = entry_state.clone();
         let on_change = on_change.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             match candidate_entry(&new_key, &new_value, (*entry_state).as_slice(), validate_entry.as_ref()) {
                 CandidateDecision::Accepted(candidate) => {
                     let mut updated = (*entry_state).clone();

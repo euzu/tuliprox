@@ -128,7 +128,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
         let collapsed = collapsed.clone();
         let is_mobile = is_mobile.clone();
 
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             let Some(window) = window() else {
                 return;
             };
@@ -351,7 +351,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
                        {
                           if let Some(logo) = services.config.ui_config.app_logo.as_ref() {
                             let alt = format!("{} logo", services.config.ui_config.app_title.as_deref().unwrap_or("tuliprox"));
-                            html! { <img src={logo.to_string()} alt={alt}/> }
+                            html! { <img src={logo.clone()} alt={alt}/> }
                           } else {
                             html! { <AppIcon name="Logo"/> }
                           }

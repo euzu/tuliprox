@@ -34,7 +34,7 @@ pub fn recording_edit_view() -> Html {
     {
         let tasks = tasks.clone();
         let svc = services.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             let sid = svc.event.subscribe(move |msg| {
                 if let EventMessage::RecordingSnapshot { tasks: incoming, .. } = msg {
                     let mapped = incoming.iter().map(|t| RecordingTaskResponse::from(t.clone())).collect();
@@ -46,15 +46,13 @@ pub fn recording_edit_view() -> Html {
         });
     }
 
-    let on_done = Callback::from(move |_: ()| { /* router picks this up */ });
+    let on_done = Callback::from(move |(): ()| { /* router picks this up */ });
 
     let body = match (*editing.0).as_ref() {
-        Some(id) => (*tasks)
-            .iter()
-            .find(|t| &t.id == id)
-            .cloned()
-            .map(|task| html! { <TaskEditForm task={task} on_done={on_done} /> })
-            .unwrap_or_else(|| html! { <p>{ translate.t("MESSAGES.RECORDING.TASK_NOT_FOUND") }</p> }),
+        Some(id) => (*tasks).iter().find(|t| &t.id == id).cloned().map_or_else(
+            || html! { <p>{ translate.t("MESSAGES.RECORDING.TASK_NOT_FOUND") }</p> },
+            |task| html! { <TaskEditForm task={task} on_done={on_done} /> },
+        ),
         None => html! { <p>{ translate.t("MESSAGES.RECORDING.NO_TASK_SELECTED") }</p> },
     };
 

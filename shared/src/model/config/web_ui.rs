@@ -119,7 +119,8 @@ pub struct ContentSecurityPolicyConfigDto {
 impl ContentSecurityPolicyConfigDto {
     pub fn is_empty(&self) -> bool {
         !self.enabled
-            && (self.custom_attributes.is_none() || self.custom_attributes.as_ref().is_some_and(|v| v.is_empty()))
+            && (self.custom_attributes.is_none()
+                || self.custom_attributes.as_ref().is_some_and(std::vec::Vec::is_empty))
     }
 
     pub fn validate(&self) -> Result<(), TuliproxError> {
@@ -199,19 +200,19 @@ impl WebUiConfigDto {
             && is_blank_optional_str(self.player_server.as_deref())
             && self.kick_secs == default_kick_secs()
             && (self.content_security_policy.is_none()
-                || self.content_security_policy.as_ref().is_some_and(|c| c.is_empty()))
-            && (self.auth.is_none() || self.auth.as_ref().is_some_and(|c| c.is_empty()))
-            && (self.stream_info.is_none() || self.stream_info.as_ref().is_some_and(|s| s.is_empty()))
+                || self.content_security_policy.as_ref().is_some_and(ContentSecurityPolicyConfigDto::is_empty))
+            && (self.auth.is_none() || self.auth.as_ref().is_some_and(super::web_auth::WebAuthConfigDto::is_empty))
+            && (self.stream_info.is_none() || self.stream_info.as_ref().is_some_and(StreamInfoConfigDto::is_empty))
     }
 
     pub fn clean(&mut self) {
-        if self.content_security_policy.as_ref().is_some_and(|c| c.is_empty()) {
+        if self.content_security_policy.as_ref().is_some_and(ContentSecurityPolicyConfigDto::is_empty) {
             self.content_security_policy = None;
         }
-        if self.auth.as_ref().is_some_and(|c| c.is_empty()) {
+        if self.auth.as_ref().is_some_and(super::web_auth::WebAuthConfigDto::is_empty) {
             self.auth = None;
         }
-        if self.stream_info.as_ref().is_some_and(|s| s.is_empty()) {
+        if self.stream_info.as_ref().is_some_and(StreamInfoConfigDto::is_empty) {
             self.stream_info = None;
         }
 

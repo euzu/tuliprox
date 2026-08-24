@@ -1,3 +1,8 @@
+// Build-time asset packer for the flag atlas. Every `as` narrowing below is on a
+// length or index bounded by the checked-in SVG set and by the on-disk format's
+// own field widths, so truncation cannot occur for any input this tool accepts.
+#![allow(clippy::cast_possible_truncation)]
+
 ///////////
 // Flags Builder creates a flags.dat file from a directory with svg files named with <countrycode>.svg
 // This file is used by the frontend to display the flags.

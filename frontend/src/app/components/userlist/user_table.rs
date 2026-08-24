@@ -203,8 +203,8 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                     2 => html! { <UserStatus status={ dto.credentials.status } /> },
                     3 => html! { <span class={if target_names.contains(dto.target.as_str()) {""} else {"tp__user-table__invalid-target"} }>{dto.target.as_str()}</span> },
                     4 => html! { dto.credentials.username.as_str() },
-                    5 => html! { <HideContent content={dto.credentials.password.to_string()}></HideContent> },
-                    6 => html! { dto.credentials.token.as_ref().map_or_else(|| html!{}, |token| html! { <HideContent content={token.to_string()}></HideContent>}) },
+                    5 => html! { <HideContent content={dto.credentials.password.clone()}></HideContent> },
+                    6 => html! { dto.credentials.token.as_ref().map_or_else(|| html!{}, |token| html! { <HideContent content={token.clone()}></HideContent>}) },
                     7 => html! {<ProxyTypeView value={dto.credentials.proxy} /> },
                     8 => dto.credentials.server.as_ref().map_or_else(|| html! {}, |s| html! { s }),
                     9 => html! { <MaxConnections value={dto.credentials.max_connections} /> },
@@ -216,11 +216,8 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                                     />  },
                     14 => dto.credentials.epg_timeshift.as_ref().map_or_else(|| html! {}, |s| html! { s }),
                     15 => dto.credentials.epg_request_timeshift.as_ref().map_or_else(|| html! {}, |s| html! { s }),
-                    16 => dto.credentials.created_at.as_ref().and_then(|ts| unix_ts_to_str(*ts))
-                        .map(|s| html! { { s } }).unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
-                    17 => dto.credentials.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts))
-                        .map(|s| html! { <span class="tp__table__nowrap">{ s }</span> })
-                        .unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
+                    16 => dto.credentials.created_at.as_ref().and_then(|ts| unix_ts_to_str(*ts)).map_or_else(|| html! { <AppIcon name="Unlimited" /> }, |s| html! { { s } }),
+                    17 => dto.credentials.exp_date.as_ref().and_then(|ts| unix_ts_to_str(*ts)).map_or_else(|| html! { <AppIcon name="Unlimited" /> }, |s| html! { <span class="tp__table__nowrap">{ s }</span> }),
                     18 => dto.credentials.comment.as_ref()
                         .map_or_else(|| html! {},
                                      |comment| html! { <RevealContent preview={Some(html! {comment.substring(0, 50)})}>{comment}</RevealContent> }),
@@ -391,7 +388,7 @@ pub fn UserTable(props: &UserTableProps) -> Html {
                                 "username: {} password: {} token: {}",
                                 dto.credentials.username,
                                 dto.credentials.password,
-                                dto.credentials.token.as_ref().map_or_else(String::new, |t| t.to_string())
+                                dto.credentials.token.as_ref().map_or_else(String::new, std::clone::Clone::clone)
                             );
                             copy_to_clipboard.emit(text);
                         }

@@ -119,7 +119,7 @@ mod tests {
             Some(dt) => dt,
             None => return ts.to_string(),
         };
-        let east_secs = -(js_offset_minutes_west as i64) * 60;
+        let east_secs = -i64::from(js_offset_minutes_west) * 60;
         match i32::try_from(east_secs).ok().and_then(chrono::FixedOffset::east_opt) {
             Some(offset) => utc.with_timezone(&offset).format(fmt).to_string(),
             None => utc.format(fmt).to_string(),

@@ -59,7 +59,7 @@ pub fn DropDownIconButton(props: &DropDownIconButtonProps) -> Html {
         use_effect_with(props.options.clone(), move |options| {
             let selections = options.iter().filter(|x| x.selected).map(|x| x.id.clone()).collect::<HashSet<String>>();
             set_selections.set(selections);
-        })
+        });
     }
 
     let handle_popup_close = {

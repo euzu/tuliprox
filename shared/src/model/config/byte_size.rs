@@ -45,7 +45,7 @@ impl<'de> Deserialize<'de> for ByteSize {
     {
         struct ByteSizeVisitor;
 
-        impl<'de> de::Visitor<'de> for ByteSizeVisitor {
+        impl de::Visitor<'_> for ByteSizeVisitor {
             type Value = ByteSize;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

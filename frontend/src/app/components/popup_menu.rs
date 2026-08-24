@@ -27,7 +27,7 @@ pub fn PopupMenu(props: &PopupMenuProps) -> Html {
             if !*is_open || anchor_ref.is_none() {
                 return "hidden".to_string();
             }
-            "".to_owned()
+            String::new()
         })
     };
 

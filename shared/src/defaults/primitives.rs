@@ -9,7 +9,7 @@ pub const fn is_true(v: &bool) -> bool { *v }
 pub const fn is_false(v: &bool) -> bool { !*v }
 pub const fn default_as_true() -> bool { true }
 
-pub fn is_empty_optional_vec<T>(s: &Option<Vec<T>>) -> bool { s.as_ref().is_none_or(|v| v.is_empty()) }
+pub fn is_empty_optional_vec<T>(s: &Option<Vec<T>>) -> bool { s.as_ref().is_none_or(std::vec::Vec::is_empty) }
 
 pub fn default_as_default() -> String { "default".into() }
 

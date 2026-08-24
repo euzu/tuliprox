@@ -7,6 +7,22 @@ version = "3.3.91"
 edition = "2021"
 rust-version = "1.95.0"
 
+[workspace.lints.clippy]
+# Shared policy for every workspace crate (modularization plan, Phase 0).
+# Extracted crates must not silently lose the lint level that previously
+# existed only as a crate attribute on backend/src/main.rs.
+all      = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# Allows carried over verbatim from backend/src/main.rs. They were already
+# accepted for the backend; moving the policy to the workspace must not change
+# which warnings the backend emits.
+module_name_repetitions = "allow"
+must_use_candidate      = "allow"
+return_self_not_must_use = "allow"
+missing_errors_doc      = "allow"
+large_futures           = "allow"
+
 [workspace.dependencies]
 serde         = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json    = { version = "1.0.150" }

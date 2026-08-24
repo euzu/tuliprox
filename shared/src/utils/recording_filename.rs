@@ -61,9 +61,7 @@ impl RecordingFilenameContext {
 
     fn render_episode_segment(&self) -> Option<String> {
         match (self.episode_season, self.episode_number) {
-            (Some(s), Some(e)) => {
-                Some(format!("{EPISODE_PREFIX}{:0width$}{EPISODE_INFIX}{:0width$}", s, e, width = EPISODE_PAD))
-            }
+            (Some(s), Some(e)) => Some(format!("{EPISODE_PREFIX}{s:0EPISODE_PAD$}{EPISODE_INFIX}{e:0EPISODE_PAD$}")),
             _ => None,
         }
     }

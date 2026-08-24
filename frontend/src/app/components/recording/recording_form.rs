@@ -55,7 +55,7 @@ pub struct RecordingFormPrefill {
 
 impl RecordingFormPrefill {
     /// Build a prefill from the minimum surface every caller has. The
-    /// channel_id / channel_name / epg are optional; the form stores
+    /// `channel_id` / `channel_name` / epg are optional; the form stores
     /// them so the server can use them for visibility and matching.
     pub fn new(
         source: RecordingSourceInput,
@@ -189,7 +189,7 @@ pub fn target_name_for_id(
         if input_name.is_some_and(|name| !source.inputs.iter().any(|configured| configured.as_ref() == name)) {
             return None;
         }
-        source.targets.iter().find(|target| target.id == target_id).map(|target| target.name.to_string())
+        source.targets.iter().find(|target| target.id == target_id).map(|target| target.name.clone())
     })
 }
 
@@ -349,7 +349,7 @@ pub fn RecordingForm(props: &RecordingFormProps) -> Html {
     let on_visibility_select = {
         let shared_state = shared_state.clone();
         Callback::from(move |selections: Rc<Vec<String>>| {
-            let picked = selections.iter().next().map(String::as_str).unwrap_or("private");
+            let picked = selections.iter().next().map_or("private", String::as_str);
             shared_state.set(picked == "shared");
         })
     };

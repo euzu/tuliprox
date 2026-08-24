@@ -12,7 +12,7 @@ pub fn DiscordActionCard() -> Html {
     let translate = use_translation();
 
     let handle_url = {
-        let discord_link = services.config.ui_config.discord.to_string();
+        let discord_link = services.config.ui_config.discord.clone();
         Callback::from(move |_| {
             let _ = window().open_with_url_and_target(&discord_link, "_blank");
         })

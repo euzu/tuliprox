@@ -3,7 +3,7 @@
 /// "1.234,56" -> 1234.56
 /// "1,234.56" -> 1234.56
 /// "1,000,23" -> 1000.23  (last comma as decimal separator)
-/// "1_000,23" -> 1000.23  (underscore as thousands separator)
+/// "`1_000,23`" -> 1000.23  (underscore as thousands separator)
 pub fn parse_localized_float(s: &str) -> Option<f64> {
     let s = s.trim();
     if s.is_empty() {
@@ -25,7 +25,7 @@ pub fn parse_localized_float(s: &str) -> Option<f64> {
         let left = s[..pos].chars().filter(|c| c.is_ascii_digit() || *c == '-').collect::<String>();
 
         // Everything to the right of the last separator: fractional part
-        let right = s[pos + 1..].chars().filter(|c| c.is_ascii_digit()).collect::<String>();
+        let right = s[pos + 1..].chars().filter(char::is_ascii_digit).collect::<String>();
 
         // If left is empty (e.g., ",5"), assume "0"
         let left = if left.is_empty() { "0".to_string() } else { left };

@@ -35,7 +35,7 @@ pub fn get_string_from_serde_value(value: &Value) -> Option<String> {
     }
 }
 
-const MARKDOWN_SPECIAL_CHARS: &str = r#"_*[]()~`>#+-=|{}.!\"#;
+const MARKDOWN_SPECIAL_CHARS: &str = r"_*[]()~`>#+-=|{}.!\";
 
 pub fn escape_markdown_v2(text: &str) -> String {
     let mut escaped = String::new();

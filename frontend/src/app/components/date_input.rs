@@ -29,8 +29,7 @@ fn parse_date_input_change(value: &str) -> DateInputChange {
         chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
             .ok()
             .and_then(|date| date.and_hms_opt(0, 0, 0))
-            .map(|dt| DateInputChange::Set(dt.and_utc().timestamp()))
-            .unwrap_or(DateInputChange::IgnoreInvalid)
+            .map_or(DateInputChange::IgnoreInvalid, |dt| DateInputChange::Set(dt.and_utc().timestamp()))
     }
 }
 

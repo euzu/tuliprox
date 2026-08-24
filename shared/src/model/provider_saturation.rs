@@ -75,12 +75,11 @@ where
     let mut groups: Vec<(&Group, usize, usize, bool)> = Vec::new();
     for slot in slots {
         let Some(group) = group_of.get(&slot.name) else { continue };
-        let index = match groups.iter().position(|(member, ..)| *member == group) {
-            Some(index) => index,
-            None => {
-                groups.push((group, 0, 0, false));
-                groups.len() - 1
-            }
+        let index = if let Some(index) = groups.iter().position(|(member, ..)| *member == group) {
+            index
+        } else {
+            groups.push((group, 0, 0, false));
+            groups.len() - 1
         };
         let (_, current, max, unlimited) = &mut groups[index];
         if slot.max_connections == 0 {
