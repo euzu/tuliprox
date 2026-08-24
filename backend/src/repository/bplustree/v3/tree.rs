@@ -4347,6 +4347,73 @@ mod tests {
         Ok(())
     }
 
+    /// Point-query benchmark for the persisted read path.
+    ///
+    /// `bench_store_throughput` only covers writing. The request hot path is
+    /// `BPlusTreeQuery::query_zero_copy` against an mmapped database, so the
+    /// extraction gate needs a read-side number too. Everything here is derived
+    /// from fixed seeds so two runs on the same host compare like for like: the
+    /// values come from the same LCG the store benchmark uses, and the lookup
+    /// order is a fixed-stride walk that defeats sequential prefetching without
+    /// needing a random number generator.
+    #[test]
+    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
+    fn bench_point_query_throughput() -> io::Result<()> {
+        // Coprime with every entry count below, so the walk visits each key exactly
+        // once and never degenerates into a scan.
+        const STRIDE: u32 = 7_919;
+        const LOOKUPS: u32 = 200_000;
+
+        let noise = |seed: u32, len: usize| -> Vec<u8> {
+            let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    u8::try_from(state >> 24).unwrap_or(0)
+                })
+                .collect()
+        };
+
+        for (label, count, size) in [("klein", 2_000u32, 800usize), ("mittel", 20_000, 2_000), ("gross", 60_000, 2_000)] {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("bench.db");
+            let mut tree = BPlusTree::<u32, Vec<u8>>::new();
+            for key in 0..count {
+                tree.insert(key, noise(key, size));
+            }
+            tree.store(&path)?;
+
+            let mut query = BPlusTreeQuery::<u32, Vec<u8>>::try_new(&path)?;
+            // Fault the mapping in first; this benchmark measures lookup, not page-in.
+            let mut checksum = 0u64;
+            for key in 0..count {
+                checksum += query
+                    .query_zero_copy(&key)
+                    .map_err(BPlusTreeError::to_io)?
+                    .map_or(0, |value| u64::from(value[0]));
+            }
+
+            let start = std::time::Instant::now();
+            let mut key = 0u32;
+            for _ in 0..LOOKUPS {
+                key = (key + STRIDE) % count;
+                checksum += query
+                    .query_zero_copy(&key)
+                    .map_err(BPlusTreeError::to_io)?
+                    .map_or(0, |value| u64::from(value[0]));
+            }
+            let elapsed = start.elapsed();
+
+            assert!(checksum > 0, "lookups must not be optimized away");
+            println!(
+                "BENCH query {label:6} entries={count:6} bytes={size:5} lookups={LOOKUPS} -> {:>8.1} ms  {:>9.0} lookups/s",
+                elapsed.as_secs_f64() * 1000.0,
+                f64::from(LOOKUPS) / elapsed.as_secs_f64()
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn streamed_store_writes_every_page_despite_out_of_order_overflow_chains() -> io::Result<()> {
         // The streaming builder hands out a leaf's page id *before* the overflow chain it
