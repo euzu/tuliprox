@@ -142,15 +142,12 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                   </div>
                 </div>
             </CollapsePanel>
-            <CollapsePanel expanded={true} title_content={Some(html! {
-                <div class="tp__stats__header">
-                 <h1>{ translate.t("LABEL.PLAYLIST_UPDATE")}</h1>
-                </div>
-                })}>
-                <div class="tp__stats__body-group">
-                    <Card><PlaylistProgressStatusCard /></Card>
-                </div>
-            </CollapsePanel>
+            <div class="tp__stats__header">
+                <h1>{ translate.t("LABEL.PLAYLIST_UPDATE")}</h1>
+            </div>
+            <div class="tp__stats__body-group">
+                <Card><PlaylistProgressStatusCard /></Card>
+            </div>
             <CollapsePanel expanded={*logs_expanded} on_state_change={on_logs_toggle.clone()} title_content={Some(html! {
                 <div class="tp__stats__header">
                  <h1>{ translate.t("LABEL.LOGS")}</h1>
