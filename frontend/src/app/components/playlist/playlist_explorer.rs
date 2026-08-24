@@ -601,6 +601,18 @@ pub fn PlaylistExplorer() -> Html {
                                 _ => None,
                             };
                             spawn_local(async move {
+                                // Cheap preflight: opening the record
+                                // dialog against a server that has no DVR
+                                // block would surface the error only after
+                                // the user fills in the form. The auth /
+                                // enablement gate on the backend turns
+                                // this into 501 in one round-trip and the
+                                // i18n key for the disabled error already
+                                // points at the Video > Download toggle.
+                                if let Err(error) = RecordingService::new().ensure_available().await {
+                                    services.toastr.error(translate_clone.t(error.i18n_key()));
+                                    return;
+                                }
                                 let target_name = match target_name {
                                     Some(name) => name,
                                     None => {

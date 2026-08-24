@@ -895,6 +895,14 @@ pub fn EpgView() -> Html {
             let translate = translate.clone();
             let padding: PaddingBounds = (*recording_padding).clone();
             spawn_local(async move {
+                // Same preflight as the playlist explorer: the form
+                // is pointless if the DVR block is absent, and the
+                // 501 i18n message already names the toggle the
+                // operator needs.
+                if let Err(error) = RecordingService::new().ensure_available().await {
+                    services.toastr.error(translate.t(error.i18n_key()));
+                    return;
+                }
                 let source = RecordingSourceInput {
                     target_id: target_name,
                     virtual_id: program.channel_id.clone(),

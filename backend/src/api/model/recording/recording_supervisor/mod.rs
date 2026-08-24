@@ -78,7 +78,12 @@ pub(crate) fn recording_config(app_state: &AppState) -> Option<RecordingConfig> 
 /// An absent `recording:` block means "use the defaults", and the default
 /// is enabled.
 pub fn recording_enabled(app_state: &AppState) -> bool {
-    recording_config(app_state).is_none_or(|cfg| cfg.enabled)
+    let config = app_state.app_config.config.load();
+    config
+        .video
+        .as_ref()
+        .and_then(|video| video.download.as_ref())
+        .is_some_and(|download| download.recording.as_ref().is_none_or(|recording| recording.enabled))
 }
 
 pub(crate) fn now_ts() -> i64 {
@@ -142,15 +147,35 @@ pub async fn start_recording_supervisors(app_state: &Arc<AppState>, cancel_token
 mod tests {
     use super::*;
 
+    fn config_with_download(recording: Option<shared::model::RecordingConfigDto>) -> crate::model::Config {
+        crate::model::Config {
+            video: Some(crate::model::VideoConfig::from(&shared::model::VideoConfigDto {
+                download: Some(shared::model::VideoDownloadConfigDto { recording, ..Default::default() }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
-    async fn an_absent_recording_block_means_enabled() {
-        // The DVR must be on for a deployment that never mentions
-        // `recording:` — otherwise upgrading would silently switch off a
-        // feature the operator was already using.
+    async fn an_absent_download_engine_means_disabled() {
         let config = crate::model::Config::default();
         let app_state = crate::api::model::create_test_app_state(config);
-        assert!(recording_enabled(app_state.as_ref()));
+        assert!(!recording_enabled(app_state.as_ref()));
         assert!(recording_config(app_state.as_ref()).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_absent_recording_block_means_enabled() {
+        let app_state = crate::api::model::create_test_app_state(config_with_download(None));
+        assert!(recording_enabled(app_state.as_ref()));
+    }
+
+    #[tokio::test]
+    async fn an_explicitly_disabled_recording_block_means_disabled() {
+        let recording = shared::model::RecordingConfigDto { enabled: false, ..Default::default() };
+        let app_state = crate::api::model::create_test_app_state(config_with_download(Some(recording)));
+        assert!(!recording_enabled(app_state.as_ref()));
     }
 
     #[test]

@@ -295,8 +295,10 @@ pub enum RecordingError {
     /// `recording_not_terminal` — deletion was attempted on a
     /// recording that has not finished yet.
     NotTerminal,
-    /// `recording_disabled` — the DVR is switched off on this server
-    /// (`video.download.recording.enabled: false`).
+    /// `recording_disabled` — the DVR cannot run on this server:
+    /// either the `video.download` block is missing from the
+    /// configuration, or `video.download.recording.enabled` is
+    /// `false`.
     Disabled,
     /// Catch-all for unrecognised codes so the frontend does not
     /// panic on a backend change.
@@ -436,6 +438,8 @@ impl RecordingService {
 
     fn rule_path(&self, id: &str) -> String { concat_path_leading_slash(&self.base_path, &format!("rules/{id}")) }
 
+    fn availability_path(&self) -> String { concat_path_leading_slash(&self.base_path, "availability") }
+
     /// GET /recording/tasks — list visible tasks.
     pub async fn list_tasks(&self) -> Result<RecordingSnapshot, RecordingError> {
         let body: RecordingSnapshot = request_get(&self.tasks_path(), None, Some(Encoding::Json))
@@ -552,6 +556,17 @@ impl RecordingService {
     pub async fn delete_rule(&self, id: &str, future: &str) -> Result<(), RecordingError> {
         let path = format!("{}?future={future}", self.rule_path(id));
         request_delete::<()>(&path, None, None).await.map_err(network)?;
+        Ok(())
+    }
+
+    /// GET /recording/availability — cheap preflight called before
+    /// opening record forms. Returns `Ok(())` when the recording routes
+    /// are reachable (DVR enabled) and a typed `RecordingError`
+    /// otherwise; the `Disabled` variant maps to the actionable i18n
+    /// message that points operators at the Video > Download toggle.
+    pub async fn ensure_available(&self) -> Result<(), RecordingError> {
+        let _body: Option<serde_json::Value> =
+            request_get(&self.availability_path(), None, Some(Encoding::Json)).await.map_err(network)?;
         Ok(())
     }
 }
@@ -775,6 +790,11 @@ mod tests {
     }
 
     #[test]
+    fn http_response_recording_code_maps_to_typed_error() {
+        assert_eq!(network(Error::HttpResponse("recording_disabled".to_string())), RecordingError::Disabled);
+    }
+
+    #[test]
     fn error_from_code_triggers_token_refresh_for_schema_errors() {
         // Missing subject_id or a stale permission schema_version both
         // trigger token-refresh. We surface both via the same enum
@@ -808,6 +828,7 @@ mod tests {
         assert_eq!(svc.quota_path(), "/api/v1/recording/quota");
         assert_eq!(svc.rules_path(), "/api/v1/recording/rules");
         assert_eq!(svc.rule_path("rule-1"), "/api/v1/recording/rules/rule-1");
+        assert_eq!(svc.availability_path(), "/api/v1/recording/availability");
     }
 
     #[test]

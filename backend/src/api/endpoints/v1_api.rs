@@ -6,7 +6,7 @@ use crate::{
             extract_accept_header::ExtractAcceptHeader,
             library_api::library_api_register,
             rbac_api::{rbac_api_register, rbac_api_register_unprotected},
-            recording_api::{recording_api_register, recording_enabled_layer},
+            recording_api::{recording_api_register, recording_availability_register, recording_enabled_layer},
             recording_media_api::recording_media_api_register,
             user_api::user_api_register,
             v1_api_config::{v1_api_config_register, v1_api_config_register_with_permissions},
@@ -163,6 +163,7 @@ pub fn v1_api_register(
             .merge(v1_api_playlist_register_with_permissions(axum::routing::Router::new(), app_state))
             .merge(library_api_register(axum::routing::Router::new(), Some(app_state)))
             .merge(rbac_api_register(Arc::clone(app_state)))
+            .merge(recording_availability_register(axum::routing::Router::new()))
             // `recording.enabled: false` turns the DVR off end to end:
             // the supervisors idle and the routes answer
             // `501 recording_disabled` instead of queueing work nothing
@@ -183,6 +184,7 @@ pub fn v1_api_register(
             .merge(v1_api_playlist_register_protected(axum::routing::Router::new()))
             .merge(library_api_register(axum::routing::Router::new(), None))
             .merge(rbac_api_register_unprotected(Arc::clone(app_state)))
+            .merge(recording_availability_register(axum::routing::Router::new()))
             .merge(
                 recording_api_register(axum::routing::Router::new())
                     .merge(recording_media_api_register(axum::routing::Router::new()))
@@ -206,7 +208,7 @@ mod tests {
     use super::{create_status_check, v1_api_register};
     use crate::{
         api::model::{create_test_app_state, ConnectionKind, ConnectionParams},
-        auth::Fingerprint,
+        auth::{create_jwt_web_user, Fingerprint},
         model::Config,
     };
     use axum::{
@@ -214,7 +216,7 @@ mod tests {
         http::{Request, StatusCode},
     };
     use shared::{
-        model::{PlaylistItemType, StreamChannel, XtreamCluster},
+        model::{Permission, PlaylistItemType, StreamChannel, WebAuthConfigDto, WebUiConfigDto, XtreamCluster},
         utils::Internable,
     };
     use std::{borrow::Cow, net::SocketAddr};
@@ -225,10 +227,24 @@ mod tests {
     /// deserialize → domain path it does in production.
     fn config_with_recording_enabled(enabled: bool) -> Config {
         let recording = shared::model::RecordingConfigDto { enabled, ..Default::default() };
-        let download =
-            shared::model::VideoDownloadConfigDto { recording: Some(recording), ..Default::default() };
+        let download = shared::model::VideoDownloadConfigDto { recording: Some(recording), ..Default::default() };
         let video = shared::model::VideoConfigDto { download: Some(download), ..Default::default() };
         Config { video: Some((&video).into()), ..Config::default() }
+    }
+
+    fn config_with_recording_and_web_auth(recording_enabled: bool) -> Config {
+        let mut config = config_with_recording_enabled(recording_enabled);
+        let web_ui = WebUiConfigDto {
+            auth: Some(WebAuthConfigDto {
+                enabled: true,
+                issuer: "test".to_string(),
+                secret: "test-secret".to_string(),
+                ..WebAuthConfigDto::default()
+            }),
+            ..WebUiConfigDto::default()
+        };
+        config.web_ui = Some((&web_ui).into());
+        config
     }
 
     #[tokio::test]
@@ -242,11 +258,7 @@ mod tests {
 
         let response = router
             .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/v1/recording/tasks")
-                    .body(Body::empty())
-                    .expect("request"),
+                Request::builder().method("GET").uri("/api/v1/recording/tasks").body(Body::empty()).expect("request"),
             )
             .await
             .expect("response");
@@ -265,11 +277,7 @@ mod tests {
 
         let response = router
             .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/v1/recording/tasks")
-                    .body(Body::empty())
-                    .expect("request"),
+                Request::builder().method("GET").uri("/api/v1/recording/tasks").body(Body::empty()).expect("request"),
             )
             .await
             .expect("response");
@@ -279,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_auth_router_exposes_recording_routes() {
-        let app_state = create_test_app_state(Config::default());
+        let app_state = create_test_app_state(config_with_recording_enabled(true));
         let router = v1_api_register(false, &app_state, "").with_state(app_state);
 
         for path in ["/api/v1/recording/tasks", "/api/v1/library/recording/playback/missing"] {
@@ -291,6 +299,68 @@ mod tests {
 
             assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "missing route: {path}");
         }
+    }
+
+    #[tokio::test]
+    async fn recording_availability_authenticates_before_reporting_disabled() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let app_state = create_test_app_state(Config::default());
+        let router = v1_api_register(true, &app_state, "").with_state(app_state);
+
+        let response = router
+            .oneshot(Request::builder().method("GET").uri("/api/v1/recording/availability").body(Body::empty())?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recording_availability_reports_disabled_after_authenticated_recording_claim(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let config = config_with_recording_and_web_auth(false);
+        let Some(web_auth) = config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()) else {
+            return Err("missing test web auth".into());
+        };
+        let token = create_jwt_web_user(web_auth, "alice", Permission::RecordingRead.into(), 0)?;
+        let app_state = create_test_app_state(config);
+        let router = v1_api_register(true, &app_state, "").with_state(app_state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/recording/availability")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        assert_eq!(body.as_ref(), br#"{"error":"recording_disabled"}"#);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recording_availability_reports_disabled_for_no_auth_token() -> Result<(), Box<dyn std::error::Error>> {
+        let app_state = create_test_app_state(config_with_recording_enabled(false));
+        let router = v1_api_register(false, &app_state, "").with_state(app_state);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/recording/availability")
+                    .header("Authorization", format!("Bearer {}", shared::model::TOKEN_NO_AUTH))
+                    .body(Body::empty())?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        assert_eq!(body.as_ref(), br#"{"error":"recording_disabled"}"#);
+        Ok(())
     }
 
     #[tokio::test]

@@ -1,8 +1,5 @@
 use crate::{
-    app::{
-        components::{menu_item::MenuItem, svg_icon::AppIcon, CollapsePanel, IconButton},
-        ConfigContext,
-    },
+    app::components::{menu_item::MenuItem, svg_icon::AppIcon, CollapsePanel, IconButton},
     hooks::use_service_context,
     i18n::use_translation,
     model::ViewType,
@@ -63,17 +60,12 @@ fn is_sidebar_expanded(collapsed: CollapseState) -> bool {
 
 /// Should the DVR entries appear in the navigation?
 ///
-/// Two independent gates: the principal needs `recording.read`, and the
-/// server must have the DVR switched on. Showing the entries on a server
-/// where `recording.enabled: false` would lead every route to
-/// `501 recording_disabled`.
-///
-/// `recording_enabled` is `None` when the config has not loaded yet or
-/// carries no `recording:` block; both mean "assume the default", and the
-/// default is enabled.
-pub fn show_recording_nav(has_recording_read: bool, recording_enabled: Option<bool>) -> bool {
-    has_recording_read && recording_enabled.unwrap_or(true)
-}
+/// Visibility is permission-only. The DVR availability gate is checked
+/// at the action site: any record-form open preflights
+/// `RecordingService::ensure_available`, so hiding the menu while the
+/// DVR is off would only hide the path the operator needs to reach
+/// the toggle in the first place.
+pub const fn show_recording_nav(has_recording_read: bool) -> bool { has_recording_read }
 
 #[component]
 pub fn Sidebar(props: &SidebarProps) -> Html {
@@ -87,19 +79,7 @@ pub fn Sidebar(props: &SidebarProps) -> Html {
     let is_mobile = use_state(|| false);
     let resolved_state = resolved_sidebar_state(*collapsed, *is_mobile);
     let active_menu = props.active_page;
-    let config_ctx = use_context::<ConfigContext>();
-    let recording_enabled = config_ctx.and_then(|ctx| {
-        ctx.config.as_ref().and_then(|config| {
-            config
-                .config
-                .video
-                .as_ref()
-                .and_then(|video| video.download.as_ref())
-                .and_then(|download| download.recording.as_ref())
-                .map(|recording| recording.enabled)
-        })
-    });
-    let show_recording = show_recording_nav(services.auth.has_permission(Permission::RecordingRead), recording_enabled);
+    let show_recording = show_recording_nav(services.auth.has_permission(Permission::RecordingRead));
 
     let handle_menu_click = {
         let viewchange = props.onview.clone();
@@ -437,17 +417,8 @@ mod tests {
     }
 
     #[test]
-    fn recording_nav_needs_both_the_permission_and_the_feature_flag() {
-        assert!(show_recording_nav(true, Some(true)));
-        assert!(!show_recording_nav(true, Some(false)));
-        assert!(!show_recording_nav(false, Some(true)));
-        assert!(!show_recording_nav(false, None));
-    }
-
-    #[test]
-    fn recording_nav_assumes_enabled_before_the_config_arrives() {
-        // Hiding the entries until the config loads would make them flash
-        // in on every page load; the default is enabled anyway.
-        assert!(show_recording_nav(true, None));
+    fn recording_nav_requires_only_recording_read() {
+        assert!(show_recording_nav(true));
+        assert!(!show_recording_nav(false));
     }
 }

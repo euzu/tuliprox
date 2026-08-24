@@ -184,7 +184,7 @@ impl VideoDownloadConfigDto {
             && is_default_retry_backoff_max_secs(&self.retry_backoff_max_secs)
             && is_default_retry_backoff_jitter_percent(&self.retry_backoff_jitter_percent)
             && is_default_retry_max_attempts(&self.retry_max_attempts)
-            && self.recording.as_ref().is_none_or(RecordingConfigDto::is_empty)
+            && self.recording.is_none()
     }
 }
 
@@ -482,8 +482,12 @@ impl VideoConfigDto {
 
     pub fn clean(&mut self) {
         if let Some(download) = self.download.as_mut() {
-            if download.recording.as_ref().is_some_and(RecordingConfigDto::is_empty) {
-                download.recording = None;
+            if let Some(recording) = download.recording.as_mut() {
+                recording.retention = recording.retention.take().filter(|retention| !retention.is_empty());
+                recording.disk = recording.disk.take().filter(|disk| !disk.is_empty());
+                recording.quota = recording.quota.take().filter(|quota| !quota.is_empty());
+                recording.notifications =
+                    recording.notifications.take().filter(|notifications| !notifications.is_empty());
             }
         }
         if self.download.as_ref().is_some_and(|d| d.is_empty()) {
@@ -937,11 +941,28 @@ mod tests {
 
     #[test]
     fn recording_notification_block_rejects_impossible_values() {
-        let mut recording = make_recording_config();
-        recording.notifications =
-            Some(RecordingNotificationConfigDto { max_attempts: 0, ..RecordingNotificationConfigDto::default() });
-        let mut video = make_recording_video_config(recording);
-        assert!(video.prepare().is_err());
+        let zero_cases = [
+            (
+                "outbox_buffer",
+                RecordingNotificationConfigDto { outbox_buffer: 0, ..RecordingNotificationConfigDto::default() },
+            ),
+            (
+                "max_attempts",
+                RecordingNotificationConfigDto { max_attempts: 0, ..RecordingNotificationConfigDto::default() },
+            ),
+            (
+                "backoff_initial_secs",
+                RecordingNotificationConfigDto { backoff_initial_secs: 0, ..RecordingNotificationConfigDto::default() },
+            ),
+        ];
+
+        for (field, notifications) in zero_cases {
+            let mut recording = make_recording_config();
+            recording.notifications = Some(notifications);
+            let mut video = make_recording_video_config(recording);
+            let result = video.prepare();
+            assert!(result.as_ref().is_err_and(|err| err.to_string().contains(field)), "field: {field}");
+        }
 
         let mut recording = make_recording_config();
         recording.notifications = Some(RecordingNotificationConfigDto {
@@ -950,7 +971,8 @@ mod tests {
             ..RecordingNotificationConfigDto::default()
         });
         let mut video = make_recording_video_config(recording);
-        assert!(video.prepare().is_err());
+        let result = video.prepare();
+        assert!(result.as_ref().is_err_and(|err| err.to_string().contains("backoff_max_secs")));
     }
 
     #[test]
@@ -1257,6 +1279,104 @@ mod tests {
         video.clean();
         // After defaults filled, clean() treats the recording as non-empty.
         assert!(video.download.as_ref().unwrap().recording.is_some());
+    }
+
+    #[test]
+    fn clean_preserves_explicit_empty_recording_and_removes_empty_nested_blocks() {
+        let mut video = make_recording_video_config(RecordingConfigDto {
+            retention: Some(RecordingRetentionConfigDto::default()),
+            disk: Some(RecordingDiskConfigDto::default()),
+            quota: Some(RecordingQuotaConfigDto::default()),
+            notifications: Some(RecordingNotificationConfigDto::default()),
+            ..RecordingConfigDto::default()
+        });
+
+        video.clean();
+
+        let recording = video.download.as_ref().and_then(|download| download.recording.as_ref());
+        assert!(recording.is_some(), "explicit recording block should remain");
+        let Some(recording) = recording else { return };
+        assert!(recording.retention.is_none());
+        assert!(recording.disk.is_none());
+        assert!(recording.quota.is_none());
+        assert!(recording.notifications.is_none());
+    }
+
+    #[test]
+    fn clean_preserves_each_non_empty_recording_sibling() {
+        type RecordingCase = (&'static str, RecordingConfigDto, fn(&RecordingConfigDto) -> bool);
+        let cases: [RecordingCase; 4] = [
+            (
+                "retention",
+                RecordingConfigDto {
+                    retention: Some(RecordingRetentionConfigDto {
+                        keep_last_per_channel: Some(1),
+                        ..RecordingRetentionConfigDto::default()
+                    }),
+                    disk: Some(RecordingDiskConfigDto::default()),
+                    quota: Some(RecordingQuotaConfigDto::default()),
+                    notifications: Some(RecordingNotificationConfigDto::default()),
+                    ..RecordingConfigDto::default()
+                },
+                |recording| recording.retention.is_some(),
+            ),
+            (
+                "disk",
+                RecordingConfigDto {
+                    retention: Some(RecordingRetentionConfigDto::default()),
+                    disk: Some(RecordingDiskConfigDto {
+                        high_water_percent: Some(90),
+                        ..RecordingDiskConfigDto::default()
+                    }),
+                    quota: Some(RecordingQuotaConfigDto::default()),
+                    notifications: Some(RecordingNotificationConfigDto::default()),
+                    ..RecordingConfigDto::default()
+                },
+                |recording| recording.disk.is_some(),
+            ),
+            (
+                "quota",
+                RecordingConfigDto {
+                    retention: Some(RecordingRetentionConfigDto::default()),
+                    disk: Some(RecordingDiskConfigDto::default()),
+                    quota: Some(RecordingQuotaConfigDto {
+                        shared_bytes: Some(1024),
+                        ..RecordingQuotaConfigDto::default()
+                    }),
+                    notifications: Some(RecordingNotificationConfigDto::default()),
+                    ..RecordingConfigDto::default()
+                },
+                |recording| recording.quota.is_some(),
+            ),
+            (
+                "notifications",
+                RecordingConfigDto {
+                    retention: Some(RecordingRetentionConfigDto::default()),
+                    disk: Some(RecordingDiskConfigDto::default()),
+                    quota: Some(RecordingQuotaConfigDto::default()),
+                    notifications: Some(RecordingNotificationConfigDto {
+                        max_attempts: default_recording_notification_max_attempts() + 1,
+                        ..RecordingNotificationConfigDto::default()
+                    }),
+                    ..RecordingConfigDto::default()
+                },
+                |recording| recording.notifications.is_some(),
+            ),
+        ];
+
+        for (name, recording, is_preserved) in cases {
+            let mut video = make_recording_video_config(recording);
+            video.clean();
+
+            let recording = video.download.as_ref().and_then(|download| download.recording.as_ref());
+            assert!(recording.is_some(), "recording with {name} should remain");
+            let Some(recording) = recording else { continue };
+            assert!(is_preserved(recording), "{name} should remain");
+            assert!(recording.retention.as_ref().is_none_or(|section| !section.is_empty()));
+            assert!(recording.disk.as_ref().is_none_or(|section| !section.is_empty()));
+            assert!(recording.quota.as_ref().is_none_or(|section| !section.is_empty()));
+            assert!(recording.notifications.as_ref().is_none_or(|section| !section.is_empty()));
+        }
     }
 
     #[test]
