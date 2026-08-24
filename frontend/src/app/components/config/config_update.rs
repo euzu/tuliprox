@@ -1,6 +1,7 @@
 use crate::app::components::config::config_page::ConfigForm;
 use shared::{
     defaults::is_default_supported_library_extensions,
+    error::TuliproxError,
     model::{
         ConfigDto, HdHomeRunConfigDto, LibraryConfigDto, LibraryMetadataConfigDto, LibraryPlaylistConfigDto,
         ThumbnailConfigDto, WebUiConfigDto,
@@ -144,14 +145,21 @@ pub fn update_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) {
     }
 }
 
+pub fn apply_and_prepare_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) -> Result<(), TuliproxError> {
+    update_config(config, forms);
+    config.prepare(false)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::update_config;
+    use super::{apply_and_prepare_config, update_config};
     use crate::app::components::config::config_page::ConfigForm;
     use shared::model::{
         view_type::ViewType, ConfigDto, ContentSecurityPolicyConfigDto, DiskAlertConfigDto, HdHomeRunConfigDto,
         HdHomeRunDeviceConfigDto, LibraryConfigDto, LibraryScanDirectoryDto, MessagingConfigDto,
-        MetadataUpdateConfigDto, MsgKind, ProxyConfigDto, StreamInfoConfigDto, WebAuthConfigDto, WebUiConfigDto,
+        MetadataUpdateConfigDto, MsgKind, ProxyConfigDto, RecordingConfigDto, RecordingDiskConfigDto,
+        RecordingNotificationConfigDto, RecordingQuotaConfigDto, RecordingRetentionConfigDto, StreamInfoConfigDto,
+        VideoConfigDto, VideoDownloadConfigDto, WebAuthConfigDto, WebUiConfigDto,
     };
 
     #[test]
@@ -562,5 +570,98 @@ mod tests {
 
         let messaging = config.messaging.as_ref().expect("messaging config should be set");
         assert_eq!(messaging.disk_alert, Some(disk_alert));
+    }
+
+    #[test]
+    fn update_config_round_trips_explicit_recording_and_cleans_empty_nested_blocks() {
+        let quota = RecordingQuotaConfigDto { shared_bytes: Some(1024), ..RecordingQuotaConfigDto::default() };
+        let video = VideoConfigDto {
+            download: Some(VideoDownloadConfigDto {
+                recording: Some(RecordingConfigDto {
+                    retention: Some(RecordingRetentionConfigDto::default()),
+                    disk: Some(RecordingDiskConfigDto::default()),
+                    quota: Some(quota.clone()),
+                    notifications: Some(RecordingNotificationConfigDto::default()),
+                    ..RecordingConfigDto::default()
+                }),
+                ..VideoDownloadConfigDto::default()
+            }),
+            ..VideoConfigDto::default()
+        };
+        let mut config = ConfigDto::default();
+
+        update_config(&mut config, vec![ConfigForm::Video(true, video)]);
+
+        let serialized = serde_json::to_string(&config);
+        assert!(serialized.is_ok(), "config should serialize");
+        let Ok(serialized) = serialized else { return };
+        let config: Result<ConfigDto, _> = serde_json::from_str(&serialized);
+        assert!(config.is_ok(), "config should deserialize");
+        let Ok(config) = config else { return };
+        let recording = config
+            .video
+            .as_ref()
+            .and_then(|video| video.download.as_ref())
+            .and_then(|download| download.recording.as_ref());
+        assert!(recording.is_some(), "explicit recording block should round-trip");
+        let Some(recording) = recording else { return };
+        assert!(recording.retention.is_none());
+        assert!(recording.disk.is_none());
+        assert_eq!(recording.quota, Some(quota));
+        assert!(recording.notifications.is_none());
+    }
+
+    #[test]
+    fn update_config_round_trips_explicit_empty_recording() {
+        let video = VideoConfigDto {
+            download: Some(VideoDownloadConfigDto {
+                recording: Some(RecordingConfigDto::default()),
+                ..VideoDownloadConfigDto::default()
+            }),
+            ..VideoConfigDto::default()
+        };
+        let mut config = ConfigDto::default();
+
+        update_config(&mut config, vec![ConfigForm::Video(true, video)]);
+
+        let serialized = serde_json::to_string(&config);
+        assert!(serialized.is_ok(), "config should serialize");
+        let Ok(serialized) = serialized else { return };
+        let config: Result<ConfigDto, _> = serde_json::from_str(&serialized);
+        assert!(config.is_ok(), "config should deserialize");
+        let Ok(config) = config else { return };
+        let recording = config
+            .video
+            .as_ref()
+            .and_then(|video| video.download.as_ref())
+            .and_then(|download| download.recording.as_ref());
+        assert!(recording.is_some(), "explicit recording block should round-trip");
+        let Some(recording) = recording else { return };
+        assert!(recording.enabled);
+    }
+
+    #[test]
+    fn apply_and_prepare_config_returns_the_shared_recording_validation_error() {
+        let invalid_video = VideoConfigDto {
+            download: Some(VideoDownloadConfigDto {
+                recording: Some(RecordingConfigDto {
+                    default_pre_roll_secs: Some(2),
+                    max_pre_roll_secs: 1,
+                    ..RecordingConfigDto::default()
+                }),
+                ..VideoDownloadConfigDto::default()
+            }),
+            ..VideoConfigDto::default()
+        };
+        let mut config = ConfigDto::default();
+
+        let result = apply_and_prepare_config(&mut config, vec![ConfigForm::Video(true, invalid_video)]);
+
+        assert!(result.is_err(), "invalid recording config must be rejected");
+        let Err(error) = result else { return };
+        assert_eq!(
+            error.to_string(),
+            "config video download error: recording.default_pre_roll_secs (2) must not exceed max_pre_roll_secs (1)"
+        );
     }
 }

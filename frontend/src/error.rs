@@ -50,6 +50,10 @@ pub enum Error {
     #[error("{0}")]
     InternalServerError(String),
 
+    /// Non-success HTTP response not covered by a dedicated variant.
+    #[error("{0}")]
+    HttpResponse(String),
+
     /// serde deserialize error
     #[error("Deserialize Error")]
     DeserializeError,

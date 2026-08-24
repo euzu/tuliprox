@@ -1,24 +1,34 @@
 //! Recording REST routes.
 
-use std::sync::Arc;
-
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json, Router};
-use serde::{Deserialize, Serialize};
-
-use crate::api::endpoints::recording_media_api::AuthClaims;
-use crate::api::model::recording_service::{
-    CreateRecordingInput, EditRecordingPatch, RecordingService, RecordingSourceInput, ServiceError,
+use crate::{
+    api::{
+        endpoints::recording_media_api::AuthClaims,
+        model::{
+            event_manager::EventMessage,
+            recording_quota,
+            recording_rule_service::{DeleteFuture, RuleServiceError},
+            recording_service::{
+                CreateRecordingInput, EditRecordingPatch, RecordingService, RecordingSourceInput, ServiceError,
+            },
+            recording_ws, AppState, FileDownload,
+        },
+    },
+    repository::recording_rule_repository::RecordingRuleRepository,
 };
-use crate::api::model::recording_rule_service::{DeleteFuture, RuleServiceError};
-use crate::api::model::{event_manager::EventMessage, recording_quota, recording_ws, FileDownload};
-use crate::api::model::AppState;
-use crate::repository::recording_rule_repository::RecordingRuleRepository;
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, patch, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
 use shared::model::{
     recording::{RecordingProvenance, RecordingVisibility},
     recording_rule::{RecordingRule, RuleBody, RuleSource, RuleVisibility},
     FileDownloadDto, Permission, UserId, XtreamCluster, ROLE_ADMIN,
 };
-use axum::routing::{get, patch, post};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorResponse {
@@ -47,6 +57,7 @@ fn service_error_status(err: &ServiceError) -> StatusCode {
         | ServiceError::InvalidPath
         | ServiceError::QuotaExceeded => StatusCode::BAD_REQUEST,
         ServiceError::DiskFull => StatusCode::INSUFFICIENT_STORAGE,
+        ServiceError::Disabled => StatusCode::NOT_IMPLEMENTED,
         ServiceError::Forbidden | ServiceError::SharedCreationNotAdministrator => StatusCode::FORBIDDEN,
         ServiceError::UnknownRecording => StatusCode::NOT_FOUND,
         ServiceError::PersistenceFailed | ServiceError::IoError(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -73,10 +84,7 @@ pub async fn list_recording_tasks(
     let (revision, mut tasks) = recording_ws::recording_snapshot(&app_state.downloads, &claims).await;
     if let Some(owner) = params.owner.as_deref() {
         tasks.retain(|task| {
-            task.recording
-                .as_ref()
-                .and_then(|recording| recording.owner_id.as_ref())
-                .is_some_and(|id| id.0 == owner)
+            task.recording.as_ref().and_then(|recording| recording.owner_id.as_ref()).is_some_and(|id| id.0 == owner)
         });
     }
     if let Some(visibility) = params.visibility.as_deref() {
@@ -146,12 +154,8 @@ pub async fn create_recording_task(
     match service.create_recording(&claims, &input).await {
         Ok(view) => {
             let _ = app_state.event_manager.send_event(EventMessage::RecordingChanged);
-            Json(CreateRecordingTaskResponse {
-                id: view.uuid,
-                title: view.filename_preview,
-                recording: None,
-            })
-            .into_response()
+            Json(CreateRecordingTaskResponse { id: view.uuid, title: view.filename_preview, recording: None })
+                .into_response()
         }
         Err(err) => service_error_response(&err),
     }
@@ -386,12 +390,14 @@ pub async fn get_recording_quota(
     let tasks = all_recording_tasks(&app_state).await;
     let totals = recording_quota::compute_totals(&tasks);
     let config = app_state.app_config.config.load();
-    let limits = quota_limits_from_config(config
-        .video
-        .as_ref()
-        .and_then(|v| v.download.as_ref())
-        .and_then(|d| d.recording.as_ref())
-        .and_then(|r| r.quota.as_ref()));
+    let limits = quota_limits_from_config(
+        config
+            .video
+            .as_ref()
+            .and_then(|v| v.download.as_ref())
+            .and_then(|d| d.recording.as_ref())
+            .and_then(|r| r.quota.as_ref()),
+    );
     let quota = recording_quota::regular_user_dto(subject_id, &totals, &limits, &tasks);
     Json(RecordingQuotaResponse {
         private_used_bytes: quota.private.measured_bytes.saturating_add(quota.private.reserved_bytes),
@@ -440,8 +446,7 @@ pub async fn get_recording_health(
         server_time: chrono::Utc::now().timestamp(),
         reconciliation_last_run: health.reconciliation_last_run(),
         retention_last_tick: health.retention_last_tick(),
-        retention_sweep_interval_secs: recording
-            .and_then(|cfg| cfg.retention.as_ref().map(|r| r.sweep_interval_secs)),
+        retention_sweep_interval_secs: recording.and_then(|cfg| cfg.retention.as_ref().map(|r| r.sweep_interval_secs)),
         notification_last_drain: health.notification_last_drain(),
         notification_outbox_depth: health.notification_outbox_depth(),
         notification_dead_lettered: health.notification_dead_lettered(),
@@ -469,11 +474,13 @@ fn rule_error_response(err: &crate::api::model::recording_rule_service::RuleServ
         RuleServiceError::Forbidden
         | RuleServiceError::SharedManagementNotAdministrator
         | RuleServiceError::NotOwner => StatusCode::FORBIDDEN,
-        RuleServiceError::InvalidRule
-        | RuleServiceError::InvalidFuture
-        | RuleServiceError::Unsupported { .. } => StatusCode::BAD_REQUEST,
+        RuleServiceError::InvalidRule | RuleServiceError::InvalidFuture | RuleServiceError::Unsupported { .. } => {
+            StatusCode::BAD_REQUEST
+        }
         RuleServiceError::UnknownRule => StatusCode::NOT_FOUND,
-        RuleServiceError::PersistenceFailed | RuleServiceError::PartialOperation { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+        RuleServiceError::PersistenceFailed | RuleServiceError::PartialOperation { .. } => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     };
     error_response(status, err.code())
 }
@@ -482,13 +489,9 @@ fn recording_rule_repo(app_state: &AppState) -> RecordingRuleRepository {
     RecordingRuleRepository::new(&app_state.app_config.config.load().storage_dir)
 }
 
-fn can_write_rules(claims: &shared::model::Claims) -> bool {
-    claims.permissions.contains(Permission::RecordingWrite)
-}
+fn can_write_rules(claims: &shared::model::Claims) -> bool { claims.permissions.contains(Permission::RecordingWrite) }
 
-fn is_admin(claims: &shared::model::Claims) -> bool {
-    claims.roles.iter().any(|role| role == ROLE_ADMIN)
-}
+fn is_admin(claims: &shared::model::Claims) -> bool { claims.roles.iter().any(|role| role == ROLE_ADMIN) }
 
 fn quota_limits_from_config(config: Option<&crate::model::RecordingQuotaConfig>) -> recording_quota::QuotaLimits {
     let mut per_user_bytes = std::collections::HashMap::new();
@@ -534,12 +537,12 @@ async fn resolve_recording_source(
             return false;
         }
         let Some(resolved) =
-        crate::api::endpoints::v1_api_playlist::resolve_target_live_recording_source_by_epg_channel(
-            &app_state.app_config,
-            target_name,
-            virtual_id,
-        )
-        .await
+            crate::api::endpoints::v1_api_playlist::resolve_target_live_recording_source_by_epg_channel(
+                &app_state.app_config,
+                target_name,
+                virtual_id,
+            )
+            .await
         else {
             return false;
         };
@@ -621,16 +624,14 @@ pub async fn create_recording_rule(
     }
     let now = chrono::Utc::now().timestamp();
     let rule = recording_rule_from_create(owner_id, body, now);
-    if let Err(err) = crate::api::model::recording_rule_service::validate_rule(&rule)
-        .and_then(|()| {
-            crate::api::model::recording_rule_service::authorize_rule_action(
-                can_write_rules(&claims),
-                is_admin(&claims),
-                &rule.owner_id,
-                &rule,
-            )
-        })
-    {
+    if let Err(err) = crate::api::model::recording_rule_service::validate_rule(&rule).and_then(|()| {
+        crate::api::model::recording_rule_service::authorize_rule_action(
+            can_write_rules(&claims),
+            is_admin(&claims),
+            &rule.owner_id,
+            &rule,
+        )
+    }) {
         return rule_error_response(&err);
     }
     match recording_rule_repo(&app_state).create(rule).await {
@@ -692,11 +693,14 @@ pub async fn edit_recording_rule(
     let mut rule = match repo.load().await {
         Ok(file) => match file.rules.into_iter().find(|rule| rule.id == id) {
             Some(rule) => rule,
-            None => return rule_error_response(&crate::api::model::recording_rule_service::RuleServiceError::UnknownRule),
+            None => {
+                return rule_error_response(&crate::api::model::recording_rule_service::RuleServiceError::UnknownRule)
+            }
         },
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed"),
     };
-    if let Err(err) = authorize_and_apply_recording_rule_edit(&claims, &mut rule, body, chrono::Utc::now().timestamp()) {
+    if let Err(err) = authorize_and_apply_recording_rule_edit(&claims, &mut rule, body, chrono::Utc::now().timestamp())
+    {
         return match err {
             EditRuleError::MissingSubject => {
                 error_response(StatusCode::UNAUTHORIZED, "recording_token_refresh_required")
@@ -827,7 +831,9 @@ pub async fn delete_recording_rule(
     let rule = match repo.load().await {
         Ok(file) => match file.rules.into_iter().find(|rule| rule.id == id) {
             Some(rule) => rule,
-            None => return rule_error_response(&crate::api::model::recording_rule_service::RuleServiceError::UnknownRule),
+            None => {
+                return rule_error_response(&crate::api::model::recording_rule_service::RuleServiceError::UnknownRule)
+            }
         },
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "recording_persistence_failed"),
     };
@@ -852,10 +858,7 @@ pub async fn delete_recording_rule(
     let service = RecordingService::new(app_state.downloads.clone(), app_state.app_config.clone());
     let mut cancelled = Vec::new();
     if future == DeleteFuture::Cancel {
-        match service
-            .cancel_future_rule_recordings(&claims, &id, chrono::Utc::now().timestamp())
-            .await
-        {
+        match service.cancel_future_rule_recordings(&claims, &id, chrono::Utc::now().timestamp()).await {
             Ok(tasks) => cancelled = tasks,
             Err(_) => {
                 return rule_error_response(&RuleServiceError::PartialOperation {
@@ -923,6 +926,26 @@ where
     }
 }
 
+/// GET /api/v1/recording/availability — authenticated DVR preflight.
+pub async fn recording_availability(
+    State(app_state): State<Arc<AppState>>,
+    AuthClaims(claims): AuthClaims,
+) -> axum::response::Response {
+    if !claims.permissions.contains(Permission::RecordingRead)
+        && !claims.permissions.contains(Permission::RecordingWrite)
+    {
+        return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
+    }
+    if !crate::api::model::recording::recording_supervisor::recording_enabled(app_state.as_ref()) {
+        return error_response(StatusCode::NOT_IMPLEMENTED, "recording_disabled");
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub fn recording_availability_register(router: Router<Arc<AppState>>) -> Router<Arc<AppState>> {
+    router.route("/recording/availability", get(recording_availability))
+}
+
 /// Reject every recording route while the DVR is switched off.
 ///
 /// `video.download.recording.enabled: false` has to mean more than
@@ -955,19 +978,13 @@ pub async fn require_recording_enabled(
 pub fn recording_api_register(router: Router<Arc<AppState>>) -> axum::Router<Arc<AppState>> {
     let recording_routes = Router::new()
         .route("/tasks", get(list_recording_tasks).post(create_recording_task))
-        .route(
-            "/tasks/{id}",
-            patch(edit_recording_task).delete(delete_recording_task),
-        )
+        .route("/tasks/{id}", patch(edit_recording_task).delete(delete_recording_task))
         .route("/tasks/{id}/cancel", post(cancel_recording_task))
         .route("/conflicts/preview", post(preview_recording_conflicts))
         .route("/quota", get(get_recording_quota))
         .route("/health", get(get_recording_health))
         .route("/rules", get(list_recording_rules).post(create_recording_rule))
-        .route(
-            "/rules/{id}",
-            patch(edit_recording_rule).delete(delete_recording_rule),
-        );
+        .route("/rules/{id}", patch(edit_recording_rule).delete(delete_recording_rule));
 
     router.nest("/recording", recording_routes)
 }
@@ -1005,6 +1022,50 @@ mod tests {
             subject_id,
             permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
         }
+    }
+
+    fn enabled_recording_state() -> Arc<AppState> {
+        let recording = shared::model::RecordingConfigDto { enabled: true, ..Default::default() };
+        let download = shared::model::VideoDownloadConfigDto { recording: Some(recording), ..Default::default() };
+        let video = shared::model::VideoConfigDto { download: Some(download), ..Default::default() };
+        crate::api::model::create_test_app_state(crate::model::Config {
+            video: Some((&video).into()),
+            ..crate::model::Config::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn recording_availability_accepts_write_only_claims() {
+        let response = recording_availability(
+            State(enabled_recording_state()),
+            AuthClaims(edit_claims(Some(UserId::from("web:alice")), false)),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn recording_availability_accepts_read_only_claims() {
+        let mut claims = edit_claims(Some(UserId::from("web:alice")), false);
+        claims.permissions = Permission::RecordingRead.into();
+
+        let response = recording_availability(State(enabled_recording_state()), AuthClaims(claims)).await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn recording_availability_rejects_claims_without_recording_permission() {
+        let app_state = crate::api::model::create_test_app_state(crate::model::Config::default());
+        let mut claims = edit_claims(Some(UserId::from("web:alice")), false);
+        claims.permissions = Permission::SystemRead.into();
+
+        let response = recording_availability(State(app_state), AuthClaims(claims)).await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+        assert!(matches!(body.as_deref(), Ok(bytes) if bytes == br#"{"error":"recording_forbidden"}"#));
     }
 
     fn editable_rule() -> RecordingRule {
@@ -1052,10 +1113,7 @@ mod tests {
             2,
         );
 
-        assert!(matches!(
-            result,
-            Err(EditRuleError::Rule(RuleServiceError::SharedManagementNotAdministrator))
-        ));
+        assert!(matches!(result, Err(EditRuleError::Rule(RuleServiceError::SharedManagementNotAdministrator))));
     }
 
     #[test]
@@ -1063,13 +1121,8 @@ mod tests {
         let mut rule = editable_rule();
         let patch: EditRecordingRuleBody = serde_json::from_value(json!({"visibility": "shared"})).expect("parse");
 
-        authorize_and_apply_recording_rule_edit(
-            &edit_claims(Some(UserId::builtin_admin()), true),
-            &mut rule,
-            patch,
-            2,
-        )
-        .expect("admin edit");
+        authorize_and_apply_recording_rule_edit(&edit_claims(Some(UserId::builtin_admin()), true), &mut rule, patch, 2)
+            .expect("admin edit");
 
         assert_eq!(rule.visibility, RuleVisibility::Shared);
     }
@@ -1297,8 +1350,7 @@ mod tests {
     #[test]
     fn list_tasks_params_accepts_explicit_owner_and_visibility() {
         let parsed: ListTasksParams =
-            serde_json::from_value(json!({"owner": "web:alice", "visibility": "private"}))
-                .expect("parse full params");
+            serde_json::from_value(json!({"owner": "web:alice", "visibility": "private"})).expect("parse full params");
         assert_eq!(parsed.owner.as_deref(), Some("web:alice"));
         assert_eq!(parsed.visibility.as_deref(), Some("private"));
     }
@@ -1311,15 +1363,13 @@ mod tests {
 
     #[test]
     fn delete_rule_params_accepts_future_retain() {
-        let parsed: DeleteRuleParams =
-            serde_json::from_value(json!({"future": "retain"})).expect("parse retain");
+        let parsed: DeleteRuleParams = serde_json::from_value(json!({"future": "retain"})).expect("parse retain");
         assert_eq!(parsed.future.as_deref(), Some("retain"));
     }
 
     #[test]
     fn delete_rule_params_accepts_future_cancel() {
-        let parsed: DeleteRuleParams =
-            serde_json::from_value(json!({"future": "cancel"})).expect("parse cancel");
+        let parsed: DeleteRuleParams = serde_json::from_value(json!({"future": "cancel"})).expect("parse cancel");
         assert_eq!(parsed.future.as_deref(), Some("cancel"));
     }
 }

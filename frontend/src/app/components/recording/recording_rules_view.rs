@@ -355,8 +355,17 @@ pub fn recording_rules_view() -> Html {
 
     let on_create_click = {
         let creating = creating.clone();
+        let services = services.clone();
+        let translate = translate.clone();
         Callback::from(move |_: String| {
-            creating.set(true);
+            let creating = creating.clone();
+            let services = services.clone();
+            let translate = translate.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                if super::ensure_recording_available(&services, &translate).await {
+                    creating.set(true);
+                }
+            });
         })
     };
 
@@ -409,7 +418,7 @@ pub fn recording_rules_view() -> Html {
     let is_empty = rules_items.is_empty();
     let render_data = {
         let translate = translate.clone();
-        Callback::from(move |(col, _idx, rule): (usize, usize, Rc<RecordingRuleResponse>)| match col {
+        Callback::from(move |(_row, col, rule): (usize, usize, Rc<RecordingRuleResponse>)| match col {
             0 => html! { <>{ rule_summary(&rule) }</> },
             1 => html! { <>{ rule_visibility_label(&translate, &rule) }</> },
             2 => html! { <>{ rule_schedule_label(&translate, &rule) }</> },

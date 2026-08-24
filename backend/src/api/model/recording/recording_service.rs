@@ -113,6 +113,11 @@ pub enum ServiceError {
     /// The recording cannot fit on disk; reservation would exceed
     /// available space.
     DiskFull,
+    /// The server has no download engine: the `video.download` block
+    /// is missing from the configuration. Distinct from
+    /// `InvalidSource` because the caller's identifiers may be
+    /// perfectly valid — nothing on the server can execute them.
+    Disabled,
 }
 
 impl std::fmt::Display for ServiceError {
@@ -142,6 +147,7 @@ impl ServiceError {
             Self::Duplicate => "recording_duplicate",
             Self::InvalidPath => "recording_invalid_path",
             Self::DiskFull => "recording_disk_full",
+            Self::Disabled => "recording_disabled",
         }
     }
 }
@@ -297,7 +303,7 @@ impl RecordingService {
         let owner_id = Self::subject_id(claims)?;
         let config = self.app_config.config.load();
         let Some(download_cfg) = config.video.as_ref().and_then(|v| v.download.as_ref()) else {
-            return Err(ServiceError::InvalidSource);
+            return Err(ServiceError::Disabled);
         };
         let recording_cfg = download_cfg.recording.as_ref();
         recording_edit::validate_padding(
@@ -1898,6 +1904,32 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn create_recording_without_download_config_reports_disabled() {
+        // A missing `video.download` block means the server has no
+        // download engine at all — the caller's source identifiers are
+        // not wrong. Reporting `InvalidSource` here sent clients
+        // hunting for a misconfiguration that does not exist.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let downloads = Arc::new(DownloadQueue::new_with_state_file(Some(dir.path().join("downloads.json"))));
+        let service = RecordingService::new(Arc::clone(&downloads), test_app_config());
+        let claims = shared::model::Claims {
+            username: "alice".to_string(),
+            iss: "tuliprox".to_string(),
+            iat: 0,
+            exp: 0,
+            roles: Vec::new(),
+            permissions: Permission::RecordingWrite.into(),
+            pwd_version: 0,
+            subject_id: Some(UserId::from("web:alice")),
+            permission_schema_version: shared::model::CURRENT_PERMISSION_SCHEMA_VERSION,
+        };
+
+        let result = service.create_recording(&claims, &create_input()).await;
+
+        assert!(matches!(result, Err(ServiceError::Disabled)));
+    }
+
     fn test_app_config() -> Arc<AppConfig> {
         Arc::new(AppConfig {
             config: Arc::new(arc_swap::ArcSwap::from_pointee(crate::model::Config::default())),
@@ -1942,6 +1974,7 @@ mod tests {
             ServiceError::ProvenanceImmutable.code(),
             "recording_provenance_immutable"
         );
+        assert_eq!(ServiceError::Disabled.code(), "recording_disabled");
     }
 
     #[test]

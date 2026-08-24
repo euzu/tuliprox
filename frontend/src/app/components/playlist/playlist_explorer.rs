@@ -3,7 +3,9 @@ use crate::{
         components::{
             menu_item::MenuItem,
             popup_menu::PopupMenu,
-            recording::{target_name_for_id, PaddingBounds, RecordingForm, RecordingFormPrefill},
+            recording::{
+                ensure_recording_available, target_name_for_id, PaddingBounds, RecordingForm, RecordingFormPrefill,
+            },
             AppIcon, Chip, DropDownOption, IconButton, NoContent, Panel, Search,
         },
         context::{ConfigContext, PlaylistExplorerContext},
@@ -601,6 +603,9 @@ pub fn PlaylistExplorer() -> Html {
                                 _ => None,
                             };
                             spawn_local(async move {
+                                if !ensure_recording_available(&services, &translate_clone).await {
+                                    return;
+                                }
                                 let target_name = match target_name {
                                     Some(name) => name,
                                     None => {

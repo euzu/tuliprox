@@ -8,7 +8,7 @@ use crate::{
                     LABEL_MESSAGING_CONFIG, LABEL_METADATA_UPDATE_CONFIG, LABEL_PANEL_CONFIG, LABEL_PROXY_CONFIG,
                     LABEL_REVERSE_PROXY_CONFIG, LABEL_SCHEDULES_CONFIG, LABEL_VIDEO_CONFIG, LABEL_WEB_UI_CONFIG,
                 },
-                config_update::update_config,
+                config_update::apply_and_prepare_config,
                 config_view_context::ConfigViewContext,
                 ApiConfigView, HdHomerunConfigView, IpCheckConfigView, LibraryConfigView, LogConfigView,
                 MainConfigView, MessagingConfigView, MetadataUpdateConfigView, PanelConfigView, ProxyConfigView,
@@ -217,11 +217,7 @@ pub fn ConfigView() -> Html {
                         other => modified_main_forms.push(other),
                     }
                 }
-                if !modified_main_forms.is_empty() {
-                    update_config(&mut app_config.config, modified_main_forms);
-                }
-
-                if let Err(err) = app_config.config.prepare(false) {
+                if let Err(err) = apply_and_prepare_config(&mut app_config.config, modified_main_forms) {
                     services.toastr.error(err.to_string());
                     return;
                 }
@@ -289,8 +285,7 @@ pub fn ConfigView() -> Html {
             if !modified_main_forms.is_empty() {
                 let mut config_dto =
                     config_ctx.config.as_ref().map_or_else(ConfigDto::default, |app_cfg| app_cfg.config.clone());
-                update_config(&mut config_dto, modified_main_forms);
-                if let Err(err) = config_dto.prepare(false) {
+                if let Err(err) = apply_and_prepare_config(&mut config_dto, modified_main_forms) {
                     services.toastr.error(err.to_string());
                     return;
                 }

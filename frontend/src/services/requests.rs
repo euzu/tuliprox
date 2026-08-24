@@ -135,6 +135,14 @@ async fn extract_error_message(response: Response) -> String {
     extract_error_message_checked(response).await.unwrap_or_default()
 }
 
+fn unexpected_response_error(message: String) -> Error {
+    if message.trim().is_empty() {
+        Error::RequestError
+    } else {
+        Error::HttpResponse(message)
+    }
+}
+
 const TOKEN_KEY: &str = "tuliprox.token";
 pub fn get_token() -> Option<String> { LocalStorage::get(TOKEN_KEY).ok() }
 
@@ -285,7 +293,7 @@ where
                         Err(Error::DeserializeError)
                     }
                 }
-                _ => Err(Error::RequestError),
+                _ => Err(unexpected_response_error(extract_error_message(response).await)),
             }
         }
         Err(e) => {
@@ -377,7 +385,7 @@ pub async fn request_get_binary(url: &str) -> Result<Vec<u8>, Error> {
                 Err(Error::InternalServerError(message))
             }
         }
-        _ => Err(Error::RequestError),
+        _ => Err(unexpected_response_error(extract_error_message(response).await)),
     }
 }
 
@@ -520,7 +528,8 @@ pub fn get_base_href() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::should_decode_success_body;
+    use super::{should_decode_success_body, unexpected_response_error};
+    use crate::error::Error;
 
     #[test]
     fn accepted_json_response_with_body_is_decoded() {
@@ -536,5 +545,13 @@ mod tests {
     fn no_content_and_unit_responses_are_not_decoded() {
         assert!(!should_decode_success_body::<serde_json::Value>(204, "application/json"));
         assert!(!should_decode_success_body::<()>(202, "application/json"));
+    }
+
+    #[test]
+    fn unexpected_http_status_preserves_recording_error_code() {
+        assert_eq!(
+            unexpected_response_error("recording_disabled".to_string()),
+            Error::HttpResponse("recording_disabled".to_string())
+        );
     }
 }

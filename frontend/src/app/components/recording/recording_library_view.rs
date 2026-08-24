@@ -17,7 +17,7 @@ use shared::model::{
     permission::Permission,
     recording::{RecordingOwner, RecordingVisibility},
     web_socket::ProtocolMessage,
-    SortOrder, TransferStatusDto, UserId,
+    DownloadsDelta, SortOrder, TaskKindDto, TransferStatusDto, UserId,
 };
 use std::rc::Rc;
 use yew::prelude::*;
@@ -207,9 +207,6 @@ pub fn recording_library_view() -> Html {
     // Revision of the snapshot currently rendered, so an out-of-order
     // delivery cannot replace newer data with older data.
     let last_revision = use_state(|| None::<u64>);
-    // Set when the socket reports an actionable refusal. Distinguishes an
-    // empty library from an unusable one.
-    let unavailable = use_state(|| None::<RecordingError>);
     let translate_for_events = translate.clone();
 
     // Subscribe to WS-driven updates. Backend broadcasts RecordingChanged
@@ -218,25 +215,43 @@ pub fn recording_library_view() -> Html {
     {
         let tasks = tasks.clone();
         let last_revision = last_revision.clone();
-        let unavailable = unavailable.clone();
         let svc = services.clone();
         use_effect_with((), move |_| {
-            let toastr = svc.toastr.clone();
             let translate = translate_for_events.clone();
             let sid = svc.event.subscribe(move |msg| {
-                // The socket refused for an actionable reason — a stale
-                // token or a server-side DVR switch-off. Both used to
-                // arrive as an empty task list, so the user stared at an
-                // empty library with nothing to act on.
+                // The socket may report an unavailable backend (stale
+                // token, DVR switched off, or no `video.download`
+                // block). The library view used to surface this as a
+                // toast and a permanent banner, which turned an idle
+                // recording tab into an alarm. Log and move on — the
+                // actionable error surfaces only when the user clicks a
+                // record action.
                 if let EventMessage::RecordingUnavailable { code } = &msg {
                     let error = RecordingError::from_code(code);
-                    log::warn!("recording socket unavailable: {code}");
-                    toastr.error(error_message(&translate, &error));
-                    unavailable.set(Some(error));
+                    log::warn!("recording socket unavailable: {code} ({})", error.i18n_key());
+                    log::debug!("{}", error_message(&translate, &error));
+                    return;
+                }
+                // Byte-level progress for the running transfer arrives on
+                // the downloads delta channel, not as a recording
+                // snapshot: the worker patches the active task and
+                // broadcasts `DownloadsDelta::ActivePatched`. Without
+                // this branch the progress column only moved on
+                // lifecycle changes (start, finish, cancel).
+                if let EventMessage::DownloadsDeltaUpdate(delta) = &msg {
+                    if let DownloadsDelta::ActivePatched(task) = &**delta {
+                        if task.kind == TaskKindDto::Recording {
+                            let updated = RecordingTaskResponse::from(task.clone());
+                            let mut current = (**tasks).clone();
+                            if let Some(slot) = current.iter_mut().find(|t| t.id == updated.id) {
+                                *slot = updated;
+                                tasks.set(Rc::new(current));
+                            }
+                        }
+                    }
                     return;
                 }
                 if let EventMessage::RecordingSnapshot { revision, tasks: incoming } = msg {
-                    unavailable.set(None);
                     // The revision guard exists for ordering, not for
                     // completeness: `RecordingSnapshot` is a *full* list,
                     // so a snapshot that skips revisions is still current
@@ -319,7 +334,7 @@ pub fn recording_library_view() -> Html {
         let svc = services.clone();
         let translate = translate_for_render_actions;
         let editing_for_actions = editing_task_id.clone();
-        Callback::from(move |(col, _idx, task): (usize, usize, Rc<RecordingTaskResponse>)| {
+        Callback::from(move |(_row, col, task): (usize, usize, Rc<RecordingTaskResponse>)| {
             match column_at(col) {
                 LibraryColumn::Channel => html! { <>{ task_channel(&task) }</> },
                 LibraryColumn::Title => html! { <>{ task_title(&task) }</> },
@@ -404,11 +419,11 @@ pub fn recording_library_view() -> Html {
                     let row_title = task_title(&task);
                     html! {
                         <div class="tp__recording-row-actions">
-                            <TextButton name="task_edit" icon="" title={edit_label.clone()}
+                            <TextButton name="task_edit" icon="Edit" title={edit_label.clone()}
                                 aria_label={format!("{edit_label}: {row_title}")} onclick={on_edit_click} />
-                            <TextButton name="task_cancel" icon="" title={cancel_label.clone()}
+                            <TextButton name="task_cancel" icon="Cancel" title={cancel_label.clone()}
                                 aria_label={format!("{cancel_label}: {row_title}")} onclick={on_cancel_click} />
-                            <TextButton name="task_delete" icon="" class="tp__button--danger" title={delete_label.clone()}
+                            <TextButton name="task_delete" icon="Delete" class="tp__button--danger" title={delete_label.clone()}
                                 aria_label={format!("{delete_label}: {row_title}")} onclick={on_delete_click} />
                         </div>
                     }
@@ -481,14 +496,7 @@ pub fn recording_library_view() -> Html {
                         { quota_view.unwrap_or_else(|| html! { <></> }) }
                     </div>
                     <div class="tp__recording-list__body tp__list-list__body">
-                        if let Some(error) = unavailable.as_ref() {
-                            // Not an empty library — an unusable one. Say
-                            // which, so the user knows whether to wait,
-                            // reload, or ask an administrator.
-                            <p class="tp__recording-list__unavailable" role="alert">
-                                { error_message(&translate, error) }
-                            </p>
-                        } else if is_empty {
+                        if is_empty {
                             // An empty table reads as "something failed".
                             // Say what the list is for and where to start.
                             <p class="tp__recording-list__empty">
