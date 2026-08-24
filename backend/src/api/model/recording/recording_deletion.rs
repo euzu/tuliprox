@@ -605,7 +605,12 @@ mod tests {
     #[tokio::test]
     async fn execute_deletion_unlinks_existing_file_and_returns_path() {
         let dir = TempDir::new().expect("tempdir");
-        let final_path = dir.path().join("r.ts");
+        // `execute_deletion` returns the canonicalized path. On macOS the temp
+        // directory sits behind the `/var` -> `/private/var` symlink, so the
+        // fixture path must be canonicalized too; otherwise the assertion
+        // compares two spellings of the same file and always fails there.
+        let dir_path = dir.path().canonicalize().expect("canonical tempdir");
+        let final_path = dir_path.join("r.ts");
         tokio::fs::write(&final_path, b"data").await.expect("write");
         let mut task = finished_with_state("r", DownloadState::Completed, Some(DeletionPreviousState::Completed));
         task.file_path = final_path.clone();

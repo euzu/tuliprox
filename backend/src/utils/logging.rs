@@ -288,13 +288,35 @@ mod tests {
 
     #[test]
     fn test_log_buffer_eviction_and_history() {
+        // The log buffer is process-global, so entries pushed by other tests
+        // running in parallel share it. Tag our own entries and assert only on
+        // the subsequence we pushed; asserting on absolute buffer positions
+        // makes this test order-dependent (see `test_log_broadcast_subscription`).
+        const TARGET: &str = "log_buffer_eviction_and_history";
+
         for i in 0..LOG_BUFFER_CAPACITY + 10 {
-            push_log_entry(LogEntry::new("ts", shared::model::LogLevel::Info, "target", format!("msg {i}")));
+            push_log_entry(LogEntry::new("ts", shared::model::LogLevel::Info, TARGET, format!("msg {i}")));
         }
         let history = get_log_history();
         assert_eq!(history.len(), LOG_BUFFER_CAPACITY);
-        assert_eq!(history.last().unwrap().message, format!("msg {}", LOG_BUFFER_CAPACITY + 9));
-        assert_eq!(history.first().unwrap().message, "msg 10");
+
+        let ours: Vec<&LogEntry> = history.iter().filter(|entry| entry.target == TARGET).collect();
+        assert_eq!(ours.last().unwrap().message, format!("msg {}", LOG_BUFFER_CAPACITY + 9));
+
+        // We pushed 10 more entries than the buffer holds, so at least the
+        // first 10 of ours must have been evicted.
+        let oldest_retained: usize = ours
+            .first()
+            .unwrap()
+            .message
+            .strip_prefix("msg ")
+            .expect("tagged entry")
+            .parse()
+            .expect("numeric suffix");
+        assert!(
+            oldest_retained >= 10,
+            "expected at least 10 evicted entries, oldest retained is msg {oldest_retained}"
+        );
     }
 
     #[tokio::test]
