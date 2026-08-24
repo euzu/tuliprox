@@ -49,7 +49,7 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
         connections: Rc::from([SparklineSeries::new(MetricsHistory::as_vec(&history.connections))]),
     });
 
-    let logs_expanded = use_state(|| false);
+    let logs_expanded = use_state(|| true);
     let on_logs_toggle = {
         let logs_expanded = logs_expanded.clone();
         Callback::from(move |expanded: bool| {
@@ -129,9 +129,6 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                 })}>
                 <div class="tp__stats__body">
                   { render_system_stats(cache) }
-                  <div class="tp__stats__body-group">
-                    <Card><PlaylistProgressStatusCard /></Card>
-                  </div>
                 </div>
             </CollapsePanel>
             <CollapsePanel expanded={true} title_content={Some(html! {
@@ -143,6 +140,15 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                   <div class="tp__stats__body-group">
                      <StreamsView embedded={true} />
                   </div>
+                </div>
+            </CollapsePanel>
+            <CollapsePanel expanded={true} title_content={Some(html! {
+                <div class="tp__stats__header">
+                 <h1>{ translate.t("LABEL.PLAYLIST_UPDATE")}</h1>
+                </div>
+                })}>
+                <div class="tp__stats__body-group">
+                    <Card><PlaylistProgressStatusCard /></Card>
                 </div>
             </CollapsePanel>
             <CollapsePanel expanded={*logs_expanded} on_state_change={on_logs_toggle.clone()} title_content={Some(html! {
@@ -243,9 +249,6 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
             </div>
             <div class="tp__stats__body">
                 { render_system_stats(cache) }
-                <div class="tp__stats__body-group">
-                    <Card><PlaylistProgressStatusCard /></Card>
-                </div>
                 <div class="tp__stats__body-group tp__stats__body-group-provider">
                     <Card><StatusCard title={translate.t("LABEL.ACTIVE_USERS")} data={users}
                         chart={Some(html! { <Sparkline class="tp__sparkline--users" format={SparklineFormat::Count}
@@ -256,6 +259,9 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                     <Card><StatusCard icon="PlayArrow" title={translate.t("LABEL.ACTIVE_STREAMS")} data={stream_count}
                         footer={stream_footer} /></Card>
                     { render_active_provider_connections() }
+                </div>
+                <div class="tp__stats__body-group">
+                    <Card><PlaylistProgressStatusCard /></Card>
                 </div>
                 <CollapsePanel expanded={*logs_expanded} on_state_change={on_logs_toggle.clone()} title_content={Some(html! {
                     <div class="tp__stats__header">

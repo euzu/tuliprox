@@ -19,6 +19,8 @@ pub struct TextButtonProps {
     /// each one deletes; the visible label stays short.
     #[prop_or(None)]
     pub aria_label: Option<String>,
+    #[prop_or(None)]
+    pub hint: Option<String>,
 }
 
 #[component]
@@ -38,6 +40,7 @@ pub fn TextButton(props: &TextButtonProps) -> Html {
             disabled={props.disabled}
             onclick={handle_click}
             aria-label={props.aria_label.clone()}
+            title={props.hint.clone()}
             class={classes!("tp__text-button", props.class.clone())}>
          if !props.icon.is_empty() {
             <AppIcon name={props.icon.clone()}></AppIcon>

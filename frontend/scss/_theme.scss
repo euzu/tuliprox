@@ -288,6 +288,17 @@ body {
   --theme-brand-emphasis: var(--theme-palette-emphasis-tone-500);
   --theme-brand-accent: var(--theme-palette-accent-tone-500);
 
+  --theme-brand-log-console-background: var(--theme-palette-log-console-background);
+  --theme-brand-log-console-text: var(--theme-palette-log-console-text);
+  --theme-brand-log-console-muted: var(--theme-palette-log-console-muted);
+  --theme-brand-log-console-trace: var(--theme-palette-log-console-trace);
+  --theme-brand-log-console-debug: var(--theme-palette-log-console-debug);
+  --theme-brand-log-console-info: var(--theme-palette-log-console-info);
+  --theme-brand-log-console-warn: var(--theme-palette-log-console-warn);
+  --theme-brand-log-console-error: var(--theme-palette-log-console-error);
+  --theme-brand-log-console-success: var(--theme-palette-log-console-success);
+  --theme-brand-log-console-target: var(--theme-palette-log-console-target);
+
   --theme-brand-tag-surface: var(--theme-palette-status-tag-surface);
   --theme-brand-tag-active-text: var(--theme-palette-status-tag-active-text);
   --theme-brand-tag-active-surface: var(--theme-palette-status-tag-active-surface);
@@ -719,6 +730,24 @@ body {
   --source-editor-active-line-color: color-mix(in srgb, var(--theme-brand-text) 18%, var(--theme-brand-positive) 82%);
   --source-editor-pending-line-color: color-mix(in srgb, var(--theme-brand-text) 20%, var(--theme-brand-warning-strong) 80%);
   --source-editor-block-shadow: var(--theme-brand-source-block-shadow);
+
+  --log-console-background-color: var(--theme-brand-log-console-background);
+  --log-console-text-color: var(--theme-brand-log-console-text);
+  --log-console-muted-color: var(--theme-brand-log-console-muted);
+  --log-console-trace-color: var(--theme-brand-log-console-trace);
+  --log-console-debug-color: var(--theme-brand-log-console-debug);
+  --log-console-info-color: var(--theme-brand-log-console-info);
+  --log-console-warn-color: var(--theme-brand-log-console-warn);
+  --log-console-error-color: var(--theme-brand-log-console-error);
+  --log-console-success-color: var(--theme-brand-log-console-success);
+  --log-console-target-color: var(--theme-brand-log-console-target);
+  --log-console-row-border-color: color-mix(in srgb, var(--theme-brand-log-console-text) 3%, transparent);
+  --log-console-row-hover-background-color: color-mix(in srgb, var(--theme-brand-log-console-text) 4%, transparent);
+  --log-console-trace-background-color: color-mix(in srgb, var(--theme-brand-log-console-trace) 20%, transparent);
+  --log-console-debug-background-color: color-mix(in srgb, var(--theme-brand-log-console-debug) 20%, transparent);
+  --log-console-info-background-color: color-mix(in srgb, var(--theme-brand-log-console-info) 20%, transparent);
+  --log-console-warn-background-color: color-mix(in srgb, var(--theme-brand-log-console-warn) 20%, transparent);
+  --log-console-error-background-color: color-mix(in srgb, var(--theme-brand-log-console-error) 25%, transparent);
 
   --selection-area-border-color: var(--theme-brand-border-selection);
   --selection-area-background-color: color-mix(in srgb, var(--theme-brand-border-selection) 12%, transparent);
