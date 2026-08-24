@@ -1,4 +1,15 @@
 body[data-theme="paper"] {
+  --theme-palette-log-console-background: #121212;
+  --theme-palette-log-console-text: #e0e0e0;
+  --theme-palette-log-console-muted: #757575;
+  --theme-palette-log-console-trace: #9e9e9e;
+  --theme-palette-log-console-debug: #9c27b0;
+  --theme-palette-log-console-info: #03a9f4;
+  --theme-palette-log-console-warn: #ff9800;
+  --theme-palette-log-console-error: #f44336;
+  --theme-palette-log-console-success: #4caf50;
+  --theme-palette-log-console-target: #81c784;
+
   --theme-palette-page: #f5efe5;
   --theme-palette-particle: #d6c6ad;
   --theme-palette-particle-alt: #bda98d;

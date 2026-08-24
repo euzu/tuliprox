@@ -1,12 +1,21 @@
 use crate::{
-    app::components::AppIcon,
+    app::components::{input::Input, RadioButtonGroup, TextButton},
     hooks::{use_clipboard_copy, use_log_stream, UseLogStreamOptions},
     i18n::use_translation,
 };
 use shared::model::{LogEntry, LogLevel};
-use wasm_bindgen::JsCast;
-use web_sys::{HtmlElement, HtmlInputElement};
+use std::rc::Rc;
+use web_sys::HtmlElement;
 use yew::prelude::*;
+
+fn filter_level_from_selection(selections: &[String]) -> Option<Option<LogLevel>> {
+    let selection = selections.first()?;
+    if selection.eq_ignore_ascii_case("ALL") {
+        Some(None)
+    } else {
+        selection.parse().ok().map(Some)
+    }
+}
 
 #[derive(Properties, Clone, PartialEq, Debug)]
 pub struct LogConsoleProps {
@@ -87,21 +96,20 @@ pub fn LogConsole(props: &LogConsoleProps) -> Html {
             .collect()
     };
 
-    // Level selector callback
-    let on_select_level = |level: Option<LogLevel>| {
+    let on_select_level = {
         let selected_level = selected_level.clone();
-        Callback::from(move |_| {
-            selected_level.set(level);
+        Callback::from(move |selections: Rc<Vec<String>>| {
+            if let Some(level) = filter_level_from_selection(&selections) {
+                selected_level.set(level);
+            }
         })
     };
 
     // Search input callback
     let on_search_input = {
         let search_query = search_query.clone();
-        Callback::from(move |e: InputEvent| {
-            if let Some(input) = e.target().and_then(|t| t.dyn_into::<HtmlInputElement>().ok()) {
-                search_query.set(input.value());
-            }
+        Callback::from(move |value: String| {
+            search_query.set(value);
         })
     };
 
@@ -142,76 +150,59 @@ pub fn LogConsole(props: &LogConsoleProps) -> Html {
         })
     };
 
-    let levels = [
-        (None, "ALL", "tp__log-console__filter-btn--all"),
-        (Some(LogLevel::Error), "ERROR", "tp__log-console__filter-btn--error"),
-        (Some(LogLevel::Warn), "WARN", "tp__log-console__filter-btn--warn"),
-        (Some(LogLevel::Info), "INFO", "tp__log-console__filter-btn--info"),
-        (Some(LogLevel::Debug), "DEBUG", "tp__log-console__filter-btn--debug"),
-        (Some(LogLevel::Trace), "TRACE", "tp__log-console__filter-btn--trace"),
-    ];
+    let level_options =
+        Rc::new(vec!["ALL", "ERROR", "WARN", "INFO", "DEBUG", "TRACE"].into_iter().map(String::from).collect());
+    let level_selection = Rc::new(vec![(*selected_level).as_ref().map_or("ALL", LogLevel::as_str).to_uppercase()]);
 
     html! {
         <div class="tp__log-console">
             <div class="tp__log-console__toolbar">
                 <div class="tp__log-console__filters">
-                    {
-                        for levels.iter().map(|(lvl, label, cls)| {
-                            let is_active = *selected_level == *lvl;
-                            let active_cls = if is_active { "tp__log-console__filter-btn--active" } else { "" };
-                            html! {
-                                <button
-                                    type="button"
-                                    class={classes!("tp__log-console__filter-btn", *cls, active_cls)}
-                                    onclick={on_select_level(*lvl)}
-                                >
-                                    { *label }
-                                </button>
-                            }
-                        })
-                    }
+                    <RadioButtonGroup
+                        multi_select={false}
+                        none_allowed={false}
+                        options={level_options}
+                        selected={level_selection}
+                        on_select={on_select_level}
+                    />
                 </div>
 
                 <div class="tp__log-console__controls">
                     <div class="tp__log-console__search">
-                        <input
-                            type="text"
+                        <Input
                             placeholder={translate.t("LABEL.SEARCH_LOGS")}
                             value={(*search_query).clone()}
-                            oninput={on_search_input}
+                            on_change={on_search_input}
                         />
                     </div>
 
                     <div class="tp__log-console__actions">
-                        <button
-                            type="button"
-                            class={classes!("tp__log-console__action-btn", if *auto_scroll { "tp__log-console__action-btn--active" } else { "" })}
-                            title={if *auto_scroll { translate.t("LABEL.PAUSE_SCROLL") } else { translate.t("LABEL.RESUME_SCROLL") }}
+                        <TextButton
+                            name="autoscroll_log"
+                            icon={if *auto_scroll { "Pause" } else { "Play" }}
+                            class={format!("tp__log-console__action-btn {}",  if *auto_scroll { "tp__log-console__action-btn--active" } else { "" })}
+                            title={translate.t("LABEL.AUTO_SCROLL")}
+                            hint={if *auto_scroll { translate.t("LABEL.PAUSE_SCROLL") } else { translate.t("LABEL.RESUME_SCROLL") }}
                             onclick={on_toggle_auto_scroll}
-                        >
-                            <AppIcon name={if *auto_scroll { "Pause" } else { "Play" }} />
-                            <span>{ translate.t("LABEL.AUTO_SCROLL") }</span>
-                        </button>
+                        />
 
-                        <button
-                            type="button"
+                        <TextButton
+                            name="copy_log"
+                            icon="Copy"
                             class="tp__log-console__action-btn"
-                            title={translate.t("LABEL.COPY_LOGS")}
+                            hint={translate.t("LABEL.COPY_LOGS")}
+                            title={ translate.t("LABEL.COPY_LOGS") }
                             onclick={on_copy}
-                        >
-                            <AppIcon name="Copy" />
-                            <span>{ translate.t("LABEL.COPY_LOGS") }</span>
-                        </button>
+                        />
 
-                        <button
-                            type="button"
+                        <TextButton
+                            name="delete_log"
+                            icon="Delete"
                             class="tp__log-console__action-btn"
-                            title={translate.t("LABEL.CLEAR_LOGS")}
+                            title={ translate.t("LABEL.CLEAR_LOGS") }
+                            hint={translate.t("LABEL.CLEAR_LOGS")}
                             onclick={on_clear}
-                        >
-                            <AppIcon name="Delete" />
-                            <span>{ translate.t("LABEL.CLEAR_LOGS") }</span>
-                        </button>
+                        />
                     </div>
 
                     <div class="tp__log-console__status">
@@ -264,5 +255,31 @@ pub fn LogConsole(props: &LogConsoleProps) -> Html {
                 }
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filter_selection_maps_all_and_log_levels() {
+        assert_eq!(filter_level_from_selection(&["ALL".to_string()]), Some(None));
+
+        for (value, expected) in [
+            ("ERROR", LogLevel::Error),
+            ("WARN", LogLevel::Warn),
+            ("INFO", LogLevel::Info),
+            ("DEBUG", LogLevel::Debug),
+            ("TRACE", LogLevel::Trace),
+        ] {
+            assert_eq!(filter_level_from_selection(&[value.to_string()]), Some(Some(expected)));
+        }
+    }
+
+    #[test]
+    fn filter_selection_ignores_empty_and_invalid_values() {
+        assert_eq!(filter_level_from_selection(&[]), None);
+        assert_eq!(filter_level_from_selection(&["INVALID".to_string()]), None);
     }
 }

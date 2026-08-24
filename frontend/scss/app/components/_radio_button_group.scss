@@ -9,6 +9,7 @@
     background-color: var(--text-button-active-background-color);
     color: var(--text-button-active-color);
     border-color: var(--text-button-active-border-color);
+    z-index: 1;
   }
 
   button:not(:first-child) {
@@ -22,7 +23,7 @@
   }
 
   button:not(:first-child) {
-    border-left: none;
+    margin-left: -1px;
   }
 
 }
