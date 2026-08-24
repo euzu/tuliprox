@@ -1,4 +1,4 @@
-pub(crate) mod v4 {
+pub mod v4 {
     use crate::repository::bplustree::{
         codec::{binary_deserialize, binary_serialize},
         v3::{BPlusTreeQuery, Locator},
@@ -280,7 +280,7 @@ pub(crate) mod v4 {
         }
     }
 
-    pub(crate) struct OwnedIterator<K, V, SortKey> {
+    pub struct OwnedIterator<K, V, SortKey> {
         reader: Reader<SortKey, K>,
         query: BPlusTreeQuery<K, V>,
         previous_sort_key: Option<SortKey>,
@@ -293,14 +293,14 @@ pub(crate) mod v4 {
         V: for<'de> Deserialize<'de>,
         SortKey: Ord + for<'de> Deserialize<'de>,
     {
-        pub(crate) fn open(query: BPlusTreeQuery<K, V>, index_path: &Path) -> io::Result<Self> {
+        pub fn open(query: BPlusTreeQuery<K, V>, index_path: &Path) -> io::Result<Self> {
             let (database_id, generation) = query.snapshot_identity();
             let reader = Reader::open(index_path, database_id, generation)?;
             Ok(Self { reader, query, previous_sort_key: None, finished: false })
         }
 
         #[cfg(test)]
-        pub(crate) fn remaining(&self) -> u64 { self.reader.remaining() }
+        pub fn remaining(&self) -> u64 { self.reader.remaining() }
     }
 
     impl<K, V, SortKey> Iterator for OwnedIterator<K, V, SortKey>

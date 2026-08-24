@@ -106,7 +106,7 @@ pub(crate) fn write_all_at_offset(file: &File, buf: &[u8], offset: u64) -> io::R
     Ok(())
 }
 
-pub(crate) fn sidecar_lock_path(filepath: &Path) -> PathBuf {
+pub fn sidecar_lock_path(filepath: &Path) -> PathBuf {
     if let Some(stem) = filepath.file_stem() {
         let mut name = OsString::from(".");
         name.push(stem);
@@ -155,7 +155,7 @@ pub(crate) fn resolved_path_identity(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
-pub(crate) fn ensure_distinct_sidecar_lock_domains(published: &Path, staging: &Path) -> io::Result<()> {
+pub fn ensure_distinct_sidecar_lock_domains(published: &Path, staging: &Path) -> io::Result<()> {
     let published_lock = sidecar_lock_path(published);
     let staging_lock = sidecar_lock_path(staging);
     let published_identity = resolved_path_identity(&published_lock)?;

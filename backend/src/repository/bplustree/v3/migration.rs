@@ -17,13 +17,13 @@ const HEADER_FLAG_HAS_TOMBSTONES: u32 = 1 << 30;
 const HEADER_METADATA_LEN_MASK: u32 = !(HEADER_FLAG_HAS_METADATA_FLAGS | HEADER_FLAG_HAS_TOMBSTONES);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct MigrationValidation {
-    pub(crate) entries: usize,
-    pub(crate) database_id: [u8; 16],
-    pub(crate) generation: u64,
+pub struct MigrationValidation {
+    pub entries: usize,
+    pub database_id: [u8; 16],
+    pub generation: u64,
 }
 
-pub(crate) fn storage_version(path: &Path) -> io::Result<Option<u32>> {
+pub fn storage_version(path: &Path) -> io::Result<Option<u32>> {
     let mut file = File::open(path)?;
     if file.metadata()?.len() < 8 {
         return Ok(None);
@@ -95,7 +95,7 @@ fn legacy_metadata(path: &Path) -> io::Result<BPlusTreeMetadata> {
     }
 }
 
-pub(crate) fn migrate_v2_typed<K, V>(source: &Path) -> io::Result<MigrationValidation>
+pub fn migrate_v2_typed<K, V>(source: &Path) -> io::Result<MigrationValidation>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     V: Serialize + for<'de> Deserialize<'de> + Clone,
@@ -109,7 +109,7 @@ where
     )
 }
 
-pub(crate) fn migrate_v2_typed_with_index<K, V, SortKey, F>(
+pub fn migrate_v2_typed_with_index<K, V, SortKey, F>(
     source: &Path,
     sort_key: F,
 ) -> io::Result<MigrationValidation>
@@ -142,7 +142,7 @@ where
     )
 }
 
-pub(crate) fn migrate_v2_typed_map<K, SourceV, DestinationV, Map>(
+pub fn migrate_v2_typed_map<K, SourceV, DestinationV, Map>(
     source: &Path,
     map: Map,
 ) -> io::Result<MigrationValidation>

@@ -5,7 +5,7 @@
 //! rewrites legacy v1/v2 databases into verified v3 files before publishing
 //! them atomically.
 
-use super::v3::{BPlusTree, MAGIC, STORAGE_VERSION};
+use super::bplustree::{typed_migration, BPlusTree, BPlusTreeQuery, MAGIC, STORAGE_VERSION};
 use crate::repository::{
     qos_snapshot_repository::{QosAggregationCheckpoint, QosSnapshotRecord},
     storage_const,
@@ -314,7 +314,7 @@ impl BPlusTreeStartupMigrator {
         let version =
             u32::from_le_bytes(header[4..8].try_into().map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?);
         if version == STORAGE_VERSION {
-            let _ = super::v3::BPlusTreeQuery::<u8, u8>::try_new(path)?;
+            let _ = BPlusTreeQuery::<u8, u8>::try_new(path)?;
             return Ok(FileMigrationOutcome::AlreadyCurrent);
         }
         if version != LEGACY_STORAGE_VERSION && version != 2 {
@@ -367,7 +367,7 @@ impl BPlusTreeStartupMigrator {
     }
 
     fn migrate_typed_path(path: &Path, roots: &[PathBuf], version: u32) -> io::Result<()> {
-        use super::v3::migration::{migrate_v2_typed, migrate_v2_typed_with_index};
+        use super::typed_migration::{migrate_v2_typed, migrate_v2_typed_with_index};
 
         let kind = Self::migration_kind(path, roots).ok_or_else(|| {
             io::Error::new(
@@ -843,7 +843,7 @@ where
     SourceV: serde::Serialize + for<'de> serde::Deserialize<'de> + Clone,
     Map: FnMut(SourceV) -> StoredApiUserV7,
 {
-    if super::v3::migration::migrate_v2_typed_map::<String, SourceV, StoredApiUserV7, _>(db_path, map).is_err()
+    if typed_migration::migrate_v2_typed_map::<String, SourceV, StoredApiUserV7, _>(db_path, map).is_err()
     {
         return Ok(false);
     }
@@ -883,10 +883,10 @@ fn migrate_user_db_schema(db_path: &Path, merge_guard_path: &Path) -> io::Result
         return Ok(false);
     }
 
-    let storage_version = super::v3::migration::storage_version(db_path)?
+    let storage_version = typed_migration::storage_version(db_path)?
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "user database is not a B+Tree"))?;
     if storage_version <= 2 {
-        if super::v3::migration::migrate_v2_typed::<String, StoredApiUserV7>(db_path).is_ok() {
+        if typed_migration::migrate_v2_typed::<String, StoredApiUserV7>(db_path).is_ok() {
             return Ok(false);
         }
         if migrate_legacy_user_schema::<StoredApiUserV6, _>(db_path, merge_guard_path, |user| {
@@ -1121,7 +1121,7 @@ mod tests {
 
     fn write_legacy_geoip(root: &Path, version: u32) -> io::Result<PathBuf> {
         let path = root.join("geoip.db");
-        let mut tree = super::super::v2::BPlusTree::new();
+        let mut tree = crate::repository::bplustree::v2::BPlusTree::new();
         tree.insert(1u32, (2u32, String::from("DE")));
         tree.store(&path)?;
         if version == LEGACY_STORAGE_VERSION {
@@ -1177,7 +1177,7 @@ mod tests {
     fn startup_migrator_rejects_an_unknown_valid_legacy_tree_without_changing_it() -> io::Result<()> {
         let temp = tempdir()?;
         let path = temp.path().join("backup.db");
-        let mut tree = super::super::v2::BPlusTree::new();
+        let mut tree = crate::repository::bplustree::v2::BPlusTree::new();
         tree.insert(1u32, String::from("preserve"));
         tree.store(&path)?;
         let before = std::fs::read(&path)?;
@@ -1258,7 +1258,7 @@ mod tests {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
-                let mut tree = super::super::v2::BPlusTree::<$key, $value>::new();
+                let mut tree = crate::repository::bplustree::v2::BPlusTree::<$key, $value>::new();
                 tree.store(&path)?;
                 paths.push(path);
             }};
@@ -1285,7 +1285,7 @@ mod tests {
         let stats = migrate_bplustree_databases(&[temp.path().to_path_buf()])?;
         assert_eq!(stats.migrated_files, paths.len());
         for path in paths {
-            assert_eq!(super::super::v3::migration::storage_version(&path)?, Some(STORAGE_VERSION));
+            assert_eq!(crate::repository::bplustree::typed_migration::storage_version(&path)?, Some(STORAGE_VERSION));
         }
         assert!(temp.path().join("target/m3u/m3u.idx").exists());
         assert!(temp.path().join("target/xtream/live.idx").exists());
@@ -1389,8 +1389,8 @@ mod tests {
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
 
-        let mut v2_tree: super::super::v2::BPlusTree<String, StoredApiUserV2> =
-            super::super::v2::BPlusTree::new();
+        let mut v2_tree: crate::repository::bplustree::v2::BPlusTree<String, StoredApiUserV2> =
+            crate::repository::bplustree::v2::BPlusTree::new();
         v2_tree.insert(
             "alice".to_string(),
             StoredApiUserV2 {
@@ -1589,8 +1589,8 @@ mod tests {
         let db_path = temp.path().join(storage_const::API_USER_DB_FILE);
         let merge_guard_path = user_db_merge_guard_path(temp.path());
 
-        let mut v6_tree: super::super::v2::BPlusTree<String, StoredApiUserV6> =
-            super::super::v2::BPlusTree::new();
+        let mut v6_tree: crate::repository::bplustree::v2::BPlusTree<String, StoredApiUserV6> =
+            crate::repository::bplustree::v2::BPlusTree::new();
         v6_tree.insert(
             "erin".to_string(),
             StoredApiUserV6 {

@@ -7,12 +7,12 @@ const PAGE_SIZE_U32: u32 = 4096;
 pub(crate) const STORAGE_VERSION_V1: u32 = 1;
 #[cfg(test)]
 pub(crate) const STORAGE_VERSION_V2: u32 = 2;
-pub(crate) const STORAGE_VERSION_V3: u32 = 3;
+pub const STORAGE_VERSION_V3: u32 = 3;
 pub(crate) const MAX_ENCODED_KEY_LEN: usize = 2004;
 pub(crate) const MAX_CELL_FOOTPRINT: usize = 2032;
 pub(crate) const MAX_INLINE_STORED_VALUE: usize = 512;
 pub(crate) const OVERFLOW_PAYLOAD_LEN: usize = 4056;
-pub(crate) const MAGIC: &[u8; 4] = b"BTRE";
+pub const MAGIC: &[u8; 4] = b"BTRE";
 
 const DATABASE_CHECKSUM_OFFSET: usize = 72;
 const PAGE_CHECKSUM_OFFSET: usize = 24;
@@ -915,7 +915,7 @@ pub(crate) fn encode_internal_cell(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Locator {
+pub struct Locator {
     pub(crate) leaf_page_id: u64,
     pub(crate) slot_index: u16,
     pub(crate) serialized_key_crc32: u32,

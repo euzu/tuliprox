@@ -9,11 +9,11 @@ use std::task::{Context, Poll};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::{BPlusTreeDiskIteratorOwned, BPlusTreeQuery};
+use super::{BPlusTreeDiskIteratorOwned, BPlusTreeQuery, SortedIndexIterator};
 
 pub(crate) enum PlaylistIteratorReader<K, V, SortKey> {
     Sorted {
-        iterator: super::bplustree::sorted_index::v4::OwnedIterator<K, V, SortKey>,
+        iterator: SortedIndexIterator<K, V, SortKey>,
         fallback_path: std::path::PathBuf,
         yielded: bool,
     },
@@ -111,7 +111,7 @@ where
         )))?;
 
     if index_path.exists() {
-        match super::bplustree::sorted_index::v4::OwnedIterator::open(query, index_path) {
+        match SortedIndexIterator::open(query, index_path) {
             Ok(iterator) => {
                 return Ok(PlaylistIteratorReader::Sorted {
                     iterator,
@@ -136,10 +136,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::{
-        bplustree::v3::{BPlusTree, Locator},
-        sorted_index::v4,
-    };
+    use crate::repository::bplustree::{sorted_index::v4, BPlusTree, Locator};
     use std::{fs, io};
 
     #[test]

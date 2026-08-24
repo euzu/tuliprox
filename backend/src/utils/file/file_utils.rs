@@ -362,6 +362,46 @@ pub async fn async_open_readonly_file(path: &Path) -> std::io::Result<tokio::fs:
     tokio::fs::OpenOptions::new().read(true).write(false).truncate(false).create(false).open(path).await
 }
 
+/// The parent of `path`, or `.` when it has none.
+///
+/// Used wherever a file has to be published and then its directory entry
+/// synchronized: an empty parent means "the current directory", not "no parent".
+pub fn parent_or_dot(path: &Path) -> &Path {
+    path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
+}
+
+pub fn same_parent_directory(left: &Path, right: &Path) -> bool {
+    parent_or_dot(left) == parent_or_dot(right)
+}
+
+/// Rejects a staging/published pair that a rename cannot atomically publish.
+pub fn require_same_parent_directory(staging: &Path, published: &Path) -> std::io::Result<()> {
+    if same_parent_directory(staging, published) {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "staging path {} and published path {} must share one parent directory",
+                staging.display(),
+                published.display()
+            ),
+        ))
+    }
+}
+
+/// Removes `path`, treating "already gone" as success.
+pub fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(std::io::Error::new(
+            error.kind(),
+            format!("failed to remove file {}: {error}", path.display()),
+        )),
+    }
+}
+
 pub fn rename_or_copy(src: &Path, dest: &Path, remove_old: bool) -> std::io::Result<()> {
     // Try to rename the file
     if fs::rename(src, dest).is_err() {

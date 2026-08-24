@@ -1,6 +1,7 @@
 mod storage;
 mod target_id_mapping;
 mod bplustree;
+mod startup_migration;
 mod playlist_repository;
 mod m3u_repository;
 mod xtream_repository;
@@ -27,6 +28,7 @@ pub mod stalker_generation_repository;
 pub use storage::*;
 pub use target_id_mapping::*;
 pub use bplustree::*;
+pub use startup_migration::*;
 pub use playlist_repository::*;
 pub use m3u_repository::*;
 pub use xtream_repository::*;

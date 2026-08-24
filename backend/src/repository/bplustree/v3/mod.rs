@@ -1,18 +1,18 @@
 mod format;
-pub(crate) mod migration;
+pub mod migration;
 mod page;
 mod publish;
 mod tree;
 mod wal;
 
-pub(crate) use publish::{publish_staged_database, BPlusTreeStagingArtifacts};
+pub use publish::{publish_staged_database, BPlusTreeStagingArtifacts};
 
 #[allow(unused_imports)]
 pub use tree::{
     BPlusTree, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeQuery, BPlusTreeRangeIterator,
     BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy,
 };
-pub(crate) use format::{Locator, MAGIC, STORAGE_VERSION_V3 as STORAGE_VERSION};
+pub use format::{Locator, MAGIC, STORAGE_VERSION_V3 as STORAGE_VERSION};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BPlusTreeMetadata {

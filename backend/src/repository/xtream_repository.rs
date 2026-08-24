@@ -5,10 +5,10 @@ use crate::model::{Config, ConfigTarget};
 use crate::model::{ConfigInput, PlaylistXtreamCategory};
 use crate::processing::parser::xtream;
 use crate::repository::bplustree::{
-    common::{ensure_distinct_sidecar_lock_domains, remove_file_if_exists},
-    v3::{publish_staged_database, BPlusTreeStagingArtifacts},
-    BPlusTree, BPlusTreeError, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy,
+    ensure_distinct_sidecar_lock_domains, publish_staged_database, BPlusTree, BPlusTreeError,
+    BPlusTreeQuery, BPlusTreeStagingArtifacts, BPlusTreeUpdate, FlushPolicy,
 };
+use crate::utils::{parent_or_dot, remove_file_if_exists, require_same_parent_directory};
 use crate::repository::open_playlist_reader;
 use crate::repository::playlist_scratch::PlaylistScratch;
 use crate::repository::storage::{
@@ -1346,7 +1346,6 @@ pub async fn persist_input_xtream_playlist_cluster_to_disk(
 }
 
 fn publish_staged_file_same_directory(staging: &Path, published: &Path) -> io::Result<()> {
-    use crate::repository::bplustree::common::require_same_parent_directory;
     require_same_parent_directory(staging, published)?;
     let staging_path = tempfile::TempPath::try_from_path(staging).map_err(|error| {
         io::Error::new(
@@ -1368,7 +1367,6 @@ fn publish_staged_file_with_parent_sync(
     published: &Path,
     sync_parent: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
-    use crate::repository::bplustree::common::parent_or_dot;
     staging_path.persist(published).map_err(io::Error::from)?;
     sync_parent(published).map_err(|error| {
         io::Error::new(
@@ -1434,7 +1432,7 @@ fn publish_staged_file_platform(mut staging_path: tempfile::TempPath, published:
 
 #[cfg(unix)]
 fn sync_published_file_parent(path: &Path) -> io::Result<()> {
-    File::open(crate::repository::bplustree::common::parent_or_dot(path))?.sync_all()
+    File::open(parent_or_dot(path))?.sync_all()
 }
 
 /// There is no supported directory durability barrier for other targets.
@@ -1942,7 +1940,7 @@ mod tests {
         MediaToolCapabilities, SourcesConfig,
     };
     use crate::repository::{
-        bplustree::common::{ensure_distinct_sidecar_lock_domains, sidecar_lock_path},
+        bplustree::{ensure_distinct_sidecar_lock_domains, sidecar_lock_path},
         build_input_storage_path, cleanup_orphaned_staging_artifacts, get_file_path_for_db_index,
         refresh_generation_guard_path, BPlusTreeQuery, BPlusTreeUpdate,
     };

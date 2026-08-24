@@ -3716,8 +3716,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        repository::bplustree::v3::{
+    use crate::repository::bplustree::{
+        v3::{
             format::{
                 encode_inline_leaf_cell, encode_internal_cell, encode_overflow_leaf_cell,
                 encode_tombstone_leaf_cell, encode_value, Compression, PageHeader, PageType,
@@ -3727,7 +3727,7 @@ mod tests {
                 encode_free_page, encode_overflow_page, page_open_count, reset_page_open_count, SlottedPage,
             },
         },
-        repository::bplustree::codec::binary_serialize,
+        codec::binary_serialize,
     };
     use std::{
         fs, io,

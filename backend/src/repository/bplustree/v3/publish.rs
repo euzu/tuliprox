@@ -76,10 +76,10 @@ impl BPlusTreeArtifactPaths {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) struct BPlusTreeStagingArtifacts(BPlusTreeArtifactPaths);
+pub struct BPlusTreeStagingArtifacts(BPlusTreeArtifactPaths);
 
 impl BPlusTreeStagingArtifacts {
-    pub(crate) fn new(published: &Path, staging: &Path) -> io::Result<Self> {
+    pub fn new(published: &Path, staging: &Path) -> io::Result<Self> {
         ensure_distinct_sidecar_lock_domains(published, staging)?;
         let published_artifacts = BPlusTreeArtifactPaths::for_database(published);
         let staging_artifacts = BPlusTreeArtifactPaths::for_database(staging);
@@ -87,10 +87,10 @@ impl BPlusTreeStagingArtifacts {
         Ok(Self(staging_artifacts))
     }
 
-    pub(crate) fn remove_owned_staging_artifacts(&self) -> io::Result<()> { self.0.remove_all() }
+    pub fn remove_owned_staging_artifacts(&self) -> io::Result<()> { self.0.remove_all() }
 
     #[cfg(test)]
-    pub(crate) fn owned_paths(&self) -> [&Path; 5] {
+    pub fn owned_paths(&self) -> [&Path; 5] {
         [
             &self.0.database,
             &self.0.index,
@@ -181,7 +181,7 @@ where
     }
 }
 
-pub(crate) fn publish_staged_database<K, V>(staging: &Path, published: &Path) -> io::Result<()>
+pub fn publish_staged_database<K, V>(staging: &Path, published: &Path) -> io::Result<()>
 where
     K: Ord + Serialize + DeserializeOwned + Clone,
     V: Serialize + DeserializeOwned,
@@ -237,8 +237,8 @@ mod tests {
         publish_staged_database_with_directory_sync, BPlusTreeArtifactPaths, BPlusTreeStagingArtifacts,
     };
     use super::super::wal::{leave_uncommitted_test_wal_after_database_write, wal_path};
-    use crate::repository::{
-        bplustree::common::get_file_path_for_db_index, BPlusTree, BPlusTreeError, BPlusTreeQuery,
+    use crate::repository::bplustree::{
+        common::get_file_path_for_db_index, BPlusTree, BPlusTreeError, BPlusTreeQuery,
     };
     use std::{
         env, fs, io,

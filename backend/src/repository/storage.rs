@@ -397,7 +397,7 @@ pub fn get_geoip_path(storage_dir: &str) -> PathBuf {
 // The sorted-index sidecar name is part of the B+Tree on-disk layout, so the
 // engine owns it. Re-exported here because every repository already reaches for
 // it through `repository::storage`.
-pub use super::bplustree::common::get_file_path_for_db_index;
+pub use super::bplustree::get_file_path_for_db_index;
 
 #[cfg(test)]
 mod tests {
