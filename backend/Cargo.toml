@@ -14,6 +14,7 @@ lol_html = "2.9.0"
 handlebars = "6.4.1"
 shared = { version = "3", path = "../shared" }
 tuliprox-btree = { version = "3", path = "../btree" }
+tuliprox-media-server = { version = "3", path = "../media-server" }
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }

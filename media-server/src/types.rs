@@ -1,4 +1,4 @@
-use crate::media_server::MediaServerError;
+use crate::MediaServerError;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use reqwest::{header::HeaderMap, StatusCode};
@@ -37,9 +37,7 @@ impl TryFrom<InputType> for MediaServerKind {
             | InputType::Stalker
             | InputType::StalkerBatch
             | InputType::Library
-            | InputType::Staged => {
-                Err("input type is not a media-server input")
-            }
+            | InputType::Staged => Err("input type is not a media-server input"),
         }
     }
 }
@@ -244,24 +242,9 @@ pub struct MediaServerEpisode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaServerStreamRef {
-    Emby {
-        input_name: Arc<str>,
-        server_id: Arc<str>,
-        item_id: Arc<str>,
-        media_source_id: Option<Arc<str>>,
-    },
-    Jellyfin {
-        input_name: Arc<str>,
-        server_id: Arc<str>,
-        item_id: Arc<str>,
-        media_source_id: Option<Arc<str>>,
-    },
-    Plex {
-        input_name: Arc<str>,
-        server_id: Arc<str>,
-        rating_key: Arc<str>,
-        part_key: Arc<str>,
-    },
+    Emby { input_name: Arc<str>, server_id: Arc<str>, item_id: Arc<str>, media_source_id: Option<Arc<str>> },
+    Jellyfin { input_name: Arc<str>, server_id: Arc<str>, item_id: Arc<str>, media_source_id: Option<Arc<str>> },
+    Plex { input_name: Arc<str>, server_id: Arc<str>, rating_key: Arc<str>, part_key: Arc<str> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

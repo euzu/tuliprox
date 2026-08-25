@@ -1,4 +1,4 @@
-use crate::media_server::redaction::redact_media_server_text;
+use crate::redaction::redact_media_server_text;
 use reqwest::StatusCode;
 use std::{error::Error, fmt};
 
@@ -27,14 +27,7 @@ pub struct MediaServerError {
 }
 
 impl MediaServerError {
-    pub fn new(kind: MediaServerErrorKind) -> Self {
-        Self {
-            kind,
-            provider: None,
-            status: None,
-            detail: None,
-        }
-    }
+    pub fn new(kind: MediaServerErrorKind) -> Self { Self { kind, provider: None, status: None, detail: None } }
 
     pub fn provider(mut self, provider: &'static str) -> Self {
         self.provider = Some(provider);

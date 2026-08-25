@@ -18,14 +18,8 @@ const SENSITIVE_QUERY_KEYS: &[&str] = &[
     "auth",
 ];
 
-const SENSITIVE_HEADER_NAMES: &[&str] = &[
-    "authorization",
-    "x-emby-token",
-    "x-mediabrowser-token",
-    "x-plex-token",
-    "cookie",
-    "set-cookie",
-];
+const SENSITIVE_HEADER_NAMES: &[&str] =
+    &["authorization", "x-emby-token", "x-mediabrowser-token", "x-plex-token", "cookie", "set-cookie"];
 
 pub fn is_sensitive_media_server_header(name: &HeaderName) -> bool {
     let value = name.as_str().to_ascii_lowercase();

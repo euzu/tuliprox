@@ -9,7 +9,6 @@ macro_rules! include_modules {
         pub mod iptv;
         pub mod library;
         pub mod media_enrichment;
-        pub mod media_server;
         pub mod messaging;
         pub mod model;
         pub mod processing;

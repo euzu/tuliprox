@@ -4457,6 +4457,7 @@ dependencies = [
  "tower-http",
  "tower_governor",
  "tuliprox-btree",
+ "tuliprox-media-server",
  "url",
  "uuid",
  "vergen",
@@ -4481,6 +4482,25 @@ dependencies = [
  "smallvec",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "tuliprox-media-server"
+version = "3.3.91"
+dependencies = [
+ "bytes",
+ "futures",
+ "http 1.4.0",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "quick-xml",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "shared",
+ "tokio",
+ "url",
 ]
 
 [[package]]

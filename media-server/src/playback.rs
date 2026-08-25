@@ -1,13 +1,11 @@
-use crate::media_server::{
+use crate::{
     BoxedMediaServerStream, MediaServerCatalogClient, MediaServerError, MediaServerErrorKind, MediaServerImageRef,
     MediaServerResourceResponse, MediaServerStreamRef, MediaServerStreamResponse,
 };
 use bytes::Bytes;
 use futures::{stream, StreamExt};
 use reqwest::{
-    header::{
-        HeaderMap, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, LAST_MODIFIED,
-    },
+    header::{HeaderMap, ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, LAST_MODIFIED},
     StatusCode,
 };
 use shared::model::{InputType, PlaylistItemType};
@@ -106,7 +104,10 @@ pub fn safe_media_server_response_headers(headers: &HeaderMap) -> HeaderMap {
     safe
 }
 
-pub fn parse_media_server_stream_ref(input_name: &Arc<str>, item_url: &str) -> Result<MediaServerStreamRef, MediaServerError> {
+pub fn parse_media_server_stream_ref(
+    input_name: &Arc<str>,
+    item_url: &str,
+) -> Result<MediaServerStreamRef, MediaServerError> {
     let Some(rest) = item_url.strip_prefix("media-server://") else {
         return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
             .detail("playlist item is not a media server URL"));
@@ -119,10 +120,8 @@ pub fn parse_media_server_stream_ref(input_name: &Arc<str>, item_url: &str) -> R
     }
 
     match parts[0].as_str() {
-        "unavailable" => Err(
-            MediaServerError::new(MediaServerErrorKind::NoDirectPlayableMediaServerSource)
-                .detail("media server item has no direct playable source"),
-        ),
+        "unavailable" => Err(MediaServerError::new(MediaServerErrorKind::NoDirectPlayableMediaServerSource)
+            .detail("media server item has no direct playable source")),
         "emby" => Ok(MediaServerStreamRef::Emby {
             input_name: input_name.clone(),
             server_id: Arc::<str>::from(parts[1].as_str()),
@@ -139,12 +138,10 @@ pub fn parse_media_server_stream_ref(input_name: &Arc<str>, item_url: &str) -> R
             input_name: input_name.clone(),
             server_id: Arc::<str>::from(parts[1].as_str()),
             rating_key: Arc::<str>::from(parts[2].as_str()),
-            part_key: query_value(query, "part_key")
-                .map(Arc::<str>::from)
-                .ok_or_else(|| {
-                    MediaServerError::new(MediaServerErrorKind::NoDirectPlayableMediaServerSource)
-                        .detail("plex media-server URL is missing part_key")
-                })?,
+            part_key: query_value(query, "part_key").map(Arc::<str>::from).ok_or_else(|| {
+                MediaServerError::new(MediaServerErrorKind::NoDirectPlayableMediaServerSource)
+                    .detail("plex media-server URL is missing part_key")
+            })?,
         }),
         _ => Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
             .detail("unsupported media server URL scheme")),
@@ -168,36 +165,30 @@ pub fn parse_media_server_image_ref(resource_url: &str) -> Result<MediaServerIma
             input_name: Arc::<str>::from(parts[1].as_str()),
             server_id: Arc::<str>::from(parts[2].as_str()),
             item_id: Arc::<str>::from(parts[3].as_str()),
-            image_kind: query_value(query, "image_kind")
-                .map(Arc::<str>::from)
-                .ok_or_else(|| {
-                    MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
-                        .detail("emby media-server image URL is missing image_kind")
-                })?,
+            image_kind: query_value(query, "image_kind").map(Arc::<str>::from).ok_or_else(|| {
+                MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+                    .detail("emby media-server image URL is missing image_kind")
+            })?,
             tag: query_value(query, "tag").map(Arc::<str>::from),
         }),
         "jellyfin" => Ok(MediaServerImageRef::Jellyfin {
             input_name: Arc::<str>::from(parts[1].as_str()),
             server_id: Arc::<str>::from(parts[2].as_str()),
             item_id: Arc::<str>::from(parts[3].as_str()),
-            image_kind: query_value(query, "image_kind")
-                .map(Arc::<str>::from)
-                .ok_or_else(|| {
-                    MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
-                        .detail("jellyfin media-server image URL is missing image_kind")
-                })?,
+            image_kind: query_value(query, "image_kind").map(Arc::<str>::from).ok_or_else(|| {
+                MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+                    .detail("jellyfin media-server image URL is missing image_kind")
+            })?,
             tag: query_value(query, "tag").map(Arc::<str>::from),
         }),
         "plex" => Ok(MediaServerImageRef::Plex {
             input_name: Arc::<str>::from(parts[1].as_str()),
             server_id: Arc::<str>::from(parts[2].as_str()),
             rating_key: Arc::<str>::from(parts[3].as_str()),
-            image_path: query_value(query, "image_path")
-                .map(Arc::<str>::from)
-                .ok_or_else(|| {
-                    MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
-                        .detail("plex media-server image URL is missing image_path")
-                })?,
+            image_path: query_value(query, "image_path").map(Arc::<str>::from).ok_or_else(|| {
+                MediaServerError::new(MediaServerErrorKind::MediaServerItemNotFound)
+                    .detail("plex media-server image URL is missing image_path")
+            })?,
         }),
         _ => Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
             .detail("unsupported media server image URL scheme")),
@@ -205,8 +196,7 @@ pub fn parse_media_server_image_ref(resource_url: &str) -> Result<MediaServerIma
 }
 
 fn query_value(query: &str, key: &str) -> Option<String> {
-    url::form_urlencoded::parse(query.as_bytes())
-        .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
+    url::form_urlencoded::parse(query.as_bytes()).find_map(|(name, value)| (name == key).then(|| value.into_owned()))
 }
 
 fn unescape_internal_url_component(value: &str) -> String {
@@ -227,9 +217,7 @@ fn unescape_internal_url_component(value: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
-fn decode_hex_byte(high: u8, low: u8) -> Option<u8> {
-    Some(hex_value(high)? << 4 | hex_value(low)?)
-}
+fn decode_hex_byte(high: u8, low: u8) -> Option<u8> { Some(hex_value(high)? << 4 | hex_value(low)?) }
 
 fn hex_value(value: u8) -> Option<u8> {
     match value {
@@ -243,14 +231,14 @@ fn hex_value(value: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_server::{
+    use crate::{
         playlist_mapper::media_server_image_ref_to_internal_url, MediaServerEpisode, MediaServerLibrary,
         MediaServerLibraryRef, MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerSeason,
         MediaServerSeries, MediaServerStatus,
     };
     use futures::{stream, StreamExt};
     use reqwest::header::{HeaderValue, AUTHORIZATION};
-    use std::sync::{Mutex, Arc as StdArc};
+    use std::sync::{Arc as StdArc, Mutex};
 
     #[derive(Default)]
     struct MockPlaybackClient {
@@ -262,7 +250,9 @@ mod tests {
         fn discover(&self) -> impl std::future::Future<Output = Result<MediaServerStatus, MediaServerError>> {
             std::future::pending::<Result<MediaServerStatus, MediaServerError>>()
         }
-        fn list_libraries(&self) -> impl std::future::Future<Output = Result<Vec<MediaServerLibrary>, MediaServerError>> {
+        fn list_libraries(
+            &self,
+        ) -> impl std::future::Future<Output = Result<Vec<MediaServerLibrary>, MediaServerError>> {
             std::future::ready(Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)))
         }
         fn list_movies(
@@ -300,7 +290,7 @@ mod tests {
             &self,
             _stream_ref: &MediaServerStreamRef,
             range: Option<&str>,
-        ) -> impl std::future::Future<Output = Result<crate::media_server::MediaServerStreamResponse, MediaServerError>> {
+        ) -> impl std::future::Future<Output = Result<crate::MediaServerStreamResponse, MediaServerError>> {
             *self.seen_range.lock().expect("lock") = range.map(ToOwned::to_owned);
             if let Some(error) = self.stream_error.clone() {
                 return std::future::ready(Err(error));
@@ -340,9 +330,8 @@ mod tests {
             part_key: "/library/parts/redacted/file.mkv".into(),
         };
 
-        let response = media_server_stream_response(&client, &stream_ref, Some("bytes=0-1023"))
-            .await
-            .expect("stream opens");
+        let response =
+            media_server_stream_response(&client, &stream_ref, Some("bytes=0-1023")).await.expect("stream opens");
 
         assert_eq!(client.seen_range.lock().expect("lock").as_deref(), Some("bytes=0-1023"));
         assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
@@ -366,8 +355,13 @@ mod tests {
         .expect("media_server ref parses");
         assert!(matches!(media_server, PlaybackOrigin::MediaServer(MediaServerStreamRef::Plex { .. })));
 
-        let local = classify_playback_origin(InputType::Library, PlaylistItemType::LocalVideo, &input_name, "file:///tmp/a.mkv")
-            .expect("local classifies");
+        let local = classify_playback_origin(
+            InputType::Library,
+            PlaylistItemType::LocalVideo,
+            &input_name,
+            "file:///tmp/a.mkv",
+        )
+        .expect("local classifies");
         assert_eq!(local, PlaybackOrigin::LocalLibrary);
 
         let encoded = parse_media_server_stream_ref(
@@ -389,8 +383,13 @@ mod tests {
             .expect_err("unavailable sentinel should map to a stable playback error");
         assert_eq!(unavailable.kind, MediaServerErrorKind::NoDirectPlayableMediaServerSource);
 
-        let provider = classify_playback_origin(InputType::M3u, PlaylistItemType::Live, &input_name, "http://example.invalid/live")
-            .expect("provider classifies");
+        let provider = classify_playback_origin(
+            InputType::M3u,
+            PlaylistItemType::Live,
+            &input_name,
+            "http://example.invalid/live",
+        )
+        .expect("provider classifies");
         assert_eq!(provider, PlaybackOrigin::Provider);
     }
 
@@ -404,7 +403,8 @@ mod tests {
             tag: Some("tag/one+?".into()),
         };
         assert_eq!(
-            parse_media_server_image_ref(&media_server_image_ref_to_internal_url(&emby)).expect("emby image ref parses"),
+            parse_media_server_image_ref(&media_server_image_ref_to_internal_url(&emby))
+                .expect("emby image ref parses"),
             emby
         );
 
@@ -428,7 +428,8 @@ mod tests {
             image_path: "/library/metadata/1/thumb/2?X-Plex-Token=ignored+".into(),
         };
         assert_eq!(
-            parse_media_server_image_ref(&media_server_image_ref_to_internal_url(&plex)).expect("plex image ref parses"),
+            parse_media_server_image_ref(&media_server_image_ref_to_internal_url(&plex))
+                .expect("plex image ref parses"),
             plex
         );
     }
@@ -458,8 +459,9 @@ mod tests {
             .expect_err("image URLs require enough path parts");
         assert_eq!(too_few_parts.kind, MediaServerErrorKind::MediaServerStreamOpenFailed);
 
-        let unsupported = parse_media_server_image_ref("media-server://image/kodi/input/server/item?image_kind=Primary")
-            .expect_err("unsupported image schemes are rejected");
+        let unsupported =
+            parse_media_server_image_ref("media-server://image/kodi/input/server/item?image_kind=Primary")
+                .expect_err("unsupported image schemes are rejected");
         assert_eq!(unsupported.kind, MediaServerErrorKind::MediaServerStreamOpenFailed);
     }
 
@@ -476,9 +478,8 @@ mod tests {
             media_source_id: None,
         };
 
-        let error = media_server_stream_response(&client, &stream_ref, None)
-            .await
-            .expect_err("auth denied should fail");
+        let error =
+            media_server_stream_response(&client, &stream_ref, None).await.expect_err("auth denied should fail");
 
         assert_eq!(error.kind, MediaServerErrorKind::MediaServerAuthDenied);
     }

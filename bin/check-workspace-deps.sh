@@ -41,6 +41,8 @@ while IFS=$'\t' read -r from to; do
     case "$from -> $to" in
         "tuliprox -> shared") ;;
         "tuliprox -> tuliprox-btree") ;;
+        "tuliprox -> tuliprox-media-server") ;;
+        "tuliprox-media-server -> shared") ;;
         "frontend -> shared") ;;
         *)
             echo "check-workspace-deps: undeclared workspace edge: $from -> $to" >&2

@@ -1,9 +1,8 @@
-use shared::model::MediaServerLibraryKind;
-use crate::media_server::{
+use crate::{
     MediaServerCatalogClient, MediaServerEpisode, MediaServerError, MediaServerErrorKind, MediaServerLibrary,
-    MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerSeason,
-    MediaServerSeries,
+    MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerSeason, MediaServerSeries,
 };
+use shared::model::MediaServerLibraryKind;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,7 +108,8 @@ where
 
     let _server = client.discover().await?;
     let libraries = client.list_libraries().await?;
-    let mut snapshot = MediaServerCatalogSnapshot { libraries: libraries.clone(), ..MediaServerCatalogSnapshot::default() };
+    let mut snapshot =
+        MediaServerCatalogSnapshot { libraries: libraries.clone(), ..MediaServerCatalogSnapshot::default() };
 
     for library in libraries {
         match library.kind {
@@ -186,8 +186,8 @@ fn validate_page_progress<T>(library: &MediaServerLibrary, page: &MediaServerPag
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_server::{
-        MediaServerDescriptiveFacts, MediaServerImageRef, MediaServerLibraryRef, MediaServerKind,
+    use crate::{
+        MediaServerDescriptiveFacts, MediaServerImageRef, MediaServerKind, MediaServerLibraryRef,
         MediaServerProviderIdHint, MediaServerResourceResponse, MediaServerSeason, MediaServerSeries,
         MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
     };
@@ -210,9 +210,7 @@ mod tests {
     }
 
     impl MockMediaServerCatalogClient {
-        fn with_libraries(libraries: Vec<MediaServerLibrary>) -> Self {
-            Self { libraries, ..Self::default() }
-        }
+        fn with_libraries(libraries: Vec<MediaServerLibrary>) -> Self { Self { libraries, ..Self::default() } }
     }
 
     impl MediaServerCatalogClient for MockMediaServerCatalogClient {
@@ -226,7 +224,9 @@ mod tests {
             }))
         }
 
-        fn list_libraries(&self) -> impl std::future::Future<Output = Result<Vec<MediaServerLibrary>, MediaServerError>> {
+        fn list_libraries(
+            &self,
+        ) -> impl std::future::Future<Output = Result<Vec<MediaServerLibrary>, MediaServerError>> {
             std::future::ready(Ok(self.libraries.clone()))
         }
 
@@ -267,7 +267,7 @@ mod tests {
             &self,
             _stream_ref: &MediaServerStreamRef,
             _range: Option<&str>,
-        ) -> impl std::future::Future<Output = Result<crate::media_server::MediaServerStreamResponse, MediaServerError>> {
+        ) -> impl std::future::Future<Output = Result<crate::MediaServerStreamResponse, MediaServerError>> {
             std::future::ready(Ok(empty_stream_response()))
         }
 
@@ -406,7 +406,10 @@ mod tests {
     #[tokio::test]
     async fn incomplete_refresh_retains_previous_trusted_snapshot() {
         let mut cache = MediaServerCatalogCache::default();
-        cache.publish(MediaServerCatalogSnapshot { movies: vec![movie("old")], ..MediaServerCatalogSnapshot::default() });
+        cache.publish(MediaServerCatalogSnapshot {
+            movies: vec![movie("old")],
+            ..MediaServerCatalogSnapshot::default()
+        });
 
         let client = MockMediaServerCatalogClient::with_libraries(vec![movie_library()]);
         client.movie_pages.lock().expect("lock").extend([
@@ -415,7 +418,10 @@ mod tests {
         ]);
 
         let outcome = cache
-            .refresh_or_retain(&client, MediaServerCatalogRefreshPolicy { page_size: 1, ..MediaServerCatalogRefreshPolicy::default() })
+            .refresh_or_retain(
+                &client,
+                MediaServerCatalogRefreshPolicy { page_size: 1, ..MediaServerCatalogRefreshPolicy::default() },
+            )
             .await;
 
         assert!(matches!(outcome, MediaServerCatalogRefreshOutcome::Retained { retained: true, .. }));
@@ -446,15 +452,16 @@ mod tests {
     #[tokio::test]
     async fn stalled_page_returns_stable_failure() {
         let client = MockMediaServerCatalogClient::with_libraries(vec![movie_library()]);
-        client
-            .movie_pages
-            .lock()
-            .expect("lock")
-            .push(Ok(MediaServerPage::new(MediaServerPageRequest::new(0, 100), Some(1), vec![])));
+        client.movie_pages.lock().expect("lock").push(Ok(MediaServerPage::new(
+            MediaServerPageRequest::new(0, 100),
+            Some(1),
+            vec![],
+        )));
 
-        let error = refresh_media_server_catalog_complete_before_publish(&client, MediaServerCatalogRefreshPolicy::default())
-            .await
-            .expect_err("stalled page should fail");
+        let error =
+            refresh_media_server_catalog_complete_before_publish(&client, MediaServerCatalogRefreshPolicy::default())
+                .await
+                .expect_err("stalled page should fail");
 
         assert_eq!(error.kind, MediaServerErrorKind::MediaServerCatalogPageStalled);
     }
@@ -478,9 +485,10 @@ mod tests {
             vec![episode("episode-1")],
         )));
 
-        let snapshot = refresh_media_server_catalog_complete_before_publish(&client, MediaServerCatalogRefreshPolicy::default())
-            .await
-            .expect("tv catalog should refresh");
+        let snapshot =
+            refresh_media_server_catalog_complete_before_publish(&client, MediaServerCatalogRefreshPolicy::default())
+                .await
+                .expect("tv catalog should refresh");
 
         assert_eq!(snapshot.series.len(), 1);
         assert_eq!(snapshot.seasons.len(), 1);
@@ -492,9 +500,10 @@ mod tests {
     async fn unsupported_library_kind_is_reported_and_not_coerced() {
         let client = MockMediaServerCatalogClient::with_libraries(vec![unsupported_library()]);
 
-        let snapshot = refresh_media_server_catalog_complete_before_publish(&client, MediaServerCatalogRefreshPolicy::default())
-            .await
-            .expect("unsupported library should be skipped safely");
+        let snapshot =
+            refresh_media_server_catalog_complete_before_publish(&client, MediaServerCatalogRefreshPolicy::default())
+                .await
+                .expect("unsupported library should be skipped safely");
 
         assert_eq!(snapshot.item_count(), 0);
         assert_eq!(snapshot.unsupported_libraries.len(), 1);

@@ -1,14 +1,11 @@
-use crate::media_server::plex::dto::{PlexDirectoryDto, PlexGuidDto, PlexMediaDto, PlexSectionDto, PlexVideoDto};
-use crate::media_server::{
+use crate::{
+    plex::dto::{PlexDirectoryDto, PlexGuidDto, PlexMediaDto, PlexSectionDto, PlexVideoDto},
     MediaServerAudioTechnicalFacts, MediaServerDescriptiveFacts, MediaServerEpisode, MediaServerImageRef,
-    MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerProviderIdHint,
-    MediaServerSeason, MediaServerSeries, MediaServerStreamRef, MediaServerTechnicalFacts,
-    MediaServerVideoTechnicalFacts,
+    MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerProviderIdHint, MediaServerSeason,
+    MediaServerSeries, MediaServerStreamRef, MediaServerTechnicalFacts, MediaServerVideoTechnicalFacts,
 };
 use shared::model::{MediaServerLibraryKind, MediaServerLibrarySelector};
-use std::cmp::Reverse;
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::{cmp::Reverse, collections::HashSet, sync::Arc};
 
 pub fn plex_section_to_library(
     input_name: &Arc<str>,
@@ -32,10 +29,12 @@ pub fn plex_section_matches_selector(section: &PlexSectionDto, selector: &MediaS
     match selector {
         MediaServerLibrarySelector::Name(name) => matches_trimmed(section.title.as_deref(), name),
         MediaServerLibrarySelector::Detailed(details) => {
-            let identity_matches = details.key.as_deref().is_some_and(|key| matches_trimmed(section.key.as_deref(), key))
-                || details.id.as_deref().is_some_and(|id| matches_trimmed(section.key.as_deref(), id))
-                || details.name.as_deref().is_some_and(|name| matches_trimmed(section.title.as_deref(), name));
-            identity_matches && details.kind.is_none_or(|kind| plex_section_kind_matches(section.section_type.as_deref(), kind))
+            let identity_matches =
+                details.key.as_deref().is_some_and(|key| matches_trimmed(section.key.as_deref(), key))
+                    || details.id.as_deref().is_some_and(|id| matches_trimmed(section.key.as_deref(), id))
+                    || details.name.as_deref().is_some_and(|name| matches_trimmed(section.title.as_deref(), name));
+            identity_matches
+                && details.kind.is_none_or(|kind| plex_section_kind_matches(section.section_type.as_deref(), kind))
         }
     }
 }
@@ -89,7 +88,12 @@ pub fn plex_directory_to_series(
         descriptive_facts: directory_descriptive_facts(directory),
         child_count: directory.child_count,
         episode_count: directory.leaf_count,
-        image_ref: plex_image_ref(input_name, server_id, &rating_key, [&directory.thumb, &directory.art, &directory.theme]),
+        image_ref: plex_image_ref(
+            input_name,
+            server_id,
+            &rating_key,
+            [&directory.thumb, &directory.art, &directory.theme],
+        ),
     })
 }
 
@@ -182,12 +186,7 @@ fn first_media(media: &[PlexMediaDto]) -> Option<&PlexMediaDto> {
 }
 
 fn media_preference_key(media: &PlexMediaDto, index: usize) -> (bool, u32, u64, Reverse<usize>) {
-    (
-        first_part_key(media).is_some(),
-        media.bitrate.unwrap_or_default(),
-        media_resolution_pixels(media),
-        Reverse(index),
-    )
+    (first_part_key(media).is_some(), media.bitrate.unwrap_or_default(), media_resolution_pixels(media), Reverse(index))
 }
 
 fn media_resolution_pixels(media: &PlexMediaDto) -> u64 {
@@ -323,9 +322,7 @@ fn has_video_facts(facts: &MediaServerVideoTechnicalFacts) -> bool {
     facts.codec.is_some() || facts.width.is_some() || facts.height.is_some()
 }
 
-fn has_audio_facts(facts: &MediaServerAudioTechnicalFacts) -> bool {
-    facts.codec.is_some() || facts.channels.is_some()
-}
+fn has_audio_facts(facts: &MediaServerAudioTechnicalFacts) -> bool { facts.codec.is_some() || facts.channels.is_some() }
 
 fn has_technical_facts(facts: &MediaServerTechnicalFacts) -> bool {
     facts.container.is_some()
@@ -381,8 +378,8 @@ fn normalize_guid_namespace(namespace: &str) -> Option<Arc<str>> {
     (!namespace.is_empty()).then(|| Arc::<str>::from(namespace))
 }
 
-fn tag_values(tags: &[crate::media_server::plex::dto::PlexTagDto]) -> Vec<Arc<str>> {
-    tags.iter().filter_map(crate::media_server::plex::dto::PlexTagDto::value).collect()
+fn tag_values(tags: &[crate::plex::dto::PlexTagDto]) -> Vec<Arc<str>> {
+    tags.iter().filter_map(crate::plex::dto::PlexTagDto::value).collect()
 }
 
 fn non_blank(value: Option<&str>) -> Option<Arc<str>> {
@@ -396,8 +393,10 @@ fn source_version_hint(updated_at: Option<i64>, added_at: Option<i64>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_server::plex::dto::{PlexMediaContainerDto, PlexMediaDto, PlexPartDto};
-    use crate::media_server::test_fixtures::{PLEX_EPISODES_XML, PLEX_MOVIES_XML, PLEX_SEASONS_XML, PLEX_SHOWS_XML};
+    use crate::{
+        plex::dto::{PlexMediaContainerDto, PlexMediaDto, PlexPartDto},
+        test_fixtures::{PLEX_EPISODES_XML, PLEX_MOVIES_XML, PLEX_SEASONS_XML, PLEX_SHOWS_XML},
+    };
 
     fn input_name() -> Arc<str> { Arc::<str>::from("media_server") }
     fn server_id() -> Arc<str> { Arc::<str>::from("machine-redacted") }
@@ -406,16 +405,22 @@ mod tests {
     #[test]
     fn maps_plex_movie_catalog_row_to_media_server_movie_without_leaking_part_file() {
         let container: PlexMediaContainerDto = quick_xml::de::from_str(PLEX_MOVIES_XML).expect("fixture parses");
-        let movie = plex_video_to_movie(&input_name(), &server_id(), &library_id(), &container.videos[0])
-            .expect("movie maps");
+        let movie =
+            plex_video_to_movie(&input_name(), &server_id(), &library_id(), &container.videos[0]).expect("movie maps");
 
         assert_eq!(movie.item_id.as_ref(), "rating-redacted-1");
         assert_eq!(movie.title.as_ref(), "Movie Redacted");
         assert_eq!(movie.year, Some(2024));
         assert_eq!(movie.release_date.as_deref(), Some("2024-01-02"));
         assert_eq!(movie.source_version_hint.as_deref(), Some("1700000001"));
-        assert!(movie.provider_hints.iter().any(|hint| hint.namespace.as_ref() == "tmdb" && hint.value.as_ref() == "12345"));
-        assert!(movie.provider_hints.iter().any(|hint| hint.namespace.as_ref() == "imdb" && hint.value.as_ref() == "tt-redacted"));
+        assert!(movie
+            .provider_hints
+            .iter()
+            .any(|hint| hint.namespace.as_ref() == "tmdb" && hint.value.as_ref() == "12345"));
+        assert!(movie
+            .provider_hints
+            .iter()
+            .any(|hint| hint.namespace.as_ref() == "imdb" && hint.value.as_ref() == "tt-redacted"));
 
         let descriptive = movie.descriptive_facts.as_ref().expect("descriptive facts");
         assert_eq!(descriptive.original_title.as_deref(), Some("Original Movie Redacted"));
@@ -460,7 +465,10 @@ mod tests {
         assert_eq!(series.title.as_ref(), "Show Redacted");
         assert_eq!(series.episode_count, Some(2));
         assert_eq!(series.child_count, Some(1));
-        assert!(series.provider_hints.iter().any(|hint| hint.namespace.as_ref() == "tmdb" && hint.value.as_ref() == "222"));
+        assert!(series
+            .provider_hints
+            .iter()
+            .any(|hint| hint.namespace.as_ref() == "tmdb" && hint.value.as_ref() == "222"));
         let series_facts = series.descriptive_facts.as_ref().expect("series descriptive facts");
         assert_eq!(series_facts.summary.as_deref(), Some("Show summary redacted"));
         assert_eq!(series_facts.genres.iter().map(AsRef::as_ref).collect::<Vec<_>>(), vec!["Mystery"]);
@@ -473,7 +481,10 @@ mod tests {
         assert_eq!(season.series_title.as_deref(), Some("Show Redacted"));
         assert_eq!(season.season, Some(1));
         assert_eq!(season.episode_count, Some(2));
-        assert!(season.provider_hints.iter().any(|hint| hint.namespace.as_ref() == "tvdb" && hint.value.as_ref() == "333"));
+        assert!(season
+            .provider_hints
+            .iter()
+            .any(|hint| hint.namespace.as_ref() == "tvdb" && hint.value.as_ref() == "333"));
     }
 
     #[test]
@@ -488,7 +499,10 @@ mod tests {
         assert_eq!(episode.season, Some(1));
         assert_eq!(episode.episode, Some(2));
         assert_eq!(episode.release_date.as_deref(), Some("2024-02-03"));
-        assert!(episode.provider_hints.iter().any(|hint| hint.namespace.as_ref() == "tmdb" && hint.value.as_ref() == "67890"));
+        assert!(episode
+            .provider_hints
+            .iter()
+            .any(|hint| hint.namespace.as_ref() == "tmdb" && hint.value.as_ref() == "67890"));
         assert!(!episode.provider_hints.iter().any(|hint| hint.value.as_ref() == "222"));
         assert_eq!(
             episode.stream_ref,
@@ -578,12 +592,7 @@ mod tests {
 
         assert_eq!(
             hints.iter().map(|hint| (hint.namespace.as_ref(), hint.value.as_ref())).collect::<Vec<_>>(),
-            vec![
-                ("tmdb", "123"),
-                ("imdb", "tt-redacted"),
-                ("tmdb", "456"),
-                ("tvdb", "789")
-            ]
+            vec![("tmdb", "123"), ("imdb", "tt-redacted"), ("tmdb", "456"), ("tvdb", "789")]
         );
     }
 }

@@ -1,8 +1,8 @@
-use crate::media_server::{
-    redaction::redact_media_server_text, MediaServerEpisode, MediaServerError, MediaServerErrorKind, MediaServerImageRef,
-    MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage, MediaServerPageRequest,
-    MediaServerResourceResponse, MediaServerSeason, MediaServerSeries, MediaServerStatus, MediaServerStreamRef,
-    MediaServerStreamResponse,
+use crate::{
+    redaction::redact_media_server_text, MediaServerEpisode, MediaServerError, MediaServerErrorKind,
+    MediaServerImageRef, MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage,
+    MediaServerPageRequest, MediaServerResourceResponse, MediaServerSeason, MediaServerSeries, MediaServerStatus,
+    MediaServerStreamRef, MediaServerStreamResponse,
 };
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue},
@@ -45,7 +45,10 @@ pub trait MediaServerCatalogClient: Send + Sync {
         range: Option<&str>,
     ) -> Result<MediaServerStreamResponse, MediaServerError>;
 
-    async fn open_image(&self, image_ref: &MediaServerImageRef) -> Result<MediaServerResourceResponse, MediaServerError>;
+    async fn open_image(
+        &self,
+        image_ref: &MediaServerImageRef,
+    ) -> Result<MediaServerResourceResponse, MediaServerError>;
 }
 
 #[derive(Clone)]
@@ -106,7 +109,10 @@ impl MediaServerHttpRequestBuilder {
     }
 
     pub fn playback_errors(self) -> Self {
-        self.error_kinds(MediaServerErrorKind::MediaServerItemNotFound, MediaServerErrorKind::MediaServerStreamOpenFailed)
+        self.error_kinds(
+            MediaServerErrorKind::MediaServerItemNotFound,
+            MediaServerErrorKind::MediaServerStreamOpenFailed,
+        )
     }
 
     pub async fn send(self) -> Result<reqwest::Response, MediaServerError> {
@@ -114,10 +120,14 @@ impl MediaServerHttpRequestBuilder {
         self.send_with_error_detail(detail).await
     }
 
-    pub async fn send_with_error_detail(self, detail: impl Into<String>) -> Result<reqwest::Response, MediaServerError> {
+    pub async fn send_with_error_detail(
+        self,
+        detail: impl Into<String>,
+    ) -> Result<reqwest::Response, MediaServerError> {
         let detail = detail.into();
         self.builder.send().await.map_err(|err| {
-            MediaServerError::from_reqwest_error_with_fallback(&err, self.not_found_kind, self.fallback_kind).detail(&detail)
+            MediaServerError::from_reqwest_error_with_fallback(&err, self.not_found_kind, self.fallback_kind)
+                .detail(&detail)
         })
     }
 }

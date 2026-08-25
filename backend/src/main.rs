@@ -13,6 +13,8 @@ mod modules;
 
 include_modules!();
 
+// The media-server anti-corruption layer is its own package; aliased under its
+// historical module name so `crate::media_server::X` paths keep resolving.
 use crate::{
     auth::generate_password,
     library::LibraryProcessor,
@@ -34,6 +36,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tuliprox_media_server as media_server;
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Parser)]

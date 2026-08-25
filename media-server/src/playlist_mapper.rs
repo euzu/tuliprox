@@ -1,4 +1,4 @@
-use crate::media_server::{
+use crate::{
     encode_url_path_segment, MediaServerAudioTechnicalFacts, MediaServerCatalogSnapshot, MediaServerDescriptiveFacts,
     MediaServerEpisode, MediaServerImageRef, MediaServerMovie, MediaServerProviderIdHint, MediaServerSeason,
     MediaServerSeries, MediaServerStreamRef, MediaServerTechnicalFacts, MediaServerVideoTechnicalFacts,
@@ -30,7 +30,8 @@ pub fn media_server_catalog_snapshot_to_playlist(snapshot: &MediaServerCatalogSn
     let mut series_channels = Vec::with_capacity(snapshot.series.len().saturating_add(snapshot.episodes.len()));
     let seasons_by_series = media_server_seasons_by_series(&snapshot.seasons);
     for series in &snapshot.series {
-        let season_key = media_server_series_season_key(&series.input_name, &series.server_id, &series.library_id, &series.item_id);
+        let season_key =
+            media_server_series_season_key(&series.input_name, &series.server_id, &series.library_id, &series.item_id);
         let seasons = seasons_by_series.get(&season_key).map(Vec::as_slice).unwrap_or_default();
         series_channels.push(media_server_series_to_playlist_item(series, seasons));
     }
@@ -93,17 +94,26 @@ fn series_parent_code_map(series: &[MediaServerSeries]) -> HashMap<MediaServerSe
     series
         .iter()
         .map(|series| {
-            let stable_id = stable_media_server_item_id(&series.server_id, &series.library_id, &series.item_id, "series");
+            let stable_id =
+                stable_media_server_item_id(&series.server_id, &series.library_id, &series.item_id, "series");
             let uuid = generate_provider_playlist_uuid(&series.input_name, &stable_id, PlaylistItemType::SeriesInfo);
             (
-                media_server_series_parent_key(&series.input_name, &series.server_id, &series.library_id, &series.item_id),
+                media_server_series_parent_key(
+                    &series.input_name,
+                    &series.server_id,
+                    &series.library_id,
+                    &series.item_id,
+                ),
                 uuid.intern(),
             )
         })
         .collect()
 }
 
-fn episode_parent_code(episode: &MediaServerEpisode, parent_codes: &HashMap<MediaServerSeriesKey<'_>, Arc<str>>) -> Arc<str> {
+fn episode_parent_code(
+    episode: &MediaServerEpisode,
+    parent_codes: &HashMap<MediaServerSeriesKey<'_>, Arc<str>>,
+) -> Arc<str> {
     // Orphan episodes keep a stable media-server parent key when no SeriesInfo anchor exists.
     // materialize_media_server_series_info_episodes and rewrite_series_episode_parent_virtual_ids
     // only link episodes whose parent_code is a SeriesInfo uuid.intern(); this fallback is
@@ -291,7 +301,8 @@ fn movie_details(
     let descriptive = movie.descriptive_facts.as_ref();
     let video = technical.and_then(media_server_video_json);
     let audio = technical.and_then(media_server_audio_json);
-    let duration_secs = technical.and_then(|facts| facts.duration_secs).map(|duration| Arc::<str>::from(duration.to_string()));
+    let duration_secs =
+        technical.and_then(|facts| facts.duration_secs).map(|duration| Arc::<str>::from(duration.to_string()));
     let bitrate = technical.and_then(|facts| facts.bitrate).unwrap_or_default();
     let summary = descriptive.and_then(|facts| facts.summary.clone());
     let age = descriptive.and_then(|facts| facts.parental_age.map(|age| Arc::<str>::from(age.to_string())));
@@ -327,10 +338,7 @@ fn movie_details(
     has_movie_details(&details).then_some(details)
 }
 
-fn series_details(
-    series: &MediaServerSeries,
-    seasons: &[&MediaServerSeason],
-) -> Option<SeriesStreamDetailProperties> {
+fn series_details(series: &MediaServerSeries, seasons: &[&MediaServerSeason]) -> Option<SeriesStreamDetailProperties> {
     if series.year.is_none() && seasons.is_empty() {
         return None;
     }
@@ -385,11 +393,7 @@ fn has_movie_details(details: &VideoStreamDetailProperties) -> bool {
 }
 
 fn joined_values(values: Option<&[Arc<str>]>) -> Option<Arc<str>> {
-    let values = values?
-        .iter()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
+    let values = values?.iter().map(|value| value.trim()).filter(|value| !value.is_empty()).collect::<Vec<_>>();
     (!values.is_empty()).then(|| Arc::<str>::from(values.join(", ")))
 }
 
@@ -514,44 +518,23 @@ pub fn media_server_stream_ref_to_internal_url(stream_ref: &MediaServerStreamRef
 
 pub fn media_server_image_ref_to_internal_url(image_ref: &MediaServerImageRef) -> String {
     match image_ref {
-        MediaServerImageRef::Emby {
-            input_name,
-            server_id,
-            item_id,
-            image_kind,
-            tag,
-        } => format!(
+        MediaServerImageRef::Emby { input_name, server_id, item_id, image_kind, tag } => format!(
             "media-server://image/emby/{}/{}/{}?image_kind={}{}",
             encode_url_path_segment(input_name),
             encode_url_path_segment(server_id),
             encode_url_path_segment(item_id),
             encode_url_path_segment(image_kind),
-            tag.as_ref()
-                .map(|tag| format!("&tag={}", encode_url_path_segment(tag)))
-                .unwrap_or_default()
+            tag.as_ref().map(|tag| format!("&tag={}", encode_url_path_segment(tag))).unwrap_or_default()
         ),
-        MediaServerImageRef::Jellyfin {
-            input_name,
-            server_id,
-            item_id,
-            image_kind,
-            tag,
-        } => format!(
+        MediaServerImageRef::Jellyfin { input_name, server_id, item_id, image_kind, tag } => format!(
             "media-server://image/jellyfin/{}/{}/{}?image_kind={}{}",
             encode_url_path_segment(input_name),
             encode_url_path_segment(server_id),
             encode_url_path_segment(item_id),
             encode_url_path_segment(image_kind),
-            tag.as_ref()
-                .map(|tag| format!("&tag={}", encode_url_path_segment(tag)))
-                .unwrap_or_default()
+            tag.as_ref().map(|tag| format!("&tag={}", encode_url_path_segment(tag))).unwrap_or_default()
         ),
-        MediaServerImageRef::Plex {
-            input_name,
-            server_id,
-            rating_key,
-            image_path,
-        } => format!(
+        MediaServerImageRef::Plex { input_name, server_id, rating_key, image_path } => format!(
             "media-server://image/plex/{}/{}/{}?image_path={}",
             encode_url_path_segment(input_name),
             encode_url_path_segment(server_id),
@@ -561,11 +544,10 @@ pub fn media_server_image_ref_to_internal_url(image_ref: &MediaServerImageRef) -
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_server::{MediaServerCatalogSnapshot, MediaServerImageRef, MediaServerProviderIdHint};
+    use crate::{MediaServerCatalogSnapshot, MediaServerImageRef, MediaServerProviderIdHint};
     use serde_json::Value;
 
     fn movie() -> MediaServerMovie {
@@ -677,8 +659,14 @@ mod tests {
         assert_eq!(groups[0].xtream_cluster, XtreamCluster::Video);
         assert_eq!(groups[0].channels[0].header.item_type, PlaylistItemType::Video);
         assert_eq!(groups[0].channels[0].header.virtual_id, 0);
-        assert!(groups[0].channels[0].header.id.starts_with("media-server:server/one:movies:movie:item?one plus+space"));
-        assert!(groups[0].channels[0].header.url.contains("media-server://emby/server%2Fone/item%3Fone%20plus%2Bspace"));
+        assert!(groups[0].channels[0]
+            .header
+            .id
+            .starts_with("media-server:server/one:movies:movie:item?one plus+space"));
+        assert!(groups[0].channels[0]
+            .header
+            .url
+            .contains("media-server://emby/server%2Fone/item%3Fone%20plus%2Bspace"));
         assert_eq!(groups[1].channels[0].header.item_type, PlaylistItemType::Series);
         assert_eq!(groups[1].channels[0].header.parent_code.as_ref(), "media-server:server:shows:series:series");
         assert!(groups[1].channels[0].header.url.contains("part_key=%2Flibrary%2Fparts%2Fredacted%2Ffile.mkv"));
@@ -759,10 +747,12 @@ mod tests {
         assert_eq!(episode_first_item.header.parent_code, series_a_item.header.uuid.intern());
         assert_eq!(episode_second_item.header.parent_code, series_b_item.header.uuid.intern());
 
-        let Some(StreamProperties::Series(series_first_properties)) = &series_a_item.header.additional_properties else {
+        let Some(StreamProperties::Series(series_first_properties)) = &series_a_item.header.additional_properties
+        else {
             return Err("expected series A properties".to_string());
         };
-        let Some(StreamProperties::Series(series_second_properties)) = &series_b_item.header.additional_properties else {
+        let Some(StreamProperties::Series(series_second_properties)) = &series_b_item.header.additional_properties
+        else {
             return Err("expected series B properties".to_string());
         };
         let seasons_first = series_first_properties
@@ -798,10 +788,7 @@ mod tests {
                 width: Some(1_920),
                 height: Some(1_080),
             }),
-            audio: Some(MediaServerAudioTechnicalFacts {
-                codec: Some("eac3".into()),
-                channels: Some(6),
-            }),
+            audio: Some(MediaServerAudioTechnicalFacts { codec: Some("eac3".into()), channels: Some(6) }),
         });
 
         let mut episode = episode();
@@ -813,7 +800,11 @@ mod tests {
         });
         episode.technical_facts = Some(MediaServerTechnicalFacts {
             container: Some("mp4".into()),
-            video: Some(MediaServerVideoTechnicalFacts { codec: Some("h264".into()), width: Some(1_280), height: Some(720) }),
+            video: Some(MediaServerVideoTechnicalFacts {
+                codec: Some("h264".into()),
+                width: Some(1_280),
+                height: Some(720),
+            }),
             audio: Some(MediaServerAudioTechnicalFacts { codec: Some("aac".into()), channels: Some(2) }),
             ..MediaServerTechnicalFacts::default()
         });

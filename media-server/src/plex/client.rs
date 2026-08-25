@@ -1,19 +1,23 @@
-use crate::media_server::plex::dto::{PlexMediaContainerDto, PlexResourcesDto, PlexSectionDto, PlexSectionsDto};
-use crate::media_server::plex::mapper::{
-    plex_directory_to_season, plex_directory_to_series, plex_section_matches_selector, plex_section_to_library,
-    plex_video_to_episode, plex_video_to_movie,
-};
-use crate::media_server::{
-    encode_url_path_segment, MediaServerCatalogClient, MediaServerEpisode, MediaServerError, MediaServerErrorKind,
-    MediaServerHttpClient, MediaServerImageRef, MediaServerKind, MediaServerLibrary, MediaServerLibraryRef,
-    MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerResourceResponse, MediaServerSeason,
-    MediaServerSeries, MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
+use crate::{
+    encode_url_path_segment,
+    plex::{
+        dto::{PlexMediaContainerDto, PlexResourcesDto, PlexSectionDto, PlexSectionsDto},
+        mapper::{
+            plex_directory_to_season, plex_directory_to_series, plex_section_matches_selector, plex_section_to_library,
+            plex_video_to_episode, plex_video_to_movie,
+        },
+    },
+    MediaServerCatalogClient, MediaServerEpisode, MediaServerError, MediaServerErrorKind, MediaServerHttpClient,
+    MediaServerImageRef, MediaServerKind, MediaServerLibrary, MediaServerLibraryRef, MediaServerMovie, MediaServerPage,
+    MediaServerPageRequest, MediaServerResourceResponse, MediaServerSeason, MediaServerSeries, MediaServerStatus,
+    MediaServerStreamRef, MediaServerStreamResponse,
 };
 use futures::{StreamExt, TryStreamExt};
-use reqwest::header::{HeaderName, HeaderValue, RANGE};
-use reqwest::{Method, StatusCode};
-use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use reqwest::{
+    header::{HeaderName, HeaderValue, RANGE},
+    Method, StatusCode,
+};
+use serde::{de::DeserializeOwned, Deserialize};
 use shared::model::MediaServerLibrarySelector;
 use std::{
     collections::HashMap,
@@ -163,13 +167,15 @@ impl PlexCatalogClient {
                 .provider("plex")
                 .detail("Plex resource discovery requires media_server.account_token")
         })?;
-        let resources: PlexResourcesDto = self.get_xml(PLEX_TV_RESOURCES_URL, &account_token, PlexOperation::Discovery).await?;
+        let resources: PlexResourcesDto =
+            self.get_xml(PLEX_TV_RESOURCES_URL, &account_token, PlexOperation::Discovery).await?;
         let resource = select_resource(&resources.devices, &self.config)?;
-        let resource_token = resource.access_token.as_deref().and_then(non_blank).map(Arc::<str>::from).ok_or_else(|| {
-            MediaServerError::new(MediaServerErrorKind::MediaServerAuthDenied)
-                .provider("plex")
-                .detail("selected Plex resource did not expose a PMS access token")
-        })?;
+        let resource_token =
+            resource.access_token.as_deref().and_then(non_blank).map(Arc::<str>::from).ok_or_else(|| {
+                MediaServerError::new(MediaServerErrorKind::MediaServerAuthDenied)
+                    .provider("plex")
+                    .detail("selected Plex resource did not expose a PMS access token")
+            })?;
         let candidates = selected_connection_urls(resource, self.config.prefer_https, self.config.allow_relay)?;
 
         let mut last_error = None;
@@ -177,7 +183,8 @@ impl PlexCatalogClient {
             match self.fetch_identity(&candidate, &resource_token).await {
                 Ok(identity) => {
                     verify_resource_identity(resource, &identity)?;
-                    let status = identity.into_status(resource.client_identifier.as_deref(), resource.owned.map(|owned| owned != 0))?;
+                    let status = identity
+                        .into_status(resource.client_identifier.as_deref(), resource.owned.map(|owned| owned != 0))?;
                     return Ok(PlexConnectionState { base_url: candidate, token: resource_token, status });
                 }
                 Err(error) => last_error = Some(error),
@@ -270,9 +277,7 @@ impl PlexCatalogClient {
 
 #[allow(async_fn_in_trait)]
 impl MediaServerCatalogClient for PlexCatalogClient {
-    async fn discover(&self) -> Result<MediaServerStatus, MediaServerError> {
-        Ok(self.connection().await?.status)
-    }
+    async fn discover(&self) -> Result<MediaServerStatus, MediaServerError> { Ok(self.connection().await?.status) }
 
     async fn list_libraries(&self) -> Result<Vec<MediaServerLibrary>, MediaServerError> {
         let connection = self.connection().await?;
@@ -291,7 +296,9 @@ impl MediaServerCatalogClient for PlexCatalogClient {
         let items = container
             .videos
             .iter()
-            .filter_map(|video| plex_video_to_movie(&self.config.input_name, &connection.status.server_id, &library.library_id, video))
+            .filter_map(|video| {
+                plex_video_to_movie(&self.config.input_name, &connection.status.server_id, &library.library_id, video)
+            })
             .collect();
         Ok(MediaServerPage::with_upstream_item_count(page, container.total_size, upstream_item_count, items))
     }
@@ -307,9 +314,16 @@ impl MediaServerCatalogClient for PlexCatalogClient {
         let items = container
             .directories
             .iter()
-            .filter(|directory| directory.item_type.as_deref().is_none_or(|item_type| item_type.eq_ignore_ascii_case("show")))
+            .filter(|directory| {
+                directory.item_type.as_deref().is_none_or(|item_type| item_type.eq_ignore_ascii_case("show"))
+            })
             .filter_map(|directory| {
-                plex_directory_to_series(&self.config.input_name, &connection.status.server_id, &library.library_id, directory)
+                plex_directory_to_series(
+                    &self.config.input_name,
+                    &connection.status.server_id,
+                    &library.library_id,
+                    directory,
+                )
             })
             .collect();
         Ok(MediaServerPage::with_upstream_item_count(page, container.total_size, upstream_item_count, items))
@@ -326,9 +340,16 @@ impl MediaServerCatalogClient for PlexCatalogClient {
         let items = container
             .directories
             .iter()
-            .filter(|directory| directory.item_type.as_deref().is_none_or(|item_type| item_type.eq_ignore_ascii_case("season")))
+            .filter(|directory| {
+                directory.item_type.as_deref().is_none_or(|item_type| item_type.eq_ignore_ascii_case("season"))
+            })
             .filter_map(|directory| {
-                plex_directory_to_season(&self.config.input_name, &connection.status.server_id, &library.library_id, directory)
+                plex_directory_to_season(
+                    &self.config.input_name,
+                    &connection.status.server_id,
+                    &library.library_id,
+                    directory,
+                )
             })
             .collect();
         Ok(MediaServerPage::with_upstream_item_count(page, container.total_size, upstream_item_count, items))
@@ -345,7 +366,9 @@ impl MediaServerCatalogClient for PlexCatalogClient {
         let items = container
             .videos
             .iter()
-            .filter_map(|video| plex_video_to_episode(&self.config.input_name, &connection.status.server_id, &library.library_id, video))
+            .filter_map(|video| {
+                plex_video_to_episode(&self.config.input_name, &connection.status.server_id, &library.library_id, video)
+            })
             .collect();
         Ok(MediaServerPage::with_upstream_item_count(page, container.total_size, upstream_item_count, items))
     }
@@ -355,12 +378,7 @@ impl MediaServerCatalogClient for PlexCatalogClient {
         stream_ref: &MediaServerStreamRef,
         range: Option<&str>,
     ) -> Result<MediaServerStreamResponse, MediaServerError> {
-        let MediaServerStreamRef::Plex {
-            input_name,
-            server_id,
-            rating_key,
-            part_key,
-        } = stream_ref else {
+        let MediaServerStreamRef::Plex { input_name, server_id, rating_key, part_key } = stream_ref else {
             return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
                 .provider("plex")
                 .detail("Plex stream open received a non-Plex stream ref"));
@@ -389,11 +407,7 @@ impl MediaServerCatalogClient for PlexCatalogClient {
                 .provider("plex")
                 .detail("Plex token contains invalid header characters")
         })?;
-        let mut request = self
-            .http
-            .request(Method::GET, &url)
-            .playback_errors()
-            .header(X_PLEX_TOKEN, token);
+        let mut request = self.http.request(Method::GET, &url).playback_errors().header(X_PLEX_TOKEN, token);
         if let Some(range) = range.and_then(non_blank) {
             let range = HeaderValue::from_str(range).map_err(|_| {
                 MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
@@ -426,13 +440,11 @@ impl MediaServerCatalogClient for PlexCatalogClient {
         Ok(MediaServerStreamResponse { status, headers, body })
     }
 
-    async fn open_image(&self, image_ref: &MediaServerImageRef) -> Result<MediaServerResourceResponse, MediaServerError> {
-        let MediaServerImageRef::Plex {
-            input_name,
-            server_id,
-            rating_key,
-            image_path,
-        } = image_ref else {
+    async fn open_image(
+        &self,
+        image_ref: &MediaServerImageRef,
+    ) -> Result<MediaServerResourceResponse, MediaServerError> {
+        let MediaServerImageRef::Plex { input_name, server_id, rating_key, image_path } = image_ref else {
             return Err(MediaServerError::new(MediaServerErrorKind::MediaServerStreamOpenFailed)
                 .provider("plex")
                 .detail("Plex image open received a non-Plex image ref"));
@@ -497,7 +509,8 @@ impl PlexOperation {
     }
 
     fn status_error(self, status: StatusCode) -> MediaServerError {
-        MediaServerError::from_http_status_with_fallback(status, self.not_found_kind(), self.fallback_kind()).provider("plex")
+        MediaServerError::from_http_status_with_fallback(status, self.not_found_kind(), self.fallback_kind())
+            .provider("plex")
     }
 }
 
@@ -513,7 +526,11 @@ struct PlexIdentityDto {
 }
 
 impl PlexIdentityDto {
-    fn into_status(self, fallback_server_id: Option<&str>, owned: Option<bool>) -> Result<MediaServerStatus, MediaServerError> {
+    fn into_status(
+        self,
+        fallback_server_id: Option<&str>,
+        owned: Option<bool>,
+    ) -> Result<MediaServerStatus, MediaServerError> {
         let server_id = self
             .machine_identifier
             .as_deref()
@@ -548,7 +565,8 @@ fn select_libraries(
 ) -> Result<Vec<MediaServerLibrary>, MediaServerError> {
     let mut libraries = Vec::new();
     for selector in &config.libraries {
-        let matches = sections.iter().filter(|section| plex_section_matches_selector(section, selector)).collect::<Vec<_>>();
+        let matches =
+            sections.iter().filter(|section| plex_section_matches_selector(section, selector)).collect::<Vec<_>>();
         match matches.as_slice() {
             [] => {
                 return Err(MediaServerError::new(MediaServerErrorKind::MediaServerLibraryUnavailable)
@@ -574,16 +592,13 @@ fn select_libraries(
 }
 
 fn select_resource<'a>(
-    resources: &'a [crate::media_server::plex::dto::PlexResourceDto],
+    resources: &'a [crate::plex::dto::PlexResourceDto],
     config: &PlexClientConfig,
-) -> Result<&'a crate::media_server::plex::dto::PlexResourceDto, MediaServerError> {
+) -> Result<&'a crate::plex::dto::PlexResourceDto, MediaServerError> {
     let plex_servers = resources
         .iter()
         .filter(|resource| {
-            resource
-                .product
-                .as_deref()
-                .is_some_and(|product| product.eq_ignore_ascii_case("Plex Media Server"))
+            resource.product.as_deref().is_some_and(|product| product.eq_ignore_ascii_case("Plex Media Server"))
         })
         .collect::<Vec<_>>();
 
@@ -612,7 +627,7 @@ fn select_resource<'a>(
 }
 
 fn selected_connection_urls(
-    resource: &crate::media_server::plex::dto::PlexResourceDto,
+    resource: &crate::plex::dto::PlexResourceDto,
     prefer_https: bool,
     allow_relay: bool,
 ) -> Result<Vec<Arc<str>>, MediaServerError> {
@@ -656,15 +671,23 @@ const fn https_sort_key(is_https: bool, prefer_https: bool) -> u8 {
 
 fn verify_direct_selectors(config: &PlexClientConfig, identity: &PlexIdentityDto) -> Result<(), MediaServerError> {
     if let Some(server_id) = config.server_id.as_deref() {
-        verify_selector(identity.machine_identifier.as_deref(), server_id, "configured Plex server selector did not match PMS identity")?;
+        verify_selector(
+            identity.machine_identifier.as_deref(),
+            server_id,
+            "configured Plex server selector did not match PMS identity",
+        )?;
     }
     if let Some(server_name) = config.server_name.as_deref() {
-        verify_selector(identity.friendly_name.as_deref(), server_name, "configured Plex server name did not match PMS identity")?;
+        verify_selector(
+            identity.friendly_name.as_deref(),
+            server_name,
+            "configured Plex server name did not match PMS identity",
+        )?;
     }
     Ok(())
 }
 
-fn resource_matches_server_id(resource: &crate::media_server::plex::dto::PlexResourceDto, server_id: &str) -> bool {
+fn resource_matches_server_id(resource: &crate::plex::dto::PlexResourceDto, server_id: &str) -> bool {
     // For Plex Media Server resources, MyPlex exposes the stable server identity as
     // clientIdentifier. PMS /identity exposes the same identity as machineIdentifier.
     resource.client_identifier.as_deref().is_some_and(|value| value == server_id)
@@ -672,7 +695,7 @@ fn resource_matches_server_id(resource: &crate::media_server::plex::dto::PlexRes
 }
 
 fn verify_resource_identity(
-    resource: &crate::media_server::plex::dto::PlexResourceDto,
+    resource: &crate::plex::dto::PlexResourceDto,
     identity: &PlexIdentityDto,
 ) -> Result<(), MediaServerError> {
     let expected_server_id = resource.machine_identifier.as_deref().or(resource.client_identifier.as_deref());
@@ -690,9 +713,7 @@ fn verify_selector(actual: Option<&str>, expected: &str, detail: &'static str) -
     if actual.is_some_and(|actual| actual == expected) {
         Ok(())
     } else {
-        Err(MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
-            .provider("plex")
-            .detail(detail))
+        Err(MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed).provider("plex").detail(detail))
     }
 }
 
@@ -736,9 +757,7 @@ fn resolve_pms_resource_url(
     field_name: &str,
 ) -> Result<String, MediaServerError> {
     let resource_path = non_blank(resource_path).ok_or_else(|| {
-        MediaServerError::new(error_kind)
-            .provider("plex")
-            .detail(format!("Plex {field_name} is missing"))
+        MediaServerError::new(error_kind).provider("plex").detail(format!("Plex {field_name} is missing"))
     })?;
     if !resource_path.starts_with(expected_prefix)
         || resource_path.starts_with("//")
@@ -801,7 +820,7 @@ fn non_blank(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media_server::plex::dto::{PlexConnectionDto, PlexResourceDto};
+    use crate::plex::dto::{PlexConnectionDto, PlexResourceDto};
     use bytes::Bytes;
     use futures::StreamExt;
     use http_body_util::Full;
@@ -968,14 +987,25 @@ mod tests {
         };
 
         let urls = selected_connection_urls(&resource, true, false).expect("usable connection");
-        assert_eq!(urls.iter().map(AsRef::as_ref).collect::<Vec<_>>(), vec!["https://pms.example.invalid", "http://pms.example.invalid"]);
+        assert_eq!(
+            urls.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
+            vec!["https://pms.example.invalid", "http://pms.example.invalid"]
+        );
     }
 
     #[test]
     fn selected_libraries_reject_duplicate_title_selectors() {
         let sections = vec![
-            PlexSectionDto { key: Some("1".to_string()), title: Some("Movies".to_string()), section_type: Some("movie".to_string()) },
-            PlexSectionDto { key: Some("2".to_string()), title: Some("Movies".to_string()), section_type: Some("movie".to_string()) },
+            PlexSectionDto {
+                key: Some("1".to_string()),
+                title: Some("Movies".to_string()),
+                section_type: Some("movie".to_string()),
+            },
+            PlexSectionDto {
+                key: Some("2".to_string()),
+                title: Some("Movies".to_string()),
+                section_type: Some("movie".to_string()),
+            },
         ];
         let error = select_libraries(&config(), &"machine-redacted".into(), &sections).expect_err("duplicate title");
 
@@ -990,10 +1020,19 @@ mod tests {
             ..MediaServerLibrarySelectorDetailsDto::default()
         })];
         let sections = vec![
-            PlexSectionDto { key: Some("1".to_string()), title: Some("Movies".to_string()), section_type: Some("movie".to_string()) },
-            PlexSectionDto { key: Some("2".to_string()), title: Some("Movies".to_string()), section_type: Some("movie".to_string()) },
+            PlexSectionDto {
+                key: Some("1".to_string()),
+                title: Some("Movies".to_string()),
+                section_type: Some("movie".to_string()),
+            },
+            PlexSectionDto {
+                key: Some("2".to_string()),
+                title: Some("Movies".to_string()),
+                section_type: Some("movie".to_string()),
+            },
         ];
-        let libraries = select_libraries(&config, &"machine-redacted".into(), &sections).expect("stable key disambiguates");
+        let libraries =
+            select_libraries(&config, &"machine-redacted".into(), &sections).expect("stable key disambiguates");
 
         assert_eq!(libraries[0].reference.library_id.as_ref(), "2");
     }
@@ -1007,7 +1046,9 @@ mod tests {
             "http://127.0.0.1:32400/library/parts/part-redacted/file.mkv?download=1"
         );
         assert_eq!(
-            pms_part_url(&base, "/library/metadata/rating-redacted").expect_err("metadata paths are not direct part refs").kind,
+            pms_part_url(&base, "/library/metadata/rating-redacted")
+                .expect_err("metadata paths are not direct part refs")
+                .kind,
             MediaServerErrorKind::NoDirectPlayableMediaServerSource
         );
         assert_eq!(
@@ -1048,7 +1089,8 @@ mod tests {
         );
         assert_eq!(
             pms_image_url(&base, "/library/parts/part-redacted/file.mkv")
-                .expect_err("part paths are not metadata images").kind,
+                .expect_err("part paths are not metadata images")
+                .kind,
             MediaServerErrorKind::MediaServerItemNotFound
         );
         assert_eq!(
@@ -1109,11 +1151,8 @@ mod tests {
             "/library/parts/part-redacted/file.mkv" => {
                 state.stream_requests.fetch_add(1, Ordering::SeqCst);
                 *state.last_uri.lock().await = Some(req.uri().to_string());
-                *state.last_range.lock().await = req
-                    .headers()
-                    .get(http::header::RANGE)
-                    .and_then(|value| value.to_str().ok())
-                    .map(ToOwned::to_owned);
+                *state.last_range.lock().await =
+                    req.headers().get(http::header::RANGE).and_then(|value| value.to_str().ok()).map(ToOwned::to_owned);
 
                 Ok(Response::builder()
                     .status(StatusCode::PARTIAL_CONTENT)
@@ -1134,7 +1173,9 @@ mod tests {
         }
     }
 
-    async fn start_plex_playback_server(state: StdArc<PlexPlaybackServerState>) -> (String, tokio::task::JoinHandle<()>) {
+    async fn start_plex_playback_server(
+        state: StdArc<PlexPlaybackServerState>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("test server binds");
         let addr = listener.local_addr().expect("local addr");
         let handle = tokio::spawn(async move {
@@ -1170,22 +1211,19 @@ mod tests {
             part_key: "/library/parts/part-redacted/file.mkv?download=1".into(),
         };
 
-        let response = client
-            .open_stream(&stream_ref, Some("bytes=5-8"))
-            .await
-            .expect("Plex stream opens");
+        let response = client.open_stream(&stream_ref, Some("bytes=5-8")).await.expect("Plex stream opens");
 
         assert_eq!(response.status, StatusCode::PARTIAL_CONTENT);
-        assert_eq!(response.headers.get(http::header::CONTENT_RANGE).and_then(|value| value.to_str().ok()), Some("bytes 5-8/9"));
+        assert_eq!(
+            response.headers.get(http::header::CONTENT_RANGE).and_then(|value| value.to_str().ok()),
+            Some("bytes 5-8/9")
+        );
         let chunks = response.body.collect::<Vec<_>>().await;
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].as_ref().map(Bytes::as_ref), Ok(b"data".as_slice()));
         assert_eq!(state.stream_requests.load(Ordering::SeqCst), 1);
         assert_eq!(state.last_range.lock().await.as_deref(), Some("bytes=5-8"));
-        assert_eq!(
-            state.last_uri.lock().await.as_deref(),
-            Some("/library/parts/part-redacted/file.mkv?download=1")
-        );
+        assert_eq!(state.last_uri.lock().await.as_deref(), Some("/library/parts/part-redacted/file.mkv?download=1"));
         assert!(!state.last_uri.lock().await.as_deref().unwrap_or_default().contains(PLEX_TEST_TOKEN));
         assert!(!state.last_uri.lock().await.as_deref().unwrap_or_default().contains("X-Plex-Token"));
 
@@ -1213,7 +1251,10 @@ mod tests {
         let response = client.open_image(&image_ref).await.expect("Plex image opens");
 
         assert_eq!(response.status, StatusCode::OK);
-        assert_eq!(response.headers.get(http::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()), Some("image/jpeg"));
+        assert_eq!(
+            response.headers.get(http::header::CONTENT_TYPE).and_then(|value| value.to_str().ok()),
+            Some("image/jpeg")
+        );
         assert_eq!(response.body.as_ref(), b"jpeg");
 
         server.abort();
