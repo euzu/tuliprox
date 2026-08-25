@@ -2,7 +2,6 @@ mod dummy;
 mod event;
 mod time;
 
-use crate::{model::IcsEpgSourceConfig, utils::compressed_file_reader_async::CompressedFileReaderAsync};
 pub use dummy::fill_dummy_gaps;
 pub use event::IcsEvent;
 use shared::{
@@ -13,6 +12,7 @@ use shared::{
 };
 use std::{path::Path, sync::Arc};
 use tokio::io::AsyncReadExt;
+use tuliprox_core::{model::IcsEpgSourceConfig, utils::compressed_file_reader_async::CompressedFileReaderAsync};
 
 pub async fn parse_ics_file_to_channel(
     file_path: &Path,
@@ -95,11 +95,8 @@ fn events_to_programmes(
             append_description_metadata(&mut desc, "Categories: ", &categories_text);
         }
 
-        let categories: Vec<EpgCategory> = event
-            .categories
-            .into_iter()
-            .map(|value| EpgCategory { value: value.intern(), lang: None })
-            .collect();
+        let categories: Vec<EpgCategory> =
+            event.categories.into_iter().map(|value| EpgCategory { value: value.intern(), lang: None }).collect();
 
         let mut programme = EpgProgramme::new_all(
             start,
@@ -171,11 +168,10 @@ fn append_utf8_bounded(target: &mut String, value: &str, max_bytes: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{IcsEpgSourceConfig, IcsEventMapping};
-    use shared::model::EpgCategory;
-    use shared::utils::Internable;
+    use shared::{model::EpgCategory, utils::Internable};
     use std::fs;
     use tempfile::tempdir;
+    use tuliprox_core::model::{IcsEpgSourceConfig, IcsEventMapping};
 
     #[tokio::test]
     async fn parses_file_to_channel_and_programmes() {
@@ -207,10 +203,7 @@ mod tests {
         assert_eq!(channel.programmes[0].desc.as_deref(), Some("Session\nLocation: Bahrain\nCategories: F1,Race"));
         assert_eq!(
             channel.programmes[0].categories,
-            vec![
-                EpgCategory { value: "F1".intern(), lang: None },
-                EpgCategory { value: "Race".intern(), lang: None },
-            ],
+            vec![EpgCategory { value: "F1".intern(), lang: None }, EpgCategory { value: "Race".intern(), lang: None },],
         );
         assert!(!channel.programmes[0].is_live);
         assert!(!channel.programmes[0].is_new);
@@ -257,8 +250,7 @@ mod tests {
             ..IcsEvent::default()
         };
         let repeated_description = "{description}".repeat(MAX_ICS_SUMMARY_LENGTH / "{description}".len());
-        let rendered_description =
-            render_event_template(&repeated_description, &event, "", MAX_ICS_SUMMARY_LENGTH);
+        let rendered_description = render_event_template(&repeated_description, &event, "", MAX_ICS_SUMMARY_LENGTH);
         assert!(rendered_description.len() <= MAX_ICS_SUMMARY_LENGTH);
         assert!(rendered_description.chars().all(|character| character == '€'));
 

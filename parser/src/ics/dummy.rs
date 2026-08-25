@@ -1,8 +1,8 @@
-use crate::model::IcsDummyConfig;
 use chrono::{Duration, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use shared::{error::TuliproxError, model::EpgProgramme, utils::Internable};
 use std::sync::Arc;
+use tuliprox_core::model::IcsDummyConfig;
 
 pub fn fill_dummy_gaps(
     programmes: &mut Vec<EpgProgramme>,

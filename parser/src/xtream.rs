@@ -1,19 +1,20 @@
-use crate::model::{ConfigInput, ConfigInputFlags};
-use crate::model::XtreamCategory;
-use crate::utils::request::DynReader;
-use crate::model::get_xtream_stream_url_base;
 use indexmap::IndexMap;
 use serde::Deserializer;
-use shared::error::TuliproxError;
-use shared::model::UUIDType;
-use shared::model::{EpisodeStreamProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem,
-                    PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
-                    SeriesStreamProperties, StreamProperties, VideoStreamProperties,
-                    XtreamCluster, XtreamPlaylistItem};
-use shared::utils::{generate_provider_playlist_uuid, trim_last_slash, Internable};
-use std::collections::HashMap;
-use std::sync::Arc;
+use shared::{
+    error::TuliproxError,
+    model::{
+        EpisodeStreamProperties, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemHeader,
+        PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamProperties, StreamProperties, UUIDType,
+        VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
+    },
+    utils::{generate_provider_playlist_uuid, trim_last_slash, Internable},
+};
+use std::{collections::HashMap, sync::Arc};
 use tokio::task::spawn_blocking;
+use tuliprox_core::{
+    model::{get_xtream_stream_url_base, ConfigInput, ConfigInputFlags, XtreamCategory},
+    utils::request::DynReader,
+};
 
 /// Bucket size for composite ordinal encoding in the streaming parser.
 /// Layout: `cat_position * CAT_BUCKET + within_cat_counter`.
@@ -34,28 +35,42 @@ fn next_group_map_key<T>(group_map: &IndexMap<u32, T>) -> u32 {
     candidate
 }
 
-async fn map_to_xtream_category(categories: DynReader, input_name: &Arc<str>) -> Result<Vec<XtreamCategory>, TuliproxError> {
+async fn map_to_xtream_category(
+    categories: DynReader,
+    input_name: &Arc<str>,
+) -> Result<Vec<XtreamCategory>, TuliproxError> {
     let input_name_clone = Arc::clone(input_name);
     spawn_blocking(move || {
         let reader = tokio_util::io::SyncIoBridge::new(categories);
         match serde_json::from_reader::<_, Vec<XtreamCategory>>(reader) {
             Ok(xtream_categories) => Ok(xtream_categories),
-            Err(err) => {
-                Err(TuliproxError::RepositoryXtream(format!("Failed to process categories input {input_name_clone}: {err}")))
-            }
+            Err(err) => Err(TuliproxError::RepositoryXtream(format!(
+                "Failed to process categories input {input_name_clone}: {err}"
+            ))),
         }
-    }).await.map_err(|err| TuliproxError::RepositoryXtream(format!("Mapping xtream categories failed for input {input_name}: {err}")))?
+    })
+    .await
+    .map_err(|err| {
+        TuliproxError::RepositoryXtream(format!("Mapping xtream categories failed for input {input_name}: {err}"))
+    })?
 }
 
-async fn map_to_xtream_streams(xtream_cluster: XtreamCluster, streams: DynReader, input_name: &Arc<str>) -> Result<Vec<StreamProperties>, TuliproxError> {
+async fn map_to_xtream_streams(
+    xtream_cluster: XtreamCluster,
+    streams: DynReader,
+    input_name: &Arc<str>,
+) -> Result<Vec<StreamProperties>, TuliproxError> {
     let input_name_clone = Arc::clone(input_name);
     spawn_blocking(move || {
         let reader = tokio_util::io::SyncIoBridge::new(streams);
 
         let parsed: Result<Vec<StreamProperties>, serde_json::Error> = match xtream_cluster {
-            XtreamCluster::Live => serde_json::from_reader::<_, Vec<LiveStreamProperties>>(reader).map(|list| list.into_iter().map(Box::new).map(StreamProperties::Live).collect()),
-            XtreamCluster::Video => serde_json::from_reader::<_, Vec<VideoStreamProperties>>(reader).map(|list| list.into_iter().map(Box::new).map(StreamProperties::Video).collect()),
-            XtreamCluster::Series => serde_json::from_reader::<_, Vec<SeriesStreamProperties>>(reader).map(|list| list.into_iter().map(Box::new).map(StreamProperties::Series).collect()),
+            XtreamCluster::Live => serde_json::from_reader::<_, Vec<LiveStreamProperties>>(reader)
+                .map(|list| list.into_iter().map(Box::new).map(StreamProperties::Live).collect()),
+            XtreamCluster::Video => serde_json::from_reader::<_, Vec<VideoStreamProperties>>(reader)
+                .map(|list| list.into_iter().map(Box::new).map(StreamProperties::Video).collect()),
+            XtreamCluster::Series => serde_json::from_reader::<_, Vec<SeriesStreamProperties>>(reader)
+                .map(|list| list.into_iter().map(Box::new).map(StreamProperties::Series).collect()),
         };
 
         match parsed {
@@ -65,14 +80,23 @@ async fn map_to_xtream_streams(xtream_cluster: XtreamCluster, streams: DynReader
                 }
                 Ok(stream_list)
             }
-            Err(err) => {
-                Err(TuliproxError::RepositoryXtream(format!("Failed to map to xtream streams {xtream_cluster} for input {input_name_clone}: {err}")))
-            }
+            Err(err) => Err(TuliproxError::RepositoryXtream(format!(
+                "Failed to map to xtream streams {xtream_cluster} for input {input_name_clone}: {err}"
+            ))),
         }
-    }).await.map_err(|e| TuliproxError::RepositoryXtream(format!("Mapping xtream streams failed for input {input_name}: {e}")))?
+    })
+    .await
+    .map_err(|e| {
+        TuliproxError::RepositoryXtream(format!("Mapping xtream streams failed for input {input_name}: {e}"))
+    })?
 }
 
-pub fn create_xtream_series_episode_url(url: &str, username: &str, password: &str, episode: &SeriesStreamDetailEpisodeProperties) -> Arc<str> {
+pub fn create_xtream_series_episode_url(
+    url: &str,
+    username: &str,
+    password: &str,
+    episode: &SeriesStreamDetailEpisodeProperties,
+) -> Arc<str> {
     if episode.direct_source.is_empty() {
         let ext = episode.container_extension.clone();
         let stream_base_url = format!("{url}/series/{username}/{password}/{}.{ext}", episode.id);
@@ -82,63 +106,73 @@ pub fn create_xtream_series_episode_url(url: &str, username: &str, password: &st
     }
 }
 
-pub fn parse_xtream_series_info(parent_uuid: &UUIDType, series_info: &SeriesStreamProperties, group_title: &str, series_name: &Arc<str>, input: &ConfigInput,
-                                // Add series_release_date parameter
-                                series_release_date: Option<&Arc<str>>,
-                                parent_source_ordinal: u32,
+pub fn parse_xtream_series_info(
+    parent_uuid: &UUIDType,
+    series_info: &SeriesStreamProperties,
+    group_title: &str,
+    series_name: &Arc<str>,
+    input: &ConfigInput,
+    // Add series_release_date parameter
+    series_release_date: Option<&Arc<str>>,
+    parent_source_ordinal: u32,
 ) -> Option<Vec<PlaylistItem>> {
     let url = input.url.as_str();
-    let (username, password) = (
-        input.username.as_deref().unwrap_or(""),
-        input.password.as_deref().unwrap_or(""),
-    );
+    let (username, password) = (input.username.as_deref().unwrap_or(""), input.password.as_deref().unwrap_or(""));
 
     if let Some(episodes) = series_info.details.as_ref().and_then(|d| d.episodes.as_ref()) {
-        let result: Vec<PlaylistItem> = episodes.iter().map(|episode| {
-            let episode_id = episode.id.to_string();
-            let episode_url = create_xtream_series_episode_url(url, username, password, episode);
+        let result: Vec<PlaylistItem> = episodes
+            .iter()
+            .map(|episode| {
+                let episode_id = episode.id.to_string();
+                let episode_url = create_xtream_series_episode_url(url, username, password, episode);
 
-            // Create properties and inject global release date if available
-            let mut episode_info = EpisodeStreamProperties::from_series(series_info, episode);
-            if let Some(date) = series_release_date {
-                episode_info.series_release_date = Some(Arc::clone(date));
-            }
+                // Create properties and inject global release date if available
+                let mut episode_info = EpisodeStreamProperties::from_series(series_info, episode);
+                if let Some(date) = series_release_date {
+                    episode_info.series_release_date = Some(Arc::clone(date));
+                }
 
-
-            let mut item = PlaylistItem {
-                header: PlaylistItemHeader {
-                    uuid: generate_provider_playlist_uuid(&input.name, &episode_id, PlaylistItemType::Series),
-                    id: episode_id.into(),
-                    // we use parent_code to track the parent series
-                    parent_code: parent_uuid.intern(),
-                    name: Arc::clone(series_name),
-                    logo: Arc::clone(&episode.movie_image),
-                    group: group_title.intern(),
-                    title: Arc::clone(&episode.title),
-                    url: episode_url,
-                    item_type: PlaylistItemType::Series,
-                    xtream_cluster: XtreamCluster::Series,
-                    additional_properties: Some(StreamProperties::Episode(Box::new(episode_info))),
-                    category_id: 0,
-                    input_name: input.name.intern(),
-                    // Keep episode ordering tied to its parent SeriesInfo to avoid cross-series ordinal overlap.
-                    source_ordinal: parent_source_ordinal,
-                    ..Default::default()
-                },
-            };
-            item.header.freeze_input_stream_id();
-            item
-        }).collect();
+                let mut item = PlaylistItem {
+                    header: PlaylistItemHeader {
+                        uuid: generate_provider_playlist_uuid(&input.name, &episode_id, PlaylistItemType::Series),
+                        id: episode_id.into(),
+                        // we use parent_code to track the parent series
+                        parent_code: parent_uuid.intern(),
+                        name: Arc::clone(series_name),
+                        logo: Arc::clone(&episode.movie_image),
+                        group: group_title.intern(),
+                        title: Arc::clone(&episode.title),
+                        url: episode_url,
+                        item_type: PlaylistItemType::Series,
+                        xtream_cluster: XtreamCluster::Series,
+                        additional_properties: Some(StreamProperties::Episode(Box::new(episode_info))),
+                        category_id: 0,
+                        input_name: input.name.intern(),
+                        // Keep episode ordering tied to its parent SeriesInfo to avoid cross-series ordinal overlap.
+                        source_ordinal: parent_source_ordinal,
+                        ..Default::default()
+                    },
+                };
+                item.header.freeze_input_stream_id();
+                item
+            })
+            .collect();
         return if result.is_empty() { None } else { Some(result) };
     }
     None
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn get_xtream_url(xtream_cluster: XtreamCluster, url: &str,
-                      username: &str, password: &str,
-                      stream_id: u32, container_extension: Option<&str>,
-                      live_stream_use_prefix: bool, live_stream_without_extension: bool) -> String {
+pub fn get_xtream_url(
+    xtream_cluster: XtreamCluster,
+    url: &str,
+    username: &str,
+    password: &str,
+    stream_id: u32,
+    container_extension: Option<&str>,
+    live_stream_use_prefix: bool,
+    live_stream_without_extension: bool,
+) -> String {
     let url = trim_last_slash(url);
     let stream_base_url = match xtream_cluster {
         XtreamCluster::Live => {
@@ -153,43 +187,58 @@ pub fn get_xtream_url(xtream_cluster: XtreamCluster, url: &str,
                 format!("{url}/movie/{username}/{password}/{stream_id}")
             }
         }
-        XtreamCluster::Series =>
-            format!("{}&action={}&series_id={stream_id}", get_xtream_stream_url_base(url.as_ref(), username, password), crate::model::XC_ACTION_GET_SERIES_INFO)
+        XtreamCluster::Series => format!(
+            "{}&action={}&series_id={stream_id}",
+            get_xtream_stream_url_base(url.as_ref(), username, password),
+            tuliprox_core::model::XC_ACTION_GET_SERIES_INFO
+        ),
     };
     stream_base_url
 }
 
-pub fn create_xtream_url(xtream_cluster: XtreamCluster, url: &str, username: &str, password: &str,
-                         stream: &StreamProperties, live_stream_use_prefix: bool, live_stream_without_extension: bool) -> Arc<str> {
-    stream.get_direct_source().unwrap_or_else(||
-        get_xtream_url(xtream_cluster, url, username, password, stream.get_stream_id(),
-                       stream.get_container_extension().as_deref(),
-                       live_stream_use_prefix, live_stream_without_extension).into()
-    )
+pub fn create_xtream_url(
+    xtream_cluster: XtreamCluster,
+    url: &str,
+    username: &str,
+    password: &str,
+    stream: &StreamProperties,
+    live_stream_use_prefix: bool,
+    live_stream_without_extension: bool,
+) -> Arc<str> {
+    stream.get_direct_source().unwrap_or_else(|| {
+        get_xtream_url(
+            xtream_cluster,
+            url,
+            username,
+            password,
+            stream.get_stream_id(),
+            stream.get_container_extension().as_deref(),
+            live_stream_use_prefix,
+            live_stream_without_extension,
+        )
+        .into()
+    })
 }
 
-pub async fn parse_xtream(input: &ConfigInput,
-                          xtream_cluster: XtreamCluster,
-                          categories: DynReader,
-                          streams: DynReader) -> Result<Option<Vec<PlaylistGroup>>, TuliproxError> {
+pub async fn parse_xtream(
+    input: &ConfigInput,
+    xtream_cluster: XtreamCluster,
+    categories: DynReader,
+    streams: DynReader,
+) -> Result<Option<Vec<PlaylistGroup>>, TuliproxError> {
     match map_to_xtream_category(categories, &input.name).await {
         Ok(xtream_categories) => {
             let input_name = input.name.clone();
             let url = input.url.as_str();
-            let (username, password) = (
-                input.username.as_deref().unwrap_or(""),
-                input.password.as_deref().unwrap_or(""),
-            );
+            let (username, password) =
+                (input.username.as_deref().unwrap_or(""), input.password.as_deref().unwrap_or(""));
 
             match map_to_xtream_streams(xtream_cluster, streams, &input.name).await {
                 Ok(xtream_streams) => {
                     let mut group_map: IndexMap<u32, XtreamCategory> =
                         xtream_categories.into_iter().map(|category| (category.category_id, category)).collect();
-                    let mut unknown_grp = XtreamCategory {
-                        category_id: 0u32,
-                        category_name: "Unknown".intern(),
-                        channels: vec![],
-                    };
+                    let mut unknown_grp =
+                        XtreamCategory { category_id: 0u32, category_name: "Unknown".intern(), channels: vec![] };
 
                     let (live_stream_use_prefix, live_stream_without_extension) = (
                         input.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix),
@@ -199,12 +248,24 @@ pub async fn parse_xtream(input: &ConfigInput,
                     for stream in xtream_streams {
                         let group = group_map.get_mut(&stream.get_category_id()).unwrap_or(&mut unknown_grp);
                         let category_name = &group.category_name;
-                        let stream_url = create_xtream_url(xtream_cluster, url, username, password, &stream, live_stream_use_prefix, live_stream_without_extension);
+                        let stream_url = create_xtream_url(
+                            xtream_cluster,
+                            url,
+                            username,
+                            password,
+                            &stream,
+                            live_stream_use_prefix,
+                            live_stream_without_extension,
+                        );
                         let item_type = PlaylistItemType::from(xtream_cluster);
                         let mut item = PlaylistItem {
                             header: PlaylistItemHeader {
                                 id: stream.get_stream_id().intern(),
-                                uuid: generate_provider_playlist_uuid(&input_name, &stream.get_stream_id().to_string(), item_type),
+                                uuid: generate_provider_playlist_uuid(
+                                    &input_name,
+                                    &stream.get_stream_id().to_string(),
+                                    item_type,
+                                ),
                                 name: Arc::clone(&stream.get_name()),
                                 logo: Arc::clone(&stream.get_stream_icon()),
                                 group: Arc::clone(category_name),
@@ -241,23 +302,30 @@ pub async fn parse_xtream(input: &ConfigInput,
                         }
                     }
 
-                    Ok(Some(group_map.values().filter(|category| !category.channels.is_empty())
-                        .map(|category| {
-                            PlaylistGroup {
+                    Ok(Some(
+                        group_map
+                            .values()
+                            .filter(|category| !category.channels.is_empty())
+                            .map(|category| PlaylistGroup {
                                 id: category.category_id,
                                 xtream_cluster,
                                 title: Arc::clone(&category.category_name),
                                 channels: category.channels.clone(),
-                            }
-                        }).collect()))
+                            })
+                            .collect(),
+                    ))
                 }
-                Err(err) => Err(err)
+                Err(err) => Err(err),
             }
         }
-        Err(err) => Err(err)
+        Err(err) => Err(err),
     }
 }
 
+// Unchanged by the move to this crate; it crossed the 100-line threshold
+// only because rustfmt reflowed one call across several lines here.
+// Shortening it is a real refactor and does not belong in an extraction.
+#[allow(clippy::too_many_lines)]
 pub async fn parse_xtream_streaming<F>(
     input: &ConfigInput,
     xtream_cluster: XtreamCluster,
@@ -274,15 +342,14 @@ where
     // 2. Prepare for Stream Parsing
     let input_name = input.name.clone();
     let url = input.url.as_str().to_string();
-    let (username, password) = (
-        input.username.as_deref().unwrap_or("").to_string(),
-        input.password.as_deref().unwrap_or("").to_string(),
-    );
+    let (username, password) =
+        (input.username.as_deref().unwrap_or("").to_string(), input.password.as_deref().unwrap_or("").to_string());
     let live_stream_use_prefix = input.has_flag(ConfigInputFlags::XtreamLiveStreamUsePrefix);
     let live_stream_without_extension = input.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension);
 
     // Map categories for lookup
-    let group_map: IndexMap<u32, Arc<str>> = xtream_categories.iter().map(|c| (c.category_id, c.category_name.clone())).collect();
+    let group_map: IndexMap<u32, Arc<str>> =
+        xtream_categories.iter().map(|c| (c.category_id, c.category_name.clone())).collect();
     let unknown_group_name = "Unknown".intern();
 
     // Category position lookup for source_ordinal: streams are ordered by
@@ -294,9 +361,8 @@ where
     // Layout:  cat_position * CAT_BUCKET + within_cat_counter
     // With CAT_BUCKET = 100_000 this supports up to ~42_900 categories
     // with up to 100 000 streams each — well beyond real-world sizes.
-    let cat_order: HashMap<u32, u32> = group_map.keys().enumerate()
-        .map(|(idx, &cat_id)| (cat_id, u32::try_from(idx).unwrap_or(u32::MAX)))
-        .collect();
+    let cat_order: HashMap<u32, u32> =
+        group_map.keys().enumerate().map(|(idx, &cat_id)| (cat_id, u32::try_from(idx).unwrap_or(u32::MAX))).collect();
     let unknown_cat_pos = u32::try_from(cat_order.len()).unwrap_or(u32::MAX);
 
     spawn_blocking(move || {
@@ -316,38 +382,79 @@ where
                 let mut on_stream = |stream: LiveStreamProperties| {
                     let ordinal = cat_source_ordinal(stream.category_id);
                     let stream_prop = StreamProperties::Live(Box::new(stream));
-                    process_stream_item(&input_name, &url, &username, &password,
-                                        xtream_cluster, &group_map, &unknown_group_name,
-                                        stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, ordinal)
+                    process_stream_item(
+                        &input_name,
+                        &url,
+                        &username,
+                        &password,
+                        xtream_cluster,
+                        &group_map,
+                        &unknown_group_name,
+                        stream_prop,
+                        &mut on_item,
+                        live_stream_use_prefix,
+                        live_stream_without_extension,
+                        ordinal,
+                    )
                 };
                 let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
-                deserializer.deserialize_any(visitor).map_err(|e| TuliproxError::RepositoryXtream(format!("JSON parse error: {e}")))?;
+                deserializer
+                    .deserialize_any(visitor)
+                    .map_err(|e| TuliproxError::RepositoryXtream(format!("JSON parse error: {e}")))?;
             }
             XtreamCluster::Video => {
                 let mut on_stream = |stream: VideoStreamProperties| {
                     let ordinal = cat_source_ordinal(stream.category_id);
                     let stream_prop = StreamProperties::Video(Box::new(stream));
-                    process_stream_item(&input_name, &url, &username, &password,
-                                        xtream_cluster, &group_map, &unknown_group_name,
-                                        stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, ordinal)
+                    process_stream_item(
+                        &input_name,
+                        &url,
+                        &username,
+                        &password,
+                        xtream_cluster,
+                        &group_map,
+                        &unknown_group_name,
+                        stream_prop,
+                        &mut on_item,
+                        live_stream_use_prefix,
+                        live_stream_without_extension,
+                        ordinal,
+                    )
                 };
                 let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
-                deserializer.deserialize_any(visitor).map_err(|e| TuliproxError::RepositoryXtream(format!("JSON parse error: {e}")))?;
+                deserializer
+                    .deserialize_any(visitor)
+                    .map_err(|e| TuliproxError::RepositoryXtream(format!("JSON parse error: {e}")))?;
             }
             XtreamCluster::Series => {
                 let mut on_stream = |stream: SeriesStreamProperties| {
                     let ordinal = cat_source_ordinal(stream.category_id);
                     let stream_prop = StreamProperties::Series(Box::new(stream));
-                    process_stream_item(&input_name, &url, &username, &password,
-                                        xtream_cluster, &group_map, &unknown_group_name,
-                                        stream_prop, &mut on_item, live_stream_use_prefix, live_stream_without_extension, ordinal)
+                    process_stream_item(
+                        &input_name,
+                        &url,
+                        &username,
+                        &password,
+                        xtream_cluster,
+                        &group_map,
+                        &unknown_group_name,
+                        stream_prop,
+                        &mut on_item,
+                        live_stream_use_prefix,
+                        live_stream_without_extension,
+                        ordinal,
+                    )
                 };
                 let visitor = XtreamItemVisitor { on_item: &mut on_stream, _marker: std::marker::PhantomData };
-                deserializer.deserialize_any(visitor).map_err(|e| TuliproxError::RepositoryXtream(format!("JSON parse error: {e}")))?;
+                deserializer
+                    .deserialize_any(visitor)
+                    .map_err(|e| TuliproxError::RepositoryXtream(format!("JSON parse error: {e}")))?;
             }
         }
         Ok(())
-    }).await.map_err(|e| TuliproxError::RepositoryXtream(format!("Streaming parse failed: {e}")))??;
+    })
+    .await
+    .map_err(|e| TuliproxError::RepositoryXtream(format!("Streaming parse failed: {e}")))??;
 
     Ok(xtream_categories)
 }
@@ -355,7 +462,9 @@ where
 #[allow(clippy::too_many_arguments)]
 fn process_stream_item<F>(
     input_name: &Arc<str>,
-    url: &str, username: &str, password: &str,
+    url: &str,
+    username: &str,
+    password: &str,
     cluster: XtreamCluster,
     group_map: &IndexMap<u32, Arc<str>>,
     unknown_group_name: &Arc<str>,
@@ -371,7 +480,15 @@ where
     stream.prepare();
     let category_id = stream.get_category_id();
     let category_name = group_map.get(&category_id).unwrap_or(unknown_group_name);
-    let stream_url = create_xtream_url(cluster, url, username, password, &stream, live_stream_use_prefix, live_stream_without_extension);
+    let stream_url = create_xtream_url(
+        cluster,
+        url,
+        username,
+        password,
+        &stream,
+        live_stream_use_prefix,
+        live_stream_without_extension,
+    );
 
     let item_type = PlaylistItemType::from(cluster);
     let mut item = PlaylistItem {
@@ -435,7 +552,8 @@ where
     where
         A: serde::de::MapAccess<'de>,
     {
-        let val: serde_json::Value = serde::de::Deserialize::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+        let val: serde_json::Value =
+            serde::de::Deserialize::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
         if let Some(msg) = val.get("message").and_then(|m| m.as_str()) {
             return Err(serde::de::Error::custom(format!("Xtream API error: {msg}")));
         }
@@ -445,20 +563,23 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::CAT_BUCKET;
-    use super::{parse_xtream, parse_xtream_series_info, parse_xtream_streaming};
-    use super::map_to_xtream_streams;
-    use crate::model::ConfigInput;
-    use crate::utils::{async_file_reader, request::DynReader};
-    use shared::model::{
-        UUIDType,
-        SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamProperties,
-        XtreamCluster, XtreamPlaylistItem, XtreamSeriesInfo,
+    use super::{map_to_xtream_streams, parse_xtream, parse_xtream_series_info, parse_xtream_streaming, CAT_BUCKET};
+    use shared::{
+        model::{
+            SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, SeriesStreamProperties, UUIDType,
+            XtreamCluster, XtreamPlaylistItem, XtreamSeriesInfo,
+        },
+        utils::Internable,
     };
-    use shared::utils::Internable;
-    use std::fs;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        fs,
+        sync::{Arc, Mutex},
+    };
     use tokio::io::AsyncWriteExt;
+    use tuliprox_core::{
+        model::ConfigInput,
+        utils::{async_file_reader, request::DynReader},
+    };
 
     fn make_reader(content: &str) -> DynReader {
         let (mut writer, reader) = tokio::io::duplex(4096);
@@ -483,9 +604,8 @@ mod tests {
     #[tokio::test]
     async fn xtream_live_stream_preserves_epg_channel_id_for_common_epg_matching() {
         let categories = make_reader(r#"[{"category_id":"1","category_name":"Sports"}]"#);
-        let streams = make_reader(
-            r#"[{"name":"Formula 1","stream_id":"100","category_id":"1","epg_channel_id":"f1.calendar"}]"#,
-        );
+        let streams =
+            make_reader(r#"[{"name":"Formula 1","stream_id":"100","category_id":"1","epg_channel_id":"f1.calendar"}]"#);
 
         let groups = parse_xtream(&test_input(), XtreamCluster::Live, categories, streams)
             .await
@@ -599,11 +719,7 @@ mod tests {
         .unwrap();
 
         let series_props = SeriesStreamProperties {
-            details: Some(SeriesStreamDetailProperties {
-                year: None,
-                seasons: None,
-                episodes: Some(vec![episode]),
-            }),
+            details: Some(SeriesStreamDetailProperties { year: None, seasons: None, episodes: Some(vec![episode]) }),
             ..SeriesStreamProperties::default()
         };
         let parent_uuid = UUIDType::from_valid_uuid("parent_uuid");
@@ -681,15 +797,10 @@ mod tests {
             ]
         "#;
 
-        let groups = parse_xtream(
-            &test_input(),
-            XtreamCluster::Live,
-            make_reader(categories),
-            make_reader(streams),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let groups = parse_xtream(&test_input(), XtreamCluster::Live, make_reader(categories), make_reader(streams))
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].title.as_ref(), "Known");
@@ -698,11 +809,7 @@ mod tests {
         assert_eq!(groups[0].channels[0].header.source_ordinal, 1);
 
         assert_eq!(groups[1].title.as_ref(), "Unknown");
-        let unknown_names: Vec<&str> = groups[1]
-            .channels
-            .iter()
-            .map(|item| item.header.name.as_ref())
-            .collect();
+        let unknown_names: Vec<&str> = groups[1].channels.iter().map(|item| item.header.name.as_ref()).collect();
         assert_eq!(unknown_names, vec!["unknown-999", "unknown-888"]);
         assert_eq!(groups[1].channels[0].header.source_ordinal, 2);
         assert_eq!(groups[1].channels[1].header.source_ordinal, 3);
@@ -722,15 +829,10 @@ mod tests {
             ]
         "#;
 
-        let groups = parse_xtream(
-            &test_input(),
-            XtreamCluster::Live,
-            make_reader(categories),
-            make_reader(streams),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let groups = parse_xtream(&test_input(), XtreamCluster::Live, make_reader(categories), make_reader(streams))
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].id, 0);

@@ -51,6 +51,7 @@ use tuliprox_library::{library, media_enrichment};
 use tuliprox_media_server as media_server;
 use tuliprox_messaging as messaging;
 use tuliprox_mpegts as mpegts;
+use tuliprox_parser as parser;
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Parser)]

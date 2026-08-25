@@ -19,12 +19,7 @@ const M3U_CATCHUP_PARAM_UTC: &str = "utc";
 const M3U_CATCHUP_PARAM_LUTC: &str = "lutc";
 const XC_START_TEMPLATE: &str = "{Y}-{m}-{d}:{H}-{M}-{S}";
 const FLUSSONIC_UTC_SENTINEL: &str = "__TULIPROX_M3U_CATCHUP_UTC__";
-const XTREAM_BRIDGE_START_FORMATS: [&str; 4] = [
-    "%Y-%m-%d %H:%M",
-    "%Y-%m-%d:%H-%M",
-    "%Y-%m-%d:%H:%M",
-    "%Y-%m-%d-%H-%M",
-];
+const XTREAM_BRIDGE_START_FORMATS: [&str; 4] = ["%Y-%m-%d %H:%M", "%Y-%m-%d:%H-%M", "%Y-%m-%d:%H:%M", "%Y-%m-%d-%H-%M"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct M3uCatchupRewrite {
@@ -53,9 +48,7 @@ fn mode_alias(mode: &str) -> &str {
         "shift"
     } else if mode.eq_ignore_ascii_case("xc") {
         "xc"
-    } else if ["fs", "flussonic", "flussonic-hls", "flussonic-ts"]
-        .iter()
-        .any(|alias| mode.eq_ignore_ascii_case(alias))
+    } else if ["fs", "flussonic", "flussonic-hls", "flussonic-ts"].iter().any(|alias| mode.eq_ignore_ascii_case(alias))
     {
         "fs"
     } else if mode.eq_ignore_ascii_case("vod") {
@@ -132,13 +125,7 @@ fn collect_placeholders(segments: &[TemplateSegment]) -> Vec<&str> {
         .collect()
 }
 
-fn build_local_source(
-    base_url: &str,
-    path: &str,
-    token: &str,
-    placeholders: &[&str],
-    append_mode: bool,
-) -> String {
+fn build_local_source(base_url: &str, path: &str, token: &str, placeholders: &[&str], append_mode: bool) -> String {
     let mut source = if append_mode {
         format!("?{M3U_CATCHUP_MARKER}={token}")
     } else {
@@ -181,9 +168,7 @@ fn append_mode_default_template(source_url: &str) -> String {
 
 fn derive_xc_template(source_url: &str) -> Option<String> {
     let parsed = Url::parse(source_url).ok()?;
-    let mut segments = parsed
-        .path_segments()
-        .map(|it| it.map(ToString::to_string).collect::<Vec<_>>())?;
+    let mut segments = parsed.path_segments().map(|it| it.map(ToString::to_string).collect::<Vec<_>>())?;
     if segments.len() < 3 {
         return None;
     }
@@ -209,14 +194,9 @@ fn derive_xc_template(source_url: &str) -> Option<String> {
 
 fn derive_flussonic_template(source_url: &str) -> Option<String> {
     let mut parsed = Url::parse(source_url).ok()?;
-    let mut segments = parsed
-        .path_segments()
-        .map(|it| it.map(ToString::to_string).collect::<Vec<_>>())?;
+    let mut segments = parsed.path_segments().map(|it| it.map(ToString::to_string).collect::<Vec<_>>())?;
     let file_name = segments.pop()?;
-    segments.push(format!(
-        "timeshift_abs-{FLUSSONIC_UTC_SENTINEL}{}",
-        extract_suffix_from_filename(&file_name)
-    ));
+    segments.push(format!("timeshift_abs-{FLUSSONIC_UTC_SENTINEL}{}", extract_suffix_from_filename(&file_name)));
     parsed.set_path(&format!("/{}", segments.join("/")));
     Some(String::from(parsed).replace(FLUSSONIC_UTC_SENTINEL, "{utc}"))
 }
@@ -234,10 +214,7 @@ fn append_query_template(source_url: &str, source_template: &str) -> Option<Stri
 }
 
 fn extract_suffix_from_filename(file_name: &str) -> &str {
-    file_name
-        .char_indices()
-        .find_map(|(idx, ch)| (ch == '.').then_some(&file_name[idx..]))
-        .unwrap_or_default()
+    file_name.char_indices().find_map(|(idx, ch)| (ch == '.').then_some(&file_name[idx..])).unwrap_or_default()
 }
 
 fn is_append_like_query_source(mode: &str, source: &str) -> bool {
@@ -261,18 +238,11 @@ fn archive_discriminator_from_resolved_url(url: &str) -> Option<String> {
         } else if key.eq_ignore_ascii_case("lutc") {
             end_ts = value.parse::<i64>().ok().or(end_ts);
         } else if key.eq_ignore_ascii_case("offset") || key.eq_ignore_ascii_case("duration") {
-            duration_secs = value
-                .parse::<i64>()
-                .ok()
-                .and_then(i64::checked_abs)
-                .or(duration_secs);
+            duration_secs = value.parse::<i64>().ok().and_then(i64::checked_abs).or(duration_secs);
         }
     }
     let start = start_ts?;
-    let duration = end_ts
-        .map(|end| end.saturating_sub(start).max(0))
-        .or(duration_secs)
-        .unwrap_or(0);
+    let duration = end_ts.map(|end| end.saturating_sub(start).max(0)).or(duration_secs).unwrap_or(0);
     Some(format!("archive|{start}|{duration}"))
 }
 
@@ -324,9 +294,7 @@ fn resolve_collectors(raw_query: Option<&str>, placeholders: &[&str]) -> Vec<(us
     // `v0`/`v1` collectors, falling back only where the named pass did not
     // already fill the slot (so callers can mix both styles in one query).
     for (key, value) in &params {
-        let Some(idx) = key
-            .strip_prefix(COLLECTOR_PREFIX)
-            .and_then(|suffix| suffix.parse::<usize>().ok()) else {
+        let Some(idx) = key.strip_prefix(COLLECTOR_PREFIX).and_then(|suffix| suffix.parse::<usize>().ok()) else {
             continue;
         };
         if let Some(collector) = collectors.get_mut(idx).filter(|collector| collector.is_none()) {
@@ -343,10 +311,7 @@ fn query_key_matches_placeholder(key: &str, placeholder: &str) -> bool {
     if key.eq_ignore_ascii_case(placeholder) {
         return true;
     }
-    if ["timestamp", "utcstart", "utc"]
-        .iter()
-        .any(|name| placeholder.eq_ignore_ascii_case(name))
-    {
+    if ["timestamp", "utcstart", "utc"].iter().any(|name| placeholder.eq_ignore_ascii_case(name)) {
         return key.eq_ignore_ascii_case("timestamp")
             || key.eq_ignore_ascii_case("utcstart")
             || key.eq_ignore_ascii_case(M3U_CATCHUP_PARAM_UTC);
@@ -359,10 +324,8 @@ fn fill_collectors_from_utc_lutc(
     placeholders: &[&str],
     params: &[(String, String)],
 ) {
-    let utc = params
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(M3U_CATCHUP_PARAM_UTC))
-        .map(|(_, value)| value.as_str());
+    let utc =
+        params.iter().find(|(key, _)| key.eq_ignore_ascii_case(M3U_CATCHUP_PARAM_UTC)).map(|(_, value)| value.as_str());
     let duration = utc
         .and_then(|start| start.parse::<i64>().ok())
         .zip(
@@ -391,11 +354,7 @@ fn fill_collectors_from_utc_lutc(
 }
 
 fn into_collectors(collectors: Vec<Option<String>>) -> Vec<(usize, String)> {
-    collectors
-        .into_iter()
-        .enumerate()
-        .filter_map(|(idx, val)| val.map(|v| (idx, v)))
-        .collect()
+    collectors.into_iter().enumerate().filter_map(|(idx, val)| val.map(|v| (idx, v))).collect()
 }
 
 fn placeholder_name(placeholder: &str) -> &str {
@@ -418,9 +377,8 @@ fn render_template(segments: &[TemplateSegment], collectors: &[(usize, String)])
                 if *actual_idx != collector_idx {
                     return Err(TuliproxError::Crypto("Catchup collector sequence is sparse".to_string()));
                 }
-                let strips_sign = ["offset", "duration"]
-                    .iter()
-                    .any(|name| placeholder_name(placeholder).eq_ignore_ascii_case(name));
+                let strips_sign =
+                    ["offset", "duration"].iter().any(|name| placeholder_name(placeholder).eq_ignore_ascii_case(name));
                 let value = if strips_sign && output.ends_with('-') {
                     value.strip_prefix('-').unwrap_or(value)
                 } else if strips_sign && output.ends_with('+') {
@@ -456,14 +414,8 @@ pub fn build_m3u_catchup_rewrite(
     let Some(template) = derived_template_for_mode(source_url, catchup) else {
         return Ok(None);
     };
-    let token = encode_m3u_catchup_token(
-        secret,
-        &M3uCatchupToken {
-            username: username.to_string(),
-            target_id,
-            virtual_id,
-        },
-    )?;
+    let token =
+        encode_m3u_catchup_token(secret, &M3uCatchupToken { username: username.to_string(), target_id, virtual_id })?;
     let segments = parse_template(template.as_ref());
     let placeholders = collect_placeholders(&segments);
     let append_mode = catchup
@@ -497,10 +449,7 @@ pub fn is_xtream_m3u_catchup_supported(source_url: &str, catchup: &CatchupProper
     xtream_m3u_catchup_segments(source_url, catchup).is_some()
 }
 
-fn xtream_m3u_catchup_segments(
-    source_url: &str,
-    catchup: &CatchupProperties,
-) -> Option<Vec<TemplateSegment>> {
+fn xtream_m3u_catchup_segments(source_url: &str, catchup: &CatchupProperties) -> Option<Vec<TemplateSegment>> {
     let template = derived_template_for_mode(source_url, catchup)?;
     let segments = parse_template(template.as_ref());
     let mut has_placeholder = false;
@@ -517,18 +466,16 @@ fn xtream_m3u_catchup_segments(
 
 fn parse_xtream_bridge_start(start: &str) -> Result<i64, TuliproxError> {
     if let Ok(ts) = start.parse::<i64>() {
-        return DateTime::from_timestamp(ts, 0).map(|_| ts).ok_or_else(|| {
-            TuliproxError::RepositoryM3u(format!("Invalid Xtream start timestamp: {start}"))
-        });
+        return DateTime::from_timestamp(ts, 0)
+            .map(|_| ts)
+            .ok_or_else(|| TuliproxError::RepositoryM3u(format!("Invalid Xtream start timestamp: {start}")));
     }
     for fmt in XTREAM_BRIDGE_START_FORMATS {
         if let Ok(dt) = NaiveDateTime::parse_from_str(start, fmt) {
             return Ok(dt.and_utc().timestamp());
         }
     }
-    Err(TuliproxError::RepositoryM3u(format!(
-        "Unsupported Xtream start time format: {start}"
-    )))
+    Err(TuliproxError::RepositoryM3u(format!("Unsupported Xtream start time format: {start}")))
 }
 
 pub fn resolve_xtream_m3u_catchup_url(
@@ -538,17 +485,15 @@ pub fn resolve_xtream_m3u_catchup_url(
     duration_minutes: &str,
 ) -> Result<ResolvedM3uCatchup, TuliproxError> {
     let segments = xtream_m3u_catchup_segments(source_url, catchup).ok_or_else(|| {
-        TuliproxError::RepositoryM3u(
-            "M3U catch-up template is not supported by the Xtream bridge".to_string(),
-        )
+        TuliproxError::RepositoryM3u("M3U catch-up template is not supported by the Xtream bridge".to_string())
     })?;
     let utc_start = parse_xtream_bridge_start(start)?;
-    let minutes: u64 = duration_minutes.parse().map_err(|_| {
-        TuliproxError::RepositoryM3u(format!("Invalid Xtream duration minutes: {duration_minutes}"))
-    })?;
-    let duration_secs = minutes.checked_mul(60).ok_or_else(|| {
-        TuliproxError::RepositoryM3u("Xtream duration minutes overflow seconds".to_string())
-    })?;
+    let minutes: u64 = duration_minutes
+        .parse()
+        .map_err(|_| TuliproxError::RepositoryM3u(format!("Invalid Xtream duration minutes: {duration_minutes}")))?;
+    let duration_secs = minutes
+        .checked_mul(60)
+        .ok_or_else(|| TuliproxError::RepositoryM3u("Xtream duration minutes overflow seconds".to_string()))?;
 
     let collectors: Vec<(usize, String)> = segments
         .iter()
@@ -558,11 +503,7 @@ pub fn resolve_xtream_m3u_catchup_url(
         })
         .enumerate()
         .map(|(idx, p)| {
-            let value = if p == "{utc}" {
-                utc_start.to_string()
-            } else {
-                duration_secs.to_string()
-            };
+            let value = if p == "{utc}" { utc_start.to_string() } else { duration_secs.to_string() };
             (idx, value)
         })
         .collect();
@@ -609,9 +550,8 @@ pub fn resolve_m3u_catchup_url(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_m3u_catchup_rewrite, has_m3u_catchup_marker, is_xtream_m3u_catchup_supported,
-        parse_template, render_template, resolve_m3u_catchup_url, resolve_xtream_m3u_catchup_url,
-        M3U_CATCHUP_MARKER,
+        build_m3u_catchup_rewrite, has_m3u_catchup_marker, is_xtream_m3u_catchup_supported, parse_template,
+        render_template, resolve_m3u_catchup_url, resolve_xtream_m3u_catchup_url, M3U_CATCHUP_MARKER,
     };
     use shared::{error::TuliproxError, model::CatchupProperties, utils::Internable};
 
@@ -648,10 +588,7 @@ mod tests {
             7,
             42,
             "http://provider.example/live/42.ts",
-            &CatchupProperties {
-                mode: Some("shift".intern()),
-                ..CatchupProperties::default()
-            },
+            &CatchupProperties { mode: Some("shift".intern()), ..CatchupProperties::default() },
         )
         .unwrap()
         .unwrap();
@@ -676,10 +613,7 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/live/42.m3u8?offset=-120&utcstart=1717200000"
-        );
+        assert_eq!(resolved.url, "http://provider.example/live/42.m3u8?offset=-120&utcstart=1717200000");
         assert_eq!(resolved.discriminator, "archive|1717200000|120");
     }
 
@@ -726,10 +660,7 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/live/42.m3u8?token=abc&offset=-120&utcstart=1717200000"
-        );
+        assert_eq!(resolved.url, "http://provider.example/live/42.m3u8?token=abc&offset=-120&utcstart=1717200000");
     }
 
     #[test]
@@ -746,10 +677,7 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/live/42.ts?playseek=1717200000&duration=120"
-        );
+        assert_eq!(resolved.url, "http://provider.example/live/42.ts?playseek=1717200000&duration=120");
     }
 
     #[test]
@@ -780,39 +708,27 @@ mod tests {
     fn resolve_shift_template_roundtrips_collectors() {
         let resolved = resolve_m3u_catchup_url(
             "http://provider.example/live/42.ts",
-            &CatchupProperties {
-                mode: Some("shift".intern()),
-                ..CatchupProperties::default()
-            },
+            &CatchupProperties { mode: Some("shift".intern()), ..CatchupProperties::default() },
             Some("v0=20240101120000&v1=20240101130000"),
         )
         .unwrap()
         .unwrap();
 
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/live/42.ts?utc=20240101120000&lutc=20240101130000"
-        );
+        assert_eq!(resolved.url, "http://provider.example/live/42.ts?utc=20240101120000&lutc=20240101130000");
     }
 
     #[test]
     fn discriminator_changes_when_collectors_change() {
         let first = resolve_m3u_catchup_url(
             "http://provider.example/live/42.ts",
-            &CatchupProperties {
-                mode: Some("shift".intern()),
-                ..CatchupProperties::default()
-            },
+            &CatchupProperties { mode: Some("shift".intern()), ..CatchupProperties::default() },
             Some("v0=20240101120000&v1=20240101130000"),
         )
         .unwrap()
         .unwrap();
         let second = resolve_m3u_catchup_url(
             "http://provider.example/live/42.ts",
-            &CatchupProperties {
-                mode: Some("shift".intern()),
-                ..CatchupProperties::default()
-            },
+            &CatchupProperties { mode: Some("shift".intern()), ..CatchupProperties::default() },
             Some("v0=20240101140000&v1=20240101150000"),
         )
         .unwrap()
@@ -917,37 +833,25 @@ mod tests {
         // `utc`/`lutc`. The server must still resolve the upstream URL.
         let resolved = resolve_m3u_catchup_url(
             "http://provider.example/live/42.ts",
-            &CatchupProperties {
-                mode: Some("shift".intern()),
-                ..CatchupProperties::default()
-            },
+            &CatchupProperties { mode: Some("shift".intern()), ..CatchupProperties::default() },
             Some("utc=20240101120000&lutc=20240101130000"),
         )
         .unwrap()
         .unwrap();
 
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/live/42.ts?utc=20240101120000&lutc=20240101130000"
-        );
+        assert_eq!(resolved.url, "http://provider.example/live/42.ts?utc=20240101120000&lutc=20240101130000");
     }
 
     #[test]
     fn resolve_flussonic_hls_template_replaces_utc() -> Result<(), TuliproxError> {
         let resolved = resolve_m3u_catchup_url(
             "http://provider.example/channel/mono.m3u8?token=abc",
-            &CatchupProperties {
-                mode: Some("fs".intern()),
-                ..CatchupProperties::default()
-            },
+            &CatchupProperties { mode: Some("fs".intern()), ..CatchupProperties::default() },
             Some("utc=1784885700&lutc=1784899708"),
         )?
         .ok_or_else(|| TuliproxError::RepositoryM3u("HLS Flussonic URL was not resolved".to_string()))?;
 
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/channel/timeshift_abs-1784885700.m3u8?token=abc"
-        );
+        assert_eq!(resolved.url, "http://provider.example/channel/timeshift_abs-1784885700.m3u8?token=abc");
         assert!(!resolved.url.contains("%7B"));
         Ok(())
     }
@@ -956,18 +860,12 @@ mod tests {
     fn resolve_flussonic_ts_template_replaces_utc() -> Result<(), TuliproxError> {
         let resolved = resolve_m3u_catchup_url(
             "http://provider.example/channel/channel.ts?token=abc",
-            &CatchupProperties {
-                mode: Some("fs".intern()),
-                ..CatchupProperties::default()
-            },
+            &CatchupProperties { mode: Some("fs".intern()), ..CatchupProperties::default() },
             Some("utc=1784885700&lutc=1784899708"),
         )?
         .ok_or_else(|| TuliproxError::RepositoryM3u("TS Flussonic URL was not resolved".to_string()))?;
 
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/channel/timeshift_abs-1784885700.ts?token=abc"
-        );
+        assert_eq!(resolved.url, "http://provider.example/channel/timeshift_abs-1784885700.ts?token=abc");
         assert!(!resolved.url.contains("%7B"));
         Ok(())
     }
@@ -977,18 +875,12 @@ mod tests {
         for mode in ["fs", "FLUSSONIC", "Flussonic-Hls", "flussonic-TS"] {
             let resolved = resolve_m3u_catchup_url(
                 "http://provider.example/channel/mono.m3u8",
-                &CatchupProperties {
-                    mode: Some(mode.intern()),
-                    ..CatchupProperties::default()
-                },
+                &CatchupProperties { mode: Some(mode.intern()), ..CatchupProperties::default() },
                 Some("utc=1784885700"),
             )?
             .ok_or_else(|| TuliproxError::RepositoryM3u(format!("mode {mode} was not resolved")))?;
 
-            assert_eq!(
-                resolved.url,
-                "http://provider.example/channel/timeshift_abs-1784885700.m3u8"
-            );
+            assert_eq!(resolved.url, "http://provider.example/channel/timeshift_abs-1784885700.m3u8");
         }
         Ok(())
     }
@@ -997,18 +889,12 @@ mod tests {
     fn catchup_type_flussonic_is_used_when_mode_is_missing() -> Result<(), TuliproxError> {
         let resolved = resolve_m3u_catchup_url(
             "http://provider.example/channel/channel.ts",
-            &CatchupProperties {
-                catchup_type: Some("flussonic".intern()),
-                ..CatchupProperties::default()
-            },
+            &CatchupProperties { catchup_type: Some("flussonic".intern()), ..CatchupProperties::default() },
             Some("utc=1784885700"),
         )?
         .ok_or_else(|| TuliproxError::RepositoryM3u("catchup-type was not resolved".to_string()))?;
 
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/channel/timeshift_abs-1784885700.ts"
-        );
+        assert_eq!(resolved.url, "http://provider.example/channel/timeshift_abs-1784885700.ts");
         Ok(())
     }
 
@@ -1048,10 +934,7 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/live/42.m3u8?offset=-120&utcstart=1717200000"
-        );
+        assert_eq!(resolved.url, "http://provider.example/live/42.m3u8?offset=-120&utcstart=1717200000");
     }
 
     #[test]
@@ -1060,19 +943,13 @@ mod tests {
         // placeholders without overlap.
         let resolved = resolve_m3u_catchup_url(
             "http://provider.example/live/42.ts",
-            &CatchupProperties {
-                mode: Some("shift".intern()),
-                ..CatchupProperties::default()
-            },
+            &CatchupProperties { mode: Some("shift".intern()), ..CatchupProperties::default() },
             Some("utc=20240101120000&v1=20240101130000"),
         )
         .unwrap()
         .unwrap();
 
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/live/42.ts?utc=20240101120000&lutc=20240101130000"
-        );
+        assert_eq!(resolved.url, "http://provider.example/live/42.ts?utc=20240101120000&lutc=20240101130000");
     }
 
     #[test]
@@ -1089,10 +966,7 @@ mod tests {
             "60",
         )
         .expect("valid Flussonic template");
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/channel/video-1704067200-3600.m3u8"
-        );
+        assert_eq!(resolved.url, "http://provider.example/channel/video-1704067200-3600.m3u8");
         assert!(!resolved.discriminator.is_empty());
     }
 
@@ -1103,10 +977,7 @@ mod tests {
             source: Some("http://provider.example/channel/${timestamp}.m3u8".intern()),
             ..CatchupProperties::default()
         };
-        assert!(!is_xtream_m3u_catchup_supported(
-            "http://provider.example/channel/index.m3u8",
-            &catchup
-        ));
+        assert!(!is_xtream_m3u_catchup_supported("http://provider.example/channel/index.m3u8", &catchup));
         let err = resolve_xtream_m3u_catchup_url(
             "http://provider.example/channel/index.m3u8",
             &catchup,
@@ -1158,16 +1029,9 @@ mod tests {
             source: Some("http://provider.example/channel/video-{utc}-{duration}.m3u8".intern()),
             ..CatchupProperties::default()
         };
-        let resolved = resolve_xtream_m3u_catchup_url(
-            "http://provider.example/channel/index.m3u8",
-            &catchup,
-            "1704067200",
-            "60",
-        )
-        .expect("unix seconds start");
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/channel/video-1704067200-3600.m3u8"
-        );
+        let resolved =
+            resolve_xtream_m3u_catchup_url("http://provider.example/channel/index.m3u8", &catchup, "1704067200", "60")
+                .expect("unix seconds start");
+        assert_eq!(resolved.url, "http://provider.example/channel/video-1704067200-3600.m3u8");
     }
 }

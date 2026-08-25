@@ -1,7 +1,4 @@
-use crate::{
-    model::IcsEpgSourceConfig,
-    parser::ics::time::{display_from_timestamp_in_timezone, parse_ics_datetime, parse_ics_duration},
-};
+use crate::ics::time::{display_from_timestamp_in_timezone, parse_ics_datetime, parse_ics_duration};
 use chrono_tz::Tz;
 use log::warn;
 use shared::{
@@ -9,6 +6,7 @@ use shared::{
     error::TuliproxError,
 };
 use std::collections::HashMap;
+use tuliprox_core::model::IcsEpgSourceConfig;
 
 #[derive(Debug, Clone, Default)]
 pub struct IcsEvent {
@@ -41,6 +39,10 @@ enum CalendarState {
     After,
 }
 
+// Unchanged by the move to this crate; it crossed the 100-line threshold
+// only because rustfmt reflowed one call across several lines here.
+// Shortening it is a real refactor and does not belong in an extraction.
+#[allow(clippy::too_many_lines)]
 pub fn parse_ics_events(content: &str, config: &IcsEpgSourceConfig) -> Result<Vec<IcsEvent>, TuliproxError> {
     let lines = unfold_ics_lines(content)?;
     let mut events = Vec::new();
@@ -145,7 +147,13 @@ pub fn parse_ics_events(content: &str, config: &IcsEpgSourceConfig) -> Result<Ve
     }
 
     validate_complete_calendar(calendar_state)?;
-    log_parse_summary(invalid_events, unsupported_recurrence_events, examined_events, event_limit_reached, config.max_events);
+    log_parse_summary(
+        invalid_events,
+        unsupported_recurrence_events,
+        examined_events,
+        event_limit_reached,
+        config.max_events,
+    );
 
     Ok(events)
 }
@@ -404,8 +412,8 @@ fn push_ics_text_list_value(values: &mut Vec<String>, raw: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::IcsEpgSourceConfig;
     use std::fmt::Write;
+    use tuliprox_core::model::IcsEpgSourceConfig;
 
     fn config() -> IcsEpgSourceConfig { IcsEpgSourceConfig::default() }
 

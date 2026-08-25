@@ -57,8 +57,7 @@ fn split_media_suffix(value: &str) -> (&str, &'static str) {
 }
 
 fn is_valid_start_duration(start: &str, duration: &str) -> bool {
-    start.parse::<u64>().is_ok()
-        && (duration.eq_ignore_ascii_case("now") || duration.parse::<u64>().is_ok())
+    start.parse::<u64>().is_ok() && (duration.eq_ignore_ascii_case("now") || duration.parse::<u64>().is_ok())
 }
 
 fn split_start_duration(value: &str) -> Option<(&str, &str)> {
@@ -70,8 +69,7 @@ fn split_start_duration(value: &str) -> Option<(&str, &str)> {
 }
 
 pub fn parse_flat_flussonic_archive(file: &str) -> Option<(u32, FlussonicArchiveKind)> {
-    if file.contains('/')
-        || !std::path::Path::new(file).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("m3u8"))
+    if file.contains('/') || !std::path::Path::new(file).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("m3u8"))
     {
         return None;
     }
@@ -85,11 +83,7 @@ pub fn parse_flat_flussonic_archive(file: &str) -> Option<(u32, FlussonicArchive
     }
     Some((
         virtual_id,
-        FlussonicArchiveKind::Archive {
-            start: start.to_string(),
-            duration: duration.to_string(),
-            extension: ".m3u8",
-        },
+        FlussonicArchiveKind::Archive { start: start.to_string(), duration: duration.to_string(), extension: ".m3u8" },
     ))
 }
 
@@ -147,10 +141,7 @@ fn provider_playlist_stem(provider_url: &str) -> Option<&'static str> {
     }
 }
 
-pub fn build_provider_flussonic_archive_url(
-    provider_url: &str,
-    archive: &FlussonicArchiveKind,
-) -> Option<String> {
+pub fn build_provider_flussonic_archive_url(provider_url: &str, archive: &FlussonicArchiveKind) -> Option<String> {
     let new_file = match archive {
         FlussonicArchiveKind::Archive { start, duration, extension } => {
             format!("{}-{start}-{duration}{extension}", provider_playlist_stem(provider_url).unwrap_or("archive"))
@@ -182,8 +173,8 @@ mod tests {
 
     #[test]
     fn parses_flat_tivimate_hls_archive() -> Result<(), &'static str> {
-        let (virtual_id, archive) = parse_flat_flussonic_archive("59-1784898000-3600.m3u8")
-            .ok_or("flat archive path was not parsed")?;
+        let (virtual_id, archive) =
+            parse_flat_flussonic_archive("59-1784898000-3600.m3u8").ok_or("flat archive path was not parsed")?;
         assert_eq!(virtual_id, 59);
         assert_eq!(
             archive,
@@ -226,26 +217,21 @@ mod tests {
             "video-1784898000-3600.m3u8",
             "mono-1784898000-now.m3u8",
         ] {
-            assert!(matches!(
-                parse_flussonic_archive_file(file),
-                Some(FlussonicArchiveKind::Archive { .. })
-            ));
+            assert!(matches!(parse_flussonic_archive_file(file), Some(FlussonicArchiveKind::Archive { .. })));
         }
         assert_eq!(
             parse_flussonic_archive_file("timeshift_abs-1784898000.ts"),
-            Some(FlussonicArchiveKind::TimeshiftAbs {
-                start: "1784898000".to_string(),
-                extension: ".ts",
-            })
+            Some(FlussonicArchiveKind::TimeshiftAbs { start: "1784898000".to_string(), extension: ".ts" })
         );
 
         for file in ["archive-1784898000-3600.ts", "timeshift_rel-120.ts"] {
             let archive = parse_flussonic_archive_file(file).expect("TS archive path should parse");
             let url = build_provider_flussonic_archive_url("http://cdn.example/ch/index.ts", &archive)
                 .expect("TS provider archive URL should build");
-            assert!(std::path::Path::new(&url)
-                 .extension()
-                 .is_some_and(|ext| ext.eq_ignore_ascii_case("ts")), "requested TS extension was not preserved: {url}");
+            assert!(
+                std::path::Path::new(&url).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("ts")),
+                "requested TS extension was not preserved: {url}"
+            );
         }
     }
 
@@ -288,10 +274,7 @@ mod tests {
 
         let ts = build_provider_flussonic_archive_url(
             "http://cdn.example/ch/channel.ts?token=abc",
-            &FlussonicArchiveKind::TimeshiftAbs {
-                start: "1784898000".to_string(),
-                extension: ".ts",
-            },
+            &FlussonicArchiveKind::TimeshiftAbs { start: "1784898000".to_string(), extension: ".ts" },
         )
         .ok_or("TS provider archive URL was not built")?;
         assert_eq!(ts, "http://cdn.example/ch/timeshift_abs-1784898000.ts?token=abc");

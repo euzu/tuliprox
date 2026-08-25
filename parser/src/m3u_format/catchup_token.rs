@@ -1,5 +1,5 @@
-use crate::utils::{deobscure_authenticated_bytes, obscure_authenticated_bytes};
 use shared::error::TuliproxError;
+use tuliprox_core::utils::{deobscure_authenticated_bytes, obscure_authenticated_bytes};
 
 const TOKEN_DOMAIN: &[u8] = b"m3u-catchup";
 
@@ -58,17 +58,15 @@ pub fn decode_m3u_catchup_token(secret: &[u8; 16], encoded: &str) -> Result<M3uC
 #[cfg(test)]
 mod tests {
     use super::{decode_m3u_catchup_token, encode_m3u_catchup_token, M3uCatchupToken};
-    use crate::utils::{decode_provider_resolve_token, encode_provider_resolve_playlist_item_token, ProviderResolvePlaylistItemToken};
     use shared::model::XtreamCluster;
+    use tuliprox_core::utils::{
+        decode_provider_resolve_token, encode_provider_resolve_playlist_item_token, ProviderResolvePlaylistItemToken,
+    };
 
     #[test]
     fn m3u_catchup_token_roundtrip_is_compact() {
         let secret = [9u8; 16];
-        let payload = M3uCatchupToken {
-            username: "alice".to_string(),
-            target_id: 42,
-            virtual_id: 81_356,
-        };
+        let payload = M3uCatchupToken { username: "alice".to_string(), target_id: 42, virtual_id: 81_356 };
 
         let encoded = encode_m3u_catchup_token(&secret, &payload).unwrap();
         let decoded = decode_m3u_catchup_token(&secret, &encoded).unwrap();
@@ -81,11 +79,7 @@ mod tests {
     #[test]
     fn m3u_catchup_token_rejects_overlong_usernames() {
         let secret = [9u8; 16];
-        let payload = M3uCatchupToken {
-            username: "a".repeat(256),
-            target_id: 42,
-            virtual_id: 81_356,
-        };
+        let payload = M3uCatchupToken { username: "a".repeat(256), target_id: 42, virtual_id: 81_356 };
 
         assert!(encode_m3u_catchup_token(&secret, &payload).is_err());
     }
@@ -95,11 +89,7 @@ mod tests {
         let secret = [9u8; 16];
         let catchup_token = encode_m3u_catchup_token(
             &secret,
-            &M3uCatchupToken {
-                username: "alice".to_string(),
-                target_id: 42,
-                virtual_id: 81_356,
-            },
+            &M3uCatchupToken { username: "alice".to_string(), target_id: 42, virtual_id: 81_356 },
         )
         .unwrap();
         let provider_token = encode_provider_resolve_playlist_item_token(

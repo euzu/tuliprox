@@ -4462,6 +4462,7 @@ dependencies = [
  "tuliprox-media-server",
  "tuliprox-messaging",
  "tuliprox-mpegts",
+ "tuliprox-parser",
  "url",
  "uuid",
  "vergen",
@@ -4611,6 +4612,27 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "zeroize",
+]
+
+[[package]]
+name = "tuliprox-parser"
+version = "3.3.91"
+dependencies = [
+ "aes",
+ "base64 0.23.1",
+ "chrono",
+ "chrono-tz",
+ "ctr",
+ "indexmap",
+ "log",
+ "serde",
+ "serde_json",
+ "shared",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tuliprox-core",
+ "url",
 ]
 
 [[package]]
