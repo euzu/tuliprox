@@ -184,6 +184,14 @@ impl AppConfig {
         config.reverse_proxy.as_ref().is_none_or(|r| !r.resource_rewrite_disabled)
     }
 
+    /// The secret used to rewrite resource URLs, falling back to the configured
+    /// encrypt secret. Derived entirely from this configuration, so callers do
+    /// not need the server state to obtain it.
+    pub fn get_encrypt_secret(&self) -> [u8; 16] {
+        self.get_reverse_proxy_rewrite_secret().unwrap_or(self.encrypt_secret)
+    }
+
+
     pub fn get_reverse_proxy_rewrite_secret(&self) -> Option<[u8; 16]> {
         let config = self.config.load();
         config.reverse_proxy.as_ref().map(|r| r.rewrite_secret)

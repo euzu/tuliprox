@@ -1,4 +1,4 @@
-use crate::api::model::AppState;
+use crate::model::AppConfig;
 use crate::model::IcsEpgSourceConfig;
 use crate::model::xmltv::XmlTagIcon::Undefined;
 use crate::model::InputSource;
@@ -157,9 +157,13 @@ pub async fn parse_xmltv_for_web_ui_from_file(path: &Path) -> Result<Vec<EpgChan
     parse_xmltv_for_web_ui(file).await
 }
 
-pub async fn parse_xmltv_for_web_ui_from_url(app_state: &Arc<AppState>, url: &str) -> Result<Vec<EpgChannel>, TuliproxError> {
+pub async fn parse_xmltv_for_web_ui_from_url(
+    app_config: &Arc<AppConfig>,
+    http_client: &reqwest::Client,
+    url: &str,
+) -> Result<Vec<EpgChannel>, TuliproxError> {
     if let Ok(request_url) = Url::parse(url) {
-        let client = app_state.http_client.load();
+        let client = http_client;
         let input_source: InputSource = InputSource {
             name: "xmltv".intern(),
             url: request_url.to_string(),
@@ -171,8 +175,8 @@ pub async fn parse_xmltv_for_web_ui_from_url(app_state: &Arc<AppState>, url: &st
         };
 
         match get_remote_content_as_stream(
-            &app_state.app_config,
-            &client,
+            app_config,
+            client,
             &input_source,
             None,
             &request_url,

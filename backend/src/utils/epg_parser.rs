@@ -1,4 +1,4 @@
-use crate::api::model::AppState;
+use crate::model::AppConfig;
 use crate::model::{ConfigTarget, ProxyUserCredentials};
 use chrono::{DateTime, Duration, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -53,9 +53,13 @@ pub struct EpgProcessingOptions {
     pub encrypt_secret: [u8; 16],
 }
 
-pub fn get_epg_processing_options(app_state: &Arc<AppState>, user: &ProxyUserCredentials, target: &Arc<ConfigTarget>) -> EpgProcessingOptions {
-    let rewrite_resources = app_state.app_config.is_reverse_proxy_resource_rewrite_enabled();
-    let encrypt_secret = app_state.get_encrypt_secret();
+pub fn get_epg_processing_options(
+    app_config: &Arc<AppConfig>,
+    user: &ProxyUserCredentials,
+    target: &Arc<ConfigTarget>,
+) -> EpgProcessingOptions {
+    let rewrite_resources = app_config.is_reverse_proxy_resource_rewrite_enabled();
+    let encrypt_secret = app_config.get_encrypt_secret();
 
     // If redirect is true -> rewrite_urls = false -> keep original
     // If redirect is false and rewrite_resources is true -> rewrite_urls = true -> rewriting allowed

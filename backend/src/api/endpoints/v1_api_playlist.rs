@@ -389,7 +389,7 @@ async fn load_xmltv_epg_source_channels(
         }
     }
 
-    parse_xmltv_for_web_ui_from_url(app_state, resolved_url).await
+    parse_xmltv_for_web_ui_from_url(&app_state.app_config, &app_state.http_client.load(), resolved_url).await
 }
 
 async fn load_ics_epg_source_channels(
@@ -906,7 +906,7 @@ async fn playlist_epg(
                 )
                     .into_response();
             }
-            match parse_xmltv_for_web_ui_from_url(&app_state, &url).await {
+            match parse_xmltv_for_web_ui_from_url(&app_state.app_config, &app_state.http_client.load(), &url).await {
                 Ok(epg) => {
                     let config = app_state.app_config.config.load();
                     let web_ui_path = config.web_ui.as_ref().and_then(|w| w.path.as_ref()).map_or("", String::as_str);

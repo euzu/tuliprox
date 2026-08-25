@@ -1,4 +1,3 @@
-use crate::api::model::AppState;
 use crate::model::Config;
 use crate::model::{ApiProxyConfig, AppConfig, MediaToolCapabilities, SourcesConfig, UserPlan};
 use crate::repository::{
@@ -979,12 +978,12 @@ pub async fn save_templates_config(
 }
 
 async fn build_templates_to_persist(
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
     dto: &SourcesConfigDto,
 ) -> Result<Option<TemplateDefinitionDto>, TuliproxError> {
     let mut new_dto = dto.clone();
-    let config = app_state.app_config.config.load();
-    let paths = app_state.app_config.paths.load();
+    let config = app_config.config.load();
+    let paths = app_config.paths.load();
 
     let existing_source_inline_templates = match parse_sources_file_from_path(
         Path::new(paths.sources_file_path.as_str()),
@@ -1045,18 +1044,18 @@ async fn build_templates_to_persist(
 }
 
 pub async fn validate_source_config_for_persist(
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
     dto: &SourcesConfigDto,
 ) -> Result<Option<TemplateDefinitionDto>, TuliproxError> {
-    build_templates_to_persist(app_state, dto).await
+    build_templates_to_persist(app_config, dto).await
 }
 
 pub async fn persist_templates_config(
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
     template_definition: &TemplateDefinitionDto,
 ) -> Result<(), TuliproxError> {
-    let config = app_state.app_config.config.load();
-    let paths = app_state.app_config.paths.load();
+    let config = app_config.config.load();
+    let paths = app_config.paths.load();
     let template_file = utils::resolve_template_persist_file_path(
         paths.template_file_path.as_deref().or(config.template_path.as_deref()),
         &paths.config_path,
@@ -1065,21 +1064,21 @@ pub async fn persist_templates_config(
 }
 
 pub async fn persist_source_config(
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
     source_file_path: Option<&Path>,
     doc: SourcesConfigDto,
 ) -> Result<SourcesConfigDto, TuliproxError> {
     let source_file = {
         source_file_path.and_then(|p| p.to_str()).map_or_else(
             || {
-                let paths = app_state.app_config.paths.load();
+                let paths = app_config.paths.load();
                 paths.sources_file_path.clone()
             },
             ToString::to_string,
         )
     };
     let backup_dir = {
-        let config = app_state.app_config.config.load();
+        let config = app_config.config.load();
         config.get_backup_dir().to_string()
     };
 
@@ -1133,16 +1132,16 @@ pub async fn sanitize_sources_for_persist(mut source_config: SourcesConfigDto) -
 }
 
 pub async fn validate_and_persist_source_config(
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
     dto: SourcesConfigDto,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    let templates_to_persist = validate_source_config_for_persist(app_state, &dto).await?;
+    let templates_to_persist = validate_source_config_for_persist(app_config, &dto).await?;
 
     if let Some(template_definition) = templates_to_persist.as_ref() {
-        persist_templates_config(app_state, template_definition).await?;
+        persist_templates_config(app_config, template_definition).await?;
     }
 
-    persist_source_config(app_state, None, dto).await
+    persist_source_config(app_config, None, dto).await
 }
 
 pub fn resolve_env_var(value: &str) -> String {
@@ -1161,9 +1160,9 @@ pub fn resolve_env_var(value: &str) -> String {
         .to_string()
 }
 
-pub async fn persist_messaging_templates(app_state: &Arc<AppState>, cfg: &mut ConfigDto) -> Result<(), TuliproxError> {
+pub async fn persist_messaging_templates(app_config: &Arc<AppConfig>, cfg: &mut ConfigDto) -> Result<(), TuliproxError> {
     let templates_dir = {
-        let paths = app_state.app_config.paths.load();
+        let paths = app_config.paths.load();
         PathBuf::from(&paths.config_path).join("messaging_templates")
     };
 

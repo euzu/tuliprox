@@ -668,7 +668,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     }
 
     exec_scheduler(client.as_ref(), &app_state, &cancel_token_scheduler);
-    exec_file_lock_prune(&app_state);
+    exec_file_lock_prune(&app_state.app_config);
     exec_interner_prune(&app_state);
     exec_config_watch(&app_state, &cancel_token_file_watch);
     exec_provider_dns(&app_state, &cancel_token_provider_dns);

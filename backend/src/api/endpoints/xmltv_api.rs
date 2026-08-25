@@ -237,7 +237,7 @@ async fn serve_epg_with_rewrites(
         return get_empty_epg_response();
     }
 
-    let epg_processing_options = get_epg_processing_options(app_state, user, target);
+    let epg_processing_options = get_epg_processing_options(&app_state.app_config, user, target);
     let lowercase_display_names = target
         .options
         .as_ref()
@@ -581,7 +581,7 @@ pub async fn serve_short_epg(
         let limit = if limit > 0 { limit } else { DEFAULT_SHORT_EPG_LIMIT };
         if file_exists_async(epg_path).await {
             if let Some(epg_channel) = get_epg_channel_by_storage_key(app_state, &storage_key, epg_path).await {
-                let epg_processing_options = get_epg_processing_options(app_state, user, target);
+                let epg_processing_options = get_epg_processing_options(&app_state.app_config, user, target);
                 ShortEpgResultDto {
                     epg_listings: epg_channel
                         .get_programme_with_limit(limit)
@@ -654,7 +654,7 @@ async fn serve_stream_epg(
     epg_path: &Path,
     prepared: PreparedStreamEpgRequest,
 ) -> StreamEpgResponse {
-    let epg_processing_options = get_epg_processing_options(app_state, user, target);
+    let epg_processing_options = get_epg_processing_options(&app_state.app_config, user, target);
     let live_now = chrono::Utc::now().timestamp();
 
     let PreparedStreamEpgRequest { entries: prepared_entries } = prepared;

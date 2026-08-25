@@ -1612,7 +1612,7 @@ async fn persist_sources_yml_with_patches(
         return Ok(false);
     }
 
-    persist_source_config(app_state, Some(sources_path), sources).await?;
+    persist_source_config(&app_state.app_config, Some(sources_path), sources).await?;
     Ok(true)
 }
 

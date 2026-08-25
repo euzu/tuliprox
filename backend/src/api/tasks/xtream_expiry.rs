@@ -417,7 +417,7 @@ async fn persist_updates(app_state: &Arc<AppState>, updates: &[(&Account, i64)])
             }
         }
         if source_changed {
-            persist_source_config(app_state, Some(sources_path), sources).await?;
+            persist_source_config(&app_state.app_config, Some(sources_path), sources).await?;
             app_state
                 .app_config
                 .file_locks

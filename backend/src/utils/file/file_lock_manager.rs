@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
 use shared::error::str_to_io_error;
 use path_clean::PathClean;
-use crate::api::model::AppState;
+use crate::model::AppConfig;
 
 fn revision_is_missing(result: &io::Result<bool>) -> bool { matches!(result, Ok(false)) }
 
@@ -222,13 +222,13 @@ fn normalize_path(path: &Path) -> PathBuf {
     base.clean()
 }
 
-pub fn exec_file_lock_prune(app_state: &Arc<AppState>) {
-    let app_state = Arc::clone(app_state);
+pub fn exec_file_lock_prune(app_config: &Arc<AppConfig>) {
+    let app_config = Arc::clone(app_config);
     tokio::spawn({
         async move {
             loop {
                 tokio::time::sleep(Duration::from_mins(1)).await;
-                app_state.app_config.file_locks.prune_unused_locks().await;
+                app_config.file_locks.prune_unused_locks().await;
             }
         }
     });
