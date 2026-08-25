@@ -89,7 +89,6 @@ mod terminal_tail;
 mod timeline;
 mod transient;
 mod transient_fetcher;
-mod ts_inspector;
 
 #[cfg(test)]
 pub(crate) use self::recovery_timing::{
@@ -151,13 +150,13 @@ pub(crate) use self::{
         terminal_tail_manifest_body, HlsLeasePlaybackMode, HlsTerminalSegmentPath, HlsTerminalTailPlan,
     },
     timeline::TimelineMapError,
-    ts_inspector::{
-        evaluate_mpeg_ts_splice_boundary, hls_aes128_cbc_iv, inspect_mpeg_ts, inspect_mpeg_ts_async,
+};
+pub(in crate::api) use crate::mpegts::ts_inspector::{
+        evaluate_mpeg_ts_splice_boundary, hls_aes128_cbc_iv, inspect_mpeg_ts_async,
         inspect_mpeg_ts_media_evidence_async, HlsTrackEvidenceResolution, HlsTsMediaEvidence,
-        HlsTsProbeBudget, HlsTsProbeOutcome, HlsTsProbeProtection, HlsTsProtectionReason,
+        HlsTsProbeBudget, HlsTsProbeProtection, HlsTsProtectionReason,
         HlsTsSpliceBoundaryIncompatibility, HlsTsSpliceEvidence, HlsTsSpliceIncompatibility,
-        HlsTsTrackSignature,
-    },
+    HlsTsTrackSignature,
 };
 pub use self::{
     backpressure::{classify_hls_backpressure, HlsBackpressureState},

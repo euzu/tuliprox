@@ -11,6 +11,7 @@ macro_rules! include_modules {
         pub mod media_enrichment;
         pub mod messaging;
         pub mod model;
+        pub mod mpegts;
         pub mod processing;
         pub mod ptt;
         pub mod repository;

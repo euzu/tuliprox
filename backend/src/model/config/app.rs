@@ -1,4 +1,4 @@
-use crate::api::model::TransportStreamBuffer;
+use crate::mpegts::transport_stream_buffer::TransportStreamBuffer;
 use crate::model::{
     ApiProxyConfig, ApiProxyServerInfo, Config, ConfigInput, ConfigInputOptions, ConfigTarget, CustomStreamResponse,
     GracePeriodOptions, HdHomeRunConfig, HdHomeRunFlags, Mappings, MediaToolCapabilities,

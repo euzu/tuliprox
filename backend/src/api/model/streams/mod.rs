@@ -3,7 +3,6 @@ mod client_stream;
 mod custom_video_stream;
 mod provisioning_stream;
 mod timed_client_stream;
-mod transport_stream_buffer;
 // mod chunked_buffer;
 mod active_client_stream;
 pub mod persist_pipe_stream;
@@ -14,7 +13,7 @@ mod metering_stream;
 mod throttled_stream;
 
 pub use self::persist_pipe_stream::*;
-pub(crate) use self::transport_stream_buffer::*;
+pub(crate) use crate::mpegts::transport_stream_buffer::*;
 pub(in crate::api) use self::buffered_stream::MAX_BUFFER_BYTES;
 pub(in crate::api) use self::{
     active_client_stream::*, custom_video_stream::*, metering_stream::*, provider_stream::*,

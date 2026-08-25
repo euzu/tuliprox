@@ -1,6 +1,6 @@
 use shared::model::{AdmissionStrategy, StreamBufferConfigDto, StreamConfigDto};
 use shared::utils::parse_to_kbps;
-use crate::api::model::TransportStreamBuffer;
+use crate::mpegts::transport_stream_buffer::TransportStreamBuffer;
 use crate::model::macros;
 
 

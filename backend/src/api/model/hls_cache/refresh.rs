@@ -8449,14 +8449,14 @@ mod tests {
     fn critical_handoff_and_terminal_tail_share_ts_inspector_signature() {
         let terminal_buffer = TransportStreamBuffer::new(CRITICAL_HANDOFF_TS_BODY.to_vec());
         let terminal_asset = super::snapshot_terminal_media_asset(&terminal_buffer).expect("terminal asset");
-        let critical_signature = match crate::api::model::inspect_mpeg_ts(
+        let critical_signature = match crate::mpegts::ts_inspector::inspect_mpeg_ts(
             std::io::Cursor::new(CRITICAL_HANDOFF_TS_BODY),
-            crate::api::model::HlsTsProbeProtection::Clear,
-            crate::api::model::HlsTsProbeBudget::default(),
+            crate::mpegts::ts_inspector::HlsTsProbeProtection::Clear,
+            crate::mpegts::ts_inspector::HlsTsProbeBudget::default(),
         )
         .expect("critical handoff fixture inspection succeeds")
         {
-            crate::api::model::HlsTsProbeOutcome::Found(signature) => signature,
+            crate::mpegts::ts_inspector::HlsTsProbeOutcome::Found(signature) => signature,
             outcome => panic!("critical handoff fixture has no MPEG-TS tracks: {outcome:?}"),
         };
 
@@ -8491,14 +8491,14 @@ mod tests {
         assert_eq!(reserve.guaranteed_media_horizon_ms, manifest.last_visible_media_end_ms);
         assert_eq!(reserve.guaranteed_reserve_ms, 0);
         assert!(reserve.cutover_required);
-        let candidate_tracks = match crate::api::model::inspect_mpeg_ts(
+        let candidate_tracks = match crate::mpegts::ts_inspector::inspect_mpeg_ts(
             std::io::Cursor::new(CRITICAL_HANDOFF_TS_BODY),
-            crate::api::model::HlsTsProbeProtection::Clear,
-            crate::api::model::HlsTsProbeBudget::default(),
+            crate::mpegts::ts_inspector::HlsTsProbeProtection::Clear,
+            crate::mpegts::ts_inspector::HlsTsProbeBudget::default(),
         )
         .expect("critical handoff fixture inspection succeeds")
         {
-            crate::api::model::HlsTsProbeOutcome::Found(signature) => signature,
+            crate::mpegts::ts_inspector::HlsTsProbeOutcome::Found(signature) => signature,
             outcome => panic!("critical handoff fixture has no MPEG-TS tracks: {outcome:?}"),
         };
         let terminal_response =

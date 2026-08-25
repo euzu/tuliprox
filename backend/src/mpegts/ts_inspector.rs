@@ -22,7 +22,7 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::api::model::{HlsTsTimestampProfile, HlsTsTimestampProfileScanner};
+use crate::mpegts::transport_stream_buffer::{HlsTsTimestampProfile, HlsTsTimestampProfileScanner};
 
 const AES_128_BLOCK_BYTES: usize = 16;
 const TS_PACKET_BYTES: usize = Packet::SIZE;
@@ -2555,11 +2555,11 @@ mod tests {
     async fn current_terminal_asset_and_finalized_segment_zero_have_complete_splice_evidence() {
         const TERMINAL_ASSET_BYTES: &[u8] =
             include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
-        let renderer = crate::api::model::TransportStreamBuffer::new(TERMINAL_ASSET_BYTES.to_vec());
+        let renderer = crate::mpegts::transport_stream_buffer::TransportStreamBuffer::new(TERMINAL_ASSET_BYTES.to_vec());
         let duration_ticks = renderer.duration_ticks_90khz().expect("terminal asset duration");
         let asset_profile = renderer.finite_hls_timestamp_profile().expect("terminal asset profile");
         let prepared = renderer
-            .render_finite_hls_segment(crate::api::model::HlsFiniteTsRenderSpec {
+            .render_finite_hls_segment(crate::mpegts::transport_stream_buffer::HlsFiniteTsRenderSpec {
                 timestamp_offset_ticks_90khz: 0,
                 continuity_seed: 0,
                 logical_segment_index: 0,
@@ -2568,9 +2568,9 @@ mod tests {
         let finalized = renderer
             .finalize_prepared_finite_hls_segment(
                 &prepared,
-                crate::api::model::HlsFiniteTsFinalizeSpec {
+                crate::mpegts::transport_stream_buffer::HlsFiniteTsFinalizeSpec {
                     additional_timestamp_offset_ticks_90khz: 90_000,
-                    discontinuity: crate::api::model::HlsFiniteTsDiscontinuityMode::FirstPacketPerPid,
+                    discontinuity: crate::mpegts::transport_stream_buffer::HlsFiniteTsDiscontinuityMode::FirstPacketPerPid,
                 },
             )
             .expect("finalized terminal segment zero");
@@ -3038,7 +3038,7 @@ mod tests {
     async fn aes128_terminal_base_timestamp_profile_uses_decrypted_cached_bytes() {
         const TERMINAL_ASSET_BYTES: &[u8] =
             include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
-        let asset = crate::api::model::TransportStreamBuffer::new(TERMINAL_ASSET_BYTES.to_vec());
+        let asset = crate::mpegts::transport_stream_buffer::TransportStreamBuffer::new(TERMINAL_ASSET_BYTES.to_vec());
         let expected_profile = asset.finite_hls_timestamp_profile().expect("fixture timestamp profile");
         let expected_signature = asset.finite_hls_track_signature().expect("fixture track signature");
         let key = *b"0123456789abcdef";

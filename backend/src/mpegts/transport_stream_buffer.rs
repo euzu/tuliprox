@@ -1139,7 +1139,7 @@ pub struct TransportStreamBuffer {
     waker: Arc<AtomicWaker>,
     first_pcr: Option<u64>,
     finite_hls_timestamp_profile: Option<HlsTsTimestampProfile>,
-    finite_hls_track_signature: Option<crate::api::model::HlsTsTrackSignature>,
+    finite_hls_track_signature: Option<crate::mpegts::ts_inspector::HlsTsTrackSignature>,
     finite_hls_asset_fingerprint: [u8; 32],
     #[cfg(test)]
     finite_hls_render_count: Arc<std::sync::atomic::AtomicUsize>,
@@ -1211,16 +1211,16 @@ impl TransportStreamBuffer {
             .as_ref()
             .ok()
             .and_then(|layout| finite_hls_presentation_duration(&raw, layout).ok());
-        let finite_hls_track_signature = match crate::api::model::inspect_mpeg_ts(
+        let finite_hls_track_signature = match crate::mpegts::ts_inspector::inspect_mpeg_ts(
             std::io::Cursor::new(&raw),
-            crate::api::model::HlsTsProbeProtection::Clear,
-            crate::api::model::HlsTsProbeBudget::default(),
+            crate::mpegts::ts_inspector::HlsTsProbeProtection::Clear,
+            crate::mpegts::ts_inspector::HlsTsProbeBudget::default(),
         ) {
-            Ok(crate::api::model::HlsTsProbeOutcome::Found(signature)) => Some(signature),
+            Ok(crate::mpegts::ts_inspector::HlsTsProbeOutcome::Found(signature)) => Some(signature),
             Ok(
-                crate::api::model::HlsTsProbeOutcome::ProbeBudgetExhausted { .. }
-                | crate::api::model::HlsTsProbeOutcome::Malformed(_)
-                | crate::api::model::HlsTsProbeOutcome::UnsupportedProtection(_),
+                crate::mpegts::ts_inspector::HlsTsProbeOutcome::ProbeBudgetExhausted { .. }
+                | crate::mpegts::ts_inspector::HlsTsProbeOutcome::Malformed(_)
+                | crate::mpegts::ts_inspector::HlsTsProbeOutcome::UnsupportedProtection(_),
             )
             | Err(_) => None,
         };
@@ -1261,18 +1261,6 @@ impl TransportStreamBuffer {
         }
     }
 
-    /// Fallible constructor: returns an error if the raw bytes contain no valid MPEG-TS data.
-    pub fn try_new(raw: Vec<u8>) -> Result<Self, crate::model::StreamError> {
-        let buf = Self::new(raw);
-        if buf.length == 0 {
-            Err(crate::model::StreamError::MalformedPacket(
-                "TS buffer does not contain decodable packet indices".to_string(),
-            ))
-        } else {
-            Ok(buf)
-        }
-    }
-
     pub fn as_bytes(&self) -> &[u8] { &self.buffer }
 
     /// Cheap clone of the underlying buffer as `Bytes` (refcount bump).
@@ -1293,7 +1281,7 @@ impl TransportStreamBuffer {
         self.finite_hls_timestamp_profile
     }
 
-    pub(crate) fn finite_hls_track_signature(&self) -> Option<crate::api::model::HlsTsTrackSignature> {
+    pub(crate) fn finite_hls_track_signature(&self) -> Option<crate::mpegts::ts_inspector::HlsTsTrackSignature> {
         self.finite_hls_track_signature.clone()
     }
 
@@ -2678,13 +2666,13 @@ mod tests {
             .expect("anchored terminal asset");
 
         assert_ffmpeg_compatible_continuity(&finalized);
-        let outcome = crate::api::model::inspect_mpeg_ts(
+        let outcome = crate::mpegts::ts_inspector::inspect_mpeg_ts(
             std::io::Cursor::new(finalized),
-            crate::api::model::HlsTsProbeProtection::Clear,
-            crate::api::model::HlsTsProbeBudget::default(),
+            crate::mpegts::ts_inspector::HlsTsProbeProtection::Clear,
+            crate::mpegts::ts_inspector::HlsTsProbeBudget::default(),
         )
         .expect("finalized terminal asset remains inspectable");
-        assert_eq!(outcome, crate::api::model::HlsTsProbeOutcome::Found(expected_signature));
+        assert_eq!(outcome, crate::mpegts::ts_inspector::HlsTsProbeOutcome::Found(expected_signature));
     }
 
     #[test]
