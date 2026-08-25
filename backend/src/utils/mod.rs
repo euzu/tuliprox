@@ -13,7 +13,6 @@ mod provider_resolve_token;
 mod recording_paths;
 mod binary_utils;
 mod telegram;
-pub(crate) mod stream_history_viewer;
 mod epg_parser;
 mod epg_id;
 mod ordinal;
@@ -90,5 +89,3 @@ pub use self::provider_resolve_token::*;
 pub use self::step_measure::*;
 pub use self::sys_utils::*;
 pub use self::time_utils::*;
-
-pub use self::stream_history_viewer::stream_history_viewer;

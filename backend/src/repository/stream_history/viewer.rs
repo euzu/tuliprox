@@ -9,9 +9,9 @@ use serde::Deserialize;
 use shared::model::{FieldFilter, SearchFieldKind};
 use shared::utils::Internable;
 use crate::model::{StreamHistoryRecord};
-use crate::repository::{
-    FileHeaderBody, StreamHistoryFileReader,
-    extract_day_from_filename, read_and_verify_file_magic, read_framed,
+use super::{
+    extract_day_from_filename, read_and_verify_file_magic, read_framed, FileHeaderBody,
+    StreamHistoryFileReader,
 };
 
 #[derive(Deserialize)]

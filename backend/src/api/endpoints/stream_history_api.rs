@@ -10,7 +10,7 @@ use crate::api::endpoints::extract_accept_header::ExtractAcceptHeader;
 use crate::api::model::AppState;
 use crate::model::StreamHistoryRecord;
 use crate::repository::{QosSnapshotRecord, QosSnapshotRepository, StreamHistoryFileReader};
-use crate::utils::stream_history_viewer::{discover_files, resolve_time_range, CompiledFilter, StreamHistoryQuery, TimeRange};
+use crate::repository::{discover_files, resolve_time_range, CompiledFilter, StreamHistoryQuery, TimeRange};
 
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
@@ -644,7 +644,7 @@ pub(crate) async fn qos_snapshot_detail_query(
 /// Filters are applied lazily — records are never collected into a Vec.
 /// Errors opening files or reading records are logged but do not stop iteration.
 struct RecordFileIter {
-    files: std::vec::IntoIter<crate::utils::stream_history_viewer::HistoryFile>,
+    files: std::vec::IntoIter<crate::repository::HistoryFile>,
     current_iter: Option<Box<dyn Iterator<Item=std::io::Result<StreamHistoryRecord>>>>,
     time_range: TimeRange,
     filters: Arc<CompiledFilter>,

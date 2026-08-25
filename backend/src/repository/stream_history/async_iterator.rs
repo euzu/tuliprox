@@ -1,5 +1,5 @@
 use crate::repository::stream_history::{StreamHistoryFileReader, AsyncStreamHistoryPendingReader};
-use crate::utils::stream_history_viewer::{discover_files, CompiledFilter, TimeRange};
+use super::viewer::{discover_files, CompiledFilter, TimeRange};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;

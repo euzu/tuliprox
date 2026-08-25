@@ -156,7 +156,7 @@ async fn main() {
     db_viewer(&args.db_viewer_args());
 
     if let Some(ref sh_input) = args.stream_history {
-        std::process::exit(utils::stream_history_viewer(sh_input).await);
+        std::process::exit(repository::stream_history_viewer(sh_input).await);
     }
 
     if args.genpwd {

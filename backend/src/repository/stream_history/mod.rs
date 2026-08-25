@@ -2,11 +2,16 @@ mod archive;
 mod writer;
 mod storage;
 mod reader;
+// Reads stream-history files with this module's own primitives, and is read back
+// by `async_iterator`. It belongs on this side of the boundary: leaving it in
+// `utils` made the two layers mutually dependent.
+mod viewer;
 
 pub use writer::*;
 pub use archive::*;
 pub use storage::*;
 pub use reader::*;
+pub use viewer::*;
 
 #[cfg(test)]
 pub(crate) mod tests {
