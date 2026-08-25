@@ -1,4 +1,4 @@
-//! Provider payload parsers that depend on nothing above them.
+//! Provider wire-format handling that depends on nothing above it.
 //!
 //! Pure transformations from a provider's wire format into playlist items and
 //! EPG entries. They sit below the repository because the repository parses
@@ -10,4 +10,5 @@
 //! those references are resolved.
 
 pub mod ics;
+pub mod m3u_format;
 pub mod xtream;

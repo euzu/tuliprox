@@ -1,6 +1,6 @@
 use crate::{
     model::IcsEpgSourceConfig,
-    processing::parser::ics::time::{display_from_timestamp_in_timezone, parse_ics_datetime, parse_ics_duration},
+    parser::ics::time::{display_from_timestamp_in_timezone, parse_ics_datetime, parse_ics_duration},
 };
 use chrono_tz::Tz;
 use log::warn;

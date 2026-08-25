@@ -1,5 +1,5 @@
 use crate::{
-    iptv::m3u::{build_m3u_catchup_rewrite, flussonic_proxy_live_file},
+    parser::m3u_format::{build_m3u_catchup_rewrite, flussonic_proxy_live_file},
     model::{AppConfig, ConfigTarget, ProxyUserCredentials},
     repository::{
         ensure_target_storage_path, get_file_path_for_db_index, m3u_get_file_path_for_db, open_playlist_reader,
