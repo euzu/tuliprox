@@ -1,13 +1,8 @@
-use rand::{Rng};
-use rand::distr::Alphanumeric;
+use rand::{distr::Alphanumeric, Rng};
 use shared::error::str_to_io_error;
 
 fn generate_salt(length: usize) -> String {
-    let salt: String = rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(length)
-        .map(char::from)
-        .collect();
+    let salt: String = rand::rng().sample_iter(&Alphanumeric).take(length).map(char::from).collect();
     salt
 }
 
@@ -38,18 +33,16 @@ pub fn generate_password_from_input(password: &str) -> std::io::Result<String> {
 
 pub fn generate_password() -> std::io::Result<String> {
     match rpassword::prompt_password("password> ") {
-        Ok(pwd1) => {
-            match rpassword::prompt_password("retype password> ") {
-                Ok(pwd2) => {
-                    if pwd1.eq(&pwd2) {
-                        generate_password_from_input(&pwd1)
-                    } else {
-                        Err(str_to_io_error("Passwords don't match"))
-                    }
+        Ok(pwd1) => match rpassword::prompt_password("retype password> ") {
+            Ok(pwd2) => {
+                if pwd1.eq(&pwd2) {
+                    generate_password_from_input(&pwd1)
+                } else {
+                    Err(str_to_io_error("Passwords don't match"))
                 }
-                Err(err) => Err(err)
             }
+            Err(err) => Err(err),
         },
-        Err(err) => Err(err)
+        Err(err) => Err(err),
     }
 }

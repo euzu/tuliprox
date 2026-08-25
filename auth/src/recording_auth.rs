@@ -17,9 +17,11 @@
 //! checks": system retention can act on behalf of any user, but only on
 //! eligible terminal states and only through the retention worker.
 
-use shared::model::permission::Permission;
-use shared::model::recording::{RecordingMetadata, RecordingVisibility};
-use shared::model::{Claims, ROLE_ADMIN, UserId};
+use shared::model::{
+    permission::Permission,
+    recording::{RecordingMetadata, RecordingVisibility},
+    Claims, UserId, ROLE_ADMIN,
+};
 
 /// Actions the recording system distinguishes. Each action maps to one
 /// or more HTTP routes and one or more WebSocket messages. New
@@ -151,9 +153,7 @@ impl TerminalState {
     /// `true` when the recording is in a terminal state that is
     /// eligible for retention delete. Only the completed, failed
     /// and cancelled states qualify.
-    pub fn is_eligible_for_retention(&self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
-    }
+    pub fn is_eligible_for_retention(&self) -> bool { matches!(self, Self::Completed | Self::Failed | Self::Cancelled) }
 }
 
 impl<'a> RecordingSubject<'a> {
@@ -175,9 +175,7 @@ impl RecordingDecision {
     pub fn is_allow(&self) -> bool { matches!(self, Self::Allow) }
 }
 
-fn is_admin(claims: &Claims) -> bool {
-    claims.roles.iter().any(|r| r == ROLE_ADMIN)
-}
+fn is_admin(claims: &Claims) -> bool { claims.roles.iter().any(|r| r == ROLE_ADMIN) }
 
 /// The `username` of the synthetic `Claims` the retention worker
 /// builds to act on shared / orphan / legacy-owned recordings.
@@ -206,8 +204,7 @@ pub fn is_system_principal(claims: &Claims) -> bool {
     // alone would not survive a future auth refactor that issues the
     // builtin admin subject_id to a real account. The supervisor is
     // the only place that mints a Claims with both sentinel values.
-    claims.username == SYSTEM_PRINCIPAL_USERNAME
-        && claims.subject_id.as_ref().is_some_and(UserId::is_builtin_admin)
+    claims.username == SYSTEM_PRINCIPAL_USERNAME && claims.subject_id.as_ref().is_some_and(UserId::is_builtin_admin)
 }
 
 fn check_create(claims: &Claims, action: RecordingAction) -> RecordingDecision {
@@ -239,17 +236,11 @@ fn owner_of(meta: &RecordingMetadata) -> Option<UserId> {
     }
 }
 
-fn is_visibility(meta: &RecordingMetadata, want: RecordingVisibility) -> bool {
-    meta.visibility == want
-}
+fn is_visibility(meta: &RecordingMetadata, want: RecordingVisibility) -> bool { meta.visibility == want }
 
-fn has_recording_read(claims: &Claims) -> bool {
-    claims.permissions.contains(Permission::RecordingRead)
-}
+fn has_recording_read(claims: &Claims) -> bool { claims.permissions.contains(Permission::RecordingRead) }
 
-fn has_recording_write(claims: &Claims) -> bool {
-    claims.permissions.contains(Permission::RecordingWrite)
-}
+fn has_recording_write(claims: &Claims) -> bool { claims.permissions.contains(Permission::RecordingWrite) }
 
 /// The principal decision. Pure function — does not touch the
 /// filesystem, the network, or the queue.
@@ -382,11 +373,7 @@ fn check_read_action(
     RecordingDecision::Allow
 }
 
-fn check_mutate_action(
-    claims: &Claims,
-    subject_id: &UserId,
-    meta: &RecordingMetadata,
-) -> RecordingDecision {
+fn check_mutate_action(claims: &Claims, subject_id: &UserId, meta: &RecordingMetadata) -> RecordingDecision {
     if !has_recording_write(claims) {
         return RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite));
     }
@@ -407,10 +394,7 @@ fn check_mutate_action(
 fn action_requires_owner(action: RecordingAction) -> bool {
     matches!(
         action,
-        RecordingAction::Edit
-            | RecordingAction::Cancel
-            | RecordingAction::Delete
-            | RecordingAction::ManageRule
+        RecordingAction::Edit | RecordingAction::Cancel | RecordingAction::Delete | RecordingAction::ManageRule
     )
 }
 
@@ -442,8 +426,10 @@ pub fn authorize_orphan(claims: &Claims) -> RecordingDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::model::recording::{AiringStatus, EpgEpisodeMetadata, RecordingOwner};
-    use shared::model::{Claims, CURRENT_PERMISSION_SCHEMA_VERSION, UserId};
+    use shared::model::{
+        recording::{AiringStatus, EpgEpisodeMetadata, RecordingOwner},
+        Claims, UserId, CURRENT_PERMISSION_SCHEMA_VERSION,
+    };
 
     fn make_claims(
         username: &str,
@@ -502,24 +488,16 @@ mod tests {
         make_meta(RecordingOwner::User(UserId::from(uid)), visibility)
     }
 
-    fn legacy_meta() -> RecordingMetadata {
-        make_meta(RecordingOwner::LegacyAdmin, RecordingVisibility::Private)
-    }
+    fn legacy_meta() -> RecordingMetadata { make_meta(RecordingOwner::LegacyAdmin, RecordingVisibility::Private) }
 
     fn subject(uid: &str) -> UserId { UserId::from(uid) }
 
-    fn read_perms() -> shared::model::permission::PermissionSet {
-        Permission::RecordingRead.into()
-    }
-    fn write_perms() -> shared::model::permission::PermissionSet {
-        Permission::RecordingWrite.into()
-    }
+    fn read_perms() -> shared::model::permission::PermissionSet { Permission::RecordingRead.into() }
+    fn write_perms() -> shared::model::permission::PermissionSet { Permission::RecordingWrite.into() }
     fn read_write_perms() -> shared::model::permission::PermissionSet {
         Permission::RecordingRead | Permission::RecordingWrite
     }
-    fn config_read_perms() -> shared::model::permission::PermissionSet {
-        Permission::ConfigRead.into()
-    }
+    fn config_read_perms() -> shared::model::permission::PermissionSet { Permission::ConfigRead.into() }
 
     // --- read / playback / download ---
 
@@ -528,7 +506,12 @@ mod tests {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::Read, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::Read,
+            &sub,
+        );
         assert!(d.is_allow(), "expected allow, got {d:?}");
     }
 
@@ -537,7 +520,12 @@ mod tests {
         let claims = make_claims("bob", Some(subject("web:bob")), vec!["WEB"], read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::Read, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::Read,
+            &sub,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::NotOwner)));
     }
 
@@ -546,7 +534,12 @@ mod tests {
         let claims = make_claims("bob", Some(subject("web:bob")), vec!["WEB"], read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Shared);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::Read, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::Read,
+            &sub,
+        );
         assert!(d.is_allow());
     }
 
@@ -555,7 +548,12 @@ mod tests {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], config_read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::Read, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::Read,
+            &sub,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingRead))));
     }
 
@@ -564,7 +562,12 @@ mod tests {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], read_perms());
         let meta = legacy_meta();
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::Read, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::Read,
+            &sub,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::LegacyAdminReserved)));
     }
 
@@ -574,7 +577,12 @@ mod tests {
     fn create_private_with_recording_write_is_allowed() {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::CreatePrivate, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::CreatePrivate,
+            &sub,
+        );
         assert!(d.is_allow());
     }
 
@@ -582,7 +590,12 @@ mod tests {
     fn create_shared_requires_administrator_role() {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], read_write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::CreateShared, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::CreateShared,
+            &sub,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::NotAdministrator)));
     }
 
@@ -590,7 +603,12 @@ mod tests {
     fn create_shared_with_admin_role_and_recording_write_is_allowed() {
         let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], read_write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::CreateShared, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::CreateShared,
+            &sub,
+        );
         assert!(d.is_allow());
     }
 
@@ -601,7 +619,12 @@ mod tests {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Scheduled, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::Edit, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::Edit,
+            &sub,
+        );
         assert!(d.is_allow());
     }
 
@@ -610,7 +633,12 @@ mod tests {
         let claims = make_claims("bob", Some(subject("web:bob")), vec!["WEB"], write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Scheduled, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::Edit, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::Edit,
+            &sub,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::NotOwner)));
     }
 
@@ -619,7 +647,12 @@ mod tests {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Shared);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Scheduled, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::Edit, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::Edit,
+            &sub,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::NotAdministrator)));
     }
 
@@ -628,7 +661,12 @@ mod tests {
         let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], write_perms());
         let meta = make_meta(RecordingOwner::User(UserId::from("web:alice")), RecordingVisibility::Shared);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::Delete, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::Delete,
+            &sub,
+        );
         assert!(d.is_allow());
     }
 
@@ -638,11 +676,21 @@ mod tests {
     fn manage_rule_requires_administrator_and_recording_write() {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
         let sub = RecordingSubject::new(None, TerminalState::Active, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::ManageRule, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::ManageRule,
+            &sub,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::NotAdministrator)));
 
         let admin = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], write_perms());
-        let d = authorize(&admin, admin.subject_id.as_ref().expect("test subject_id present"), RecordingAction::ManageRule, &sub);
+        let d = authorize(
+            &admin,
+            admin.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::ManageRule,
+            &sub,
+        );
         assert!(d.is_allow());
     }
 
@@ -653,10 +701,20 @@ mod tests {
         let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub_active = RecordingSubject::new(Some(&meta), TerminalState::Active, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::SystemRetentionDelete, &sub_active);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::SystemRetentionDelete,
+            &sub_active,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::IneligibleState)));
         let sub_deleting = RecordingSubject::new(Some(&meta), TerminalState::Deleting, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::SystemRetentionDelete, &sub_deleting);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::SystemRetentionDelete,
+            &sub_deleting,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::IneligibleState)));
     }
 
@@ -669,7 +727,12 @@ mod tests {
         let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::SystemRetentionDelete, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::SystemRetentionDelete,
+            &sub,
+        );
         assert!(d.is_allow(), "retention delete must bypass owner for eligible Completed; got {d:?}");
     }
 
@@ -678,7 +741,12 @@ mod tests {
         let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], read_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::SystemRetentionDelete, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::SystemRetentionDelete,
+            &sub,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingWrite))));
     }
 
@@ -687,7 +755,12 @@ mod tests {
         let claims = make_claims("alice", Some(subject("web:alice")), vec!["WEB"], write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, true);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::SystemRetentionDelete, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::SystemRetentionDelete,
+            &sub,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::NotAdministrator)));
     }
 
@@ -696,7 +769,12 @@ mod tests {
         let claims = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], write_perms());
         let meta = owner_meta("web:alice", RecordingVisibility::Private);
         let sub = RecordingSubject::new(Some(&meta), TerminalState::Completed, false);
-        let d = authorize(&claims, claims.subject_id.as_ref().expect("test subject_id present"), RecordingAction::SystemRetentionDelete, &sub);
+        let d = authorize(
+            &claims,
+            claims.subject_id.as_ref().expect("test subject_id present"),
+            RecordingAction::SystemRetentionDelete,
+            &sub,
+        );
         assert!(matches!(d, RecordingDecision::Deny(DenyReason::InvalidPath)));
     }
 
@@ -725,7 +803,10 @@ mod tests {
         assert!(matches!(authorize_orphan(&web), RecordingDecision::Deny(DenyReason::NotAdministrator)));
 
         let admin = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], config_read_perms());
-        assert!(matches!(authorize_orphan(&admin), RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingRead))));
+        assert!(matches!(
+            authorize_orphan(&admin),
+            RecordingDecision::Deny(DenyReason::MissingPermission(Permission::RecordingRead))
+        ));
 
         let admin_ok = make_claims("admin", Some(UserId::builtin_admin()), vec!["ADMIN"], read_perms());
         assert!(authorize_orphan(&admin_ok).is_allow());
@@ -752,12 +833,7 @@ mod tests {
         let mut perms = shared::model::permission::PermissionSet::new();
         perms.set(Permission::RecordingWrite);
         perms.set(Permission::RecordingRead);
-        let claims = make_claims(
-            SYSTEM_PRINCIPAL_USERNAME,
-            Some(UserId::builtin_admin()),
-            vec![ROLE_ADMIN],
-            perms,
-        );
+        let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), vec![ROLE_ADMIN], perms);
         assert!(is_system_principal(&claims));
     }
 
@@ -769,12 +845,7 @@ mod tests {
         let mut perms = shared::model::permission::PermissionSet::new();
         perms.set(Permission::RecordingWrite);
         perms.set(Permission::RecordingRead);
-        let claims = make_claims(
-            "alice",
-            Some(UserId::builtin_admin()),
-            vec![ROLE_ADMIN],
-            perms,
-        );
+        let claims = make_claims("alice", Some(UserId::builtin_admin()), vec![ROLE_ADMIN], perms);
         assert!(!is_system_principal(&claims));
     }
 
@@ -788,12 +859,7 @@ mod tests {
         let mut perms = shared::model::permission::PermissionSet::new();
         perms.set(Permission::RecordingWrite);
         perms.set(Permission::RecordingRead);
-        let claims = make_claims(
-            SYSTEM_PRINCIPAL_USERNAME,
-            Some(UserId::builtin_admin()),
-            vec![ROLE_ADMIN],
-            perms,
-        );
+        let claims = make_claims(SYSTEM_PRINCIPAL_USERNAME, Some(UserId::builtin_admin()), vec![ROLE_ADMIN], perms);
         let meta = make_meta(RecordingOwner::User(UserId::from("web:alice")), RecordingVisibility::Private);
         let subject = RecordingSubject::new(Some(&meta), TerminalState::Active, false);
         assert_eq!(

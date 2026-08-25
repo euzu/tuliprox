@@ -1,15 +1,16 @@
+use crate::Rejection;
+use axum::{
+    extract::{ConnectInfo, FromRequestParts},
+    http::{request::Parts, StatusCode},
+};
 use std::net::SocketAddr;
-use axum::extract::{ConnectInfo, FromRequestParts};
-use axum::http::request::Parts;
-use axum::http::StatusCode;
-use crate::auth::Rejection;
 
 const MAX_HEADER_LENGTH: usize = 512;
 
 fn validate_header(value: &str) -> Option<String> {
     // TODO i think this is unnecessary because axum validates the headers ?
     if value.len() <= MAX_HEADER_LENGTH && !value.contains('\0') {
-       Some(value.to_string())
+        Some(value.to_string())
     } else {
         None
     }
@@ -23,13 +24,7 @@ pub struct Fingerprint {
 }
 
 impl Fingerprint {
-    pub fn new(key: String, client_ip: String, addr: SocketAddr) -> Self {
-        Self {
-            key,
-            client_ip,
-            addr,
-        }
-    }
+    pub fn new(key: String, client_ip: String, addr: SocketAddr) -> Self { Self { key, client_ip, addr } }
 }
 
 impl<B> FromRequestParts<B> for Fingerprint
@@ -44,7 +39,6 @@ where
 }
 
 impl Fingerprint {
-
     async fn decode_request_parts<B>(req: &mut Parts, state: &B) -> Result<Self, Rejection>
     where
         B: Send + Sync,
@@ -57,15 +51,15 @@ impl Fingerprint {
         let mut forwarded_for = None;
         let mut real_ip = None;
         for header in &req.headers {
-            if  header.0.as_str().eq_ignore_ascii_case(axum::http::header::USER_AGENT.as_str()) {
+            if header.0.as_str().eq_ignore_ascii_case(axum::http::header::USER_AGENT.as_str()) {
                 if let Ok(val) = header.1.to_str() {
                     user_agent = validate_header(val);
                 }
-            } else if  header.0.as_str().eq_ignore_ascii_case("x-forwarded-for") {
+            } else if header.0.as_str().eq_ignore_ascii_case("x-forwarded-for") {
                 if let Ok(val) = header.1.to_str() {
                     forwarded_for = validate_header(val);
                 }
-            } else if  header.0.as_str().eq_ignore_ascii_case("x-real-ip") {
+            } else if header.0.as_str().eq_ignore_ascii_case("x-real-ip") {
                 if let Ok(val) = header.1.to_str() {
                     real_ip = validate_header(val);
                 }
@@ -80,7 +74,7 @@ impl Fingerprint {
         let ua = user_agent.unwrap_or_else(String::new);
         let key = format!("{client_ip}|{ua}");
 
-       // debug!("{key}, {client_ip}, {addr}");
+        // debug!("{key}, {client_ip}, {addr}");
 
         Ok(Fingerprint::new(key, client_ip, addr))
     }

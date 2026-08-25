@@ -1,15 +1,13 @@
-use crate::model::AppConfig;
-use crate::repository::GeoIp;
 use arc_swap::ArcSwapOption;
-use crate::model::ProxyUserPermissionDenyReason;
-use crate::repository::{
-    evaluate_network_access, log_network_access_allowed_geoip_unavailable, log_network_access_denied,
-    NetworkAccessDecision, NetworkAccessDenyReason,
-};
 use axum::response::IntoResponse;
 use log::debug;
 use shared::utils::sanitize_sensitive_info;
 use std::sync::Arc;
+use tuliprox_core::model::{AppConfig, ProxyUserPermissionDenyReason};
+use tuliprox_repository::{
+    evaluate_network_access, log_network_access_allowed_geoip_unavailable, log_network_access_denied, GeoIp,
+    NetworkAccessDecision, NetworkAccessDenyReason,
+};
 
 #[derive(Debug, Clone)]
 pub enum PermissionDenyReason {
@@ -29,9 +27,7 @@ impl From<ProxyUserPermissionDenyReason> for PermissionDenyReason {
             ProxyUserPermissionDenyReason::Banned => PermissionDenyReason::Banned,
             ProxyUserPermissionDenyReason::Inactive
             | ProxyUserPermissionDenyReason::UnresolvedPlan
-            | ProxyUserPermissionDenyReason::InvalidFilter => {
-                PermissionDenyReason::Inactive
-            }
+            | ProxyUserPermissionDenyReason::InvalidFilter => PermissionDenyReason::Inactive,
         }
     }
 }
@@ -81,16 +77,16 @@ impl ApiUserAuthError {
 
 #[derive(Debug)]
 pub struct ApiUserContext {
-    pub user: Arc<crate::model::ProxyUserCredentials>,
-    pub target: Arc<crate::model::ConfigTarget>,
-    pub fingerprint: crate::auth::Fingerprint,
+    pub user: Arc<tuliprox_core::model::ProxyUserCredentials>,
+    pub target: Arc<tuliprox_core::model::ConfigTarget>,
+    pub fingerprint: crate::Fingerprint,
 }
 
 /// Checks only network access (no permission check). Used by stream endpoints
 /// where permission check must happen later with full stream info for `admission_failure_response`.
 pub fn check_network_access_only(
-    user: &Arc<crate::model::ProxyUserCredentials>,
-    fingerprint: &crate::auth::Fingerprint,
+    user: &Arc<tuliprox_core::model::ProxyUserCredentials>,
+    fingerprint: &crate::Fingerprint,
     app_config: &Arc<AppConfig>,
     geoip: &Arc<ArcSwapOption<GeoIp>>,
 ) -> Result<(), ApiUserAuthError> {
@@ -111,8 +107,8 @@ pub fn check_network_access_only(
 /// Checks network access without logging. Used for high-frequency polling endpoints
 /// (e.g., `HDHomeRun` `lineup_status`) where repeated log output would be noisy.
 pub fn try_check_network_access_only(
-    user: &Arc<crate::model::ProxyUserCredentials>,
-    fingerprint: &crate::auth::Fingerprint,
+    user: &Arc<tuliprox_core::model::ProxyUserCredentials>,
+    fingerprint: &crate::Fingerprint,
     app_config: &Arc<AppConfig>,
     geoip: &Arc<ArcSwapOption<GeoIp>>,
 ) -> Result<(), ApiUserAuthError> {
@@ -124,9 +120,9 @@ pub fn try_check_network_access_only(
 }
 
 pub fn resolve_api_user_context(
-    user: Arc<crate::model::ProxyUserCredentials>,
-    target: Arc<crate::model::ConfigTarget>,
-    fingerprint: crate::auth::Fingerprint,
+    user: Arc<tuliprox_core::model::ProxyUserCredentials>,
+    target: Arc<tuliprox_core::model::ConfigTarget>,
+    fingerprint: crate::Fingerprint,
     app_config: &Arc<AppConfig>,
     geoip: &Arc<ArcSwapOption<GeoIp>>,
 ) -> Result<ApiUserContext, ApiUserAuthError> {
@@ -154,8 +150,8 @@ pub fn resolve_api_user_context(
 /// Checks permission and network access without taking ownership. Used when
 /// user/target are needed after the auth check (avoids unnecessary Arc clones).
 pub fn check_permission_and_network_access_only(
-    user: &Arc<crate::model::ProxyUserCredentials>,
-    fingerprint: &crate::auth::Fingerprint,
+    user: &Arc<tuliprox_core::model::ProxyUserCredentials>,
+    fingerprint: &crate::Fingerprint,
     app_config: &Arc<AppConfig>,
     geoip: &Arc<ArcSwapOption<GeoIp>>,
 ) -> Result<(), ApiUserAuthError> {

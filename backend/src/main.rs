@@ -43,6 +43,8 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tuliprox_auth as auth;
+use tuliprox_config_loader as config_loader;
 // The configuration model and shared utilities are their own package. Aliased
 // under their historical module names so `crate::model::X` and
 // `crate::utils::X` keep resolving across the backend.

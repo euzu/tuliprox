@@ -1,8 +1,8 @@
-use axum::extract::FromRequestParts;
-use axum::http::HeaderMap;
-use axum::http::request::Parts;
-use axum::http::StatusCode;
-use crate::auth::Rejection;
+use crate::Rejection;
+use axum::{
+    extract::FromRequestParts,
+    http::{request::Parts, HeaderMap, StatusCode},
+};
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct AuthBearer(pub String);
@@ -22,11 +22,9 @@ where
 }
 
 impl AuthBearer {
-    fn from_header(contents: &str) -> Self {
-        Self(contents.to_string())
-    }
+    fn from_header(contents: &str) -> Self { Self(contents.to_string()) }
 
-    pub(crate) fn from_headers(headers: &HeaderMap) -> Result<Self, Rejection> {
+    pub fn from_headers(headers: &HeaderMap) -> Result<Self, Rejection> {
         let authorization = headers
             .get(axum::http::header::AUTHORIZATION)
             .ok_or((StatusCode::FORBIDDEN, "Authorization header is missing"))?
@@ -40,7 +38,5 @@ impl AuthBearer {
         }
     }
 
-    fn decode_request_parts(req: &mut Parts) -> Result<Self, Rejection> {
-        Self::from_headers(&req.headers)
-    }
+    fn decode_request_parts(req: &mut Parts) -> Result<Self, Rejection> { Self::from_headers(&req.headers) }
 }

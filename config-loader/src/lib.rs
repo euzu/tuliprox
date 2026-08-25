@@ -1,38 +1,38 @@
-use std::io::ErrorKind;
-use crate::utils::{config_file_reader, resolve_env_var};
-use crate::model::Config;
-use crate::model::{ApiProxyConfig, AppConfig, MediaToolCapabilities, SourcesConfig, UserPlan};
-use crate::repository::{
-    backup_api_user_db_file, csv_read_inputs, csv_write_inputs, get_api_user_db_path, is_csv_file,
-    load_api_user, merge_api_user,
-};
-use crate::utils;
-use crate::utils::file_exists_async;
-use crate::utils::exit;
-use crate::utils::{
-    open_file, read_mappings_file_unprepared, read_templates_file,
-    FileLockManager,
-};
 use arc_swap::{ArcSwap, ArcSwapAny};
 use chrono::Local;
 use log::{error, info, warn};
 use serde::Serialize;
 use shared::{
+    concat_string,
+    defaults::{generate_default_access_secret, generate_default_encrypt_secret, TEMPLATE_FILE},
     error::TuliproxError,
     foundation::prepare_templates,
     model::{
-        ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview, InputType,
-        MsgKind, PatternTemplate, PlansConfigDto, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto, UserPlanDto,
+        ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview,
+        InputType, MsgKind, PatternTemplate, PlansConfigDto, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
+        UserPlanDto,
     },
     utils::PROVIDER_SCHEME_PREFIX,
-    defaults::{generate_default_access_secret, generate_default_encrypt_secret, TEMPLATE_FILE},
 };
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::fs;
-use shared::concat_string;
-use crate::utils::request::{is_uri};
+use tuliprox_core::{
+    model::{ApiProxyConfig, AppConfig, Config, MediaToolCapabilities, SourcesConfig, UserPlan},
+    utils,
+    utils::{
+        config_file_reader, exit, file_exists_async, open_file, read_mappings_file_unprepared, read_templates_file,
+        request::is_uri, resolve_env_var, FileLockManager,
+    },
+};
+use tuliprox_repository::{
+    backup_api_user_db_file, csv_read_inputs, csv_write_inputs, get_api_user_db_path, is_csv_file, load_api_user,
+    merge_api_user,
+};
 use url::Url;
 
 /// Options controlling how configuration files are parsed.
@@ -62,27 +62,21 @@ impl ReadConfigOptions {
     // Expand environment variables and include all computed fields — the typical
     // production default.
     #[must_use]
-    pub const fn resolve_and_compute() -> Self {
-        Self { resolve_env: true, include_computed: true }
-    }
+    pub const fn resolve_and_compute() -> Self { Self { resolve_env: true, include_computed: true } }
 
     // Parse the raw YAML without any variable expansion or computed fields —
     // useful when you need the literal, unexpanded content (e.g. before saving).
     #[must_use]
-    pub const fn raw() -> Self {
-        Self { resolve_env: false, include_computed: false }
-    }
+    pub const fn raw() -> Self { Self { resolve_env: false, include_computed: false } }
 }
 
-pub(crate) struct PreparedTemplateBundle {
-    pub(crate) definition: Option<TemplateDefinitionDto>,
-    pub(crate) prepared: Option<Vec<PatternTemplate>>,
-    pub(crate) files_used: Option<Vec<String>>,
+pub struct PreparedTemplateBundle {
+    pub definition: Option<TemplateDefinitionDto>,
+    pub prepared: Option<Vec<PatternTemplate>>,
+    pub files_used: Option<Vec<String>>,
 }
-
 
 // `Read`-Trait for Either
-
 
 pub async fn read_api_proxy_config(
     config: &AppConfig,
@@ -174,7 +168,14 @@ pub async fn read_sources_file_from_path_with_options(
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
     prepared_templates: Option<&[shared::model::PatternTemplate]>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    read_sources_file_from_path_with_templates(sources_file, opts.resolve_env, opts.include_computed, hdhr_config, prepared_templates).await
+    read_sources_file_from_path_with_templates(
+        sources_file,
+        opts.resolve_env,
+        opts.include_computed,
+        hdhr_config,
+        prepared_templates,
+    )
+    .await
 }
 
 pub async fn read_sources_file_from_path(
@@ -187,8 +188,9 @@ pub async fn read_sources_file_from_path(
         sources_file,
         ReadConfigOptions { resolve_env, include_computed },
         hdhr_config,
-        None
-    ).await
+        None,
+    )
+    .await
 }
 
 pub async fn read_sources_file_with_options(
@@ -207,13 +209,16 @@ pub async fn read_sources_file(
     hdhr_config: Option<&HdHomeRunDeviceOverview>,
     prepared_templates: Option<&[shared::model::PatternTemplate]>,
 ) -> Result<SourcesConfigDto, TuliproxError> {
-    read_sources_file_with_options(sources_file, ReadConfigOptions { resolve_env, include_computed }, hdhr_config, prepared_templates).await
+    read_sources_file_with_options(
+        sources_file,
+        ReadConfigOptions { resolve_env, include_computed },
+        hdhr_config,
+        prepared_templates,
+    )
+    .await
 }
 
-pub fn read_config_file_with_options(
-    config_file: &str,
-    opts: ReadConfigOptions,
-) -> Result<ConfigDto, TuliproxError> {
+pub fn read_config_file_with_options(config_file: &str, opts: ReadConfigOptions) -> Result<ConfigDto, TuliproxError> {
     match open_file(&std::path::PathBuf::from(config_file)) {
         Ok(file) => {
             let maybe_config: Result<ConfigDto, _> =
@@ -241,7 +246,7 @@ pub fn read_config_file(
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn read_templates(
+pub fn read_templates(
     template_file_path: Option<&str>,
     resolve_env: bool,
     sources_inline_templates: Option<&[PatternTemplate]>,
@@ -252,17 +257,10 @@ pub(crate) fn read_templates(
         sources: HashSet<String>,
     }
 
-    fn track_template_name(
-        usage: &mut HashMap<String, TemplateNameUsage>,
-        template_name: &str,
-        source: &str,
-    ) {
+    fn track_template_name(usage: &mut HashMap<String, TemplateNameUsage>, template_name: &str, source: &str) {
         let entry = usage
             .entry(template_name.to_string())
-            .or_insert_with(|| TemplateNameUsage {
-                count: 0,
-                sources: HashSet::new(),
-            });
+            .or_insert_with(|| TemplateNameUsage { count: 0, sources: HashSet::new() });
         entry.count = entry.count.saturating_add(1);
         entry.sources.insert(source.to_string());
     }
@@ -288,11 +286,7 @@ pub(crate) fn read_templates(
                 )
             };
             for template in &definition.templates {
-                track_template_name(
-                    &mut template_name_usage,
-                    template.name.as_str(),
-                    file_source_label.as_str(),
-                );
+                track_template_name(&mut template_name_usage, template.name.as_str(), file_source_label.as_str());
             }
             merged_templates.extend(definition.templates);
             loaded_template_files.extend(template_paths.iter().map(|p| p.display().to_string()));
@@ -301,21 +295,13 @@ pub(crate) fn read_templates(
 
     if let Some(templates) = sources_inline_templates {
         for template in templates {
-            track_template_name(
-                &mut template_name_usage,
-                template.name.as_str(),
-                "source.yml inline templates",
-            );
+            track_template_name(&mut template_name_usage, template.name.as_str(), "source.yml inline templates");
         }
         merged_templates.extend(templates.iter().cloned());
     }
     if let Some(templates) = mappings_inline_templates {
         for template in templates {
-            track_template_name(
-                &mut template_name_usage,
-                template.name.as_str(),
-                "mapping.yml inline templates",
-            );
+            track_template_name(&mut template_name_usage, template.name.as_str(), "mapping.yml inline templates");
         }
         merged_templates.extend(templates.iter().cloned());
     }
@@ -340,27 +326,17 @@ pub(crate) fn read_templates(
         )));
     }
 
-    let files_used = if loaded_template_files.is_empty() {
-        None
-    } else {
-        Some(loaded_template_files)
-    };
+    let files_used = if loaded_template_files.is_empty() { None } else { Some(loaded_template_files) };
 
     if merged_templates.is_empty() {
-        return Ok(PreparedTemplateBundle {
-            definition: None,
-            prepared: None,
-            files_used,
-        });
+        return Ok(PreparedTemplateBundle { definition: None, prepared: None, files_used });
     }
 
     let mut prepared_templates = merged_templates.clone();
     prepare_templates(&mut prepared_templates)?;
 
     Ok(PreparedTemplateBundle {
-        definition: Some(TemplateDefinitionDto {
-            templates: merged_templates,
-        }),
+        definition: Some(TemplateDefinitionDto { templates: merged_templates }),
         prepared: Some(prepared_templates),
         files_used,
     })
@@ -382,30 +358,21 @@ pub async fn read_app_config_dto(
         resolve_template_and_mapping_paths(paths, config.template_path.as_deref(), config.mapping_path.as_deref());
 
     let mut sources = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env).await?;
-    let mut mappings = read_mappings_file_unprepared(&effective_mapping_path, resolve_env)?
-        .map(|(_, mapping)| mapping);
+    let mut mappings = read_mappings_file_unprepared(&effective_mapping_path, resolve_env)?.map(|(_, mapping)| mapping);
 
     let template_bundle = read_templates(
         Some(&effective_template_path),
         resolve_env,
         sources.templates.as_deref(),
-        mappings
-            .as_ref()
-            .and_then(|mapping| mapping.mappings.templates.as_deref()),
+        mappings.as_ref().and_then(|mapping| mapping.mappings.templates.as_deref()),
     )?;
     let templates = template_bundle.definition;
     let prepared_templates = template_bundle.prepared;
 
     if resolve_env {
-        sources.prepare(
-            include_computed,
-            config.get_hdhr_device_overview().as_ref(),
-            prepared_templates.as_deref(),
-        )?;
+        sources.prepare(include_computed, config.get_hdhr_device_overview().as_ref(), prepared_templates.as_deref())?;
         if let Some(mapping) = mappings.as_mut() {
-            mapping
-                .mappings
-                .prepare(prepared_templates.as_deref())?;
+            mapping.mappings.prepare(prepared_templates.as_deref())?;
         }
     }
 
@@ -424,13 +391,7 @@ pub async fn read_app_config_dto(
         }
     };
 
-    Ok(AppConfigDto {
-        config,
-        sources,
-        mappings,
-        templates,
-        api_proxy,
-    })
+    Ok(AppConfigDto { config, sources, mappings, templates, api_proxy })
 }
 
 fn apply_prepared_mappings(
@@ -443,19 +404,13 @@ fn apply_prepared_mappings(
 ) {
     match mapping.mappings.prepare(prepared_templates) {
         Ok(()) => {
-            let mappings: crate::model::Mappings = crate::model::Mappings::from(&*mapping);
+            let mappings: tuliprox_core::model::Mappings = tuliprox_core::model::Mappings::from(&*mapping);
             app_config.set_mappings(mappings_file, &mappings);
-            paths.mapping_files_used = mapping_paths.map(|items| {
-                items
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<String>>()
-            });
+            paths.mapping_files_used =
+                mapping_paths.map(|items| items.iter().map(|p| p.display().to_string()).collect::<Vec<String>>());
         }
         Err(err) => {
-            error!(
-                "Failed to prepare mapping '{mappings_file}': {err}. Skipping mapping registration."
-            );
+            error!("Failed to prepare mapping '{mappings_file}': {err}. Skipping mapping registration.");
             paths.mapping_files_used = None;
         }
     }
@@ -470,13 +425,7 @@ pub async fn prepare_sources_batch(
         .inputs
         .iter()
         .flat_map(|item| {
-            std::iter::once(item.id).chain(
-                item.aliases
-                    .as_ref()
-                    .into_iter()
-                    .flatten()
-                    .map(|alias| alias.id),
-            )
+            std::iter::once(item.id).chain(item.aliases.as_ref().into_iter().flatten().map(|alias| alias.id))
         })
         .max()
         .unwrap_or(0);
@@ -518,22 +467,14 @@ Use a batch:// URL or a local CSV path (absolute/relative)."
 
         return match csv_read_inputs(input_type, url).await {
             Ok((file_path, batch_aliases)) => Ok(Some((file_path, batch_aliases))),
-            Err(err) => {
-                Err(TuliproxError::Config(format!("{err}")))
-            }
+            Err(err) => Err(TuliproxError::Config(format!("{err}"))),
         };
     }
     Ok(None)
 }
 
-pub async fn prepare_users(
-    app_config_dto: &mut AppConfigDto,
-    app_config: &AppConfig,
-) -> Result<(), TuliproxError> {
-    let use_user_db = app_config_dto
-        .api_proxy
-        .as_ref()
-        .is_some_and(|p| p.use_user_db);
+pub async fn prepare_users(app_config_dto: &mut AppConfigDto, app_config: &AppConfig) -> Result<(), TuliproxError> {
+    let use_user_db = app_config_dto.api_proxy.as_ref().is_some_and(|p| p.use_user_db);
 
     if use_user_db {
         let user_db_path = get_api_user_db_path(app_config);
@@ -541,16 +482,11 @@ pub async fn prepare_users(
             match load_api_user(app_config).await {
                 Ok(stored_users) => {
                     if let Some(api_proxy) = app_config_dto.api_proxy.as_mut() {
-                        api_proxy
-                            .user
-                            .extend(stored_users.iter().map(TargetUserDto::from));
+                        api_proxy.user.extend(stored_users.iter().map(TargetUserDto::from));
                     }
                 }
                 Err(err) => {
-                    warn!(
-                        "Failed to load users from DB at {}: {err}",
-                        user_db_path.display()
-                    );
+                    warn!("Failed to load users from DB at {}: {err}", user_db_path.display());
                 }
             }
         }
@@ -581,14 +517,9 @@ pub async fn read_initial_app_config(
         .or(config_dto.template_path.as_deref())
         .map(|path| if resolve_env { resolve_env_var(path) } else { path.to_string() });
 
-    paths.mapping_file_path = Some(utils::resolve_mapping_file_path(
-        config_path,
-        configured_mapping_path.as_deref(),
-    ));
-    paths.template_file_path = Some(utils::resolve_template_file_path(
-        config_path,
-        configured_template_path.as_deref(),
-    ));
+    paths.mapping_file_path = Some(utils::resolve_mapping_file_path(config_path, configured_mapping_path.as_deref()));
+    paths.template_file_path =
+        Some(utils::resolve_template_file_path(config_path, configured_template_path.as_deref()));
 
     let mut sources_dto = parse_sources_file_from_path(&PathBuf::from(sources_file), resolve_env).await?;
 
@@ -606,9 +537,7 @@ pub async fn read_initial_app_config(
         paths.template_file_path.as_deref(),
         resolve_env,
         sources_dto.templates.as_deref(),
-        mappings_dto
-            .as_ref()
-            .and_then(|mapping| mapping.mappings.templates.as_deref()),
+        mappings_dto.as_ref().and_then(|mapping| mapping.mappings.templates.as_deref()),
     )?;
     let prepared_templates = template_bundle.prepared;
     let template_files_used = template_bundle.files_used;
@@ -694,9 +623,7 @@ pub fn read_api_proxy_file(
                 }
                 Ok(Some(api_proxy_dto))
             }
-            Err(err) => {
-                Err(TuliproxError::Config(format!("can't read api-proxy-config file: {err}")))
-            }
+            Err(err) => Err(TuliproxError::Config(format!("can't read api-proxy-config file: {err}"))),
         }
     })
 }
@@ -734,9 +661,7 @@ where
     T: ?Sized + Serialize,
 {
     let path = PathBuf::from(file_path);
-    let filename = path.file_name().map_or(default_name.to_string(), |f| {
-        f.to_string_lossy().to_string()
-    });
+    let filename = path.file_name().map_or(default_name.to_string(), |f| f.to_string_lossy().to_string());
 
     let mut serialized = String::new();
     let options = serde_saphyr::ser_options! {prefer_block_scalars: false};
@@ -765,17 +690,25 @@ where
         info!("Saving file to {}", path.to_str().unwrap_or("?"));
     }
 
-    let parent_dir = path.parent().ok_or_else(|| { TuliproxError::Config(format!("Could not write file {}: missing parent directory", path.to_str().unwrap_or("?")))})?;
+    let parent_dir = path.parent().ok_or_else(|| {
+        TuliproxError::Config(format!(
+            "Could not write file {}: missing parent directory",
+            path.to_str().unwrap_or("?")
+        ))
+    })?;
 
-    let dest_file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(default_name);
+    let dest_file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or(default_name);
 
     let mut tmp_path = parent_dir.to_path_buf();
-    tmp_path.push(format!(".{dest_file_name}.tmp-{}-{}", std::process::id(), Local::now().timestamp_nanos_opt().unwrap_or_default()));
+    tmp_path.push(format!(
+        ".{dest_file_name}.tmp-{}-{}",
+        std::process::id(),
+        Local::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
 
-    fs::write(&tmp_path, serialized).await.map_err(|err| { TuliproxError::Config(format!("Could not write temp file {}: {err}", tmp_path.to_str().unwrap_or("?")))})?;
+    fs::write(&tmp_path, serialized).await.map_err(|err| {
+        TuliproxError::Config(format!("Could not write temp file {}: {err}", tmp_path.to_str().unwrap_or("?")))
+    })?;
 
     match fs::rename(&tmp_path, &path).await {
         Ok(()) => Ok(()),
@@ -812,11 +745,7 @@ fn replace_file_windows(source: &Path, target: &Path) -> io::Result<()> {
     // SAFETY: both paths are NUL-terminated UTF-16 buffers that remain alive for
     // the call. `MOVEFILE_REPLACE_EXISTING` leaves the target in place on error.
     let ok = unsafe {
-        MoveFileExW(
-            source_wide.as_ptr(),
-            target_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
+        MoveFileExW(source_wide.as_ptr(), target_wide.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
     };
     if ok == 0 {
         return Err(io::Error::last_os_error());
@@ -898,10 +827,9 @@ async fn apply_authoritative_plans(config: &AppConfig, api_proxy: &mut ApiProxyC
                     cfg.get_backup_dir().to_string()
                 };
                 match save_plans(&plans_path_str, &backup_dir, &migrated).await {
-                    Ok(()) => info!(
-                        "Migrated {} user plan(s) from api-proxy.yml to {plans_path_str}",
-                        migrated.plans.len()
-                    ),
+                    Ok(()) => {
+                        info!("Migrated {} user plan(s) from api-proxy.yml to {plans_path_str}", migrated.plans.len());
+                    }
                     Err(err) => error!("Failed to migrate plans to {plans_path_str}: {err}"),
                 }
                 let plans = legacy_plans.iter().map(|plan| Arc::new(UserPlan::from(plan))).collect();
@@ -931,19 +859,11 @@ fn read_legacy_api_proxy_plans(config: &AppConfig, resolve_env: bool) -> Option<
     }
 }
 
-pub async fn save_main_config(
-    file_path: &str,
-    backup_dir: &str,
-    config: &ConfigDto,
-) -> Result<(), TuliproxError> {
+pub async fn save_main_config(file_path: &str, backup_dir: &str, config: &ConfigDto) -> Result<(), TuliproxError> {
     write_config_file(file_path, backup_dir, config, "config.yml").await
 }
 
-pub async fn save_sources_config<T>(
-    file_path: &str,
-    backup_dir: &str,
-    config: &T,
-) -> Result<(), TuliproxError>
+pub async fn save_sources_config<T>(file_path: &str, backup_dir: &str, config: &T) -> Result<(), TuliproxError>
 where
     T: ?Sized + Serialize,
 {
@@ -966,21 +886,14 @@ async fn build_templates_to_persist(
     let config = app_config.config.load();
     let paths = app_config.paths.load();
 
-    let existing_source_inline_templates = match parse_sources_file_from_path(
-        Path::new(paths.sources_file_path.as_str()),
-        true,
-    )
-    .await
-    {
-        Ok(existing_sources) => existing_sources.templates,
-        Err(err) => {
-            warn!(
-                "Failed to read existing source.yml for template migration '{}': {err}",
-                paths.sources_file_path
-            );
-            None
-        }
-    };
+    let existing_source_inline_templates =
+        match parse_sources_file_from_path(Path::new(paths.sources_file_path.as_str()), true).await {
+            Ok(existing_sources) => existing_sources.templates,
+            Err(err) => {
+                warn!("Failed to read existing source.yml for template migration '{}': {err}", paths.sources_file_path);
+                None
+            }
+        };
 
     let mapping_inline_templates = if let Some(mapping_file_path) = paths.mapping_file_path.as_ref() {
         read_mappings_file_unprepared(mapping_file_path, true)?
@@ -997,19 +910,11 @@ async fn build_templates_to_persist(
     };
 
     let template_file_path = paths.template_file_path.as_deref().or(config.template_path.as_deref());
-    let template_bundle = read_templates(
-        template_file_path,
-        true,
-        source_inline_templates,
-        mapping_inline_templates.as_deref(),
-    )?;
+    let template_bundle =
+        read_templates(template_file_path, true, source_inline_templates, mapping_inline_templates.as_deref())?;
     let prepared_templates = template_bundle.prepared;
 
-    new_dto.prepare(
-        true,
-        config.get_hdhr_device_overview().as_ref(),
-        prepared_templates.as_deref(),
-    )?;
+    new_dto.prepare(true, config.get_hdhr_device_overview().as_ref(), prepared_templates.as_deref())?;
 
     if let Some(templates) = new_dto.templates.clone() {
         if templates.is_empty() {
@@ -1072,11 +977,7 @@ pub async fn persist_source_config(
 pub async fn sanitize_sources_for_persist(mut source_config: SourcesConfigDto) -> SourcesConfigDto {
     source_config.templates = None;
     for input in &mut source_config.inputs {
-        if input
-            .panel_api
-            .as_ref()
-            .is_some_and(|panel| panel.alias_pool.is_some())
-        {
+        if input.panel_api.as_ref().is_some_and(|panel| panel.alias_pool.is_some()) {
             if let Some(aliases) = input.aliases.as_mut() {
                 aliases.sort_by(|a, b| {
                     let a_ts = a.exp_date.unwrap_or(i64::MIN);
@@ -1085,10 +986,8 @@ pub async fn sanitize_sources_for_persist(mut source_config: SourcesConfigDto) -
                 });
             }
         }
-        if matches!(
-            input.input_type,
-            InputType::XtreamBatch | InputType::M3uBatch | InputType::StalkerBatch
-        ) && is_csv_file(input.url.as_str())
+        if matches!(input.input_type, InputType::XtreamBatch | InputType::M3uBatch | InputType::StalkerBatch)
+            && is_csv_file(input.url.as_str())
         {
             if let Some(aliases) = &input.aliases {
                 if let Err(err) = csv_write_inputs(input.url.as_str(), aliases).await {
@@ -1125,8 +1024,10 @@ pub async fn validate_and_persist_source_config(
     persist_source_config(app_config, None, dto).await
 }
 
-
-pub async fn persist_messaging_templates(app_config: &Arc<AppConfig>, cfg: &mut ConfigDto) -> Result<(), TuliproxError> {
+pub async fn persist_messaging_templates(
+    app_config: &Arc<AppConfig>,
+    cfg: &mut ConfigDto,
+) -> Result<(), TuliproxError> {
     let templates_dir = {
         let paths = app_config.paths.load();
         PathBuf::from(&paths.config_path).join("messaging_templates")
@@ -1155,8 +1056,12 @@ pub async fn persist_messaging_templates(app_config: &Arc<AppConfig>, cfg: &mut 
     Ok(())
 }
 
-
-async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template: &str, templates_dir: &Path) -> Result<String, TuliproxError> {
+async fn persist_single_template(
+    prefix: &str,
+    kind: Option<&MsgKind>,
+    template: &str,
+    templates_dir: &Path,
+) -> Result<String, TuliproxError> {
     if template.is_empty() || is_uri(template) {
         return Ok(template.to_string());
     }
@@ -1173,23 +1078,25 @@ async fn persist_single_template(prefix: &str, kind: Option<&MsgKind>, template:
 
     // It's a raw string, persist it
     if !file_exists_async(templates_dir).await {
-        tokio::fs::create_dir_all(templates_dir)
-            .await
-            .map_err(|e| TuliproxError::Config(format!("Messaging templates dir: failed to create dir: {} {e}", templates_dir.display())))?;
+        tokio::fs::create_dir_all(templates_dir).await.map_err(|e| {
+            TuliproxError::Config(format!(
+                "Messaging templates dir: failed to create dir: {} {e}",
+                templates_dir.display()
+            ))
+        })?;
     }
 
-    let filename = if let Some(k) = kind {
-        k.template_filename(prefix)
-    } else {
-        concat_string!(prefix, "_default.templ")
-    };
+    let filename =
+        if let Some(k) = kind { k.template_filename(prefix) } else { concat_string!(prefix, "_default.templ") };
 
     let file_path = templates_dir.join(filename);
-    fs::write(&file_path, template).await.map_err(|e| TuliproxError::Config(format!("Failed to write template file: {e}")))?;
+    fs::write(&file_path, template)
+        .await
+        .map_err(|e| TuliproxError::Config(format!("Failed to write template file: {e}")))?;
 
-    Url::from_file_path(&file_path)
-        .map(|u| u.to_string())
-        .map_err(|()| TuliproxError::Config(format!("Failed to convert persisted path to file URL: {}", file_path.display())))
+    Url::from_file_path(&file_path).map(|u| u.to_string()).map_err(|()| {
+        TuliproxError::Config(format!("Failed to convert persisted path to file URL: {}", file_path.display()))
+    })
 }
 
 // ---- API user migration (config file <-> user database) ----
@@ -1206,12 +1113,12 @@ fn serialize_api_proxy_config(config: &ApiProxyConfigDto) -> Result<String, Stri
 }
 
 async fn api_proxy_file_would_change(api_proxy_file: &str, config: &ApiProxyConfigDto) -> Result<bool, String> {
-let serialized = serialize_api_proxy_config(config)?;
-match tokio::fs::read_to_string(api_proxy_file).await {
-    Ok(existing) => Ok(existing != serialized),
-    Err(err) if err.kind() == ErrorKind::NotFound => Ok(true),
-    Err(err) => Err(format!("Could not read api proxy file {api_proxy_file}: {err}")),
-}
+    let serialized = serialize_api_proxy_config(config)?;
+    match tokio::fs::read_to_string(api_proxy_file).await {
+        Ok(existing) => Ok(existing != serialized),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(true),
+        Err(err) => Err(format!("Could not read api proxy file {api_proxy_file}: {err}")),
+    }
 }
 
 async fn backfill_output_clusters_to_file(api_proxy: &ApiProxyConfig, cfg: &AppConfig, errors: &mut Vec<String>) {
@@ -1253,8 +1160,7 @@ pub async fn migrate_api_user(api_proxy: &mut ApiProxyConfig, cfg: &AppConfig, e
                 let backup_dir = config.get_backup_dir();
                 api_proxy.user = vec![];
                 if let Err(err) =
-                    save_api_proxy(api_proxy_file, backup_dir.as_ref(), &ApiProxyConfigDto::from(&*api_proxy))
-                        .await
+                    save_api_proxy(api_proxy_file, backup_dir.as_ref(), &ApiProxyConfigDto::from(&*api_proxy)).await
                 {
                     errors.push(format!("Error saving api proxy file: {err}"));
                 }
@@ -1315,17 +1221,15 @@ pub async fn migrate_api_user(api_proxy: &mut ApiProxyConfig, cfg: &AppConfig, e
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use super::{prepare_sources_batch, sanitize_sources_for_persist, write_config_file};
-    use super::get_batch_aliases;
-    use crate::utils::resolve_env_var;
+    use super::{get_batch_aliases, prepare_sources_batch, sanitize_sources_for_persist, write_config_file};
     use shared::{
         model::{ConfigInputAliasDto, ConfigInputDto, InputType, SourcesConfigDto},
         utils::Internable,
     };
     use tempfile::tempdir;
+    use tuliprox_core::utils::resolve_env_var;
 
     #[test]
     #[allow(clippy::manual_unwrap_or_default)]
@@ -1343,9 +1247,7 @@ mod tests {
     async fn batch_provider_scheme_returns_clear_error() {
         let result = get_batch_aliases(InputType::XtreamBatch, "provider://my_provider").await;
         let err = result.expect_err("provider:// must not be accepted for batch inputs");
-        assert!(err
-            .to_string()
-            .contains("does not support provider:// URLs"));
+        assert!(err.to_string().contains("does not support provider:// URLs"));
     }
 
     #[tokio::test]
@@ -1373,11 +1275,8 @@ mod tests {
     async fn stalker_batch_loads_and_persists_csv_aliases() {
         let dir = tempdir().expect("temp dir");
         let path = dir.path().join("stalker.csv");
-        std::fs::write(
-            &path,
-            "#name;username;password;url;max_connections\nalias;user;pass;http://portal.example;1\n",
-        )
-        .expect("write csv");
+        std::fs::write(&path, "#name;username;password;url;max_connections\nalias;user;pass;http://portal.example;1\n")
+            .expect("write csv");
 
         let (_, aliases) = get_batch_aliases(InputType::StalkerBatch, path.to_string_lossy().as_ref())
             .await
@@ -1419,5 +1318,4 @@ mod tests {
         assert_eq!(tokio::fs::read_to_string(config_path).await?, "old");
         Ok(())
     }
-
 }

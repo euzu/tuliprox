@@ -1,9 +1,8 @@
-use shared::utils::{hex_decode, hex_encode};
 use chrono::Utc;
-
+use shared::utils::{hex_decode, hex_encode};
 // `constant_time_eq` lives in `utils::crypto_utils`; re-exported here for the
 // authentication call sites that have always used it under this path.
-pub use crate::utils::constant_time_eq;
+pub use tuliprox_core::utils::constant_time_eq;
 
 // #[derive(Serialize, Deserialize, Debug)]
 // struct AccessToken {
@@ -77,7 +76,7 @@ fn verify_access_token_at(token_str: &str, secret: &[u8; 32], current_timestamp:
 
 #[cfg(test)]
 mod tests {
-    use crate::auth::access_token::{create_access_token_at, verify_access_token, verify_access_token_at};
+    use crate::access_token::{create_access_token_at, verify_access_token, verify_access_token_at};
     use std::panic::catch_unwind;
 
     #[test]

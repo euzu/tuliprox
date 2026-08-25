@@ -1,4 +1,3 @@
-use crate::model::WebAuthConfig;
 use chrono::{Duration, Local};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation};
 use shared::{
@@ -8,6 +7,7 @@ use shared::{
         Claims, UserId, CURRENT_PERMISSION_SCHEMA_VERSION, ROLE_ADMIN, ROLE_API_USER,
     },
 };
+use tuliprox_core::model::WebAuthConfig;
 
 pub fn create_jwt_admin(
     web_auth_config: &WebAuthConfig,
@@ -92,7 +92,7 @@ fn create_jwt(
     }
 }
 
-pub(crate) fn verify_token(token: &str, secret_key: &[u8]) -> Option<TokenData<Claims>> {
+pub fn verify_token(token: &str, secret_key: &[u8]) -> Option<TokenData<Claims>> {
     if let Ok(token_data) =
         decode::<Claims>(token, &DecodingKey::from_secret(secret_key), &Validation::new(Algorithm::HS256))
     {
@@ -166,7 +166,7 @@ impl std::fmt::Display for AuthError {
 /// version, and [`AuthError::MissingSubject`] when the
 /// `subject_id` is `None`. A token that passes both checks is fit
 /// for downstream permission and authorization checks.
-pub(crate) fn validate_token_claims(claims: &Claims) -> Result<(), AuthError> {
+pub fn validate_token_claims(claims: &Claims) -> Result<(), AuthError> {
     if claims.permission_schema_version < CURRENT_PERMISSION_SCHEMA_VERSION {
         return Err(AuthError::StaleSchema);
     }
@@ -179,10 +179,10 @@ pub(crate) fn validate_token_claims(claims: &Claims) -> Result<(), AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::WebAuthConfig;
     use shared::model::{
         permission::Permission, Claims, UserId, CURRENT_PERMISSION_SCHEMA_VERSION, ROLE_ADMIN, ROLE_API_USER,
     };
+    use tuliprox_core::model::WebAuthConfig;
 
     fn test_web_auth_config() -> WebAuthConfig {
         WebAuthConfig {

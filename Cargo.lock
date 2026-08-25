@@ -4456,7 +4456,9 @@ dependencies = [
  "tower",
  "tower-http",
  "tower_governor",
+ "tuliprox-auth",
  "tuliprox-btree",
+ "tuliprox-config-loader",
  "tuliprox-core",
  "tuliprox-library",
  "tuliprox-media-server",
@@ -4469,6 +4471,27 @@ dependencies = [
  "vergen",
  "winapi",
  "windows-sys 0.61.2",
+ "zeroize",
+]
+
+[[package]]
+name = "tuliprox-auth"
+version = "3.3.91"
+dependencies = [
+ "arc-swap",
+ "axum",
+ "base64 0.23.1",
+ "blake3",
+ "chrono",
+ "jsonwebtoken",
+ "log",
+ "rand 0.9.4",
+ "rpassword",
+ "rust-argon2",
+ "serde_json",
+ "shared",
+ "tuliprox-core",
+ "tuliprox-repository",
  "zeroize",
 ]
 
@@ -4488,6 +4511,24 @@ dependencies = [
  "smallvec",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "tuliprox-config-loader"
+version = "3.3.91"
+dependencies = [
+ "arc-swap",
+ "chrono",
+ "log",
+ "serde",
+ "serde-saphyr",
+ "shared",
+ "tempfile",
+ "tokio",
+ "tuliprox-core",
+ "tuliprox-repository",
+ "url",
+ "winapi",
 ]
 
 [[package]]
