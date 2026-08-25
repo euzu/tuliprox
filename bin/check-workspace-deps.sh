@@ -45,6 +45,9 @@ while IFS=$'\t' read -r from to; do
         "tuliprox -> tuliprox-mpegts") ;;
         "tuliprox -> tuliprox-core") ;;
         "tuliprox -> tuliprox-library") ;;
+        "tuliprox -> tuliprox-messaging") ;;
+        "tuliprox-messaging -> shared") ;;
+        "tuliprox-messaging -> tuliprox-core") ;;
         "tuliprox-library -> shared") ;;
         "tuliprox-library -> tuliprox-core") ;;
         "tuliprox-core -> shared") ;;

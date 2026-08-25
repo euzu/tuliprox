@@ -16,6 +16,7 @@ shared = { version = "3", path = "../shared" }
 tuliprox-btree = { version = "3", path = "../btree" }
 tuliprox-core = { version = "3", path = "../core" }
 tuliprox-library = { version = "3", path = "../library" }
+tuliprox-messaging = { version = "3", path = "../messaging" }
 tuliprox-media-server = { version = "3", path = "../media-server" }
 tuliprox-mpegts = { version = "3", path = "../mpegts" }
 serde.workspace = true

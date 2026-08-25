@@ -4460,6 +4460,7 @@ dependencies = [
  "tuliprox-core",
  "tuliprox-library",
  "tuliprox-media-server",
+ "tuliprox-messaging",
  "tuliprox-mpegts",
  "url",
  "uuid",
@@ -4577,6 +4578,24 @@ dependencies = [
  "serde_json",
  "shared",
  "tokio",
+ "url",
+]
+
+[[package]]
+name = "tuliprox-messaging"
+version = "3.3.91"
+dependencies = [
+ "arc-swap",
+ "chrono",
+ "handlebars",
+ "log",
+ "mime",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "shared",
+ "tokio",
+ "tuliprox-core",
  "url",
 ]
 

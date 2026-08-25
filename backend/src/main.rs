@@ -49,6 +49,7 @@ use std::{
 use tuliprox_core::{model, utils};
 use tuliprox_library::{library, media_enrichment};
 use tuliprox_media_server as media_server;
+use tuliprox_messaging as messaging;
 use tuliprox_mpegts as mpegts;
 
 #[allow(clippy::struct_excessive_bools)]

@@ -1,21 +1,34 @@
-use crate::model::{AppConfig, InputSource, MessagingConfig, MessageContent, TemplateContext};
-use crate::utils::{telegram_create_instance, telegram_send_message, SendMessageOption, SendMessageParseMode};
+//! Outbound notification delivery.
+//!
+//! Renders message templates and sends them over the configured channels -
+//! Telegram and generic REST endpoints. The playlist pipeline, the recording
+//! supervisor and the API all notify through here, and none of them are named
+//! by this crate.
+
 use chrono::Utc;
 use handlebars::{Context, Handlebars, Helper, HelperResult, Output, RenderContext};
 use log::{debug, error};
 use reqwest::{header, Method};
 use serde_json::json;
-use shared::model::{DiskAlert, InputFetchMethod, MsgKind};
-use shared::utils::{escape_markdown_v2, human_readable_byte_size, json_str_to_markdown, Internable};
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::str::FromStr;
-use std::sync::{Arc, LazyLock};
-use crate::utils::request::download_text_content;
+use shared::{
+    model::{DiskAlert, InputFetchMethod, MsgKind},
+    utils::{escape_markdown_v2, human_readable_byte_size, json_str_to_markdown, Internable},
+};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    str::FromStr,
+    sync::{Arc, LazyLock},
+};
+use tuliprox_core::{
+    model::{AppConfig, InputSource, MessageContent, MessagingConfig, TemplateContext},
+    utils::{
+        request::download_text_content, telegram_create_instance, telegram_send_message, SendMessageOption,
+        SendMessageParseMode,
+    },
+};
 
-fn is_enabled(kind: MsgKind, cfg: &MessagingConfig) -> bool {
-    cfg.notify_on.contains(&kind)
-}
+fn is_enabled(kind: MsgKind, cfg: &MessagingConfig) -> bool { cfg.notify_on.contains(&kind) }
 
 /// One configured outbound messaging channel.
 ///
@@ -101,18 +114,28 @@ fn default_disk_alert_text(alert: &DiskAlert) -> String {
 
 static HANDLEBARS: LazyLock<Handlebars> = LazyLock::new(|| {
     let mut h = Handlebars::new();
-    h.register_helper("json_escape", Box::new(|h: &Helper, _: &Handlebars, _: &Context, _: &mut RenderContext, out: &mut dyn Output| -> HelperResult {
-        let param = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
-        let escaped = serde_json::to_string(param).unwrap_or_else(|_| String::new());
-        if escaped.len() >= 2 {
-            out.write(&escaped[1..escaped.len()-1])?;
-        }
-        Ok(())
-    }));
+    h.register_helper(
+        "json_escape",
+        Box::new(
+            |h: &Helper, _: &Handlebars, _: &Context, _: &mut RenderContext, out: &mut dyn Output| -> HelperResult {
+                let param = h.param(0).and_then(|v| v.value().as_str()).unwrap_or("");
+                let escaped = serde_json::to_string(param).unwrap_or_else(|_| String::new());
+                if escaped.len() >= 2 {
+                    out.write(&escaped[1..escaped.len() - 1])?;
+                }
+                Ok(())
+            },
+        ),
+    );
     h
 });
 
-async fn render_template(app_config: &Arc<AppConfig>, http_client: &reqwest::Client, template: Option<&str>, content: &MessageContent) -> String {
+async fn render_template(
+    app_config: &Arc<AppConfig>,
+    http_client: &reqwest::Client,
+    template: Option<&str>,
+    content: &MessageContent,
+) -> String {
     let timestamp = Utc::now().to_rfc3339();
     let kind = content.kind().to_string();
 
@@ -189,7 +212,7 @@ fn default_text_for(content: &MessageContent) -> String {
     }
 }
 
-fn default_recording_lifecycle_text(recording: &crate::model::RecordingLifecycleMessage) -> String {
+fn default_recording_lifecycle_text(recording: &tuliprox_core::model::RecordingLifecycleMessage) -> String {
     let label = match recording.event {
         MsgKind::RecordingStarted => "Recording started",
         MsgKind::RecordingCompleted => "Recording completed",
@@ -204,7 +227,12 @@ fn default_recording_lifecycle_text(recording: &crate::model::RecordingLifecycle
     }
 }
 
-async fn send_rest_message(app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) -> ChannelOutcome {
+async fn send_rest_message(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    content: &MessageContent,
+    messaging: &MessagingConfig,
+) -> ChannelOutcome {
     if let Some(rest) = &messaging.rest {
         let kind = content.kind();
         let template = rest.templates.get(&kind).map(String::as_str);
@@ -242,7 +270,12 @@ async fn send_rest_message(app_config: &Arc<AppConfig>, client: &reqwest::Client
     }
 }
 
-async fn send_discord_message(app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) -> ChannelOutcome {
+async fn send_discord_message(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    content: &MessageContent,
+    messaging: &MessagingConfig,
+) -> ChannelOutcome {
     if let Some(discord) = &messaging.discord {
         let kind = content.kind();
         let template = discord.templates.get(&kind).map(String::as_str);
@@ -250,9 +283,9 @@ async fn send_discord_message(app_config: &Arc<AppConfig>, client: &reqwest::Cli
         let body = if let Some(templ) = template {
             render_template(app_config, client, Some(templ), content).await
         } else {
-             // Default json formatting
-             let msg_str = default_text_for(content);
-             json!({ "content": msg_str }).to_string()
+            // Default json formatting
+            let msg_str = default_text_for(content);
+            json!({ "content": msg_str }).to_string()
         };
 
         match client
@@ -281,7 +314,12 @@ async fn send_discord_message(app_config: &Arc<AppConfig>, client: &reqwest::Cli
     }
 }
 
-async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) -> ChannelOutcome {
+async fn send_telegram_message(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    content: &MessageContent,
+    messaging: &MessagingConfig,
+) -> ChannelOutcome {
     if let Some(telegram) = &messaging.telegram {
         let kind = content.kind();
         let template = telegram.templates.get(&kind).map(String::as_str);
@@ -292,17 +330,17 @@ async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
         } else {
             let serialized;
             match content {
-                 MessageContent::Info(s) | MessageContent::Error(s) => s.clone(),
-                 MessageContent::Watch(s) => {
-                     serialized = serde_json::to_string_pretty(s).unwrap_or_default();
-                     serialized
-                 }
-                 MessageContent::ProcessingStats(ps) => {
-                     serialized = serde_json::to_string_pretty(ps).unwrap_or_default();
-                     serialized
-                 }
-                 MessageContent::DiskAlert(alert) => default_disk_alert_text(alert),
-                 MessageContent::RecordingLifecycle(recording) => default_recording_lifecycle_text(recording),
+                MessageContent::Info(s) | MessageContent::Error(s) => s.clone(),
+                MessageContent::Watch(s) => {
+                    serialized = serde_json::to_string_pretty(s).unwrap_or_default();
+                    serialized
+                }
+                MessageContent::ProcessingStats(ps) => {
+                    serialized = serde_json::to_string_pretty(ps).unwrap_or_default();
+                    serialized
+                }
+                MessageContent::DiskAlert(alert) => default_disk_alert_text(alert),
+                MessageContent::RecordingLifecycle(recording) => default_recording_lifecycle_text(recording),
             }
         };
 
@@ -315,7 +353,10 @@ async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
                     if has_template {
                         (Cow::Borrowed(&msg), Some(SendMessageOption { parse_mode: SendMessageParseMode::MarkdownV2 }))
                     } else {
-                        (Cow::Owned(escape_markdown_v2(&msg)), Some(SendMessageOption { parse_mode: SendMessageParseMode::MarkdownV2 }))
+                        (
+                            Cow::Owned(escape_markdown_v2(&msg)),
+                            Some(SendMessageOption { parse_mode: SendMessageParseMode::MarkdownV2 }),
+                        )
                     }
                 }
             } else {
@@ -334,12 +375,9 @@ async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
             if telegram.markdown && has_template && send_result.parse_error && !delivered {
                 // Template output can include dynamic fields that break MarkdownV2. Retry once escaped.
                 let escaped = escape_markdown_v2(&msg);
-                let escaped_options = SendMessageOption {
-                    parse_mode: SendMessageParseMode::MarkdownV2,
-                };
-                delivered = telegram_send_message(app_config, client, &bot, &escaped, Some(&escaped_options))
-                    .await
-                    .delivered;
+                let escaped_options = SendMessageOption { parse_mode: SendMessageParseMode::MarkdownV2 };
+                delivered =
+                    telegram_send_message(app_config, client, &bot, &escaped, Some(&escaped_options)).await.delivered;
             }
             all_delivered &= delivered;
         }
@@ -349,7 +387,12 @@ async fn send_telegram_message(app_config: &Arc<AppConfig>, client: &reqwest::Cl
     }
 }
 
-async fn send_pushover_message(_app_config: &Arc<AppConfig>, client: &reqwest::Client, content: &MessageContent, messaging: &MessagingConfig) -> ChannelOutcome {
+async fn send_pushover_message(
+    _app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    content: &MessageContent,
+    messaging: &MessagingConfig,
+) -> ChannelOutcome {
     if let Some(pushover) = &messaging.pushover {
         let msg = default_text_for(content);
 
@@ -404,10 +447,14 @@ pub async fn send_message(app_config: &Arc<AppConfig>, client: &reqwest::Client,
     dispatch_send_message(app_config, client, content).await;
 }
 
-async fn resolve_template<'a>(app_config: &'a Arc<AppConfig>, http_client: &'a reqwest::Client, template: &'a str) -> Cow<'a, str> {
+async fn resolve_template<'a>(
+    app_config: &'a Arc<AppConfig>,
+    http_client: &'a reqwest::Client,
+    template: &'a str,
+) -> Cow<'a, str> {
     let url = template.to_string();
 
-    let input_source =  InputSource {
+    let input_source = InputSource {
         name: "Template".intern(),
         url,
         provider: None,
@@ -416,14 +463,9 @@ async fn resolve_template<'a>(app_config: &'a Arc<AppConfig>, http_client: &'a r
         method: InputFetchMethod::GET,
         headers: HashMap::default(),
     };
-    if let Ok((content, _response_url)) = download_text_content(
-        app_config,
-        http_client,
-        &input_source,
-        None,
-        None,
-        false,
-    ).await {
+    if let Ok((content, _response_url)) =
+        download_text_content(app_config, http_client, &input_source, None, None, false).await
+    {
         Cow::Owned(content)
     } else {
         Cow::Borrowed(template)
@@ -432,11 +474,13 @@ async fn resolve_template<'a>(app_config: &'a Arc<AppConfig>, http_client: &'a r
 
 #[cfg(test)]
 mod tests {
-    use arc_swap::{ArcSwap, ArcSwapOption};
-    use crate::model::{MediaToolCapabilities, ProcessingStats};
     use super::*;
-    use shared::model::{ConfigPaths};
-    use crate::utils::FileLockManager;
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::model::ConfigPaths;
+    use tuliprox_core::{
+        model::{MediaToolCapabilities, ProcessingStats},
+        utils::FileLockManager,
+    };
 
     fn create_app_config() -> Arc<AppConfig> {
         Arc::new(AppConfig {
@@ -459,8 +503,11 @@ mod tests {
                 custom_stream_response_path: None,
             })),
             custom_stream_response: Arc::new(ArcSwapOption::default()),
-            access_token_secret: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32],
-            encrypt_secret: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16],
+            access_token_secret: [
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+                29, 30, 31, 32,
+            ],
+            encrypt_secret: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             media_tools: Arc::new(MediaToolCapabilities::new()),
         })
     }
@@ -472,17 +519,14 @@ mod tests {
         let app_cfg = create_app_config();
         let client = reqwest::Client::new();
         let output = render_template(&app_cfg, &client, Some("Message: {{message}}, Kind: {{kind}}"), &content).await;
-        
+
         assert!(output.contains("Message: Hello World"));
         assert!(output.contains("Kind: Info"));
     }
 
     #[tokio::test]
     async fn test_render_template_processing_stats() {
-        let stats = ProcessingStats {
-            stats: None,
-            errors: Some("test error".to_string()),
-        };
+        let stats = ProcessingStats { stats: None, errors: Some("test error".to_string()) };
         let content = MessageContent::ProcessingStats(stats);
         let app_cfg = create_app_config();
         let client = reqwest::Client::new();
@@ -492,7 +536,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_render_discord_template() {
-        use shared::model::{SourceStats, InputStats, InputType, PlaylistStats, TargetStats};
+        use shared::model::{InputStats, InputType, PlaylistStats, SourceStats, TargetStats};
 
         let input_stats = InputStats {
             name: "Test Input".to_string(),
@@ -503,10 +547,7 @@ mod tests {
             secs_took: 125,
         };
 
-        let source_stats = SourceStats {
-            inputs: vec![input_stats],
-            targets: vec![TargetStats::success("Target 1")],
-        };
+        let source_stats = SourceStats { inputs: vec![input_stats], targets: vec![TargetStats::success("Target 1")] };
 
         // Add a second source for testing multi-source rendering
         let input_stats2 = InputStats {
@@ -517,10 +558,7 @@ mod tests {
             processed_stats: PlaylistStats { group_count: 180, channel_count: 1800 },
             secs_took: 300,
         };
-        let source_stats2 = SourceStats {
-            inputs: vec![input_stats2],
-            targets: vec![TargetStats::success("Target 2")],
-        };
+        let source_stats2 = SourceStats { inputs: vec![input_stats2], targets: vec![TargetStats::success("Target 2")] };
 
         let stats = ProcessingStats {
             stats: Some(vec![source_stats, source_stats2]),
@@ -591,7 +629,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_render_telegram_template() {
-        use shared::model::{SourceStats, InputStats, InputType, PlaylistStats, TargetStats};
+        use shared::model::{InputStats, InputType, PlaylistStats, SourceStats, TargetStats};
 
         let input_stats = InputStats {
             name: "Telegram Input".to_string(),
@@ -602,10 +640,7 @@ mod tests {
             secs_took: 45,
         };
 
-        let source_stats = SourceStats {
-            inputs: vec![input_stats],
-            targets: vec![TargetStats::success("Target T1")],
-        };
+        let source_stats = SourceStats { inputs: vec![input_stats], targets: vec![TargetStats::success("Target T1")] };
 
         let stats = ProcessingStats {
             stats: Some(vec![source_stats]),
@@ -643,7 +678,7 @@ mod tests {
             _Timestamp: {{timestamp}}_
         ";
         let output = render_template(&app_cfg, &client, Some(template), &content).await;
-        
+
         println!("Telegram Output:\n{output}");
 
         assert!(output.contains("🔄 Playlist Update Report"));

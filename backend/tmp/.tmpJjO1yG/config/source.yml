@@ -1,0 +1,12 @@
+
+inputs:
+  - name: demo
+    type: m3u
+    url: http://provider.example/get.php?username=alice&password=secret
+sources:
+  - inputs: [demo]
+    targets:
+      - name: default
+        filter: 'Group ~ ".*"'
+        output:
+          - type: m3u
