@@ -682,7 +682,7 @@ pub fn log_network_access_allowed_geoip_unavailable(username: &str, client_ip: &
 pub fn evaluate_network_access(
     user: &ProxyUserCredentials,
     client_ip: &str,
-    geoip: &Arc<ArcSwapOption<crate::utils::GeoIp>>,
+    geoip: &Arc<ArcSwapOption<crate::repository::GeoIp>>,
     geoip_unavailable_policy: GeoIpUnavailablePolicy,
 ) -> NetworkAccessDecision {
     let Some(access) = user.network_access.as_ref() else {
@@ -4647,7 +4647,8 @@ mod tests {
             MediaToolCapabilities, NetworkAccess, ProcessTargets, ProxyUserCredentials, SourcesConfig,
             StreamHistoryConfig,
         },
-        utils::{FileLockManager, GeoIp},
+        repository::GeoIp,
+        utils::FileLockManager,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::http::{HeaderMap, Response, StatusCode};

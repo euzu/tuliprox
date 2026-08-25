@@ -1370,7 +1370,8 @@ mod tests {
             AppConfig, Config, ConfigInput, GracePeriodOptions, MediaToolCapabilities, ProcessTargets,
             ProxyUserCredentials, SourcesConfig, StreamConfig,
         },
-        utils::{FileLockManager, GeoIp},
+        repository::GeoIp,
+        utils::FileLockManager,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::{body::Body, http::HeaderMap};

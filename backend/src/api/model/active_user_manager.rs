@@ -5,7 +5,8 @@ use crate::{
     },
     auth::Fingerprint,
     model::{Config, ProxyUserCredentials},
-    utils::{debug_if_enabled, utc_day_from_secs, GeoIp},
+    repository::GeoIp,
+    utils::{debug_if_enabled, utc_day_from_secs},
 };
 use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;

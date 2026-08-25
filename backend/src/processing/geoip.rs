@@ -2,7 +2,8 @@ use crate::{
     api::model::AppState,
     model::InputSource,
     repository::get_geoip_path,
-    utils::{request::download_text_content, GeoIp},
+    repository::GeoIp,
+    utils::request::download_text_content,
 };
 use log::{error, info};
 use shared::{

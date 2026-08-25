@@ -1,5 +1,10 @@
 mod storage;
 mod target_id_mapping;
+// A B+Tree-backed IPv4 lookup and a CLI dumper for the repository's databases.
+// Both read repository storage directly, so they belong here rather than in
+// `utils`, which must not depend on this layer.
+mod db_viewer;
+mod geoip;
 mod metadata_retry_record;
 mod startup_migration;
 mod playlist_repository;
@@ -31,6 +36,8 @@ pub use target_id_mapping::*;
 // module name so every `crate::repository::bplustree::X` path keeps resolving.
 pub use tuliprox_btree as bplustree;
 pub use tuliprox_btree::*;
+pub use db_viewer::*;
+pub use geoip::*;
 pub use metadata_retry_record::*;
 pub use startup_migration::*;
 pub use playlist_repository::*;

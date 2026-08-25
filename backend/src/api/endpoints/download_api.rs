@@ -2191,7 +2191,8 @@ mod tests {
             ApiProxyConfig, ApiProxyServerInfo, AppConfig, Config, ConfigInput, MediaToolCapabilities,
             MessageContent, ProcessTargets, SourcesConfig,
         },
-        utils::{FileLockManager, GeoIp},
+        repository::GeoIp,
+        utils::FileLockManager,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::response::IntoResponse;

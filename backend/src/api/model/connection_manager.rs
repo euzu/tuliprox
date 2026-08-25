@@ -1236,7 +1236,8 @@ mod tests {
     use super::*;
     use crate::api::model::{ActiveProviderManager, ActiveUserManager, CreateUserSessionParams, EventManager, SharedStreamManager};
     use crate::model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProxyUserCredentials, SourcesConfig};
-    use crate::utils::{FileLockManager, GeoIp};
+    use crate::repository::GeoIp;
+    use crate::utils::FileLockManager;
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::model::{ConfigPaths, InputFetchMethod, InputType, ProxyType, UserConnectionPermission};
     use shared::model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster};

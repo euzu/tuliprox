@@ -1,3 +1,4 @@
+use crate::repository::GeoIp;
 use crate::{
     api::{
         endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
@@ -18,7 +19,7 @@ use crate::{
     utils::{
         reload_logger,
         request::{create_client, create_client_with_redirect, PublicIpResolver},
-        GeoIp, LRUResourceCache,
+        LRUResourceCache,
     },
 };
 use arc_swap::{ArcSwap, ArcSwapOption};

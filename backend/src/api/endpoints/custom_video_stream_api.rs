@@ -511,7 +511,8 @@ mod tests {
         response::IntoResponse,
         Router,
     };
-    use crate::utils::{FileLockManager, GeoIp};
+    use crate::repository::GeoIp;
+    use crate::utils::FileLockManager;
     use std::{collections::HashMap, sync::Arc};
     use tower::ServiceExt;
     use tokio::sync::mpsc;

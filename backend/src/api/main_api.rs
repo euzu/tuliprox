@@ -37,7 +37,8 @@ use crate::{
     model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, ProcessTargets, RateLimitConfig},
     processing::processor::exec_processing,
     repository::{get_geoip_path, load_playlists_into_memory_cache},
-    utils::{exec_file_lock_prune, get_default_web_root_path, GeoIp},
+    repository::GeoIp,
+    utils::{exec_file_lock_prune, get_default_web_root_path},
     VERSION,
 };
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -986,7 +987,8 @@ mod tests {
                 MetadataUpdateManager, PlaylistStorageState, ProviderHandle, SharedStreamManager, UpdateGuard,
             },
             model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProcessTargets, SourcesConfig},
-            utils::{FileLockManager, GeoIp},
+            repository::GeoIp,
+        utils::FileLockManager,
         };
         use arc_swap::{ArcSwap, ArcSwapOption};
         use axum::response::IntoResponse;

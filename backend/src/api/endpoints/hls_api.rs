@@ -8151,8 +8151,8 @@ mod tests {
             origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome},
             rewrite_hls, RewriteHlsProps,
         },
-        utils::GeoIp,
     };
+    use crate::repository::GeoIp;
     use aes::{
         cipher::{Block, BlockEncrypt, KeyInit},
         Aes128,

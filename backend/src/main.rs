@@ -21,8 +21,8 @@ use crate::{
     library::{LibraryProcessor, MediaToolProbes},
     model::{AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig},
     processing::processor::exec_processing,
-    repository::run_startup_migrations,
-    utils::{config_file_reader, db_viewer, init_logger, request::create_client, resolve_env_var},
+    repository::{db_viewer, run_startup_migrations},
+    utils::{config_file_reader, init_logger, request::create_client, resolve_env_var},
 };
 use arc_swap::{access::Access, ArcSwap};
 use chrono::{DateTime, Utc};
@@ -125,8 +125,8 @@ struct Args {
 }
 
 impl Args {
-    fn db_viewer_args(&self) -> utils::DbViewerArgs<'_> {
-        utils::DbViewerArgs::new(
+    fn db_viewer_args(&self) -> repository::DbViewerArgs<'_> {
+        repository::DbViewerArgs::new(
             self.db_xtream_file_name.as_deref(),
             self.db_m3u_file_name.as_deref(),
             self.db_epg_file_name.as_deref(),

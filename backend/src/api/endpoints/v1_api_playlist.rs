@@ -1254,11 +1254,9 @@ mod tests {
             AppConfig, Config, ConfigInput, ConfigProvider, ConfigSource, ConfigTarget, SourcesConfig,
             StreamHistoryConfig, VideoDownloadConfig,
         },
-        utils::{
-            epg::{get_input_raw_epg_file_path, get_input_raw_xmltv_file_path},
-            GeoIp,
-        },
+        utils::epg::{get_input_raw_epg_file_path, get_input_raw_xmltv_file_path},
     };
+    use crate::repository::GeoIp;
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::{
         extract::{Path as AxumPath, Query, State},
