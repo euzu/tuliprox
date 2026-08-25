@@ -13,7 +13,8 @@ use crate::{
     },
     model::{
         AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget,
-        Epg, Mapping, MessageContent, ProcessTargets, ReverseProxyDisabledHeaderConfig, TVGuide,
+        is_valid, Epg, Mapping, MessageContent, ProcessTargets, ReverseProxyDisabledHeaderConfig,
+        TVGuide,
     },
     processing::{
         input_cache,
@@ -119,11 +120,6 @@ fn stalker_checkpoint_message(input: &str) -> String {
     format!("Input '{input}': Stalker refresh checkpoint saved; active snapshot remains in service")
 }
 
-fn is_valid(pli: &PlaylistItem, filter: &Filter, match_as_ascii: bool) -> bool {
-    let provider = ValueProvider { pli, match_as_ascii };
-    filter.filter(&provider)
-}
-
 pub fn apply_filter_to_source(source: &mut PlaylistSource, filter: &Filter) -> Option<Vec<PlaylistGroup>> {
     let mut groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
     for pli in source.into_items() {
@@ -157,31 +153,6 @@ fn filter_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option
     apply_filter_to_source(source, &target.filter)
 }
 
-pub fn apply_filter_to_playlist(playlist: &mut [PlaylistGroup], filter: &Filter) -> Option<Vec<PlaylistGroup>> {
-    // NOTE: the source `playlist` is intentionally cloned (not drained) here because
-    // the caller reuses the same slice for every target output and for the no-filter
-    // fallback path, so the survivors cannot be moved out of it. Cap the initial
-    // allocation so selective filters do not retain capacity for every source item.
-    const INITIAL_FILTERED_GROUP_CAPACITY: usize = 256;
-    let mut new_playlist = Vec::with_capacity(playlist.len());
-    for pg in playlist.iter() {
-        let mut channels = Vec::with_capacity(pg.channels.len().min(INITIAL_FILTERED_GROUP_CAPACITY));
-        channels.extend(pg.channels.iter().filter(|&pli| is_valid(pli, filter, false)).cloned());
-        if !channels.is_empty() {
-            new_playlist.push(PlaylistGroup {
-                id: pg.id,
-                title: pg.title.clone(),
-                channels,
-                xtream_cluster: pg.xtream_cluster,
-            });
-        }
-    }
-    if new_playlist.is_empty() {
-        None
-    } else {
-        Some(new_playlist)
-    }
-}
 
 fn assign_channel_no_playlist(new_playlist: &mut [PlaylistGroup]) {
     let assigned_chnos: HashSet<u32> =
@@ -1998,7 +1969,7 @@ pub async fn exec_processing(
     provider_manager: Option<Arc<ActiveProviderManager>>,
     metadata_manager: Option<Arc<MetadataUpdateManager>>,
     pre_processed_inputs: Option<HashSet<Arc<str>>>,
-    acquired_permit: Option<crate::api::model::UpdateGuardPermit>,
+    acquired_permit: Option<crate::model::UpdateGuardPermit>,
 ) {
     let max_update_duration = Duration::from_secs(PLAYLIST_UPDATE_MAX_DURATION_SECS);
     let playlist_guard = if let Some(permit) = acquired_permit {

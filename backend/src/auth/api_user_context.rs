@@ -1,14 +1,10 @@
 use crate::model::AppConfig;
 use crate::repository::GeoIp;
 use arc_swap::ArcSwapOption;
-use crate::{
-    api::{
-        api_utils::{
-            evaluate_network_access, log_network_access_allowed_geoip_unavailable, log_network_access_denied,
-            NetworkAccessDecision, NetworkAccessDenyReason,
-        },
-    },
-    model::ProxyUserPermissionDenyReason,
+use crate::model::ProxyUserPermissionDenyReason;
+use crate::repository::{
+    evaluate_network_access, log_network_access_allowed_geoip_unavailable, log_network_access_denied,
+    NetworkAccessDecision, NetworkAccessDenyReason,
 };
 use axum::response::IntoResponse;
 use log::debug;

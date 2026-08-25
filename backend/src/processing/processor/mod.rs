@@ -142,9 +142,9 @@ macro_rules! process_foreground_retry_once {
             }
 
             let __provider_id = if let Ok(__uid) = __pli.header.id.parse::<u32>() {
-                crate::api::model::ProviderIdType::Id(__uid)
+                crate::model::ProviderIdType::Id(__uid)
             } else {
-                crate::api::model::ProviderIdType::from(&*__pli.header.id)
+                crate::model::ProviderIdType::from(&*__pli.header.id)
             };
 
             if !$retry_once_ids.remove(&__provider_id) {
@@ -224,7 +224,7 @@ macro_rules! process_foreground_retry_once {
                                         // Foreground retry batches can include text provider IDs (e.g. M3U).
                                         // Persist batch functions for these paths are keyed by numeric Xtream IDs,
                                         // so text IDs are intentionally skipped here.
-                                        if let crate::api::model::ProviderIdType::Id(__vid) = __id {
+                                        if let crate::model::ProviderIdType::Id(__vid) = __id {
                                             Some((*__vid, __props.clone()))
                                         } else {
                                             None

@@ -3,10 +3,8 @@ use crate::{api::{
     config_file::ConfigFile,
     model::AppState,
 }, api::auth_middleware::permission_layer,
-    auth::{verify_token, AuthBearer}, iptv::xtream::{get_xtream_stream_url_base, xtream_login}, model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource, UserPlan}, utils, utils::{
-    persist_messaging_templates, plans_file_path, prepare_sources_batch, prepare_users, read_api_proxy_file,
-    read_plans_file, save_plans, request::download_text_content,
-}};
+    auth::{verify_token, AuthBearer}, iptv::xtream::{get_xtream_stream_url_base, xtream_login}, model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource, UserPlan}, utils::{request::download_text_content},
+    config_loader::{persist_messaging_templates, plans_file_path, prepare_sources_batch, prepare_users, read_api_proxy_file, read_plans_file, save_plans}};
 use axum::{
     http::{header::IF_MATCH, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::IntoResponse,
@@ -134,7 +132,7 @@ pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(
     api_proxy: &ApiProxyConfigDto,
     file_path: &str,
 ) -> Option<TuliproxError> {
-    match utils::save_api_proxy(file_path, backup_dir, api_proxy).await {
+    match crate::config_loader::save_api_proxy(file_path, backup_dir, api_proxy).await {
         Ok(()) => {}
         Err(err) => {
             error!("Failed to save api-proxy.yml {err}");
@@ -145,7 +143,7 @@ pub(in crate::api::endpoints) async fn intern_save_config_api_proxy(
 }
 
 async fn intern_save_config_main(file_path: &str, backup_dir: &str, cfg: &ConfigDto) -> Option<TuliproxError> {
-    match utils::save_main_config(file_path, backup_dir, cfg).await {
+    match crate::config_loader::save_main_config(file_path, backup_dir, cfg).await {
         Ok(()) => {}
         Err(err) => {
             error!("Failed to save config.yml {err}");
@@ -233,7 +231,7 @@ async fn save_config_sources(
         return response;
     }
 
-    let templates_to_persist = match utils::validate_source_config_for_persist(&app_state.app_config, &sources).await {
+    let templates_to_persist = match crate::config_loader::validate_source_config_for_persist(&app_state.app_config, &sources).await {
         Ok(value) => value,
         Err(err) => {
             error!("Failed to validate source.yml {err}");
@@ -243,14 +241,14 @@ async fn save_config_sources(
     };
 
     if let Some(template_definition) = templates_to_persist.as_ref() {
-        if let Err(err) = utils::persist_templates_config(&app_state.app_config, template_definition).await {
+        if let Err(err) = crate::config_loader::persist_templates_config(&app_state.app_config, template_definition).await {
             error!("Failed to save template config {err}");
             return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
                 .into_response();
         }
     }
 
-    match utils::persist_source_config(&app_state.app_config, None, sources).await {
+    match crate::config_loader::persist_source_config(&app_state.app_config, None, sources).await {
         Ok(_) => {}
         Err(err) => {
             error!("Failed to persist source.yml {err}");
@@ -419,7 +417,7 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
 
     let read_result = {
         let paths = app_state.app_config.paths.load();
-        utils::read_app_config_dto(&paths, true, false).await
+        crate::config_loader::read_app_config_dto(&paths, true, false).await
     };
     match read_result {
         Ok(mut app_config) => {

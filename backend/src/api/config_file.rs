@@ -2,10 +2,8 @@ use crate::{
     api::model::{update_app_state_config, update_app_state_sources, AppState, EventMessage},
     model::{Config, Mappings, ProcessTargets, SourcesConfig},
     utils,
-    utils::{
-        prepare_sources_batch, read_mappings_file_unprepared, read_mappings_file_with_templates,
-        read_sources_file, read_sources_file_from_path_with_templates, read_templates,
-    },
+    utils::{read_mappings_file_unprepared, read_mappings_file_with_templates},
+    config_loader::{prepare_sources_batch, read_sources_file, read_sources_file_from_path_with_templates, read_templates},
 };
 use log::{debug, error, info, warn};
 use shared::{
@@ -16,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use crate::utils::resolve_template_and_mapping_paths;
+use crate::config_loader::resolve_template_and_mapping_paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConfigFile {
@@ -236,7 +234,7 @@ impl ConfigFile {
     // -----------------------------------------------------------------
 
     async fn load_api_proxy(app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
-        match utils::read_api_proxy_config(&app_state.app_config, true).await {
+        match crate::config_loader::read_api_proxy_config(&app_state.app_config, true).await {
             Ok(Some(api_proxy)) => {
                 app_state.app_config.set_api_proxy(api_proxy)?;
                 let paths = app_state.app_config.paths.load();
@@ -263,7 +261,7 @@ impl ConfigFile {
         let config_file = paths.config_file_path.clone();
 
         // ── Parse ────────────────────────────────────────────────────
-        let config_dto = crate::utils::read_config_file_with_options(config_file.as_str(), crate::utils::ReadConfigOptions::resolve_and_compute())?;
+        let config_dto = crate::config_loader::read_config_file_with_options(config_file.as_str(), crate::config_loader::ReadConfigOptions::resolve_and_compute())?;
 
         let current_mapping_path = paths.mapping_file_path.clone().unwrap_or_else(|| {
             utils::resolve_mapping_file_path(paths.config_path.as_str(), None)

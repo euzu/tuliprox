@@ -6,6 +6,7 @@ macro_rules! include_modules {
         extern crate pest;
         pub mod api;
         pub mod auth;
+        pub mod config_loader;
         pub mod iptv;
         pub mod library;
         pub mod media_enrichment;

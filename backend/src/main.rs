@@ -182,7 +182,7 @@ async fn main() {
     if args.scan_library || args.force_library_rescan {
         info!("Library scan mode requested");
         let app_config = Arc::new(
-            utils::read_initial_app_config(&mut config_paths, true, true, false)
+            crate::config_loader::read_initial_app_config(&mut config_paths, true, true, false)
                 .await
                 .unwrap_or_else(|err| exit!("{}", err)),
         );
@@ -214,7 +214,7 @@ async fn main() {
         }
     }
 
-    let app_config = utils::read_initial_app_config(&mut config_paths, true, true, args.server)
+    let app_config = crate::config_loader::read_initial_app_config(&mut config_paths, true, true, args.server)
         .await
         .unwrap_or_else(|err| exit!("{err}"));
     print_info(&app_config).await;
@@ -320,9 +320,9 @@ fn get_file_paths(args: &Args) -> ConfigPaths {
         utils::resolve_template_file_path(config_path.as_str(), Some(path.as_str()))
     });
     let storage_path = if Path::new(&config_file).exists() {
-        match utils::read_config_file_with_options(
+        match crate::config_loader::read_config_file_with_options(
             &config_file,
-            crate::utils::ReadConfigOptions { resolve_env: true, include_computed: false },
+            crate::config_loader::ReadConfigOptions { resolve_env: true, include_computed: false },
         ) {
             Ok(cfg) => resolve_storage_path(&home_path, cfg.storage_dir.as_deref()),
             Err(err) => {

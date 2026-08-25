@@ -1,5 +1,5 @@
 use crate::api::model::{ActiveProviderManager, ProviderHandle};
-use crate::api::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
+use crate::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
 use crate::library::{MediaMetadata, MetadataResolver, MetadataStorage};
 use crate::iptv::xtream;
 use crate::media_enrichment::policy::MissingFactEnrichmentPolicy;

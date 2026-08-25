@@ -3,7 +3,7 @@ mod target_id_mapping;
 // A B+Tree-backed IPv4 lookup and a CLI dumper for the repository's databases.
 // Both read repository storage directly, so they belong here rather than in
 // `utils`, which must not depend on this layer.
-mod api_user_migration;
+mod network_access;
 // Wraps a `PlaylistSource` for the duration of one fetch. It held a repository
 // type as a field, which is what made `model` depend on this layer.
 mod fetched_playlist;
@@ -41,7 +41,7 @@ pub use target_id_mapping::*;
 // module name so every `crate::repository::bplustree::X` path keeps resolving.
 pub use tuliprox_btree as bplustree;
 pub use tuliprox_btree::*;
-pub use api_user_migration::*;
+pub use network_access::*;
 pub use fetched_playlist::*;
 pub use db_viewer::*;
 pub use geoip::*;

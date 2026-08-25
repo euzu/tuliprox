@@ -10,7 +10,8 @@ use crate::utils::ffmpeg::{
 };
 use log::{debug, warn};
 use crate::processing::parser::xtream::create_xtream_url;
-use crate::api::model::{ActiveProviderManager, ProviderHandle, ProviderIdType};
+use crate::api::model::{ActiveProviderManager, ProviderHandle};
+use crate::model::{ProviderIdType};
 
 /// Updates metadata for a single Live stream (primarily probing)
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]

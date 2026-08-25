@@ -1,7 +1,8 @@
 use super::playlist_mem_cache::{PlaylistM3uStorage, PlaylistStorage, PlaylistStorageState, PlaylistXtreamStorage};
 use crate::model::Epg;
 use crate::model::{AppConfig, ConfigInput, ConfigTarget, TargetOutput};
-use crate::processing::processor::{apply_filter_to_playlist, PlaylistProcessingContext};
+use crate::model::apply_filter_to_playlist;
+use crate::processing::processor::PlaylistProcessingContext;
 use crate::repository::epg_write_for_target;
 use crate::repository::write_strm_playlist;
 use crate::repository::FILE_SUFFIX_DB;

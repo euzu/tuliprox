@@ -1,5 +1,5 @@
 use crate::model::{AppConfig, Config, HdHomeRunConfig, HdHomeRunFlags, LibraryConfig};
-use crate::utils::read_app_config_dto;
+use crate::config_loader::read_app_config_dto;
 use arc_swap::{access::Access, ArcSwap};
 use log::{error, info};
 use serde::Serialize;
@@ -270,7 +270,7 @@ fn redact_url_like_value(value: &str) -> String { shared::utils::sanitize_sensit
 mod tests {
     use super::{build_runtime_config_report, redact_value, render_runtime_config_report};
     use crate::model::AppConfig;
-    use crate::utils::read_initial_app_config;
+    use crate::config_loader::read_initial_app_config;
     use shared::model::{ConfigPaths, RuntimeConfigReportFormat};
     use tempfile::tempdir;
     use tokio::fs;
