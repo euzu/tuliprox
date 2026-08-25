@@ -1,10 +1,9 @@
-use crate::api::model::create_http_client;
 use crate::library::metadata::{EpisodeMetadata, MediaMetadata, MetadataCacheEntry, SeriesMetadata, TechnicalMetadata};
 use crate::library::metadata_resolver::MetadataResolver;
 use crate::library::metadata_storage::MetadataStorage;
 use crate::library::scanner::LibraryScanner;
 use crate::library::{thumbnail::{self, ThumbnailExtractor}, MediaGroup, MediaGrouper};
-use crate::model::{AppConfig, LibraryConfig, MetadataUpdateConfig};
+use crate::model::{LibraryConfig, MetadataUpdateConfig};
 use crate::utils::ffmpeg::{FfmpegExecutor, ProbeUrlOutcome};
 use log::{debug, error, info, warn};
 use path_clean::PathClean;
@@ -19,6 +18,30 @@ use std::sync::Arc;
 
 type FfprobeAvailabilityFuture = Pin<Box<dyn Future<Output=bool> + Send>>;
 type FfprobeAvailabilityChecker = Arc<dyn Fn() -> FfprobeAvailabilityFuture + Send + Sync>;
+
+/// The two media-tool capabilities the processor needs from its host.
+///
+/// This replaces a `Option<Arc<AppConfig>>` field. The processor asked that
+/// whole value exactly two questions - is ffprobe enabled, is ffmpeg available -
+/// so it now receives those two answers instead of the application's global
+/// configuration. Both are resolved once per scan, never on a hot path.
+#[derive(Clone)]
+pub struct MediaToolProbes {
+    ffprobe_enabled: FfprobeAvailabilityChecker,
+    ffmpeg_available: FfprobeAvailabilityChecker,
+}
+
+impl MediaToolProbes {
+    pub fn new(ffprobe_enabled: FfprobeAvailabilityChecker, ffmpeg_available: FfprobeAvailabilityChecker) -> Self {
+        Self { ffprobe_enabled, ffmpeg_available }
+    }
+}
+
+impl fmt::Debug for MediaToolProbes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MediaToolProbes").finish_non_exhaustive()
+    }
+}
 
 // Action taken when processing a file
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +87,7 @@ pub struct LibraryProcessor {
     storage: MetadataStorage,
     thumbnail_extractor: Option<ThumbnailExtractor>,
     metadata_update_config: Option<MetadataUpdateConfig>,
-    app_config: Option<Arc<AppConfig>>, // Need access to global config for FFprobe settings
+    tool_probes: Option<MediaToolProbes>,
     ffprobe_availability_checker: FfprobeAvailabilityChecker,
 }
 
@@ -94,22 +117,14 @@ impl LibraryProcessor {
         Arc::new(|| Box::pin(async { FfmpegExecutor::new().check_ffprobe_availability().await }))
     }
 
-    // Creates a new Library processor from application config
-    pub fn from_app_config(app_config: &AppConfig) -> Option<Self> {
-        let Ok(client) = create_http_client(app_config) else {
-            error!("Failed to create HTTP client for LibraryProcessor, skipping library scan. Please check your configuration.");
-            return None;
-        };
-        let config = app_config.config.load();
-        config
-            .library
-            .as_ref()
-            .map(|lib_cfg| {
-                let mut processor =
-                    Self::new(lib_cfg.clone(), config.metadata_update.as_ref(), client, &config.storage_dir);
-                processor.app_config = Some(Arc::new(app_config.clone()));
-                processor
-            })
+    /// Attaches the host's media-tool capability probes.
+    ///
+    /// Without them the processor falls back to its own configuration and a
+    /// direct `FfmpegExecutor` check, which is what the CLI and tests use.
+    #[must_use]
+    pub fn with_tool_probes(mut self, probes: MediaToolProbes) -> Self {
+        self.tool_probes = Some(probes);
+        self
     }
 
     // Creates a new Library processor with the given configuration
@@ -153,7 +168,7 @@ impl LibraryProcessor {
             storage,
             thumbnail_extractor,
             metadata_update_config: metadata_update_config.cloned(),
-            app_config: None,
+            tool_probes: None,
             ffprobe_availability_checker,
         }
     }
@@ -192,8 +207,8 @@ impl LibraryProcessor {
         let ffprobe_enabled = self.is_local_ffprobe_enabled().await;
 
         let ffmpeg_available = if self.thumbnail_extractor.is_some() {
-            if let Some(app_cfg) = &self.app_config {
-                app_cfg.is_ffmpeg_available().await
+            if let Some(probes) = &self.tool_probes {
+                (probes.ffmpeg_available)().await
             } else {
                 FfmpegExecutor::new().check_ffmpeg_availability().await
             }
@@ -685,8 +700,8 @@ impl LibraryProcessor {
     }
 
     async fn is_local_ffprobe_enabled(&self) -> bool {
-        if let Some(app_cfg) = &self.app_config {
-            return app_cfg.is_ffprobe_enabled().await;
+        if let Some(probes) = &self.tool_probes {
+            return (probes.ffprobe_enabled)().await;
         }
 
         let ffprobe_enabled_in_config = self
@@ -812,7 +827,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_ffprobe_enablement_falls_back_to_metadata_update_config_without_app_config() {
+    async fn local_ffprobe_enablement_falls_back_to_metadata_update_config_without_probes() {
         let mut processor = LibraryProcessor::new_with_ffprobe_availability_checker(
             LibraryConfig::from(&LibraryConfigDto::default()),
             Some(&MetadataUpdateConfig::default()),
@@ -820,7 +835,7 @@ mod tests {
             "/tmp",
             Arc::new(|| Box::pin(async { false })),
         );
-        processor.app_config = None;
+        processor.tool_probes = None;
 
         let metadata_update = MetadataUpdateConfig {
             ffprobe: crate::model::FfprobeConfig::from(&FfprobeConfigDto {

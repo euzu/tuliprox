@@ -16,8 +16,9 @@ include_modules!();
 // The media-server anti-corruption layer is its own package; aliased under its
 // historical module name so `crate::media_server::X` paths keep resolving.
 use crate::{
+    api::model::create_http_client,
     auth::generate_password,
-    library::LibraryProcessor,
+    library::{LibraryProcessor, MediaToolProbes},
     model::{AppConfig, Config, Healthcheck, HealthcheckConfig, ProcessTargets, SourcesConfig},
     processing::processor::exec_processing,
     repository::run_startup_migrations,
@@ -378,10 +379,43 @@ async fn start_in_server_mode(cfg: Arc<AppConfig>, targets: Arc<ProcessTargets>)
     }
 }
 
+/// Builds a library processor from the application configuration.
+///
+/// This was `LibraryProcessor::from_app_config`. It moved here because it was
+/// the only thing in `library` that knew what an `AppConfig` is, and because
+/// building the HTTP client is the composition root's job, not the library's.
+fn library_processor_from_app_config(app_config: &Arc<AppConfig>) -> Option<LibraryProcessor> {
+    let Ok(client) = create_http_client(app_config) else {
+        error!("Failed to create HTTP client for LibraryProcessor, skipping library scan. Please check your configuration.");
+        return None;
+    };
+    // `Access` is in scope here, so `.load()` alone is ambiguous.
+    let config = ArcSwap::load(&app_config.config);
+    let library_config = config.library.as_ref()?;
+    let probes = {
+        let for_ffprobe = Arc::clone(app_config);
+        let for_ffmpeg = Arc::clone(app_config);
+        MediaToolProbes::new(
+            Arc::new(move || {
+                let app_config = Arc::clone(&for_ffprobe);
+                Box::pin(async move { app_config.is_ffprobe_enabled().await })
+            }),
+            Arc::new(move || {
+                let app_config = Arc::clone(&for_ffmpeg);
+                Box::pin(async move { app_config.is_ffmpeg_available().await })
+            }),
+        )
+    };
+    Some(
+        LibraryProcessor::new(library_config.clone(), config.metadata_update.as_ref(), client, &config.storage_dir)
+            .with_tool_probes(probes),
+    )
+}
+
 async fn scan_library_cli(app_config: &Arc<AppConfig>, force_rescan: bool) {
     info!("Starting Library scan from CLI (force_rescan: {force_rescan})");
 
-    let Some(processor) = LibraryProcessor::from_app_config(app_config) else {
+    let Some(processor) = library_processor_from_app_config(app_config) else {
         error!("Library is not enabled in configuration");
         std::process::exit(1);
     };
