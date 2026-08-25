@@ -759,7 +759,7 @@ async fn playlist_webplayer_stream(
 
     let req_virtual_id: u32 = try_result_bad_request!(stream_id.trim().parse());
     let pli = try_result_bad_request!(
-        m3u_get_item_for_stream_id(req_virtual_id, &app_state, &target).await,
+        m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await,
         true,
         format!("Failed to read m3u item for stream id {req_virtual_id}")
     );
@@ -818,7 +818,7 @@ async fn playlist_recording_stream(
     }
 
     let pli = try_result_bad_request!(
-        m3u_get_item_for_stream_id(virtual_id, &app_state, &resolved.target).await,
+        m3u_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, &resolved.target).await,
         true,
         format!("Failed to read m3u item for stream id {virtual_id}")
     );

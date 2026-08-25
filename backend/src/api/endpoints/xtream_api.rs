@@ -1330,7 +1330,8 @@ pub async fn xtream_get_stream_info_response(
                 // fetch info from the upstream provider
                 if let Ok(content) = xtream::get_xtream_stream_info(
                     &app_state.http_client.load(),
-                    app_state,
+                    &app_state.app_config,
+                    &app_state.playlists,
                     user,
                     &input,
                     target,

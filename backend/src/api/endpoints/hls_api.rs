@@ -7190,7 +7190,7 @@ async fn get_stream_channel(
         }
     }
     let target_id = target.id;
-    m3u_get_item_for_stream_id(virtual_id, app_state, target).await.ok().map(|pli| pli.to_stream_channel(target_id))
+    m3u_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target).await.ok().map(|pli| pli.to_stream_channel(target_id))
 }
 
 fn hls_stream_context_or_unavailable(
@@ -7214,13 +7214,13 @@ pub(in crate::api) async fn resolve_hls_virtual_source_for_target(
             (Arc::clone(&item.input_name), stream_context)
         } else {
             let item =
-                m3u_get_item_for_stream_id(virtual_id, app_state, target).await.map_err(|_| StatusCode::NOT_FOUND)?;
+                m3u_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target).await.map_err(|_| StatusCode::NOT_FOUND)?;
             let stream_context = hls_stream_context_or_unavailable(&item, virtual_id)?;
             (Arc::clone(&item.input_name), stream_context)
         }
     } else {
         let item =
-            m3u_get_item_for_stream_id(virtual_id, app_state, target).await.map_err(|_| StatusCode::NOT_FOUND)?;
+            m3u_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target).await.map_err(|_| StatusCode::NOT_FOUND)?;
         let stream_context = hls_stream_context_or_unavailable(&item, virtual_id)?;
         (Arc::clone(&item.input_name), stream_context)
     };

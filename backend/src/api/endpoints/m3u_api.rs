@@ -623,7 +623,7 @@ async fn m3u_api_stream(
     }
 
     if let Some((req_virtual_id, archive)) = parse_flat_flussonic_archive(stream_req.stream_id) {
-        let pli = match m3u_get_item_for_stream_id(req_virtual_id, app_state, &target).await {
+        let pli = match m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await {
             Ok(pli) => pli,
             Err(err) => {
                 error!("Failed to read M3U item for native archive stream id {req_virtual_id}: {err}");
@@ -665,7 +665,7 @@ async fn m3u_api_stream(
 
     let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let pli = match m3u_get_item_for_stream_id(req_virtual_id, app_state, &target).await {
+    let pli = match m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await {
         Ok(pli) => pli,
         Err(err) => {
             error!("Failed to read m3u item for stream id {req_virtual_id}: {err}");
@@ -728,7 +728,7 @@ async fn m3u_api_stream_nested(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
     let req_virtual_id: u32 = try_result_bad_request!(stream_req.stream_id.trim().parse());
-    let pli = match m3u_get_item_for_stream_id(req_virtual_id, app_state, &target).await {
+    let pli = match m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await {
         Ok(pli) => pli,
         Err(err) => {
             error!("Failed to read M3U item for nested stream id {req_virtual_id}: {err}");
@@ -818,7 +818,7 @@ async fn m3u_api_catchup(
     let _user_guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
 
     let pli = try_result_not_found!(
-        m3u_get_item_for_stream_id(virtual_id, &app_state, &target).await,
+        m3u_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, &target).await,
         true,
         format!("Failed to read m3u item for stream id {virtual_id}")
     );
@@ -892,7 +892,7 @@ async fn m3u_api_resource(
         debug!("Target has no m3u playlist {target_name}");
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
-    let m3u_item = match m3u_get_item_for_stream_id(m3u_stream_id, &app_state, &target).await {
+    let m3u_item = match m3u_get_item_for_stream_id(m3u_stream_id, &app_state.app_config, &app_state.playlists, &target).await {
         Ok(item) => item,
         Err(err) => {
             error!("Failed to get m3u url: {}", sanitize_sensitive_info(&err.to_string()));

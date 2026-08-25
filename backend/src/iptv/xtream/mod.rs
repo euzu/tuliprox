@@ -1,4 +1,4 @@
-use crate::api::model::AppState;
+use crate::repository::PlaylistStorageState;
 use crate::messaging::send_message;
 use crate::model::{is_input_expired, xtream_mapping_option_from_target_options, AppConfig,
                    ConfigInput, ConfigInputFlags, ConfigTarget, MessageContent, XtreamTargetOutput};
@@ -65,7 +65,8 @@ pub async fn get_xtream_stream_info_content(app_config: &Arc<AppConfig>, client:
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn get_xtream_stream_info(client: &reqwest::Client,
-                                    app_state: &Arc<AppState>,
+                                    app_config: &Arc<AppConfig>,
+                                    playlists: &PlaylistStorageState,
                                     user: &ProxyUserCredentials,
                                     input: &ConfigInput,
                                     target: &ConfigTarget,
@@ -74,8 +75,8 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                     cluster: XtreamCluster) -> Result<String, TuliproxError> {
     let xtream_output = target.get_xtream_output().ok_or_else(|| TuliproxError::ApiXtream("Unexpected error, missing xtream output".to_string()))?;
 
-    let app_config = &app_state.app_config;
-    let encrypt_secret = app_state.get_encrypt_secret();
+    let app_config = &app_config;
+    let encrypt_secret = app_config.get_encrypt_secret();
     let options = xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, encrypt_secret)?;
 
     if let Some(content) = pli.get_resolved_info_document(&options) {
@@ -101,7 +102,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                 let video_stream_props = VideoStreamProperties::from_info(&info, pli);
 
                                 // persist input info
-                                if let Err(err) = persist_input_vod_info(&app_state.app_config, &storage_path, cluster, &input.name, provider_id, &video_stream_props).await {
+                                if let Err(err) = persist_input_vod_info(app_config, &storage_path, cluster, &input.name, provider_id, &video_stream_props).await {
                                     error!("Failed to persist video stream for input {}: {err}", input.name);
                                 }
 
@@ -114,10 +115,10 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                 }
 
                                 if target.use_memory_cache {
-                                    app_state.playlists.update_playlist_items(target, vec![&vod_pli]).await;
+                                    playlists.update_playlist_items(target, vec![&vod_pli]).await;
                                 }
 
-                                if let Some(value) = xtream_resolve_stream_info(app_state, user, target, xtream_output, &vod_pli) {
+                                if let Some(value) = xtream_resolve_stream_info(app_config, playlists, user, target, xtream_output, &vod_pli) {
                                     return value;
                                 }
                             }
@@ -156,7 +157,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                 // `source_ordinal` is copied from `PlaylistItemHeader.source_ordinal` on conversion.
                                 pli.source_ordinal,
                             ) {
-                                let config = &app_state.app_config.config.load();
+                                let config = &app_config.config.load();
                                 match get_target_storage_path(config, target.name.as_str()) {
                                     None => {
                                         error!("Failed to get target storage path {}. Can't save episodes", target.name);
@@ -165,7 +166,7 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                         let mut in_memory_updates = Vec::new();
                                         let mut provider_series: HashMap<Arc<str>, Vec<ProviderEpisodeKey>> = HashMap::new();
                                         {
-                                            let (mut target_id_mapping, _file_lock) = get_target_id_mapping(&app_state.app_config, &target_path, target.use_memory_cache).await?;
+                                            let (mut target_id_mapping, _file_lock) = get_target_id_mapping(app_config, &target_path, target.use_memory_cache).await?;
 
                                             if let Some(_parent_id) = pli.get_provider_id() {
                                                 let category_id = pli.get_category_id().unwrap_or(0);
@@ -207,8 +208,8 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                         }
 
                                         if target.use_memory_cache && !in_memory_updates.is_empty() {
-                                            app_state.playlists.insert_playlist_items(target, episodes).await;
-                                            app_state.playlists.update_target_id_mapping(target, in_memory_updates).await;
+                                            playlists.insert_playlist_items(target, episodes).await;
+                                            playlists.update_target_id_mapping(target, in_memory_updates).await;
                                         }
 
                                         if !provider_series.is_empty() {
@@ -218,9 +219,9 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                             if let Err(err) = write_playlist_item_update(app_config, &target.name, &series_pli).await {
                                                 error!("Failed to persist series stream: {err}");
                                             }
-                                            app_state.playlists.update_playlist_items(target, vec![&series_pli]).await;
+                                            playlists.update_playlist_items(target, vec![&series_pli]).await;
 
-                                            if let Some(value) = xtream_resolve_stream_info(app_state, user, target, xtream_output, &series_pli) {
+                                            if let Some(value) = xtream_resolve_stream_info(app_config, playlists, user, target, xtream_output, &series_pli) {
                                                 return value;
                                             }
                                         }
@@ -241,11 +242,12 @@ pub async fn get_xtream_stream_info(client: &reqwest::Client,
                                    target.name.replace(' ', "_").as_str(), cluster, pli.get_virtual_id())))
 }
 
-fn xtream_resolve_stream_info(app_state: &Arc<AppState>, user: &ProxyUserCredentials,
+fn xtream_resolve_stream_info(app_config: &Arc<AppConfig>,
+                                    _playlists: &PlaylistStorageState, user: &ProxyUserCredentials,
                               target: &ConfigTarget, xtream_output: &XtreamTargetOutput,
                               pli: &XtreamPlaylistItem) -> Option<Result<String, TuliproxError>> {
-    let app_config = &app_state.app_config;
-    let encrypt_secret = app_state.get_encrypt_secret();
+    let app_config = &app_config;
+    let encrypt_secret = app_config.get_encrypt_secret();
     let options = match xtream_mapping_option_from_target_options(target, xtream_output, app_config, user, encrypt_secret) {
         Ok(options) => options,
         Err(err) => return Some(Err(err)),

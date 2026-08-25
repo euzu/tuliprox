@@ -1,10 +1,9 @@
 use crate::{
     api::{
         model::{
-            ActiveProviderManager, AppState, EventManager, EventMessage, MetadataUpdateManager, PlaylistStorageState,
+            ActiveProviderManager, EventManager, EventMessage, MetadataUpdateManager, PlaylistStorageState,
             ProviderIdType, ResolveReason, UpdateGuard, UpdateTask,
         },
-        sync_panel_api_exp_dates,
     },
     iptv::{m3u, xtream},
     messaging::send_message,
@@ -34,6 +33,8 @@ use crate::{
     processing::epg,
     utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
+use std::future::Future;
+use std::pin::Pin;
 use futures::{FutureExt, StreamExt};
 use indexmap::IndexMap;
 use log::{debug, error, info, log_enabled, warn, Level};
@@ -1975,13 +1976,21 @@ async fn process_watch(
     }
 }
 
+/// Work the composition root runs once the playlist lock is held, before the
+/// update proper starts.
+///
+/// This was an `Option<Arc<AppState>>` used for exactly one call. Passing the
+/// call instead of the state keeps `processing` from naming the server state.
+pub type PlaylistUpdateBootstrap =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn exec_processing(
     client: &reqwest::Client,
     app_config: Arc<AppConfig>,
     targets: Arc<ProcessTargets>,
     event_manager: Option<Arc<EventManager>>,
-    app_state: Option<Arc<AppState>>,
+    bootstrap: Option<PlaylistUpdateBootstrap>,
     playlist_state: Option<Arc<PlaylistStorageState>>,
     update_guard: Option<UpdateGuard>,
     disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
@@ -2008,8 +2017,8 @@ pub async fn exec_processing(
     };
 
     if playlist_guard.is_some() {
-        if let Some(state) = app_state.as_ref() {
-            if tokio::time::timeout(max_update_duration, sync_panel_api_exp_dates(state)).await.is_err() {
+        if let Some(bootstrap) = bootstrap.as_ref() {
+            if tokio::time::timeout(max_update_duration, bootstrap()).await.is_err() {
                 error!(
                     "Playlist update bootstrap timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
                 );

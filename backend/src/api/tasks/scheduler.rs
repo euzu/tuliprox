@@ -202,7 +202,14 @@ async fn run_playlist_update_inner(
         Arc::clone(&app_state.app_config),
         targets,
         Some(Arc::clone(&app_state.event_manager)),
-        Some(Arc::clone(app_state)),
+        Some({
+            let state = Arc::clone(app_state);
+            std::sync::Arc::new(move || {
+                let state = Arc::clone(&state);
+                Box::pin(async move { crate::api::sync_panel_api_exp_dates(&state).await })
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            })
+        }),
         Some(app_state.playlists.clone()),
         Some(app_state.update_guard.clone()),
         app_state.get_disabled_headers(),

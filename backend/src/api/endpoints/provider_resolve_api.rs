@@ -133,7 +133,7 @@ async fn load_provider_resolve_item(
         })
         .map_err(|err| TuliproxError::RepositoryXtream(err.to_string())),
         ProviderResolveOutputKind::M3u => {
-            let item = m3u_get_item_for_stream_id(decoded_virtual_id, app_state, target)
+            let item = m3u_get_item_for_stream_id(decoded_virtual_id, &app_state.app_config, &app_state.playlists, target)
                 .await
                 .map_err(|err| TuliproxError::RepositoryM3u(err.to_string()))?;
             if !item.item_type.is_cluster(decoded_cluster) {

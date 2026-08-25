@@ -1,5 +1,5 @@
+use super::playlist_mem_cache::PlaylistStorageState;
 use crate::{
-    api::model::AppState,
     model::{AppConfig, Config, ConfigInput, ConfigTarget, M3uTargetOutput, ProxyUserCredentials},
     repository::{
         bplustree::{BPlusTree, BPlusTreeQuery},
@@ -320,14 +320,15 @@ pub async fn m3u_load_rewrite_playlist(
 
 pub async fn m3u_get_item_for_stream_id(
     stream_id: u32,
-    app_state: &AppState,
+    app_config: &AppConfig,
+    playlists: &PlaylistStorageState,
     target: &ConfigTarget,
 ) -> Result<M3uPlaylistItem, Error> {
     if stream_id == 0 {
         return Err(str_to_io_error("id should start with 1"));
     }
     {
-        if let Some(playlist) = app_state.playlists.data.read().await.get(target.name.as_str()) {
+        if let Some(playlist) = playlists.data.read().await.get(target.name.as_str()) {
             if let Some(m3u_playlist) = playlist.m3u.as_ref() {
                 if let Some(item) = m3u_playlist.query(&stream_id) {
                     return Ok(item.clone());
@@ -336,7 +337,7 @@ pub async fn m3u_get_item_for_stream_id(
             }
         }
 
-        let cfg: &AppConfig = &app_state.app_config;
+        let cfg: &AppConfig = app_config;
         let target_path = get_target_storage_path(&cfg.config.load(), target.name.as_str())
             .ok_or_else(|| string_to_io_error(format!("Could not find path for target {}", target.name)))?;
         let m3u_path = m3u_get_file_path_for_db(&target_path);

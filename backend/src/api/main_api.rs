@@ -29,7 +29,7 @@ use crate::{
             recording_rule_scheduler::spawn_recording_rule_scheduler,
             recording_supervisor::start_recording_supervisors,
         },
-        panel_api::sync_panel_api_exp_dates_on_boot,
+        panel_api::{sync_panel_api_exp_dates, sync_panel_api_exp_dates_on_boot},
         tasks::{exec_interner_prune, exec_scheduler, exec_xtream_expiry_sync},
         serve::serve,
         sys_usage::exec_system_usage,
@@ -211,7 +211,14 @@ fn spawn_metadata_trigger_update(
                             Arc::clone(&app_config),
                             proc_targets,
                             Some(Arc::clone(&event_manager)),
-                            Some(app_state_clone.clone()),
+Some({
+                                let state = Arc::clone(&app_state_clone);
+                                std::sync::Arc::new(move || {
+                                    let state = Arc::clone(&state);
+                                    Box::pin(async move { sync_panel_api_exp_dates(&state).await })
+                                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                                })
+                            }),
                             Some(Arc::clone(&playlist_state)),
                             Some(update_guard.clone()),
                             disabled_headers.clone(),
@@ -404,7 +411,14 @@ async fn run_manual_update_worker(
             Arc::clone(&app_state.app_config),
             request.targets,
             Some(Arc::clone(&app_state.event_manager)),
-            Some(Arc::clone(&app_state)),
+            Some({
+                let state = Arc::clone(&app_state);
+                std::sync::Arc::new(move || {
+                    let state = Arc::clone(&state);
+                    Box::pin(async move { sync_panel_api_exp_dates(&state).await })
+                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                })
+            }),
             Some(Arc::clone(&app_state.playlists)),
             Some(app_state.update_guard.clone()),
             app_state.get_disabled_headers(),
@@ -478,7 +492,14 @@ fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targ
                 app_config_clone,
                 targets_clone,
                 event_manager,
-                Some(app_state_clone),
+                Some({
+                    let state = Arc::clone(&app_state_clone);
+                    std::sync::Arc::new(move || {
+                        let state = Arc::clone(&state);
+                        Box::pin(async move { sync_panel_api_exp_dates(&state).await })
+                            as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                    })
+                }),
                 Some(playlist_state),
                 update_guard,
                 disabled_headers,
