@@ -246,7 +246,7 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     }
     if changes.flags.contains(UpdateChangesFlags::Downloads) {
         spawn_download_services(app_state, &app_state.cancel_tokens.load().downloads);
-        spawn_recording_rule_scheduler(app_state, &app_state.cancel_tokens.load().downloads);
+        spawn_recording_rule_scheduler(&app_state.recording_ctx(), &app_state.cancel_tokens.load().downloads);
         let config = app_state.app_config.config.load();
         if let Some(download_cfg) = config.video.as_ref().and_then(|video| video.download.as_ref()).cloned() {
             let app_state = Arc::clone(app_state);
@@ -928,6 +928,21 @@ pub struct HdHomerunAppState {
     pub app_state: Arc<AppState>,
     pub device: Arc<HdHomeRunDeviceConfig>,
     pub hd_scan_state: Arc<AtomicI8>,
+}
+
+impl AppState {
+    /// The handles the DVR needs, lifted out of the root state.
+    ///
+    /// The recording subsystem does not name `AppState`; this is where the two
+    /// meet.
+    pub fn recording_ctx(&self) -> crate::api::model::recording::recording_ctx::RecordingCtx {
+        crate::api::model::recording::recording_ctx::RecordingCtx {
+            app_config: Arc::clone(&self.app_config),
+            downloads: Arc::clone(&self.downloads),
+            event_manager: Arc::clone(&self.event_manager),
+            http_client: Arc::clone(&self.http_client),
+        }
+    }
 }
 
 #[cfg(test)]

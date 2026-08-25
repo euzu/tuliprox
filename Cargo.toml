@@ -1,5 +1,5 @@
 [workspace]
-members = ["auth", "backend", "btree", "config-loader", "core", "frontend", "iptv", "library", "media-server", "messaging", "mpegts", "parser", "repository", "session", "shared"]
+members = ["auth", "backend", "btree", "config-loader", "core", "dvr", "frontend", "iptv", "library", "media-server", "messaging", "mpegts", "parser", "repository", "session", "shared"]
 resolver = "2"
 
 [workspace.package]

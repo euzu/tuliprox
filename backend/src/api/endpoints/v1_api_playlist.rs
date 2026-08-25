@@ -57,6 +57,9 @@ use shared::{
 use std::{path::Path, str::FromStr, sync::Arc};
 use tokio_stream::StreamExt;
 use url::Url;
+// Recording-source resolution moved into the recording subsystem so it no
+// longer has to call back into `endpoints`.
+use crate::api::model::recording::recording_source_resolution::{resolve_recording_config, resolve_recording_target};
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
     ConfigInput {
@@ -173,20 +176,6 @@ fn build_recording_stream_url(
     Some(url.into())
 }
 
-pub(in crate::api) fn build_recording_source_descriptor(
-    target_name: &str,
-    input_name: &str,
-    virtual_id: u32,
-    cluster: XtreamCluster,
-) -> Option<String> {
-    let mut url = Url::parse("tuliprox-recording://source").ok()?;
-    url.query_pairs_mut()
-        .append_pair("target_name", target_name)
-        .append_pair("input_name", input_name)
-        .append_pair("virtual_id", &virtual_id.to_string())
-        .append_pair("cluster", cluster.as_stream_type());
-    Some(url.into())
-}
 
 pub(in crate::api) fn build_webplayer_recording_url(
     app_config: &crate::model::AppConfig,
@@ -242,34 +231,8 @@ pub(in crate::api) struct ResolvedRecordingSource {
     pub input_name: String,
 }
 
-#[derive(Debug, Clone)]
-pub(in crate::api) struct ResolvedRecordingConfig {
-    pub target: Arc<crate::model::ConfigTarget>,
-    pub input: Arc<ConfigInput>,
-}
 
-pub(in crate::api) fn resolve_recording_config(
-    sources: &crate::model::SourcesConfig,
-    target_name: &str,
-    input_name: &str,
-) -> Option<ResolvedRecordingConfig> {
-    let source = sources.sources.iter().find(|source| {
-        source.inputs.iter().any(|configured_input| configured_input.as_ref() == input_name)
-            && source.targets.iter().any(|target| target.name == target_name)
-    })?;
-    let target = source.targets.iter().find(|target| target.name == target_name)?.clone();
-    let input = sources.inputs.iter().find(|input| input.name.as_ref() == input_name)?.clone();
-    Some(ResolvedRecordingConfig { target, input })
-}
 
-pub(in crate::api) fn resolve_recording_target(
-    app_config: &crate::model::AppConfig,
-    target_name: &str,
-    input_name: &str,
-) -> Option<Arc<crate::model::ConfigTarget>> {
-    resolve_recording_config(app_config.sources.load().as_ref(), target_name, input_name)
-        .map(|resolved| resolved.target)
-}
 
 pub(in crate::api) async fn resolve_target_recording_source(
     app_config: &crate::model::AppConfig,
@@ -1242,7 +1205,8 @@ async fn playlist_episode_item(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_provider_url_for_request, resolve_recording_config};
+    use super::resolve_provider_url_for_request;
+    use crate::api::model::recording::recording_source_resolution::resolve_recording_config;
     use crate::{
         api::model::{
             ActiveProviderManager, ActiveUserManager, AppState, ConnectionManager, DownloadQueue, EventManager,
@@ -1805,7 +1769,7 @@ mod tests {
 
     #[test]
     fn recording_source_descriptor_is_token_free_and_percent_encodes_names() {
-        let url = super::build_recording_source_descriptor(
+        let url = crate::api::model::recording::recording_source_resolution::build_recording_source_descriptor(
             "News/HD &+",
             "input/name ?+",
             42,
@@ -1826,7 +1790,7 @@ mod tests {
 
     #[test]
     fn future_scheduled_recording_descriptor_round_trips_without_token() {
-        let url = super::build_recording_source_descriptor(
+        let url = crate::api::model::recording::recording_source_resolution::build_recording_source_descriptor(
             "stable-target",
             "input-a",
             42,

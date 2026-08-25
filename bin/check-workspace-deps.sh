@@ -56,6 +56,15 @@ while IFS=$'\t' read -r from to; do
         "tuliprox -> tuliprox-repository") ;;
         "tuliprox -> tuliprox-auth") ;;
         "tuliprox -> tuliprox-session") ;;
+        "tuliprox -> tuliprox-dvr") ;;
+        # The DVR. Reads the running server through `RecordingCtx`; needs
+        # `session` for the event bus it publishes recording changes on.
+        "tuliprox-dvr -> shared") ;;
+        "tuliprox-dvr -> tuliprox-auth") ;;
+        "tuliprox-dvr -> tuliprox-core") ;;
+        "tuliprox-dvr -> tuliprox-messaging") ;;
+        "tuliprox-dvr -> tuliprox-repository") ;;
+        "tuliprox-dvr -> tuliprox-session") ;;
         # Provider allocation and the streaming-session runtime. Reaches
         # `repository` to persist stream history and resolve GeoIP, and `mpegts`
         # for the transport-stream buffer it hands to preempted clients.

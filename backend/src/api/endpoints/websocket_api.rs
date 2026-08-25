@@ -399,7 +399,7 @@ async fn recording_frame_for_session(app_state: &AppState, claims: &Claims) -> P
     // schedulers; the socket has to agree, or a client would keep
     // receiving live recording data while every REST call answered
     // `501 recording_disabled`.
-    if !crate::api::model::recording::recording_supervisor::recording_enabled(app_state) {
+    if !crate::api::model::recording::recording_supervisor::recording_enabled(&app_state.app_config) {
         return ProtocolMessage::RecordingWsError { code: "recording_disabled".to_string() };
     }
     if let Some(RecordingViewDenial::TokenRefreshRequired) = recording_view_denial(claims) {

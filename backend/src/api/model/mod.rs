@@ -1,6 +1,5 @@
 mod app_state;
 mod byte_range;
-mod download;
 mod hls_cache;
 mod hls_provisioning;
 mod metadata_update_manager;
@@ -8,7 +7,6 @@ mod model_utils;
 mod provider_dns_manager;
 mod proxy;
 mod qos_aggregation_manager;
-pub(in crate::api) mod recording;
 mod request;
 mod streams;
 mod xtream;
@@ -19,7 +17,7 @@ pub(in crate::api) use self::hls_provisioning::{
 };
 pub use self::{
     app_state::*, hls_cache::*, hls_provisioning::HlsProvisioningState, metadata_update_manager::*,
-    provider_dns_manager::*, proxy::*, recording::*,
+    provider_dns_manager::*, proxy::*,
 };
 mod playlist_cache_loader;
 pub use self::playlist_cache_loader::*;
@@ -31,8 +29,12 @@ pub use crate::model::update_guard::*;
 pub use crate::model::update_task::*;
 // Provider value types moved to `model`; re-exported so `api` keeps its names.
 pub use crate::model::provider::*;
-pub use self::download::{DownloadKind, DownloadState};
 pub use crate::model::stream_error::*;
+
+// The recording queue and the DVR moved to `tuliprox-dvr`; re-exported so `api`
+// call sites keep their names, module paths included.
+pub use tuliprox_dvr::{download, recording};
+pub use tuliprox_dvr::{download::*, recording::*};
 
 // Provider allocation and the streaming-session runtime moved to
 // `tuliprox-session`; re-exported so `api` call sites keep their names, module
@@ -48,7 +50,6 @@ pub use tuliprox_session::{
 };
 pub(in crate::api) use self::{
     byte_range::{resolve_single_byte_range, SingleByteRange},
-    download::*,
     hls_provisioning::{
         hls_custom_video_manifest_response_for_access_lease,
         hls_custom_video_manifest_response_with_virtual_id,

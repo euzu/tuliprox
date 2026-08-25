@@ -127,8 +127,8 @@ async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &c
     // Cloned out of the `ArcSwap` guard first: the guard must not be held
     // across the await below.
     let downloads_cancel = app_state.cancel_tokens.load().downloads.clone();
-    start_recording_supervisors(app_state, &downloads_cancel).await;
-    spawn_recording_rule_scheduler(app_state, &downloads_cancel);
+    start_recording_supervisors(&app_state.recording_ctx(), &downloads_cancel).await;
+    spawn_recording_rule_scheduler(&app_state.recording_ctx(), &downloads_cancel);
     if let Err(err) = resume_download_worker_if_needed(app_state.as_ref(), download_cfg).await {
         error!("Failed to resume persisted downloads during startup; continuing with downloads paused: {err}");
     }

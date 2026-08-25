@@ -4460,6 +4460,7 @@ dependencies = [
  "tuliprox-btree",
  "tuliprox-config-loader",
  "tuliprox-core",
+ "tuliprox-dvr",
  "tuliprox-iptv",
  "tuliprox-library",
  "tuliprox-media-server",
@@ -4580,6 +4581,32 @@ dependencies = [
  "tuliprox-mpegts",
  "url",
  "zeroize",
+]
+
+[[package]]
+name = "tuliprox-dvr"
+version = "3.3.91"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "chrono",
+ "chrono-tz",
+ "futures",
+ "libc",
+ "log",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "shared",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tuliprox-auth",
+ "tuliprox-core",
+ "tuliprox-messaging",
+ "tuliprox-repository",
+ "tuliprox-session",
+ "url",
 ]
 
 [[package]]

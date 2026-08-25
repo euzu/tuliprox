@@ -294,7 +294,7 @@ pub async fn preview_recording_conflicts(
         post_roll_secs: body.candidate.post_roll_secs,
         priority: body.candidate.priority,
     };
-    let service = crate::api::model::recording_service::RecordingService::from_app_state(&state);
+    let service = crate::api::model::recording_service::RecordingService::from_ctx(&state.recording_ctx());
     let preview = match service.preview_conflicts(&claims, &request).await {
         Ok(preview) => preview,
         Err(err) => return service_error_response(&err),
@@ -936,7 +936,7 @@ pub async fn recording_availability(
     {
         return error_response(StatusCode::FORBIDDEN, "recording_forbidden");
     }
-    if !crate::api::model::recording::recording_supervisor::recording_enabled(app_state.as_ref()) {
+    if !crate::api::model::recording::recording_supervisor::recording_enabled(&app_state.app_config) {
         return error_response(StatusCode::NOT_IMPLEMENTED, "recording_disabled");
     }
     StatusCode::NO_CONTENT.into_response()
@@ -962,7 +962,7 @@ pub async fn require_recording_enabled(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if crate::api::model::recording::recording_supervisor::recording_enabled(app_state.as_ref()) {
+    if crate::api::model::recording::recording_supervisor::recording_enabled(&app_state.app_config) {
         next.run(request).await
     } else {
         error_response(StatusCode::NOT_IMPLEMENTED, "recording_disabled")
