@@ -176,7 +176,7 @@ pub fn exec_provider_dns(app_state: &Arc<AppState>, cancel: &CancellationToken) 
     drop(sources);
 
     if provider_names.is_empty() {
-        let app_for_prune = Arc::clone(app_state);
+        let app_for_prune = Arc::clone(&app_state.app_config);
         tokio::spawn(async move {
             prune_persisted_dns_resolved_to_runtime(&app_for_prune).await;
         });
@@ -188,12 +188,12 @@ pub fn exec_provider_dns(app_state: &Arc<AppState>, cancel: &CancellationToken) 
     let cancel_for_start = cancel.clone();
     tokio::spawn(async move {
         // Seed runtime caches first, then start writer/tasks to avoid startup races.
-        load_persisted_dns_resolved(&app_for_start).await;
+        load_persisted_dns_resolved(&app_for_start.app_config).await;
         if cancel_for_start.is_cancelled() {
             return;
         }
 
-        let writer_tx = spawn_dns_resolved_writer(Arc::clone(&app_for_start), cancel_for_start.clone(), generation);
+        let writer_tx = spawn_dns_resolved_writer(Arc::clone(&app_for_start.app_config), cancel_for_start.clone(), generation);
         debug!("Provider dns manager: starting {} provider task(s)", provider_names.len());
 
         for provider_name in provider_names {

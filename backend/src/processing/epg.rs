@@ -34,6 +34,8 @@ pub async fn get_input_raw_epg_file_path(
     Ok(download_path.join(format!("{file_prefix}{suffix}")))
 }
 
+// Used only by the playlist API's tests, which build EPG cache paths directly.
+#[cfg(test)]
 pub async fn get_input_raw_xmltv_file_path(
     url: &str,
     input: &ConfigInput,

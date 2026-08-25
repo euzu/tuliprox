@@ -1,3 +1,4 @@
+use log::debug;
 use super::DynReader;
 use crate::utils::compression::compression_utils::{is_gzip, is_zlib_header};
 use async_compression::tokio::bufread::{BrotliDecoder, DeflateDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
@@ -462,6 +463,81 @@ pub(crate) fn is_http_body_transport_error(error: &io::Error) -> bool {
         };
         source = next;
     }
+}
+
+// Origin content-coding diagnostics. These live here rather than in the HLS
+// cache because the observation type they format is defined in this module and
+// because the HTTP client logs them too - keeping them above meant `utils`
+// depended on `api`.
+/// Fixed HLS object classes allowed in content-coding diagnostics.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum HlsOriginContentCodingObjectKind {
+    Manifest,
+    Segment,
+    Map,
+    Key,
+    Part,
+    Other,
+}
+
+impl HlsOriginContentCodingObjectKind {
+    const fn as_log_value(self) -> &'static str {
+        match self {
+            Self::Manifest => "manifest",
+            Self::Segment => "segment",
+            Self::Map => "map",
+            Self::Key => "key",
+            Self::Part => "part",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Fixed Tuliprox HLS stacks allowed in content-coding diagnostics.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum HlsOriginContentCodingSource {
+    Legacy,
+    Shared,
+}
+
+impl HlsOriginContentCodingSource {
+    const fn as_log_value(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Shared => "shared",
+        }
+    }
+}
+
+/// Logs a prepared origin-coding normalization using fixed or numeric fields only.
+pub fn log_hls_origin_content_coding(
+    observation: ContentCodingObservation,
+    object_kind: HlsOriginContentCodingObjectKind,
+    range_requested: bool,
+    source: HlsOriginContentCodingSource,
+) {
+    debug!(
+        "HLS origin content coding normalization prepared: {}",
+        hls_origin_content_coding_log_fields(observation, object_kind, range_requested, source)
+    );
+}
+
+pub(crate) fn hls_origin_content_coding_log_fields(
+    observation: ContentCodingObservation,
+    object_kind: HlsOriginContentCodingObjectKind,
+    range_requested: bool,
+    source: HlsOriginContentCodingSource,
+) -> String {
+    let content_length = observation.content_length.map_or_else(|| "unknown".to_string(), |value| value.to_string());
+    format!(
+        "object_kind={} content_encoding={} status={} requested_accept_encoding=identity decoded_to_identity=true content_length={} range_requested={} source={}",
+        object_kind.as_log_value(),
+        observation.content_encoding,
+        observation.status.as_u16(),
+        content_length,
+        range_requested,
+        source.as_log_value()
+    )
 }
 
 #[cfg(test)]

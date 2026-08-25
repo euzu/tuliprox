@@ -36,11 +36,8 @@ use crate::{
         iter_raw_m3u_target_playlist, iter_raw_xtream_target_playlist, m3u_get_item_for_stream_id,
         xtream_get_item_for_stream_id,
     },
-    utils::{
-        epg::get_input_raw_epg_file_path,
-        file_exists_async,
-        request,
-    },
+    processing::epg::get_input_raw_epg_file_path,
+    utils::{file_exists_async, request},
 };
 use axum::{response::IntoResponse, Router};
 use log::{debug, error};
@@ -1254,7 +1251,7 @@ mod tests {
             AppConfig, Config, ConfigInput, ConfigProvider, ConfigSource, ConfigTarget, SourcesConfig,
             StreamHistoryConfig, VideoDownloadConfig,
         },
-        utils::epg::{get_input_raw_epg_file_path, get_input_raw_xmltv_file_path},
+        processing::epg::{get_input_raw_epg_file_path, get_input_raw_xmltv_file_path},
     };
     use crate::repository::GeoIp;
     use arc_swap::{ArcSwap, ArcSwapOption};

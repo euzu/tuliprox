@@ -4,8 +4,10 @@ use super::{
     origin_progress::{HlsOriginPathCondition, HlsOriginProgressPhase},
     HlsAccessLeaseId, HlsSession, HlsSessionKey, ProxySessionId,
 };
-use crate::utils::content_coding::ContentCodingObservation;
-use log::debug;
+pub(crate) use crate::utils::content_coding::{
+    log_hls_origin_content_coding,
+    HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource,
+};
 use sha2::{Digest, Sha256};
 use shared::utils::sanitize_sensitive_info;
 use std::{
@@ -15,77 +17,6 @@ use std::{
         Arc,
     },
 };
-
-/// Fixed HLS object classes allowed in content-coding diagnostics.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum HlsOriginContentCodingObjectKind {
-    Manifest,
-    Segment,
-    Map,
-    Key,
-    Part,
-    Other,
-}
-
-impl HlsOriginContentCodingObjectKind {
-    const fn as_log_value(self) -> &'static str {
-        match self {
-            Self::Manifest => "manifest",
-            Self::Segment => "segment",
-            Self::Map => "map",
-            Self::Key => "key",
-            Self::Part => "part",
-            Self::Other => "other",
-        }
-    }
-}
-
-/// Fixed Tuliprox HLS stacks allowed in content-coding diagnostics.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum HlsOriginContentCodingSource {
-    Legacy,
-    Shared,
-}
-
-impl HlsOriginContentCodingSource {
-    const fn as_log_value(self) -> &'static str {
-        match self {
-            Self::Legacy => "legacy",
-            Self::Shared => "shared",
-        }
-    }
-}
-
-/// Logs a prepared origin-coding normalization using fixed or numeric fields only.
-pub(crate) fn log_hls_origin_content_coding(
-    observation: ContentCodingObservation,
-    object_kind: HlsOriginContentCodingObjectKind,
-    range_requested: bool,
-    source: HlsOriginContentCodingSource,
-) {
-    debug!(
-        "HLS origin content coding normalization prepared: {}",
-        hls_origin_content_coding_log_fields(observation, object_kind, range_requested, source)
-    );
-}
-
-fn hls_origin_content_coding_log_fields(
-    observation: ContentCodingObservation,
-    object_kind: HlsOriginContentCodingObjectKind,
-    range_requested: bool,
-    source: HlsOriginContentCodingSource,
-) -> String {
-    let content_length = observation.content_length.map_or_else(|| "unknown".to_string(), |value| value.to_string());
-    format!(
-        "object_kind={} content_encoding={} status={} requested_accept_encoding=identity decoded_to_identity=true content_length={} range_requested={} source={}",
-        object_kind.as_log_value(),
-        observation.content_encoding,
-        observation.status.as_u16(),
-        content_length,
-        range_requested,
-        source.as_log_value()
-    )
-}
 
 /// In-memory counters for the live HLS cache path.
 #[derive(Debug, Default)]
@@ -402,7 +333,7 @@ fn short_hash(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        hls_manifest_recovery_log_fields, hls_origin_content_coding_log_fields, hls_origin_log_value,
+        hls_manifest_recovery_log_fields, hls_origin_log_value,
         safe_proxy_session_id, safe_session_key, HlsCacheMetrics, HlsLogIdentity,
         HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource, HlsRecoveryAvailabilityLogEvidence,
         HlsRecoveryTriggerDiagnostic, HlsRecoveryTriggerSource,
@@ -415,7 +346,7 @@ mod tests {
             },
             HlsAccessLeaseId, HlsManifestAcceptanceTrigger, HlsSession, HlsSessionKey, ProxySessionId,
         },
-        utils::content_coding::ContentCodingObservation,
+        utils::content_coding::{hls_origin_content_coding_log_fields, ContentCodingObservation},
     };
     use reqwest::StatusCode;
     use shared::utils::{is_sanitize_sensitive_info_enabled, sanitize_sensitive_info, set_sanitize_sensitive_info};

@@ -5,10 +5,13 @@ pub use super::DynReader;
 /// Owned here because this is the client that enforces it; the streaming layer
 /// re-exports it so both sides cannot drift apart.
 pub const STREAM_IDLE_TIMEOUT: u64 = 60;
+use crate::utils::content_coding::{
+    log_hls_origin_content_coding, HlsOriginContentCodingObjectKind,
+    HlsOriginContentCodingSource,
+};
 use crate::{
     api::model::{
-        log_hls_origin_content_coding, persist_pipe_stream::tee_dyn_reader, AppState, HlsOriginContentCodingObjectKind,
-        HlsOriginContentCodingSource,
+        persist_pipe_stream::tee_dyn_reader,
     },
     model::{
         resolve_provider_scheme_url_with_provider_index, AppConfig, Config, ConfigInput, ConfigProvider, InputSource,
@@ -1607,70 +1610,6 @@ pub async fn get_input_epg_content_as_file(
             error!("can't persist to: {}  => {}", persist_path.display(), err);
             TuliproxError::RepositoryNetwork(format!("Failed to persist: {}  => {err}", persist_path.display()))
         })
-    }
-}
-
-pub async fn get_input_text_content(
-    app_state: &Arc<AppState>,
-    client: &reqwest::Client,
-    input: &InputSource,
-    storage_dir: &str,
-    persist_filepath: Option<PathBuf>,
-) -> Result<String, TuliproxError> {
-    debug_if_enabled!(
-        "getting input text content storage_dir: {}, url: {}",
-        storage_dir,
-        sanitize_sensitive_info(&input.url)
-    );
-
-    if input.url.parse::<url::Url>().is_ok() {
-        match download_text_content(&app_state.app_config, client, input, None, persist_filepath, false).await {
-            Ok((content, _response_url)) => Ok(content),
-            Err(e) => {
-                error!("Failed to download input '{}': {}", input.name, sanitize_sensitive_info(&e.to_string()));
-                Err(TuliproxError::RepositoryNetwork(format!(
-                    "Failed to download input '{}': {}",
-                    input.name,
-                    sanitize_sensitive_info(&e.to_string())
-                )))
-            }
-        }
-    } else {
-        let result = match get_file_path(storage_dir, Some(PathBuf::from(&input.url))) {
-            Some(filepath) => {
-                if filepath.exists() {
-                    if let Some(persist_file_value) = persist_filepath {
-                        let to_file = &persist_file_value;
-                        if let Err(e) = tokio::fs::copy(&filepath, to_file).await {
-                            error!("can't persist to: {}  => {}", to_file.to_str().unwrap_or("?"), e);
-                            return Err(TuliproxError::RepositoryNetwork(format!(
-                                "Failed to persist: {}  => {}",
-                                to_file.to_str().unwrap_or("?"),
-                                e
-                            )));
-                        }
-                    }
-
-                    match get_local_file_content(&filepath).await {
-                        Ok(content) => Some(content),
-                        Err(err) => {
-                            return Err(TuliproxError::RepositoryNetwork(format!("Failed : {err}")));
-                        }
-                    }
-                } else {
-                    None
-                }
-            }
-            None => None,
-        };
-        result.map_or_else(
-            || {
-                let msg = format!("can't read input url: {}", sanitize_sensitive_info(&input.url));
-                error!("{msg}");
-                Err(TuliproxError::RepositoryNetwork(msg))
-            },
-            Ok,
-        )
     }
 }
 

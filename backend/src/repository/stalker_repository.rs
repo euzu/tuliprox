@@ -25,7 +25,6 @@ use shared::model::stalker_item::{StalkerPlaylistItem, StalkerSeasonItem};
 
 use crate::iptv::stalker::epg::StalkerProgramRecord;
 
-use crate::api::model::AppState;
 use crate::model::{AppConfig, ConfigInput, ConfigTarget};
 use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy};
 use crate::repository::storage::ensure_input_storage_path;
@@ -636,13 +635,13 @@ pub async fn remove_stalker_file(app_config: &Arc<AppConfig>, file_path: &Path) 
 }
 
 /// Convenience for the proxy path: resolve the per-input storage path given an
-/// `AppState` and a `ConfigInput`. Returns `None` if the input is not named or
+/// `AppConfig` and a `ConfigInput`. Returns `None` if the input is not named or
 /// the input directory cannot be created.
 pub async fn resolve_stalker_storage_for_input(
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
     input: &ConfigInput,
 ) -> Option<PathBuf> {
-    let cfg = app_state.app_config.config.load();
+    let cfg = app_config.config.load();
     let input_path = crate::repository::storage::ensure_input_storage_path(&cfg, &input.name)
         .await
         .ok()?;
@@ -654,7 +653,7 @@ pub async fn resolve_stalker_storage_for_input(
 /// feed it do; this helper centralises the lookup so callers don't need to
 /// duplicate the `ensure_*` / `get_stalker_storage_path` logic.
 pub async fn resolve_stalker_storage_for_target(
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
     _target: &ConfigTarget,
     inputs: &[Arc<ConfigInput>],
 ) -> Option<(PathBuf, Arc<ConfigInput>)> {
@@ -663,7 +662,7 @@ pub async fn resolve_stalker_storage_for_target(
     // per the current config schema; we pick the first match.
     for input in inputs {
         if input.input_type.is_stalker() {
-            let path = resolve_stalker_storage_for_input(app_state, input).await?;
+            let path = resolve_stalker_storage_for_input(app_config, input).await?;
             return Some((path, input.clone()));
         }
     }

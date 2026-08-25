@@ -1,3 +1,4 @@
+use crate::model::AppConfig;
 use indexmap::IndexMap;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,6 @@ use std::time::Duration;
 use tokio::fs;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use crate::api::model::AppState;
 use crate::model::ConfigProvider;
 
 /// All providers' resolved DNS data, keyed by provider name -> hostname -> IPs.
@@ -151,8 +151,8 @@ pub async fn persist_dns_resolved_store(path: &Path, store: &DnsResolvedStore) -
 
 /// Load persisted DNS resolved data and seed the in-memory caches for all providers.
 /// Called at startup and after config reloads, before DNS background tasks run.
-pub async fn load_persisted_dns_resolved(app_state: &std::sync::Arc<crate::api::model::AppState>) {
-    let storage_dir = app_state.app_config.config.load().storage_dir.clone();
+pub async fn load_persisted_dns_resolved(app_config: &std::sync::Arc<AppConfig>) {
+    let storage_dir = app_config.config.load().storage_dir.clone();
     let path = dns_resolved_file_path(&storage_dir);
 
     let store = match load_dns_resolved_store_from_path(&path).await {
@@ -167,7 +167,7 @@ pub async fn load_persisted_dns_resolved(app_state: &std::sync::Arc<crate::api::
         }
     };
 
-    let sources = app_state.app_config.sources.load();
+    let sources = app_config.sources.load();
     let mut seeded_count = 0usize;
     for (provider_name, hosts) in &store.providers {
         let Some(provider) = sources.get_provider_by_name(provider_name) else {
@@ -194,8 +194,8 @@ pub async fn load_persisted_dns_resolved(app_state: &std::sync::Arc<crate::api::
     }
 }
 
-fn prune_store_to_runtime_enabled_providers(app_state: &Arc<AppState>, store: &mut DnsResolvedStore) -> usize {
-    let sources = app_state.app_config.sources.load();
+fn prune_store_to_runtime_enabled_providers(app_config: &Arc<AppConfig>, store: &mut DnsResolvedStore) -> usize {
+    let sources = app_config.sources.load();
     let enabled_provider_names = sources
         .provider
         .iter()
@@ -216,15 +216,15 @@ fn prune_store_to_enabled_provider_names(
     before.saturating_sub(store.providers.len())
 }
 
-fn is_provider_dns_enabled_in_runtime(app_state: &Arc<AppState>, provider_name: &str) -> bool {
-    let sources = app_state.app_config.sources.load();
+fn is_provider_dns_enabled_in_runtime(app_config: &Arc<AppConfig>, provider_name: &str) -> bool {
+    let sources = app_config.sources.load();
     sources
         .get_provider_by_name(provider_name)
         .is_some_and(|provider| provider.get_dns_config().is_some_and(|cfg| cfg.enabled))
 }
 
-pub async fn prune_persisted_dns_resolved_to_runtime(app_state: &Arc<AppState>) {
-    let storage_dir = app_state.app_config.config.load().storage_dir.clone();
+pub async fn prune_persisted_dns_resolved_to_runtime(app_config: &Arc<AppConfig>) {
+    let storage_dir = app_config.config.load().storage_dir.clone();
     let path = dns_resolved_file_path(&storage_dir);
     let mut store = match load_dns_resolved_store_from_path(&path).await {
         Ok(Some(existing)) => existing,
@@ -238,7 +238,7 @@ pub async fn prune_persisted_dns_resolved_to_runtime(app_state: &Arc<AppState>) 
         }
     };
 
-    let removed = prune_store_to_runtime_enabled_providers(app_state, &mut store);
+    let removed = prune_store_to_runtime_enabled_providers(app_config, &mut store);
     if removed == 0 {
         return;
     }
@@ -266,11 +266,11 @@ pub type DnsResolvedWriteTx = mpsc::Sender<DnsResolvedWriteUpdate>;
 
 #[allow(clippy::too_many_lines)]
 pub fn spawn_dns_resolved_writer(
-    app_state: Arc<AppState>,
+    app_config: Arc<AppConfig>,
     cancel: CancellationToken,
     generation: u64,
 ) -> DnsResolvedWriteTx {
-    let storage_dir = app_state.app_config.config.load().storage_dir.clone();
+    let storage_dir = app_config.config.load().storage_dir.clone();
     let path = dns_resolved_file_path(&storage_dir);
     let (tx, mut rx) = mpsc::channel::<DnsResolvedWriteUpdate>(256);
 
@@ -283,7 +283,7 @@ pub fn spawn_dns_resolved_writer(
                 DnsResolvedStore::default()
             }
         };
-        let removed_on_start = prune_store_to_runtime_enabled_providers(&app_state, &mut store);
+        let removed_on_start = prune_store_to_runtime_enabled_providers(&app_config, &mut store);
         if removed_on_start > 0 {
             info!(
                 "Pruned {removed_on_start} stale provider(s) from DNS resolved store on writer start '{}'",
@@ -334,7 +334,7 @@ pub fn spawn_dns_resolved_writer(
                         break;
                     }
 
-                    if update.resolved.is_empty() || !is_provider_dns_enabled_in_runtime(&app_state, update.provider_name.as_str()) {
+                    if update.resolved.is_empty() || !is_provider_dns_enabled_in_runtime(&app_config, update.provider_name.as_str()) {
                         store.providers.remove(update.provider_name.as_str());
                     } else {
                         store.providers.insert(update.provider_name, update.resolved);
@@ -344,7 +344,7 @@ pub fn spawn_dns_resolved_writer(
                     dirty_updates = dirty_updates.saturating_add(1);
 
                     if dirty_updates >= DNS_WRITER_FLUSH_BATCH_THRESHOLD {
-                        let _ = prune_store_to_runtime_enabled_providers(&app_state, &mut store);
+                        let _ = prune_store_to_runtime_enabled_providers(&app_config, &mut store);
                         if let Err(err) = persist_dns_resolved_store(&path, &store).await {
                             warn!("Failed to persist DNS resolved store '{}': {err}", path.display());
                         } else {
@@ -362,7 +362,7 @@ pub fn spawn_dns_resolved_writer(
                 () = &mut flush_timer, if flush_timer_active => {
                     flush_timer_active = false;
                     if dirty {
-                        let _ = prune_store_to_runtime_enabled_providers(&app_state, &mut store);
+                        let _ = prune_store_to_runtime_enabled_providers(&app_config, &mut store);
                         if let Err(err) = persist_dns_resolved_store(&path, &store).await {
                             warn!("Failed to persist DNS resolved store '{}': {err}", path.display());
                         } else {
@@ -375,7 +375,7 @@ pub fn spawn_dns_resolved_writer(
         }
 
         if flush_before_exit && dirty {
-            let _ = prune_store_to_runtime_enabled_providers(&app_state, &mut store);
+            let _ = prune_store_to_runtime_enabled_providers(&app_config, &mut store);
             if let Err(err) = persist_dns_resolved_store(&path, &store).await {
                 warn!(
                     "Failed to persist DNS resolved store during writer shutdown '{}': {err}",

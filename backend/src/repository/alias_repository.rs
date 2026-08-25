@@ -1,6 +1,6 @@
 use crate::{
     model::is_input_expired,
-    utils::{file_reader, request::get_local_file_content, resolve_relative_path, EnvResolvingReader},
+    utils::{file_reader, request::get_local_file_content, EnvResolvingReader},
 };
 use chrono::Local;
 use futures::TryFutureExt;
@@ -12,8 +12,7 @@ use shared::{
         StalkerInputConfigDto, StalkerMagPreset,
     },
     utils::{
-        get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, Internable,
-        BATCH_SCHEME_PREFIX, PROVIDER_SCHEME_PREFIX,
+        get_credentials_from_url, get_credentials_from_url_str, parse_timestamp, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX,
     },
 };
 use std::{
@@ -321,22 +320,9 @@ pub async fn csv_read_inputs(
     csv_read_inputs_from_path(input_type, &file_path).await
 }
 
-pub fn get_csv_file_path(file_uri: &str) -> Result<PathBuf, Error> {
-    // Handle batch:// scheme: strip prefix and treat remainder as file path.
-    if let Some(path_str) = file_uri.strip_prefix(BATCH_SCHEME_PREFIX) {
-        let path = Path::new(path_str);
-        return if path.is_absolute() { Ok(path.to_path_buf()) } else { resolve_relative_path(path_str) };
-    }
-    let raw_path = Path::new(file_uri);
-    if raw_path.is_absolute() {
-        return Ok(raw_path.to_path_buf());
-    }
-    if let Ok(_url) = file_uri.parse::<Url>() {
-        Err(string_to_io_error(format!("Unsupported URL scheme for batch CSV, use batch:// instead: {file_uri}")))
-    } else {
-        resolve_relative_path(file_uri)
-    }
-}
+// `get_csv_file_path` lives in `utils::file_utils`; re-exported by
+// `repository::mod` so existing call sites are unchanged.
+pub use crate::utils::get_csv_file_path;
 
 pub async fn csv_backup_file(csv_path: &Path, backup_dir: &str) -> Result<(), TuliproxError> {
     let filename = csv_path.file_name().and_then(|name| name.to_str()).ok_or_else(|| {

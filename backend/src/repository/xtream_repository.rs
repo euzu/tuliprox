@@ -667,7 +667,7 @@ pub async fn xtream_load_rewrite_playlist(
     category_id: Option<u32>,
     user: &ProxyUserCredentials,
 ) -> Result<XtreamPlaylistJsonIterator, TuliproxError> {
-    XtreamPlaylistJsonIterator::new(cluster, app_state, target, category_id, user).await
+    XtreamPlaylistJsonIterator::new(cluster, &app_state.app_config, target, category_id, user).await
 }
 
 pub async fn iter_raw_xtream_target_playlist(app_config: &AppConfig, target: &ConfigTarget, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item=Result<XtreamPlaylistItem, TuliproxError>> + Send + Unpin>> {

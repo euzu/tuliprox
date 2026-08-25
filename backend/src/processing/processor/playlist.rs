@@ -31,10 +31,8 @@ use crate::{
         load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource,
         PlaylistSource,
     },
-    utils::{
-        debug_if_enabled, epg, log_memory_snapshot, trace_if_enabled,
-        StepMeasure, StepMeasureCallback,
-    },
+    processing::epg,
+    utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
 use futures::{FutureExt, StreamExt};
 use indexmap::IndexMap;

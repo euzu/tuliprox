@@ -1,4 +1,3 @@
-use crate::api::model::AppState;
 use crate::model::ConfigTarget;
 use crate::model::{xtream_mapping_option_from_target_options, AppConfig, ProxyUserCredentials};
 use crate::repository::get_file_path_for_db_index;
@@ -190,7 +189,7 @@ pub struct XtreamPlaylistJsonIterator {
 impl XtreamPlaylistJsonIterator {
     pub async fn new(
         cluster: XtreamCluster,
-        app_state: &Arc<AppState>,
+        app_config: &Arc<AppConfig>,
         target: &ConfigTarget,
         category_id: Option<u32>,
         user: &ProxyUserCredentials,
@@ -204,16 +203,16 @@ impl XtreamPlaylistJsonIterator {
                 options: None,
             });
         }
-        let encrypt_secret = app_state.get_encrypt_secret();
+        let encrypt_secret = app_config.get_encrypt_secret();
         let options = xtream_mapping_option_from_target_options(
             target,
             xtream_output,
-            &app_state.app_config,
+            app_config,
             user,
             encrypt_secret,
         )?;
         Ok(Self {
-            inner: XtreamPlaylistIterator::new(cluster, &app_state.app_config, target, category_id, user).await?,
+            inner: XtreamPlaylistIterator::new(cluster, app_config, target, category_id, user).await?,
             options: Some(options),
         })
     }

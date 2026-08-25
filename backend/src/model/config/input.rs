@@ -5,7 +5,7 @@ use crate::{
         client::MediaServerHttpClient,
     },
     model::{macros, ConfigProvider, EpgConfig, PanelApiConfig},
-    repository::get_csv_file_path,
+    utils::get_csv_file_path,
 };
 use chrono::Utc;
 use log::warn;

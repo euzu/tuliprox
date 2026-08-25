@@ -362,6 +362,30 @@ pub async fn async_open_readonly_file(path: &Path) -> std::io::Result<tokio::fs:
     tokio::fs::OpenOptions::new().read(true).write(false).truncate(false).create(false).open(path).await
 }
 
+/// Resolves a batch CSV URI to a filesystem path.
+///
+/// Pure path arithmetic over the `batch://` scheme - no storage is touched - so
+/// it belongs here rather than in the repository layer, which the configuration
+/// model must not depend on.
+pub fn get_csv_file_path(file_uri: &str) -> Result<PathBuf, std::io::Error> {
+    // Handle batch:// scheme: strip prefix and treat remainder as file path.
+    if let Some(path_str) = file_uri.strip_prefix(shared::utils::BATCH_SCHEME_PREFIX) {
+        let path = Path::new(path_str);
+        return if path.is_absolute() { Ok(path.to_path_buf()) } else { resolve_relative_path(path_str) };
+    }
+    let raw_path = Path::new(file_uri);
+    if raw_path.is_absolute() {
+        return Ok(raw_path.to_path_buf());
+    }
+    if file_uri.parse::<url::Url>().is_ok() {
+        Err(shared::error::string_to_io_error(format!(
+            "Unsupported URL scheme for batch CSV, use batch:// instead: {file_uri}"
+        )))
+    } else {
+        resolve_relative_path(file_uri)
+    }
+}
+
 /// The parent of `path`, or `.` when it has none.
 ///
 /// Used wherever a file has to be published and then its directory entry
