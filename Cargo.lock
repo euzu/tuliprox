@@ -4461,6 +4461,7 @@ dependencies = [
  "tuliprox-config-loader",
  "tuliprox-core",
  "tuliprox-dvr",
+ "tuliprox-hls",
  "tuliprox-iptv",
  "tuliprox-library",
  "tuliprox-media-server",
@@ -4610,6 +4611,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "tuliprox-hls"
+version = "3.3.91"
+dependencies = [
+ "arc-swap",
+ "async-compression",
+ "axum",
+ "base64 0.23.1",
+ "blake3",
+ "brotli",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "fastrand",
+ "filetime",
+ "flate2",
+ "futures",
+ "http-body-util",
+ "log",
+ "lru",
+ "rand 0.9.4",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "shared",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tuliprox-core",
+ "tuliprox-mpegts",
+ "tuliprox-parser",
+ "tuliprox-session",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "tuliprox-iptv"
 version = "3.3.91"
 dependencies = [
@@ -4722,6 +4762,7 @@ dependencies = [
  "ctr",
  "indexmap",
  "log",
+ "rand 0.9.4",
  "regex",
  "serde",
  "serde_json",

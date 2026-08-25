@@ -57,6 +57,15 @@ while IFS=$'\t' read -r from to; do
         "tuliprox -> tuliprox-auth") ;;
         "tuliprox -> tuliprox-session") ;;
         "tuliprox -> tuliprox-dvr") ;;
+        "tuliprox -> tuliprox-hls") ;;
+        # The HLS proxy. Reads the running server through `HlsCtx`; needs
+        # `session` for provider allocation and connection admission, `mpegts`
+        # for transport-stream rendering and `parser` for origin manifests.
+        "tuliprox-hls -> shared") ;;
+        "tuliprox-hls -> tuliprox-core") ;;
+        "tuliprox-hls -> tuliprox-mpegts") ;;
+        "tuliprox-hls -> tuliprox-parser") ;;
+        "tuliprox-hls -> tuliprox-session") ;;
         # The DVR. Reads the running server through `RecordingCtx`; needs
         # `session` for the event bus it publishes recording changes on.
         "tuliprox-dvr -> shared") ;;

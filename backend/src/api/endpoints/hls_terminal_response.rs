@@ -258,7 +258,7 @@ pub(super) async fn resolve_hls_terminal_manifest_state(
             return Err(Box::new(response));
         }
         let resolution = commit_terminal_tail_if_lease_reserve_requires_cutover(
-            app_state,
+            &app_state.hls_ctx(),
             &decision_session,
             proxy_session_id,
             &lease,

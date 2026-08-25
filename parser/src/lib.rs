@@ -9,6 +9,7 @@
 //! pipeline, `iptv` or the API layer, and stay in `processing::parser` until
 //! those references are resolved.
 
+pub mod hls;
 pub mod ics;
 pub mod m3u;
 pub mod m3u_format;

@@ -89,13 +89,10 @@ use crate::{
         ConfigInput, ConfigInputFlags, ConfigProvider, ConfigTarget, InputSource, ProxyUserCredentials,
         ReverseProxyDisabledHeaderConfig,
     },
-    processing::parser::hls::{
-        get_hls_session_token_and_url_from_token,
-        initial_strip::{
-            materialize_initial_hls_strip_view, HlsInitialStripOutcome, HlsInitialStripSkipReason,
-        },
-        rewrite_hls, RewriteHlsProps,
+    api::model::hls_cache::initial_strip::{
+        materialize_initial_hls_strip_view, HlsInitialStripOutcome, HlsInitialStripSkipReason,
     },
+    processing::parser::hls::{get_hls_session_token_and_url_from_token, rewrite_hls, RewriteHlsProps},
     repository::{
         load_input_live_bitrate_bps, m3u_get_item_for_stream_id, persist_input_live_bitrate_bps, storage_const,
         xtream_get_item_for_stream_id, LiveBitratePersistenceOutcome,
@@ -1139,7 +1136,7 @@ async fn build_hls_segment_fetch_context(
         )
     };
     let mut origin_io = HlsOriginIoContext {
-        app_state: Arc::clone(app_state),
+        ctx: app_state.hls_ctx(),
         client_addr: fingerprint.addr,
         allow_grace: HlsOriginWorkClass::Demand.allows_grace(),
         priority: origin_policy.priority,
@@ -2178,7 +2175,7 @@ async fn hls_runtime_custom_tail_response(
     fallback_status: StatusCode,
 ) -> axum::response::Response {
     let outcome = commit_hls_runtime_custom_tail(
-        Arc::clone(app_state),
+        app_state.hls_ctx(),
         HlsRuntimeCustomTailRequest {
             session: Arc::clone(session),
             proxy_session_id: proxy_session_id.clone(),
@@ -3387,7 +3384,7 @@ async fn prepare_hls_origin_runtime(
     }
     if let Some(binding) = existing_binding {
         if binding.is_active() {
-            match hls_origin_account_status(app_state, &binding) {
+            match hls_origin_account_status(&app_state.hls_ctx(), &binding) {
                 stale_status @ (HlsOriginAccountStatus::Missing | HlsOriginAccountStatus::Expired) => {
                     return rebind_hls_origin_account(
                         app_state,
@@ -3711,7 +3708,7 @@ async fn detach_unprotected_hls_origin_account_bindings(app_state: &Arc<AppState
             {
                 continue;
             }
-            if !matches!(hls_origin_account_status(app_state, &binding), HlsOriginAccountStatus::Known) {
+            if !matches!(hls_origin_account_status(&app_state.hls_ctx(), &binding), HlsOriginAccountStatus::Known) {
                 continue;
             }
             if let Some(binding) = session_guard.origin_account_binding.as_mut() {
@@ -3884,7 +3881,7 @@ async fn find_hls_origin_policy_preempt_candidate(
         if session_guard.activity.active_origin_work_count > 0 {
             continue;
         }
-        if !matches!(hls_origin_account_status(app_state, binding), HlsOriginAccountStatus::Known) {
+        if !matches!(hls_origin_account_status(&app_state.hls_ctx(), binding), HlsOriginAccountStatus::Known) {
             continue;
         }
         let victim_policy = session_guard.effective_origin_acquire_policy_or_default();
@@ -4943,7 +4940,7 @@ async fn hls_direct_refresh_follow_up(
         return Some(hls_canonical_retry_after_response());
     };
     match register_hls_availability_reevaluation(
-        Arc::clone(app_state),
+        app_state.hls_ctx(),
         Arc::clone(session),
         owner_key,
         refresh_request,
@@ -5989,7 +5986,7 @@ async fn try_hls_cache_canonical_manifest_response(
     let manifest_commit_requirement =
         hls_manifest_commit_requirement(&session, session_outcome, handoff_previous_rendered_at_ms, now_ms).await;
     let acceptance_evaluation = hls_manifest_acceptance_directive_for_session(
-        app_state,
+        &app_state.hls_ctx(),
         &session,
         path_proxy_session_id,
     )
@@ -6023,7 +6020,7 @@ async fn try_hls_cache_canonical_manifest_response(
     let origin_provider_session_headers = session.read().await.origin_provider_session_headers.clone();
     let mut preacquired_provider_handle = prepared_origin.preacquired_origin_account_handle;
     let mut origin_io = HlsOriginIoContext {
-        app_state: Arc::clone(app_state),
+        ctx: app_state.hls_ctx(),
         client_addr: fingerprint.addr,
         allow_grace: HlsOriginWorkClass::ManifestInteractive.allows_grace(),
         priority: origin_policy.priority,
@@ -6066,7 +6063,7 @@ async fn try_hls_cache_canonical_manifest_response(
         now_ms,
         origin_io: Some(origin_io),
         post_refresh_runtime: Some(crate::api::model::HlsPostRefreshRuntime {
-            app_state: Arc::downgrade(app_state),
+            ctx: app_state.hls_ctx().downgrade(),
         }),
     };
     let refresh_ordering = if session_outcome == HlsSessionStoreOutcome::Reused {
@@ -6102,7 +6099,7 @@ async fn try_hls_cache_canonical_manifest_response(
             safe_session_key(&session.key)
         };
         let registration = register_hls_availability_reevaluation(
-            Arc::clone(app_state),
+            app_state.hls_ctx(),
             Arc::clone(&session),
             owner_key,
             refresh_request,
@@ -6375,7 +6372,7 @@ fn hls_transient_origin_binding_requires_runtime_prepare(
     binding.is_detached()
         || (binding.is_active()
             && matches!(
-                hls_origin_account_status(app_state, binding),
+                hls_origin_account_status(&app_state.hls_ctx(), binding),
                 HlsOriginAccountStatus::Missing | HlsOriginAccountStatus::Expired
             ))
 }
@@ -6434,10 +6431,10 @@ async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
     let origin_policy = hls_effective_origin_acquire_policy(session).await;
     let reservation_ttl_secs = hls_origin_account_reservation_ttl_secs_for_session(session).await;
     if let Some(binding) = existing_binding.as_ref().filter(|binding| binding.is_active()) {
-        match hls_origin_account_status(app_state, binding) {
+        match hls_origin_account_status(&app_state.hls_ctx(), binding) {
             HlsOriginAccountStatus::Known => {
                 let origin_io = HlsOriginIoContext {
-                    app_state: Arc::clone(app_state),
+                    ctx: app_state.hls_ctx(),
                     client_addr: fingerprint.addr,
                     allow_grace: HlsOriginWorkClass::Demand.allows_grace(),
                     priority: origin_policy.priority,
@@ -6509,7 +6506,7 @@ async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
     let origin_io = HlsOriginIoContext {
-        app_state: Arc::clone(app_state),
+        ctx: app_state.hls_ctx(),
         client_addr: fingerprint.addr,
         allow_grace: HlsOriginWorkClass::Demand.allows_grace(),
         priority: origin_policy.priority,
@@ -6801,7 +6798,7 @@ async fn try_hls_cached_manifest_response(
             };
             if let Some((materialized, snapshot, delivered_at_ms)) = prepared {
                 if access_lease_state == HlsAccessLeaseState::Pending
-                    && !hls_startup_admission_allows_snapshot(app_state, session, &snapshot, delivered_at_ms).await
+                    && !hls_startup_admission_allows_snapshot(&app_state.hls_ctx(), session, &snapshot, delivered_at_ms).await
                 {
                     if wait_for_hls_startup_evidence(started_at, options.wait_timeout).await {
                         continue;
@@ -9946,7 +9943,7 @@ mod tests {
             session.advance_media_readiness_generation();
         }
         let directive = match crate::api::model::hls_manifest_acceptance_directive_for_session(
-            &fixture.app_state,
+            &fixture.app_state.hls_ctx(),
             &fixture.session,
             &fixture.proxy_session_id,
         )
@@ -10339,7 +10336,7 @@ mod tests {
     ) -> HlsManifestAcceptanceDirective {
         apply_terminal_cutover_pressure(fixture).await;
         let directive = match crate::api::model::hls_manifest_acceptance_directive_for_session(
-            &fixture.app_state,
+            &fixture.app_state.hls_ctx(),
             &fixture.session,
             &fixture.proxy_session_id,
         )
@@ -10445,7 +10442,7 @@ mod tests {
             .expect("measured lease playback start")
             .saturating_add(fixture.base_manifest.playlist_duration_ms);
         let first = commit_terminal_tail_if_lease_reserve_requires_cutover(
-            &fixture.app_state,
+            &fixture.app_state.hls_ctx(),
             &fixture.session,
             &fixture.proxy_session_id,
             pressured_lease,
@@ -10464,7 +10461,7 @@ mod tests {
             .await
             .expect("terminal lease remains stored");
         let second = commit_terminal_tail_if_lease_reserve_requires_cutover(
-            &fixture.app_state,
+            &fixture.app_state.hls_ctx(),
             &fixture.session,
             &fixture.proxy_session_id,
             &terminal_lease,
@@ -10710,7 +10707,7 @@ mod tests {
         let segment_zero_response = get_response(Arc::clone(&app_state), &segment_zero_uri, None).await;
         assert_eq!(segment_zero_response.status(), StatusCode::OK);
         assert!(hls_session_last_media_at_ms(&app_state, &proxy_session_id).await.is_some());
-        assert!(!crate::api::api_utils::should_compress_response(&segment_zero_response));
+        assert!(!tuliprox_core::utils::response_compression::should_compress_response(&segment_zero_response));
         assert_eq!(segment_zero_response.headers()[header::CONTENT_TYPE], "video/mp2t");
         assert_eq!(segment_zero_response.headers()[header::ACCEPT_RANGES], "bytes");
         assert!(segment_zero_response.headers()[header::CACHE_CONTROL]
@@ -10737,7 +10734,7 @@ mod tests {
 
         let range_response = get_response(Arc::clone(&app_state), &segment_zero_uri, Some("bytes=0-187")).await;
         assert_eq!(range_response.status(), StatusCode::PARTIAL_CONTENT);
-        assert!(!crate::api::api_utils::should_compress_response(&range_response));
+        assert!(!tuliprox_core::utils::response_compression::should_compress_response(&range_response));
         assert_eq!(range_response.headers()[header::CONTENT_LENGTH], "188");
         let expected_content_range = format!("bytes 0-187/{declared_length}");
         assert_eq!(
@@ -10753,7 +10750,7 @@ mod tests {
         let unsatisfiable_range = format!("bytes={declared_length}-");
         let unsatisfiable_response = get_response(app_state, &segment_zero_uri, Some(&unsatisfiable_range)).await;
         assert_eq!(unsatisfiable_response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-        assert!(!crate::api::api_utils::should_compress_response(&unsatisfiable_response));
+        assert!(!tuliprox_core::utils::response_compression::should_compress_response(&unsatisfiable_response));
         let expected_unsatisfied_content_range = format!("bytes */{declared_length}");
         assert_eq!(
             unsatisfiable_response.headers()[header::CONTENT_RANGE].to_str().ok(),
@@ -11438,7 +11435,7 @@ mod tests {
         let response = super::hls_response("#EXTM3U\n".to_string()).into_response();
 
         assert_eq!(response.headers().get(header::CONTENT_TYPE).unwrap(), "application/vnd.apple.mpegurl");
-        assert!(crate::api::api_utils::should_compress_response(&response));
+        assert!(tuliprox_core::utils::response_compression::should_compress_response(&response));
     }
 
     #[test]
@@ -12562,7 +12559,7 @@ mod tests {
 
     fn test_hls_origin_io_context(app_state: &Arc<AppState>) -> HlsOriginIoContext {
         HlsOriginIoContext {
-            app_state: Arc::clone(app_state),
+            ctx: app_state.hls_ctx(),
             client_addr: test_fingerprint().addr,
             allow_grace: false,
             priority: 0,
@@ -17275,7 +17272,7 @@ mod tests {
             diagnostics,
             [super::HlsInitialStripPublicationDiagnostic::Skipped {
                 mode: "normal",
-                reason: crate::processing::parser::hls::initial_strip::HlsInitialStripSkipReason::StripDisabled,
+                reason: crate::api::model::hls_cache::initial_strip::HlsInitialStripSkipReason::StripDisabled,
                 visible_segments: 6,
             }]
         );

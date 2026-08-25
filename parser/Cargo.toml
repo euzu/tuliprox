@@ -26,5 +26,6 @@ tokio-util = { version = "0.7.18", features = ["io", "io-util"] }
 url.workspace = true
 
 [dev-dependencies]
+rand = "0.9.4"
 tempfile = "3.27.0"
 tokio = { workspace = true, features = ["test-util", "macros"] }

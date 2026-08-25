@@ -1,4 +1,4 @@
-use crate::api::model::ActiveProviderManager;
+use tuliprox_session::ActiveProviderManager;
 use crate::model::ConfigInput;
 use crate::model::AppConfig;
 use crate::processing::processor::{select_cancel_token, ProbeHandleGuard};

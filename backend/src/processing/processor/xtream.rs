@@ -10,7 +10,7 @@ use crate::utils::ffmpeg::{
 };
 use log::{debug, warn};
 use crate::processing::parser::xtream::create_xtream_url;
-use crate::api::model::ActiveProviderManager;
+use tuliprox_session::ActiveProviderManager;
 use crate::model::ProviderHandle;
 use crate::model::{ProviderIdType};
 

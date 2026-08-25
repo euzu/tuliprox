@@ -41,7 +41,7 @@ use crate::{
 use arc_swap::ArcSwapOption;
 use axum::{
     body::Body,
-    http::{header, Extensions, HeaderMap, HeaderName, HeaderValue, Response, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Response, StatusCode},
     response::IntoResponse,
 };
 use bytes::{Bytes, BytesMut};
@@ -439,14 +439,6 @@ macro_rules! internal_server_error {
 }
 
 #[macro_export]
-macro_rules! try_unwrap_body {
-    ($body:expr) => {
-        $body
-            .map_or_else(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(), |resp| resp.into_response())
-    };
-}
-
-#[macro_export]
 macro_rules! try_result_or_status {
     ($option:expr, $status:expr, $msg_is_error:expr, $msg:expr) => {
         match $option {
@@ -504,7 +496,8 @@ pub use try_option_forbidden;
 pub use try_result_bad_request;
 pub use try_result_not_found;
 pub use try_result_or_status;
-pub use try_unwrap_body;
+// Moved to `tuliprox-core` so crates outside `api` can build responses too.
+pub use tuliprox_core::try_unwrap_body;
 use crate::api::static_headers::CT_OCTET;
 
 pub fn get_server_time() -> String {
@@ -526,21 +519,11 @@ pub fn get_build_time() -> Option<String> {
         .map(|datetime| datetime.format("%Y-%m-%d %H:%M:%S %Z").to_string())
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct DisableResponseCompression;
-
-pub(crate) fn mark_response_as_uncompressed<B>(response: &mut Response<B>) {
-    response.extensions_mut().insert(DisableResponseCompression);
-}
-
-#[cfg(test)]
-pub(crate) fn should_compress_response<B>(response: &Response<B>) -> bool {
-    should_compress_response_extensions(response.extensions())
-}
-
-pub(crate) fn should_compress_response_extensions(extensions: &Extensions) -> bool {
-    extensions.get::<DisableResponseCompression>().is_none()
-}
+// Response-compression opt-out moved to `tuliprox_core::utils`; re-exported so
+// api call sites keep their names.
+pub(crate) use tuliprox_core::utils::response_compression::{
+    mark_response_as_uncompressed, should_compress_response_extensions,
+};
 
 #[derive(Clone, Copy, Debug, Default)]
 struct StreamMeteringConfig {
@@ -4522,6 +4505,7 @@ pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Resp
 
 #[cfg(test)]
 mod tests {
+    use tuliprox_core::utils::response_compression::should_compress_response;
     use shared::model::GeoIpUnavailablePolicy;
     use super::*;
     use crate::{

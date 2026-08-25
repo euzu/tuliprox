@@ -55,9 +55,8 @@ fn apply_custom_stream_timeout(cfg: &AppConfig, stream: BoxedProviderStream) -> 
 /// `custom_stream_response_error_status` instead. This allows a downstream Nginx
 /// with `proxy_intercept_errors on;` to sever the socket instead of seeing an
 /// infinite 200 OK loop.
-pub(crate) fn is_custom_video_stream_enabled(cfg: &AppConfig) -> bool {
-    cfg.config.load().custom_stream_response_enabled
-}
+// Moved to `tuliprox_core::model`: the HLS proxy reads it too.
+pub(crate) use tuliprox_core::model::is_custom_video_stream_enabled;
 
 /// Returns the HTTP status code the custom-video factories should produce when
 /// `custom_stream_response_enabled` is `false`. The configured value is validated

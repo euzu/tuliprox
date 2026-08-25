@@ -492,7 +492,7 @@ async fn hls_custom_video_manifest_response_with_access(
         };
         let access = access.unwrap_or_else(|| HlsStandaloneCustomAccess::for_user(user.username.clone()));
         let Ok(plan) =
-            build_hls_standalone_custom_plan(app_state, &base_url, access, reason, current_time_millis()).await
+            build_hls_standalone_custom_plan(&app_state.hls_ctx(), &base_url, access, reason, current_time_millis()).await
         else {
             return fallback_status.into_response();
         };

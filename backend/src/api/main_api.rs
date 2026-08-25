@@ -696,8 +696,8 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     exec_config_watch(&app_state, &cancel_token_file_watch);
     exec_provider_dns(&app_state, &cancel_token_provider_dns);
     exec_qos_aggregation(&app_state, &cancel_token_qos_aggregation);
-    exec_hls_lifecycle(&app_state, &app_state.cancel_tokens.load().hls_cache);
-    exec_hls_cache_gc(&app_state, &app_state.cancel_tokens.load().hls_cache);
+    exec_hls_lifecycle(&app_state.hls_ctx(), &app_state.cancel_tokens.load().hls_cache);
+    exec_hls_cache_gc(&app_state.hls_ctx(), &app_state.cancel_tokens.load().hls_cache);
 
     let web_auth_enabled = is_web_auth_enabled(&cfg, web_ui_enabled);
 

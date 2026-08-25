@@ -1,5 +1,7 @@
 pub mod xmltv;
-pub mod hls;
+// The pure HLS manifest parser moved to `tuliprox-parser` beside the other
+// format parsers. Re-exported so `processing::parser::hls` keeps resolving.
+pub use crate::parser::hls;
 
 // Moved below this layer so the repository can parse without reaching up.
 // Re-exported so `processing::parser::{ics, xtream}` keeps resolving.

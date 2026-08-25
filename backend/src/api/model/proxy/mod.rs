@@ -4,4 +4,5 @@
 //! `header_policy` is the canonical home for hop-by-hop header rules used by both
 //! the HLS cache proxy and the MPEG-TS reverse proxy — see its module docs.
 
-pub mod header_policy;
+// Hop-by-hop header policy moved to `tuliprox-hls`, its only consumer.
+pub use tuliprox_hls::header_policy;

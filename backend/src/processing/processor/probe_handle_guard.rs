@@ -1,4 +1,4 @@
-use crate::api::model::ActiveProviderManager;
+use tuliprox_session::ActiveProviderManager;
 use crate::model::ProviderHandle;
 use std::sync::Arc;
 

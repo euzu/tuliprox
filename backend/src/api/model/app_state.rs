@@ -945,6 +945,21 @@ impl AppState {
     }
 }
 
+impl AppState {
+    /// The handles the HLS proxy needs, lifted out of the root state.
+    ///
+    /// The HLS proxy does not name `AppState`; this is where the two meet.
+    pub fn hls_ctx(&self) -> crate::api::model::hls_cache::HlsCtx {
+        crate::api::model::hls_cache::HlsCtx {
+            app_config: Arc::clone(&self.app_config),
+            hls_proxy: Arc::clone(&self.hls_proxy),
+            active_provider: Arc::clone(&self.active_provider),
+            connection_manager: Arc::clone(&self.connection_manager),
+            active_users: Arc::clone(&self.active_users),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -1,5 +1,5 @@
 use crate::model::UpdateTask;
-use crate::api::model::ActiveProviderManager;
+use tuliprox_session::ActiveProviderManager;
 use crate::model::ProviderHandle;
 use crate::model::{ProviderIdType, ResolveReason, ResolveReasonSet};
 use crate::library::{MetadataResolver, MetadataStorage};

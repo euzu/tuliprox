@@ -1,6 +1,5 @@
 mod app_state;
-mod byte_range;
-mod hls_cache;
+mod hls_playback;
 mod hls_provisioning;
 mod metadata_update_manager;
 mod model_utils;
@@ -16,7 +15,7 @@ pub(in crate::api) use self::hls_provisioning::{
     build_hls_custom_video_manifest_body, hls_panel_provisioning_manifest_path,
 };
 pub use self::{
-    app_state::*, hls_cache::*, hls_provisioning::HlsProvisioningState, metadata_update_manager::*,
+    app_state::*, hls_provisioning::HlsProvisioningState, metadata_update_manager::*,
     provider_dns_manager::*, proxy::*,
 };
 mod playlist_cache_loader;
@@ -29,6 +28,9 @@ pub use crate::model::update_guard::*;
 pub use crate::model::update_task::*;
 // Provider value types moved to `model`; re-exported so `api` keeps its names.
 pub use crate::model::provider::*;
+// HTTP range parsing moved to `tuliprox_core::utils`; re-exported so `api` call
+// sites keep their names.
+pub use tuliprox_core::utils::byte_range::{resolve_single_byte_range, SingleByteRange};
 pub use crate::model::stream_error::*;
 
 // The recording queue and the DVR moved to `tuliprox-dvr`; re-exported so `api`
@@ -49,7 +51,6 @@ pub use tuliprox_session::{
     streams::*,
 };
 pub(in crate::api) use self::{
-    byte_range::{resolve_single_byte_range, SingleByteRange},
     hls_provisioning::{
         hls_custom_video_manifest_response_for_access_lease,
         hls_custom_video_manifest_response_with_virtual_id,
@@ -62,12 +63,13 @@ pub(in crate::api) use self::{
     request::*,
     xtream::*,
 };
-pub(crate) use self::{
-    hls_cache::{
-        log_hls_origin_content_coding, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource,
-        HlsPostRefreshRuntime,
-    },
-    streams::*,
+pub(crate) use self::streams::*;
+// The HLS proxy moved to `tuliprox-hls`; re-exported so `api` call sites keep
+// their names, module path included.
+pub use tuliprox_hls as hls_cache;
+pub use tuliprox_hls::*;
+pub(in crate::api) use self::hls_playback::{
+    validate_hls_access_lease, HlsAccessAdmissionMode, HlsAccessContext, HlsAccessLeaseValidationError,
 };
 mod batch_result_collector;
 pub use self::batch_result_collector::*;

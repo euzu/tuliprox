@@ -1,0 +1,54 @@
+[package]
+name = "tuliprox-hls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "HLS proxy: session and lease lifecycle, manifest refresh, segment cache and terminal tails"
+
+[lints]
+workspace = true
+
+[features]
+# Exposes helpers that are otherwise `#[cfg(test)]`, so the backend's own tests
+# can drive the proxy. Enabled only from `[dev-dependencies]`; never in a build.
+test-support = []
+
+[dependencies]
+shared = { version = "3", path = "../shared" }
+tuliprox-core = { version = "3", path = "../core" }
+tuliprox-mpegts = { version = "3", path = "../mpegts" }
+tuliprox-parser = { version = "3", path = "../parser" }
+tuliprox-session = { version = "3", path = "../session" }
+arc-swap.workspace = true
+axum = { version = "0.8.9", features = ["macros", "default", "ws"] }
+bytes.workspace = true
+chrono.workspace = true
+base64.workspace = true
+blake3.workspace = true
+fastrand.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+rand = "0.9.4"
+dashmap.workspace = true
+futures.workspace = true
+log.workspace = true
+lru = "0.16.3"
+reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros", "sync"] }
+tokio-stream = { version = "0.1.18", features = ["sync"] }
+tokio-util = { version = "0.7.18", features = ["io", "io-util"] }
+url.workspace = true
+http-body-util = "0.1.3"
+
+[dev-dependencies]
+rand = "0.9.4"
+tempfile = "3.24.0"
+tuliprox-mpegts = { version = "3", path = "../mpegts", features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util"] }
+async-compression = { version = "0.4.42", features = ["tokio", "brotli", "deflate", "gzip", "zlib", "zstd"] }
+filetime = "0.2.29"
+flate2 = "1.1.9"
+brotli.workspace = true

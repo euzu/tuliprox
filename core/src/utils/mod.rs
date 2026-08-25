@@ -1,5 +1,6 @@
 pub mod atomic_json_store;
 mod binary_utils;
+pub mod byte_range;
 mod compression;
 mod crypto_utils;
 mod epg_id;
@@ -14,6 +15,7 @@ pub mod network;
 mod ordinal;
 mod provider_resolve_token;
 mod recording_paths;
+pub mod response_compression;
 mod step_measure;
 mod sys_utils;
 mod telegram;

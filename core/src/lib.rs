@@ -8,5 +8,7 @@
 //!
 //! Nothing here names the API layer, a repository, or the playlist pipeline.
 
+pub mod response_macros;
+
 pub mod model;
 pub mod utils;

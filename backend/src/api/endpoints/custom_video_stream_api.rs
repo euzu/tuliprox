@@ -266,7 +266,7 @@ async fn cvs_standalone_hls_segment_response(
     let access_lease = HlsAccessLeaseId(access_lease.to_string());
     let now_ms = current_time_millis();
     let access =
-        match resolve_hls_standalone_custom_segment(app_state, &access_lease, asset_fingerprint, index, now_ms) {
+        match resolve_hls_standalone_custom_segment(&app_state.hls_ctx(), &access_lease, asset_fingerprint, index, now_ms) {
             Ok(access) => access,
             Err(
                 HlsStandaloneCustomSegmentError::InvalidIndex
@@ -1045,7 +1045,7 @@ mod tests {
             HlsRuntimeCustomTailReason::SessionOrLeaseExpired,
         ] {
             let plan = build_hls_standalone_custom_plan(
-                &app_state,
+                &app_state.hls_ctx(),
                 "https://example.test/iptv",
                 HlsStandaloneCustomAccess::for_user("viewer"),
                 reason,
@@ -1121,7 +1121,7 @@ mod tests {
     async fn standalone_custom_range_requests_slice_prepared_immutable_bytes() {
         let app_state = create_test_app_state();
         let plan = build_hls_standalone_custom_plan(
-            &app_state,
+            &app_state.hls_ctx(),
             "https://example.test/iptv",
             HlsStandaloneCustomAccess::for_user("viewer"),
             HlsRuntimeCustomTailReason::LowPriorityPreempted,
