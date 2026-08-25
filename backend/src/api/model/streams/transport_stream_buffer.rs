@@ -1262,10 +1262,10 @@ impl TransportStreamBuffer {
     }
 
     /// Fallible constructor: returns an error if the raw bytes contain no valid MPEG-TS data.
-    pub fn try_new(raw: Vec<u8>) -> Result<Self, crate::api::model::StreamError> {
+    pub fn try_new(raw: Vec<u8>) -> Result<Self, crate::model::StreamError> {
         let buf = Self::new(raw);
         if buf.length == 0 {
-            Err(crate::api::model::StreamError::MalformedPacket(
+            Err(crate::model::StreamError::MalformedPacket(
                 "TS buffer does not contain decodable packet indices".to_string(),
             ))
         } else {

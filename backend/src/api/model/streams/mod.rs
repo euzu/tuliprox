@@ -22,4 +22,6 @@ pub(in crate::api) use self::{
     throttled_stream::*, timed_client_stream::*,
 };
 
-pub const STREAM_IDLE_TIMEOUT: u64 = 60;
+// Defined by the HTTP client that implements the timeout; re-exported here
+// because the streaming layer applies the same default.
+pub use crate::utils::network::request::STREAM_IDLE_TIMEOUT;

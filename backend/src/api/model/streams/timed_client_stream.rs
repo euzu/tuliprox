@@ -1,5 +1,6 @@
 use crate::{
-    api::model::{stream_error::StreamError, AppState, BoxedProviderStream},
+    api::model::{AppState, BoxedProviderStream},
+    model::StreamError,
     utils::debug_if_enabled,
 };
 use bytes::Bytes;

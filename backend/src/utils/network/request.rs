@@ -1,8 +1,14 @@
 pub use super::DynReader;
+
+/// Seconds a stream may go without producing bytes before it is treated as idle.
+///
+/// Owned here because this is the client that enforces it; the streaming layer
+/// re-exports it so both sides cannot drift apart.
+pub const STREAM_IDLE_TIMEOUT: u64 = 60;
 use crate::{
     api::model::{
         log_hls_origin_content_coding, persist_pipe_stream::tee_dyn_reader, AppState, HlsOriginContentCodingObjectKind,
-        HlsOriginContentCodingSource, STREAM_IDLE_TIMEOUT,
+        HlsOriginContentCodingSource,
     },
     model::{
         resolve_provider_scheme_url_with_provider_index, AppConfig, Config, ConfigInput, ConfigProvider, InputSource,
@@ -3033,6 +3039,7 @@ mod tests {
         send_with_retry_and_provider_policy, should_retry_text_body_error, should_try_next_ip_on_connect_error,
         strip_sensitive_headers_for_cross_origin_redirect, text_response_error_log_label, InputEpgFileRequest,
         PublicIpResolver, RequestFetchOptions, TextContentBodyOptions, TextContentFetchOptions,
+        STREAM_IDLE_TIMEOUT,
     };
     use crate::{
         model::{
@@ -4102,7 +4109,7 @@ mod tests {
         hold_virtual_time.store(false, Ordering::SeqCst);
         virtual_time_guard.await.expect("virtual time guard should stop");
         request_seen.expect("origin should receive the request");
-        tokio::time::advance(Duration::from_secs(crate::api::model::STREAM_IDLE_TIMEOUT + 1)).await;
+        tokio::time::advance(Duration::from_secs(STREAM_IDLE_TIMEOUT + 1)).await;
         tokio::task::yield_now().await;
         if !request.is_finished() {
             request.abort();

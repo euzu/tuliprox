@@ -19,7 +19,6 @@ mod qos_aggregation_manager;
 pub(in crate::api) mod recording;
 mod request;
 mod stream;
-mod stream_error;
 mod streams;
 mod update_guard;
 mod xtream;
@@ -35,6 +34,7 @@ pub use self::{
     update_guard::*,
 };
 pub use self::download::{DownloadKind, DownloadState};
+pub use crate::model::stream_error::*;
 pub(in crate::api) use self::{
     active_user_manager::*,
     admission_strategy::{evaluate_strategy, AdmissionDecision, EvictionCandidate, GraceMode, StrategyContext},
@@ -51,7 +51,6 @@ pub(in crate::api) use self::{
     provider_config::*,
     qos_aggregation_manager::*,
     request::*,
-    stream_error::*,
     xtream::*,
 };
 pub(crate) use self::{
