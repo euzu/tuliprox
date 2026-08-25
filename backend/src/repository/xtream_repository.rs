@@ -3,7 +3,7 @@ use crate::model::XtreamCategory;
 use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{Config, ConfigTarget};
 use crate::model::{ConfigInput, PlaylistXtreamCategory};
-use crate::processing::parser::xtream;
+use crate::parser::xtream;
 use crate::repository::bplustree::{
     ensure_distinct_sidecar_lock_domains, publish_staged_database, BPlusTree, BPlusTreeError,
     BPlusTreeQuery, BPlusTreeStagingArtifacts, BPlusTreeUpdate, FlushPolicy,

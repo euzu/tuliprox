@@ -189,7 +189,7 @@ pub async fn epg_query_channels_by_storage_key(
 mod tests {
     use super::*;
     use crate::model::{IcsEpgSourceConfig, M3uTargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput};
-    use crate::processing::parser::ics::parse_ics_file_to_channel;
+    use crate::parser::ics::parse_ics_file_to_channel;
     use crate::repository::BPlusTree;
     use crate::utils::FileLockManager;
     use arc_swap::ArcSwapOption;

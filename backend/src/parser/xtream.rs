@@ -447,7 +447,7 @@ where
 mod tests {
     use super::CAT_BUCKET;
     use super::{parse_xtream, parse_xtream_series_info, parse_xtream_streaming};
-    use crate::processing::parser::xtream::map_to_xtream_streams;
+    use super::map_to_xtream_streams;
     use crate::model::ConfigInput;
     use crate::utils::{async_file_reader, request::DynReader};
     use shared::model::{
