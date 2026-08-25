@@ -5,7 +5,8 @@ use crate::{
         },
         model::AppState,
     },
-    auth::{validator_api_user, AuthBearer},
+    api::auth_middleware::validator_api_user,
+    auth::AuthBearer,
     model::{AppConfig, ConfigTarget, PlaylistXtreamCategory},
     repository::{
         iter_raw_m3u_target_playlist, load_user_bouquet_as_json, save_user_bouquet, xtream_get_playlist_categories,

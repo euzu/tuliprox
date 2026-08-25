@@ -17,7 +17,7 @@ macro_rules! permission_layer {
         {
             let app_state = ::std::sync::Arc::clone($app_state);
             ::axum::middleware::from_fn_with_state(app_state, move |state, auth, request, next| {
-                $crate::auth::require_permission_inner($permission, state, auth, request, next)
+                $crate::api::auth_middleware::require_permission_inner($permission, state, auth, request, next)
             })
         }
     };

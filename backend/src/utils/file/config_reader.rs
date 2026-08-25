@@ -113,7 +113,7 @@ pub async fn read_api_proxy_config(
         let mut errors = vec![];
         let mut api_proxy: ApiProxyConfig = ApiProxyConfig::from(&api_proxy_dto);
         apply_authoritative_plans(config, &mut api_proxy, resolve_env).await;
-        api_proxy.migrate_api_user(config, &mut errors).await;
+        crate::repository::migrate_api_user(&mut api_proxy, config, &mut errors).await;
         if !errors.is_empty() {
             for error in errors {
                 error!("{error}");
@@ -727,7 +727,7 @@ pub async fn read_api_proxy(config: &AppConfig, resolve_env: bool) -> Option<Api
             let mut errors = vec![];
             let mut api_proxy: ApiProxyConfig = ApiProxyConfig::from(&api_proxy_dto);
             apply_authoritative_plans(config, &mut api_proxy, resolve_env).await;
-            api_proxy.migrate_api_user(config, &mut errors).await;
+            crate::repository::migrate_api_user(&mut api_proxy, config, &mut errors).await;
             if !errors.is_empty() {
                 for error in errors {
                     error!("{error}");

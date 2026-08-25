@@ -1,6 +1,10 @@
 use crate::{
-    api::model::{StreamError, STREAM_IDLE_TIMEOUT},
-    utils::{async_file_writer, debug_if_enabled, request::DynReader, IO_BUFFER_SIZE},
+    model::StreamError,
+    utils::{
+        async_file_writer, debug_if_enabled,
+        request::{DynReader, STREAM_IDLE_TIMEOUT},
+        IO_BUFFER_SIZE,
+    },
 };
 use bytes::Bytes;
 use log::{debug, error};

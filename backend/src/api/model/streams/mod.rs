@@ -5,14 +5,15 @@ mod provisioning_stream;
 mod timed_client_stream;
 // mod chunked_buffer;
 mod active_client_stream;
-pub mod persist_pipe_stream;
 mod provider_stream;
 mod provider_stream_factory;
 mod shared_stream_manager;
 mod metering_stream;
 mod throttled_stream;
 
-pub use self::persist_pipe_stream::*;
+// Moved to `utils::network::persist_pipe`; re-exported so api call sites keep
+// their existing names.
+pub use crate::utils::network::persist_pipe::*;
 pub(crate) use crate::mpegts::transport_stream_buffer::*;
 pub(in crate::api) use self::buffered_stream::MAX_BUFFER_BYTES;
 pub(in crate::api) use self::{

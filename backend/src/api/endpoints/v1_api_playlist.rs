@@ -1228,7 +1228,7 @@ async fn playlist_episode_item(
             if target.has_output(TargetType::Xtream) {
                 if let Ok(vid) = virtual_id.parse::<u32>() {
                     if let Ok(pli) =
-                        xtream_get_item_for_stream_id(vid, &app_state, &target, Some(XtreamCluster::Series)).await
+                        xtream_get_item_for_stream_id(vid, &app_state.app_config, &app_state.playlists, &target, Some(XtreamCluster::Series)).await
                     {
                         return axum::Json(json!(UiPlaylistItem::from(pli))).into_response();
                     }

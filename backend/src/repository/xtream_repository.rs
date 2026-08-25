@@ -1,4 +1,4 @@
-use crate::api::model::AppState;
+use crate::api::model::PlaylistStorageState;
 use crate::model::XtreamCategory;
 use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{Config, ConfigTarget};
@@ -510,11 +510,11 @@ macro_rules! try_cluster {
 
 async fn xtream_get_item_for_stream_id_from_memory(
     virtual_id: u32,
-    app_state: &Arc<AppState>,
+    playlists: &PlaylistStorageState,
     target: &ConfigTarget,
     xtream_cluster: Option<XtreamCluster>,
 ) -> Result<Option<(XtreamPlaylistItem, VirtualIdRecord)>, Error> {
-    if let Some(playlist) = app_state.playlists.data.read().await.get(target.name.as_str()) {
+    if let Some(playlist) = playlists.data.read().await.get(target.name.as_str()) {
         return match (playlist.xtream.as_ref(), playlist.id_mapping.as_ref()) {
             (Some(xtream_storage), Some(id_mapping)) => {
                 let mapping = id_mapping.query(&virtual_id).ok_or_else(|| string_to_io_error(format!("Could not find mapping for target {} and id {}", target.name, virtual_id)))?.clone();
@@ -582,19 +582,19 @@ async fn xtream_get_item_for_stream_id_from_memory(
 
 pub async fn xtream_get_item_for_stream_id(
     virtual_id: u32,
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
+    playlists: &PlaylistStorageState,
     target: &ConfigTarget,
     xtream_cluster: Option<XtreamCluster>,
 ) -> Result<XtreamPlaylistItem, Error> {
     if target.use_memory_cache {
         if let Ok(Some((playlist_item, _virtual_record))) =
-            xtream_get_item_for_stream_id_from_memory(virtual_id, app_state, target, xtream_cluster).await {
+            xtream_get_item_for_stream_id_from_memory(virtual_id, playlists, target, xtream_cluster).await {
             return Ok(playlist_item);
         }
         // fall through to disk lookup on cache miss
     }
 
-    let app_config: &AppConfig = &app_state.app_config;
     let config = app_config.config.load();
     let target_path = get_target_storage_path(&config, target.name.as_str()).ok_or_else(|| string_to_io_error(format!("Could not find path for target {}", target.name)))?;
     let storage_path = xtream_get_storage_path(&config, target.name.as_str()).ok_or_else(|| string_to_io_error(format!("Could not find path for target {} xtream output", target.name)))?;
@@ -662,12 +662,12 @@ pub async fn xtream_get_item_for_stream_id(
 
 pub async fn xtream_load_rewrite_playlist(
     cluster: XtreamCluster,
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
     target: &ConfigTarget,
     category_id: Option<u32>,
     user: &ProxyUserCredentials,
 ) -> Result<XtreamPlaylistJsonIterator, TuliproxError> {
-    XtreamPlaylistJsonIterator::new(cluster, &app_state.app_config, target, category_id, user).await
+    XtreamPlaylistJsonIterator::new(cluster, app_config, target, category_id, user).await
 }
 
 pub async fn iter_raw_xtream_target_playlist(app_config: &AppConfig, target: &ConfigTarget, cluster: XtreamCluster) -> Option<Box<dyn Stream<Item=Result<XtreamPlaylistItem, TuliproxError>> + Send + Unpin>> {

@@ -117,8 +117,7 @@ async fn load_provider_resolve_item(
 ) -> Result<ProviderResolveLoadedItem, TuliproxError> {
     match output_kind {
         ProviderResolveOutputKind::Xtream => xtream_get_item_for_stream_id(
-            decoded_virtual_id,
-            app_state,
+            decoded_virtual_id, &app_state.app_config, &app_state.playlists,
             target,
             Some(decoded_cluster),
         )

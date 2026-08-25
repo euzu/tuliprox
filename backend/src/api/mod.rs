@@ -1,3 +1,4 @@
+pub mod auth_middleware;
 pub mod api_utils;
 mod http_layers;
 pub mod model;

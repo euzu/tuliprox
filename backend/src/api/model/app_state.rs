@@ -15,7 +15,8 @@ use crate::{
         AppConfig, Config, ConfigProvider, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig,
         ProcessTargets, ReverseProxyDisabledHeaderConfig, ScheduleConfig, SourcesConfig,
     },
-    repository::{get_geoip_path, load_target_into_memory_cache},
+    api::model::load_target_into_memory_cache,
+    repository::get_geoip_path,
     utils::{
         reload_logger,
         request::{create_client, create_client_with_redirect, PublicIpResolver},

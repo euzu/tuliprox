@@ -1,4 +1,4 @@
-use crate::api::model::{AppState, PlaylistM3uStorage, PlaylistStorage, PlaylistStorageState, PlaylistXtreamStorage};
+use crate::api::model::{PlaylistM3uStorage, PlaylistStorage, PlaylistStorageState, PlaylistXtreamStorage};
 use crate::model::Epg;
 use crate::model::{AppConfig, ConfigInput, ConfigTarget, TargetOutput};
 use crate::processing::processor::{apply_filter_to_playlist, PlaylistProcessingContext};
@@ -17,7 +17,7 @@ use crate::repository::{
 };
 use crate::repository::{TargetIdMapping, VirtualIdRecord};
 use crate::utils::{self, fold_epg_id_arc, normalized_source_ordinal};
-use log::{debug, info, warn};
+use log::{debug, warn};
 use shared::error::{ TuliproxError};
 use shared::model::xtream_const::XTREAM_CLUSTER;
 use shared::model::{ConfigTargetOptions, InputPersistence, M3uPlaylistItem, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties, SeriesStreamDetailProperties, StreamProperties, UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem};
@@ -550,7 +550,7 @@ async fn load_id_mapping_target_storage(app_config: &AppConfig, target: &ConfigT
     load_target_id_mapping_as_tree(app_config, &target_path, target).await
 }
 
-async fn load_xtream_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<PlaylistXtreamStorage, TuliproxError> {
+pub async fn load_xtream_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<PlaylistXtreamStorage, TuliproxError> {
     let config = app_config.config.load();
 
     let storage_path = xtream_get_storage_path(&config, target.name.as_str()).ok_or_else(||
@@ -567,7 +567,7 @@ async fn load_xtream_target_storage(app_config: &AppConfig, target: &ConfigTarge
     })
 }
 
-async fn load_m3u_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<PlaylistM3uStorage, TuliproxError> {
+pub async fn load_m3u_target_storage(app_config: &AppConfig, target: &ConfigTarget) -> Result<PlaylistM3uStorage, TuliproxError> {
     let config = app_config.config.load();
     let target_path = get_target_storage_path(&config, target.name.as_str()).ok_or_else(||
         TuliproxError::Config(format!("Could not find path for target {}", target.name)))?;
@@ -593,36 +593,6 @@ async fn load_m3u_target_storage(app_config: &AppConfig, target: &ConfigTarget) 
             "Failed to join m3u storage load task {}: {join_err}",
             m3u_path.display()
         ))),
-    }
-}
-
-pub async fn load_playlists_into_memory_cache(app_state: &AppState) -> Result<(), TuliproxError> {
-    for sources in &app_state.app_config.sources.load().sources {
-        for target in &sources.targets {
-            load_target_into_memory_cache(app_state, target).await;
-        }
-    }
-    Ok(())
-}
-
-pub async fn load_target_into_memory_cache(app_state: &AppState, target: &Arc<ConfigTarget>) {
-    if target.use_memory_cache {
-        info!("Loading target {} into memory cache", target.name);
-        for output in &target.output {
-            match output {
-                TargetOutput::Xtream(_) => {
-                    if let Ok(storage) = load_xtream_target_storage(&app_state.app_config, target).await {
-                        app_state.cache_playlist(&target.name, PlaylistStorage::XtreamPlaylist(Box::new(storage))).await;
-                    }
-                }
-                TargetOutput::M3u(_) => {
-                    if let Ok(storage) = load_m3u_target_storage(&app_state.app_config, target).await {
-                        app_state.cache_playlist(&target.name, PlaylistStorage::M3uPlaylist(Box::new(storage))).await;
-                    }
-                }
-                _ => {}
-            }
-        };
     }
 }
 

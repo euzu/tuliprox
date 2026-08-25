@@ -7185,7 +7185,7 @@ async fn get_stream_channel(
     virtual_id: u32,
 ) -> Option<StreamChannel> {
     if target.has_output(TargetType::Xtream) {
-        if let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, app_state, target, None).await {
+        if let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target, None).await {
             return Some(pli.to_stream_channel(target.id));
         }
     }
@@ -7209,7 +7209,7 @@ pub(in crate::api) async fn resolve_hls_virtual_source_for_target(
     virtual_id: u32,
 ) -> Result<HlsResolvedVirtualSource, StatusCode> {
     let (input_name, stream_context) = if target.has_output(TargetType::Xtream) {
-        if let Ok(item) = xtream_get_item_for_stream_id(virtual_id, app_state, target, None).await {
+        if let Ok(item) = xtream_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target, None).await {
             let stream_context = hls_stream_context_or_unavailable(&item, virtual_id)?;
             (Arc::clone(&item.input_name), stream_context)
         } else {
@@ -7236,7 +7236,7 @@ async fn resolve_hls_origin_playlist_url(
     fallback_url: &str,
 ) -> Result<String, StatusCode> {
     if input.input_type.is_xtream() && target.has_output(TargetType::Xtream) {
-        let pli = xtream_get_item_for_stream_id(virtual_id, app_state, target, None)
+        let pli = xtream_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target, None)
             .await
             .map_err(|_| StatusCode::NOT_FOUND)?;
         let hls_extension = format!(".{HLS_EXT}");

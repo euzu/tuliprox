@@ -290,7 +290,7 @@ async fn xtream_player_api_stream(
     }
 
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let Ok(mut pli) = xtream_get_item_for_stream_id(req_virtual_id, app_state, &target, None).await else {
+    let Ok(mut pli) = xtream_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target, None).await else {
         error!("Failed to read xtream item for stream id {req_virtual_id}");
         if is_hls_manifest_request {
             return hls_custom_video_manifest_response(
@@ -878,7 +878,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
         let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
         let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
         let mut pli = try_result_bad_request!(
-            xtream_get_item_for_stream_id(req_virtual_id, app_state, &target, Some(stream_req.context.cluster())).await,
+            xtream_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target, Some(stream_req.context.cluster())).await,
             true,
             format!("Failed to read xtream item for stream id {req_virtual_id}")
         );
@@ -1044,7 +1044,7 @@ async fn xtream_player_api_resource(
     let req_virtual_id: u32 = try_result_bad_request!(resource_req.stream_id.trim().parse());
     let resource = resource_req.action_path.trim();
     let pli = try_result_bad_request!(
-        xtream_get_item_for_stream_id(req_virtual_id, app_state, &target, None).await,
+        xtream_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target, None).await,
         true,
         format!("Failed to read xtream item for stream id {req_virtual_id}")
     );
@@ -1277,7 +1277,7 @@ pub async fn xtream_get_stream_info_response(
         Err(_) => return try_unwrap_body!(empty_json_response_as_object()),
     };
 
-    let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, app_state, target, Some(cluster)).await else {
+    let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target, Some(cluster)).await else {
         return empty_stream_info_response(cluster);
     };
 
@@ -1382,7 +1382,7 @@ async fn xtream_get_short_epg(
             Err(_) => return get_empty_epg_response().into_response(),
         };
 
-        if let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, app_state, target, None).await {
+        if let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target, None).await {
             // Content filter: hidden items expose no EPG either
             if !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli))) {
                 return axum::Json(json!(ShortEpgResultDto::default())).into_response();
@@ -1535,7 +1535,7 @@ async fn xtream_get_catchup_response(
     };
 
     let pli = try_result_bad_request!(
-        xtream_get_item_for_stream_id(req_virtual_id, app_state, target, Some(XtreamCluster::Live)).await
+        xtream_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, target, Some(XtreamCluster::Live)).await
     );
 
     // Content filter: hidden items expose no catch-up table either, so a
@@ -1792,15 +1792,15 @@ async fn xtream_player_api(
     let result = match action {
         crate::model::XC_ACTION_GET_LIVE_STREAMS => skip_flag_optional!(
             skip_live,
-            xtream_load_rewrite_playlist(XtreamCluster::Live, app_state, &target, category_id, &user).await
+            xtream_load_rewrite_playlist(XtreamCluster::Live, &app_state.app_config, &target, category_id, &user).await
         ),
         crate::model::XC_ACTION_GET_VOD_STREAMS => skip_flag_optional!(
             skip_vod,
-            xtream_load_rewrite_playlist(XtreamCluster::Video, app_state, &target, category_id, &user).await
+            xtream_load_rewrite_playlist(XtreamCluster::Video, &app_state.app_config, &target, category_id, &user).await
         ),
         crate::model::XC_ACTION_GET_SERIES => skip_flag_optional!(
             skip_series,
-            xtream_load_rewrite_playlist(XtreamCluster::Series, app_state, &target, category_id, &user).await
+            xtream_load_rewrite_playlist(XtreamCluster::Series, &app_state.app_config, &target, category_id, &user).await
         ),
         _ => Some(Err(TuliproxError::ApiXtream(format!("Unknown api call: {action} for target: {}", target.name)))),
     };

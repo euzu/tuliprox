@@ -5,14 +5,12 @@ pub use super::DynReader;
 /// Owned here because this is the client that enforces it; the streaming layer
 /// re-exports it so both sides cannot drift apart.
 pub const STREAM_IDLE_TIMEOUT: u64 = 60;
+use crate::utils::network::persist_pipe::tee_dyn_reader;
 use crate::utils::content_coding::{
     log_hls_origin_content_coding, HlsOriginContentCodingObjectKind,
     HlsOriginContentCodingSource,
 };
 use crate::{
-    api::model::{
-        persist_pipe_stream::tee_dyn_reader,
-    },
     model::{
         resolve_provider_scheme_url_with_provider_index, AppConfig, Config, ConfigInput, ConfigProvider, InputSource,
         ResourceRetryConfig, ReverseProxyDisabledHeaderConfig,

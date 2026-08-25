@@ -33,6 +33,8 @@ pub use self::{
     provider_dns_manager::*, provider_lineup_manager::*, proxy::*, recording::*, stream::*,
     update_guard::*,
 };
+mod playlist_cache_loader;
+pub use self::playlist_cache_loader::*;
 pub use self::download::{DownloadKind, DownloadState};
 pub use crate::model::stream_error::*;
 pub(in crate::api) use self::{
