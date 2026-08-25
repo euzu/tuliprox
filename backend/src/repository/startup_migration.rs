@@ -11,7 +11,7 @@ use crate::repository::{
     storage_const,
     target_id_mapping::VirtualIdRecord,
 };
-use crate::api::model::{MetadataRetryDbKey, MetadataRetryDbValue};
+use super::{MetadataRetryDbKey, MetadataRetryDbValue};
 use fs2::FileExt as _;
 use log::{info, trace, warn};
 use shared::model::{

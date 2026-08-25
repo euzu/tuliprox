@@ -1,5 +1,6 @@
 mod storage;
 mod target_id_mapping;
+mod metadata_retry_record;
 mod startup_migration;
 mod playlist_repository;
 mod m3u_repository;
@@ -30,6 +31,7 @@ pub use target_id_mapping::*;
 // module name so every `crate::repository::bplustree::X` path keeps resolving.
 pub use tuliprox_btree as bplustree;
 pub use tuliprox_btree::*;
+pub use metadata_retry_record::*;
 pub use startup_migration::*;
 pub use playlist_repository::*;
 pub use m3u_repository::*;

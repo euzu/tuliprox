@@ -1,4 +1,4 @@
-use crate::api::model::{MetadataRetryDbKey, MetadataRetryDbValue};
+use crate::repository::{MetadataRetryDbKey, MetadataRetryDbValue};
 use crate::repository::{BPlusTreeDiskIterator, BPlusTreeQuery, QosSnapshotRecord, VirtualIdRecord};
 use base64::{engine::general_purpose, Engine as _};
 use env_logger::{Builder, Target};

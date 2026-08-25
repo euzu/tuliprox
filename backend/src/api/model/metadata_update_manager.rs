@@ -1,3 +1,4 @@
+use crate::repository::{MetadataRetryDbKey, MetadataRetryDbValue, RetryStateDbValue};
 use crate::{
     api::model::{AppState, BatchResultCollector, EventMessage, ProviderHandle},
     model::MetadataUpdateConfig,
@@ -17,7 +18,6 @@ use arc_swap::ArcSwap;
 use dashmap::{mapref::entry::Entry, DashMap};
 use log::{debug, error, info, warn};
 use parking_lot::Mutex as ParkingMutex;
-use serde::{Deserialize, Serialize};
 use shared::{
     create_bitset,
     error::TuliproxError,
@@ -369,17 +369,6 @@ impl TaskRetryState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MetadataRetryDbKey {
-    VodId(u32),
-    VodText(String),
-    SeriesId(u32),
-    SeriesText(String),
-    LiveId(u32),
-    LiveText(String),
-    Stream { scope: String, id: String },
-}
-
 impl MetadataRetryDbKey {
     fn from_task_key(task_key: &TaskKey) -> Self {
         match task_key {
@@ -406,16 +395,6 @@ impl MetadataRetryDbKey {
             Self::Stream { scope, id } => TaskKey::Stream { scope: Arc::from(scope), id: Arc::from(id) },
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RetryStateDbValue {
-    attempts: u8,
-    next_allowed_at_ts: i64,
-    cooldown_until_ts: Option<i64>,
-    last_error: Option<String>,
-    #[serde(default)]
-    source_last_modified: Option<u64>,
 }
 
 impl RetryStateDbValue {
@@ -445,14 +424,6 @@ impl RetryStateDbValue {
             source_last_modified: self.source_last_modified,
         })
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetadataRetryDbValue {
-    resolve: Option<RetryStateDbValue>,
-    probe: Option<RetryStateDbValue>,
-    tmdb: Option<RetryStateDbValue>,
-    updated_at_ts: i64,
 }
 
 impl MetadataRetryDbValue {
