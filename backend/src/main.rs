@@ -8,6 +8,12 @@
 // #[global_allocator]
 // static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+// `debug_if_enabled!`, `trace_if_enabled!`, `exit!` and the config `from_impl!`
+// family are exported by tuliprox-core; make them available unqualified as they
+// were when they lived in this crate.
+#[macro_use]
+extern crate tuliprox_core;
+
 #[macro_use]
 mod modules;
 
@@ -37,6 +43,10 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+// The configuration model and shared utilities are their own package. Aliased
+// under their historical module names so `crate::model::X` and
+// `crate::utils::X` keep resolving across the backend.
+use tuliprox_core::{model, utils};
 use tuliprox_media_server as media_server;
 use tuliprox_mpegts as mpegts;
 

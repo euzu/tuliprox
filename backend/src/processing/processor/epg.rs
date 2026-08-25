@@ -840,8 +840,9 @@ mod tests {
     use crate::{
         model::{
             ConfigInput, EpgConfig, EpgSmartMatchConfig, IcsEpgSourceConfig, PersistedEpgSource,
-            PersistedEpgSourceKind, TVGuide,
+            PersistedEpgSourceKind,
         },
+        processing::parser::xmltv::TVGuide,
         repository::{FetchedPlaylist, MemoryPlaylistSource},
     };
     use rand::{Rng, distr::Alphanumeric};

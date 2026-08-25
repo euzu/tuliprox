@@ -1,3 +1,4 @@
+use crate::processing::parser::xmltv::TVGuide;
 use crate::{
     api::{
         model::{
@@ -14,8 +15,7 @@ use crate::{
     model::{
         AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget,
         is_valid, Epg, Mapping, MessageContent, ProcessTargets, ReverseProxyDisabledHeaderConfig,
-        TVGuide,
-    },
+        },
     processing::{
         input_cache,
         input_cache::ClusterState,

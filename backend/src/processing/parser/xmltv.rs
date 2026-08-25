@@ -1,10 +1,11 @@
+use crate::utils::FileLockManager;
 use crate::{
     model::{
         EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_DESC,
         EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW, EPG_TAG_PROGRAMME, EPG_TAG_TITLE, EPG_TAG_TV,
         EPG_TAG_PREVIOUSLY_SHOWN,
         Epg, EpgSmartMatchConfig, IcsDummyPolicy, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
-        TVGuide, XmlTag, XmlTagIcon
+        XmlTag, XmlTagIcon
     },
     processing::{parser::ics, processor::EpgIdCache},
     repository::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy},
@@ -130,6 +131,38 @@ pub fn normalize_channel_name(name: &str, normalize_config: &EpgSmartMatchConfig
         },
     };
     normalize_config.normalize_regex.replace_all(&reconstructed, "").into_owned()
+}
+
+/// A set of persisted EPG sources, read and merged into one guide.
+///
+/// The type lives beside the XMLTV parsing that gives it behaviour: its
+/// `impl` needs `EpgIdCache` and the tag types from this module, so keeping the
+/// struct in the configuration model would have split a type from its methods
+/// across a crate boundary.
+#[derive(Debug, Clone)]
+pub struct TVGuide {
+    epg_sources: Vec<PersistedEpgSource>,
+    file_locks: Option<Arc<FileLockManager>>,
+}
+
+impl TVGuide {
+    pub fn new(mut epg_sources: Vec<PersistedEpgSource>) -> Self {
+        epg_sources.sort_by_key(|a| a.priority);
+        Self { epg_sources, file_locks: None }
+    }
+
+    /// Uses the shared cache lock manager while reading persisted EPG sources.
+    pub fn with_file_locks(mut self, file_locks: Arc<FileLockManager>) -> Self {
+        self.file_locks = Some(file_locks);
+        self
+    }
+
+    #[inline]
+    pub fn get_epg_sources(&self) -> &Vec<PersistedEpgSource> {
+        &self.epg_sources
+    }
+
+    pub fn get_file_locks(&self) -> Option<&FileLockManager> { self.file_locks.as_deref() }
 }
 
 impl TVGuide {
@@ -1235,11 +1268,12 @@ pub(crate) fn merge_epg_trees(sources: Vec<DiskEpgSource>) -> io::Result<Option<
 
 #[cfg(test)]
 mod tests {
+    use super::TVGuide;
+
     use crate::{
         model::{
             Epg, EpgSmartMatchConfig, IcsDummyConfig, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
-            TVGuide,
-        },
+            },
         processing::parser::xmltv::{
             EpgDummyPolicySource, EpgMergeAccumulator, flatten_tvguide, merge_epg_channels_by_priority,
             merge_epg_channels_by_priority_with_dummy_policies, normalize_channel_name,

@@ -67,17 +67,6 @@ fn get_or_create_provider_connection(
 }
 
 
-impl PartialEq for ProviderAllocation {
-    fn eq(&self, other: &Self) -> bool {
-        // Note: released flag ignored
-        match (self, other) {
-            (ProviderAllocation::Exhausted, ProviderAllocation::Exhausted) => true,
-            (ProviderAllocation::Available(cfg1), ProviderAllocation::Available(cfg2))
-            | (ProviderAllocation::GracePeriod(cfg1), ProviderAllocation::GracePeriod(cfg2)) => cfg1 == cfg2,
-            _ => false,
-        }
-    }
-}
 
 /// This manages different types of provider lineups:
 ///

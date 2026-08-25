@@ -149,35 +149,7 @@ impl MetadataUpdateRuntimeSettings {
     }
 }
 
-impl UpdateTask {
-    pub fn delay(&self) -> u16 {
-        match self {
-            UpdateTask::ResolveVod { delay, .. }
-            | UpdateTask::ResolveSeries { delay, .. }
-            | UpdateTask::ProbeLive { delay, .. }
-            | UpdateTask::ProbeStream { delay, .. } => *delay,
-        }
-    }
-}
 
-impl std::fmt::Display for UpdateTask {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            UpdateTask::ResolveVod { id, reason, delay, .. } => {
-                write!(f, "Resolve VOD {id} (Reason: {reason}, Delay: {delay}sec)")
-            }
-            UpdateTask::ResolveSeries { id, reason, delay, .. } => {
-                write!(f, "Resolve Series {id} (Reason: {reason}, Delay: {delay}sec)")
-            }
-            UpdateTask::ProbeLive { id, reason, delay, interval } => {
-                write!(f, "Probe Live {id} (Reason: {reason}, Delay: {delay}sec, Interval: {interval}secs )")
-            }
-            UpdateTask::ProbeStream { probe_scope, unique_id, reason, delay, .. } => {
-                write!(f, "Probe Stream {probe_scope}/{unique_id} (Reason: {reason}, Delay: {delay}sec)")
-            }
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TaskKey {

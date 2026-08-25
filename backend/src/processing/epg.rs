@@ -1,6 +1,6 @@
+use crate::processing::parser::xmltv::TVGuide;
 use crate::model::{
-    ConfigInput, EpgSource, EpgSourceType, PersistedEpgSource, PersistedEpgSourceKind, TVGuide,
-};
+    ConfigInput, EpgSource, EpgSourceType, PersistedEpgSource, PersistedEpgSourceKind, };
 use crate::processing::processor::PlaylistProcessingContext;
 use crate::repository::get_input_storage_path;
 use crate::utils::{add_prefix_to_filename, prepare_file_path, request};

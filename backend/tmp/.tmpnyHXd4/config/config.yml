@@ -1,0 +1,13 @@
+
+storage_dir: data
+api:
+  host: 0.0.0.0
+  port: 8901
+  web_root: web
+log:
+  runtime_config_report_enabled: true
+  runtime_config_report_format: json
+proxy:
+  url: http://proxy.example
+  username: proxy-user
+  password: proxy-pass

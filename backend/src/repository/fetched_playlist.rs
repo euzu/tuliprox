@@ -1,4 +1,5 @@
-use crate::model::{ConfigInput, TVGuide};
+use crate::processing::parser::xmltv::TVGuide;
+use crate::model::ConfigInput;
 use super::PlaylistSource;
 use shared::error::TuliproxError;
 use shared::model::UUIDType;
