@@ -6,7 +6,7 @@ use crate::media_enrichment::policy::MissingFactEnrichmentPolicy;
 use crate::media_enrichment::xtream::{
     apply_fact_patch_to_series, series_fact_patch_from_metadata, series_fact_patch_from_title_candidates,
 };
-use crate::model::FetchedPlaylist;
+use crate::repository::FetchedPlaylist;
 use crate::model::{AppConfig, ConfigTarget, MetadataUpdateConfig};
 use crate::model::{ConfigInput, ConfigInputFlags, InputSource};
 use crate::processing::parser::xtream::create_xtream_series_episode_url;

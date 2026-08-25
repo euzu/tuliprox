@@ -1,7 +1,7 @@
 use crate::{api::{
     model::AppState,
     tasks::{spawn_library_scan, LibraryScanTaskOptions},
-}, auth::permission_layer, library::{resolve_metadata_storage_path, LibraryProcessor, MetadataStorage}};
+}, api::auth_middleware::permission_layer, library::{resolve_metadata_storage_path, LibraryProcessor, MetadataStorage}};
 use axum::response::IntoResponse;
 use log::{debug, warn};
 use serde_json::json;

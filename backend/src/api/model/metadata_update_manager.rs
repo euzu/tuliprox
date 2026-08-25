@@ -1,3 +1,4 @@
+use crate::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
 use crate::repository::{MetadataRetryDbKey, MetadataRetryDbValue, RetryStateDbValue};
 use crate::{
     api::model::{AppState, BatchResultCollector, EventMessage, ProviderHandle},
@@ -19,7 +20,6 @@ use dashmap::{mapref::entry::Entry, DashMap};
 use log::{debug, error, info, warn};
 use parking_lot::Mutex as ParkingMutex;
 use shared::{
-    create_bitset,
     error::TuliproxError,
     model::{
         InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, StreamProperties, UUIDType,
@@ -147,67 +147,6 @@ impl MetadataUpdateRuntimeSettings {
             backoff_jitter_percent: cfg.probe.backoff_jitter_percent.min(95),
         }
     }
-}
-
-create_bitset!(u8, ResolveReason, Info, Tmdb, Date, Probe, MissingDetails);
-
-/// `PlaylistItemIdType` ID can be either a String (M3U) or u32 (Xtream/TargetDB)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ProviderIdType {
-    Text(Arc<str>),
-    Id(u32),
-}
-
-impl std::fmt::Display for ProviderIdType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProviderIdType::Text(s) => write!(f, "{s}"),
-            ProviderIdType::Id(id) => write!(f, "{id}"),
-        }
-    }
-}
-
-impl From<u32> for ProviderIdType {
-    fn from(id: u32) -> Self { ProviderIdType::Id(id) }
-}
-
-impl From<&str> for ProviderIdType {
-    fn from(s: &str) -> Self { ProviderIdType::Text(Arc::from(s)) }
-}
-
-impl From<String> for ProviderIdType {
-    fn from(s: String) -> Self { ProviderIdType::Text(Arc::from(s.as_str())) }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum UpdateTask {
-    ResolveVod {
-        id: ProviderIdType,
-        reason: ResolveReasonSet,
-        delay: u16,
-        source_last_modified: Option<u64>,
-    },
-    ResolveSeries {
-        id: ProviderIdType,
-        reason: ResolveReasonSet,
-        delay: u16,
-        source_last_modified: Option<u64>,
-    },
-    ProbeLive {
-        id: ProviderIdType,
-        reason: ResolveReasonSet,
-        delay: u16,
-        interval: u64,
-    },
-    // Generic probe for M3U/Library/etc.
-    ProbeStream {
-        probe_scope: Arc<str>,
-        unique_id: String,
-        url: String,
-        item_type: PlaylistItemType,
-        reason: ResolveReasonSet,
-        delay: u16,
-    },
 }
 
 impl UpdateTask {

@@ -13,7 +13,7 @@ use crate::{
     },
     model::{
         AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget,
-        Epg, FetchedPlaylist, Mapping, MessageContent, ProcessTargets, ReverseProxyDisabledHeaderConfig, TVGuide,
+        Epg, Mapping, MessageContent, ProcessTargets, ReverseProxyDisabledHeaderConfig, TVGuide,
     },
     processing::{
         input_cache,
@@ -27,6 +27,7 @@ use crate::{
         },
     },
     repository::{
+        FetchedPlaylist,
         load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource,
         PlaylistSource,
     },

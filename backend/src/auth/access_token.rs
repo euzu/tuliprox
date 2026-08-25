@@ -1,9 +1,9 @@
 use shared::utils::{hex_decode, hex_encode};
 use chrono::Utc;
 
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
+// `constant_time_eq` lives in `utils::crypto_utils`; re-exported here for the
+// authentication call sites that have always used it under this path.
+pub use crate::utils::constant_time_eq;
 
 // #[derive(Serialize, Deserialize, Debug)]
 // struct AccessToken {

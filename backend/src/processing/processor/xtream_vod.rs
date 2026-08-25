@@ -7,7 +7,7 @@ use crate::media_enrichment::xtream::{
     apply_fact_patch_to_video, distinct_non_empty_title_candidates, video_fact_patch_from_metadata,
     video_fact_patch_from_title_candidates,
 };
-use crate::model::FetchedPlaylist;
+use crate::repository::FetchedPlaylist;
 use crate::model::InputSource;
 use crate::model::{AppConfig, ConfigTarget};
 use crate::model::{ConfigInput, ConfigInputFlags};

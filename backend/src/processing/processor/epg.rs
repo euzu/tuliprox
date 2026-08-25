@@ -1,5 +1,6 @@
 use crate::{
-    model::{Epg, EpgConfig, EpgSmartMatchConfig, FetchedPlaylist},
+    model::{Epg, EpgConfig, EpgSmartMatchConfig},
+    repository::FetchedPlaylist,
     processing::parser::xmltv::normalize_channel_name,
     utils::with_folded_epg_id,
 };
@@ -838,10 +839,10 @@ pub async fn process_playlist_epg(fp: &mut FetchedPlaylist<'_>, epg: &mut Vec<Ep
 mod tests {
     use crate::{
         model::{
-            ConfigInput, EpgConfig, EpgSmartMatchConfig, FetchedPlaylist, IcsEpgSourceConfig, PersistedEpgSource,
+            ConfigInput, EpgConfig, EpgSmartMatchConfig, IcsEpgSourceConfig, PersistedEpgSource,
             PersistedEpgSourceKind, TVGuide,
         },
-        repository::MemoryPlaylistSource,
+        repository::{FetchedPlaylist, MemoryPlaylistSource},
     };
     use rand::{Rng, distr::Alphanumeric};
     use rphonetic::{DoubleMetaphone, Encoder};

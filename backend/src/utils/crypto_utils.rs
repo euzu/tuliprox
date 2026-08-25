@@ -1,3 +1,11 @@
+/// Length-checked, branch-free byte comparison.
+///
+/// Lives here rather than in `auth` because the configuration model compares
+/// credentials with it, and `model` must not depend on `auth`.
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 use aes::Aes128;
 use base64::{engine::general_purpose, Engine as _};
 use ctr::cipher::{KeyIvInit, StreamCipher};

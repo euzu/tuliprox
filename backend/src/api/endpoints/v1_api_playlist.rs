@@ -19,7 +19,8 @@ use crate::{
         },
         model::AppState,
     },
-    auth::{create_access_token, permission_layer, verify_access_token},
+    api::auth_middleware::permission_layer,
+    auth::{create_access_token, verify_access_token},
     iptv::{stalker::client::validate_public_playable_url, xtream},
     model::{
         parse_xmltv_for_web_ui_from_file, parse_xmltv_for_web_ui_from_url, AppConfig, ConfigInput, ConfigInputFlags,

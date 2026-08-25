@@ -18,7 +18,7 @@ use crate::{
         },
         model::AppState,
     },
-    auth::permission_layer,
+    api::auth_middleware::permission_layer,
     processing::geoip::{update_geoip_db, GeoIpUpdateError},
     utils::ip_checker::get_ips,
     VERSION,

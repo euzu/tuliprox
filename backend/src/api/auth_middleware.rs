@@ -115,3 +115,18 @@ pub async fn require_permission_inner(
 
     next.run(request).await
 }
+
+/// Builds an Axum layer that enforces one permission.
+///
+/// Defined here rather than in `auth` because it expands to a call into this
+/// module; keeping it there meant `auth` named `api`.
+#[macro_export]
+macro_rules! permission_layer {
+    ($app_state:expr, $permission:expr ) => {{
+        let app_state = ::std::sync::Arc::clone($app_state);
+        ::axum::middleware::from_fn_with_state(app_state, move |state, auth, request, next| {
+            $crate::api::auth_middleware::require_permission_inner($permission, state, auth, request, next)
+        })
+    }};
+}
+pub use permission_layer;

@@ -11,19 +11,6 @@ mod recording_auth;
 
 type Rejection = (StatusCode, &'static str);
 
-#[macro_export]
-macro_rules! permission_layer {
-    ($app_state:expr, $permission:expr ) => {
-        {
-            let app_state = ::std::sync::Arc::clone($app_state);
-            ::axum::middleware::from_fn_with_state(app_state, move |state, auth, request, next| {
-                $crate::api::auth_middleware::require_permission_inner($permission, state, auth, request, next)
-            })
-        }
-    };
-}
-pub use permission_layer;
-
 pub use self::authenticator::*;
 pub use self::access_token::*;
 pub use self::password::*;

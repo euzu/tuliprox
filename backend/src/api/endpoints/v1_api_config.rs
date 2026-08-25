@@ -2,7 +2,8 @@ use crate::{api::{
     api_utils::{internal_server_error, try_unwrap_body},
     config_file::ConfigFile,
     model::AppState,
-}, auth::{permission_layer, verify_token, AuthBearer}, iptv::xtream::{get_xtream_stream_url_base, xtream_login}, model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource, UserPlan}, utils, utils::{
+}, api::auth_middleware::permission_layer,
+    auth::{verify_token, AuthBearer}, iptv::xtream::{get_xtream_stream_url_base, xtream_login}, model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource, UserPlan}, utils, utils::{
     persist_messaging_templates, plans_file_path, prepare_sources_batch, prepare_users, read_api_proxy_file,
     read_plans_file, save_plans, request::download_text_content,
 }};

@@ -19,7 +19,6 @@ pub(in crate::api) mod recording;
 mod request;
 mod stream;
 mod streams;
-mod update_guard;
 mod xtream;
 
 #[cfg(test)]
@@ -30,13 +29,15 @@ pub use self::{
     active_provider_manager::*, app_state::*, connection_manager::*, event_manager::*, hls_cache::*,
     hls_provisioning::HlsProvisioningState, metadata_update_manager::*,
     provider_dns_manager::*, provider_lineup_manager::*, proxy::*, recording::*, stream::*,
-    update_guard::*,
 };
 mod playlist_cache_loader;
 pub use self::playlist_cache_loader::*;
 // In-memory playlist storage moved to `repository`; re-exported so `api` call
 // sites keep their names.
 pub use crate::repository::playlist_mem_cache::*;
+// Update semaphores moved to `model`; re-exported so `api` keeps its names.
+pub use crate::model::update_guard::*;
+pub use crate::model::update_task::*;
 pub use self::download::{DownloadKind, DownloadState};
 pub use crate::model::stream_error::*;
 pub(in crate::api) use self::{

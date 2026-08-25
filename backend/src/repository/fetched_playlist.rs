@@ -1,5 +1,5 @@
 use crate::model::{ConfigInput, TVGuide};
-use crate::repository::PlaylistSource;
+use super::PlaylistSource;
 use shared::error::TuliproxError;
 use shared::model::UUIDType;
 use shared::model::{PlaylistGroup, PlaylistItem};
