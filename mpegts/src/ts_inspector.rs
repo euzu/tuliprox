@@ -1,3 +1,4 @@
+use crate::transport_stream_buffer::{HlsTsTimestampProfile, HlsTsTimestampProfileScanner};
 use aes::{
     cipher::{Block, BlockDecrypt, KeyInit},
     Aes128,
@@ -10,8 +11,8 @@ use mpeg2ts_reader::{
         self,
         pat::{PatSection, ProgramDescriptor},
         pmt::PmtSection,
-        BufferSectionSyntaxParser, CurrentNext, SectionPacketConsumer, SectionSyntaxSectionProcessor,
-        SectionProcessor, WholeSectionSyntaxPayloadParser,
+        BufferSectionSyntaxParser, CurrentNext, SectionPacketConsumer, SectionProcessor, SectionSyntaxSectionProcessor,
+        WholeSectionSyntaxPayloadParser,
     },
 };
 use std::{
@@ -21,8 +22,6 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 use zeroize::{Zeroize, Zeroizing};
-
-use crate::mpegts::transport_stream_buffer::{HlsTsTimestampProfile, HlsTsTimestampProfileScanner};
 
 const AES_128_BLOCK_BYTES: usize = 16;
 const TS_PACKET_BYTES: usize = Packet::SIZE;
@@ -35,7 +34,7 @@ const PSI_SYNTAX_HEADER_BYTES: usize = psi::SectionCommonHeader::SIZE + psi::Tab
 
 /// Hard limits for one read-only MPEG-TS compatibility probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HlsTsProbeBudget {
+pub struct HlsTsProbeBudget {
     pub max_bytes: u64,
     pub max_packets: u64,
     pub read_chunk_bytes: usize,
@@ -59,7 +58,7 @@ impl HlsTsProbeBudget {
 
 /// Stable PAT/PMT compatibility evidence. It is not cross-host content identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HlsTsTrackSignature {
+pub struct HlsTsTrackSignature {
     pub program_count: u16,
     pub has_pcr: bool,
     pub stream_types: Arc<[u8]>,
@@ -67,13 +66,13 @@ pub(crate) struct HlsTsTrackSignature {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HlsTsElementaryStreamBinding {
+pub struct HlsTsElementaryStreamBinding {
     pub stream_type: u8,
     pub elementary_pid: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HlsTsProgramTopology {
+pub struct HlsTsProgramTopology {
     pub transport_stream_id: u16,
     pub program_number: u16,
     pub pmt_pid: u16,
@@ -82,14 +81,9 @@ pub(crate) struct HlsTsProgramTopology {
 }
 
 impl HlsTsTrackSignature {
-    #[cfg(test)]
-    pub(crate) fn from_stream_types(stream_types: impl Into<Arc<[u8]>>) -> Self {
-        Self {
-            program_count: 1,
-            has_pcr: true,
-            stream_types: stream_types.into(),
-            programs: Arc::from([]),
-        }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_stream_types(stream_types: impl Into<Arc<[u8]>>) -> Self {
+        Self { program_count: 1, has_pcr: true, stream_types: stream_types.into(), programs: Arc::from([]) }
     }
 }
 
@@ -98,7 +92,7 @@ fn is_audio_stream_type(stream_type: u8) -> bool { matches!(stream_type, 0x03 | 
 fn is_video_stream_type(stream_type: u8) -> bool { matches!(stream_type, 0x01 | 0x02 | 0x10 | 0x1B | 0x24 | 0x42) }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HlsTsMalformedReason {
+pub enum HlsTsMalformedReason {
     InvalidSynchronization,
     InvalidPacketHeader,
     TransportError,
@@ -127,7 +121,7 @@ impl HlsTsMalformedReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HlsTsProtectionReason {
+pub enum HlsTsProtectionReason {
     TransportScrambling,
     UnsupportedEncryption,
 }
@@ -142,7 +136,7 @@ impl HlsTsProtectionReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HlsTsProbeOutcome {
+pub enum HlsTsProbeOutcome {
     Found(HlsTsTrackSignature),
     ProbeBudgetExhausted { bytes_examined: u64, packets_examined: u64 },
     Malformed(HlsTsMalformedReason),
@@ -150,14 +144,14 @@ pub(crate) enum HlsTsProbeOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HlsTsMediaEvidence {
+pub struct HlsTsMediaEvidence {
     pub track_outcome: HlsTsProbeOutcome,
     pub timestamp_profile: Option<HlsTsTimestampProfile>,
     pub splice_evidence: HlsTsSpliceEvidence,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HlsTsPidBoundaryEvidence {
+pub struct HlsTsPidBoundaryEvidence {
     pub pid: u16,
     pub first_packet_index: u64,
     pub first_continuity_counter: u8,
@@ -167,7 +161,7 @@ pub(crate) struct HlsTsPidBoundaryEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HlsTsCompatibleSpliceEvidence {
+pub struct HlsTsCompatibleSpliceEvidence {
     topology: HlsTsTrackSignature,
     pid_boundaries: Arc<[HlsTsPidBoundaryEvidence]>,
 }
@@ -180,47 +174,27 @@ impl HlsTsCompatibleSpliceEvidence {
             .and_then(|index| self.pid_boundaries.get(index))
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_test(topology: HlsTsTrackSignature) -> Self {
-        Self { topology, pid_boundaries: Arc::from([]) }
-    }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(topology: HlsTsTrackSignature) -> Self { Self { topology, pid_boundaries: Arc::from([]) } }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HlsTsSpliceIncompatibility {
-    InvalidPacket {
-        packet_index: u64,
-    },
-    TransportError {
-        pid: u16,
-        packet_index: u64,
-    },
-    ContinuityFailure {
-        pid: u16,
-        packet_index: u64,
-        expected: u8,
-        actual: u8,
-    },
-    IncompletePes {
-        pid: u16,
-        packet_index: u64,
-        declared_bytes: Option<u16>,
-        observed_bytes: u64,
-    },
-    InvalidPes {
-        pid: u16,
-        packet_index: u64,
-    },
+pub enum HlsTsSpliceIncompatibility {
+    InvalidPacket { packet_index: u64 },
+    TransportError { pid: u16, packet_index: u64 },
+    ContinuityFailure { pid: u16, packet_index: u64, expected: u8, actual: u8 },
+    IncompletePes { pid: u16, packet_index: u64, declared_bytes: Option<u16>, observed_bytes: u64 },
+    InvalidPes { pid: u16, packet_index: u64 },
     InspectionBudgetExhausted,
     TopologyUnavailable,
 }
 
 impl HlsTsSpliceIncompatibility {
-    pub(crate) const fn result_code(self) -> &'static str {
+    pub const fn result_code(self) -> &'static str {
         match self {
-            Self::InvalidPacket { .. }
-            | Self::TransportError { .. }
-            | Self::ContinuityFailure { .. } => "continuity-failure",
+            Self::InvalidPacket { .. } | Self::TransportError { .. } | Self::ContinuityFailure { .. } => {
+                "continuity-failure"
+            }
             Self::IncompletePes { .. } | Self::InvalidPes { .. } => "incomplete-pes",
             Self::InspectionBudgetExhausted | Self::TopologyUnavailable => "topology-mismatch",
         }
@@ -228,25 +202,25 @@ impl HlsTsSpliceIncompatibility {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HlsTsSpliceEvidence {
+pub enum HlsTsSpliceEvidence {
     Compatible(HlsTsCompatibleSpliceEvidence),
     Incompatible(HlsTsSpliceIncompatibility),
 }
 
 impl HlsTsSpliceEvidence {
-    #[cfg(test)]
-    pub(crate) fn compatible_for_test(topology: HlsTsTrackSignature) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn compatible_for_test(topology: HlsTsTrackSignature) -> Self {
         Self::Compatible(HlsTsCompatibleSpliceEvidence::for_test(topology))
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HlsTsSpliceBoundaryIncompatibility {
+pub enum HlsTsSpliceBoundaryIncompatibility {
     Media(HlsTsSpliceIncompatibility),
     TopologyMismatch,
 }
 
-pub(crate) fn evaluate_mpeg_ts_splice_boundary(
+pub fn evaluate_mpeg_ts_splice_boundary(
     base: &HlsTsSpliceEvidence,
     terminal: &HlsTsSpliceEvidence,
 ) -> Result<(), HlsTsSpliceBoundaryIncompatibility> {
@@ -278,21 +252,19 @@ pub(crate) fn evaluate_mpeg_ts_splice_boundary(
             base_boundary.last_continuity_counter
         };
         if boundary.first_continuity_counter != expected {
-            return Err(HlsTsSpliceBoundaryIncompatibility::Media(
-                HlsTsSpliceIncompatibility::ContinuityFailure {
-                    pid: boundary.pid,
-                    packet_index: boundary.first_packet_index,
-                    expected,
-                    actual: boundary.first_continuity_counter,
-                },
-            ));
+            return Err(HlsTsSpliceBoundaryIncompatibility::Media(HlsTsSpliceIncompatibility::ContinuityFailure {
+                pid: boundary.pid,
+                packet_index: boundary.first_packet_index,
+                expected,
+                actual: boundary.first_continuity_counter,
+            }));
         }
     }
     Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum HlsTsProbeError {
+pub enum HlsTsProbeError {
     #[error("MPEG-TS probe I/O failed")]
     Io(#[source] std::io::Error),
     #[error("MPEG-TS probe key is unavailable")]
@@ -305,7 +277,7 @@ pub(crate) enum HlsTsProbeError {
 
 /// Policy-facing track evidence with stable diagnostics and no parser-crate types.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HlsTrackEvidenceResolution {
+pub enum HlsTrackEvidenceResolution {
     Found(HlsTsTrackSignature),
     InsufficientEvidence { bytes_examined: u64, packets_examined: u64 },
     IncompleteEvidence,
@@ -318,7 +290,7 @@ pub(crate) enum HlsTrackEvidenceResolution {
 }
 
 impl HlsTrackEvidenceResolution {
-    pub(crate) fn signature(&self) -> Option<&HlsTsTrackSignature> {
+    pub fn signature(&self) -> Option<&HlsTsTrackSignature> {
         match self {
             Self::Found(signature) => Some(signature),
             Self::InsufficientEvidence { .. }
@@ -332,7 +304,7 @@ impl HlsTrackEvidenceResolution {
         }
     }
 
-    pub(crate) const fn reason_code(&self) -> &'static str {
+    pub const fn reason_code(&self) -> &'static str {
         match self {
             Self::Found(_) => "found",
             Self::InsufficientEvidence { .. } => "insufficient-evidence",
@@ -370,13 +342,13 @@ impl From<Result<HlsTsProbeOutcome, HlsTsProbeError>> for HlsTrackEvidenceResolu
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum HlsTsProbeProtection<'a> {
+pub enum HlsTsProbeProtection<'a> {
     Clear,
     Aes128Cbc { key: &'a [u8], iv: [u8; AES_128_BLOCK_BYTES] },
 }
 
 /// Implements the existing HLS AES-128 explicit-IV and sequence-derived-IV rules.
-pub(crate) fn hls_aes128_cbc_iv(
+pub fn hls_aes128_cbc_iv(
     explicit_iv: Option<&str>,
     media_sequence: u64,
 ) -> Result<[u8; AES_128_BLOCK_BYTES], HlsTsProbeError> {
@@ -453,9 +425,7 @@ impl HlsPsiTableKind {
     }
 }
 
-fn psi_section_length(header: &[u8]) -> usize {
-    (usize::from(header[1] & 0x0F) << 8) | usize::from(header[2])
-}
+fn psi_section_length(header: &[u8]) -> usize { (usize::from(header[1] & 0x0F) << 8) | usize::from(header[2]) }
 
 /// Thin adapter for the crate's documented syntax-header buffering gap. The
 /// crate still owns section framing, continuation, CRC payload collection and
@@ -496,9 +466,7 @@ where
                 let (previous_section, section_start) = section_data.split_at(pointer);
                 pending.extend_from_slice(previous_section);
                 if pending.len() < psi::SectionCommonHeader::SIZE
-                    || !self
-                        .table_kind
-                        .validate_common_header(&pending[..psi::SectionCommonHeader::SIZE])
+                    || !self.table_kind.validate_common_header(&pending[..psi::SectionCommonHeader::SIZE])
                 {
                     ctx.record_malformed(self.table_kind.malformed_reason());
                     return;
@@ -572,9 +540,7 @@ where
     fn consume_new_section(&mut self, ctx: &mut HlsTsDemuxContext, pid: Pid, section_start: &[u8]) {
         if section_start.len() < PSI_SYNTAX_HEADER_BYTES {
             if section_start.len() >= psi::SectionCommonHeader::SIZE
-                && !self
-                    .table_kind
-                    .validate_common_header(&section_start[..psi::SectionCommonHeader::SIZE])
+                && !self.table_kind.validate_common_header(&section_start[..psi::SectionCommonHeader::SIZE])
             {
                 ctx.record_malformed(self.table_kind.malformed_reason());
                 return;
@@ -720,8 +686,7 @@ struct HlsPmtEvidence {
 
 impl HlsPmtEvidence {
     fn complete(&self) -> bool {
-        self.last_section_number
-            .is_some_and(|last| (0..=last).all(|section| self.sections.contains_key(&section)))
+        self.last_section_number.is_some_and(|last| (0..=last).all(|section| self.sections.contains_key(&section)))
     }
 
     fn restart_version(&mut self, version: u8, last_section_number: u8) {
@@ -741,10 +706,7 @@ impl HlsPmtEvidence {
             return Err(HlsTsMalformedReason::InvalidPmt);
         }
         self.sections.insert(section_number, section);
-        self.has_pcr = self
-            .sections
-            .values()
-            .any(|section| section.pcr_pid != u16::from(mpeg2ts_reader::STUFFING_PID));
+        self.has_pcr = self.sections.values().any(|section| section.pcr_pid != u16::from(mpeg2ts_reader::STUFFING_PID));
         self.stream_types = self
             .sections
             .values()
@@ -753,11 +715,7 @@ impl HlsPmtEvidence {
         Ok(())
     }
 
-    fn topology(
-        &self,
-        transport_stream_id: u16,
-        pmt_pid: u16,
-    ) -> Option<HlsTsProgramTopology> {
+    fn topology(&self, transport_stream_id: u16, pmt_pid: u16) -> Option<HlsTsProgramTopology> {
         if !self.complete() {
             return None;
         }
@@ -766,19 +724,12 @@ impl HlsPmtEvidence {
         if self.sections.values().any(|section| section.pcr_pid != pcr_pid) {
             return None;
         }
-        let streams = self
-            .sections
-            .values()
-            .flat_map(|section| section.streams.iter().copied())
-            .collect::<Vec<_>>();
+        let streams = self.sections.values().flat_map(|section| section.streams.iter().copied()).collect::<Vec<_>>();
         if streams.is_empty() {
             return None;
         }
         let mut elementary_pids = BTreeSet::new();
-        if streams
-            .iter()
-            .any(|stream| !elementary_pids.insert(stream.elementary_pid))
-        {
+        if streams.iter().any(|stream| !elementary_pids.insert(stream.elementary_pid)) {
             return None;
         }
         Some(HlsTsProgramTopology {
@@ -822,25 +773,16 @@ impl HlsTsDemuxContext {
 
     fn register_program(&mut self, program_number: u16, pid: Pid) {
         let pid_value = u16::from(pid);
-        if self
-            .programs_by_pid
-            .get(&pid_value)
-            .is_some_and(|registered_program| *registered_program != program_number)
-            || self
-                .programs_by_pid
-                .iter()
-                .any(|(registered_pid, registered_program)| {
-                    *registered_program == program_number && *registered_pid != pid_value
-                })
+        if self.programs_by_pid.get(&pid_value).is_some_and(|registered_program| *registered_program != program_number)
+            || self.programs_by_pid.iter().any(|(registered_pid, registered_program)| {
+                *registered_program == program_number && *registered_pid != pid_value
+            })
         {
             self.record_malformed(HlsTsMalformedReason::InvalidPat);
             return;
         }
         if self.programs_by_pid.insert(pid_value, program_number).is_none() {
-            self.pmt_evidence.insert(
-                pid_value,
-                HlsPmtEvidence { program_number, ..HlsPmtEvidence::default() },
-            );
+            self.pmt_evidence.insert(pid_value, HlsPmtEvidence { program_number, ..HlsPmtEvidence::default() });
             self.changeset.insert(pid, HlsTsPacketFilter::Pmt(HlsPmtPacketFilter::new(pid, program_number)));
         }
     }
@@ -868,12 +810,8 @@ impl HlsTsDemuxContext {
         let mut pids_by_program = BTreeMap::new();
         for section in self.pat_sections.values() {
             for (pid, program_number) in section {
-                if programs_by_pid
-                    .insert(*pid, *program_number)
-                    .is_some_and(|current| current != *program_number)
-                    || pids_by_program
-                        .insert(*program_number, *pid)
-                        .is_some_and(|current| current != *pid)
+                if programs_by_pid.insert(*pid, *program_number).is_some_and(|current| current != *program_number)
+                    || pids_by_program.insert(*program_number, *pid).is_some_and(|current| current != *pid)
                 {
                     return Err(HlsTsMalformedReason::InvalidPat);
                 }
@@ -895,7 +833,9 @@ impl HlsTsDemuxContext {
         Ok(())
     }
 
-    fn is_psi_pid(&self, pid: u16) -> bool { pid == u16::from(psi::pat::PAT_PID) || self.programs_by_pid.contains_key(&pid) }
+    fn is_psi_pid(&self, pid: u16) -> bool {
+        pid == u16::from(psi::pat::PAT_PID) || self.programs_by_pid.contains_key(&pid)
+    }
 
     fn signature(&self) -> Option<HlsTsTrackSignature> {
         let pat_complete = self
@@ -917,9 +857,11 @@ impl HlsTsDemuxContext {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        if !stream_types.iter().copied().any(|stream_type| {
-            is_audio_stream_type(stream_type) || is_video_stream_type(stream_type)
-        }) {
+        if !stream_types
+            .iter()
+            .copied()
+            .any(|stream_type| is_audio_stream_type(stream_type) || is_video_stream_type(stream_type))
+        {
             return None;
         }
         Some(HlsTsTrackSignature {
@@ -988,10 +930,7 @@ impl WholeSectionSyntaxPayloadParser for HlsPatSectionParser {
             Some(_) => {}
             None => ctx.pat_table_identity = Some(table_identity),
         }
-        if ctx
-            .pat_last_section_number
-            .is_some_and(|last| last != table_header.last_section_number())
-        {
+        if ctx.pat_last_section_number.is_some_and(|last| last != table_header.last_section_number()) {
             ctx.record_malformed(HlsTsMalformedReason::InvalidPat);
             return;
         }
@@ -1010,23 +949,15 @@ impl WholeSectionSyntaxPayloadParser for HlsPatSectionParser {
         for descriptor in PatSection::new(payload).programs() {
             if let ProgramDescriptor::Program { program_number, pid } = descriptor {
                 let pid = u16::from(pid);
-                if programs
-                    .insert(pid, program_number)
-                    .is_some_and(|current| current != program_number)
-                    || pids_by_program
-                        .insert(program_number, pid)
-                        .is_some_and(|current| current != pid)
+                if programs.insert(pid, program_number).is_some_and(|current| current != program_number)
+                    || pids_by_program.insert(program_number, pid).is_some_and(|current| current != pid)
                 {
                     ctx.record_malformed(HlsTsMalformedReason::InvalidPat);
                     return;
                 }
             }
         }
-        if ctx
-            .pat_sections
-            .get(&table_header.section_number())
-            .is_some_and(|current| current != &programs)
-        {
+        if ctx.pat_sections.get(&table_header.section_number()).is_some_and(|current| current != &programs) {
             ctx.record_malformed(HlsTsMalformedReason::InvalidPat);
             return;
         }
@@ -1180,16 +1111,8 @@ struct HlsTsPidContinuityState {
 }
 
 enum HlsTsPesInspectionState {
-    Header {
-        bytes: [u8; 6],
-        len: usize,
-        started_at_packet_index: u64,
-    },
-    Finite {
-        declared_bytes: u16,
-        observed_bytes: u64,
-        started_at_packet_index: u64,
-    },
+    Header { bytes: [u8; 6], len: usize, started_at_packet_index: u64 },
+    Finite { declared_bytes: u16, observed_bytes: u64, started_at_packet_index: u64 },
     UnboundedVideo,
 }
 
@@ -1206,11 +1129,7 @@ fn validated_adaptation_length(packet: &Packet<'_>, bytes: &[u8]) -> Result<Opti
         return Err(());
     }
     let adaptation_length = adaptation_control.has_adaptation_field().then(|| usize::from(bytes[4]));
-    match (
-        adaptation_control.has_adaptation_field(),
-        adaptation_control.has_payload(),
-        adaptation_length,
-    ) {
+    match (adaptation_control.has_adaptation_field(), adaptation_control.has_payload(), adaptation_length) {
         (false, true, None) | (true, false, Some(183)) => Ok(adaptation_length),
         (true, true, Some(length)) if length <= 182 => Ok(adaptation_length),
         _ => Err(()),
@@ -1256,8 +1175,7 @@ impl HlsTsTransportStreamInspector {
         let has_payload = packet.adaptation_control().has_payload();
         let discontinuity = adaptation_length.is_some_and(|length| length > 0 && bytes[5] & 0x80 != 0);
         let continuity_counter = packet.continuity_counter().count();
-        if let Err(reason) =
-            self.inspect_continuity(pid, packet_index, continuity_counter, has_payload, discontinuity)
+        if let Err(reason) = self.inspect_continuity(pid, packet_index, continuity_counter, has_payload, discontinuity)
         {
             self.incompatible = Some(reason);
             return;
@@ -1324,38 +1242,29 @@ impl HlsTsTransportStreamInspector {
         Ok(())
     }
 
-    fn take_discontinuity_pes_incompatibility(
-        &mut self,
-        pid: u16,
-    ) -> Option<HlsTsSpliceIncompatibility> {
+    fn take_discontinuity_pes_incompatibility(&mut self, pid: u16) -> Option<HlsTsSpliceIncompatibility> {
         match self.pes[usize::from(pid)].take() {
-            Some(HlsTsPesInspectionState::Header {
-                started_at_packet_index,
-                ..
-            }) => Some(HlsTsSpliceIncompatibility::IncompletePes {
-                pid,
-                packet_index: started_at_packet_index,
-                declared_bytes: None,
-                observed_bytes: 0,
-            }),
-            Some(HlsTsPesInspectionState::Finite {
-                declared_bytes,
-                observed_bytes,
-                started_at_packet_index,
-            }) => Some(HlsTsSpliceIncompatibility::IncompletePes {
-                pid,
-                packet_index: started_at_packet_index,
-                declared_bytes: Some(declared_bytes),
-                observed_bytes,
-            }),
+            Some(HlsTsPesInspectionState::Header { started_at_packet_index, .. }) => {
+                Some(HlsTsSpliceIncompatibility::IncompletePes {
+                    pid,
+                    packet_index: started_at_packet_index,
+                    declared_bytes: None,
+                    observed_bytes: 0,
+                })
+            }
+            Some(HlsTsPesInspectionState::Finite { declared_bytes, observed_bytes, started_at_packet_index }) => {
+                Some(HlsTsSpliceIncompatibility::IncompletePes {
+                    pid,
+                    packet_index: started_at_packet_index,
+                    declared_bytes: Some(declared_bytes),
+                    observed_bytes,
+                })
+            }
             Some(HlsTsPesInspectionState::UnboundedVideo) | None => None,
         }
     }
 
-    fn finish(
-        mut self,
-        topology: Option<HlsTsTrackSignature>,
-    ) -> HlsTsSpliceEvidence {
+    fn finish(mut self, topology: Option<HlsTsTrackSignature>) -> HlsTsSpliceEvidence {
         if let Some(reason) = self.incompatible {
             return HlsTsSpliceEvidence::Incompatible(reason);
         }
@@ -1365,32 +1274,21 @@ impl HlsTsTransportStreamInspector {
             };
             let pid = u16::try_from(pid).unwrap_or(u16::MAX);
             match state {
-                HlsTsPesInspectionState::Header {
-                    started_at_packet_index,
-                    ..
-                } => {
-                    return HlsTsSpliceEvidence::Incompatible(
-                        HlsTsSpliceIncompatibility::IncompletePes {
-                            pid,
-                            packet_index: started_at_packet_index,
-                            declared_bytes: None,
-                            observed_bytes: 0,
-                        },
-                    );
+                HlsTsPesInspectionState::Header { started_at_packet_index, .. } => {
+                    return HlsTsSpliceEvidence::Incompatible(HlsTsSpliceIncompatibility::IncompletePes {
+                        pid,
+                        packet_index: started_at_packet_index,
+                        declared_bytes: None,
+                        observed_bytes: 0,
+                    });
                 }
-                HlsTsPesInspectionState::Finite {
-                    declared_bytes,
-                    observed_bytes,
-                    started_at_packet_index,
-                } => {
-                    return HlsTsSpliceEvidence::Incompatible(
-                        HlsTsSpliceIncompatibility::IncompletePes {
-                            pid,
-                            packet_index: started_at_packet_index,
-                            declared_bytes: Some(declared_bytes),
-                            observed_bytes,
-                        },
-                    );
+                HlsTsPesInspectionState::Finite { declared_bytes, observed_bytes, started_at_packet_index } => {
+                    return HlsTsSpliceEvidence::Incompatible(HlsTsSpliceIncompatibility::IncompletePes {
+                        pid,
+                        packet_index: started_at_packet_index,
+                        declared_bytes: Some(declared_bytes),
+                        observed_bytes,
+                    });
                 }
                 HlsTsPesInspectionState::UnboundedVideo => {}
             }
@@ -1439,10 +1337,7 @@ fn advance_ts_pes_inspection(
 ) -> Result<Option<HlsTsPesInspectionState>, HlsTsSpliceIncompatibility> {
     let state = if payload_unit_start {
         match previous {
-            Some(HlsTsPesInspectionState::Header {
-                started_at_packet_index,
-                ..
-            }) => {
+            Some(HlsTsPesInspectionState::Header { started_at_packet_index, .. }) => {
                 return Err(HlsTsSpliceIncompatibility::IncompletePes {
                     pid,
                     packet_index: started_at_packet_index,
@@ -1450,11 +1345,7 @@ fn advance_ts_pes_inspection(
                     observed_bytes: 0,
                 });
             }
-            Some(HlsTsPesInspectionState::Finite {
-                declared_bytes,
-                observed_bytes,
-                started_at_packet_index,
-            }) => {
+            Some(HlsTsPesInspectionState::Finite { declared_bytes, observed_bytes, started_at_packet_index }) => {
                 return Err(HlsTsSpliceIncompatibility::IncompletePes {
                     pid,
                     packet_index: started_at_packet_index,
@@ -1464,35 +1355,21 @@ fn advance_ts_pes_inspection(
             }
             Some(HlsTsPesInspectionState::UnboundedVideo) | None => {}
         }
-        Some(HlsTsPesInspectionState::Header {
-            bytes: [0; 6],
-            len: 0,
-            started_at_packet_index: packet_index,
-        })
+        Some(HlsTsPesInspectionState::Header { bytes: [0; 6], len: 0, started_at_packet_index: packet_index })
     } else {
         previous
     };
     let (mut bytes, mut len, started_at_packet_index) = match state {
-        Some(HlsTsPesInspectionState::Header {
-            bytes,
-            len,
-            started_at_packet_index,
-        }) => (bytes, len, started_at_packet_index),
-        Some(HlsTsPesInspectionState::Finite {
-            declared_bytes,
-            observed_bytes,
-            started_at_packet_index,
-        }) => {
+        Some(HlsTsPesInspectionState::Header { bytes, len, started_at_packet_index }) => {
+            (bytes, len, started_at_packet_index)
+        }
+        Some(HlsTsPesInspectionState::Finite { declared_bytes, observed_bytes, started_at_packet_index }) => {
             let available = u64::try_from(payload.len()).unwrap_or(u64::MAX);
             let observed_bytes = observed_bytes.saturating_add(available).min(u64::from(declared_bytes));
             return if observed_bytes == u64::from(declared_bytes) {
                 Ok(None)
             } else {
-                Ok(Some(HlsTsPesInspectionState::Finite {
-                    declared_bytes,
-                    observed_bytes,
-                    started_at_packet_index,
-                }))
+                Ok(Some(HlsTsPesInspectionState::Finite { declared_bytes, observed_bytes, started_at_packet_index }))
             };
         }
         Some(HlsTsPesInspectionState::UnboundedVideo) => {
@@ -1510,11 +1387,7 @@ fn advance_ts_pes_inspection(
         return Ok(None);
     }
     if len < 6 {
-        return Ok(Some(HlsTsPesInspectionState::Header {
-            bytes,
-            len,
-            started_at_packet_index,
-        }));
+        return Ok(Some(HlsTsPesInspectionState::Header { bytes, len, started_at_packet_index }));
     }
     let stream_id = bytes[3];
     let declared_bytes = u16::from_be_bytes([bytes[4], bytes[5]]);
@@ -1525,17 +1398,12 @@ fn advance_ts_pes_inspection(
             Err(HlsTsSpliceIncompatibility::InvalidPes { pid, packet_index })
         };
     }
-    let observed_bytes = u64::try_from(payload.len().saturating_sub(copied))
-        .unwrap_or(u64::MAX)
-        .min(u64::from(declared_bytes));
+    let observed_bytes =
+        u64::try_from(payload.len().saturating_sub(copied)).unwrap_or(u64::MAX).min(u64::from(declared_bytes));
     if observed_bytes == u64::from(declared_bytes) {
         Ok(None)
     } else {
-        Ok(Some(HlsTsPesInspectionState::Finite {
-            declared_bytes,
-            observed_bytes,
-            started_at_packet_index,
-        }))
+        Ok(Some(HlsTsPesInspectionState::Finite { declared_bytes, observed_bytes, started_at_packet_index }))
     }
 }
 
@@ -1581,8 +1449,9 @@ impl HlsTsMediaStreamInspector {
             let available_search = self.pending.len().saturating_sub(confirmation_bytes);
             let search_end = available_search.min(self.budget.max_resync_bytes);
             let alignment = (0..=search_end).find(|offset| {
-                (0..TS_ALIGNMENT_CONFIRMATION_PACKETS)
-                    .all(|index| self.pending[offset.saturating_add(index.saturating_mul(TS_PACKET_BYTES))] == Packet::SYNC_BYTE)
+                (0..TS_ALIGNMENT_CONFIRMATION_PACKETS).all(|index| {
+                    self.pending[offset.saturating_add(index.saturating_mul(TS_PACKET_BYTES))] == Packet::SYNC_BYTE
+                })
             });
             let Some(alignment) = alignment else {
                 if available_search >= self.budget.max_resync_bytes {
@@ -1635,21 +1504,14 @@ impl HlsTsMediaStreamInspector {
         if self.invalid || !self.aligned || !valid_remainder {
             return (
                 None,
-                HlsTsSpliceEvidence::Incompatible(
-                    if self.packets_examined >= self.budget.max_packets {
-                        HlsTsSpliceIncompatibility::InspectionBudgetExhausted
-                    } else {
-                        HlsTsSpliceIncompatibility::InvalidPacket {
-                            packet_index: self.packets_examined,
-                        }
-                    },
-                ),
+                HlsTsSpliceEvidence::Incompatible(if self.packets_examined >= self.budget.max_packets {
+                    HlsTsSpliceIncompatibility::InspectionBudgetExhausted
+                } else {
+                    HlsTsSpliceIncompatibility::InvalidPacket { packet_index: self.packets_examined }
+                }),
             );
         }
-        (
-            self.timestamp_scanner.finish(),
-            self.transport_scanner.finish(topology),
-        )
+        (self.timestamp_scanner.finish(), self.transport_scanner.finish(topology))
     }
 }
 
@@ -1685,9 +1547,8 @@ impl HlsTsInspector {
     }
 
     fn record_source_bytes(&mut self, bytes: usize) {
-        self.source_bytes_examined = self
-            .source_bytes_examined
-            .saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
+        self.source_bytes_examined =
+            self.source_bytes_examined.saturating_add(u64::try_from(bytes).unwrap_or(u64::MAX));
     }
 
     fn budget_exhausted(&self) -> HlsTsProbeOutcome {
@@ -1705,11 +1566,7 @@ impl HlsTsInspector {
         self.feed_plaintext_with_mode(bytes, HlsTsInspectionMode::Complete)
     }
 
-    fn feed_plaintext_with_mode(
-        &mut self,
-        bytes: &[u8],
-        mode: HlsTsInspectionMode,
-    ) -> Option<HlsTsProbeOutcome> {
+    fn feed_plaintext_with_mode(&mut self, bytes: &[u8], mode: HlsTsInspectionMode) -> Option<HlsTsProbeOutcome> {
         self.pending.extend_from_slice(bytes);
         if !self.aligned {
             let confirmation_bytes = TS_PACKET_BYTES.saturating_mul(TS_ALIGNMENT_CONFIRMATION_PACKETS);
@@ -1719,8 +1576,9 @@ impl HlsTsInspector {
             let available_search = self.pending.len().saturating_sub(confirmation_bytes);
             let search_end = available_search.min(self.budget.max_resync_bytes);
             let alignment = (0..=search_end).find(|offset| {
-                (0..TS_ALIGNMENT_CONFIRMATION_PACKETS)
-                    .all(|index| self.pending[offset.saturating_add(index.saturating_mul(TS_PACKET_BYTES))] == Packet::SYNC_BYTE)
+                (0..TS_ALIGNMENT_CONFIRMATION_PACKETS).all(|index| {
+                    self.pending[offset.saturating_add(index.saturating_mul(TS_PACKET_BYTES))] == Packet::SYNC_BYTE
+                })
             });
             let Some(alignment) = alignment else {
                 if available_search >= self.budget.max_resync_bytes {
@@ -1929,7 +1787,7 @@ impl HlsTsSourceDecoder {
 }
 
 /// Inspects a blocking reader without retaining or mutating source media bytes.
-pub(crate) fn inspect_mpeg_ts<R: Read>(
+pub fn inspect_mpeg_ts<R: Read>(
     mut reader: R,
     protection: HlsTsProbeProtection<'_>,
     budget: HlsTsProbeBudget,
@@ -1951,8 +1809,7 @@ pub(crate) fn inspect_mpeg_ts<R: Read>(
             Err(error) => return Err(HlsTsProbeError::Io(error)),
         };
         inspector.record_source_bytes(read);
-        if let Some(outcome) =
-            decoder.with_plaintext(&buffer[..read], |plaintext| inspector.feed_plaintext(plaintext))
+        if let Some(outcome) = decoder.with_plaintext(&buffer[..read], |plaintext| inspector.feed_plaintext(plaintext))
         {
             return Ok(outcome);
         }
@@ -1962,7 +1819,7 @@ pub(crate) fn inspect_mpeg_ts<R: Read>(
 }
 
 /// Async cache-file entry point backed by the same parser and CBC state machine.
-pub(crate) async fn inspect_mpeg_ts_async<R: AsyncRead + Unpin>(
+pub async fn inspect_mpeg_ts_async<R: AsyncRead + Unpin>(
     mut reader: R,
     protection: HlsTsProbeProtection<'_>,
     budget: HlsTsProbeBudget,
@@ -1982,8 +1839,7 @@ pub(crate) async fn inspect_mpeg_ts_async<R: AsyncRead + Unpin>(
             break;
         }
         inspector.record_source_bytes(read);
-        if let Some(outcome) =
-            decoder.with_plaintext(&buffer[..read], |plaintext| inspector.feed_plaintext(plaintext))
+        if let Some(outcome) = decoder.with_plaintext(&buffer[..read], |plaintext| inspector.feed_plaintext(plaintext))
         {
             return Ok(outcome);
         }
@@ -1996,7 +1852,7 @@ pub(crate) async fn inspect_mpeg_ts_async<R: AsyncRead + Unpin>(
 ///
 /// PAT/PMT discovery may settle from the prefix, while timestamp collection continues to
 /// EOF in bounded chunks. Valid AES-CBC padding is excluded from the aligned TS stream.
-pub(crate) async fn inspect_mpeg_ts_media_evidence_async<R: AsyncRead + Unpin>(
+pub async fn inspect_mpeg_ts_media_evidence_async<R: AsyncRead + Unpin>(
     mut reader: R,
     protection: HlsTsProbeProtection<'_>,
     budget: HlsTsProbeBudget,
@@ -2026,8 +1882,7 @@ pub(crate) async fn inspect_mpeg_ts_media_evidence_async<R: AsyncRead + Unpin>(
         if read == 0 {
             break;
         }
-        source_bytes_examined =
-            source_bytes_examined.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        source_bytes_examined = source_bytes_examined.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         if track_outcome.is_none() {
             track_inspector.record_source_bytes(read);
         }
@@ -2039,8 +1894,7 @@ pub(crate) async fn inspect_mpeg_ts_media_evidence_async<R: AsyncRead + Unpin>(
         });
     }
     decoder.finish()?;
-    let track_outcome =
-        track_outcome.unwrap_or_else(|| track_inspector.finish_complete(plaintext_remainder));
+    let track_outcome = track_outcome.unwrap_or_else(|| track_inspector.finish_complete(plaintext_remainder));
     let topology = match &track_outcome {
         HlsTsProbeOutcome::Found(signature) => Some(signature.clone()),
         HlsTsProbeOutcome::ProbeBudgetExhausted { .. }
@@ -2071,9 +1925,7 @@ mod tests {
         section
     }
 
-    fn psi_version_byte(version: u8, current: bool) -> u8 {
-        0xC0 | ((version & 0x1F) << 1) | u8::from(current)
-    }
+    fn psi_version_byte(version: u8, current: bool) -> u8 { 0xC0 | ((version & 0x1F) << 1) | u8::from(current) }
 
     fn pat_section_with_header(
         programs: &[(u16, u16)],
@@ -2102,9 +1954,7 @@ mod tests {
         append_crc(section)
     }
 
-    fn pat_section(programs: &[(u16, u16)]) -> Vec<u8> {
-        pat_section_with_header(programs, 0, true, 0, 0)
-    }
+    fn pat_section(programs: &[(u16, u16)]) -> Vec<u8> { pat_section_with_header(programs, 0, true, 0, 0) }
 
     #[derive(Clone, Copy)]
     struct PmtSectionHeader {
@@ -2200,10 +2050,7 @@ mod tests {
     }
 
     fn psi_start_packet_with_pointer(pid: u16, previous_section: &[u8], section_start: &[u8]) -> [u8; TS_PACKET_BYTES] {
-        let payload_length = 1usize
-            .saturating_add(previous_section.len())
-            .saturating_add(section_start.len())
-            .min(184);
+        let payload_length = 1usize.saturating_add(previous_section.len()).saturating_add(section_start.len()).min(184);
         let mut packet = [0xFF_u8; TS_PACKET_BYTES];
         packet[0] = Packet::SYNC_BYTE;
         packet[1] = (u8::try_from(pid >> 8).unwrap_or(0) & 0x1F) | 0x40;
@@ -2270,11 +2117,7 @@ mod tests {
         packet
     }
 
-    fn media_adaptation_only_packet(
-        pid: u16,
-        continuity_counter: u8,
-        discontinuity: bool,
-    ) -> [u8; TS_PACKET_BYTES] {
+    fn media_adaptation_only_packet(pid: u16, continuity_counter: u8, discontinuity: bool) -> [u8; TS_PACKET_BYTES] {
         let mut packet = [0xFF_u8; TS_PACKET_BYTES];
         packet[0] = Packet::SYNC_BYTE;
         packet[1] = u8::try_from(pid >> 8).unwrap_or(0) & 0x1F;
@@ -2325,9 +2168,8 @@ mod tests {
     }
 
     fn multi_packet_pat_stream() -> Vec<u8> {
-        let programs = (0_u16..46)
-            .map(|index| (index.saturating_add(1), 0x100_u16.saturating_add(index)))
-            .collect::<Vec<_>>();
+        let programs =
+            (0_u16..46).map(|index| (index.saturating_add(1), 0x100_u16.saturating_add(index))).collect::<Vec<_>>();
         let mut stream = packetize_section(0, &pat_section(&programs), 0);
         for (program_number, pmt_pid) in programs {
             stream.extend_from_slice(&packetize_section(
@@ -2364,18 +2206,9 @@ mod tests {
                 pmt_pid: 0x100,
                 pcr_pid: 0x101,
                 streams: Arc::from([
-                    HlsTsElementaryStreamBinding {
-                        stream_type: 0x1B,
-                        elementary_pid: 0x101,
-                    },
-                    HlsTsElementaryStreamBinding {
-                        stream_type: 0x0F,
-                        elementary_pid: 0x102,
-                    },
-                    HlsTsElementaryStreamBinding {
-                        stream_type: 0x0F,
-                        elementary_pid: 0x103,
-                    },
+                    HlsTsElementaryStreamBinding { stream_type: 0x1B, elementary_pid: 0x101 },
+                    HlsTsElementaryStreamBinding { stream_type: 0x0F, elementary_pid: 0x102 },
+                    HlsTsElementaryStreamBinding { stream_type: 0x0F, elementary_pid: 0x103 },
                 ]),
             }]
         );
@@ -2425,10 +2258,7 @@ mod tests {
         valid.extend_from_slice(&media_payload_packet(pid, 3, true, false, &exact_pes));
         valid.extend_from_slice(&media_adaptation_only_packet(pid, 3, false));
         valid.extend_from_slice(&media_payload_packet(pid, 4, true, false, &next_pes));
-        assert!(matches!(
-            complete_media_evidence(&valid).await.splice_evidence,
-            HlsTsSpliceEvidence::Compatible(_)
-        ));
+        assert!(matches!(complete_media_evidence(&valid).await.splice_evidence, HlsTsSpliceEvidence::Compatible(_)));
 
         let mut discontinuity = track_stream(0);
         discontinuity.extend_from_slice(&media_payload_packet(pid, 3, true, false, &exact_pes));
@@ -2477,10 +2307,7 @@ mod tests {
         tei.extend_from_slice(&tei_packet);
         assert!(matches!(
             complete_media_evidence(&tei).await.splice_evidence,
-            HlsTsSpliceEvidence::Incompatible(HlsTsSpliceIncompatibility::TransportError {
-                pid: 0x101,
-                ..
-            })
+            HlsTsSpliceEvidence::Incompatible(HlsTsSpliceIncompatibility::TransportError { pid: 0x101, .. })
         ));
     }
 
@@ -2488,13 +2315,7 @@ mod tests {
     async fn complete_media_evidence_accounts_finite_split_and_unbounded_pes() {
         let pid = 0x101;
         let mut truncated = track_stream(0);
-        truncated.extend_from_slice(&media_payload_packet(
-            pid,
-            0,
-            true,
-            false,
-            &pes_bytes(0xE0, 20, &[0xAA; 8]),
-        ));
+        truncated.extend_from_slice(&media_payload_packet(pid, 0, true, false, &pes_bytes(0xE0, 20, &[0xAA; 8])));
         assert!(matches!(
             complete_media_evidence(&truncated).await.splice_evidence,
             HlsTsSpliceEvidence::Incompatible(HlsTsSpliceIncompatibility::IncompletePes {
@@ -2506,35 +2327,17 @@ mod tests {
         ));
 
         let mut exact = track_stream(0);
-        exact.extend_from_slice(&media_payload_packet(
-            pid,
-            0,
-            true,
-            false,
-            &pes_bytes(0xE0, 8, &[0xAA; 8]),
-        ));
-        assert!(matches!(
-            complete_media_evidence(&exact).await.splice_evidence,
-            HlsTsSpliceEvidence::Compatible(_)
-        ));
+        exact.extend_from_slice(&media_payload_packet(pid, 0, true, false, &pes_bytes(0xE0, 8, &[0xAA; 8])));
+        assert!(matches!(complete_media_evidence(&exact).await.splice_evidence, HlsTsSpliceEvidence::Compatible(_)));
 
         let header = pes_bytes(0xE0, 5, &[1, 2, 3, 4, 5]);
         let mut split = track_stream(0);
         split.extend_from_slice(&media_payload_packet(pid, 0, true, false, &header[..4]));
         split.extend_from_slice(&media_payload_packet(pid, 1, false, false, &header[4..]));
-        assert!(matches!(
-            complete_media_evidence(&split).await.splice_evidence,
-            HlsTsSpliceEvidence::Compatible(_)
-        ));
+        assert!(matches!(complete_media_evidence(&split).await.splice_evidence, HlsTsSpliceEvidence::Compatible(_)));
 
         let mut unbounded = track_stream(0);
-        unbounded.extend_from_slice(&media_payload_packet(
-            pid,
-            0,
-            true,
-            false,
-            &pes_bytes(0xE0, 0, &[0x80, 0, 0, 1]),
-        ));
+        unbounded.extend_from_slice(&media_payload_packet(pid, 0, true, false, &pes_bytes(0xE0, 0, &[0x80, 0, 0, 1])));
         assert!(matches!(
             complete_media_evidence(&unbounded).await.splice_evidence,
             HlsTsSpliceEvidence::Compatible(_)
@@ -2544,22 +2347,19 @@ mod tests {
         invalid.extend_from_slice(&media_payload_packet(pid, 0, true, false, &[0x12, 0x34, 0x56]));
         assert!(matches!(
             complete_media_evidence(&invalid).await.splice_evidence,
-            HlsTsSpliceEvidence::Incompatible(HlsTsSpliceIncompatibility::InvalidPes {
-                pid: 0x101,
-                ..
-            })
+            HlsTsSpliceEvidence::Incompatible(HlsTsSpliceIncompatibility::InvalidPes { pid: 0x101, .. })
         ));
     }
 
     #[tokio::test]
     async fn current_terminal_asset_and_finalized_segment_zero_have_complete_splice_evidence() {
         const TERMINAL_ASSET_BYTES: &[u8] =
-            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
-        let renderer = crate::mpegts::transport_stream_buffer::TransportStreamBuffer::new(TERMINAL_ASSET_BYTES.to_vec());
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"));
+        let renderer = crate::transport_stream_buffer::TransportStreamBuffer::new(TERMINAL_ASSET_BYTES.to_vec());
         let duration_ticks = renderer.duration_ticks_90khz().expect("terminal asset duration");
         let asset_profile = renderer.finite_hls_timestamp_profile().expect("terminal asset profile");
         let prepared = renderer
-            .render_finite_hls_segment(crate::mpegts::transport_stream_buffer::HlsFiniteTsRenderSpec {
+            .render_finite_hls_segment(crate::transport_stream_buffer::HlsFiniteTsRenderSpec {
                 timestamp_offset_ticks_90khz: 0,
                 continuity_seed: 0,
                 logical_segment_index: 0,
@@ -2568,9 +2368,9 @@ mod tests {
         let finalized = renderer
             .finalize_prepared_finite_hls_segment(
                 &prepared,
-                crate::mpegts::transport_stream_buffer::HlsFiniteTsFinalizeSpec {
+                crate::transport_stream_buffer::HlsFiniteTsFinalizeSpec {
                     additional_timestamp_offset_ticks_90khz: 90_000,
-                    discontinuity: crate::mpegts::transport_stream_buffer::HlsFiniteTsDiscontinuityMode::FirstPacketPerPid,
+                    discontinuity: crate::transport_stream_buffer::HlsFiniteTsDiscontinuityMode::FirstPacketPerPid,
                 },
             )
             .expect("finalized terminal segment zero");
@@ -2581,10 +2381,7 @@ mod tests {
         assert_eq!(base.timestamp_profile, Some(asset_profile));
         assert!(matches!(base.splice_evidence, HlsTsSpliceEvidence::Compatible(_)));
         assert!(matches!(terminal.splice_evidence, HlsTsSpliceEvidence::Compatible(_)));
-        assert_eq!(
-            evaluate_mpeg_ts_splice_boundary(&base.splice_evidence, &terminal.splice_evidence),
-            Ok(())
-        );
+        assert_eq!(evaluate_mpeg_ts_splice_boundary(&base.splice_evidence, &terminal.splice_evidence), Ok(()));
         assert_eq!(
             terminal.timestamp_profile.map(|profile| profile.span_ticks_90khz),
             Some(asset_profile.span_ticks_90khz)
@@ -2611,11 +2408,7 @@ mod tests {
 
     #[test]
     fn ts_inspector_restarts_incomplete_pat_on_new_current_version() {
-        let mut stream = packetize_section(
-            0,
-            &pat_section_with_header(&[(1, 0x100)], 0, true, 0, 1),
-            0,
-        );
+        let mut stream = packetize_section(0, &pat_section_with_header(&[(1, 0x100)], 0, true, 0, 1), 0);
         stream.extend_from_slice(&packetize_section(
             0x100,
             &pmt_section_with_header(
@@ -2627,11 +2420,7 @@ mod tests {
             ),
             0,
         ));
-        stream.extend_from_slice(&packetize_section(
-            0,
-            &pat_section_with_header(&[(2, 0x200)], 1, true, 0, 0),
-            1,
-        ));
+        stream.extend_from_slice(&packetize_section(0, &pat_section_with_header(&[(2, 0x200)], 1, true, 0, 0), 1));
         stream.extend_from_slice(&packetize_section(
             0x200,
             &pmt_section(2, 0x201, &[(0x1B, 0x201), (0x0F, 0x202)], 0),
@@ -2685,28 +2474,16 @@ mod tests {
 
     #[test]
     fn ts_inspector_never_mixes_pat_or_pmt_sections_across_versions() {
-        let mut pat_version_mix = packetize_section(
-            0,
-            &pat_section_with_header(&[(1, 0x100)], 0, true, 0, 1),
-            0,
-        );
+        let mut pat_version_mix = packetize_section(0, &pat_section_with_header(&[(1, 0x100)], 0, true, 0, 1), 0);
         pat_version_mix.extend_from_slice(&packetize_section(
             0,
             &pat_section_with_header(&[(2, 0x200)], 1, true, 1, 1),
             1,
         ));
-        pat_version_mix.extend_from_slice(&packetize_section(
-            0x200,
-            &pmt_section(2, 0x201, &[(0x1B, 0x201)], 0),
-            0,
-        ));
+        pat_version_mix.extend_from_slice(&packetize_section(0x200, &pmt_section(2, 0x201, &[(0x1B, 0x201)], 0), 0));
         assert_eq!(
-            inspect_mpeg_ts(
-                Cursor::new(pat_version_mix),
-                HlsTsProbeProtection::Clear,
-                HlsTsProbeBudget::default(),
-            )
-            .expect("probe completes"),
+            inspect_mpeg_ts(Cursor::new(pat_version_mix), HlsTsProbeProtection::Clear, HlsTsProbeBudget::default(),)
+                .expect("probe completes"),
             HlsTsProbeOutcome::Malformed(HlsTsMalformedReason::IncompleteProgramMetadata)
         );
 
@@ -2746,23 +2523,15 @@ mod tests {
 
     #[test]
     fn ts_inspector_rejects_same_version_pat_and_pmt_section_contradictions() {
-        let mut contradictory_pat = packetize_section(
-            0,
-            &pat_section_with_header(&[(1, 0x100)], 0, true, 0, 1),
-            0,
-        );
+        let mut contradictory_pat = packetize_section(0, &pat_section_with_header(&[(1, 0x100)], 0, true, 0, 1), 0);
         contradictory_pat.extend_from_slice(&packetize_section(
             0,
             &pat_section_with_header(&[(1, 0x101)], 0, true, 0, 1),
             1,
         ));
         assert_eq!(
-            inspect_mpeg_ts(
-                Cursor::new(contradictory_pat),
-                HlsTsProbeProtection::Clear,
-                HlsTsProbeBudget::default(),
-            )
-            .expect("probe completes"),
+            inspect_mpeg_ts(Cursor::new(contradictory_pat), HlsTsProbeProtection::Clear, HlsTsProbeBudget::default(),)
+                .expect("probe completes"),
             HlsTsProbeOutcome::Malformed(HlsTsMalformedReason::InvalidPat)
         );
 
@@ -2790,21 +2559,9 @@ mod tests {
 
     #[test]
     fn ts_inspector_next_pat_or_pmt_does_not_change_current_evidence() {
-        let mut stream = packetize_section(
-            0,
-            &pat_section_with_header(&[(1, 0x100)], 0, true, 0, 1),
-            0,
-        );
-        stream.extend_from_slice(&packetize_section(
-            0,
-            &pat_section_with_header(&[(2, 0x200)], 1, false, 1, 1),
-            1,
-        ));
-        stream.extend_from_slice(&packetize_section(
-            0,
-            &pat_section_with_header(&[], 0, true, 1, 1),
-            2,
-        ));
+        let mut stream = packetize_section(0, &pat_section_with_header(&[(1, 0x100)], 0, true, 0, 1), 0);
+        stream.extend_from_slice(&packetize_section(0, &pat_section_with_header(&[(2, 0x200)], 1, false, 1, 1), 1));
+        stream.extend_from_slice(&packetize_section(0, &pat_section_with_header(&[], 0, true, 1, 1), 2));
         for (counter, header, stream_type, pcr_pid, elementary_pid) in [
             (
                 0,
@@ -2830,13 +2587,7 @@ mod tests {
         ] {
             stream.extend_from_slice(&packetize_section(
                 0x100,
-                &pmt_section_with_header(
-                    1,
-                    pcr_pid,
-                    &[(stream_type, elementary_pid)],
-                    0,
-                    header,
-                ),
+                &pmt_section_with_header(1, pcr_pid, &[(stream_type, elementary_pid)], 0, header),
                 counter,
             ));
         }
@@ -2860,9 +2611,8 @@ mod tests {
         stream.extend_from_slice(&null_packet());
         let budget = HlsTsProbeBudget { read_chunk_bytes: 191, ..HlsTsProbeBudget::default() };
 
-        let signature = found(
-            inspect_mpeg_ts(Cursor::new(stream), HlsTsProbeProtection::Clear, budget).expect("probe succeeds"),
-        );
+        let signature =
+            found(inspect_mpeg_ts(Cursor::new(stream), HlsTsProbeProtection::Clear, budget).expect("probe succeeds"));
 
         assert_eq!(signature.program_count, 1);
         assert_eq!(signature.stream_types.as_ref(), &[0x0F, 0x1B]);
@@ -2874,9 +2624,8 @@ mod tests {
             7,
         ));
         stream.extend_from_slice(&null_packet());
-        let signature = found(
-            inspect_mpeg_ts(Cursor::new(stream), HlsTsProbeProtection::Clear, budget).expect("probe succeeds"),
-        );
+        let signature =
+            found(inspect_mpeg_ts(Cursor::new(stream), HlsTsProbeProtection::Clear, budget).expect("probe succeeds"));
         assert_eq!(signature.stream_types.as_ref(), &[0x0F, 0x1B]);
     }
 
@@ -2904,17 +2653,10 @@ mod tests {
         let mut stream = psi_start_packet_with_pointer(0, &[], &[]).to_vec();
         stream.extend_from_slice(&null_packet());
 
-        let outcome = inspect_mpeg_ts(
-            Cursor::new(stream),
-            HlsTsProbeProtection::Clear,
-            HlsTsProbeBudget::default(),
-        )
-        .expect("probe completes");
+        let outcome = inspect_mpeg_ts(Cursor::new(stream), HlsTsProbeProtection::Clear, HlsTsProbeBudget::default())
+            .expect("probe completes");
 
-        assert!(matches!(
-            outcome,
-            HlsTsProbeOutcome::Malformed(HlsTsMalformedReason::InvalidPsiPointer)
-        ));
+        assert!(matches!(outcome, HlsTsProbeOutcome::Malformed(HlsTsMalformedReason::InvalidPsiPointer)));
     }
 
     struct CountingReader {
@@ -3037,8 +2779,8 @@ mod tests {
     #[tokio::test]
     async fn aes128_terminal_base_timestamp_profile_uses_decrypted_cached_bytes() {
         const TERMINAL_ASSET_BYTES: &[u8] =
-            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
-        let asset = crate::mpegts::transport_stream_buffer::TransportStreamBuffer::new(TERMINAL_ASSET_BYTES.to_vec());
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"));
+        let asset = crate::transport_stream_buffer::TransportStreamBuffer::new(TERMINAL_ASSET_BYTES.to_vec());
         let expected_profile = asset.finite_hls_timestamp_profile().expect("fixture timestamp profile");
         let expected_signature = asset.finite_hls_track_signature().expect("fixture track signature");
         let key = *b"0123456789abcdef";
@@ -3078,11 +2820,7 @@ mod tests {
 
         let sync_signature = found(
             inspect_mpeg_ts(
-                VirtualTailReader::new(
-                    Arc::clone(&ciphertext),
-                    LOGICAL_SEGMENT_BYTES,
-                    Arc::clone(&sync_read),
-                ),
+                VirtualTailReader::new(Arc::clone(&ciphertext), LOGICAL_SEGMENT_BYTES, Arc::clone(&sync_read)),
                 HlsTsProbeProtection::Aes128Cbc { key: &key, iv },
                 HlsTsProbeBudget::default(),
             )
@@ -3109,8 +2847,7 @@ mod tests {
         let budget = HlsTsProbeBudget { read_chunk_bytes: 191, ..HlsTsProbeBudget::default() };
         let mut plaintext = track_stream(400);
         let clear_signature = found(
-            inspect_mpeg_ts(Cursor::new(&plaintext), HlsTsProbeProtection::Clear, budget)
-                .expect("sync probe succeeds"),
+            inspect_mpeg_ts(Cursor::new(&plaintext), HlsTsProbeProtection::Clear, budget).expect("sync probe succeeds"),
         );
         let async_clear_signature = found(
             inspect_mpeg_ts_async(&plaintext[..], HlsTsProbeProtection::Clear, budget)
@@ -3122,13 +2859,9 @@ mod tests {
         let iv = [0xA5; AES_128_BLOCK_BYTES];
         let ciphertext = encrypt_aes128_cbc(&plaintext, &key, iv);
         let async_aes_signature = found(
-            inspect_mpeg_ts_async(
-                &ciphertext[..],
-                HlsTsProbeProtection::Aes128Cbc { key: &key, iv },
-                budget,
-            )
-            .await
-            .expect("async AES probe succeeds"),
+            inspect_mpeg_ts_async(&ciphertext[..], HlsTsProbeProtection::Aes128Cbc { key: &key, iv }, budget)
+                .await
+                .expect("async AES probe succeeds"),
         );
 
         assert_eq!(async_clear_signature, clear_signature);
@@ -3159,10 +2892,8 @@ mod tests {
             HlsTrackEvidenceResolution::InsufficientEvidence { bytes_examined: 512, packets_examined: 2 }
         );
         assert_eq!(
-            HlsTrackEvidenceResolution::from(Ok(HlsTsProbeOutcome::Malformed(
-                HlsTsMalformedReason::InvalidPmt,
-            )))
-            .reason_code(),
+            HlsTrackEvidenceResolution::from(Ok(HlsTsProbeOutcome::Malformed(HlsTsMalformedReason::InvalidPmt,)))
+                .reason_code(),
             "invalid-pmt"
         );
         assert_eq!(

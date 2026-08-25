@@ -2561,17 +2561,17 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::oneshot;
 
-    const TERMINAL_ASSET_BYTES: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
+    const TERMINAL_ASSET_BYTES: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"));
     const LOW_PRIORITY_ASSET_BYTES: &[u8] =
-        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/low_priority_preempted.ts"));
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/low_priority_preempted.ts"));
     const PROVIDER_EXHAUSTED_ASSET_BYTES: &[u8] =
-        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/provider_connections_exhausted.ts"));
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/provider_connections_exhausted.ts"));
     const USER_EXHAUSTED_ASSET_BYTES: &[u8] =
-        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/user_connections_exhausted.ts"));
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/user_connections_exhausted.ts"));
     const ACCOUNT_EXPIRED_ASSET_BYTES: &[u8] =
-        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/user_account_expired.ts"));
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/user_account_expired.ts"));
     const SESSION_EXPIRED_ASSET_BYTES: &[u8] =
-        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/hls_session_or_lease_expired.ts"));
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/hls_session_or_lease_expired.ts"));
 
     #[test]
     fn availability_refresh_waits_for_completion_instead_of_polling_in_flight() {

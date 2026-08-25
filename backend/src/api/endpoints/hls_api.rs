@@ -9561,7 +9561,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("recovery cache tempdir");
         let unchanged_manifest = Arc::<[u8]>::from(regression_origin_manifest(100, 6));
         let progressed_manifest = Arc::<[u8]>::from(regression_origin_manifest(101, 6));
-        let segment = Arc::<[u8]>::from(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts")).as_slice());
+        let segment = Arc::<[u8]>::from(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts")).as_slice());
         let origin_phase = Arc::new(AtomicUsize::new(0));
         let phase = Arc::clone(&origin_phase);
         let origin = spawn_test_binary_origin(Arc::new(move |path| {
@@ -9742,7 +9742,7 @@ mod tests {
         let pinned_manifest = Arc::<[u8]>::from(regression_origin_manifest(100, 6));
         let alternative_manifest = Arc::<[u8]>::from(regression_origin_manifest(200, 6));
         let continued_manifest = Arc::<[u8]>::from(regression_origin_manifest(201, 6));
-        let segment = Arc::<[u8]>::from(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts")).as_slice());
+        let segment = Arc::<[u8]>::from(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts")).as_slice());
         let alternative_phase = Arc::new(AtomicUsize::new(0));
         let alternative_phase_for_handler = Arc::clone(&alternative_phase);
         let alternative_segment = Arc::clone(&segment);
@@ -12363,13 +12363,13 @@ mod tests {
         app_state.app_config.custom_stream_response.store(Some(Arc::new(CustomStreamResponse {
             channel_unavailable: None,
             user_connections_exhausted: Some(TransportStreamBuffer::new(
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/user_connections_exhausted.ts")).to_vec(),
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/user_connections_exhausted.ts")).to_vec(),
             )),
             provider_connections_exhausted: Some(TransportStreamBuffer::new(
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/provider_connections_exhausted.ts")).to_vec(),
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/provider_connections_exhausted.ts")).to_vec(),
             )),
             low_priority_preempted: Some(TransportStreamBuffer::new(
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/low_priority_preempted.ts")).to_vec(),
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/low_priority_preempted.ts")).to_vec(),
             )),
             user_account_expired: None,
             panel_api_provisioning: None,
@@ -12397,7 +12397,7 @@ mod tests {
     }
 
     fn test_custom_video_buffer() -> TransportStreamBuffer {
-        TransportStreamBuffer::new(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts")).to_vec())
+        TransportStreamBuffer::new(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts")).to_vec())
     }
 
     fn enable_hls_provisioning_custom_response(app_state: &Arc<AppState>) {
@@ -14519,7 +14519,7 @@ mod tests {
     const AES_TEST_MANIFEST: &[u8] = b"#EXTM3U\n#EXT-X-VERSION:5\n#EXT-X-TARGETDURATION:12\n#EXT-X-MEDIA-SEQUENCE:77\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\",KEYFORMAT=\"identity\",KEYFORMATVERSIONS=\"1\"\n#EXTINF:12,\n77.ts\n#EXTINF:12,\n78.ts\n#EXTINF:12,\n79.ts\n#EXTINF:12,\n80.ts\n#EXTINF:12,\n81.ts\n#EXTINF:12,\n82.ts\n";
     const AES_TEST_KEY_BYTES: &[u8] = b"0123456789abcdef";
     const AES_TEST_ROTATED_KEY_BYTES: &[u8] = b"fedcba9876543210";
-    const AES_TEST_PLAINTEXT_SEGMENT: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
+    const AES_TEST_PLAINTEXT_SEGMENT: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"));
 
     struct AesEndpointFixture {
         _temp_dir: tempfile::TempDir,
@@ -15550,7 +15550,7 @@ mod tests {
     async fn publication_late_fixture() -> PublicationLateFixture {
         let initial_manifest = Arc::<[u8]>::from(regression_origin_manifest(123, 6));
         let progressed_manifest = Arc::<[u8]>::from(regression_origin_manifest(124, 6));
-        let segment = Arc::<[u8]>::from(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts")).as_slice());
+        let segment = Arc::<[u8]>::from(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts")).as_slice());
         let origin_phase = Arc::new(AtomicUsize::new(0));
         let origin_phase_for_handler = Arc::clone(&origin_phase);
         let origin = spawn_test_binary_origin(Arc::new(move |path| {
@@ -17533,7 +17533,7 @@ mod tests {
         let app_state =
             test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_cache_settings(temp_dir.path(), 300)));
         enable_runtime_policy_custom_responses(&app_state);
-        let live_bytes = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
+        let live_bytes = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"));
         let proxy_session_id =
             ProxySessionId(map_ready_segment_without_lease(&app_state, 123, "ts", live_bytes).await);
         let session = app_state
@@ -18645,7 +18645,7 @@ mod tests {
     }
 
     fn terminal_test_asset() -> Arc<HlsTerminalMediaAsset> {
-        let bytes = bytes::Bytes::from_static(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts")));
+        let bytes = bytes::Bytes::from_static(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts")));
         let buffer = TransportStreamBuffer::new(bytes.to_vec());
         snapshot_terminal_media_asset(&buffer).expect("terminal test asset is valid")
     }
@@ -18748,7 +18748,7 @@ mod tests {
         let proxy_session_id = ProxySessionId(proxy_session_id.to_string());
         let lease_id = HlsAccessLeaseId(lease_id.to_string());
         let buffer = TransportStreamBuffer::new(
-            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts")).to_vec(),
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts")).to_vec(),
         );
         let asset = snapshot_terminal_media_asset(&buffer).expect("terminal test asset is valid");
         let base_manifest = HlsLeaseManifestSnapshot {

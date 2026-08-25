@@ -7627,7 +7627,7 @@ mod tests {
 
     const SWITCH_MAP_BODY: &[u8] = b"complete-switch-map";
     const SWITCH_SEGMENT_BODY: &[u8] = b"complete-switch-segment-body";
-    const CRITICAL_HANDOFF_TS_BODY: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
+    const CRITICAL_HANDOFF_TS_BODY: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"));
     const CRITICAL_HANDOFF_MANIFEST_BODY: &[u8] = b"#EXTM3U\n\
         #EXT-X-MEDIA-SEQUENCE:900\n\
         #EXT-X-TARGETDURATION:4\n\

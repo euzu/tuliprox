@@ -10,5 +10,5 @@
 //! layers parse live ones. Nothing here may name `api`, `AppState` or a
 //! repository.
 
-pub(crate) mod transport_stream_buffer;
-pub(crate) mod ts_inspector;
+pub mod transport_stream_buffer;
+pub mod ts_inspector;

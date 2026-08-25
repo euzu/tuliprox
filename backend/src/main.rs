@@ -38,6 +38,7 @@ use std::{
     sync::Arc,
 };
 use tuliprox_media_server as media_server;
+use tuliprox_mpegts as mpegts;
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Parser)]

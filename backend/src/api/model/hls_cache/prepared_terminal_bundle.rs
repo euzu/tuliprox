@@ -893,7 +893,7 @@ mod tests {
         Condvar,
     };
 
-    const TERMINAL_ASSET_BYTES: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
+    const TERMINAL_ASSET_BYTES: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"));
     const TARGET_DURATION_MS: u64 = 12_000;
     const SEGMENT_COUNT: u16 = super::super::terminal_tail::HLS_TERMINAL_TAIL_SEGMENT_COUNT;
 

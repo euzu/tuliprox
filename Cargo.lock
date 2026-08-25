@@ -4458,6 +4458,7 @@ dependencies = [
  "tower_governor",
  "tuliprox-btree",
  "tuliprox-media-server",
+ "tuliprox-mpegts",
  "url",
  "uuid",
  "vergen",
@@ -4501,6 +4502,20 @@ dependencies = [
  "shared",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "tuliprox-mpegts"
+version = "3.3.91"
+dependencies = [
+ "aes",
+ "bytes",
+ "futures",
+ "mpeg2ts-reader",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

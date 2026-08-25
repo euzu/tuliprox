@@ -28,9 +28,7 @@ fn forward_clock_distance_90khz(start: u64, end: u64) -> u64 {
 
 #[inline]
 #[allow(clippy::cast_possible_truncation)]
-fn pcr_offset_27mhz(offset_90khz: u64) -> u64 {
-    (u128::from(offset_90khz) * 300_u128 % u128::from(MAX_PCR)) as u64
-}
+fn pcr_offset_27mhz(offset_90khz: u64) -> u64 { (u128::from(offset_90khz) * 300_u128 % u128::from(MAX_PCR)) as u64 }
 
 #[inline]
 #[allow(clippy::cast_possible_truncation)]
@@ -101,13 +99,13 @@ fn decode_pcr(pcr_bytes: &[u8]) -> u64 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HlsTsTimestampFieldKind {
+pub enum HlsTsTimestampFieldKind {
     Pts,
     Dts,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HlsTsTimestampFieldLocation {
+pub struct HlsTsTimestampFieldLocation {
     pub pid: u16,
     pub kind: HlsTsTimestampFieldKind,
     /// Absolute byte offsets in the immutable aligned TS buffer. One field may span packets.
@@ -115,7 +113,7 @@ pub(crate) struct HlsTsTimestampFieldLocation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HlsTsPcrFieldLocation {
+pub struct HlsTsPcrFieldLocation {
     pub pid: u16,
     pub byte_offset: usize,
 }
@@ -134,14 +132,8 @@ enum HlsFiniteTsLayoutError {
     InvalidPesTimestampField { pid: u16, kind: HlsTsTimestampFieldKind },
     #[error("PES timestamp header for PID {pid} was interrupted by a new payload unit")]
     PesTimestampHeaderInterrupted { pid: u16 },
-    #[error(
-        "PES timestamp header continuity failed for PID {pid}: expected {expected:?}, actual {actual}"
-    )]
-    PesTimestampContinuityDiscontinuity {
-        pid: u16,
-        expected: Option<u8>,
-        actual: u8,
-    },
+    #[error("PES timestamp header continuity failed for PID {pid}: expected {expected:?}, actual {actual}")]
+    PesTimestampContinuityDiscontinuity { pid: u16, expected: Option<u8>, actual: u8 },
     #[error("PES timestamp header for PID {pid} is incomplete")]
     IncompletePesTimestampHeader { pid: u16 },
     #[error("too many concurrent split PES timestamp headers")]
@@ -155,7 +147,7 @@ enum HlsFiniteTsLayoutError {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct HlsPendingPesHeader {
+pub struct HlsPendingPesHeader {
     pub pid: u16,
     pub bytes: [u8; HLS_TS_TIMESTAMP_HEADER_BYTES],
     pub byte_offsets: [usize; HLS_TS_TIMESTAMP_HEADER_BYTES],
@@ -202,15 +194,8 @@ impl HlsTsPacketEvidence {
     const fn has_payload(self) -> bool { self.payload_offset.is_some() }
 }
 
-fn inspect_hls_ts_packet(
-    packet: &[u8],
-    packet_start: usize,
-) -> Result<HlsTsPacketEvidence, HlsFiniteTsLayoutError> {
-    if packet.len() != TS_PACKET_SIZE
-        || packet[0] != SYNC_BYTE
-        || packet[1] & 0x80 != 0
-        || packet[3] & 0xC0 != 0
-    {
+fn inspect_hls_ts_packet(packet: &[u8], packet_start: usize) -> Result<HlsTsPacketEvidence, HlsFiniteTsLayoutError> {
+    if packet.len() != TS_PACKET_SIZE || packet[0] != SYNC_BYTE || packet[1] & 0x80 != 0 || packet[3] & 0xC0 != 0 {
         return Err(HlsFiniteTsLayoutError::InvalidTransportPacket);
     }
     let pid = ts_packet_pid(packet);
@@ -236,9 +221,7 @@ fn inspect_hls_ts_packet(
                 }
                 pcr_field = Some(HlsTsPcrFieldLocation {
                     pid,
-                    byte_offset: packet_start
-                        .checked_add(6)
-                        .ok_or(HlsFiniteTsLayoutError::InvalidTransportPacket)?,
+                    byte_offset: packet_start.checked_add(6).ok_or(HlsFiniteTsLayoutError::InvalidTransportPacket)?,
                 });
             }
         }
@@ -273,9 +256,8 @@ fn timestamp_field_from_pending(
     start: usize,
     prefix: u8,
 ) -> Result<HlsCompletedTimestampField, HlsFiniteTsLayoutError> {
-    let end = start
-        .checked_add(5)
-        .ok_or(HlsFiniteTsLayoutError::InvalidPesTimestampField { pid: pending.pid, kind })?;
+    let end =
+        start.checked_add(5).ok_or(HlsFiniteTsLayoutError::InvalidPesTimestampField { pid: pending.pid, kind })?;
     let bytes: [u8; 5] = pending
         .bytes
         .get(start..end)
@@ -295,37 +277,20 @@ fn timestamp_field_from_pending(
     })
 }
 
-fn complete_pes_timestamps(
-    pending: &HlsPendingPesHeader,
-) -> Result<HlsCompletedPesTimestamps, HlsFiniteTsLayoutError> {
+fn complete_pes_timestamps(pending: &HlsPendingPesHeader) -> Result<HlsCompletedPesTimestamps, HlsFiniteTsLayoutError> {
     let pts_dts_flags = (pending.bytes[7] >> 6) & 0b11;
     match pts_dts_flags {
         0b00 => Ok(HlsCompletedPesTimestamps::default()),
         0b10 => Ok(HlsCompletedPesTimestamps {
             fields: [
-                Some(timestamp_field_from_pending(
-                    pending,
-                    HlsTsTimestampFieldKind::Pts,
-                    PES_PTS_OFFSET,
-                    0x02,
-                )?),
+                Some(timestamp_field_from_pending(pending, HlsTsTimestampFieldKind::Pts, PES_PTS_OFFSET, 0x02)?),
                 None,
             ],
         }),
         0b11 => Ok(HlsCompletedPesTimestamps {
             fields: [
-                Some(timestamp_field_from_pending(
-                    pending,
-                    HlsTsTimestampFieldKind::Pts,
-                    PES_PTS_OFFSET,
-                    0x03,
-                )?),
-                Some(timestamp_field_from_pending(
-                    pending,
-                    HlsTsTimestampFieldKind::Dts,
-                    PES_DTS_OFFSET,
-                    0x01,
-                )?),
+                Some(timestamp_field_from_pending(pending, HlsTsTimestampFieldKind::Pts, PES_PTS_OFFSET, 0x03)?),
+                Some(timestamp_field_from_pending(pending, HlsTsTimestampFieldKind::Dts, PES_DTS_OFFSET, 0x01)?),
             ],
         }),
         _ => Err(HlsFiniteTsLayoutError::UnsupportedPesTimestampHeader { pid: pending.pid }),
@@ -345,9 +310,8 @@ fn append_pending_pes_header(
             return Err(HlsFiniteTsLayoutError::UnsupportedPesTimestampHeader { pid: pending.pid });
         }
         pending.bytes[pending.len] = byte;
-        pending.byte_offsets[pending.len] = payload_start
-            .checked_add(payload_index)
-            .ok_or(HlsFiniteTsLayoutError::InvalidTransportPacket)?;
+        pending.byte_offsets[pending.len] =
+            payload_start.checked_add(payload_index).ok_or(HlsFiniteTsLayoutError::InvalidTransportPacket)?;
         pending.len = pending.len.saturating_add(1);
 
         if pending.len == 4 && !pes_stream_id_has_optional_header(pending.bytes[3]) {
@@ -379,9 +343,7 @@ struct HlsPesHeaderAssembler {
 }
 
 impl HlsPesHeaderAssembler {
-    fn new() -> Self {
-        Self { pending: HashMap::with_capacity(8) }
-    }
+    fn new() -> Self { Self { pending: HashMap::with_capacity(8) } }
 
     fn push_packet(
         &mut self,
@@ -402,12 +364,9 @@ impl HlsPesHeaderAssembler {
         let Some(payload_offset) = evidence.payload_offset else {
             return Ok(HlsCompletedPesTimestamps::default());
         };
-        let payload = packet
-            .get(payload_offset..)
-            .ok_or(HlsFiniteTsLayoutError::InvalidTransportPacket)?;
-        let payload_start = packet_start
-            .checked_add(payload_offset)
-            .ok_or(HlsFiniteTsLayoutError::InvalidTransportPacket)?;
+        let payload = packet.get(payload_offset..).ok_or(HlsFiniteTsLayoutError::InvalidTransportPacket)?;
+        let payload_start =
+            packet_start.checked_add(payload_offset).ok_or(HlsFiniteTsLayoutError::InvalidTransportPacket)?;
 
         if let Some(mut pending) = self.pending.remove(&evidence.pid) {
             let expected = pending.last_payload_continuity_counter.wrapping_add(1) & 0x0F;
@@ -449,7 +408,7 @@ impl HlsPesHeaderAssembler {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HlsTsTimestampProfile {
+pub struct HlsTsTimestampProfile {
     pub first_clock_90khz: u64,
     pub last_clock_90khz: u64,
     pub span_ticks_90khz: u64,
@@ -459,29 +418,23 @@ pub(crate) struct HlsTsTimestampProfile {
 
 /// MPEG-TS live-to-terminal timestamp anchor expressed in 90 kHz clock ticks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HlsTsSpliceAnchor {
+pub struct HlsTsSpliceAnchor {
     pub live_last_clock: u64,
     pub terminal_first_clock: u64,
     pub timestamp_delta_ticks: u64,
 }
 
 impl HlsTsSpliceAnchor {
-    pub(crate) fn between(
-        live_tail: HlsTsTimestampProfile,
-        terminal_asset: HlsTsTimestampProfile,
-    ) -> Option<Self> {
-        if !timestamp_profile_is_coherent(live_tail) || !timestamp_profile_is_coherent(terminal_asset)
-        {
+    pub fn between(live_tail: HlsTsTimestampProfile, terminal_asset: HlsTsTimestampProfile) -> Option<Self> {
+        if !timestamp_profile_is_coherent(live_tail) || !timestamp_profile_is_coherent(terminal_asset) {
             return None;
         }
         let terminal_first_clock_90khz =
             add_pts_dts_offset(live_tail.last_clock_90khz, HLS_TS_SPLICE_MIN_GAP_TICKS_90KHZ);
-        let timestamp_delta_ticks_90khz = terminal_first_clock_90khz
-            .wrapping_add(MAX_PTS_DTS)
-            .wrapping_sub(terminal_asset.first_clock_90khz)
-            % MAX_PTS_DTS;
-        let rebased_first =
-            add_pts_dts_offset(terminal_asset.first_clock_90khz, timestamp_delta_ticks_90khz);
+        let timestamp_delta_ticks_90khz =
+            terminal_first_clock_90khz.wrapping_add(MAX_PTS_DTS).wrapping_sub(terminal_asset.first_clock_90khz)
+                % MAX_PTS_DTS;
+        let rebased_first = add_pts_dts_offset(terminal_asset.first_clock_90khz, timestamp_delta_ticks_90khz);
         (rebased_first == terminal_first_clock_90khz).then_some(Self {
             live_last_clock: live_tail.last_clock_90khz,
             terminal_first_clock: terminal_first_clock_90khz,
@@ -495,8 +448,7 @@ fn timestamp_profile_is_coherent(profile: HlsTsTimestampProfile) -> bool {
         && profile.first_clock_90khz < MAX_PTS_DTS
         && profile.last_clock_90khz < MAX_PTS_DTS
         && profile.span_ticks_90khz < MAX_PTS_DTS
-        && forward_clock_distance_90khz(profile.first_clock_90khz, profile.last_clock_90khz)
-            == profile.span_ticks_90khz
+        && forward_clock_distance_90khz(profile.first_clock_90khz, profile.last_clock_90khz) == profile.span_ticks_90khz
 }
 
 #[derive(Debug)]
@@ -563,8 +515,7 @@ impl HlsTsTimestampProfileAccumulator {
         }
         let cycle = i128::from(MAX_PTS_DTS);
         let first_clock_90khz =
-            u64::try_from((i128::from(reference) + i128::from(self.earliest_relative_ticks)).rem_euclid(cycle))
-                .ok()?;
+            u64::try_from((i128::from(reference) + i128::from(self.earliest_relative_ticks)).rem_euclid(cycle)).ok()?;
         let last_clock_90khz =
             u64::try_from((i128::from(reference) + i128::from(self.latest_relative_ticks)).rem_euclid(cycle)).ok()?;
         Some(HlsTsTimestampProfile {
@@ -578,7 +529,7 @@ impl HlsTsTimestampProfileAccumulator {
 }
 
 #[derive(Debug)]
-pub(crate) struct HlsTsTimestampProfileScanner {
+pub struct HlsTsTimestampProfileScanner {
     assembler: HlsPesHeaderAssembler,
     accumulator: HlsTsTimestampProfileAccumulator,
     next_packet_start: usize,
@@ -586,7 +537,7 @@ pub(crate) struct HlsTsTimestampProfileScanner {
 }
 
 impl HlsTsTimestampProfileScanner {
-    pub(crate) fn new(expected_duration_ticks_90khz: u64) -> Self {
+    pub fn new(expected_duration_ticks_90khz: u64) -> Self {
         Self {
             assembler: HlsPesHeaderAssembler::new(),
             accumulator: HlsTsTimestampProfileAccumulator::new(expected_duration_ticks_90khz),
@@ -595,7 +546,7 @@ impl HlsTsTimestampProfileScanner {
         }
     }
 
-    pub(crate) fn push_aligned_packet(&mut self, packet: &[u8]) {
+    pub fn push_aligned_packet(&mut self, packet: &[u8]) {
         if self.invalid {
             return;
         }
@@ -618,20 +569,18 @@ impl HlsTsTimestampProfileScanner {
                 self.invalid = true;
                 return;
             };
-            self.accumulator
-                .observe_clock(decode_pcr(bytes) / 300, HlsTsTimestampKind::Pcr);
+            self.accumulator.observe_clock(decode_pcr(bytes) / 300, HlsTsTimestampKind::Pcr);
         }
         let Ok(completed) = self.assembler.push_packet(packet, packet_start, evidence) else {
             self.invalid = true;
             return;
         };
         for field in completed.fields.into_iter().flatten() {
-            self.accumulator
-                .observe_clock(decode_timestamp(&field.bytes), HlsTsTimestampKind::PtsOrDts);
+            self.accumulator.observe_clock(decode_timestamp(&field.bytes), HlsTsTimestampKind::PtsOrDts);
         }
     }
 
-    pub(crate) fn finish(self) -> Option<HlsTsTimestampProfile> {
+    pub fn finish(self) -> Option<HlsTsTimestampProfile> {
         if self.invalid || self.assembler.finish().is_err() {
             return None;
         }
@@ -646,9 +595,7 @@ enum HlsTsTimestampKind {
 }
 
 #[inline]
-fn ts_packet_pid(packet: &[u8]) -> u16 {
-    (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2])
-}
+fn ts_packet_pid(packet: &[u8]) -> u16 { (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) }
 
 fn same_finite_ts_packet_layout(source: &[u8], prepared: &[u8]) -> bool {
     if source.len() != TS_PACKET_SIZE
@@ -667,11 +614,7 @@ fn same_finite_ts_packet_layout(source: &[u8], prepared: &[u8]) -> bool {
 
 fn append_finite_discontinuity_packet(following_packet: &[u8], output: &mut BytesMut) {
     let following_cc = following_packet[3] & 0x0F;
-    let marker_cc = if following_packet[3] & 0x10 != 0 {
-        following_cc.wrapping_sub(1) & 0x0F
-    } else {
-        following_cc
-    };
+    let marker_cc = if following_packet[3] & 0x10 != 0 { following_cc.wrapping_sub(1) & 0x0F } else { following_cc };
     let start = output.len();
     output.resize(start.saturating_add(TS_PACKET_SIZE), 0xFF);
     let marker = &mut output[start..start + TS_PACKET_SIZE];
@@ -730,7 +673,7 @@ struct HlsFiniteTsPacketLayout {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct HlsFiniteTsLayout {
+pub struct HlsFiniteTsLayout {
     packets: Arc<[HlsFiniteTsPacketLayout]>,
     pub timestamp_fields: Arc<[HlsTsTimestampFieldLocation]>,
     pub pcr_fields: Arc<[HlsTsPcrFieldLocation]>,
@@ -749,9 +692,8 @@ fn build_hls_finite_ts_layout(buffer: &[u8]) -> Result<HlsFiniteTsLayout, HlsFin
     let mut assembler = HlsPesHeaderAssembler::new();
 
     for (packet_index, packet) in buffer.as_chunks::<TS_PACKET_SIZE>().0.iter().enumerate() {
-        let packet_start = packet_index
-            .checked_mul(TS_PACKET_SIZE)
-            .ok_or(HlsFiniteTsLayoutError::InvalidTransportPacket)?;
+        let packet_start =
+            packet_index.checked_mul(TS_PACKET_SIZE).ok_or(HlsFiniteTsLayoutError::InvalidTransportPacket)?;
         let evidence = inspect_hls_ts_packet(packet, packet_start)?;
         let pcr_field_index = evidence.pcr_field.map(|field| {
             let index = pcr_fields.len();
@@ -759,13 +701,7 @@ fn build_hls_finite_ts_layout(buffer: &[u8]) -> Result<HlsFiniteTsLayout, HlsFin
             index
         });
         let completed = assembler.push_packet(packet, packet_start, evidence)?;
-        timestamp_fields.extend(
-            completed
-                .fields
-                .into_iter()
-                .flatten()
-                .map(|field| field.location),
-        );
+        timestamp_fields.extend(completed.fields.into_iter().flatten().map(|field| field.location));
         packet_evidence.push(evidence);
         packet_pcr_indices.push(pcr_field_index);
     }
@@ -840,10 +776,7 @@ fn gather_timestamp_bytes(
 ) -> Result<[u8; 5], HlsFiniteTsLayoutError> {
     let mut bytes = [0u8; 5];
     for (destination, offset) in bytes.iter_mut().zip(location.byte_offsets) {
-        *destination = buffer
-            .get(offset)
-            .copied()
-            .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
+        *destination = buffer.get(offset).copied().ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
     }
     Ok(bytes)
 }
@@ -855,28 +788,20 @@ fn decode_timestamp_at_location(
     gather_timestamp_bytes(buffer, location).map(|bytes| decode_timestamp(&bytes))
 }
 
-fn decode_pcr_at_location(
-    buffer: &[u8],
-    location: HlsTsPcrFieldLocation,
-) -> Result<u64, HlsFiniteTsLayoutError> {
-    let end = location
-        .byte_offset
-        .checked_add(6)
-        .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
-    let bytes = buffer
-        .get(location.byte_offset..end)
-        .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
+fn decode_pcr_at_location(buffer: &[u8], location: HlsTsPcrFieldLocation) -> Result<u64, HlsFiniteTsLayoutError> {
+    let end = location.byte_offset.checked_add(6).ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
+    let bytes = buffer.get(location.byte_offset..end).ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
     Ok(decode_pcr(bytes))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HlsTsPresentationClockSource {
+pub enum HlsTsPresentationClockSource {
     Pts,
     PcrFallback,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HlsTsPidPresentationTimeline {
+pub struct HlsTsPidPresentationTimeline {
     pub pid: u16,
     pub first_pts_90khz: u64,
     pub last_pts_90khz: u64,
@@ -885,7 +810,7 @@ pub(crate) struct HlsTsPidPresentationTimeline {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct HlsTsPresentationDuration {
+pub struct HlsTsPresentationDuration {
     pub first_presentation_clock_90khz: u64,
     pub end_exclusive_clock_90khz: u64,
     pub duration_ticks_90khz: u64,
@@ -951,9 +876,8 @@ fn presentation_timeline_for_pid(
         } else {
             -i128::from(MAX_PTS_DTS.saturating_sub(forward))
         };
-        let unwrapped = previous_unwrapped
-            .checked_add(signed_delta)
-            .ok_or(HlsFiniteTsLayoutError::PresentationDurationOverflow)?;
+        let unwrapped =
+            previous_unwrapped.checked_add(signed_delta).ok_or(HlsFiniteTsLayoutError::PresentationDurationOverflow)?;
         if unwrapped > previous_unwrapped {
             deltas.push(
                 u64::try_from(unwrapped - previous_unwrapped)
@@ -978,27 +902,16 @@ fn presentation_timeline_for_pid(
         0
     };
     let first_pts_90khz = u64::try_from(
-        first_unwrapped
-            .checked_add(normalization)
-            .ok_or(HlsFiniteTsLayoutError::PresentationDurationOverflow)?,
+        first_unwrapped.checked_add(normalization).ok_or(HlsFiniteTsLayoutError::PresentationDurationOverflow)?,
     )
     .map_err(|_| HlsFiniteTsLayoutError::PresentationDurationOverflow)?;
     let last_pts_90khz = u64::try_from(
-        last_unwrapped
-            .checked_add(normalization)
-            .ok_or(HlsFiniteTsLayoutError::PresentationDurationOverflow)?,
+        last_unwrapped.checked_add(normalization).ok_or(HlsFiniteTsLayoutError::PresentationDurationOverflow)?,
     )
     .map_err(|_| HlsFiniteTsLayoutError::PresentationDurationOverflow)?;
-    let end_exclusive_90khz = last_pts_90khz
-        .checked_add(cadence_ticks_90khz)
-        .ok_or(HlsFiniteTsLayoutError::PresentationDurationOverflow)?;
-    Ok(HlsTsPidPresentationTimeline {
-        pid,
-        first_pts_90khz,
-        last_pts_90khz,
-        cadence_ticks_90khz,
-        end_exclusive_90khz,
-    })
+    let end_exclusive_90khz =
+        last_pts_90khz.checked_add(cadence_ticks_90khz).ok_or(HlsFiniteTsLayoutError::PresentationDurationOverflow)?;
+    Ok(HlsTsPidPresentationTimeline { pid, first_pts_90khz, last_pts_90khz, cadence_ticks_90khz, end_exclusive_90khz })
 }
 
 fn presentation_duration_from_pid_clocks(
@@ -1041,16 +954,10 @@ fn finite_hls_presentation_duration(
     layout: &HlsFiniteTsLayout,
 ) -> Result<HlsTsPresentationDuration, HlsFiniteTsLayoutError> {
     let mut pts_by_pid = HashMap::<u16, Vec<u64>>::new();
-    for location in layout
-        .timestamp_fields
-        .iter()
-        .copied()
-        .filter(|location| location.kind == HlsTsTimestampFieldKind::Pts)
+    for location in
+        layout.timestamp_fields.iter().copied().filter(|location| location.kind == HlsTsTimestampFieldKind::Pts)
     {
-        pts_by_pid
-            .entry(location.pid)
-            .or_default()
-            .push(decode_timestamp_at_location(buffer, location)?);
+        pts_by_pid.entry(location.pid).or_default().push(decode_timestamp_at_location(buffer, location)?);
     }
     if !pts_by_pid.is_empty() {
         return presentation_duration_from_pid_clocks(pts_by_pid, HlsTsPresentationClockSource::Pts);
@@ -1058,10 +965,7 @@ fn finite_hls_presentation_duration(
 
     let mut pcr_by_pid = HashMap::<u16, Vec<u64>>::new();
     for location in layout.pcr_fields.iter().copied() {
-        pcr_by_pid
-            .entry(location.pid)
-            .or_default()
-            .push(decode_pcr_at_location(buffer, location)? / 300);
+        pcr_by_pid.entry(location.pid).or_default().push(decode_pcr_at_location(buffer, location)? / 300);
     }
     presentation_duration_from_pid_clocks(pcr_by_pid, HlsTsPresentationClockSource::PcrFallback)
 }
@@ -1073,26 +977,18 @@ fn timestamp_profile_from_finite_layout(
 ) -> Option<HlsTsTimestampProfile> {
     let mut accumulator = HlsTsTimestampProfileAccumulator::new(expected_duration_ticks_90khz);
     for location in layout.timestamp_fields.iter().copied() {
-        accumulator.observe_clock(
-            decode_timestamp_at_location(buffer, location).ok()?,
-            HlsTsTimestampKind::PtsOrDts,
-        );
+        accumulator.observe_clock(decode_timestamp_at_location(buffer, location).ok()?, HlsTsTimestampKind::PtsOrDts);
     }
     for location in layout.pcr_fields.iter().copied() {
-        accumulator.observe_clock(
-            decode_pcr_at_location(buffer, location).ok()? / 300,
-            HlsTsTimestampKind::Pcr,
-        );
+        accumulator.observe_clock(decode_pcr_at_location(buffer, location).ok()? / 300, HlsTsTimestampKind::Pcr);
     }
     accumulator.finish()
 }
 
-fn ticks_90khz_to_rounded_millis(ticks: u64) -> Option<u64> {
-    ticks.checked_add(45)?.checked_div(90)
-}
+fn ticks_90khz_to_rounded_millis(ticks: u64) -> Option<u64> { ticks.checked_add(45)?.checked_div(90) }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HlsFiniteTsRenderSpec {
+pub struct HlsFiniteTsRenderSpec {
     pub timestamp_offset_ticks_90khz: u64,
     /// Seed used by logical segment zero. Later segments derive each PID's starting counter from
     /// the number of payload packets for that PID in one immutable asset cycle.
@@ -1101,7 +997,7 @@ pub(crate) struct HlsFiniteTsRenderSpec {
 }
 
 #[derive(Debug, thiserror::Error, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HlsFiniteTsRenderError {
+pub enum HlsFiniteTsRenderError {
     #[error("transport stream asset is empty or invalid")]
     InvalidAsset,
     #[error("prepared transport stream does not match the immutable asset packet layout")]
@@ -1109,13 +1005,13 @@ pub(crate) enum HlsFiniteTsRenderError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HlsFiniteTsDiscontinuityMode {
+pub enum HlsFiniteTsDiscontinuityMode {
     None,
     FirstPacketPerPid,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HlsFiniteTsFinalizeSpec {
+pub struct HlsFiniteTsFinalizeSpec {
     pub additional_timestamp_offset_ticks_90khz: u64,
     pub discontinuity: HlsFiniteTsDiscontinuityMode,
 }
@@ -1139,11 +1035,11 @@ pub struct TransportStreamBuffer {
     waker: Arc<AtomicWaker>,
     first_pcr: Option<u64>,
     finite_hls_timestamp_profile: Option<HlsTsTimestampProfile>,
-    finite_hls_track_signature: Option<crate::mpegts::ts_inspector::HlsTsTrackSignature>,
+    finite_hls_track_signature: Option<crate::ts_inspector::HlsTsTrackSignature>,
     finite_hls_asset_fingerprint: [u8; 32],
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     finite_hls_render_count: Arc<std::sync::atomic::AtomicUsize>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     finite_hls_finalize_count: Arc<std::sync::atomic::AtomicUsize>,
     force_discontinuity_on_wrap: bool,
 }
@@ -1182,9 +1078,9 @@ impl Clone for TransportStreamBuffer {
             finite_hls_timestamp_profile: self.finite_hls_timestamp_profile,
             finite_hls_track_signature: self.finite_hls_track_signature.clone(),
             finite_hls_asset_fingerprint: self.finite_hls_asset_fingerprint,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             finite_hls_render_count: Arc::clone(&self.finite_hls_render_count),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             finite_hls_finalize_count: Arc::clone(&self.finite_hls_finalize_count),
             // Start each clone with one initial discontinuity marker to keep
             // continuity behavior consistent for fresh consumers.
@@ -1203,32 +1099,29 @@ impl TransportStreamBuffer {
         raw.truncate(valid_length);
 
         let length = raw.len() / TS_PACKET_SIZE;
-        let packet_starts = (0..length)
-            .map(|packet_index| packet_index.saturating_mul(TS_PACKET_SIZE))
-            .collect::<Arc<[_]>>();
+        let packet_starts =
+            (0..length).map(|packet_index| packet_index.saturating_mul(TS_PACKET_SIZE)).collect::<Arc<[_]>>();
         let finite_hls_layout = build_hls_finite_ts_layout(&raw).map(Arc::new);
-        let finite_hls_presentation_duration = finite_hls_layout
-            .as_ref()
-            .ok()
-            .and_then(|layout| finite_hls_presentation_duration(&raw, layout).ok());
-        let finite_hls_track_signature = match crate::mpegts::ts_inspector::inspect_mpeg_ts(
+        let finite_hls_presentation_duration =
+            finite_hls_layout.as_ref().ok().and_then(|layout| finite_hls_presentation_duration(&raw, layout).ok());
+        let finite_hls_track_signature = match crate::ts_inspector::inspect_mpeg_ts(
             std::io::Cursor::new(&raw),
-            crate::mpegts::ts_inspector::HlsTsProbeProtection::Clear,
-            crate::mpegts::ts_inspector::HlsTsProbeBudget::default(),
+            crate::ts_inspector::HlsTsProbeProtection::Clear,
+            crate::ts_inspector::HlsTsProbeBudget::default(),
         ) {
-            Ok(crate::mpegts::ts_inspector::HlsTsProbeOutcome::Found(signature)) => Some(signature),
+            Ok(crate::ts_inspector::HlsTsProbeOutcome::Found(signature)) => Some(signature),
             Ok(
-                crate::mpegts::ts_inspector::HlsTsProbeOutcome::ProbeBudgetExhausted { .. }
-                | crate::mpegts::ts_inspector::HlsTsProbeOutcome::Malformed(_)
-                | crate::mpegts::ts_inspector::HlsTsProbeOutcome::UnsupportedProtection(_),
+                crate::ts_inspector::HlsTsProbeOutcome::ProbeBudgetExhausted { .. }
+                | crate::ts_inspector::HlsTsProbeOutcome::Malformed(_)
+                | crate::ts_inspector::HlsTsProbeOutcome::UnsupportedProtection(_),
             )
             | Err(_) => None,
         };
         let finite_hls_asset_fingerprint = Sha256::digest(&raw).into();
         let finite_hls_timestamp_profile = finite_hls_layout.as_ref().ok().and_then(|layout| {
-            finite_hls_presentation_duration.as_ref().and_then(|duration| {
-                timestamp_profile_from_finite_layout(&raw, layout, duration.duration_ticks_90khz)
-            })
+            finite_hls_presentation_duration
+                .as_ref()
+                .and_then(|duration| timestamp_profile_from_finite_layout(&raw, layout, duration.duration_ticks_90khz))
         });
         let first_pcr = finite_hls_layout
             .as_ref()
@@ -1251,9 +1144,9 @@ impl TransportStreamBuffer {
             finite_hls_timestamp_profile,
             finite_hls_track_signature,
             finite_hls_asset_fingerprint,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             finite_hls_render_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             finite_hls_finalize_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             // Emit a discontinuity packet on startup. Subsequent injections are
             // governed by wrap handling and duration/discontinuity logic.
@@ -1267,53 +1160,39 @@ impl TransportStreamBuffer {
     /// Use this from response builders to avoid `Bytes::copy_from_slice(&[u8])`.
     pub fn clone_bytes(&self) -> Bytes { self.buffer.clone() }
 
-    pub fn duration_ms(&self) -> Option<u64> {
-        self.duration_ticks_90khz().and_then(ticks_90khz_to_rounded_millis)
+    pub fn duration_ms(&self) -> Option<u64> { self.duration_ticks_90khz().and_then(ticks_90khz_to_rounded_millis) }
+
+    pub fn duration_ticks_90khz(&self) -> Option<u64> {
+        self.finite_hls_presentation_duration.as_ref().map(|duration| duration.duration_ticks_90khz)
     }
 
-    pub(crate) fn duration_ticks_90khz(&self) -> Option<u64> {
-        self.finite_hls_presentation_duration
-            .as_ref()
-            .map(|duration| duration.duration_ticks_90khz)
-    }
-
-    pub(crate) const fn finite_hls_timestamp_profile(&self) -> Option<HlsTsTimestampProfile> {
+    pub const fn finite_hls_timestamp_profile(&self) -> Option<HlsTsTimestampProfile> {
         self.finite_hls_timestamp_profile
     }
 
-    pub(crate) fn finite_hls_track_signature(&self) -> Option<crate::mpegts::ts_inspector::HlsTsTrackSignature> {
+    pub fn finite_hls_track_signature(&self) -> Option<crate::ts_inspector::HlsTsTrackSignature> {
         self.finite_hls_track_signature.clone()
     }
 
-    pub(crate) const fn has_finite_hls_track_signature(&self) -> bool {
-        self.finite_hls_track_signature.is_some()
-    }
+    pub const fn has_finite_hls_track_signature(&self) -> bool { self.finite_hls_track_signature.is_some() }
 
-    pub(crate) const fn finite_hls_asset_fingerprint(&self) -> [u8; 32] {
-        self.finite_hls_asset_fingerprint
-    }
+    pub const fn finite_hls_asset_fingerprint(&self) -> [u8; 32] { self.finite_hls_asset_fingerprint }
 
-    #[cfg(test)]
-    pub(crate) fn finite_hls_render_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finite_hls_render_count(&self) -> usize {
         self.finite_hls_render_count.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    #[cfg(test)]
-    pub(crate) fn finite_hls_finalize_count(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finite_hls_finalize_count(&self) -> usize {
         self.finite_hls_finalize_count.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Renders one immutable, finite HLS media segment without mutating the looping stream state.
-    pub(crate) fn render_finite_hls_segment(
-        &self,
-        spec: HlsFiniteTsRenderSpec,
-    ) -> Result<Bytes, HlsFiniteTsRenderError> {
-        #[cfg(test)]
+    pub fn render_finite_hls_segment(&self, spec: HlsFiniteTsRenderSpec) -> Result<Bytes, HlsFiniteTsRenderError> {
+        #[cfg(any(test, feature = "test-support"))]
         self.finite_hls_render_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let layout = self
-            .finite_hls_layout
-            .as_ref()
-            .map_err(|_| HlsFiniteTsRenderError::InvalidAsset)?;
+        let layout = self.finite_hls_layout.as_ref().map_err(|_| HlsFiniteTsRenderError::InvalidAsset)?;
         if self.buffer.is_empty() || layout.packets.is_empty() {
             return Err(HlsFiniteTsRenderError::InvalidAsset);
         }
@@ -1353,17 +1232,14 @@ impl TransportStreamBuffer {
     ///
     /// The immutable source packet layout is verified before any bytes are published. Optional
     /// splice markers are adaptation-only packets and therefore do not advance payload CC.
-    pub(crate) fn finalize_prepared_finite_hls_segment(
+    pub fn finalize_prepared_finite_hls_segment(
         &self,
         prepared: &Bytes,
         spec: HlsFiniteTsFinalizeSpec,
     ) -> Result<Bytes, HlsFiniteTsRenderError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.finite_hls_finalize_count.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let layout = self
-            .finite_hls_layout
-            .as_ref()
-            .map_err(|_| HlsFiniteTsRenderError::PreparedLayoutMismatch)?;
+        let layout = self.finite_hls_layout.as_ref().map_err(|_| HlsFiniteTsRenderError::PreparedLayoutMismatch)?;
         if self.buffer.is_empty()
             || layout.packets.is_empty()
             || prepared.len() != layout.packets.len().saturating_mul(TS_PACKET_SIZE)
@@ -1374,9 +1250,9 @@ impl TransportStreamBuffer {
         let mut marker_count = 0usize;
         for (position, packet_layout) in layout.packets.iter().enumerate() {
             let prepared_start = position.saturating_mul(TS_PACKET_SIZE);
-            let Some(source) = self.buffer.get(
-                packet_layout.packet_start..packet_layout.packet_start.saturating_add(TS_PACKET_SIZE),
-            ) else {
+            let Some(source) =
+                self.buffer.get(packet_layout.packet_start..packet_layout.packet_start.saturating_add(TS_PACKET_SIZE))
+            else {
                 return Err(HlsFiniteTsRenderError::PreparedLayoutMismatch);
             };
             let Some(candidate) = prepared.get(prepared_start..prepared_start.saturating_add(TS_PACKET_SIZE)) else {
@@ -1396,12 +1272,8 @@ impl TransportStreamBuffer {
         }
 
         let mut rewritten = BytesMut::from(prepared.as_ref());
-        Self::rewrite_layout_timestamps(
-            &mut rewritten,
-            layout,
-            spec.additional_timestamp_offset_ticks_90khz,
-        )
-        .map_err(|_| HlsFiniteTsRenderError::PreparedLayoutMismatch)?;
+        Self::rewrite_layout_timestamps(&mut rewritten, layout, spec.additional_timestamp_offset_ticks_90khz)
+            .map_err(|_| HlsFiniteTsRenderError::PreparedLayoutMismatch)?;
         first_pid_seen.fill(false);
         let additional_bytes = marker_count.saturating_mul(TS_PACKET_SIZE);
         let mut output = BytesMut::with_capacity(prepared.len().saturating_add(additional_bytes));
@@ -1503,29 +1375,19 @@ impl TransportStreamBuffer {
         for location in layout.pcr_fields.iter().copied() {
             let original = decode_pcr_at_location(bytes, location)?;
             let adjusted = add_pcr_offset_27mhz(original, pcr_offset_27mhz(timestamp_offset));
-            let end = location
-                .byte_offset
-                .checked_add(6)
-                .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
-            let destination = bytes
-                .get_mut(location.byte_offset..end)
-                .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
+            let end = location.byte_offset.checked_add(6).ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
+            let destination =
+                bytes.get_mut(location.byte_offset..end).ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
             destination.copy_from_slice(&encode_pcr(adjusted));
         }
         for location in layout.timestamp_fields.iter().copied() {
             let original = gather_timestamp_bytes(bytes, location)?;
             let prefix = original[0] & 0xF0;
-            let mut encoded = encode_timestamp(add_pts_dts_offset(
-                decode_timestamp(&original),
-                timestamp_offset,
-            ));
+            let mut encoded = encode_timestamp(add_pts_dts_offset(decode_timestamp(&original), timestamp_offset));
             encoded[0] = (encoded[0] & 0x0F) | prefix;
-            for (marker_index, (source_offset, value)) in
-                location.byte_offsets.into_iter().zip(encoded).enumerate()
-            {
-                let destination = bytes
-                    .get_mut(source_offset)
-                    .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
+            for (marker_index, (source_offset, value)) in location.byte_offsets.into_iter().zip(encoded).enumerate() {
+                let destination =
+                    bytes.get_mut(source_offset).ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
                 *destination = value;
                 if matches!(marker_index, 0 | 2 | 4) && value & 1 == 0 {
                     return Err(HlsFiniteTsLayoutError::InvalidPesTimestampField {
@@ -1562,12 +1424,10 @@ impl TransportStreamBuffer {
                 .byte_offset
                 .checked_sub(packet_layout.packet_start)
                 .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
-            let destination_start = output_start
-                .checked_add(relative_offset)
-                .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
-            let destination_end = destination_start
-                .checked_add(6)
-                .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
+            let destination_start =
+                output_start.checked_add(relative_offset).ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
+            let destination_end =
+                destination_start.checked_add(6).ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
             bytes
                 .get_mut(destination_start..destination_end)
                 .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?
@@ -1585,10 +1445,7 @@ impl TransportStreamBuffer {
                 .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
             let original = gather_timestamp_bytes(&self.buffer, location)?;
             let prefix = original[0] & 0xF0;
-            let mut encoded = encode_timestamp(add_pts_dts_offset(
-                decode_timestamp(&original),
-                timestamp_offset,
-            ));
+            let mut encoded = encode_timestamp(add_pts_dts_offset(decode_timestamp(&original), timestamp_offset));
             encoded[0] = (encoded[0] & 0x0F) | prefix;
             for (source_offset, value) in location.byte_offsets.into_iter().zip(encoded) {
                 if !(packet_layout.packet_start..packet_end).contains(&source_offset) {
@@ -1600,9 +1457,7 @@ impl TransportStreamBuffer {
                 let destination_offset = output_start
                     .checked_add(relative_offset)
                     .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)?;
-                *bytes
-                    .get_mut(destination_offset)
-                    .ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)? = value;
+                *bytes.get_mut(destination_offset).ok_or(HlsFiniteTsLayoutError::InvalidTimestampLocation)? = value;
             }
         }
         Ok(())
@@ -1649,16 +1504,10 @@ impl TransportStreamBuffer {
             let current_pos = self.current_pos;
             let packet_start = self.packet_starts[current_pos];
             let packet = &self.buffer[packet_start..packet_start + TS_PACKET_SIZE];
-            let packet_layout = self
-                .finite_hls_layout
-                .as_ref()
-                .ok()
-                .and_then(|layout| layout.packets.get(current_pos))
-                .copied();
-            let packet_has_payload = packet_layout.map_or_else(
-                || matches!((packet[3] >> 4) & 0b11, 0b01 | 0b11),
-                |layout| layout.has_payload,
-            );
+            let packet_layout =
+                self.finite_hls_layout.as_ref().ok().and_then(|layout| layout.packets.get(current_pos)).copied();
+            let packet_has_payload = packet_layout
+                .map_or_else(|| matches!((packet[3] >> 4) & 0b11, 0b01 | 0b11), |layout| layout.has_payload);
 
             // O(1) PID lookup — PID is at most 13 bits (0–8191).
             let pid = (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]);
@@ -1911,18 +1760,13 @@ mod tests {
         assert_eq!(bytes.len() % TS_PACKET_SIZE, 0, "unaligned MPEG-TS fixture");
         let mut last_continuity: [Option<u8>; 8192] = [None; 8192];
         for (packet_index, packet) in bytes.as_chunks::<TS_PACKET_SIZE>().0.iter().enumerate() {
-            let evidence =
-                inspect_hls_ts_packet(packet, packet_index.saturating_mul(TS_PACKET_SIZE))
-                    .expect("valid MPEG-TS fixture packet");
+            let evidence = inspect_hls_ts_packet(packet, packet_index.saturating_mul(TS_PACKET_SIZE))
+                .expect("valid MPEG-TS fixture packet");
             if evidence.pid == NULL_PID {
                 continue;
             }
             if let Some(previous) = last_continuity[usize::from(evidence.pid)] {
-                let expected = if evidence.has_payload() {
-                    previous.wrapping_add(1) & 0x0F
-                } else {
-                    previous
-                };
+                let expected = if evidence.has_payload() { previous.wrapping_add(1) & 0x0F } else { previous };
                 assert!(
                     evidence.discontinuity || evidence.continuity_counter == expected,
                     "PID {} continuity failed at packet {packet_index}: expected {expected}, actual {}",
@@ -1992,27 +1836,42 @@ mod tests {
         let fixtures: [(&str, &[u8]); 6] = [
             (
                 "channel_unavailable.ts",
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts")).as_slice(),
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"))
+                    .as_slice(),
             ),
             (
                 "hls_session_or_lease_expired.ts",
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/hls_session_or_lease_expired.ts")).as_slice(),
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../test/fixtures/hls/hls_session_or_lease_expired.ts"
+                ))
+                .as_slice(),
             ),
             (
                 "low_priority_preempted.ts",
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/low_priority_preempted.ts")).as_slice(),
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/low_priority_preempted.ts"))
+                    .as_slice(),
             ),
             (
                 "provider_connections_exhausted.ts",
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/provider_connections_exhausted.ts")).as_slice(),
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../test/fixtures/hls/provider_connections_exhausted.ts"
+                ))
+                .as_slice(),
             ),
             (
                 "user_account_expired.ts",
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/user_account_expired.ts")).as_slice(),
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/user_account_expired.ts"))
+                    .as_slice(),
             ),
             (
                 "user_connections_exhausted.ts",
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/user_connections_exhausted.ts")).as_slice(),
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../test/fixtures/hls/user_connections_exhausted.ts"
+                ))
+                .as_slice(),
             ),
         ];
         for (name, bytes) in fixtures {
@@ -2025,7 +1884,8 @@ mod tests {
     #[test]
     fn provisioning_asset_uses_exact_per_pid_presentation_duration() {
         let buffer = TransportStreamBuffer::new(
-            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/panel_api_provisioning.ts")).to_vec(),
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/panel_api_provisioning.ts"))
+                .to_vec(),
         );
 
         assert_eq!(buffer.duration_ticks_90khz(), Some(182_400));
@@ -2035,7 +1895,8 @@ mod tests {
     #[test]
     fn custom_asset_stride_does_not_overlap_previous_audio_presentation() {
         let buffer = TransportStreamBuffer::new(
-            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts")).to_vec(),
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"))
+                .to_vec(),
         );
         let duration = buffer.duration_ticks_90khz().expect("exact custom asset duration");
         let segment_zero = buffer
@@ -2057,22 +1918,12 @@ mod tests {
         let zero_audio = zero
             .finite_hls_presentation_duration
             .as_ref()
-            .and_then(|duration| {
-                duration
-                    .timelines
-                    .iter()
-                    .find(|timeline| timeline.cadence_ticks_90khz == 1_920)
-            })
+            .and_then(|duration| duration.timelines.iter().find(|timeline| timeline.cadence_ticks_90khz == 1_920))
             .expect("segment zero audio timeline");
         let one_audio = one
             .finite_hls_presentation_duration
             .as_ref()
-            .and_then(|duration| {
-                duration
-                    .timelines
-                    .iter()
-                    .find(|timeline| timeline.cadence_ticks_90khz == 1_920)
-            })
+            .and_then(|duration| duration.timelines.iter().find(|timeline| timeline.cadence_ticks_90khz == 1_920))
             .expect("segment one audio timeline");
 
         assert_eq!(duration, 902_400);
@@ -2169,12 +2020,7 @@ mod tests {
 
     #[test]
     fn split_pts_layout_profile_relative_and_anchored_rewrite_are_exact() {
-        let mut packets = build_split_pes_header_packets(
-            0x0101,
-            0,
-            &pts_only_pes_header(90_000),
-            &[12, 2],
-        );
+        let mut packets = build_split_pes_header_packets(0x0101, 0, &pts_only_pes_header(90_000), &[12, 2]);
         packets.push(build_pts_only_payload_packet(0x0101, 2, 93_000));
         let raw = packets.into_iter().flatten().collect::<Vec<_>>();
         let buffer = TransportStreamBuffer::new(raw);
@@ -2187,10 +2033,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(pts_fields.len(), 2);
         let split_field = pts_fields[0];
-        assert_ne!(
-            split_field.byte_offsets[0] / TS_PACKET_SIZE,
-            split_field.byte_offsets[4] / TS_PACKET_SIZE
-        );
+        assert_ne!(split_field.byte_offsets[0] / TS_PACKET_SIZE, split_field.byte_offsets[4] / TS_PACKET_SIZE);
         assert_eq!(
             buffer.finite_hls_timestamp_profile(),
             Some(HlsTsTimestampProfile {
@@ -2209,10 +2052,7 @@ mod tests {
                 logical_segment_index: 0,
             })
             .expect("relative split PTS");
-        assert_eq!(
-            decode_timestamp_at_location(&relative, split_field).expect("relative split PTS value"),
-            97_000
-        );
+        assert_eq!(decode_timestamp_at_location(&relative, split_field).expect("relative split PTS value"), 97_000);
         let anchored = buffer
             .finalize_prepared_finite_hls_segment(
                 &relative,
@@ -2222,26 +2062,15 @@ mod tests {
                 },
             )
             .expect("anchored split PTS");
-        assert_eq!(
-            decode_timestamp_at_location(&anchored, split_field).expect("anchored split PTS value"),
-            108_000
-        );
-        assert_ne!(
-            decode_timestamp_at_location(&anchored, split_field).expect("rewritten split PTS"),
-            90_000
-        );
+        assert_eq!(decode_timestamp_at_location(&anchored, split_field).expect("anchored split PTS value"), 108_000);
+        assert_ne!(decode_timestamp_at_location(&anchored, split_field).expect("rewritten split PTS"), 90_000);
         let encoded = gather_timestamp_bytes(&anchored, split_field).expect("anchored split PTS bytes");
         assert!(encoded[0] & 1 != 0 && encoded[2] & 1 != 0 && encoded[4] & 1 != 0);
     }
 
     #[test]
     fn split_pts_dts_layout_rewrites_both_fields_across_distinct_packet_boundaries() {
-        let packets = build_split_pes_header_packets(
-            0x0101,
-            5,
-            &pts_dts_pes_header(90_000, 87_000),
-            &[11, 5, 3],
-        );
+        let packets = build_split_pes_header_packets(0x0101, 5, &pts_dts_pes_header(90_000, 87_000), &[11, 5, 3]);
         let raw = packets.into_iter().flatten().collect::<Vec<_>>();
         let buffer = TransportStreamBuffer::new(raw);
         let layout = buffer.finite_hls_layout.as_ref().expect("split PTS+DTS layout");
@@ -2287,12 +2116,7 @@ mod tests {
 
     #[test]
     fn timestamp_profile_scanner_reads_split_pts_across_packets() {
-        let mut packets = build_split_pes_header_packets(
-            0x0101,
-            0,
-            &pts_only_pes_header(90_000),
-            &[12, 2],
-        );
+        let mut packets = build_split_pes_header_packets(0x0101, 0, &pts_only_pes_header(90_000), &[12, 2]);
         packets.push(build_pts_only_payload_packet(0x0101, 2, 93_000));
         let mut scanner = HlsTsTimestampProfileScanner::new(10_000);
         for packet in packets {
@@ -2322,12 +2146,7 @@ mod tests {
 
     #[test]
     fn split_pts_incomplete_at_eof_fails_with_typed_layout_error() {
-        let packets = build_split_pes_header_packets(
-            0x0101,
-            0,
-            &pts_only_pes_header(90_000),
-            &[12, 2],
-        );
+        let packets = build_split_pes_header_packets(0x0101, 0, &pts_only_pes_header(90_000), &[12, 2]);
         let buffer = TransportStreamBuffer::new(packets[0].to_vec());
 
         assert!(matches!(
@@ -2347,12 +2166,7 @@ mod tests {
 
     #[test]
     fn split_pts_continuity_discontinuity_fails_with_typed_layout_error() {
-        let mut packets = build_split_pes_header_packets(
-            0x0101,
-            0,
-            &pts_only_pes_header(90_000),
-            &[12, 2],
-        );
+        let mut packets = build_split_pes_header_packets(0x0101, 0, &pts_only_pes_header(90_000), &[12, 2]);
         packets[1][3] = (packets[1][3] & 0xF0) | 3;
         let raw = packets.into_iter().flatten().collect::<Vec<_>>();
         let buffer = TransportStreamBuffer::new(raw);
@@ -2381,10 +2195,7 @@ mod tests {
         ];
         let raw = packets.into_iter().flatten().collect::<Vec<_>>();
         let buffer = TransportStreamBuffer::new(raw);
-        let duration = buffer
-            .finite_hls_presentation_duration
-            .as_ref()
-            .expect("per-PID wrapped duration");
+        let duration = buffer.finite_hls_presentation_duration.as_ref().expect("per-PID wrapped duration");
 
         assert_eq!(duration.source, HlsTsPresentationClockSource::Pts);
         assert_eq!(duration.first_presentation_clock_90khz, MAX_PTS_DTS - 1_080);
@@ -2414,15 +2225,9 @@ mod tests {
     #[test]
     fn pcr_fallback_uses_observed_cadence_and_rejects_a_single_sample() {
         let pid = 0x0101;
-        let packets = [
-            build_pcr_only_packet(pid, 0, 90_000),
-            build_pcr_only_packet(pid, 0, 91_920),
-        ];
+        let packets = [build_pcr_only_packet(pid, 0, 90_000), build_pcr_only_packet(pid, 0, 91_920)];
         let buffer = TransportStreamBuffer::new(packets.into_iter().flatten().collect());
-        let duration = buffer
-            .finite_hls_presentation_duration
-            .as_ref()
-            .expect("PCR fallback duration");
+        let duration = buffer.finite_hls_presentation_duration.as_ref().expect("PCR fallback duration");
 
         assert_eq!(duration.source, HlsTsPresentationClockSource::PcrFallback);
         assert_eq!(duration.first_presentation_clock_90khz, 90_000);
@@ -2447,13 +2252,7 @@ mod tests {
     fn timestamp_profile_scanner_unwraps_one_33_bit_boundary() {
         let before_wrap = MAX_PTS_DTS - 1_000;
         let packets = [
-            build_pts_dts_pcr_packet(
-                0x0100,
-                0,
-                before_wrap + 200,
-                before_wrap + 100,
-                before_wrap,
-            ),
+            build_pts_dts_pcr_packet(0x0100, 0, before_wrap + 200, before_wrap + 100, before_wrap),
             build_pts_dts_pcr_packet(0x0100, 1, 1_200, 1_100, 1_000),
         ];
         let mut scanner = HlsTsTimestampProfileScanner::new(5_000);
@@ -2645,7 +2444,8 @@ mod tests {
 
     #[test]
     fn finalized_terminal_asset_preserves_tracks_and_ffmpeg_continuity() {
-        const TERMINAL_ASSET_BYTES: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
+        const TERMINAL_ASSET_BYTES: &[u8] =
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"));
         let buffer = TransportStreamBuffer::new(TERMINAL_ASSET_BYTES.to_vec());
         let expected_signature = buffer.finite_hls_track_signature().expect("terminal asset track signature");
         let prepared = buffer
@@ -2666,13 +2466,13 @@ mod tests {
             .expect("anchored terminal asset");
 
         assert_ffmpeg_compatible_continuity(&finalized);
-        let outcome = crate::mpegts::ts_inspector::inspect_mpeg_ts(
+        let outcome = crate::ts_inspector::inspect_mpeg_ts(
             std::io::Cursor::new(finalized),
-            crate::mpegts::ts_inspector::HlsTsProbeProtection::Clear,
-            crate::mpegts::ts_inspector::HlsTsProbeBudget::default(),
+            crate::ts_inspector::HlsTsProbeProtection::Clear,
+            crate::ts_inspector::HlsTsProbeBudget::default(),
         )
         .expect("finalized terminal asset remains inspectable");
-        assert_eq!(outcome, crate::mpegts::ts_inspector::HlsTsProbeOutcome::Found(expected_signature));
+        assert_eq!(outcome, crate::ts_inspector::HlsTsProbeOutcome::Found(expected_signature));
     }
 
     #[test]
@@ -2791,17 +2591,9 @@ mod tests {
 
         let mut terminal_bytes = Vec::new();
         terminal_bytes.extend_from_slice(&build_pts_dts_pcr_packet(0x0101, 0, 0, 0, 0));
-        terminal_bytes.extend_from_slice(&build_pts_dts_pcr_packet(
-            0x0101,
-            1,
-            90_000,
-            90_000,
-            90_000,
-        ));
+        terminal_bytes.extend_from_slice(&build_pts_dts_pcr_packet(0x0101, 1, 90_000, 90_000, 90_000));
         let terminal_buffer = TransportStreamBuffer::new(terminal_bytes);
-        let terminal_profile = terminal_buffer
-            .finite_hls_timestamp_profile()
-            .expect("terminal asset profile");
+        let terminal_profile = terminal_buffer.finite_hls_timestamp_profile().expect("terminal asset profile");
         let anchor = HlsTsSpliceAnchor::between(live_profile, terminal_profile).expect("splice anchor");
         let duration = terminal_buffer.duration_ticks_90khz().expect("terminal duration");
         let relative_zero = terminal_buffer
@@ -2840,10 +2632,7 @@ mod tests {
         let zero_packets = terminal_zero.as_chunks::<TS_PACKET_SIZE>().0.iter().collect::<Vec<_>>();
         assert_eq!((zero_packets[0][3] >> 4) & 0b11, 0b10);
         assert_eq!(zero_packets[0][5] & 0x80, 0x80);
-        assert_eq!(
-            (zero_packets[0][3] & 0x0F).wrapping_add(1) & 0x0F,
-            zero_packets[1][3] & 0x0F
-        );
+        assert_eq!((zero_packets[0][3] & 0x0F).wrapping_add(1) & 0x0F, zero_packets[1][3] & 0x0F);
         let terminal_one_packets = terminal_one.as_chunks::<TS_PACKET_SIZE>().0;
         assert!(terminal_one_packets.iter().all(|packet| !((packet[3] >> 4) & 0b11 == 0b10 && packet[5] & 0x80 != 0)));
 
@@ -2853,10 +2642,7 @@ mod tests {
         assert_eq!(forward_clock_distance_90khz(live_last_clock, zero_first.0), 90);
         assert!(forward_clock_distance_90khz(zero_first.0, zero_last.0) < MAX_PTS_DTS / 2);
         assert!(forward_clock_distance_90khz(zero_last.0, one_first.0) < MAX_PTS_DTS / 2);
-        assert_eq!(
-            forward_clock_distance_90khz(zero_last.0, one_first.0),
-            duration.saturating_sub(90_000)
-        );
+        assert_eq!(forward_clock_distance_90khz(zero_last.0, one_first.0), duration.saturating_sub(90_000));
         assert_eq!(zero_first.0, zero_first.1);
         assert_eq!(zero_first.0, zero_first.2);
         assert_eq!(one_first.0, one_first.1);
@@ -2878,13 +2664,7 @@ mod tests {
     fn hls_prepared_terminal_bundle_pcr_uses_300_factor_and_large_offsets_wrap_exactly() {
         let base_pcr_90khz = 123_456;
         let large_offset_90khz = u64::MAX - 37;
-        let packet = build_pts_dts_pcr_packet(
-            0x0100,
-            7,
-            90_000,
-            87_000,
-            base_pcr_90khz,
-        );
+        let packet = build_pts_dts_pcr_packet(0x0100, 7, 90_000, 87_000, base_pcr_90khz);
         let buffer = TransportStreamBuffer::new(packet.to_vec());
 
         let rendered = buffer
@@ -2896,13 +2676,10 @@ mod tests {
             .expect("finite segment with a large timestamp offset");
 
         let actual_pcr_27mhz = decode_pcr(&rendered[6..12]);
-        let expected_offset_27mhz =
-            (u128::from(large_offset_90khz) * 300_u128) % u128::from(MAX_PCR);
-        let expected_pcr_27mhz = u64::try_from(
-            (u128::from(base_pcr_90khz) * 300_u128 + expected_offset_27mhz)
-                % u128::from(MAX_PCR),
-        )
-        .expect("PCR modulo fits in u64");
+        let expected_offset_27mhz = (u128::from(large_offset_90khz) * 300_u128) % u128::from(MAX_PCR);
+        let expected_pcr_27mhz =
+            u64::try_from((u128::from(base_pcr_90khz) * 300_u128 + expected_offset_27mhz) % u128::from(MAX_PCR))
+                .expect("PCR modulo fits in u64");
         let legacy_wrapped_offset = large_offset_90khz.wrapping_mul(300) % MAX_PCR;
 
         assert_eq!(pcr_offset_27mhz(1), 300);
@@ -2919,13 +2696,7 @@ mod tests {
         let presentation_timestamp = MAX_PTS_DTS - 123;
         let decoding_timestamp = MAX_PTS_DTS - 456;
         let large_offset_90khz = u64::MAX - 37;
-        let packet = build_pts_dts_pcr_packet(
-            0x0100,
-            7,
-            presentation_timestamp,
-            decoding_timestamp,
-            90_000,
-        );
+        let packet = build_pts_dts_pcr_packet(0x0100, 7, presentation_timestamp, decoding_timestamp, 90_000);
         let buffer = TransportStreamBuffer::new(packet.to_vec());
 
         let rendered = buffer
@@ -2937,22 +2708,12 @@ mod tests {
             .expect("finite segment with wrapped PTS and DTS");
 
         let expected_timestamp = |timestamp| {
-            u64::try_from(
-                (u128::from(timestamp) + u128::from(large_offset_90khz))
-                    % u128::from(MAX_PTS_DTS),
-            )
-            .expect("PTS/DTS modulo fits in u64")
+            u64::try_from((u128::from(timestamp) + u128::from(large_offset_90khz)) % u128::from(MAX_PTS_DTS))
+                .expect("PTS/DTS modulo fits in u64")
         };
-        let (rendered_presentation_timestamp, rendered_decoding_timestamp, _) =
-            packet_timestamps(&rendered);
+        let (rendered_presentation_timestamp, rendered_decoding_timestamp, _) = packet_timestamps(&rendered);
 
-        assert_eq!(
-            rendered_presentation_timestamp,
-            expected_timestamp(presentation_timestamp)
-        );
-        assert_eq!(
-            rendered_decoding_timestamp,
-            expected_timestamp(decoding_timestamp)
-        );
+        assert_eq!(rendered_presentation_timestamp, expected_timestamp(presentation_timestamp));
+        assert_eq!(rendered_decoding_timestamp, expected_timestamp(decoding_timestamp));
     }
 }

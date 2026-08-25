@@ -529,23 +529,23 @@ mod tests {
     fn test_custom_stream_response() -> CustomStreamResponse {
         CustomStreamResponse {
             channel_unavailable: Some(TransportStreamBuffer::new(
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts")).to_vec(),
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts")).to_vec(),
             )),
             user_connections_exhausted: Some(TransportStreamBuffer::new(
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/user_connections_exhausted.ts")).to_vec(),
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/user_connections_exhausted.ts")).to_vec(),
             )),
             provider_connections_exhausted: Some(TransportStreamBuffer::new(
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/provider_connections_exhausted.ts")).to_vec(),
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/provider_connections_exhausted.ts")).to_vec(),
             )),
             low_priority_preempted: Some(TransportStreamBuffer::new(
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/low_priority_preempted.ts")).to_vec(),
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/low_priority_preempted.ts")).to_vec(),
             )),
             user_account_expired: Some(TransportStreamBuffer::new(
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/user_account_expired.ts")).to_vec(),
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/user_account_expired.ts")).to_vec(),
             )),
             panel_api_provisioning: None,
             hls_session_or_lease_expired: Some(TransportStreamBuffer::new(
-                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/hls_session_or_lease_expired.ts")).to_vec(),
+                include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/hls_session_or_lease_expired.ts")).to_vec(),
             )),
             panel_api_provisioning_hls_segments: Vec::new(),
         }
@@ -1083,7 +1083,7 @@ mod tests {
         assert_eq!(before.status(), StatusCode::OK);
         let before =
             axum::body::to_bytes(before.into_body(), usize::MAX).await.expect("original immutable body");
-        let mut revised = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/low_priority_preempted.ts")).to_vec();
+        let mut revised = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/low_priority_preempted.ts")).to_vec();
         *revised.last_mut().expect("non-empty low-priority asset") ^= 1;
         replace_low_priority_asset(&app_state, revised);
 

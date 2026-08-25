@@ -3061,7 +3061,7 @@ mod tests {
 
     #[tokio::test]
     async fn prewarmed_ready_object_reuses_metadata_on_later_demand() {
-        const CLEAN_TS: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
+        const CLEAN_TS: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"));
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let cache = Arc::new(HlsSegmentCache::with_cache_path(temp_dir.path()));
         let manager = Arc::new(HlsSegmentRepairManager::new(repair_config(HlsSegmentRepairMode::Low, 1)));

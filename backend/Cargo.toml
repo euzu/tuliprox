@@ -15,6 +15,7 @@ handlebars = "6.4.1"
 shared = { version = "3", path = "../shared" }
 tuliprox-btree = { version = "3", path = "../btree" }
 tuliprox-media-server = { version = "3", path = "../media-server" }
+tuliprox-mpegts = { version = "3", path = "../mpegts" }
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
@@ -114,6 +115,8 @@ vergen = { version = "9.1.0", features = ["build"] }
 # The migration and playlist-stream tests build legacy v2 databases and
 # sorted-index sidecars by hand; those builders live in the engine.
 tuliprox-btree = { version = "3", path = "../btree", features = ["test-support"] }
+# HLS tests assert on the segment render/finalize counters.
+tuliprox-mpegts = { version = "3", path = "../mpegts", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 rcgen = "0.14.8"
 rustls = "0.23.40"

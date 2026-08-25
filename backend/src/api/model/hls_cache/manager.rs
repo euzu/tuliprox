@@ -2876,7 +2876,7 @@ mod tests {
         Arc,
     };
 
-    const TERMINAL_ASSET_BYTES: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
+    const TERMINAL_ASSET_BYTES: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"));
 
     #[test]
     fn protected_idle_session_retry_cannot_form_a_millisecond_busy_loop() {

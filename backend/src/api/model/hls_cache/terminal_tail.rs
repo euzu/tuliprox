@@ -1720,7 +1720,7 @@ mod tests {
     };
     use crate::api::model::{HlsFiniteTsRenderSpec, TransportStreamBuffer};
 
-    const TERMINAL_ASSET_BYTES: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hls/channel_unavailable.ts"));
+    const TERMINAL_ASSET_BYTES: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../test/fixtures/hls/channel_unavailable.ts"));
 
     fn manifest() -> HlsLeaseManifestSnapshot {
         HlsLeaseManifestSnapshot {

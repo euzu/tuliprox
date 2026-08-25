@@ -1,0 +1,28 @@
+[package]
+name = "tuliprox-mpegts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "MPEG-TS buffering and stream-structure probing for tuliprox"
+
+[lints]
+workspace = true
+
+[features]
+# Publishes the render/finalize instrumentation counters. They are `#[cfg(test)]`
+# inside this crate; the feature exposes them to a dependent crate's tests, which
+# assert on how many times a segment was rendered. Enable from
+# `[dev-dependencies]` only - it is off for a normal build, so the counters'
+# atomic increments stay out of the HLS render path in release builds, exactly as
+# before this crate was split out.
+test-support = []
+
+[dependencies]
+aes = "0.8.4"
+bytes.workspace = true
+futures.workspace = true
+mpeg2ts-reader = "0.18.2"
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+zeroize.workspace = true
