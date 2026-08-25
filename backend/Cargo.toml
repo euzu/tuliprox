@@ -15,6 +15,7 @@ handlebars = "6.4.1"
 shared = { version = "3", path = "../shared" }
 tuliprox-btree = { version = "3", path = "../btree" }
 tuliprox-core = { version = "3", path = "../core" }
+tuliprox-iptv = { version = "3", path = "../iptv" }
 tuliprox-library = { version = "3", path = "../library" }
 tuliprox-messaging = { version = "3", path = "../messaging" }
 tuliprox-parser = { version = "3", path = "../parser" }

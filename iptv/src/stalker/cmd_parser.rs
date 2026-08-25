@@ -1,7 +1,6 @@
+use crate::stalker::error::{StalkerError, StalkerResult};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use url::Url;
-
-use crate::iptv::stalker::error::{StalkerError, StalkerResult};
 
 /// A Stalker `cmd` field is usually a plain-text space-prefixed command + URL pair, e.g.
 /// `"ffmpeg http://portal.example/stream/123"` or a bare URL. Some portals embed a
@@ -16,17 +15,11 @@ pub fn extract_url_from_cmd(raw_cmd: &str) -> StalkerResult<String> {
     }
     let bytes = BASE64
         .decode(trimmed.as_bytes())
-        .map_err(|err| StalkerError::BodyDecode {
-            message: format!("cmd base64 decode failed: {err}"),
-        })?;
-    let decoded = String::from_utf8(bytes).map_err(|err| StalkerError::BodyDecode {
-        message: format!("cmd utf-8 decode failed: {err}"),
-    })?;
-    extract_plain(decoded.trim()).unwrap_or_else(|| {
-        Err(StalkerError::BodyDecode {
-            message: "cmd contains no parseable url".to_string(),
-        })
-    })
+        .map_err(|err| StalkerError::BodyDecode { message: format!("cmd base64 decode failed: {err}") })?;
+    let decoded = String::from_utf8(bytes)
+        .map_err(|err| StalkerError::BodyDecode { message: format!("cmd utf-8 decode failed: {err}") })?;
+    extract_plain(decoded.trim())
+        .unwrap_or_else(|| Err(StalkerError::BodyDecode { message: "cmd contains no parseable url".to_string() }))
 }
 
 /// Try to recover a URL from a plain-text cmd. Returns `None` when no URL-shaped token is
@@ -59,9 +52,7 @@ fn check_playable(candidate: &str, url: &Url) -> StalkerResult<String> {
 /// only relay HTTP-family traffic to its clients. Rejecting non-HTTP schemes
 /// up-front keeps the supported-transport policy testable and prevents
 /// silently broken streams from leaking into M3U/xtream outputs.
-pub fn scheme_is_playable(scheme: &str) -> bool {
-    matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
-}
+pub fn scheme_is_playable(scheme: &str) -> bool { matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") }
 
 #[cfg(test)]
 mod tests {

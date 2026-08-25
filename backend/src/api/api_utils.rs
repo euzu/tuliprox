@@ -11,7 +11,8 @@ use crate::{
             get_custom_stream_response_error_status, get_stream_response_with_headers, is_custom_video_stream_enabled,
             tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason,
             ProviderAllocation, ProviderConfig, ProviderHandle, ProviderStreamCustomReason,
-            ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamManager, StreamDetails,
+            ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamCtx, SharedStreamManager,
+            StreamDetails,
             StreamError, StreamingStrategy, ThrottledStream, UserApiRequest, UserSession, MAX_HLS_MANIFEST_BYTES,
         },
     },
@@ -2895,7 +2896,12 @@ pub(crate) async fn stream_response(
             // Shared Stream response
             let shared_headers = provider_response.as_ref().map_or_else(Vec::new, |(h, _, _, _)| h.clone());
             if let Some((broadcast_stream, _shared_provider)) = SharedStreamManager::register_shared_stream(
-                app_state,
+                SharedStreamCtx {
+                    app_config: &app_state.app_config,
+                    shared_stream_manager: &app_state.shared_stream_manager,
+                    active_provider: &app_state.active_provider,
+                    connection_manager: &app_state.connection_manager,
+                },
                 stream_url,
                 stream,
                 &fingerprint.addr,
@@ -3340,7 +3346,12 @@ async fn try_shared_stream_response_if_any(
     req_headers: &HeaderMap,
 ) -> Option<impl IntoResponse> {
     if let Some((stream, provider)) = SharedStreamManager::subscribe_shared_stream(
-        app_state,
+        SharedStreamCtx {
+            app_config: &app_state.app_config,
+            shared_stream_manager: &app_state.shared_stream_manager,
+            active_provider: &app_state.active_provider,
+            connection_manager: &app_state.connection_manager,
+        },
         stream_url,
         &fingerprint.addr,
         connection_priority_for_kind(user, connection_kind),
@@ -8372,7 +8383,12 @@ mod tests {
             .expect("owner allocation should exist");
         let shared_stream = stream::pending::<Result<Bytes, std::io::Error>>();
         let registered = SharedStreamManager::register_shared_stream(
-            app_state.as_ref(),
+            SharedStreamCtx {
+                app_config: &app_state.app_config,
+                shared_stream_manager: &app_state.shared_stream_manager,
+                active_provider: &app_state.active_provider,
+                connection_manager: &app_state.connection_manager,
+            },
             stream_url,
             shared_stream,
             &owner_addr,

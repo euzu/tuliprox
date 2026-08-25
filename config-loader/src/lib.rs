@@ -1,3 +1,5 @@
+pub mod runtime_config_report;
+
 use arc_swap::{ArcSwap, ArcSwapAny};
 use chrono::Local;
 use log::{error, info, warn};

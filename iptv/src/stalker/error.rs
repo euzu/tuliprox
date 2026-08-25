@@ -2,14 +2,11 @@ use std::io;
 use thiserror::Error;
 use url::Url;
 
-pub(crate) fn safe_stalker_url(value: &str) -> String {
+pub fn safe_stalker_url(value: &str) -> String {
     let Ok(mut url) = Url::parse(value) else {
         return "[redacted invalid URL]".to_string();
     };
-    if !matches!(url.scheme(), "http" | "https")
-        || url.set_username("").is_err()
-        || url.set_password(None).is_err()
-    {
+    if !matches!(url.scheme(), "http" | "https") || url.set_username("").is_err() || url.set_password(None).is_err() {
         return "[redacted invalid URL]".to_string();
     }
     url.set_query(None);
@@ -131,11 +128,7 @@ mod tests {
 
     #[test]
     fn no_content_token_rejection_is_recognized() {
-        assert!(StalkerError::TokenRejected {
-            status: 204,
-            url: None,
-        }
-        .is_token_rejected());
+        assert!(StalkerError::TokenRejected { status: 204, url: None }.is_token_rejected());
     }
 
     #[test]

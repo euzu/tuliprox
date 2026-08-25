@@ -1,17 +1,16 @@
+use crate::stalker::{
+    client::StalkerApiClient,
+    error::{safe_stalker_url, StalkerError, StalkerResult},
+    presets::stalker_mag_preset_spec,
+    profile::{StalkerHandshake, StalkerProviderProfile, StalkerRawProviderProfile},
+    recipes::{detect_fingerprint, fallback_recipes_for, recipe_spec_for},
+    session::StalkerSession,
+    url_factory::StalkerLoadUrl,
+};
 use log::{debug, info, warn};
 use serde::Deserialize;
 use serde_json::Value;
 use shared::model::stalker::{StalkerAuthMode, StalkerBootstrapRecipe, StalkerPortalCapabilitiesDto};
-
-use crate::iptv::stalker::client::StalkerApiClient;
-use crate::iptv::stalker::error::{safe_stalker_url, StalkerError, StalkerResult};
-use crate::iptv::stalker::presets::stalker_mag_preset_spec;
-use crate::iptv::stalker::profile::{
-    StalkerHandshake, StalkerProviderProfile, StalkerRawProviderProfile,
-};
-use crate::iptv::stalker::recipes::{detect_fingerprint, fallback_recipes_for, recipe_spec_for};
-use crate::iptv::stalker::session::StalkerSession;
-use crate::iptv::stalker::url_factory::StalkerLoadUrl;
 
 /// The fields we expect in a successful handshake response. The portal wraps the result
 /// in `{"js": {...}}` — we accept both wrapped and unwrapped shapes for robustness.
@@ -65,9 +64,7 @@ pub async fn handshake(client: &StalkerApiClient) -> StalkerResult<StalkerHandsh
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| StalkerError::RecipesExhausted {
-        portal: safe_stalker_url(client.portal_url()),
-    }))
+    Err(last_err.unwrap_or_else(|| StalkerError::RecipesExhausted { portal: safe_stalker_url(client.portal_url()) }))
 }
 
 async fn attempt_recipe(client: &StalkerApiClient, recipe: StalkerBootstrapRecipe) -> StalkerResult<StalkerHandshake> {
@@ -113,15 +110,9 @@ async fn attempt_recipe(client: &StalkerApiClient, recipe: StalkerBootstrapRecip
                 };
                 let fingerprint =
                     detect_fingerprint(handshake_status, &session.fingerprint_evidence, client.config().mag_preset);
-                debug!(
-                    "Stalker portal fingerprint for {}: {fingerprint:?}",
-                    safe_stalker_url(&load_url.load_url)
-                );
+                debug!("Stalker portal fingerprint for {}: {fingerprint:?}", safe_stalker_url(&load_url.load_url));
                 let capabilities = fetch_capabilities(client, &session, &load_url, &spec).await.unwrap_or_default();
-                let size_caps = client
-                    .config()
-                    .size_caps
-                    .unwrap_or_default();
+                let size_caps = client.config().size_caps.unwrap_or_default();
                 let profile = StalkerProviderProfile::from_config(
                     client.config(),
                     raw_profile,
@@ -148,28 +139,22 @@ async fn attempt_recipe(client: &StalkerApiClient, recipe: StalkerBootstrapRecip
 async fn perform_handshake_against(
     client: &StalkerApiClient,
     load_url: &StalkerLoadUrl,
-    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::stalker::recipes::StalkerRecipeSpec,
 ) -> StalkerResult<(StalkerSession, u16)> {
     let config = client.config();
     let preset_spec = stalker_mag_preset_spec(config.mag_preset);
-    let mut builder = client
-        .http()
-        .get(&load_url.load_url)
-        .headers(client.common_headers(load_url))
-        .query(&[
-            ("type", "stb"),
-            ("action", "handshake"),
-            ("JsHttpRequest", "1-xml"),
-            ("HttpRequest", "1-xml"),
-        ]);
+    let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(load_url)).query(&[
+        ("type", "stb"),
+        ("action", "handshake"),
+        ("JsHttpRequest", "1-xml"),
+        ("HttpRequest", "1-xml"),
+    ]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, None, spec.token_in_query || preset_spec.emit_token_query);
     let response = client.send_with_cap(builder, "handshake", client.cap_for_action("handshake")).await?;
     client.ingest_response_cookies(&response);
     let status = response.status();
-    let body = client
-        .read_body_with_cap(response, "handshake", client.cap_for_action("handshake"))
-        .await?;
+    let body = client.read_body_with_cap(response, "handshake", client.cap_for_action("handshake")).await?;
     if !status.is_success() {
         if matches!(status.as_u16(), 401 | 403 | 456) {
             return Err(StalkerError::TokenRejected {
@@ -183,17 +168,14 @@ async fn perform_handshake_against(
         });
     }
     let parsed: StalkerHandshakeResponse = client.decode_body_bytes(&body, "handshake")?;
-    let token = parsed
-        .js
-        .as_ref()
-        .and_then(|js| js.token.clone())
-        .or(parsed.token.clone())
-        .or_else(|| {
-            // Some portals stash the token under the `text` field as a stringified object.
-            parsed.text.as_ref().and_then(|t| {
-                serde_json::from_str::<Value>(t).ok().and_then(|v| v.get("token").and_then(|t| t.as_str().map(String::from)))
-            })
-        });
+    let token = parsed.js.as_ref().and_then(|js| js.token.clone()).or(parsed.token.clone()).or_else(|| {
+        // Some portals stash the token under the `text` field as a stringified object.
+        parsed.text.as_ref().and_then(|t| {
+            serde_json::from_str::<Value>(t)
+                .ok()
+                .and_then(|v| v.get("token").and_then(|t| t.as_str().map(String::from)))
+        })
+    });
     let Some(token) = token else {
         return Err(StalkerError::HandshakeFailed {
             message: "no token in handshake response".to_string(),
@@ -243,21 +225,17 @@ async fn perform_do_auth(
     client: &StalkerApiClient,
     session: &StalkerSession,
     load_url: &StalkerLoadUrl,
-    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::stalker::recipes::StalkerRecipeSpec,
     login: &str,
     password: &str,
 ) -> StalkerResult<()> {
-    let mut builder = client
-        .http()
-        .get(&load_url.load_url)
-        .headers(client.common_headers(load_url))
-        .query(&[
-            ("type", "stb"),
-            ("action", "do_auth"),
-            ("login", login),
-            ("password", password),
-            ("JsHttpRequest", "1-xml"),
-        ]);
+    let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(load_url)).query(&[
+        ("type", "stb"),
+        ("action", "do_auth"),
+        ("login", login),
+        ("password", password),
+        ("JsHttpRequest", "1-xml"),
+    ]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(session), spec.token_in_query);
     let value: Value = client.send_json(builder, "do_auth").await?;
@@ -276,7 +254,7 @@ async fn perform_handshake_extra(
     client: &StalkerApiClient,
     session: &mut StalkerSession,
     load_url: &StalkerLoadUrl,
-    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::stalker::recipes::StalkerRecipeSpec,
 ) -> StalkerResult<()> {
     let mut builder = client
         .http()
@@ -303,7 +281,7 @@ async fn perform_portal_handshake(
     client: &StalkerApiClient,
     session: &StalkerSession,
     load_url: &StalkerLoadUrl,
-    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::stalker::recipes::StalkerRecipeSpec,
 ) -> StalkerResult<()> {
     let target = load_url;
     let mut builder = client
@@ -331,13 +309,13 @@ async fn fetch_profile(
     client: &StalkerApiClient,
     session: &StalkerSession,
     load_url: &StalkerLoadUrl,
-    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::stalker::recipes::StalkerRecipeSpec,
 ) -> StalkerResult<StalkerRawProviderProfile> {
-    let mut builder = client
-        .http()
-        .get(&load_url.load_url)
-        .headers(client.common_headers(load_url))
-        .query(&[("type", "stb"), ("action", "get_profile"), ("HttpRequest", "1-xml")]);
+    let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(load_url)).query(&[
+        ("type", "stb"),
+        ("action", "get_profile"),
+        ("HttpRequest", "1-xml"),
+    ]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(session), spec.token_in_query);
     let raw: serde_json::Value = client.send_json(builder, "get_profile").await?;
@@ -358,16 +336,15 @@ async fn fetch_profile(
         }
         other => other,
     };
-    serde_json::from_value::<StalkerRawProviderProfile>(merged).map_err(|err| StalkerError::BodyDecode {
-        message: format!("get_profile decode: {err}"),
-    })
+    serde_json::from_value::<StalkerRawProviderProfile>(merged)
+        .map_err(|err| StalkerError::BodyDecode { message: format!("get_profile decode: {err}") })
 }
 
 async fn fetch_capabilities(
     client: &StalkerApiClient,
     session: &StalkerSession,
     load_url: &StalkerLoadUrl,
-    spec: &crate::iptv::stalker::recipes::StalkerRecipeSpec,
+    spec: &crate::stalker::recipes::StalkerRecipeSpec,
 ) -> StalkerResult<StalkerPortalCapabilitiesDto> {
     let mut builder = client
         .http()
@@ -384,9 +361,8 @@ async fn fetch_capabilities(
         Value::Object(ref map) => map.get("js").cloned().unwrap_or(value.clone()),
         _ => return Ok(StalkerPortalCapabilitiesDto::default()),
     };
-    serde_json::from_value::<StalkerPortalCapabilitiesDto>(capabilities_value).map_err(|err| StalkerError::BodyDecode {
-        message: format!("get_capabilities decode: {err}"),
-    })
+    serde_json::from_value::<StalkerPortalCapabilitiesDto>(capabilities_value)
+        .map_err(|err| StalkerError::BodyDecode { message: format!("get_capabilities decode: {err}") })
 }
 
 // Re-export to keep callers from having to know about the inner submodule path.

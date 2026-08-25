@@ -1,6 +1,5 @@
 use shared::model::stalker::StalkerMagPreset;
-
-use crate::model::StalkerDeviceProfile;
+use tuliprox_core::model::StalkerDeviceProfile;
 
 /// The fingerprint values for a single MAG device preset. The portal uses these to
 /// distinguish "this is a real MAG device" from "this is a script" — the values
@@ -64,10 +63,7 @@ pub fn stalker_mag_preset_spec(preset: StalkerMagPreset) -> StalkerMagPresetSpec
 /// Merge the user-supplied `device_profile` with the preset defaults. We never overwrite
 /// a field the user explicitly set; we only fill in blanks. This means a user that
 /// provides only a MAC address still ends up with a fully populated profile.
-pub fn merge_profile_with_preset(
-    mut profile: StalkerDeviceProfile,
-    preset: StalkerMagPreset,
-) -> StalkerDeviceProfile {
+pub fn merge_profile_with_preset(mut profile: StalkerDeviceProfile, preset: StalkerMagPreset) -> StalkerDeviceProfile {
     let spec = stalker_mag_preset_spec(preset);
     if profile.user_agent.as_deref().map(str::trim).is_none_or(str::is_empty) {
         profile.user_agent = Some(spec.user_agent.to_string());

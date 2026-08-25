@@ -4460,6 +4460,7 @@ dependencies = [
  "tuliprox-btree",
  "tuliprox-config-loader",
  "tuliprox-core",
+ "tuliprox-iptv",
  "tuliprox-library",
  "tuliprox-media-server",
  "tuliprox-messaging",
@@ -4522,6 +4523,7 @@ dependencies = [
  "log",
  "serde",
  "serde-saphyr",
+ "serde_json",
  "shared",
  "tempfile",
  "tokio",
@@ -4577,6 +4579,31 @@ dependencies = [
  "tuliprox-mpegts",
  "url",
  "zeroize",
+]
+
+[[package]]
+name = "tuliprox-iptv"
+version = "3.3.91"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "futures",
+ "log",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "shared",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tuliprox-core",
+ "tuliprox-messaging",
+ "tuliprox-parser",
+ "tuliprox-repository",
+ "url",
 ]
 
 [[package]]

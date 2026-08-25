@@ -1,6 +1,5 @@
+use crate::stalker::error::{safe_stalker_url, StalkerError, StalkerResult};
 use url::Url;
-
-use crate::iptv::stalker::error::{safe_stalker_url, StalkerError, StalkerResult};
 
 /// The candidate endpoints a Stalker portal might respond on, in priority order. The portal
 /// will answer on any of these depending on the firmware flavour (legacy MAG250, Ministra,
@@ -25,9 +24,8 @@ pub struct StalkerLoadUrl {
 /// a URL ending in the `c/` web-UI path has that suffix stripped before generating the
 /// sibling list.
 pub fn load_url_candidates(portal_url: &str) -> StalkerResult<Vec<StalkerLoadUrl>> {
-    let parsed = Url::parse(portal_url).map_err(|err| StalkerError::BodyDecode {
-        message: format!("portal url parse failed: {err}"),
-    })?;
+    let parsed = Url::parse(portal_url)
+        .map_err(|err| StalkerError::BodyDecode { message: format!("portal url parse failed: {err}") })?;
     let origin = {
         let mut trimmed = parsed.clone();
         trimmed.set_path("");
@@ -48,10 +46,7 @@ pub fn load_url_candidates(portal_url: &str) -> StalkerResult<Vec<StalkerLoadUrl
         if matches_endpoint {
             let prefix = supplied_path[..supplied_path.len() - endpoint.len()].trim_matches('/');
             let base = join_base(&origin, prefix);
-            return Ok(vec![StalkerLoadUrl {
-                load_url: format!("{base}/{endpoint}"),
-                referer: format!("{base}/c/"),
-            }]);
+            return Ok(vec![StalkerLoadUrl { load_url: format!("{base}/{endpoint}"), referer: format!("{base}/c/") }]);
         }
     }
 
@@ -67,10 +62,7 @@ pub fn load_url_candidates(portal_url: &str) -> StalkerResult<Vec<StalkerLoadUrl
     let referer = format!("{base}/c/");
     let candidates: Vec<StalkerLoadUrl> = STALKER_LOAD_PATHS
         .iter()
-        .map(|path| StalkerLoadUrl {
-            load_url: format!("{base}/{path}"),
-            referer: referer.clone(),
-        })
+        .map(|path| StalkerLoadUrl { load_url: format!("{base}/{path}"), referer: referer.clone() })
         .collect();
     Ok(candidates)
 }
@@ -125,8 +117,7 @@ mod tests {
 
     #[test]
     fn strips_existing_load_path() {
-        let candidates =
-            load_url_candidates("http://portal.example/server/load.php").expect("ok");
+        let candidates = load_url_candidates("http://portal.example/server/load.php").expect("ok");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].load_url, "http://portal.example/server/load.php");
         assert_eq!(candidates[0].referer, "http://portal.example/c/");
@@ -146,8 +137,7 @@ mod tests {
 
     #[test]
     fn sub_path_load_url_is_single_authoritative_candidate() {
-        let candidates =
-            load_url_candidates("http://portal.example/stalker_portal/server/load.php").expect("ok");
+        let candidates = load_url_candidates("http://portal.example/stalker_portal/server/load.php").expect("ok");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].load_url, "http://portal.example/stalker_portal/server/load.php");
         assert_eq!(candidates[0].referer, "http://portal.example/stalker_portal/c/");

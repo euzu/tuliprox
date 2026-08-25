@@ -12,30 +12,28 @@
 
 #![allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 
-use log::{info, warn};
-use shared::model::stalker::{
-    StalkerCommandVariantDto, StalkerPlaybackDescriptorDto, StalkerPlaybackMode, StalkerStreamKind,
-};
-use shared::model::stalker_item::StalkerPlaylistItem;
-use shared::utils::{fnv1a_32, stable_episode_storage_id, Internable};
-use std::collections::HashSet;
-use std::sync::Arc;
-
 use super::catalog::{
     StalkerCategory, StalkerRawItem, StalkerRawItemInfo, StalkerRawSeriesDetails, StalkerRawSeriesEpisode,
     StalkerRawSeriesItem, StalkerRawSeriesSeason,
 };
+use log::{info, warn};
+use shared::{
+    model::{
+        stalker::{StalkerCommandVariantDto, StalkerPlaybackDescriptorDto, StalkerPlaybackMode, StalkerStreamKind},
+        stalker_item::StalkerPlaylistItem,
+    },
+    utils::{fnv1a_32, stable_episode_storage_id, Internable},
+};
+use std::{collections::HashSet, sync::Arc};
 
-fn intern_optional(s: Option<String>) -> Option<Arc<str>> {
-    s.filter(|v| !v.is_empty()).map(Internable::intern)
-}
+fn intern_optional(s: Option<String>) -> Option<Arc<str>> { s.filter(|v| !v.is_empty()).map(Internable::intern) }
 
 fn intern_optional_value(s: Option<&String>) -> Option<Arc<str>> {
     s.filter(|v| !v.is_empty()).map(|v| Internable::intern(v.clone()))
 }
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
-pub(crate) struct StalkerTempLinkFlags(u8);
+pub struct StalkerTempLinkFlags(u8);
 
 impl StalkerTempLinkFlags {
     const NGINX_SECURE_LINK: u8 = 1 << 0;
@@ -96,11 +94,7 @@ pub fn map_stalker_to_playlist_item(
         .or_else(|| category.and_then(|c| c.id.parse::<u32>().ok()))
         .unwrap_or(0);
     let category_name = category.map(|c| c.title.clone()).unwrap_or_default();
-    let number = raw
-        .number
-        .as_deref()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(0);
+    let number = raw.number.as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
     let stream_id = raw.stream_id().unwrap_or(0);
     let logo = raw.logo.clone().or_else(|| raw.stream_icon.clone());
     let cmd = raw.cmd.clone().unwrap_or_default();
@@ -127,10 +121,7 @@ pub fn map_stalker_to_playlist_item(
         genre: extract_info_text(info.as_ref(), |i| i.genre.clone()),
         release_date: extract_info_text(info.as_ref(), |i| i.releasedate.clone()),
         rating: info.as_ref().and_then(|i| i.rating).unwrap_or(0.0),
-        tmdb_id: info
-            .as_ref()
-            .and_then(|i| i.tmdb_id.clone())
-            .and_then(|s| s.parse::<i64>().ok()),
+        tmdb_id: info.as_ref().and_then(|i| i.tmdb_id.clone()).and_then(|s| s.parse::<i64>().ok()),
         backdrop_url: info
             .as_ref()
             .and_then(|i| i.backdrop.clone())
@@ -159,26 +150,14 @@ fn extract_info_text<F>(info: Option<&StalkerRawItemInfo>, field: F) -> Option<A
 where
     F: FnOnce(&StalkerRawItemInfo) -> Option<String>,
 {
-    info.and_then(field)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .map(Internable::intern)
+    info.and_then(field).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).map(Internable::intern)
 }
 
 fn build_descriptor_from_raw(raw: &StalkerRawItem) -> Option<StalkerPlaybackDescriptorDto> {
     let cmd = raw.cmd.clone().filter(|s| !s.is_empty())?;
     let mode = playback_mode_from_flags(StalkerTempLinkFlags::from(raw));
-    let candidates = vec![StalkerCommandVariantDto {
-        cmd,
-        playback_mode: mode,
-        source_key: None,
-        priority: 0,
-    }];
-    Some(StalkerPlaybackDescriptorDto {
-        primary_mode: mode,
-        candidates,
-        capabilities: None,
-    })
+    let candidates = vec![StalkerCommandVariantDto { cmd, playback_mode: mode, source_key: None, priority: 0 }];
+    Some(StalkerPlaybackDescriptorDto { primary_mode: mode, candidates, capabilities: None })
 }
 
 /// Map the raw Stalker temp-link capability flags to a canonical `StalkerPlaybackMode`.
@@ -188,7 +167,7 @@ fn build_descriptor_from_raw(raw: &StalkerRawItem) -> Option<StalkerPlaybackDesc
 /// 3. `wowza_tmp_link` -> `TempLinkWowza`
 /// 4. `use_http_tmp_link` -> `DirectUrl` (HTTP temp link is just a normal URL with TTL)
 /// 5. otherwise `DirectUrl`
-pub(crate) fn playback_mode_from_flags(flags: StalkerTempLinkFlags) -> StalkerPlaybackMode {
+pub fn playback_mode_from_flags(flags: StalkerTempLinkFlags) -> StalkerPlaybackMode {
     if flags.has_nginx_secure_link() {
         StalkerPlaybackMode::TempLinkNginx
     } else if flags.has_flussonic_tmp_link() {
@@ -217,16 +196,8 @@ pub fn map_stalker_series_root(
         .or_else(|| category.and_then(|c| c.id.parse::<u32>().ok()))
         .unwrap_or(0);
     let category_name = category.map(|c| c.title.clone()).unwrap_or_default();
-    let number = raw
-        .number
-        .as_deref()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(0);
-    let series_id = raw
-        .id_string()
-        .as_deref()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(0);
+    let number = raw.number.as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    let series_id = raw.id_string().as_deref().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
     let logo = raw.logo.clone().or_else(|| raw.cover.clone());
 
     StalkerPlaylistItem {
@@ -288,20 +259,9 @@ pub fn map_stalker_series_details(
     used_episode_ids: &mut HashSet<u32>,
 ) -> Vec<StalkerPlaylistItem> {
     let mut out = Vec::new();
-    let series_id_value = details
-        .id
-        .as_deref()
-        .and_then(|s| s.parse::<u32>().ok())
-        .or(parent.series_id)
-        .unwrap_or(0);
+    let series_id_value = details.id.as_deref().and_then(|s| s.parse::<u32>().ok()).or(parent.series_id).unwrap_or(0);
     for season in &details.seasons {
-        out.extend(map_stalker_season_episodes(
-            season,
-            series_id_value,
-            parent,
-            added_at,
-            used_episode_ids,
-        ));
+        out.extend(map_stalker_season_episodes(season, series_id_value, parent, added_at, used_episode_ids));
     }
     out
 }
@@ -333,14 +293,8 @@ fn map_stalker_episode(
     let season_number = episode.season_number.or(season.number).unwrap_or(0);
     let cmd = episode.cmd.clone().unwrap_or_default();
     let info = episode.info.clone();
-    let container_extension = episode
-        .container_extension
-        .clone()
-        .filter(|s| !s.is_empty());
-    let logo = info
-        .as_ref()
-        .and_then(|i| i.movie_image.clone())
-        .filter(|s| !s.is_empty());
+    let container_extension = episode.container_extension.clone().filter(|s| !s.is_empty());
+    let logo = info.as_ref().and_then(|i| i.movie_image.clone()).filter(|s| !s.is_empty());
 
     let descriptor = if cmd.is_empty() {
         None
@@ -394,10 +348,7 @@ fn map_stalker_episode(
         genre: extract_info_text(info.as_ref(), |i| i.genre.clone()),
         release_date: extract_info_text(info.as_ref(), |i| i.releasedate.clone()),
         rating: info.as_ref().and_then(|i| i.rating).unwrap_or(0.0),
-        tmdb_id: info
-            .as_ref()
-            .and_then(|i| i.tmdb_id.clone())
-            .and_then(|s| s.parse::<i64>().ok()),
+        tmdb_id: info.as_ref().and_then(|i| i.tmdb_id.clone()).and_then(|s| s.parse::<i64>().ok()),
         backdrop_url: info
             .as_ref()
             .and_then(|i| i.backdrop.clone())
@@ -438,24 +389,15 @@ fn collision_free_episode_storage_id(
     let mut salt = 0_u32;
     while !used_ids.insert(id) {
         salt = salt.saturating_add(1);
-        warn!(
-            "Stalker episode storage id collision for key '{base_key}' (id {id}), re-salting with counter {salt}"
-        );
+        warn!("Stalker episode storage id collision for key '{base_key}' (id {id}), re-salting with counter {salt}");
         id = fnv1a_32(&format!("{base_key}:{salt}"));
     }
     id
 }
 
 /// Log a single-line summary of a Stalker download for the given input.
-pub fn log_stalker_download_summary(
-    input_name: &str,
-    live_count: usize,
-    vod_count: usize,
-    series_count: usize,
-) {
-    info!(
-        "Stalker input '{input_name}' catalog: live={live_count}, vod={vod_count}, series={series_count}"
-    );
+pub fn log_stalker_download_summary(input_name: &str, live_count: usize, vod_count: usize, series_count: usize) {
+    info!("Stalker input '{input_name}' catalog: live={live_count}, vod={vod_count}, series={series_count}");
 }
 
 #[cfg(test)]
@@ -463,11 +405,7 @@ mod tests {
     use super::*;
 
     fn raw_with_id(id: &str, name: &str) -> StalkerRawItem {
-        StalkerRawItem {
-            id: Some(id.to_string()),
-            name: Some(name.to_string()),
-            ..StalkerRawItem::default()
-        }
+        StalkerRawItem { id: Some(id.to_string()), name: Some(name.to_string()), ..StalkerRawItem::default() }
     }
 
     #[test]
@@ -544,11 +482,8 @@ mod tests {
 
     #[test]
     fn series_root_records_series_id() {
-        let raw = StalkerRawSeriesItem {
-            id: Some("99".to_string()),
-            name: Some("Root".to_string()),
-            ..Default::default()
-        };
+        let raw =
+            StalkerRawSeriesItem { id: Some("99".to_string()), name: Some("Root".to_string()), ..Default::default() };
         let item = map_stalker_series_root(&raw, None, 0);
         assert!(item.is_series);
         assert_eq!(item.series_id, Some(99));
@@ -644,10 +579,7 @@ mod tests {
             number: Some(1),
             name: Some("Pilot".to_string()),
             cmd: Some("ffmpeg http://stream/1".to_string()),
-            info: Some(StalkerRawItemInfo {
-                releasedate: Some("2021-05-03".to_string()),
-                ..Default::default()
-            }),
+            info: Some(StalkerRawItemInfo { releasedate: Some("2021-05-03".to_string()), ..Default::default() }),
             ..Default::default()
         };
         let season = StalkerRawSeriesSeason { number: Some(1), episodes: vec![episode.clone()], ..Default::default() };

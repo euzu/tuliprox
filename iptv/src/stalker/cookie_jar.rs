@@ -1,10 +1,10 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-
+use crate::stalker::error::StalkerResult;
 use parking_lot::RwLock;
-
-use crate::iptv::stalker::error::StalkerResult;
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// The cookie jar is intentionally cheaply cloneable (the inner map is wrapped in a
 /// `parking_lot::RwLock` so cloning a jar shares the storage; this is safe because all
@@ -27,9 +27,7 @@ pub struct StalkerCookie {
 }
 
 impl StalkerCookie {
-    pub fn is_expired(&self, now_epoch: u64) -> bool {
-        self.expires_at_epoch.is_some_and(|exp| exp <= now_epoch)
-    }
+    pub fn is_expired(&self, now_epoch: u64) -> bool { self.expires_at_epoch.is_some_and(|exp| exp <= now_epoch) }
 }
 
 impl StalkerCookieJar {
@@ -56,9 +54,7 @@ impl StalkerCookieJar {
     }
 
     /// Remove the cookie with the given name.
-    pub fn remove(&self, name: &str) {
-        self.inner.write().remove(name);
-    }
+    pub fn remove(&self, name: &str) { self.inner.write().remove(name); }
 
     /// Wipe all stored cookies. Used when the server returns 401/403/456.
     pub fn clear(&self) { self.inner.write().clear(); }
@@ -75,11 +71,7 @@ impl StalkerCookieJar {
     /// with other cookie sources before serializing a `Cookie` header.
     pub fn active_cookies(&self, now_epoch: u64) -> Vec<(String, String)> {
         let guard = self.inner.read();
-        guard
-            .values()
-            .filter(|c| !c.is_expired(now_epoch))
-            .map(|c| (c.name.clone(), c.value.clone()))
-            .collect()
+        guard.values().filter(|c| !c.is_expired(now_epoch)).map(|c| (c.name.clone(), c.value.clone())).collect()
     }
 }
 
@@ -130,16 +122,15 @@ fn parse_cookie_expires(value: &str) -> Option<u64> {
     Some(u64::try_from(epoch).unwrap_or(0))
 }
 
-pub fn now_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
+pub fn now_epoch_secs() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
 
 /// Helper used by the client to ensure we never block longer than the configured timeout
 /// while parsing/merging cookies. The parsing helpers above are sync; the wrapper makes
 /// the call sites read like the rest of the API.
-pub fn apply_set_cookie_headers_unchecked(jar: &StalkerCookieJar, headers: &reqwest::header::HeaderMap) -> StalkerResult<()> {
+pub fn apply_set_cookie_headers_unchecked(
+    jar: &StalkerCookieJar,
+    headers: &reqwest::header::HeaderMap,
+) -> StalkerResult<()> {
     for value in headers.get_all(reqwest::header::SET_COOKIE) {
         if let Ok(raw) = value.to_str() {
             jar.ingest_set_cookie([raw]);
@@ -148,23 +139,21 @@ pub fn apply_set_cookie_headers_unchecked(jar: &StalkerCookieJar, headers: &reqw
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread::sleep;
-    use std::time::Duration;
+    use std::{thread::sleep, time::Duration};
 
     pub fn cookie_age(jar: &StalkerCookieJar, name: &str) -> Option<Duration> {
-    let guard = jar.inner.read();
-    let cookie = guard.get(name)?;
-    let expires = cookie.expires_at_epoch?;
-    let now = now_epoch_secs();
-    if expires <= now {
-        return None;
+        let guard = jar.inner.read();
+        let cookie = guard.get(name)?;
+        let expires = cookie.expires_at_epoch?;
+        let now = now_epoch_secs();
+        if expires <= now {
+            return None;
+        }
+        Some(Duration::from_secs(expires - now))
     }
-    Some(Duration::from_secs(expires - now))
-}
 
     #[test]
     fn parses_set_cookie_with_max_age() {
@@ -186,16 +175,8 @@ mod tests {
     #[test]
     fn jar_drops_expired_cookies() {
         let jar = StalkerCookieJar::new();
-        jar.insert(StalkerCookie {
-            name: "dead".to_string(),
-            value: "beef".to_string(),
-            expires_at_epoch: Some(1),
-        });
-        jar.insert(StalkerCookie {
-            name: "alive".to_string(),
-            value: "feed".to_string(),
-            expires_at_epoch: None,
-        });
+        jar.insert(StalkerCookie { name: "dead".to_string(), value: "beef".to_string(), expires_at_epoch: Some(1) });
+        jar.insert(StalkerCookie { name: "alive".to_string(), value: "feed".to_string(), expires_at_epoch: None });
         let header = jar.active_cookie_header(now_epoch_secs());
         assert!(!header.contains("dead=beef"));
         assert!(header.contains("alive=feed"));
@@ -226,8 +207,7 @@ mod tests {
 
     #[test]
     fn parses_expires_attribute() {
-        let cookie =
-            parse_set_cookie("sid=abc; Expires=Tue, 01 Jul 2042 10:00:00 GMT; Path=/").expect("ok");
+        let cookie = parse_set_cookie("sid=abc; Expires=Tue, 01 Jul 2042 10:00:00 GMT; Path=/").expect("ok");
         let exp = cookie.expires_at_epoch.expect("expires should produce expiry");
         assert!(exp > now_epoch_secs());
     }
@@ -242,24 +222,15 @@ mod tests {
 
     #[test]
     fn max_age_wins_over_expires() {
-        let cookie = parse_set_cookie("sid=abc; Expires=Tue, 01 Jul 2042 10:00:00 GMT; Max-Age=0")
-            .expect("ok");
+        let cookie = parse_set_cookie("sid=abc; Expires=Tue, 01 Jul 2042 10:00:00 GMT; Max-Age=0").expect("ok");
         assert_eq!(cookie.expires_at_epoch, Some(0));
     }
 
     #[test]
     fn active_cookies_skips_expired_pairs() {
         let jar = StalkerCookieJar::new();
-        jar.insert(StalkerCookie {
-            name: "dead".to_string(),
-            value: "beef".to_string(),
-            expires_at_epoch: Some(1),
-        });
-        jar.insert(StalkerCookie {
-            name: "alive".to_string(),
-            value: "feed".to_string(),
-            expires_at_epoch: None,
-        });
+        jar.insert(StalkerCookie { name: "dead".to_string(), value: "beef".to_string(), expires_at_epoch: Some(1) });
+        jar.insert(StalkerCookie { name: "alive".to_string(), value: "feed".to_string(), expires_at_epoch: None });
         let pairs = jar.active_cookies(now_epoch_secs());
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0], ("alive".to_string(), "feed".to_string()));
@@ -268,11 +239,7 @@ mod tests {
     #[test]
     fn cookie_age_returns_none_when_session_cookie() {
         let jar = StalkerCookieJar::new();
-        jar.insert(StalkerCookie {
-            name: "session".to_string(),
-            value: "yes".to_string(),
-            expires_at_epoch: None,
-        });
+        jar.insert(StalkerCookie { name: "session".to_string(), value: "yes".to_string(), expires_at_epoch: None });
         assert!(cookie_age(&jar, "session").is_none());
     }
 

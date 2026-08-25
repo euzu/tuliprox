@@ -1,8 +1,7 @@
+use crate::stalker::presets::stalker_mag_preset_spec;
 use shared::model::stalker::{
     StalkerAuthMode, StalkerBootstrapRecipe, StalkerEndpointPreference, StalkerMagPreset, StalkerPortalFingerprint,
 };
-
-use crate::iptv::stalker::presets::stalker_mag_preset_spec;
 
 /// A recipe captures "how to perform the handshake against a portal of flavour X using
 /// auth mode Y and MAG preset Z". The handshake is a sequence of HTTP calls (`handshake`,
@@ -95,7 +94,9 @@ pub fn recipe_spec_for(recipe: StalkerBootstrapRecipe) -> StalkerRecipeSpec {
             require_portal_handshake: true,
             token_in_query: true,
         },
-        StalkerBootstrapRecipe::ModuleGated| StalkerBootstrapRecipe::StrictMag | StalkerBootstrapRecipe::AuthStrictMag => StalkerRecipeSpec {
+        StalkerBootstrapRecipe::ModuleGated
+        | StalkerBootstrapRecipe::StrictMag
+        | StalkerBootstrapRecipe::AuthStrictMag => StalkerRecipeSpec {
             recipe,
             emit_handshake_extra: true,
             require_portal_handshake: true,
@@ -153,8 +154,8 @@ pub fn detect_fingerprint(
 /// The relative order of other candidates is preserved.
 pub fn apply_endpoint_preference(
     pref: StalkerEndpointPreference,
-    mut candidates: Vec<crate::iptv::stalker::url_factory::StalkerLoadUrl>,
-) -> Vec<crate::iptv::stalker::url_factory::StalkerLoadUrl> {
+    mut candidates: Vec<crate::stalker::url_factory::StalkerLoadUrl>,
+) -> Vec<crate::stalker::url_factory::StalkerLoadUrl> {
     match pref {
         StalkerEndpointPreference::Auto => candidates,
         StalkerEndpointPreference::ServerLoad => {
@@ -168,7 +169,7 @@ pub fn apply_endpoint_preference(
     }
 }
 
-fn rotate_to_front(candidates: &mut Vec<crate::iptv::stalker::url_factory::StalkerLoadUrl>, path: &str) {
+fn rotate_to_front(candidates: &mut Vec<crate::stalker::url_factory::StalkerLoadUrl>, path: &str) {
     if let Some(pos) = candidates.iter().position(|c| c.load_url.ends_with(path)) {
         if pos == 0 {
             return;
@@ -233,17 +234,17 @@ mod tests {
         assert!(spec.token_in_query);
     }
 
-    fn make_candidates() -> Vec<crate::iptv::stalker::url_factory::StalkerLoadUrl> {
+    fn make_candidates() -> Vec<crate::stalker::url_factory::StalkerLoadUrl> {
         vec![
-            crate::iptv::stalker::url_factory::StalkerLoadUrl {
+            crate::stalker::url_factory::StalkerLoadUrl {
                 load_url: "http://portal.example/server/load.php".to_string(),
                 referer: "http://portal.example/c/".to_string(),
             },
-            crate::iptv::stalker::url_factory::StalkerLoadUrl {
+            crate::stalker::url_factory::StalkerLoadUrl {
                 load_url: "http://portal.example/portal.php".to_string(),
                 referer: "http://portal.example/c/".to_string(),
             },
-            crate::iptv::stalker::url_factory::StalkerLoadUrl {
+            crate::stalker::url_factory::StalkerLoadUrl {
                 load_url: "http://portal.example/c/".to_string(),
                 referer: "http://portal.example/c/".to_string(),
             },
@@ -255,11 +256,14 @@ mod tests {
         let cands = make_candidates();
         let rotated = apply_endpoint_preference(StalkerEndpointPreference::Auto, cands.clone());
         let urls: Vec<&str> = rotated.iter().map(|c| c.load_url.as_str()).collect();
-        assert_eq!(urls, vec![
-            "http://portal.example/server/load.php",
-            "http://portal.example/portal.php",
-            "http://portal.example/c/",
-        ]);
+        assert_eq!(
+            urls,
+            vec![
+                "http://portal.example/server/load.php",
+                "http://portal.example/portal.php",
+                "http://portal.example/c/",
+            ]
+        );
     }
 
     #[test]
@@ -280,7 +284,7 @@ mod tests {
     fn endpoint_preference_missing_path_is_noop() {
         // No `server/load.php` in the list — rotation must not panic and must keep
         // the original order.
-        let cands = vec![crate::iptv::stalker::url_factory::StalkerLoadUrl {
+        let cands = vec![crate::stalker::url_factory::StalkerLoadUrl {
             load_url: "http://portal.example/portal.php".to_string(),
             referer: "http://portal.example/c/".to_string(),
         }];

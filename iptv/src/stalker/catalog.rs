@@ -1,14 +1,17 @@
+use crate::stalker::{
+    client::StalkerApiClient,
+    error::{safe_stalker_url, StalkerError, StalkerResult},
+    profile::StalkerHandshake,
+    recipes::recipe_spec_for,
+    url_factory::StalkerLoadUrl,
+};
 use log::{info, warn};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use shared::model::stalker::StalkerStreamKind;
-use shared::utils::{deserialize_as_option_string, deserialize_number_from_string};
-
-use crate::iptv::stalker::client::StalkerApiClient;
-use crate::iptv::stalker::error::{safe_stalker_url, StalkerError, StalkerResult};
-use crate::iptv::stalker::profile::StalkerHandshake;
-use crate::iptv::stalker::recipes::recipe_spec_for;
-use crate::iptv::stalker::url_factory::StalkerLoadUrl;
+use shared::{
+    model::stalker::StalkerStreamKind,
+    utils::{deserialize_as_option_string, deserialize_number_from_string},
+};
 
 /// A category returned by `get_*_categories`. Stalker portals wrap the list in `{"js": [...]}`.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -28,11 +31,7 @@ impl StalkerCategory {
             id: value_string(value, "id").unwrap_or_default(),
             title: obj.get("title").and_then(Value::as_str).unwrap_or_default().to_string(),
             alias: obj.get("alias").and_then(Value::as_str).map(String::from),
-            number: obj
-                .get("number")
-                .and_then(Value::as_i64)
-                .and_then(|n| i32::try_from(n).ok())
-                .unwrap_or(0),
+            number: obj.get("number").and_then(Value::as_i64).and_then(|n| i32::try_from(n).ok()).unwrap_or(0),
         })
     }
 }
@@ -91,7 +90,11 @@ impl StalkerRawItem {
     pub fn stream_id(&self) -> Option<u32> { self.id.as_ref().and_then(|s| s.parse::<u32>().ok()) }
     pub fn category_id(&self) -> Option<&str> { self.category_id.as_deref().or(self.tv_genre_id.as_deref()) }
     pub fn stream_kind(&self) -> StalkerStreamKind {
-        if self.series_id.is_some() { StalkerStreamKind::Episode } else { StalkerStreamKind::Live }
+        if self.series_id.is_some() {
+            StalkerStreamKind::Episode
+        } else {
+            StalkerStreamKind::Live
+        }
     }
     pub fn display_name(&self) -> &str { self.name.as_deref().or(self.title.as_deref()).unwrap_or("") }
 }
@@ -203,9 +206,7 @@ pub struct StalkerRawSeriesItem {
 
 impl StalkerRawSeriesItem {
     pub fn display_name(&self) -> &str { self.name.as_deref().or(self.title.as_deref()).unwrap_or("") }
-    pub fn id_string(&self) -> Option<String> {
-        self.id.clone().or_else(|| self.series_id.clone())
-    }
+    pub fn id_string(&self) -> Option<String> { self.id.clone().or_else(|| self.series_id.clone()) }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -295,16 +296,12 @@ async fn get_categories(
     let candidates = client.load_url_candidates().to_vec();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
-        let mut builder = client
-            .http()
-            .get(&load_url.load_url)
-            .headers(client.common_headers(&load_url))
-            .query(&[
-                ("type", portal_type),
-                ("action", action),
-                ("JsHttpRequest", "1-xml"),
-                ("HttpRequest", "1-xml"),
-            ]);
+        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+            ("type", portal_type),
+            ("action", action),
+            ("JsHttpRequest", "1-xml"),
+            ("HttpRequest", "1-xml"),
+        ]);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
         match client.send_json::<Value>(builder, action).await {
@@ -382,17 +379,13 @@ where
         let mut pages_fetched: u32 = 0;
         let mut all: Vec<T> = Vec::new();
         loop {
-            let mut builder = client
-                .http()
-                .get(&load_url.load_url)
-                .headers(client.common_headers(&load_url))
-                .query(&[
-                    ("type", portal_type),
-                    ("action", action),
-                    ("JsHttpRequest", "1-xml"),
-                    ("HttpRequest", "1-xml"),
-                    ("p", page.to_string().as_str()),
-                ]);
+            let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+                ("type", portal_type),
+                ("action", action),
+                ("JsHttpRequest", "1-xml"),
+                ("HttpRequest", "1-xml"),
+                ("p", page.to_string().as_str()),
+            ]);
             builder = client.apply_mac_query(builder);
             builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
             let value: Value = match client.send_json::<Value>(builder, action).await {
@@ -434,10 +427,7 @@ where
             page += 1;
         }
         // An empty result from a healthy endpoint is a legitimate empty catalog.
-        info!(
-            "Stalker {portal_type}/{action} fetched {} items across {pages_fetched} pages",
-            all.len()
-        );
+        info!("Stalker {portal_type}/{action} fetched {} items across {pages_fetched} pages", all.len());
         return Ok(all);
     }
     Err(last_err.unwrap_or_else(|| StalkerError::EmptyBody { action: action.to_string() }))
@@ -450,45 +440,37 @@ fn extract_items_array(value: &Value) -> &Value {
     }
 }
 
-fn catalog_js(value: &Value) -> &Value {
-    value.as_object().and_then(|map| map.get("js")).unwrap_or(value)
-}
+fn catalog_js(value: &Value) -> &Value { value.as_object().and_then(|map| map.get("js")).unwrap_or(value) }
 
 fn extract_total_items(value: &Value) -> Option<u32> {
     if let Some(obj) = catalog_js(value).as_object() {
-        return obj
-            .get("total_items")
-            .and_then(Value::as_u64)
-            .and_then(|n| u32::try_from(n).ok());
+        return obj.get("total_items").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
     }
     None
 }
 
 fn extract_max_page_items(value: &Value) -> Option<u32> {
-    catalog_js(value).as_object().and_then(|obj| {
-        obj.get("max_page_items")
-            .and_then(Value::as_u64)
-            .and_then(|n| u32::try_from(n).ok())
-    })
+    catalog_js(value)
+        .as_object()
+        .and_then(|obj| obj.get("max_page_items").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()))
 }
 
 /// `max_page` is the total page count, not the page size — keep it strictly separate
 /// from `max_page_items`.
 fn extract_max_page(value: &Value) -> Option<u32> {
-    catalog_js(value).as_object().and_then(|obj| {
-        obj.get("max_page")
-            .and_then(Value::as_u64)
-            .and_then(|n| u32::try_from(n).ok())
-    })
+    catalog_js(value)
+        .as_object()
+        .and_then(|obj| obj.get("max_page").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()))
 }
 
 fn catalog_data(value: &Value) -> Option<&Value> {
     let js = value.as_object().and_then(|map| map.get("js")).unwrap_or(value);
     match js {
         Value::Array(_) => Some(js),
-        Value::Object(map) => map.get("data").filter(|data| matches!(data, Value::Array(_) | Value::Object(_))).or_else(|| {
-            (!map.is_empty() && map.values().all(Value::is_object)).then_some(js)
-        }),
+        Value::Object(map) => map
+            .get("data")
+            .filter(|data| matches!(data, Value::Array(_) | Value::Object(_)))
+            .or_else(|| (!map.is_empty() && map.values().all(Value::is_object)).then_some(js)),
         _ => None,
     }
 }
@@ -519,9 +501,7 @@ fn parse_item_catalog_page(value: &Value, current_page: u32) -> StalkerResult<St
     let terminal = items.is_empty()
         || max_page.is_some_and(|last| current_page >= last)
         || max_page_items.is_some_and(|size| items.len() < usize::try_from(size).unwrap_or(usize::MAX))
-        || total.is_some_and(|count| {
-            max_page_items.is_some_and(|size| current_page.saturating_mul(size) >= count)
-        });
+        || total.is_some_and(|count| max_page_items.is_some_and(|size| current_page.saturating_mul(size) >= count));
     let next_page = (!terminal).then(|| current_page.checked_add(1)).flatten();
     Ok(StalkerCatalogPage { items, next_page, total })
 }
@@ -537,9 +517,7 @@ fn parse_series_catalog_page(
     let terminal = items.is_empty()
         || max_page.is_some_and(|last| current_page >= last)
         || max_page_items.is_some_and(|size| items.len() < usize::try_from(size).unwrap_or(usize::MAX))
-        || total.is_some_and(|count| {
-            max_page_items.is_some_and(|size| current_page.saturating_mul(size) >= count)
-        });
+        || total.is_some_and(|count| max_page_items.is_some_and(|size| current_page.saturating_mul(size) >= count));
     let next_page = (!terminal).then(|| current_page.checked_add(1)).flatten();
     Ok(StalkerCatalogPage { items, next_page, total })
 }
@@ -631,27 +609,45 @@ fn apply_page_limit<T>(
     Ok(())
 }
 
-pub async fn get_live_categories(client: &StalkerApiClient, handshake: &StalkerHandshake) -> StalkerResult<Vec<StalkerCategory>> {
+pub async fn get_live_categories(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+) -> StalkerResult<Vec<StalkerCategory>> {
     get_categories(client, handshake, "itv", "get_genres").await
 }
 
-pub async fn get_vod_categories(client: &StalkerApiClient, handshake: &StalkerHandshake) -> StalkerResult<Vec<StalkerCategory>> {
+pub async fn get_vod_categories(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+) -> StalkerResult<Vec<StalkerCategory>> {
     get_categories(client, handshake, "vod", "get_categories").await
 }
 
-pub async fn get_series_categories(client: &StalkerApiClient, handshake: &StalkerHandshake) -> StalkerResult<Vec<StalkerCategory>> {
+pub async fn get_series_categories(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+) -> StalkerResult<Vec<StalkerCategory>> {
     get_categories(client, handshake, "series", "get_categories").await
 }
 
-pub async fn get_live_streams_paginated(client: &StalkerApiClient, handshake: &StalkerHandshake) -> StalkerResult<Vec<StalkerRawItem>> {
+pub async fn get_live_streams_paginated(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+) -> StalkerResult<Vec<StalkerRawItem>> {
     get_paginated_items(client, handshake, "itv", "get_ordered_list", parse_items_page).await
 }
 
-pub async fn get_vod_streams_paginated(client: &StalkerApiClient, handshake: &StalkerHandshake) -> StalkerResult<Vec<StalkerRawItem>> {
+pub async fn get_vod_streams_paginated(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+) -> StalkerResult<Vec<StalkerRawItem>> {
     get_paginated_items(client, handshake, "vod", "get_ordered_list", parse_items_page).await
 }
 
-pub async fn get_series_list_paginated(client: &StalkerApiClient, handshake: &StalkerHandshake) -> StalkerResult<Vec<StalkerRawSeriesItem>> {
+pub async fn get_series_list_paginated(
+    client: &StalkerApiClient,
+    handshake: &StalkerHandshake,
+) -> StalkerResult<Vec<StalkerRawSeriesItem>> {
     get_paginated_items(client, handshake, "series", "get_ordered_list", parse_series_page).await
 }
 
@@ -665,10 +661,13 @@ pub async fn get_series_details(
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
         match fetch_series_page(client, handshake, &load_url, spec.token_in_query, series_id, "0").await {
-            Ok(value) => match hydrate_series_details(client, handshake, &load_url, spec.token_in_query, series_id, &value).await {
-                Ok(details) => return Ok(details),
-                Err(err) => last_err = Some(err),
-            },
+            Ok(value) => {
+                match hydrate_series_details(client, handshake, &load_url, spec.token_in_query, series_id, &value).await
+                {
+                    Ok(details) => return Ok(details),
+                    Err(err) => last_err = Some(err),
+                }
+            }
             Err(err) => {
                 last_err = Some(err);
             }
@@ -686,19 +685,15 @@ async fn fetch_series_page(
     season_id: &str,
 ) -> StalkerResult<Value> {
     let series_id = series_id.to_string();
-    let mut builder = client
-        .http()
-        .get(&load_url.load_url)
-        .headers(client.common_headers(load_url))
-        .query(&[
-            ("type", "series"),
-            ("action", "get_ordered_list"),
-            ("JsHttpRequest", "1-xml"),
-            ("HttpRequest", "1-xml"),
-            ("movie_id", series_id.as_str()),
-            ("season_id", season_id),
-            ("episode_id", "0"),
-        ]);
+    let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(load_url)).query(&[
+        ("type", "series"),
+        ("action", "get_ordered_list"),
+        ("JsHttpRequest", "1-xml"),
+        ("HttpRequest", "1-xml"),
+        ("movie_id", series_id.as_str()),
+        ("season_id", season_id),
+        ("episode_id", "0"),
+    ]);
     builder = client.apply_mac_query(builder);
     builder = client.apply_bearer(builder, Some(&handshake.session), token_in_query);
     client.send_json::<Value>(builder, "series_info").await
@@ -838,8 +833,15 @@ fn looks_like_season_row(value: &Value) -> bool {
             .is_some_and(|name| name.to_ascii_lowercase().starts_with("season "))
 }
 
-fn parse_series_episode(value: &Value, fallback_number: usize, fallback_season: u32) -> Option<StalkerRawSeriesEpisode> {
-    if looks_like_season_row(value) && value_u32(value, "episode_number").is_none() && value_u32(value, "series_number").is_none() {
+fn parse_series_episode(
+    value: &Value,
+    fallback_number: usize,
+    fallback_season: u32,
+) -> Option<StalkerRawSeriesEpisode> {
+    if looks_like_season_row(value)
+        && value_u32(value, "episode_number").is_none()
+        && value_u32(value, "series_number").is_none()
+    {
         return None;
     }
     let id = value_string(value, "id")
@@ -878,7 +880,10 @@ fn shell_episodes(value: &Value, season_number: u32) -> Vec<StalkerRawSeriesEpis
                         .or_else(|| u32::try_from(index + 1).ok())
                         .unwrap_or(1);
                     StalkerRawSeriesEpisode {
-                        id: Some(format!("{}:{number}", value_string(value, "id").unwrap_or_else(|| season_number.to_string()))),
+                        id: Some(format!(
+                            "{}:{number}",
+                            value_string(value, "id").unwrap_or_else(|| season_number.to_string())
+                        )),
                         number: Some(number),
                         name: Some(format!("Season {season_number} Episode {number}")),
                         season_number: Some(season_number),
@@ -894,10 +899,7 @@ fn shell_episodes(value: &Value, season_number: u32) -> Vec<StalkerRawSeriesEpis
 fn parse_items_page(value: &Value) -> (Vec<StalkerRawItem>, Option<u32>, Option<u32>, Option<u32>) {
     let arr = extract_items_array(value);
     let items: Vec<StalkerRawItem> = match arr {
-        Value::Array(a) => a
-            .iter()
-            .filter_map(|v| serde_json::from_value::<StalkerRawItem>(v.clone()).ok())
-            .collect(),
+        Value::Array(a) => a.iter().filter_map(|v| serde_json::from_value::<StalkerRawItem>(v.clone()).ok()).collect(),
         Value::Object(obj) => {
             // Some portals use object-keyed data: { "data": { "100": {...}, "101": {...} } }.
             let mut collected: Vec<StalkerRawItem> = Vec::new();
@@ -938,10 +940,9 @@ fn parse_items_page(value: &Value) -> (Vec<StalkerRawItem>, Option<u32>, Option<
 fn parse_series_page(value: &Value) -> (Vec<StalkerRawSeriesItem>, Option<u32>, Option<u32>, Option<u32>) {
     let arr = extract_items_array(value);
     let items: Vec<StalkerRawSeriesItem> = match arr {
-        Value::Array(a) => a
-            .iter()
-            .filter_map(|v| serde_json::from_value::<StalkerRawSeriesItem>(v.clone()).ok())
-            .collect(),
+        Value::Array(a) => {
+            a.iter().filter_map(|v| serde_json::from_value::<StalkerRawSeriesItem>(v.clone()).ok()).collect()
+        }
         Value::Object(obj) => {
             let mut collected: Vec<StalkerRawSeriesItem> = Vec::new();
             if let Some(data) = obj.get("data") {
@@ -1115,7 +1116,12 @@ mod tests {
             }
         });
         let single = serde_json::from_value::<StalkerRawItem>(
-            v.get("js").and_then(|js| js.get("data")).and_then(Value::as_array).and_then(|arr| arr.first()).cloned().unwrap()
+            v.get("js")
+                .and_then(|js| js.get("data"))
+                .and_then(Value::as_array)
+                .and_then(|arr| arr.first())
+                .cloned()
+                .unwrap(),
         );
         assert!(single.is_ok(), "single item decode failed: {single:?}");
         let (items, total, max_page_items, _max_page) = parse_items_page(&v);
@@ -1150,10 +1156,7 @@ mod tests {
     fn max_page_is_not_misread_as_page_size() {
         // `max_page` is a page COUNT, not a page size — it must surface in the fourth
         // tuple slot only.
-        let v: Value = serde_json::from_str(
-            r#"{"js":{"max_page":50,"data":[{"id":"1","name":"A"}]}}"#,
-        )
-        .unwrap();
+        let v: Value = serde_json::from_str(r#"{"js":{"max_page":50,"data":[{"id":"1","name":"A"}]}}"#).unwrap();
         let (items, total, max_page_items, max_page) = parse_items_page(&v);
         assert_eq!(items.len(), 1);
         assert_eq!(total, None);
@@ -1186,10 +1189,9 @@ mod tests {
 
     #[test]
     fn explicit_episode_row_accepts_numeric_id() {
-        let value: Value = serde_json::from_str(
-            r#"{"id":77,"name":"Pilot","series_number":1,"season_id":3,"cmd":"encoded"}"#,
-        )
-        .unwrap();
+        let value: Value =
+            serde_json::from_str(r#"{"id":77,"name":"Pilot","series_number":1,"season_id":3,"cmd":"encoded"}"#)
+                .unwrap();
         let episode = parse_series_episode(&value, 1, 3).expect("episode");
         assert_eq!(episode.id.as_deref(), Some("77"));
         assert_eq!(episode.season_number, Some(3));

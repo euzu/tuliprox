@@ -1,15 +1,22 @@
-use crate::model::{AppConfig, Config, HdHomeRunConfig, HdHomeRunFlags, LibraryConfig};
-use crate::config_loader::read_app_config_dto;
+//! Human-readable summary of the resolved runtime configuration.
+//!
+//! Logged once at startup. It reads the same config this crate loads, so it
+//! belongs beside the loader rather than in the binary.
+
+use crate::read_app_config_dto;
 use arc_swap::{access::Access, ArcSwap};
 use log::{error, info};
 use serde::Serialize;
 use serde_json::Value;
-use shared::error::TuliproxError;
-use shared::model::{
-    ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigPaths, HdHomeRunConfigDto, HdHomeRunDeviceConfigDto,
-    LibraryConfigDto, LibraryMetadataConfigDto, LibraryMetadataReadConfigDto, LibraryPlaylistConfigDto,
-    LogConfigDto, RuntimeConfigReportFormat, ThumbnailConfigDto,
+use shared::{
+    error::TuliproxError,
+    model::{
+        ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigPaths, HdHomeRunConfigDto, HdHomeRunDeviceConfigDto,
+        LibraryConfigDto, LibraryMetadataConfigDto, LibraryMetadataReadConfigDto, LibraryPlaylistConfigDto,
+        LogConfigDto, RuntimeConfigReportFormat, ThumbnailConfigDto,
+    },
 };
+use tuliprox_core::model::{AppConfig, Config, HdHomeRunConfig, HdHomeRunFlags, LibraryConfig};
 
 #[derive(Debug, Serialize)]
 struct RuntimeConfigReport {
@@ -21,7 +28,7 @@ struct RuntimeConfigReport {
     paths: ConfigPaths,
 }
 
-pub(crate) async fn log_runtime_config_report(app_config: &AppConfig) {
+pub async fn log_runtime_config_report(app_config: &AppConfig) {
     let config = <std::sync::Arc<ArcSwap<Config>> as Access<Config>>::load(&app_config.config);
     let Some(log_config) = config.log.clone() else {
         return;
@@ -49,32 +56,13 @@ async fn render_runtime_config_report(
 
 async fn build_runtime_config_report(app_config: &AppConfig) -> Result<RuntimeConfigReport, TuliproxError> {
     let paths = <std::sync::Arc<ArcSwap<ConfigPaths>> as Access<ConfigPaths>>::load(&app_config.paths).clone();
-    let AppConfigDto {
-        sources,
-        mappings,
-        templates,
-        api_proxy,
-        ..
-    } = read_app_config_dto(&paths, true, true).await?;
+    let AppConfigDto { sources, mappings, templates, api_proxy, .. } = read_app_config_dto(&paths, true, true).await?;
 
-    let config = runtime_config_to_dto(
-        &<std::sync::Arc<ArcSwap<Config>> as Access<Config>>::load(&app_config.config),
-    );
-    let api_proxy = app_config
-        .api_proxy
-        .load()
-        .as_ref()
-        .map(|runtime| ApiProxyConfigDto::from(runtime.as_ref()))
-        .or(api_proxy);
+    let config = runtime_config_to_dto(&<std::sync::Arc<ArcSwap<Config>> as Access<Config>>::load(&app_config.config));
+    let api_proxy =
+        app_config.api_proxy.load().as_ref().map(|runtime| ApiProxyConfigDto::from(runtime.as_ref())).or(api_proxy);
 
-    Ok(RuntimeConfigReport {
-        config,
-        sources,
-        mappings,
-        templates,
-        api_proxy,
-        paths,
-    })
+    Ok(RuntimeConfigReport { config, sources, mappings, templates, api_proxy, paths })
 }
 
 fn runtime_config_to_dto(config: &Config) -> ConfigDto {
@@ -92,10 +80,7 @@ fn runtime_config_to_dto(config: &Config) -> ConfigDto {
         custom_stream_response_enabled: config.custom_stream_response_enabled,
         custom_stream_response_error_status: config.custom_stream_response_error_status,
         video: config.video.as_ref().map(shared::model::VideoConfigDto::from),
-        metadata_update: config
-            .metadata_update
-            .as_ref()
-            .map(shared::model::MetadataUpdateConfigDto::from),
+        metadata_update: config.metadata_update.as_ref().map(shared::model::MetadataUpdateConfigDto::from),
         schedules: config
             .schedules
             .as_ref()
@@ -112,10 +97,7 @@ fn runtime_config_to_dto(config: &Config) -> ConfigDto {
         accept_insecure_ssl_certificates: config.accept_insecure_ssl_certificates,
         web_ui: config.web_ui.as_ref().map(shared::model::WebUiConfigDto::from),
         messaging: config.messaging.as_ref().map(shared::model::MessagingConfigDto::from),
-        reverse_proxy: config
-            .reverse_proxy
-            .as_ref()
-            .map(shared::model::ReverseProxyConfigDto::from),
+        reverse_proxy: config.reverse_proxy.as_ref().map(shared::model::ReverseProxyConfigDto::from),
         hdhomerun: config.hdhomerun.as_ref().map(hdhomerun_config_to_dto),
         proxy: config.proxy.as_ref().map(shared::model::ProxyConfigDto::from),
         ipcheck: config.ipcheck.as_ref().map(shared::model::IpCheckConfigDto::from),
@@ -192,8 +174,9 @@ fn serialize_report_value(value: &Value, format: RuntimeConfigReportFormat) -> R
         RuntimeConfigReportFormat::Yaml => {
             let mut serialized = String::new();
             let options = serde_saphyr::ser_options! {prefer_block_scalars: false};
-            serde_saphyr::to_fmt_writer_with_options(&mut serialized, value, options)
-                .map_err(|err| TuliproxError::Config(format!("Failed to serialize runtime config report as YAML: {err}")))?;
+            serde_saphyr::to_fmt_writer_with_options(&mut serialized, value, options).map_err(|err| {
+                TuliproxError::Config(format!("Failed to serialize runtime config report as YAML: {err}"))
+            })?;
             Ok(serialized)
         }
     }
@@ -251,10 +234,7 @@ fn should_redact_field(current_key: Option<&str>, parent_key: Option<&str>) -> b
         );
     }
 
-    key.ends_with("_password")
-        || key.ends_with("_secret")
-        || key.ends_with("_token")
-        || key.ends_with("_api_key")
+    key.ends_with("_password") || key.ends_with("_secret") || key.ends_with("_token") || key.ends_with("_api_key")
 }
 
 fn should_redact_as_url(current_key: Option<&str>) -> bool {
@@ -269,11 +249,11 @@ fn redact_url_like_value(value: &str) -> String { shared::utils::sanitize_sensit
 #[cfg(test)]
 mod tests {
     use super::{build_runtime_config_report, redact_value, render_runtime_config_report};
-    use crate::model::AppConfig;
-    use crate::config_loader::read_initial_app_config;
+    use crate::read_initial_app_config;
     use shared::model::{ConfigPaths, RuntimeConfigReportFormat};
     use tempfile::tempdir;
     use tokio::fs;
+    use tuliprox_core::model::AppConfig;
 
     fn test_paths(config_dir: &std::path::Path) -> ConfigPaths {
         ConfigPaths {
@@ -329,9 +309,7 @@ sources:
         fs::write(config_dir.join("source.yml"), source_yml).await.expect("source file");
 
         let mut paths = test_paths(&config_dir);
-        let app_config = read_initial_app_config(&mut paths, true, true, false)
-            .await
-            .expect("app config");
+        let app_config = read_initial_app_config(&mut paths, true, true, false).await.expect("app config");
         std::mem::forget(temp_dir);
         app_config
     }
@@ -342,13 +320,7 @@ sources:
 
         let report = build_runtime_config_report(&app_config).await.expect("report");
 
-        assert!(
-            report
-                .config
-                .storage_dir
-                .as_deref()
-                .is_some_and(|value| value.contains("/config/home/data"))
-        );
+        assert!(report.config.storage_dir.as_deref().is_some_and(|value| value.contains("/config/home/data")));
         assert_eq!(report.config.api.web_root, report.paths.config_path.clone() + "/home/web");
     }
 
@@ -375,9 +347,7 @@ sources:
     async fn runtime_config_report_formats_yaml() {
         let app_config = create_test_app_config().await;
 
-        let rendered = render_runtime_config_report(&app_config, RuntimeConfigReportFormat::Yaml)
-            .await
-            .expect("yaml");
+        let rendered = render_runtime_config_report(&app_config, RuntimeConfigReportFormat::Yaml).await.expect("yaml");
 
         assert!(rendered.contains("config:"));
         assert!(rendered.contains("sources:"));
@@ -388,9 +358,7 @@ sources:
     async fn runtime_config_report_masks_runtime_secrets() {
         let app_config = create_test_app_config().await;
 
-        let rendered = render_runtime_config_report(&app_config, RuntimeConfigReportFormat::Json)
-            .await
-            .expect("json");
+        let rendered = render_runtime_config_report(&app_config, RuntimeConfigReportFormat::Json).await.expect("json");
 
         assert!(rendered.contains("\"password\": \"***\""));
         assert!(!rendered.contains("proxy-pass"));

@@ -1,28 +1,31 @@
+use crate::stalker::{
+    auth, catalog,
+    cookie_jar::{apply_set_cookie_headers_unchecked, StalkerCookieJar},
+    epg,
+    error::{StalkerError, StalkerResult},
+    playback,
+    presets::stalker_mag_preset_spec,
+    profile::{StalkerHandshake, StalkerResolvedStream},
+    recipes::apply_endpoint_preference,
+    session::StalkerSession,
+    url_factory::{load_url_candidates, StalkerLoadUrl},
+};
 use bytes::{Bytes, BytesMut};
 use log::{trace, warn};
 use parking_lot::Mutex;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, COOKIE, REFERER, USER_AGENT};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::fmt::Write;
-
-use reqwest::{Client, RequestBuilder, Response, Url};
+use reqwest::{
+    header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, COOKIE, REFERER, USER_AGENT},
+    Client, RequestBuilder, Response, Url,
+};
 use serde::Deserialize;
+use std::{
+    fmt::Write,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::Mutex as AsyncMutex;
-
-use crate::model::{StalkerInputConfig, StalkerSizeCaps};
-use crate::iptv::stalker::auth;
-use crate::iptv::stalker::catalog;
-use crate::iptv::stalker::cookie_jar::{apply_set_cookie_headers_unchecked, StalkerCookieJar};
-use crate::iptv::stalker::epg;
-use crate::iptv::stalker::error::{StalkerError, StalkerResult};
-use crate::iptv::stalker::playback;
-use crate::iptv::stalker::presets::stalker_mag_preset_spec;
-use crate::iptv::stalker::profile::{StalkerHandshake, StalkerResolvedStream};
-use crate::iptv::stalker::recipes::apply_endpoint_preference;
-use crate::iptv::stalker::session::StalkerSession;
-use crate::iptv::stalker::url_factory::{load_url_candidates, StalkerLoadUrl};
+use tuliprox_core::model::{StalkerInputConfig, StalkerSizeCaps};
 
 /// Stalker portals expect a `X-User-Agent` header on every call. The `reqwest` re-export
 /// does not ship a constant for it (the upstream convention is to use a custom name), so
@@ -30,7 +33,7 @@ use crate::iptv::stalker::url_factory::{load_url_candidates, StalkerLoadUrl};
 const X_USER_AGENT_NAME: HeaderName = HeaderName::from_static("x-user-agent");
 
 static STALKER_DEBUG_DUMP_SEQ: AtomicU64 = AtomicU64::new(0);
-pub(crate) const DEFAULT_STALKER_CATALOG_MAX_PAGES: u32 = 4_096;
+pub const DEFAULT_STALKER_CATALOG_MAX_PAGES: u32 = 4_096;
 
 /// Upper bound on the time a handshake (including all recipe/endpoint fallbacks of a
 /// single attempt) may hold the refresh lock. Without it a hung upstream would park
@@ -55,11 +58,7 @@ pub struct StalkerBodyCaps {
 
 impl Default for StalkerBodyCaps {
     fn default() -> Self {
-        Self {
-            create_link_bytes: 64 * 1024,
-            ordered_list_bytes: 8 * 1024 * 1024,
-            get_epg_bytes: 64 * 1024 * 1024,
-        }
+        Self { create_link_bytes: 64 * 1024, ordered_list_bytes: 8 * 1024 * 1024, get_epg_bytes: 64 * 1024 * 1024 }
     }
 }
 
@@ -135,18 +134,19 @@ impl StalkerApiClient {
             // Honour the soft TTL: a cached session older than `STALKER_SESSION_TTL`
             // is discarded and re-handshaken. The portal may invalidate tokens
             // earlier; that path is caught by the 4xx retry hook in `api_utils.rs`.
-            if !active.session.is_stale(crate::iptv::stalker::session::STALKER_SESSION_TTL) {
+            if !active.session.is_stale(crate::stalker::session::STALKER_SESSION_TTL) {
                 return Ok(active);
             }
             // Stale: drop the cached handshake so the call below re-issues it.
             *self.handshake.lock() = None;
             self.cookies.clear();
         }
-        let handshake = tokio::time::timeout(STALKER_HANDSHAKE_TIMEOUT, auth::handshake(self))
-            .await
-            .map_err(|_| StalkerError::HandshakeFailed {
-                message: format!("handshake timed out after {}s", STALKER_HANDSHAKE_TIMEOUT.as_secs()),
-                url: None,
+        let handshake =
+            tokio::time::timeout(STALKER_HANDSHAKE_TIMEOUT, auth::handshake(self)).await.map_err(|_| {
+                StalkerError::HandshakeFailed {
+                    message: format!("handshake timed out after {}s", STALKER_HANDSHAKE_TIMEOUT.as_secs()),
+                    url: None,
+                }
             })??;
         *self.handshake.lock() = Some(handshake.clone());
         Ok(handshake)
@@ -159,17 +159,11 @@ impl StalkerApiClient {
         catalog::get_live_categories(self, handshake).await
     }
 
-    pub async fn get_live_streams(
-        &self,
-        handshake: &StalkerHandshake,
-    ) -> StalkerResult<Vec<catalog::StalkerRawItem>> {
+    pub async fn get_live_streams(&self, handshake: &StalkerHandshake) -> StalkerResult<Vec<catalog::StalkerRawItem>> {
         catalog::get_live_streams_paginated(self, handshake).await
     }
 
-    pub async fn get_all_channels(
-        &self,
-        handshake: &StalkerHandshake,
-    ) -> StalkerResult<Vec<catalog::StalkerRawItem>> {
+    pub async fn get_all_channels(&self, handshake: &StalkerHandshake) -> StalkerResult<Vec<catalog::StalkerRawItem>> {
         catalog::get_all_channels(self, handshake).await
     }
 
@@ -188,10 +182,7 @@ impl StalkerApiClient {
         catalog::get_vod_categories(self, handshake).await
     }
 
-    pub async fn get_vod_streams(
-        &self,
-        handshake: &StalkerHandshake,
-    ) -> StalkerResult<Vec<catalog::StalkerRawItem>> {
+    pub async fn get_vod_streams(&self, handshake: &StalkerHandshake) -> StalkerResult<Vec<catalog::StalkerRawItem>> {
         catalog::get_vod_streams_paginated(self, handshake).await
     }
 
@@ -267,26 +258,24 @@ impl StalkerApiClient {
         archive_start: Option<&str>,
         archive_end: Option<&str>,
     ) -> StalkerResult<StalkerResolvedStream> {
-        playback::create_link(self, handshake, kind, requested_mode, cmd, series_number, archive_start, archive_end).await
+        playback::create_link(self, handshake, kind, requested_mode, cmd, series_number, archive_start, archive_end)
+            .await
     }
 
     // -------------------------------------------------------------------------------------
     // Internal helpers — used by auth/catalog/epg/playback submodules
     // -------------------------------------------------------------------------------------
 
-    pub(crate) fn http(&self) -> &Client { &self.http }
+    pub fn http(&self) -> &Client { &self.http }
 
-    pub(crate) fn portal_url(&self) -> &str { &self.portal_url }
+    pub fn portal_url(&self) -> &str { &self.portal_url }
 
-    pub(crate) fn config(&self) -> &StalkerInputConfig { &self.config }
+    pub fn config(&self) -> &StalkerInputConfig { &self.config }
 
-    pub(crate) fn body_caps(&self) -> &StalkerBodyCaps { &self.body_caps }
+    pub fn body_caps(&self) -> &StalkerBodyCaps { &self.body_caps }
 
-    pub(crate) fn catalog_max_pages(&self) -> u32 {
-        self.config
-            .catalog_max_pages
-            .filter(|value| *value > 0)
-            .unwrap_or(DEFAULT_STALKER_CATALOG_MAX_PAGES)
+    pub fn catalog_max_pages(&self) -> u32 {
+        self.config.catalog_max_pages.filter(|value| *value > 0).unwrap_or(DEFAULT_STALKER_CATALOG_MAX_PAGES)
     }
 
     /// Build the common header set for a Stalker API request. We always send the
@@ -295,7 +284,7 @@ impl StalkerApiClient {
     /// identity cookies (`mac`, `stb_lang`, `timezone`) merged with whatever the portal
     /// set in the jar — many portals authorize against the cookie identity, not the
     /// query string.
-    pub(crate) fn common_headers(&self, load_url: &StalkerLoadUrl) -> HeaderMap {
+    pub fn common_headers(&self, load_url: &StalkerLoadUrl) -> HeaderMap {
         let mut headers = HeaderMap::new();
         let preset = stalker_mag_preset_spec(self.config.mag_preset);
         let ua: &str = self
@@ -332,7 +321,7 @@ impl StalkerApiClient {
             }
             Err(err) => warn!("Stalker: dropping invalid Referer header value: {err}"),
         }
-        let now = crate::iptv::stalker::cookie_jar::now_epoch_secs();
+        let now = crate::stalker::cookie_jar::now_epoch_secs();
         let mut cookie_pairs = identity_cookie_pairs(&self.config);
         for (name, value) in self.cookies.active_cookies(now) {
             // Server-set cookies win over our synthesized identity values.
@@ -342,11 +331,7 @@ impl StalkerApiClient {
                 cookie_pairs.push((name, value));
             }
         }
-        let cookie = cookie_pairs
-            .iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>()
-            .join("; ");
+        let cookie = cookie_pairs.iter().map(|(name, value)| format!("{name}={value}")).collect::<Vec<_>>().join("; ");
         if !cookie.is_empty() {
             match HeaderValue::from_str(&cookie) {
                 Ok(v) => {
@@ -360,7 +345,12 @@ impl StalkerApiClient {
 
     /// Apply the bearer token to the request builder when we have a session. The
     /// authorization scheme name comes from the active MAG preset (`token_header`).
-    pub(crate) fn apply_bearer(&self, builder: RequestBuilder, session: Option<&StalkerSession>, token_in_query: bool) -> RequestBuilder {
+    pub fn apply_bearer(
+        &self,
+        builder: RequestBuilder,
+        session: Option<&StalkerSession>,
+        token_in_query: bool,
+    ) -> RequestBuilder {
         let Some(session) = session else {
             return builder;
         };
@@ -374,7 +364,7 @@ impl StalkerApiClient {
     }
 
     /// Apply the MAC query parameter when the preset requires it.
-    pub(crate) fn apply_mac_query(&self, builder: RequestBuilder) -> RequestBuilder {
+    pub fn apply_mac_query(&self, builder: RequestBuilder) -> RequestBuilder {
         let preset = stalker_mag_preset_spec(self.config.mag_preset);
         if !preset.emit_mac_query {
             return builder;
@@ -388,7 +378,7 @@ impl StalkerApiClient {
 
     /// Persist Set-Cookie headers from a response into the jar. Called from every
     /// request helper after a successful response.
-    pub(crate) fn ingest_response_cookies(&self, response: &Response) {
+    pub fn ingest_response_cookies(&self, response: &Response) {
         apply_set_cookie_headers_unchecked(&self.cookies, response.headers()).ok();
     }
 
@@ -396,11 +386,7 @@ impl StalkerApiClient {
     /// the body cap is exceeded the request is aborted and a `ResponseTooLarge` error is
     /// returned. The cap is enforced by inspecting the `Content-Length` header when
     /// present and otherwise by streaming the body in chunks of 64 KiB.
-    pub(crate) async fn send_json<T>(
-        &self,
-        builder: RequestBuilder,
-        cap_action: &'static str,
-    ) -> StalkerResult<T>
+    pub async fn send_json<T>(&self, builder: RequestBuilder, cap_action: &'static str) -> StalkerResult<T>
     where
         T: for<'de> Deserialize<'de>,
     {
@@ -435,7 +421,7 @@ impl StalkerApiClient {
     /// Decode the body bytes as JSON, optionally stripping a JSONP wrapper and a UTF-8
     /// BOM. Returns the parsed value or a typed error.
     #[allow(clippy::unused_self)]
-    pub(crate) fn decode_body_bytes<T>(&self, body: &[u8], action: &'static str) -> StalkerResult<T>
+    pub fn decode_body_bytes<T>(&self, body: &[u8], action: &'static str) -> StalkerResult<T>
     where
         T: for<'de> Deserialize<'de>,
     {
@@ -450,9 +436,7 @@ impl StalkerApiClient {
         }
         serde_json::from_str::<T>(json).map_err(|err| {
             let snippet = json.chars().take(160).collect::<String>();
-            StalkerError::BodyDecode {
-                message: format!("{action} json decode: {err}; body prefix={snippet:?}"),
-            }
+            StalkerError::BodyDecode { message: format!("{action} json decode: {err}; body prefix={snippet:?}") }
         })
     }
 
@@ -460,7 +444,7 @@ impl StalkerApiClient {
     /// middleware emits both `{"code": N, ...}` and `{"js": {"code": N, ...}}` shapes;
     /// the wrapper can be a JSONP callback, so the same BOM/JSONP strip used for typed
     /// decode applies. Returns the parsed `code` when present, otherwise `None`.
-    pub(crate) fn inspect_portal_code(body: &[u8]) -> Option<u16> {
+    pub fn inspect_portal_code(body: &[u8]) -> Option<u16> {
         let stripped = strip_bom(body);
         let json = strip_jsonp(stripped);
         if json.is_empty() {
@@ -482,7 +466,7 @@ impl StalkerApiClient {
     /// Send a request and reject an advertised body that exceeds the action cap.
     /// Body consumers must also use `read_body_with_cap` so chunked responses are
     /// bounded when no `Content-Length` header is present.
-    pub(crate) async fn send_with_cap(
+    pub async fn send_with_cap(
         &self,
         builder: RequestBuilder,
         action: &'static str,
@@ -492,16 +476,11 @@ impl StalkerApiClient {
         let response = self.http.execute(request).await.map_err(StalkerError::from)?;
         if let Some(content_length) = response.content_length() {
             if content_length > cap {
-                return Err(StalkerError::ResponseTooLarge {
-                    action: action.to_string(),
-                    cap_bytes: cap,
-                });
+                return Err(StalkerError::ResponseTooLarge { action: action.to_string(), cap_bytes: cap });
             }
         }
         if response.status().is_success() {
-            let advertised = response
-                .content_length()
-                .map_or_else(|| "unknown".to_string(), |len| len.to_string());
+            let advertised = response.content_length().map_or_else(|| "unknown".to_string(), |len| len.to_string());
             trace!("Stalker {action} response {advertised} bytes (cap {cap})");
         } else {
             warn!("Stalker {action} response status {}", response.status());
@@ -509,29 +488,21 @@ impl StalkerApiClient {
         Ok(response)
     }
 
-    pub(crate) async fn read_body_with_cap(
+    pub async fn read_body_with_cap(
         &self,
         mut response: Response,
         action: &'static str,
         cap: u64,
     ) -> StalkerResult<Bytes> {
-        let initial_capacity = usize::try_from(
-            response
-                .content_length()
-                .unwrap_or(0)
-                .min(cap)
-                .min(INITIAL_BODY_ALLOC_CAP),
-        )
-        .unwrap_or_default();
+        let initial_capacity =
+            usize::try_from(response.content_length().unwrap_or(0).min(cap).min(INITIAL_BODY_ALLOC_CAP))
+                .unwrap_or_default();
         let mut body = BytesMut::with_capacity(initial_capacity);
         let mut received = 0_u64;
         while let Some(chunk) = response.chunk().await.map_err(StalkerError::from)? {
             received = received.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
             if received > cap {
-                return Err(StalkerError::ResponseTooLarge {
-                    action: action.to_string(),
-                    cap_bytes: cap,
-                });
+                return Err(StalkerError::ResponseTooLarge { action: action.to_string(), cap_bytes: cap });
             }
             body.extend_from_slice(&chunk);
         }
@@ -542,10 +513,12 @@ impl StalkerApiClient {
 
     /// Resolve the body cap for a given action. The cap is taken from the user's
     /// `StalkerSizeCaps`; defaults are inherited from `StalkerBodyCaps::default`.
-    pub(crate) fn cap_for_action(&self, action: &str) -> u64 {
+    pub fn cap_for_action(&self, action: &str) -> u64 {
         match action {
             "create_link" => self.body_caps.create_link_bytes,
-            "ordered_list" | "all_channels" | "vod" | "series_list" | "series_info" => self.body_caps.ordered_list_bytes,
+            "ordered_list" | "all_channels" | "vod" | "series_list" | "series_info" => {
+                self.body_caps.ordered_list_bytes
+            }
             "get_epg" | "get_short_epg" => self.body_caps.get_epg_bytes,
             _ => 8 * 1024 * 1024,
         }
@@ -553,7 +526,7 @@ impl StalkerApiClient {
 }
 
 /// Strip a leading UTF-8 BOM (`EF BB BF`) from the body.
-pub(crate) fn strip_bom(body: &[u8]) -> &[u8] {
+pub fn strip_bom(body: &[u8]) -> &[u8] {
     if body.starts_with(&[0xEF, 0xBB, 0xBF]) {
         &body[3..]
     } else {
@@ -564,15 +537,19 @@ pub(crate) fn strip_bom(body: &[u8]) -> &[u8] {
 /// Strip a JSONP wrapper of the form `callback(...)` or `jsonp12345(...)`. The portal
 /// returns JSONP for legacy MAG250 firmware; modern portals always return raw JSON. We
 /// attempt to find the matching closing parenthesis, ignoring nested parens.
-pub(crate) fn strip_jsonp(body: &[u8]) -> &str {
-    let Ok(s) = std::str::from_utf8(body) else { return ""; };
+pub fn strip_jsonp(body: &[u8]) -> &str {
+    let Ok(s) = std::str::from_utf8(body) else {
+        return "";
+    };
     let s = s.trim();
     if !looks_like_jsonp_wrapper(s) {
         return s;
     }
     // Find the first `(` — everything before it is the JSONP callback name (which we
     // discard); the matching `)` delimits the JSON body.
-    let Some(open) = s.find('(') else { return s; };
+    let Some(open) = s.find('(') else {
+        return s;
+    };
     match s.rfind(')').filter(|end| *end > open) {
         Some(end) => &s[open + 1..end],
         None => s,
@@ -599,10 +576,9 @@ fn looks_like_jsonp_wrapper(value: &str) -> bool {
 
 /// Validate that the URL the portal handed back in `create_link` is one we know how to
 /// reverse-proxy. Returns the scheme on success.
-pub(crate) fn validate_playable_scheme(url: &str) -> StalkerResult<&'static str> {
-    let parsed = Url::parse(url).map_err(|err| StalkerError::BodyDecode {
-        message: format!("create_link url parse: {err}"),
-    })?;
+pub fn validate_playable_scheme(url: &str) -> StalkerResult<&'static str> {
+    let parsed =
+        Url::parse(url).map_err(|err| StalkerError::BodyDecode { message: format!("create_link url parse: {err}") })?;
     let scheme = parsed.scheme().to_ascii_lowercase();
     match scheme.as_str() {
         "http" | "https" => Ok(match scheme.as_str() {
@@ -613,19 +589,19 @@ pub(crate) fn validate_playable_scheme(url: &str) -> StalkerResult<&'static str>
     }
 }
 
-pub(crate) async fn validate_public_playable_url(url: &Url) -> StalkerResult<()> {
+pub async fn validate_public_playable_url(url: &Url) -> StalkerResult<()> {
     validate_playable_scheme(url.as_str())?;
-    let host = url.host_str().ok_or_else(|| StalkerError::BodyDecode {
-        message: "create_link url has no host".to_string(),
-    })?;
-    let port = url.port_or_known_default().ok_or_else(|| StalkerError::BodyDecode {
-        message: "create_link url has no port".to_string(),
-    })?;
-    match crate::utils::network::request::resolve_public_socket_addrs(host, port).await {
+    let host = url
+        .host_str()
+        .ok_or_else(|| StalkerError::BodyDecode { message: "create_link url has no host".to_string() })?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| StalkerError::BodyDecode { message: "create_link url has no port".to_string() })?;
+    match tuliprox_core::utils::network::request::resolve_public_socket_addrs(host, port).await {
         Ok(_) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Err(StalkerError::BodyDecode {
-            message: format!("create_link url destination rejected: {err}"),
-        }),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(StalkerError::BodyDecode { message: format!("create_link url destination rejected: {err}") })
+        }
         Err(err) => Err(StalkerError::Io(err)),
     }
 }
@@ -696,9 +672,7 @@ fn write_stalker_debug_body(dir: &str, portal_url: &str, action: &str, body: &[u
         .and_then(|url| url.host_str().map(str::to_owned))
         .unwrap_or_else(|| "unknown-host".to_string());
     let seq = STALKER_DEBUG_DUMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0_u128, |duration| duration.as_millis());
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0_u128, |duration| duration.as_millis());
     let filename = format!(
         "{STALKER_DEBUG_DUMP_PREFIX}{ts:020}-{seq:06}-{}-{}.bin",
         sanitize_dump_component(&host),
@@ -734,10 +708,24 @@ fn redact_stalker_debug_value(value: &mut serde_json::Value) {
         serde_json::Value::Object(fields) => {
             for (key, value) in fields {
                 let key = key.to_ascii_lowercase();
-                if ["token", "password", "passwd", "credential", "secret", "auth", "email", "phone", "account",
-                    "login", "username", "mac", "cmd", "url"]
-                    .iter()
-                    .any(|sensitive| key.contains(sensitive))
+                if [
+                    "token",
+                    "password",
+                    "passwd",
+                    "credential",
+                    "secret",
+                    "auth",
+                    "email",
+                    "phone",
+                    "account",
+                    "login",
+                    "username",
+                    "mac",
+                    "cmd",
+                    "url",
+                ]
+                .iter()
+                .any(|sensitive| key.contains(sensitive))
                 {
                     *value = serde_json::Value::String("[redacted]".to_string());
                 } else {
@@ -751,7 +739,9 @@ fn redact_stalker_debug_value(value: &mut serde_json::Value) {
 }
 
 fn rotate_stalker_debug_dumps(dump_dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dump_dir) else { return; };
+    let Ok(entries) = std::fs::read_dir(dump_dir) else {
+        return;
+    };
     let mut dumps: Vec<_> = entries
         .flatten()
         .filter_map(|entry| {
@@ -837,12 +827,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let dir_path = dir.path().to_str().ok_or("temporary directory path is not UTF-8")?;
         for _ in 0..=STALKER_DEBUG_DUMP_LIMIT {
-            write_stalker_debug_body(
-                dir_path,
-                "http://portal.example/c/",
-                "profile",
-                br#"{"js":{"title":"Visible"}}"#,
-            );
+            write_stalker_debug_body(dir_path, "http://portal.example/c/", "profile", br#"{"js":{"title":"Visible"}}"#);
         }
         let entries: Vec<_> = std::fs::read_dir(dir.path())?.collect::<Result<_, _>>()?;
 
@@ -876,7 +861,9 @@ mod tests {
 
     #[test]
     fn strip_jsonp_leaves_html_untouched() {
-        let s = strip_jsonp(b"<!DOCTYPE html><html><head><script>function loadRequiredFiles(callback) {}</script></head></html>");
+        let s = strip_jsonp(
+            b"<!DOCTYPE html><html><head><script>function loadRequiredFiles(callback) {}</script></head></html>",
+        );
         assert!(s.starts_with("<!DOCTYPE html>"));
     }
 
@@ -890,10 +877,7 @@ mod tests {
     fn validate_playable_scheme_accepts_http_family() {
         assert_eq!(validate_playable_scheme("http://x/y").unwrap(), "http");
         assert_eq!(validate_playable_scheme("https://x/y").unwrap(), "https");
-        assert!(matches!(
-            validate_playable_scheme("rtmp://x/y"),
-            Err(StalkerError::UnsupportedScheme { .. })
-        ));
+        assert!(matches!(validate_playable_scheme("rtmp://x/y"), Err(StalkerError::UnsupportedScheme { .. })));
     }
 
     #[test]
@@ -905,11 +889,11 @@ mod tests {
     #[test]
     fn public_destination_filter_rejects_non_public_ranges() -> Result<(), std::net::AddrParseError> {
         for address in ["127.0.0.1", "10.0.0.1", "169.254.1.1", "100.64.0.1", "::1", "fc00::1", "fe80::1"] {
-            assert!(!crate::utils::network::request::is_public_ip(address.parse()?), "{address}");
+            assert!(!tuliprox_core::utils::network::request::is_public_ip(address.parse()?), "{address}");
         }
-        assert!(!crate::utils::network::request::is_public_ip("fec0::1".parse()?));
-        assert!(crate::utils::network::request::is_public_ip("8.8.8.8".parse()?));
-        assert!(crate::utils::network::request::is_public_ip("2606:4700:4700::1111".parse()?));
+        assert!(!tuliprox_core::utils::network::request::is_public_ip("fec0::1".parse()?));
+        assert!(tuliprox_core::utils::network::request::is_public_ip("8.8.8.8".parse()?));
+        assert!(tuliprox_core::utils::network::request::is_public_ip("2606:4700:4700::1111".parse()?));
         Ok(())
     }
 
@@ -963,12 +947,7 @@ mod tests {
             endpoint_preference: StalkerEndpointPreference::Portal,
             ..StalkerInputConfig::default()
         };
-        let client = StalkerApiClient::new(
-            Client::new(),
-            "http://portal.example".to_string(),
-            config,
-        )
-        .expect("client");
+        let client = StalkerApiClient::new(Client::new(), "http://portal.example".to_string(), config).expect("client");
         let candidates = client.load_url_candidates();
         assert_eq!(candidates.len(), 3);
         assert!(candidates[0].load_url.ends_with("portal.php"));
@@ -977,25 +956,13 @@ mod tests {
     #[test]
     fn is_token_rejected_recognises_portal_body_error() {
         // 44 and 440..=449 are recognised as token-rejected body errors.
-        assert!(StalkerError::PortalBodyError {
-            code: 44,
-            action: "create_link".into(),
-            body_snippet: String::new(),
-        }
-        .is_token_rejected());
-        assert!(StalkerError::PortalBodyError {
-            code: 449,
-            action: "create_link".into(),
-            body_snippet: String::new(),
-        }
-        .is_token_rejected());
+        assert!(StalkerError::PortalBodyError { code: 44, action: "create_link".into(), body_snippet: String::new() }
+            .is_token_rejected());
+        assert!(StalkerError::PortalBodyError { code: 449, action: "create_link".into(), body_snippet: String::new() }
+            .is_token_rejected());
         // Codes outside the 44xx band do not classify as token rejection.
-        assert!(!StalkerError::PortalBodyError {
-            code: 11,
-            action: "create_link".into(),
-            body_snippet: String::new(),
-        }
-        .is_token_rejected());
+        assert!(!StalkerError::PortalBodyError { code: 11, action: "create_link".into(), body_snippet: String::new() }
+            .is_token_rejected());
         assert!(!StalkerError::PortalBodyError {
             code: 500,
             action: "create_link".into(),
@@ -1014,11 +981,11 @@ mod tests {
     #[test]
     fn identity_cookie_pairs_includes_mac_lang_and_timezone() {
         let config = StalkerInputConfig {
-            device: Some(crate::model::StalkerDeviceProfile {
+            device: Some(tuliprox_core::model::StalkerDeviceProfile {
                 mac_address: Some("00:1A:79:DE:AD:BE".to_string()),
                 locale: Some("en".to_string()),
                 timezone: Some("Europe/Berlin".to_string()),
-                ..crate::model::StalkerDeviceProfile::default()
+                ..tuliprox_core::model::StalkerDeviceProfile::default()
             }),
             ..StalkerInputConfig::default()
         };

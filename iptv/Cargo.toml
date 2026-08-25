@@ -1,0 +1,33 @@
+[package]
+name = "tuliprox-iptv"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Provider clients for Xtream, M3U and Stalker portals"
+
+[lints]
+workspace = true
+
+[dependencies]
+shared = { version = "3", path = "../shared" }
+tuliprox-core = { version = "3", path = "../core" }
+tuliprox-messaging = { version = "3", path = "../messaging" }
+tuliprox-parser = { version = "3", path = "../parser" }
+tuliprox-repository = { version = "3", path = "../repository" }
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures.workspace = true
+log.workspace = true
+parking_lot = "0.12.5"
+reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros"] }
+tokio-util = { version = "0.7.18", features = ["io", "io-util"] }
+url.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { workspace = true, features = ["test-util", "macros"] }

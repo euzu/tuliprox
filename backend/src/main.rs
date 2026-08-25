@@ -49,6 +49,7 @@ use tuliprox_config_loader as config_loader;
 // under their historical module names so `crate::model::X` and
 // `crate::utils::X` keep resolving across the backend.
 use tuliprox_core::{model, utils};
+use tuliprox_iptv as iptv;
 use tuliprox_library::{library, media_enrichment};
 use tuliprox_media_server as media_server;
 use tuliprox_messaging as messaging;
@@ -278,7 +279,7 @@ async fn print_info(app_config: &AppConfig) {
     if let Some(metadata_update) = config.metadata_update.as_ref() {
         info!("Metadata path: {}", metadata_update.cache_path);
     }
-    runtime_config_report::log_runtime_config_report(app_config).await;
+    config_loader::runtime_config_report::log_runtime_config_report(app_config).await;
 }
 
 fn get_file_paths(args: &Args) -> ConfigPaths {

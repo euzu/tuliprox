@@ -19,13 +19,13 @@
 //! Tests in this module exercise the parsing and URL-derivation helpers directly with
 //! canned payloads; no HTTP requests are issued from unit tests.
 
-pub mod parser;
 pub mod auth;
 pub mod catalog;
 pub mod cmd_parser;
 pub mod cookie_jar;
 pub mod epg;
 pub mod error;
+pub mod parser;
 pub mod playback;
 pub mod presets;
 pub mod profile;

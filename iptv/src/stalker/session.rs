@@ -1,6 +1,8 @@
-use std::{fmt, time::{Duration, SystemTime, UNIX_EPOCH}};
-
 use super::error::safe_stalker_url;
+use std::{
+    fmt,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 /// A successful Stalker handshake. The token is sent as `Authorization: Bearer <token>` on
 /// every subsequent API call; portal cookies live in the client's shared cookie jar; the
@@ -34,13 +36,7 @@ impl fmt::Debug for StalkerSession {
 
 impl StalkerSession {
     pub fn new(token: String, referer: String, load_url: String) -> Self {
-        Self {
-            token,
-            referer,
-            load_url,
-            fingerprint_evidence: Vec::new(),
-            created_at_epoch_secs: now_epoch_secs(),
-        }
+        Self { token, referer, load_url, fingerprint_evidence: Vec::new(), created_at_epoch_secs: now_epoch_secs() }
     }
 
     pub fn with_evidence(mut self, evidence: Vec<String>) -> Self {
@@ -57,11 +53,7 @@ impl StalkerSession {
     }
 }
 
-fn now_epoch_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
+fn now_epoch_secs() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
 
 /// How long a `StalkerSession` should be considered fresh. The portal invalidates tokens
 /// aggressively (typically after 5–30 minutes of inactivity); the client treats a session
@@ -74,15 +66,23 @@ mod tests {
 
     #[test]
     fn new_session_starts_with_empty_evidence() {
-        let session = StalkerSession::new("abc".to_string(), "http://portal/c/".to_string(), "http://portal/server/load.php".to_string());
+        let session = StalkerSession::new(
+            "abc".to_string(),
+            "http://portal/c/".to_string(),
+            "http://portal/server/load.php".to_string(),
+        );
         assert!(session.fingerprint_evidence.is_empty());
         assert_eq!(session.token, "abc");
     }
 
     #[test]
     fn with_evidence_overrides() {
-        let session = StalkerSession::new("abc".to_string(), "http://portal/c/".to_string(), "http://portal/server/load.php".to_string())
-            .with_evidence(vec!["js.keyA".to_string(), "js.keyB".to_string()]);
+        let session = StalkerSession::new(
+            "abc".to_string(),
+            "http://portal/c/".to_string(),
+            "http://portal/server/load.php".to_string(),
+        )
+        .with_evidence(vec!["js.keyA".to_string(), "js.keyB".to_string()]);
         assert_eq!(session.fingerprint_evidence.len(), 2);
     }
 

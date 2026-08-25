@@ -1,9 +1,9 @@
 use crate::{
     api::model::{
-        streams::buffered_stream::CHANNEL_SIZE, ActiveProviderManager, AppState, BoxedProviderStream, ProviderHandle,
+        streams::buffered_stream::CHANNEL_SIZE, ActiveProviderManager, BoxedProviderStream, ProviderHandle,
         ConnectionManager, StreamError, STREAM_IDLE_TIMEOUT,
     },
-    model::Config,
+    model::{AppConfig, Config},
     utils::{debug_if_enabled, trace_if_enabled},
 };
 use bytes::Bytes;
@@ -693,6 +693,20 @@ pub struct SharedStreamManager {
     meter_uids: RwLock<HashMap<String, u32>>,
 }
 
+/// The four state handles the shared-stream paths need.
+///
+/// These functions used to take the whole `AppState` and reach into four of its
+/// fields. Naming the server state is what the plan forbids for anything that
+/// might leave `api`, so the slice is explicit and the composition root builds
+/// it.
+#[derive(Clone, Copy)]
+pub struct SharedStreamCtx<'a> {
+    pub app_config: &'a Arc<AppConfig>,
+    pub shared_stream_manager: &'a Arc<SharedStreamManager>,
+    pub active_provider: &'a Arc<ActiveProviderManager>,
+    pub connection_manager: &'a Arc<ConnectionManager>,
+}
+
 impl SharedStreamManager {
     pub(crate) fn new(provider_manager: Arc<ActiveProviderManager>) -> Self {
         Self {
@@ -894,7 +908,7 @@ impl SharedStreamManager {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn register_shared_stream<S, E>(
-        app_state: &AppState,
+        ctx: SharedStreamCtx<'_>,
         stream_url: &str,
         bytes_stream: S,
         addr: &SocketAddr,
@@ -910,9 +924,9 @@ impl SharedStreamManager {
     {
         let registration_started_at = Instant::now();
         let buf_size = CHANNEL_SIZE.max(buffer_size);
-        let config = app_state.app_config.config.load();
+        let config = ctx.app_config.config.load();
         let min_buffer_bytes = resolve_min_burst_buffer_bytes(&config);
-        let low_priority_preempted = app_state
+        let low_priority_preempted = ctx
             .app_config
             .custom_stream_response
             .load()
@@ -934,9 +948,9 @@ impl SharedStreamManager {
                     .map_or(DEFAULT_SUBSCRIBER_IDLE_TIMEOUT_SECS, |stream| stream.shared_subscriber_idle_timeout_secs),
             ),
         );
-        app_state.shared_stream_manager.register(addr, stream_url, Arc::clone(&shared_state)).await;
-        app_state.active_provider.make_shared_connection(addr, stream_url).await;
-        let subscribed_stream = Self::subscribe_shared_stream(app_state, stream_url, addr, user_priority, connection_kind).await;
+        ctx.shared_stream_manager.register(addr, stream_url, Arc::clone(&shared_state)).await;
+        ctx.active_provider.make_shared_connection(addr, stream_url).await;
+        let subscribed_stream = Self::subscribe_shared_stream(ctx, stream_url, addr, user_priority, connection_kind).await;
         debug_if_enabled!(
             "Shared stream startup register+subscribe completed for {} in {} ms",
             sanitize_sensitive_info(stream_url),
@@ -946,7 +960,7 @@ impl SharedStreamManager {
             shared_state.broadcast(
                 stream_url,
                 bytes_stream,
-                Arc::clone(&app_state.shared_stream_manager),
+                Arc::clone(ctx.shared_stream_manager),
             );
             debug_if_enabled!(
                 "Created shared provider stream {} (channel_capacity={buf_size}, burst_buffer_min={min_buffer_bytes} bytes)",
@@ -962,20 +976,20 @@ impl SharedStreamManager {
     }
 
     pub async fn subscribe_shared_stream(
-        app_state: &AppState,
+        ctx: SharedStreamCtx<'_>,
         stream_url: &str,
         addr: &SocketAddr,
         user_priority: i8,
         connection_kind: crate::api::model::active_provider_manager::ConnectionKind,
     ) -> Option<(BoxedProviderStream, Option<Arc<str>>)> {
-        let manager = Arc::clone(&app_state.shared_stream_manager);
-        let connection_manager = Arc::clone(&app_state.connection_manager);
-        if let Some(result) = app_state
+        let manager = Arc::clone(ctx.shared_stream_manager);
+        let connection_manager = Arc::clone(ctx.connection_manager);
+        if let Some(result) = ctx
             .shared_stream_manager
             .subscribe_stream(stream_url, addr, manager, connection_manager)
             .await
         {
-            match app_state
+            match ctx
                 .active_provider
                 .add_shared_connection(
                     addr,
@@ -993,7 +1007,7 @@ impl SharedStreamManager {
                         sanitize_sensitive_info(stream_url),
                         sanitize_sensitive_info(&err)
                     );
-                    app_state.shared_stream_manager.release_connection(addr, true).await;
+                    ctx.shared_stream_manager.release_connection(addr, true).await;
                     None
                 }
             }

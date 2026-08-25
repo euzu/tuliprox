@@ -1,14 +1,14 @@
-use std::{fmt, time::Duration};
-
+use crate::stalker::session::StalkerSession;
 use serde::Deserialize;
-use shared::model::stalker::{
-    StalkerAuthMode, StalkerBootstrapRecipe, StalkerEndpointPreference, StalkerMagPreset, StalkerPlaybackMode,
-    StalkerPortalCapabilitiesDto, StalkerStreamKind,
+use shared::{
+    model::stalker::{
+        StalkerAuthMode, StalkerBootstrapRecipe, StalkerEndpointPreference, StalkerMagPreset, StalkerPlaybackMode,
+        StalkerPortalCapabilitiesDto, StalkerStreamKind,
+    },
+    utils::deserialize_as_option_string,
 };
-use shared::utils::deserialize_as_option_string;
-
-use crate::model::{StalkerInputConfig, StalkerSizeCaps};
-use crate::iptv::stalker::session::StalkerSession;
+use std::{fmt, time::Duration};
+use tuliprox_core::model::{StalkerInputConfig, StalkerSizeCaps};
 
 /// Information the `get_profile` action returns about the underlying portal account. We
 /// deserialize it loosely (all fields optional) because the field set varies by portal

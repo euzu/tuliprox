@@ -1,26 +1,32 @@
+use crate::stalker::{
+    client::StalkerApiClient,
+    error::{safe_stalker_url, StalkerError, StalkerResult},
+    profile::StalkerHandshake,
+    recipes::recipe_spec_for,
+};
 use futures::StreamExt;
 use log::warn;
-use serde::Deserialize;
-use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{
+    de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor},
+    Deserialize,
+};
 use serde_json::Value;
 use shared::utils::deserialize_as_option_string;
-use std::fmt;
-use std::io::{Error as IoError, ErrorKind, Read};
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+use std::{
+    fmt,
+    io::{Error as IoError, ErrorKind, Read},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 use tokio_util::io::{StreamReader, SyncIoBridge};
-
-use crate::iptv::stalker::client::StalkerApiClient;
-use crate::iptv::stalker::error::{safe_stalker_url, StalkerError, StalkerResult};
-use crate::iptv::stalker::profile::StalkerHandshake;
-use crate::iptv::stalker::recipes::recipe_spec_for;
-
 /// A single EPG programme record. The portal wraps each entry in `{ ch_id, title, start,
 /// stop, ... }`. We accept any payload shape by deserialising into a permissive value
 /// first and then coercing the bits we actually need.
 // The persisted shape lives in `tuliprox_core::model`; re-exported here for
 // this module's own call sites.
 pub use tuliprox_core::model::StalkerProgramRecord;
-
 
 #[derive(Debug, Default, Clone, Deserialize)]
 struct RawStalkerProgram {
@@ -94,16 +100,12 @@ pub async fn get_short_epg(
     let candidates = client.load_url_candidates().to_vec();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
-        let mut builder = client
-            .http()
-            .get(&load_url.load_url)
-            .headers(client.common_headers(&load_url))
-            .query(&[
-                ("type", "itv"),
-                ("action", "get_short_epg"),
-                ("ch_id", &channel_id.to_string()),
-                ("period", &hours.to_string()),
-            ]);
+        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+            ("type", "itv"),
+            ("action", "get_short_epg"),
+            ("ch_id", &channel_id.to_string()),
+            ("period", &hours.to_string()),
+        ]);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
         match client.send_json::<Value>(builder, "get_short_epg").await {
@@ -129,16 +131,12 @@ pub async fn get_epg(
     let candidates = client.load_url_candidates().to_vec();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
-        let mut builder = client
-            .http()
-            .get(&load_url.load_url)
-            .headers(client.common_headers(&load_url))
-            .query(&[
-                ("type", "itv"),
-                ("action", "get_epg_info"),
-                ("ch_id", &channel_id.to_string()),
-                ("period", &period_hours.to_string()),
-            ]);
+        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+            ("type", "itv"),
+            ("action", "get_epg_info"),
+            ("ch_id", &channel_id.to_string()),
+            ("period", &period_hours.to_string()),
+        ]);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
         match client.send_json::<Value>(builder, "get_epg").await {
@@ -171,15 +169,11 @@ where
     let candidates = client.load_url_candidates().to_vec();
     let mut last_err: Option<StalkerError> = None;
     for load_url in candidates {
-        let mut builder = client
-            .http()
-            .get(&load_url.load_url)
-            .headers(client.common_headers(&load_url))
-            .query(&[
-                ("type", "itv"),
-                ("action", "get_epg_info"),
-                ("period", &period_hours.to_string()),
-            ]);
+        let mut builder = client.http().get(&load_url.load_url).headers(client.common_headers(&load_url)).query(&[
+            ("type", "itv"),
+            ("action", "get_epg_info"),
+            ("period", &period_hours.to_string()),
+        ]);
         builder = client.apply_mac_query(builder);
         builder = client.apply_bearer(builder, Some(&handshake.session), spec.token_in_query);
         let response = match client.send_with_cap(builder, "get_epg_bulk", client.body_caps().get_epg_bytes).await {
@@ -248,16 +242,10 @@ where
         }
         parse_task
             .await
-            .map_err(|err| StalkerError::BodyDecode {
-                message: format!("get_epg_bulk parser join error: {err}"),
-            })?
+            .map_err(|err| StalkerError::BodyDecode { message: format!("get_epg_bulk parser join error: {err}") })?
             .map_err(|err| match err.kind() {
-                ErrorKind::UnexpectedEof => StalkerError::EmptyBody {
-                    action: "get_epg_bulk".to_string(),
-                },
-                _ => StalkerError::BodyDecode {
-                    message: format!("get_epg_bulk json decode: {err}"),
-                },
+                ErrorKind::UnexpectedEof => StalkerError::EmptyBody { action: "get_epg_bulk".to_string() },
+                _ => StalkerError::BodyDecode { message: format!("get_epg_bulk json decode: {err}") },
             })?;
         cancellation_guard.disarm();
         if emitted == 0 {
@@ -367,10 +355,7 @@ where
     where
         D: serde::Deserializer<'de>,
     {
-        deserializer.deserialize_any(ProgramVisitor {
-            on_program: self.on_program,
-            emitted: self.emitted,
-        })
+        deserializer.deserialize_any(ProgramVisitor { on_program: self.on_program, emitted: self.emitted })
     }
 }
 
@@ -393,13 +378,7 @@ where
     where
         A: SeqAccess<'de>,
     {
-        while seq
-            .next_element_seed(ProgramSeed {
-                on_program: self.on_program,
-                emitted: self.emitted,
-            })?
-            .is_some()
-        {}
+        while seq.next_element_seed(ProgramSeed { on_program: self.on_program, emitted: self.emitted })?.is_some() {}
         Ok(())
     }
 
@@ -414,10 +393,7 @@ where
             match key.as_str() {
                 "js" | "data" => {
                     saw_nested = true;
-                    map.next_value_seed(ProgramSeed {
-                        on_program: self.on_program,
-                        emitted: self.emitted,
-                    })?;
+                    map.next_value_seed(ProgramSeed { on_program: self.on_program, emitted: self.emitted })?;
                 }
                 "ch_id" => raw.ch_id = map.next_value()?,
                 "id" => raw.id = map.next_value()?,
@@ -512,13 +488,7 @@ struct LeadingJsonReader<R> {
 }
 
 impl<R> LeadingJsonReader<R> {
-    fn new(inner: R) -> Self {
-        Self {
-            inner,
-            started: false,
-            saw_non_ws: false,
-        }
-    }
+    fn new(inner: R) -> Self { Self { inner, started: false, saw_non_ws: false } }
 }
 
 impl<R: Read> Read for LeadingJsonReader<R> {
@@ -566,12 +536,7 @@ where
     let mut reader = LeadingJsonReader::new(reader);
     let mut emitted = 0_u64;
     let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
-    ProgramSeed {
-        on_program,
-        emitted: &mut emitted,
-    }
-    .deserialize(&mut deserializer)
-    .map_err(IoError::other)?;
+    ProgramSeed { on_program, emitted: &mut emitted }.deserialize(&mut deserializer).map_err(IoError::other)?;
     Ok(emitted)
 }
 
@@ -594,10 +559,9 @@ mod tests {
 
     #[test]
     fn parse_epg_records_unwraps_js_array() {
-        let v: Value = serde_json::from_str(
-            r#"{"js":[{"ch_id":"1","title":"A","start":"1700000000","stop":"1700003600"}]}"#,
-        )
-        .unwrap();
+        let v: Value =
+            serde_json::from_str(r#"{"js":[{"ch_id":"1","title":"A","start":"1700000000","stop":"1700003600"}]}"#)
+                .unwrap();
         let recs = parse_epg_records(&v);
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].title, "A");
@@ -614,10 +578,7 @@ mod tests {
         assert_eq!(records[0].stop_epoch, Some(1_700_003_600));
 
         let mut streamed = Vec::new();
-        let emitted = stream_bulk_epg_from_reader(
-            Cursor::new(value.to_string()),
-            &mut |record| streamed.push(record),
-        )?;
+        let emitted = stream_bulk_epg_from_reader(Cursor::new(value.to_string()), &mut |record| streamed.push(record))?;
         assert_eq!(emitted, 1);
         assert_eq!(streamed, records);
         Ok(())
@@ -625,10 +586,7 @@ mod tests {
 
     #[test]
     fn for_each_program_visits_object_data() {
-        let v: Value = serde_json::from_str(
-            r#"{"js":{"data":[{"title":"x"}]}}"#,
-        )
-        .unwrap();
+        let v: Value = serde_json::from_str(r#"{"js":{"data":[{"title":"x"}]}}"#).unwrap();
         let mut count = 0;
         for_each_program(&v, &mut |_| count += 1);
         assert_eq!(count, 1);
@@ -638,7 +596,8 @@ mod tests {
     fn stream_bulk_epg_from_reader_walks_js_data_without_materializing_value_tree() {
         let json = r#"{"js":{"data":[{"ch_id":"1","title":"A","start":"1700000000","stop":"1700003600"},{"ch_id":"2","title":"B","start":"1700003600","stop":"1700007200"}]}}"#;
         let mut records = Vec::new();
-        let emitted = stream_bulk_epg_from_reader(Cursor::new(json.as_bytes()), &mut |record| records.push(record)).expect("stream parse");
+        let emitted = stream_bulk_epg_from_reader(Cursor::new(json.as_bytes()), &mut |record| records.push(record))
+            .expect("stream parse");
         assert_eq!(emitted, 2);
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].channel_id.as_deref(), Some("1"));
@@ -648,9 +607,12 @@ mod tests {
     #[test]
     fn stream_bulk_epg_from_reader_accepts_jsonp_and_bom_prefix() {
         let mut body = vec![0xEF, 0xBB, 0xBF];
-        body.extend_from_slice(br#"callback({"js":[{"ch_id":"9","title":"Wrapped","start":"1700000000","stop":"1700003600"}]})"#);
+        body.extend_from_slice(
+            br#"callback({"js":[{"ch_id":"9","title":"Wrapped","start":"1700000000","stop":"1700003600"}]})"#,
+        );
         let mut records = Vec::new();
-        let emitted = stream_bulk_epg_from_reader(Cursor::new(body), &mut |record| records.push(record)).expect("stream parse");
+        let emitted =
+            stream_bulk_epg_from_reader(Cursor::new(body), &mut |record| records.push(record)).expect("stream parse");
         assert_eq!(emitted, 1);
         assert_eq!(records[0].title, "Wrapped");
     }
