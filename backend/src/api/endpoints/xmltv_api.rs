@@ -836,7 +836,7 @@ async fn xmltv_api(fingerprint: &Fingerprint, api_req: UserApiRequest, app_state
     let Some((user, target)) = get_user_target(&api_req, app_state) else {
         return auth_status.into_response();
     };
-    if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), app_state) {
+    if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), &app_state.app_config, &app_state.geoip) {
         return e.into_player_response(auth_status);
     }
 
@@ -875,7 +875,7 @@ async fn epg_api_resource(
     let Some((user, target)) = get_user_target_by_credentials(&username, &password, &api_req, &app_state) else {
         return auth_status.into_response();
     };
-    if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), &app_state) {
+    if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), &app_state.app_config, &app_state.geoip) {
         return e.into_player_response(auth_status);
     }
 

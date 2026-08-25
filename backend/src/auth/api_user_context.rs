@@ -1,10 +1,12 @@
+use crate::model::AppConfig;
+use crate::repository::GeoIp;
+use arc_swap::ArcSwapOption;
 use crate::{
     api::{
         api_utils::{
             evaluate_network_access, log_network_access_allowed_geoip_unavailable, log_network_access_denied,
             NetworkAccessDecision, NetworkAccessDenyReason,
         },
-        model::AppState,
     },
     model::ProxyUserPermissionDenyReason,
 };
@@ -93,10 +95,11 @@ pub struct ApiUserContext {
 pub fn check_network_access_only(
     user: &Arc<crate::model::ProxyUserCredentials>,
     fingerprint: &crate::auth::Fingerprint,
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
+    geoip: &Arc<ArcSwapOption<GeoIp>>,
 ) -> Result<(), ApiUserAuthError> {
-    let geoip_unavailable_policy = app_state.app_config.get_geoip_unavailable_policy();
-    match evaluate_network_access(user, &fingerprint.client_ip, &app_state.geoip, geoip_unavailable_policy) {
+    let geoip_unavailable_policy = app_config.get_geoip_unavailable_policy();
+    match evaluate_network_access(user, &fingerprint.client_ip, geoip, geoip_unavailable_policy) {
         NetworkAccessDecision::Allowed => Ok(()),
         NetworkAccessDecision::AllowedGeoIpUnavailable => {
             log_network_access_allowed_geoip_unavailable(&user.username, &fingerprint.client_ip);
@@ -114,10 +117,11 @@ pub fn check_network_access_only(
 pub fn try_check_network_access_only(
     user: &Arc<crate::model::ProxyUserCredentials>,
     fingerprint: &crate::auth::Fingerprint,
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
+    geoip: &Arc<ArcSwapOption<GeoIp>>,
 ) -> Result<(), ApiUserAuthError> {
-    let geoip_unavailable_policy = app_state.app_config.get_geoip_unavailable_policy();
-    match evaluate_network_access(user, &fingerprint.client_ip, &app_state.geoip, geoip_unavailable_policy) {
+    let geoip_unavailable_policy = app_config.get_geoip_unavailable_policy();
+    match evaluate_network_access(user, &fingerprint.client_ip, geoip, geoip_unavailable_policy) {
         NetworkAccessDecision::Allowed | NetworkAccessDecision::AllowedGeoIpUnavailable => Ok(()),
         NetworkAccessDecision::Denied(reason) => Err(ApiUserAuthError::NetworkDenied(reason)),
     }
@@ -127,17 +131,18 @@ pub fn resolve_api_user_context(
     user: Arc<crate::model::ProxyUserCredentials>,
     target: Arc<crate::model::ConfigTarget>,
     fingerprint: crate::auth::Fingerprint,
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
+    geoip: &Arc<ArcSwapOption<GeoIp>>,
 ) -> Result<ApiUserContext, ApiUserAuthError> {
     // Permission check
-    if let Some(reason) = user.permission_denied_reason(&app_state.app_config) {
+    if let Some(reason) = user.permission_denied_reason(app_config) {
         debug!("User access denied for {}: {:?}", sanitize_sensitive_info(&user.username), reason);
         return Err(ApiUserAuthError::PermissionDenied(reason.into()));
     }
 
     // Network access check with policy
-    let geoip_unavailable_policy = app_state.app_config.get_geoip_unavailable_policy();
-    match evaluate_network_access(&user, &fingerprint.client_ip, &app_state.geoip, geoip_unavailable_policy) {
+    let geoip_unavailable_policy = app_config.get_geoip_unavailable_policy();
+    match evaluate_network_access(&user, &fingerprint.client_ip, geoip, geoip_unavailable_policy) {
         NetworkAccessDecision::Allowed => Ok(ApiUserContext { user, target, fingerprint }),
         NetworkAccessDecision::AllowedGeoIpUnavailable => {
             log_network_access_allowed_geoip_unavailable(&user.username, &fingerprint.client_ip);
@@ -155,17 +160,18 @@ pub fn resolve_api_user_context(
 pub fn check_permission_and_network_access_only(
     user: &Arc<crate::model::ProxyUserCredentials>,
     fingerprint: &crate::auth::Fingerprint,
-    app_state: &Arc<AppState>,
+    app_config: &Arc<AppConfig>,
+    geoip: &Arc<ArcSwapOption<GeoIp>>,
 ) -> Result<(), ApiUserAuthError> {
     // Permission check
-    if let Some(reason) = user.permission_denied_reason(&app_state.app_config) {
+    if let Some(reason) = user.permission_denied_reason(app_config) {
         debug!("User access denied for {}: {:?}", sanitize_sensitive_info(&user.username), reason);
         return Err(ApiUserAuthError::PermissionDenied(reason.into()));
     }
 
     // Network access check
-    let geoip_unavailable_policy = app_state.app_config.get_geoip_unavailable_policy();
-    match evaluate_network_access(user, &fingerprint.client_ip, &app_state.geoip, geoip_unavailable_policy) {
+    let geoip_unavailable_policy = app_config.get_geoip_unavailable_policy();
+    match evaluate_network_access(user, &fingerprint.client_ip, geoip, geoip_unavailable_policy) {
         NetworkAccessDecision::Allowed => Ok(()),
         NetworkAccessDecision::AllowedGeoIpUnavailable => {
             log_network_access_allowed_geoip_unavailable(&user.username, &fingerprint.client_ip);

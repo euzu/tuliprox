@@ -7705,7 +7705,7 @@ async fn hls_api_stream_leaked_relative(
     relative_path: String,
     request_query: Option<&str>,
 ) -> axum::response::Response {
-    if let Err(e) = check_network_access_only(&user, &fingerprint, &app_state) {
+    if let Err(e) = check_network_access_only(&user, &fingerprint, &app_state.app_config, &app_state.geoip) {
         return e.into_player_response(app_state.app_config.get_auth_error_status());
     }
     let Some(origin_url) = resolve_leaked_hls_relative_origin(&session_stream_url, &relative_path, request_query)
@@ -7773,7 +7773,7 @@ async fn hls_api_stream_resolved(
     token: String,
 ) -> axum::response::Response {
     // Network access check only - permission check is done later with full stream info
-    if let Err(e) = check_network_access_only(&user, &fingerprint, &app_state) {
+    if let Err(e) = check_network_access_only(&user, &fingerprint, &app_state.app_config, &app_state.geoip) {
         return e.into_player_response(app_state.app_config.get_auth_error_status());
     }
     let target_name = &target.name;

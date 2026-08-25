@@ -82,7 +82,7 @@ fn m3u_api_with_auth(
     api_req: &UserApiRequest,
 ) -> Result<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>), ApiUserAuthError> {
     let (user, target) = get_user_target(api_req, app_state).ok_or(ApiUserAuthError::AuthFailed)?;
-    check_network_access_only(&user, fingerprint, app_state)?;
+    check_network_access_only(&user, fingerprint, &app_state.app_config, &app_state.geoip)?;
     Ok((user, target))
 }
 
@@ -96,7 +96,7 @@ fn m3u_api_stream_network_auth(
 ) -> Result<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>), ApiUserAuthError> {
     let (user, target) = get_user_target_by_credentials(stream_req.username, stream_req.password, api_req, app_state)
         .ok_or(ApiUserAuthError::AuthFailed)?;
-    check_network_access_only(&user, fingerprint, app_state)?;
+    check_network_access_only(&user, fingerprint, &app_state.app_config, &app_state.geoip)?;
     Ok((user, target))
 }
 
@@ -809,7 +809,7 @@ async fn m3u_api_catchup(
     if target.id != target_id {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
-    if let Err(err) = check_network_access_only(&user, &fingerprint, &app_state) {
+    if let Err(err) = check_network_access_only(&user, &fingerprint, &app_state.app_config, &app_state.geoip) {
         return err.into_player_response(app_state.app_config.get_auth_error_status());
     }
     if user.permission_denied(&app_state.app_config) || !target.has_output(TargetType::M3u) {
@@ -862,7 +862,7 @@ fn m3u_api_resource_auth(
 ) -> Result<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>), ApiUserAuthError> {
     let (user, target) =
         get_user_target_by_credentials(username, password, api_req, app_state).ok_or(ApiUserAuthError::AuthFailed)?;
-    resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), app_state)?;
+    resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), &app_state.app_config, &app_state.geoip)?;
     Ok((user, target))
 }
 

@@ -1,4 +1,4 @@
-use crate::api::model::{PlaylistM3uStorage, PlaylistStorage, PlaylistStorageState, PlaylistXtreamStorage};
+use super::playlist_mem_cache::{PlaylistM3uStorage, PlaylistStorage, PlaylistStorageState, PlaylistXtreamStorage};
 use crate::model::Epg;
 use crate::model::{AppConfig, ConfigInput, ConfigTarget, TargetOutput};
 use crate::processing::processor::{apply_filter_to_playlist, PlaylistProcessingContext};

@@ -250,7 +250,7 @@ async fn lineup_status(
     let cfg = Arc::clone(&app_state.app_state.app_config);
     let network_access_denied =
         cfg.get_target_for_username(&app_state.device.t_username).is_none_or(|(credentials, _)| {
-            try_check_network_access_only(&credentials, &fingerprint, &app_state.app_state).is_err()
+            try_check_network_access_only(&credentials, &fingerprint, &app_state.app_state.app_config, &app_state.app_state.geoip).is_err()
         });
     let current_state = app_state.hd_scan_state.load(std::sync::atomic::Ordering::Acquire);
     if network_access_denied || current_state < 0 {
@@ -336,7 +336,7 @@ async fn lineup_post(
 ) -> impl IntoResponse {
     let cfg = Arc::clone(&app_state.app_state.app_config);
     let allowed = cfg.get_target_for_username(&app_state.device.t_username).is_some_and(|(credentials, _)| {
-        try_check_network_access_only(&credentials, &fingerprint, &app_state.app_state).is_ok()
+        try_check_network_access_only(&credentials, &fingerprint, &app_state.app_state.app_config, &app_state.app_state.geoip).is_ok()
     });
     if !allowed {
         return axum::http::StatusCode::FORBIDDEN.into_response();
@@ -454,7 +454,7 @@ async fn auth_lineup_json(
         if !username.eq(&credentials.username) || !password.eq(&credentials.password) {
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         }
-        if let Err(e) = try_check_network_access_only(&credentials, &fingerprint, &app_state.app_state) {
+        if let Err(e) = try_check_network_access_only(&credentials, &fingerprint, &app_state.app_state.app_config, &app_state.app_state.geoip) {
             return e.into_player_response(app_state.app_state.app_config.get_auth_error_status());
         }
         let user_credentials = Arc::clone(&credentials);
@@ -469,7 +469,7 @@ async fn lineup_json(
 ) -> impl IntoResponse {
     let cfg = Arc::clone(&app_state.app_state.app_config);
     if let Some((credentials, target)) = cfg.get_target_for_username(&app_state.device.t_username) {
-        if let Err(e) = try_check_network_access_only(&credentials, &fingerprint, &app_state.app_state) {
+        if let Err(e) = try_check_network_access_only(&credentials, &fingerprint, &app_state.app_state.app_config, &app_state.app_state.geoip) {
             return e.into_player_response(app_state.app_state.app_config.get_auth_error_status());
         }
         let user_credentials = Arc::clone(&credentials);

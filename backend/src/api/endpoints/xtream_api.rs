@@ -264,7 +264,7 @@ async fn xtream_player_api_stream(
         Some((user, target)) => (user, target),
     };
     // Network access check only - permission check is done later with full stream info
-    if let Err(e) = check_network_access_only(&user, fingerprint, app_state) {
+    if let Err(e) = check_network_access_only(&user, fingerprint, &app_state.app_config, &app_state.geoip) {
         return e.into_player_response(auth_status);
     }
 
@@ -1033,7 +1033,7 @@ async fn xtream_player_api_resource(
     else {
         return auth_status.into_response();
     };
-    if let Err(e) = check_permission_and_network_access_only(&user, fingerprint, app_state) {
+    if let Err(e) = check_permission_and_network_access_only(&user, fingerprint, &app_state.app_config, &app_state.geoip) {
         return e.into_player_response(auth_status);
     }
     let target_name = &target.name;
@@ -1686,7 +1686,7 @@ async fn xtream_player_api(
     let Some((user, target)) = get_user_target(&api_req, app_state) else {
         return auth_status.into_response();
     };
-    if let Err(e) = check_network_access_only(&user, fingerprint, app_state) {
+    if let Err(e) = check_network_access_only(&user, fingerprint, &app_state.app_config, &app_state.geoip) {
         return e.into_player_response(auth_status);
     }
     if !target.has_output(TargetType::Xtream) {

@@ -1,4 +1,4 @@
-use crate::api::model::PlaylistStorageState;
+use super::playlist_mem_cache::PlaylistStorageState;
 use crate::model::XtreamCategory;
 use crate::model::{AppConfig, ProxyUserCredentials};
 use crate::model::{Config, ConfigTarget};

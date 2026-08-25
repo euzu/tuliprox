@@ -67,7 +67,7 @@ fn resolve_cvs_user_context(
         return Err(Box::new(app_state.app_config.get_auth_error_status().into_response()));
     };
 
-    if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), app_state) {
+    if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), &app_state.app_config, &app_state.geoip) {
         return Err(Box::new(e.into_player_response(app_state.app_config.get_auth_error_status())));
     }
 
@@ -84,7 +84,7 @@ fn resolve_hls_cvs_user_context(
         return Err(Box::new(app_state.app_config.get_auth_error_status().into_response()));
     };
 
-    if let Err(e) = check_network_access_only(&user, fingerprint, app_state) {
+    if let Err(e) = check_network_access_only(&user, fingerprint, &app_state.app_config, &app_state.geoip) {
         return Err(Box::new(e.into_player_response(app_state.app_config.get_auth_error_status())));
     }
 
@@ -100,7 +100,7 @@ fn resolve_hls_cvs_access_user(
         return Err(Box::new(app_state.app_config.get_auth_error_status().into_response()));
     };
 
-    if let Err(e) = check_network_access_only(&user, fingerprint, app_state) {
+    if let Err(e) = check_network_access_only(&user, fingerprint, &app_state.app_config, &app_state.geoip) {
         return Err(Box::new(e.into_player_response(app_state.app_config.get_auth_error_status())));
     }
 

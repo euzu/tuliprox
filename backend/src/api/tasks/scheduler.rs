@@ -276,7 +276,7 @@ fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
 fn run_geoip_update(app_state: &Arc<AppState>) {
     let app_state = Arc::clone(app_state);
     tokio::spawn(async move {
-        if let Err(err) = update_geoip_db(&app_state).await {
+        if let Err(err) = update_geoip_db(&app_state.app_config, &app_state.http_client.load(), &app_state.geoip).await {
             if !matches!(err, GeoIpUpdateError::Disabled) {
                 log::error!("Scheduled GeoIp update failed: {err}");
             }
