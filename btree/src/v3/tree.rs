@@ -4866,6 +4866,28 @@ mod tests {
         handle.join().map_err(|_| io::Error::other("replacement writer panicked"))
     }
 
+    /// Waits for the sidecar lock to become free.
+    ///
+    /// A writer reporting its result does not mean the lock is already released:
+    /// publication can finish on the engine's background thread, so the release
+    /// happens on a different thread from the one the test observes. Asserting
+    /// `try_exclusive_sidecar` immediately races with that hand-off and fails
+    /// intermittently. Waiting for the lock to become available tests what the
+    /// engine actually promises - that it is released - without asserting an
+    /// instantaneous guarantee it never made.
+    fn wait_for_exclusive_sidecar(database: &Path) -> io::Result<bool> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if try_exclusive_sidecar(database)? {
+                return Ok(true);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn try_exclusive_sidecar(database: &Path) -> io::Result<bool> {
         let file = OpenOptions::new()
             .read(true)
@@ -4931,7 +4953,7 @@ mod tests {
         assert_writer_is_blocked(&receiver)?;
         drop(second);
         finish_writer(&receiver, handle)?;
-        assert!(try_exclusive_sidecar(&path)?);
+        assert!(wait_for_exclusive_sidecar(&path)?);
         Ok(())
     }
 
@@ -4950,7 +4972,7 @@ mod tests {
         assert_writer_is_blocked(&receiver)?;
         drop(iterator);
         finish_writer(&receiver, handle)?;
-        assert!(try_exclusive_sidecar(&path)?);
+        assert!(wait_for_exclusive_sidecar(&path)?);
         Ok(())
     }
 
