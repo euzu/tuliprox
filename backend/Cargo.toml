@@ -13,6 +13,7 @@ workspace = true
 lol_html = "2.9.0"
 handlebars = "6.4.1"
 shared = { version = "3", path = "../shared" }
+tuliprox-btree = { version = "3", path = "../btree" }
 serde.workspace = true
 serde-saphyr.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
@@ -109,6 +110,9 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Stora
 vergen = { version = "9.1.0", features = ["build"] }
 
 [dev-dependencies]
+# The migration and playlist-stream tests build legacy v2 databases and
+# sorted-index sidecars by hand; those builders live in the engine.
+tuliprox-btree = { version = "3", path = "../btree", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 rcgen = "0.14.8"
 rustls = "0.23.40"

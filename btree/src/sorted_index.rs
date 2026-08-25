@@ -1,5 +1,5 @@
 pub mod v4 {
-    use crate::repository::bplustree::{
+    use crate::{
         codec::{binary_deserialize, binary_serialize},
         v3::{BPlusTreeQuery, Locator},
     };
@@ -84,7 +84,7 @@ pub mod v4 {
         read_u64(&bytes, 40)
     }
 
-    pub(crate) struct Writer<SortKey, K> {
+    pub struct Writer<SortKey, K> {
         output: BufWriter<File>,
         database_id: [u8; 16],
         generation: u64,
@@ -98,14 +98,14 @@ pub mod v4 {
         SortKey: Serialize,
         K: Serialize,
     {
-        pub(crate) fn new(path: &Path, database_id: [u8; 16], generation: u64) -> io::Result<Self> {
+        pub fn new(path: &Path, database_id: [u8; 16], generation: u64) -> io::Result<Self> {
             let file = OpenOptions::new().write(true).create_new(true).open(path)?;
             let mut output = BufWriter::new(file);
             output.write_all(&header(database_id, generation, 0))?;
             Ok(Self { output, database_id, generation, count: 0, body: Vec::new(), _marker: PhantomData })
         }
 
-        pub(crate) fn push(&mut self, sort_key: &SortKey, primary_key: &K, locator: Locator) -> io::Result<()> {
+        pub fn push(&mut self, sort_key: &SortKey, primary_key: &K, locator: Locator) -> io::Result<()> {
             let sort_key = binary_serialize(sort_key)?;
             let primary_key = binary_serialize(primary_key)?;
             let sort_key_len = u32::try_from(sort_key.len()).map_err(invalid_integer)?;
@@ -124,7 +124,7 @@ pub mod v4 {
             Ok(())
         }
 
-        pub(crate) fn finish(mut self) -> io::Result<u64> {
+        pub fn finish(mut self) -> io::Result<u64> {
             self.output.flush()?;
             let mut file = self.output.into_inner().map_err(std::io::IntoInnerError::into_error)?;
             file.seek(SeekFrom::Start(0))?;
@@ -162,11 +162,7 @@ pub mod v4 {
         SortKey: for<'de> Deserialize<'de>,
         K: for<'de> Deserialize<'de>,
     {
-        pub(crate) fn open(
-            path: &Path,
-            expected_database_id: [u8; 16],
-            expected_generation: u64,
-        ) -> io::Result<Self> {
+        pub(crate) fn open(path: &Path, expected_database_id: [u8; 16], expected_generation: u64) -> io::Result<Self> {
             let file = File::open(path)?;
             let length = file.metadata()?.len();
             if length < HEADER_LEN as u64 {
@@ -271,10 +267,8 @@ pub mod v4 {
             let sort_key = binary_deserialize(
                 self.body.get(24..sort_key_end).ok_or_else(|| invalid_data("sort key is truncated"))?,
             )?;
-            let serialized_primary_key = self
-                .body
-                .get(sort_key_end..expected_len)
-                .ok_or_else(|| invalid_data("primary key is truncated"))?;
+            let serialized_primary_key =
+                self.body.get(sort_key_end..expected_len).ok_or_else(|| invalid_data("primary key is truncated"))?;
             let primary_key = binary_deserialize(serialized_primary_key)?;
             Ok(Some(BorrowedEntry { sort_key, primary_key, serialized_primary_key, locator }))
         }
@@ -322,9 +316,7 @@ pub mod v4 {
                     } else {
                         let BorrowedEntry { sort_key, primary_key, serialized_primary_key, locator } = entry;
                         self.previous_sort_key = Some(sort_key);
-                        self.query
-                            .read_locator_value(locator, serialized_primary_key)
-                            .map(|value| (primary_key, value))
+                        self.query.read_locator_value(locator, serialized_primary_key).map(|value| (primary_key, value))
                     }
                 }
                 Ok(None) => {
@@ -344,8 +336,10 @@ pub mod v4 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::bplustree::v3::{BPlusTree as V3Tree, BPlusTreeQuery as V3Query, Locator};
-    use crate::repository::bplustree::codec::binary_serialize;
+    use crate::{
+        codec::binary_serialize,
+        v3::{BPlusTree as V3Tree, BPlusTreeQuery as V3Query, Locator},
+    };
     use std::{fs, io, io::Write};
     use tempfile::tempdir;
 
@@ -433,11 +427,7 @@ mod tests {
 
         let mut writer = v4::Writer::<u32, u32>::new(&index, database_id, generation)?;
         writer.push(&1, &entries[0].0, entries[0].2)?;
-        writer.push(
-            &2,
-            &entries[1].0,
-            Locator { slot_index: u16::MAX, ..entries[1].2 },
-        )?;
+        writer.push(&2, &entries[1].0, Locator { slot_index: u16::MAX, ..entries[1].2 })?;
         writer.finish()?;
 
         let query = V3Query::<u32, String>::try_new(&database)?;

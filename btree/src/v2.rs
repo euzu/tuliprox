@@ -5,22 +5,24 @@
 //! rewrite of existing repositories. The future v3 storage line is expected to
 //! live behind an explicit version boundary and a typed migration path.
 
-use crate::repository::bplustree::{
+#[cfg(any(test, feature = "test-support"))]
+use crate::codec::binary_serialize_into;
+pub(crate) use crate::common::BPlusTreeError;
+// The v2 write path exists only to build fixtures for the migration tests.
+#[cfg(any(test, feature = "test-support"))]
+use crate::common::{file_writer, rename_or_copy};
+use crate::{
     codec::binary_deserialize,
     common::{file_reader, mmap_with_advice, read_exact_at_offset, Advice},
 };
-// The v2 write path exists only to build fixtures for the migration tests.
-#[cfg(test)]
-use crate::repository::bplustree::common::{file_writer, rename_or_copy};
-pub(crate) use crate::repository::bplustree::common::BPlusTreeError;
-#[cfg(test)]
-use crate::repository::bplustree::codec::binary_serialize_into;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use log::error;
 use memmap2::Mmap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use smallvec::{smallvec, SmallVec};
+#[cfg(any(test, feature = "test-support"))]
+use std::{borrow::Cow, io::Write};
 use std::{
     collections::HashSet,
     fs::File,
@@ -29,12 +31,7 @@ use std::{
     ops::Bound,
     path::Path,
 };
-#[cfg(test)]
-use std::{
-    borrow::Cow,
-    io::Write,
-};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use tempfile::NamedTempFile;
 const PAGE_SIZE: u16 = 4096;
 pub const PAGE_SIZE_USIZE: usize = PAGE_SIZE as usize;
@@ -43,7 +40,7 @@ const FLAG_SIZE: usize = 1;
 pub(crate) const MAGIC: &[u8; 4] = b"BTRE";
 pub(crate) const STORAGE_VERSION: u32 = 2;
 const HEADER_SIZE: u64 = PAGE_SIZE as u64;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const ROOT_OFFSET_POS: u64 = 8;
 const METADATA_DATA_START_POS: usize = 20;
 // Reserve space for metadata (e.g. 4096 - 16 = 4080 bytes max, but let's be safe)
@@ -53,7 +50,7 @@ const HEADER_FLAG_HAS_TOMBSTONES: u32 = 1 << 30;
 const HEADER_METADATA_LEN_MASK: u32 = !(HEADER_FLAG_HAS_METADATA_FLAGS | HEADER_FLAG_HAS_TOMBSTONES);
 
 #[inline]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const fn encode_metadata_len_with_flags(metadata_len: u32, has_tombstones: bool) -> u32 {
     let mut encoded = metadata_len | HEADER_FLAG_HAS_METADATA_FLAGS;
     if has_tombstones {
@@ -78,29 +75,29 @@ const fn decode_metadata_len_and_flags(raw: u32) -> (u32, bool) {
 
 // v2 uses conservative runtime fanout instead of pretending that size_of::<K>()
 // predicts serialized key size. Multi-block nodes keep existing files compatible.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const DEFAULT_INNER_ORDER: usize = 64;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const DEFAULT_LEAF_ORDER: usize = 64;
 
 // Value packing configuration
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const SMALL_VALUE_THRESHOLD: usize = 256;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const PACK_BLOCK_HEADER_SIZE: usize = 4;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const PACK_VALUE_HEADER_SIZE: usize = 4;
 
 // LZ4 compression configuration
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const COMPRESSION_MIN_SIZE: usize = 64;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const COMPRESSION_THRESHOLD_PERCENT: usize = 85;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const COMPRESSION_FLAG_NONE: u8 = 0x00;
 pub const COMPRESSION_FLAG_LZ4: u8 = 0x01;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const MAGIC_METADATA_TARGET_ID_MAPPING: u8 = 0x01;
 
 type TraversalStack = SmallVec<[(u64, usize); 8]>;
@@ -155,7 +152,9 @@ type TraversalStack = SmallVec<[(u64, usize); 8]>;
 */
 
 #[inline]
-fn u32_from_bytes(bytes: &[u8]) -> io::Result<u32> { Ok(u32::from_le_bytes(bytes.try_into().map_err(io::Error::other)?)) }
+fn u32_from_bytes(bytes: &[u8]) -> io::Result<u32> {
+    Ok(u32::from_le_bytes(bytes.try_into().map_err(io::Error::other)?))
+}
 
 #[inline]
 fn node_flag_to_is_leaf(flag: u8) -> io::Result<bool> {
@@ -201,7 +200,7 @@ where
 }
 
 #[inline]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const fn msgpack_array_header_len(count: usize) -> usize {
     if count <= 0x0f {
         1
@@ -213,7 +212,7 @@ const fn msgpack_array_header_len(count: usize) -> usize {
 }
 
 #[inline]
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const fn msgpack_u64_array_upper_bound_len(count: usize) -> usize {
     // Worst-case per u64: marker + 8 bytes payload.
     msgpack_array_header_len(count) + count.saturating_mul(9)
@@ -222,7 +221,7 @@ const fn msgpack_u64_array_upper_bound_len(count: usize) -> usize {
 // Adaptively compress value bytes if beneficial.
 // Returns borrowed raw bytes when compression is not useful to avoid an
 // allocation on the common uncompressed path.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn compress_if_beneficial(raw_bytes: &[u8]) -> (u8, Cow<'_, [u8]>) {
     if raw_bytes.len() >= COMPRESSION_MIN_SIZE {
         let compressed = lz4_flex::compress_prepend_size(raw_bytes);
@@ -302,20 +301,20 @@ where
     V: Serialize + for<'de> Deserialize<'de> + Clone,
 {
     #[inline]
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     const fn new(is_leaf: bool) -> Self {
         Self { is_leaf, keys: vec![], children: vec![], value_info: vec![], values: vec![] }
     }
 
     #[inline]
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn is_overflow(&self, order: usize) -> bool { self.keys.len() > order }
 
     #[inline]
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     const fn get_median_index(order: usize) -> usize { order >> 1 }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn find_leaf_entry(node: &Self) -> Option<&K> {
         if node.is_leaf {
             node.keys.first()
@@ -326,10 +325,10 @@ where
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn get_entry_index_upper_bound(&self, key: &K) -> usize { get_entry_index_upper_bound::<K>(&self.keys, key) }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn insert(&mut self, key: K, v: V, inner_order: usize, leaf_order: usize) -> Option<Self> {
         if self.is_leaf {
             // Use single binary search instead of redundant searches
@@ -368,7 +367,7 @@ where
         None
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn split(&mut self, order: usize) -> Self {
         let median = Self::get_median_index(order);
         if self.is_leaf {
@@ -388,6 +387,7 @@ where
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     #[cfg(test)]
     fn add_historical_fence_key(&mut self) -> bool {
         if self.is_leaf {
@@ -407,7 +407,7 @@ where
     }
 
     /// Write a packed value block to disk
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn write_packed_block<W: Write + Seek>(
         file: &mut W,
         buffer: &mut [u8],
@@ -440,7 +440,7 @@ where
     }
 
     /// Calculate the serialized size of this node in bytes (rounded up to block size)
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn calculate_serialized_size(&self, serial_buf: &mut Vec<u8>) -> io::Result<u64> {
         serial_buf.clear();
 
@@ -470,7 +470,7 @@ where
         Ok((blocks * PAGE_SIZE_USIZE) as u64)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn serialize_to_block<W: Write + Seek>(
         &self,
         file: &mut W,
@@ -582,7 +582,7 @@ where
 
     /// Serialize the tree in breadth-first order for better disk locality
     /// This improves query performance by keeping nodes at the same level contiguous
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn serialize_breadth_first<W: Write + Seek>(
         &mut self,
         file: &mut W,
@@ -601,7 +601,7 @@ where
         Ok(start_offset)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn serialize_bfs_pass1_populate_value_info(&mut self, serial_buf: &mut Vec<u8>) -> io::Result<()> {
         let mut current_level_mut = vec![self];
         while !current_level_mut.is_empty() {
@@ -673,7 +673,7 @@ where
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn serialize_bfs_pass2_calculate_offsets(
         &self,
         serial_buf: &mut Vec<u8>,
@@ -707,7 +707,7 @@ where
         Ok((node_offsets, child_ids_by_node, current_offset))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn serialize_bfs_pass3_assign_value_offsets(&mut self, mut current_offset: u64) {
         use std::collections::HashMap;
         let mut current_level_mut = vec![self];
@@ -749,7 +749,7 @@ where
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn serialize_bfs_pass4_write_nodes<W: Write + Seek>(
         &self,
         file: &mut W,
@@ -782,10 +782,7 @@ where
                 node.serialize_to_block(file, buffer, serial_buf, node_offset)?;
             } else {
                 let node_child_ids = child_ids_by_node.get(node_id).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "B+Tree serialization missing child id table entry",
-                    )
+                    io::Error::new(io::ErrorKind::InvalidData, "B+Tree serialization missing child id table entry")
                 })?;
                 let mut child_offsets = Vec::with_capacity(node_child_ids.len());
                 for child_id in node_child_ids {
@@ -798,19 +795,13 @@ where
                     child_offsets.push(*child_offset);
                 }
 
-                node.serialize_internal_with_offsets(
-                    file,
-                    buffer,
-                    serial_buf,
-                    node_offset,
-                    &child_offsets,
-                )?;
+                node.serialize_internal_with_offsets(file, buffer, serial_buf, node_offset, &child_offsets)?;
             }
         }
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn serialize_bfs_pass5_write_values<W: Write + Seek>(
         &self,
         file: &mut W,
@@ -870,7 +861,7 @@ where
 
     /// Serialize an internal node with pre-calculated child offsets
     /// Supports multi-block internal nodes when keys + pointers exceed a single page
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn serialize_internal_with_offsets<W: Write + Seek>(
         &self,
         file: &mut W,
@@ -1294,14 +1285,14 @@ where
 // -----------------------------------------------------------------------------
 // Metadata Enum
 // -----------------------------------------------------------------------------
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug, PartialEq)]
 pub enum BPlusTreeMetadata {
     Empty,
     TargetIdMapping(u32),
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl BPlusTreeMetadata {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
@@ -1313,10 +1304,9 @@ impl BPlusTreeMetadata {
             }
         }
     }
-
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone)]
 pub struct BPlusTree<K, V> {
     root: BPlusTreeNode<K, V>,
@@ -1326,7 +1316,7 @@ pub struct BPlusTree<K, V> {
     dirty: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const fn sanitize_order(order: usize) -> usize {
     if order < 2 {
         2
@@ -1335,10 +1325,10 @@ const fn sanitize_order(order: usize) -> usize {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const fn default_orders() -> (usize, usize) { (DEFAULT_INNER_ORDER, DEFAULT_LEAF_ORDER) }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl<K, V> Default for BPlusTree<K, V>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
@@ -1347,7 +1337,7 @@ where
     fn default() -> Self { Self::new() }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl<K, V> BPlusTree<K, V>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
@@ -1403,11 +1393,12 @@ where
         }
     }
 
+    // Only this crate's own migration tests build a tree with a historical fence.
+    #[cfg(test)]
     pub(crate) fn add_historical_fence_key(&mut self) -> bool { self.root.add_historical_fence_key() }
 
-    pub(crate) fn remove_last_root_child(&mut self) -> bool {
-        !self.root.is_leaf && self.root.children.pop().is_some()
-    }
+    #[cfg(test)]
+    pub(crate) fn remove_last_root_child(&mut self) -> bool { !self.root.is_leaf && self.root.children.pop().is_some() }
 
     pub fn store(&mut self, filepath: &Path) -> io::Result<u64> {
         if self.dirty {
@@ -1478,7 +1469,6 @@ where
             Err(err) => Err(err),
         }
     }
-
 }
 
 fn validate_legacy_tree<K, V>(
@@ -1512,7 +1502,10 @@ where
             BPlusTreeNode::<K, V>::deserialize_from_block(file, &mut buffer, offset, false)?
         };
         if node.keys.windows(2).any(|keys| keys[0] >= keys[1]) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "legacy B+Tree node keys are not strictly increasing"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "legacy B+Tree node keys are not strictly increasing",
+            ));
         }
 
         if node.is_leaf {
@@ -1530,7 +1523,8 @@ where
             continue;
         }
 
-        let pointers = pointers.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "internal node has no pointers"))?;
+        let pointers =
+            pointers.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "internal node has no pointers"))?;
         let has_fence_key = pointers.len() == node.keys.len();
         if has_fence_key && (is_root || node.keys.last() != upper.as_ref()) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid historical internal-node fence key"));
@@ -1544,7 +1538,6 @@ where
     }
     Ok(())
 }
-
 
 /// `BPlusTreeQuery` performs on-disk queries without loading the entire tree into memory.
 /// For frequent queries, consider using `BPlusTree::load()` instead, which loads the full tree into memory
@@ -1616,12 +1609,8 @@ where
         })
     }
 
-    pub fn try_new(filepath: &Path) -> io::Result<Self> {
-        Self::try_from_file(File::open(filepath)?)
-    }
-
+    pub fn try_new(filepath: &Path) -> io::Result<Self> { Self::try_from_file(File::open(filepath)?) }
 }
-
 
 impl<K, V> BPlusTreeQuery<K, V>
 where
@@ -1651,7 +1640,6 @@ where
         };
         RangeLeafIterator::new(self, start_cloned, end_cloned)
     }
-
 }
 
 /// Range scan iterator that seeks into the tree and then walks in-order
@@ -1731,11 +1719,7 @@ where
                 return Ok(());
             }
 
-            let child_idx = if let Some(key) = start_key {
-                get_entry_index_upper_bound(&node.keys, key)
-            } else {
-                0
-            };
+            let child_idx = if let Some(key) = start_key { get_entry_index_upper_bound(&node.keys, key) } else { 0 };
 
             let Some(ptrs) = pointers else {
                 self.exhausted = true;

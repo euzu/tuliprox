@@ -5,14 +5,13 @@ mod publish;
 mod tree;
 mod wal;
 
+pub use format::{Locator, MAGIC, STORAGE_VERSION_V3 as STORAGE_VERSION};
 pub use publish::{publish_staged_database, BPlusTreeStagingArtifacts};
-
 #[allow(unused_imports)]
 pub use tree::{
     BPlusTree, BPlusTreeDiskIterator, BPlusTreeDiskIteratorOwned, BPlusTreeQuery, BPlusTreeRangeIterator,
     BPlusTreeSerialWriter, BPlusTreeUpdate, FlushPolicy,
 };
-pub use format::{Locator, MAGIC, STORAGE_VERSION_V3 as STORAGE_VERSION};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BPlusTreeMetadata {
@@ -23,7 +22,7 @@ pub enum BPlusTreeMetadata {
 #[cfg(test)]
 mod contract_tests {
     use super::{tree::verify_full, BPlusTree, BPlusTreeMetadata, BPlusTreeQuery};
-    use crate::repository::bplustree::v2;
+    use crate::v2;
     use std::{io, ops::Bound};
 
     fn incompressible_value() -> Vec<u8> {
@@ -75,9 +74,7 @@ mod contract_tests {
 
                 let mut query = Query::try_new(&path)?;
                 assert_eq!(
-                    query
-                        .range_iter(Bound::Included(&20), Bound::Included(&30))
-                        .collect::<io::Result<Vec<_>>>()?,
+                    query.range_iter(Bound::Included(&20), Bound::Included(&30)).collect::<io::Result<Vec<_>>>()?,
                     expected[1..].to_vec()
                 );
                 Ok(())

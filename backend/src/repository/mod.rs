@@ -1,6 +1,5 @@
 mod storage;
 mod target_id_mapping;
-mod bplustree;
 mod startup_migration;
 mod playlist_repository;
 mod m3u_repository;
@@ -27,7 +26,10 @@ pub mod stalker_generation_repository;
 
 pub use storage::*;
 pub use target_id_mapping::*;
-pub use bplustree::*;
+// The B+Tree storage engine is its own package. Aliased under its historical
+// module name so every `crate::repository::bplustree::X` path keeps resolving.
+pub use tuliprox_btree as bplustree;
+pub use tuliprox_btree::*;
 pub use startup_migration::*;
 pub use playlist_repository::*;
 pub use m3u_repository::*;

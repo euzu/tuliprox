@@ -136,7 +136,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::bplustree::{sorted_index::v4, BPlusTree, Locator};
+    use crate::repository::bplustree::{
+        test_support::{collect_with_locators, snapshot_identity, v4, Locator},
+        BPlusTree,
+    };
     use std::{fs, io};
 
     #[test]
@@ -169,8 +172,8 @@ mod tests {
         tree.insert(3u32, String::from("three"));
         tree.store(&database)?;
         let mut query = BPlusTreeQuery::<u32, String>::try_new(&database)?;
-        let entries = query.collect_with_locators()?;
-        let (database_id, generation) = query.snapshot_identity();
+        let entries = collect_with_locators(&mut query)?;
+        let (database_id, generation) = snapshot_identity(&query);
         drop(query);
         let mut writer = v4::Writer::<u32, u32>::new(&index, database_id, generation)?;
         writer.push(&1, &entries[0].0, entries[0].2)?;

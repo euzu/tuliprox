@@ -4456,12 +4456,31 @@ dependencies = [
  "tower",
  "tower-http",
  "tower_governor",
+ "tuliprox-btree",
  "url",
  "uuid",
  "vergen",
  "winapi",
  "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "tuliprox-btree"
+version = "3.3.91"
+dependencies = [
+ "crc32fast",
+ "fs2",
+ "log",
+ "lz4_flex",
+ "memmap2",
+ "parking_lot",
+ "rand 0.9.4",
+ "rmp-serde",
+ "serde",
+ "smallvec",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]

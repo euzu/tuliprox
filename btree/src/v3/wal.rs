@@ -2,7 +2,7 @@ use super::{
     format::{DatabaseHeader, PAGE_SIZE},
     page::SlottedPage,
 };
-use crate::repository::bplustree::common::sidecar_lock_path;
+use crate::common::sidecar_lock_path;
 use fs2::FileExt as _;
 use log::info;
 use std::{
@@ -27,9 +27,7 @@ const PAGE_SIZE_U64: u64 = 4096;
 const WAL_MAGIC: &[u8; 4] = b"BTW3";
 const WAL_VERSION: u32 = 1;
 
-fn invalid_data(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message.into())
-}
+fn invalid_data(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message.into()) }
 
 fn invalid_input(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
@@ -57,7 +55,11 @@ fn read_u32(bytes: &[u8], offset: usize) -> io::Result<u32> { Ok(u32::from_le_by
 fn read_u64(bytes: &[u8], offset: usize) -> io::Result<u64> { Ok(u64::from_le_bytes(bytes_at(bytes, offset)?)) }
 
 fn require_zero(bytes: &[u8], message: &'static str) -> io::Result<()> {
-    if bytes.iter().all(|byte| *byte == 0) { Ok(()) } else { Err(invalid_data(message)) }
+    if bytes.iter().all(|byte| *byte == 0) {
+        Ok(())
+    } else {
+        Err(invalid_data(message))
+    }
 }
 
 fn crc_with_zeroed_field(bytes: &[u8], offset: usize) -> io::Result<u32> {
@@ -131,9 +133,7 @@ impl WalHeader {
         if self.transaction_id == 0 {
             return Err(invalid_data("WAL transaction id must be nonzero"));
         }
-        if self.original_database_len < PAGE_SIZE_U64
-            || !self.original_database_len.is_multiple_of(PAGE_SIZE_U64)
-        {
+        if self.original_database_len < PAGE_SIZE_U64 || !self.original_database_len.is_multiple_of(PAGE_SIZE_U64) {
             return Err(invalid_data("invalid original database length"));
         }
         if self.original_generation == 0 {
@@ -170,9 +170,8 @@ impl BeforeImage {
             return Err(invalid_data("invalid before-image payload length"));
         }
         require_zero(&payload[12..16], "before-image reserved bytes must be zero")?;
-        let page: [u8; PAGE_SIZE] = payload[16..]
-            .try_into()
-            .map_err(|_| invalid_data("truncated before-image page"))?;
+        let page: [u8; PAGE_SIZE] =
+            payload[16..].try_into().map_err(|_| invalid_data("truncated before-image page"))?;
         if read_u32(payload, 8)? != crc32fast::hash(&page) {
             return Err(invalid_data("before-image page checksum mismatch"));
         }
@@ -228,9 +227,8 @@ impl CommitRecord {
 
 fn prepare_record(encoded: &mut Vec<u8>, kind: u8, payload_length: usize) -> io::Result<()> {
     let payload_length_u32 = u32::try_from(payload_length).map_err(|_| invalid_input("WAL payload exceeds u32"))?;
-    let record_length = RECORD_HEADER_LEN
-        .checked_add(payload_length)
-        .ok_or_else(|| invalid_input("WAL record length overflow"))?;
+    let record_length =
+        RECORD_HEADER_LEN.checked_add(payload_length).ok_or_else(|| invalid_input("WAL record length overflow"))?;
     encoded.clear();
     encoded.try_reserve_exact(record_length).map_err(out_of_memory("WAL record allocation failed"))?;
     encoded.resize(record_length, 0);
@@ -296,9 +294,8 @@ fn read_wal(path: &Path) -> io::Result<ParsedWal> {
         if payload_length != expected_length {
             return Err(invalid_data("WAL record payload length mismatch"));
         }
-        let total_length = RECORD_HEADER_LEN
-            .checked_add(payload_length)
-            .ok_or_else(|| invalid_data("WAL record length overflow"))?;
+        let total_length =
+            RECORD_HEADER_LEN.checked_add(payload_length).ok_or_else(|| invalid_data("WAL record length overflow"))?;
         let total_length_u64 = u64::try_from(total_length).map_err(|_| invalid_data("WAL record exceeds u64"))?;
         if remaining < total_length_u64 {
             torn_tail = true;
@@ -340,9 +337,7 @@ fn read_wal(path: &Path) -> io::Result<ParsedWal> {
             }
             _ => return Err(invalid_data("unknown WAL record kind")),
         }
-        offset = offset
-            .checked_add(total_length_u64)
-            .ok_or_else(|| invalid_data("WAL record offset overflow"))?;
+        offset = offset.checked_add(total_length_u64).ok_or_else(|| invalid_data("WAL record offset overflow"))?;
     }
     Ok(ParsedWal { header, before_images, commit, torn_tail })
 }
@@ -453,13 +448,7 @@ struct WalErrorContext<'a> {
 
 impl WalErrorContext<'_> {
     fn wrap<T>(&self, phase: &'static str, result: io::Result<T>) -> io::Result<T> {
-        result.map_err(wal_operation_error(
-            self.outcome,
-            self.database,
-            self.wal,
-            self.transaction_id,
-            phase,
-        ))
+        result.map_err(wal_operation_error(self.outcome, self.database, self.wal, self.transaction_id, phase))
     }
 }
 
@@ -488,12 +477,7 @@ impl WalReadError {
 
 impl fmt::Display for WalReadError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "failed to parse WAL {} for database {}",
-            self.wal.display(),
-            self.database.display()
-        )?;
+        write!(formatter, "failed to parse WAL {} for database {}", self.wal.display(), self.database.display())?;
         if let Some(identity) = self.wal_database_id {
             write!(formatter, ", WAL database identity {identity:02x?}")?;
         } else {
@@ -551,18 +535,14 @@ fn write_page(file: &mut File, page_id: u64, page: &[u8; PAGE_SIZE]) -> io::Resu
 }
 
 fn database_length(next_page_id: u64) -> io::Result<u64> {
-    next_page_id
-        .checked_mul(PAGE_SIZE_U64)
-        .ok_or_else(|| invalid_input("database length overflow"))
+    next_page_id.checked_mul(PAGE_SIZE_U64).ok_or_else(|| invalid_input("database length overflow"))
 }
 
 fn database_header_crc32(page: &[u8; PAGE_SIZE]) -> io::Result<u32> { read_u32(page, 72) }
 
 fn new_transaction_id() -> io::Result<u64> {
     let bytes = uuid::Uuid::new_v4().as_u128().to_le_bytes();
-    let low: [u8; 8] = bytes[..8]
-        .try_into()
-        .map_err(|_| io::Error::other("UUID transaction id conversion failed"))?;
+    let low: [u8; 8] = bytes[..8].try_into().map_err(|_| io::Error::other("UUID transaction id conversion failed"))?;
     let transaction_id = u64::from_le_bytes(low);
     Ok(if transaction_id == 0 { 1 } else { transaction_id })
 }
@@ -575,12 +555,10 @@ pub(super) fn sync_parent_directory(path: &Path) -> io::Result<()> {
 
 #[cfg(not(unix))]
 #[allow(clippy::unnecessary_wraps)]
-pub(super) fn sync_parent_directory(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
+pub(super) fn sync_parent_directory(_path: &Path) -> io::Result<()> { Ok(()) }
 
 pub(crate) fn invalidate_sorted_index(database: &Path) -> io::Result<()> {
-    let index = crate::repository::bplustree::common::get_file_path_for_db_index(database);
+    let index = crate::common::get_file_path_for_db_index(database);
     if index == database {
         return Ok(());
     }
@@ -595,12 +573,7 @@ fn clear_wal(database: &Path, transaction_id: u64, outcome: WalOutcome) -> io::R
     clear_wal_with_hook(database, transaction_id, outcome, &mut |_| Ok(()))
 }
 
-fn clear_wal_with_hook<H>(
-    database: &Path,
-    transaction_id: u64,
-    outcome: WalOutcome,
-    hook: &mut H,
-) -> io::Result<()>
+fn clear_wal_with_hook<H>(database: &Path, transaction_id: u64, outcome: WalOutcome, hook: &mut H) -> io::Result<()>
 where
     H: FnMut(RecoveryBoundary) -> io::Result<()>,
 {
@@ -660,9 +633,7 @@ where
 }
 
 #[cfg(test)]
-fn ordered_prepared_pages(
-    prepared: &[(u64, [u8; PAGE_SIZE])],
-) -> io::Result<Vec<(u64, &[u8; PAGE_SIZE])>> {
+fn ordered_prepared_pages(prepared: &[(u64, [u8; PAGE_SIZE])]) -> io::Result<Vec<(u64, &[u8; PAGE_SIZE])>> {
     let mut ordered = Vec::new();
     ordered.try_reserve_exact(prepared.len()).map_err(out_of_memory("prepared-page ordering allocation failed"))?;
     ordered.extend(prepared.iter().map(|(page_id, page)| (*page_id, page)));
@@ -721,10 +692,7 @@ fn validate_prepared_pages(
 }
 
 #[cfg(test)]
-pub(crate) fn commit_prepared_pages(
-    database: &Path,
-    prepared: &[(u64, [u8; PAGE_SIZE])],
-) -> io::Result<()> {
+pub(crate) fn commit_prepared_pages(database: &Path, prepared: &[(u64, [u8; PAGE_SIZE])]) -> io::Result<()> {
     with_exclusive_sidecar(database, || {
         recover_pending_under_existing_lock(database)?;
         commit_prepared_pages_under_existing_lock(database, prepared)
@@ -792,10 +760,7 @@ pub(super) fn leave_uncommitted_test_wal_after_database_write(database: &Path) -
             ),
         )),
         Err(_) => Ok(()),
-        Ok(()) => Err(io::Error::other(format!(
-            "test commit for {} unexpectedly completed",
-            database.display()
-        ))),
+        Ok(()) => Err(io::Error::other(format!("test commit for {} unexpectedly completed", database.display()))),
     }
 }
 
@@ -883,19 +848,15 @@ fn commit_ordered_page_refs_with_hook_under_existing_lock(
     context.wrap("sync database", database.sync_all())?;
     context.wrap("DatabaseSynced hook", hook(CommitBoundary::DatabaseSynced))?;
 
-    let final_header_page = ordered
-        .first()
-        .map(|(_, page)| page)
-        .ok_or_else(|| invalid_input("prepared header page is missing"));
+    let final_header_page =
+        ordered.first().map(|(_, page)| page).ok_or_else(|| invalid_input("prepared header page is missing"));
     let final_header_page = context.wrap("locate prepared database header", final_header_page)?;
     let commit = CommitRecord {
         transaction_id,
         new_generation: final_header.generation,
         database_length: final_length,
-        database_header_crc32: context.wrap(
-            "read prepared database header checksum",
-            database_header_crc32(final_header_page),
-        )?,
+        database_header_crc32: context
+            .wrap("read prepared database header checksum", database_header_crc32(final_header_page))?,
     };
     context.wrap("encode WAL commit record", commit.encode_record_into(&mut record))?;
     context.wrap("append WAL commit record", wal.write_all(&record))?;
@@ -934,7 +895,9 @@ impl fmt::Display for RecoveryRequired {
 }
 
 impl Error for RecoveryRequired {
-    fn source(&self) -> Option<&(dyn Error + 'static)> { self.cause.as_ref().map(|cause| cause as &(dyn Error + 'static)) }
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        self.cause.as_ref().map(|cause| cause as &(dyn Error + 'static))
+    }
 }
 
 fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -954,12 +917,7 @@ pub(crate) fn recovery_required(database: &Path, cause: io::Error) -> io::Error 
 }
 
 fn open_sidecar(database: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(sidecar_lock_path(database))
+    OpenOptions::new().read(true).write(true).create(true).truncate(false).open(sidecar_lock_path(database))
 }
 
 pub(crate) struct SharedSidecarGuard {
@@ -1176,10 +1134,7 @@ pub(crate) fn recover_pending_under_existing_lock(database_path: &Path) -> io::R
 }
 
 #[cfg(test)]
-fn recover_pending_with_hook(
-    database: &Path,
-    hook: impl FnMut(RecoveryBoundary) -> io::Result<()>,
-) -> io::Result<()> {
+fn recover_pending_with_hook(database: &Path, hook: impl FnMut(RecoveryBoundary) -> io::Result<()>) -> io::Result<()> {
     with_exclusive_sidecar(database, || recover_pending_with_hook_under_existing_lock(database, hook))
 }
 
@@ -1242,7 +1197,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::bplustree::v3::{
+    use crate::v3::{
         format::{write_page_checksum, DatabaseHeader, PAGE_SIZE},
         page::encode_free_page,
         tree::{BPlusTree, BPlusTreeQuery},
@@ -1252,9 +1207,8 @@ mod tests {
         io::{Read, Seek, SeekFrom, Write},
     };
 
-    const DATABASE_ID: [u8; 16] = [
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
-    ];
+    const DATABASE_ID: [u8; 16] =
+        [0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f];
     const TRANSACTION_ID: u64 = 0x0102_0304_0506_0708;
 
     fn checksum_with_zeroed_field(bytes: &[u8], offset: usize) -> io::Result<u32> {
@@ -1318,10 +1272,8 @@ mod tests {
 
     fn prepared_header_page(original: &DatabaseHeader) -> io::Result<[u8; PAGE_SIZE]> {
         let mut updated = original.clone();
-        updated.generation = updated
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("test generation overflow"))?;
+        updated.generation =
+            updated.generation.checked_add(1).ok_or_else(|| io::Error::other("test generation overflow"))?;
         updated.encode()
     }
 
@@ -1351,9 +1303,7 @@ mod tests {
         }
     }
 
-    fn create_multi_page_database(
-        name: &str,
-    ) -> io::Result<(tempfile::TempDir, PathBuf, DatabaseHeader, Vec<u8>)> {
+    fn create_multi_page_database(name: &str) -> io::Result<(tempfile::TempDir, PathBuf, DatabaseHeader, Vec<u8>)> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join(name);
         let mut tree = BPlusTree::<u32, String>::new();
@@ -1394,20 +1344,14 @@ mod tests {
         Ok(page)
     }
 
-    fn create_uncommitted_multi_page_wal(
-        name: &str,
-    ) -> io::Result<(tempfile::TempDir, PathBuf, Vec<u8>, Vec<u8>)> {
+    fn create_uncommitted_multi_page_wal(name: &str) -> io::Result<(tempfile::TempDir, PathBuf, Vec<u8>, Vec<u8>)> {
         let (directory, path, original, original_bytes) = create_multi_page_database(name)?;
         let appended_page_id = original.next_page_id;
         let mut updated = original.clone();
-        updated.generation = updated
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("test generation overflow"))?;
-        updated.next_page_id = updated
-            .next_page_id
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("test page-id overflow"))?;
+        updated.generation =
+            updated.generation.checked_add(1).ok_or_else(|| io::Error::other("test generation overflow"))?;
+        updated.next_page_id =
+            updated.next_page_id.checked_add(1).ok_or_else(|| io::Error::other("test page-id overflow"))?;
         updated.free_page_head = appended_page_id;
 
         let prepared_len = usize::try_from(updated.next_page_id).map_err(io::Error::other)?;
@@ -1418,9 +1362,7 @@ mod tests {
                 .map_err(io::Error::other)?
                 .checked_mul(PAGE_SIZE)
                 .ok_or_else(|| io::Error::other("test page offset overflow"))?;
-            let end = start
-                .checked_add(PAGE_SIZE)
-                .ok_or_else(|| io::Error::other("test page end overflow"))?;
+            let end = start.checked_add(PAGE_SIZE).ok_or_else(|| io::Error::other("test page end overflow"))?;
             let page: [u8; PAGE_SIZE] = original_bytes
                 .get(start..end)
                 .ok_or_else(|| io::Error::other("multi-page fixture is truncated"))?
@@ -1433,10 +1375,7 @@ mod tests {
             };
             prepared.push((page_id, page));
         }
-        prepared.push((
-            appended_page_id,
-            encode_free_page(appended_page_id, updated.next_page_id, 0)?,
-        ));
+        prepared.push((appended_page_id, encode_free_page(appended_page_id, updated.next_page_id, 0)?));
         let _ = commit_prepared_pages_with_hook(&path, &prepared, fail_at(CommitBoundary::DatabaseWritten));
         let active = wal_path(&path);
         if !active.try_exists()? {
@@ -1450,9 +1389,7 @@ mod tests {
             .map_err(io::Error::other)?
             .checked_mul(PAGE_SIZE)
             .ok_or_else(|| io::Error::other("fixture page offset overflow"))?;
-        let end = start
-            .checked_add(PAGE_SIZE)
-            .ok_or_else(|| io::Error::other("fixture page end overflow"))?;
+        let end = start.checked_add(PAGE_SIZE).ok_or_else(|| io::Error::other("fixture page end overflow"))?;
         bytes.get(start..end).ok_or_else(|| io::Error::other("fixture page is truncated"))
     }
 
@@ -1481,12 +1418,9 @@ mod tests {
 
     fn rebuild_record_crc(record: &mut [u8]) -> io::Result<()> {
         let payload_length = usize::try_from(read_u32(record, 4)?).map_err(io::Error::other)?;
-        let record_length = 16usize
-            .checked_add(payload_length)
-            .ok_or_else(|| io::Error::other("record length overflow"))?;
-        let bytes = record
-            .get(..record_length)
-            .ok_or_else(|| io::Error::other("truncated record fixture"))?;
+        let record_length =
+            16usize.checked_add(payload_length).ok_or_else(|| io::Error::other("record length overflow"))?;
+        let bytes = record.get(..record_length).ok_or_else(|| io::Error::other("truncated record fixture"))?;
         let checksum = checksum_with_zeroed_field(bytes, 8)?;
         record
             .get_mut(8..12)
@@ -1674,7 +1608,7 @@ mod tests {
     #[test]
     fn committed_recovery_invalidates_sorted_index_before_clearing_wal() -> io::Result<()> {
         let (_directory, path, original, _) = create_database("committed-index-recovery.db")?;
-        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
+        let index_path = crate::common::get_file_path_for_db_index(&path);
         fs::write(&index_path, b"stale sorted index")?;
         let prepared = [(0, prepared_header_page(&original)?)];
 
@@ -1836,9 +1770,7 @@ mod tests {
         let database_before = fs::read(&path)?;
         let wal_before = fs::read(&active)?;
 
-        let error = recover_pending(&path)
-            .err()
-            .ok_or_else(|| io::Error::other("foreign WAL was accepted"))?;
+        let error = recover_pending(&path).err().ok_or_else(|| io::Error::other("foreign WAL was accepted"))?;
         let message = error.to_string();
         assert!(message.contains(&path.display().to_string()));
         assert!(message.contains(&format!("{:02x?}", [0x88; 16])));
@@ -1855,17 +1787,14 @@ mod tests {
         let _ = commit_prepared_pages_with_hook(&path, &prepared, fail_at(CommitBoundary::BeforeImagesSynced));
         let active = wal_path(&path);
         let mut bytes = fs::read(&active)?;
-        let checksum_byte = bytes
-            .get_mut(WAL_HEADER_LEN + 8)
-            .ok_or_else(|| io::Error::other("WAL record fixture is truncated"))?;
+        let checksum_byte =
+            bytes.get_mut(WAL_HEADER_LEN + 8).ok_or_else(|| io::Error::other("WAL record fixture is truncated"))?;
         *checksum_byte ^= 1;
         fs::write(&active, bytes)?;
         let database_before = fs::read(&path)?;
         let wal_before = fs::read(&active)?;
 
-        let error = recover_pending(&path)
-            .err()
-            .ok_or_else(|| io::Error::other("corrupt WAL record was accepted"))?;
+        let error = recover_pending(&path).err().ok_or_else(|| io::Error::other("corrupt WAL record was accepted"))?;
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         let context = error
             .get_ref()
@@ -1978,10 +1907,8 @@ mod tests {
         updated.generation += 1;
         updated.next_page_id += 1;
         updated.free_page_head = appended_page_id;
-        let prepared = [
-            (0, updated.encode()?),
-            (appended_page_id, encode_free_page(appended_page_id, updated.next_page_id, 0)?),
-        ];
+        let prepared =
+            [(0, updated.encode()?), (appended_page_id, encode_free_page(appended_page_id, updated.next_page_id, 0)?)];
         let _ = commit_prepared_pages_with_hook(&path, &prepared, fail_at(CommitBoundary::DatabaseWritten));
         assert_eq!(fs::metadata(&path)?.len(), original_length + PAGE_SIZE as u64);
 
@@ -2001,7 +1928,7 @@ mod tests {
         assert_eq!(database_header(&path)?.generation, original.generation + 1);
 
         let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
-        assert_eq!(query.query(&1).map_err(crate::repository::bplustree::common::BPlusTreeError::to_io)?, Some(String::from("original")));
+        assert_eq!(query.query(&1).map_err(crate::common::BPlusTreeError::to_io)?, Some(String::from("original")));
         assert_eq!(database_header(&path)?.generation, original.generation);
         assert!(!wal_path(&path).try_exists()?);
         Ok(())

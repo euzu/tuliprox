@@ -2,8 +2,8 @@ use super::{
     format::{
         decompress_value_in_place, decompress_value_into, encode_inline_leaf_cell, encode_internal_cell,
         encode_overflow_leaf_cell, encode_tombstone_leaf_cell, encode_value, stored_value_checksum, Compression,
-        DatabaseHeader, InternalCellRef, InternalPreamble, LeafCellRef, LeafValueRef, Locator, PageHeader, PageType, Slot,
-        MAX_CELL_FOOTPRINT, MAX_INLINE_STORED_VALUE, OVERFLOW_PAYLOAD_LEN, PAGE_HEADER_LEN, PAGE_SIZE, SLOT_LEN,
+        DatabaseHeader, InternalCellRef, InternalPreamble, LeafCellRef, LeafValueRef, Locator, PageHeader, PageType,
+        Slot, MAX_CELL_FOOTPRINT, MAX_INLINE_STORED_VALUE, OVERFLOW_PAYLOAD_LEN, PAGE_HEADER_LEN, PAGE_SIZE, SLOT_LEN,
     },
     page::{encode_free_page, encode_overflow_page, overflow_payload, PageValidation, SlottedPage},
     wal::{
@@ -13,7 +13,7 @@ use super::{
     },
     BPlusTreeMetadata,
 };
-use crate::repository::bplustree::{
+use crate::{
     codec::{binary_deserialize, binary_serialize, binary_serialize_into},
     common::{mmap_with_advice, read_exact_at_offset, write_all_at_offset, Advice, BPlusTreeError},
 };
@@ -44,9 +44,7 @@ where
     I: IntoIterator<Item = &'a [u8]>,
 {
     cells.into_iter().try_fold(base, |used, cell| {
-        let footprint = SLOT_LEN
-            .checked_add(cell.len())
-            .ok_or_else(|| invalid_input("cell footprint overflow"))?;
+        let footprint = SLOT_LEN.checked_add(cell.len()).ok_or_else(|| invalid_input("cell footprint overflow"))?;
         if footprint > maximum_cell_footprint {
             return Err(invalid_input("cell footprint exceeds format limit"));
         }
@@ -64,9 +62,8 @@ pub(crate) fn choose_leaf_split<T: AsRef<[u8]>>(cells: &[T]) -> io::Result<usize
     }
     let mut total = 0usize;
     for cell in cells {
-        let footprint = SLOT_LEN
-            .checked_add(cell.as_ref().len())
-            .ok_or_else(|| invalid_input("leaf cell footprint overflow"))?;
+        let footprint =
+            SLOT_LEN.checked_add(cell.as_ref().len()).ok_or_else(|| invalid_input("leaf cell footprint overflow"))?;
         if footprint > MAX_CELL_FOOTPRINT {
             return Err(invalid_input("leaf cell footprint exceeds format limit"));
         }
@@ -76,24 +73,16 @@ pub(crate) fn choose_leaf_split<T: AsRef<[u8]>>(cells: &[T]) -> io::Result<usize
     let mut left_payload = 0usize;
     let mut best = None;
     for boundary in 1..cells.len() {
-        let cell = cells
-            .get(boundary - 1)
-            .ok_or_else(|| invalid_input("leaf split boundary is outside cells"))?;
-        let footprint = SLOT_LEN
-            .checked_add(cell.as_ref().len())
-            .ok_or_else(|| invalid_input("leaf cell footprint overflow"))?;
-        left_payload = left_payload
-            .checked_add(footprint)
-            .ok_or_else(|| invalid_input("leaf split usage overflow"))?;
-        let right_payload = total
-            .checked_sub(left_payload)
-            .ok_or_else(|| invalid_input("leaf split usage underflow"))?;
-        let left_used = PAGE_HEADER_LEN
-            .checked_add(left_payload)
-            .ok_or_else(|| invalid_input("leaf split usage overflow"))?;
-        let right_used = PAGE_HEADER_LEN
-            .checked_add(right_payload)
-            .ok_or_else(|| invalid_input("leaf split usage overflow"))?;
+        let cell = cells.get(boundary - 1).ok_or_else(|| invalid_input("leaf split boundary is outside cells"))?;
+        let footprint =
+            SLOT_LEN.checked_add(cell.as_ref().len()).ok_or_else(|| invalid_input("leaf cell footprint overflow"))?;
+        left_payload = left_payload.checked_add(footprint).ok_or_else(|| invalid_input("leaf split usage overflow"))?;
+        let right_payload =
+            total.checked_sub(left_payload).ok_or_else(|| invalid_input("leaf split usage underflow"))?;
+        let left_used =
+            PAGE_HEADER_LEN.checked_add(left_payload).ok_or_else(|| invalid_input("leaf split usage overflow"))?;
+        let right_used =
+            PAGE_HEADER_LEN.checked_add(right_payload).ok_or_else(|| invalid_input("leaf split usage overflow"))?;
         if left_used <= PAGE_SIZE && right_used <= PAGE_SIZE {
             let imbalance = left_used.abs_diff(right_used);
             if best.is_none_or(|(_, best_imbalance)| imbalance < best_imbalance) {
@@ -101,8 +90,7 @@ pub(crate) fn choose_leaf_split<T: AsRef<[u8]>>(cells: &[T]) -> io::Result<usize
             }
         }
     }
-    best.map(|(boundary, _)| boundary)
-        .ok_or_else(|| invalid_input("leaf split has no valid boundary"))
+    best.map(|(boundary, _)| boundary).ok_or_else(|| invalid_input("leaf split has no valid boundary"))
 }
 
 fn used_internal_bytes<'a, I>(cells: I) -> io::Result<usize>
@@ -145,14 +133,10 @@ pub(crate) fn choose_internal_split<T: AsRef<[u8]>>(
             }
         }
     }
-    let promoted_index = best
-        .map(|(index, _)| index)
-        .ok_or_else(|| invalid_input("internal split has no valid boundary"))?;
+    let promoted_index =
+        best.map(|(index, _)| index).ok_or_else(|| invalid_input("internal split has no valid boundary"))?;
     let promoted = InternalCellRef::decode(
-        cells
-            .get(promoted_index)
-            .ok_or_else(|| invalid_input("promoted separator is outside cells"))?
-            .as_ref(),
+        cells.get(promoted_index).ok_or_else(|| invalid_input("promoted separator is outside cells"))?.as_ref(),
         page_id,
         next_page_id,
     )?;
@@ -161,9 +145,7 @@ pub(crate) fn choose_internal_split<T: AsRef<[u8]>>(
         promoted_index,
         right_leftmost_child: promoted.right_child,
         promoted,
-        left_cells: cells
-            .get(..promoted_index)
-            .ok_or_else(|| invalid_input("left split range is outside cells"))?,
+        left_cells: cells.get(..promoted_index).ok_or_else(|| invalid_input("left split range is outside cells"))?,
         right_cells: cells
             .get(promoted_index + 1..)
             .ok_or_else(|| invalid_input("right split range is outside cells"))?,
@@ -229,11 +211,7 @@ pub(crate) fn validate_locator<B: AsRef<[u8]>>(
     if page.header().page_type != PageType::Leaf || page.page_id() != locator.leaf_page_id {
         return Err(invalid_data("locator does not reference this leaf page"));
     }
-    let cell = LeafCellRef::decode(
-        page.cell(usize::from(locator.slot_index))?,
-        page.page_id(),
-        page.next_page_id(),
-    )?;
+    let cell = LeafCellRef::decode(page.cell(usize::from(locator.slot_index))?, page.page_id(), page.next_page_id())?;
     let cell_crc = crc32fast::hash(cell.key_bytes);
     if cell_crc != locator.serialized_key_crc32
         || crc32fast::hash(serialized_primary_key) != locator.serialized_key_crc32
@@ -250,12 +228,8 @@ fn database_page(database: &[u8], page_id: u64, next_page_id: u64) -> io::Result
         return Err(invalid_data("overflow page id is outside database"));
     }
     let page_id = usize::try_from(page_id).map_err(|_| invalid_data("overflow page id exceeds usize"))?;
-    let offset = page_id
-        .checked_mul(PAGE_SIZE)
-        .ok_or_else(|| invalid_data("overflow page offset overflow"))?;
-    let end = offset
-        .checked_add(PAGE_SIZE)
-        .ok_or_else(|| invalid_data("overflow page end overflow"))?;
+    let offset = page_id.checked_mul(PAGE_SIZE).ok_or_else(|| invalid_data("overflow page offset overflow"))?;
+    let end = offset.checked_add(PAGE_SIZE).ok_or_else(|| invalid_data("overflow page end overflow"))?;
     database.get(offset..end).ok_or_else(|| invalid_data("truncated overflow page"))
 }
 
@@ -286,15 +260,14 @@ pub(crate) fn read_leaf_value<'a>(
             }
         }
         LeafValueRef::Overflow { compression, logical_len, stored_len, head, crc32 } => {
-            let logical_length = usize::try_from(logical_len).map_err(|_| invalid_data("logical length exceeds usize"))?;
+            let logical_length =
+                usize::try_from(logical_len).map_err(|_| invalid_data("logical length exceeds usize"))?;
             let stored_length = usize::try_from(stored_len).map_err(|_| invalid_data("stored length exceeds usize"))?;
             if logical_length > maximum_length || stored_length > maximum_length {
                 return Err(invalid_data("overflow value exceeds allocation limit"));
             }
             scratch.clear();
-            scratch
-                .try_reserve(stored_length)
-                .map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
+            scratch.try_reserve(stored_length).map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
             let mut page_id = head;
             let mut visited = HashSet::new();
             while page_id != 0 {
@@ -311,9 +284,7 @@ pub(crate) fn read_leaf_value<'a>(
                 if payload.is_empty() {
                     return Err(invalid_data("overflow chain contains an empty payload"));
                 }
-                visited
-                    .try_reserve(1)
-                    .map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
+                visited.try_reserve(1).map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
                 if !visited.insert(page_id) {
                     return Err(invalid_data("overflow chain contains a cycle"));
                 }
@@ -355,9 +326,7 @@ impl<K: Ord, V> Default for BPlusTree<K, V> {
 }
 
 impl<K: Ord, V> BPlusTree<K, V> {
-    pub const fn new() -> Self {
-        Self { entries: BTreeMap::new(), metadata: BPlusTreeMetadata::Empty, dirty: true }
-    }
+    pub const fn new() -> Self { Self { entries: BTreeMap::new(), metadata: BPlusTreeMetadata::Empty, dirty: true } }
 
     pub fn get_metadata(&self) -> &BPlusTreeMetadata { &self.metadata }
 
@@ -443,39 +412,23 @@ fn leaf_page<T: AsRef<[u8]>>(page_id: u64, left: u64, right: u64, cells: &[T]) -
         right,
     }
     .encode_into(&mut bytes, page_id, u64::MAX)?;
-    SlottedPage::open(bytes.as_mut_slice(), page_id, u64::MAX)?
-        .rebuild_ordered(cells.iter().map(AsRef::as_ref))?;
+    SlottedPage::open(bytes.as_mut_slice(), page_id, u64::MAX)?.rebuild_ordered(cells.iter().map(AsRef::as_ref))?;
     Ok(bytes)
 }
 
-fn internal_page<T: AsRef<[u8]>>(
-    page_id: u64,
-    leftmost_child: u64,
-    cells: &[T],
-) -> io::Result<[u8; PAGE_SIZE]> {
-    let first = cells
-        .first()
-        .ok_or_else(|| invalid_input("internal page must contain a separator"))?
-        .as_ref();
-    let first_offset = PAGE_SIZE
-        .checked_sub(first.len())
-        .ok_or_else(|| invalid_input("internal cell exceeds page"))?;
+fn internal_page<T: AsRef<[u8]>>(page_id: u64, leftmost_child: u64, cells: &[T]) -> io::Result<[u8; PAGE_SIZE]> {
+    let first = cells.first().ok_or_else(|| invalid_input("internal page must contain a separator"))?.as_ref();
+    let first_offset = PAGE_SIZE.checked_sub(first.len()).ok_or_else(|| invalid_input("internal cell exceeds page"))?;
     let mut bytes = [0; PAGE_SIZE];
     InternalPreamble { leftmost_child }.encode_into(&mut bytes, page_id, u64::MAX)?;
-    bytes
-        .get_mut(40..44)
-        .ok_or_else(|| invalid_input("internal slot is outside page"))?
-        .copy_from_slice(
-            &Slot {
-                offset: u16::try_from(first_offset).map_err(|_| invalid_input("internal cell offset exceeds u16"))?,
-                length: u16::try_from(first.len()).map_err(|_| invalid_input("internal cell length exceeds u16"))?,
-            }
-            .encode(),
-        );
-    bytes
-        .get_mut(first_offset..)
-        .ok_or_else(|| invalid_input("internal cell is outside page"))?
-        .copy_from_slice(first);
+    bytes.get_mut(40..44).ok_or_else(|| invalid_input("internal slot is outside page"))?.copy_from_slice(
+        &Slot {
+            offset: u16::try_from(first_offset).map_err(|_| invalid_input("internal cell offset exceeds u16"))?,
+            length: u16::try_from(first.len()).map_err(|_| invalid_input("internal cell length exceeds u16"))?,
+        }
+        .encode(),
+    );
+    bytes.get_mut(first_offset..).ok_or_else(|| invalid_input("internal cell is outside page"))?.copy_from_slice(first);
     PageHeader {
         page_type: PageType::Internal,
         cell_count: 1,
@@ -485,8 +438,7 @@ fn internal_page<T: AsRef<[u8]>>(
         right: 0,
     }
     .encode_into(&mut bytes, page_id, u64::MAX)?;
-    SlottedPage::open(bytes.as_mut_slice(), page_id, u64::MAX)?
-        .rebuild_ordered(cells.iter().map(AsRef::as_ref))?;
+    SlottedPage::open(bytes.as_mut_slice(), page_id, u64::MAX)?.rebuild_ordered(cells.iter().map(AsRef::as_ref))?;
     Ok(bytes)
 }
 
@@ -619,14 +571,9 @@ fn group_internal_children(level: &[NodeInfo]) -> io::Result<Vec<(usize, usize)>
         if moved <= previous.0 {
             return Err(invalid_input("internal page cannot retain two children"));
         }
-        groups
-            .get_mut(last - 1)
-            .ok_or_else(|| invalid_input("internal grouping is missing its previous group"))?
-            .1 = moved;
-        groups
-            .get_mut(last)
-            .ok_or_else(|| invalid_input("internal grouping is missing its last group"))?
-            .0 = moved;
+        groups.get_mut(last - 1).ok_or_else(|| invalid_input("internal grouping is missing its previous group"))?.1 =
+            moved;
+        groups.get_mut(last).ok_or_else(|| invalid_input("internal grouping is missing its last group"))?.0 = moved;
     }
     Ok(groups)
 }
@@ -677,10 +624,7 @@ where
 }
 
 fn temporary_path(filepath: &Path) -> io::Result<PathBuf> {
-    let name = filepath
-        .file_name()
-        .ok_or_else(|| invalid_input("database path has no file name"))?
-        .to_string_lossy();
+    let name = filepath.file_name().ok_or_else(|| invalid_input("database path has no file name"))?.to_string_lossy();
     Ok(filepath.with_file_name(format!("{name}.{}.v3.tmp", uuid::Uuid::new_v4())))
 }
 
@@ -691,9 +635,7 @@ pub(super) enum PublishDatabaseError {
 }
 
 impl PublishDatabaseError {
-    pub(super) const fn database_was_published(&self) -> bool {
-        matches!(self, Self::PublishedDurabilityUnknown(_))
-    }
+    pub(super) const fn database_was_published(&self) -> bool { matches!(self, Self::PublishedDurabilityUnknown(_)) }
 
     fn into_io(self) -> io::Error {
         match self {
@@ -718,10 +660,7 @@ pub(super) fn publish_database(
             return Err(PublishDatabaseError::NotPublished(error));
         }
     };
-    temporary
-        .persist(destination)
-        .map_err(io::Error::from)
-        .map_err(PublishDatabaseError::NotPublished)?;
+    temporary.persist(destination).map_err(io::Error::from).map_err(PublishDatabaseError::NotPublished)?;
     sync_directory(destination).map_err(|error| {
         PublishDatabaseError::PublishedDurabilityUnknown(io::Error::new(
             error.kind(),
@@ -905,10 +844,10 @@ where
         entries.sort_unstable_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
         drop(query);
 
-        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(filepath);
+        let index_path = crate::common::get_file_path_for_db_index(filepath);
         let temporary = temporary_path(&index_path)?;
         let prepared = (|| {
-            let mut writer = crate::repository::bplustree::sorted_index::v4::Writer::new(&temporary, database_id, generation)?;
+            let mut writer = crate::sorted_index::v4::Writer::new(&temporary, database_id, generation)?;
             for (sort_key, primary_key, locator) in &entries {
                 writer.push(sort_key, primary_key, *locator)?;
             }
@@ -921,7 +860,6 @@ where
         }
         publish_database(&temporary, &index_path, sync_parent_directory).map_err(io::Error::from)
     }
-
 }
 
 struct StoredDatabase {
@@ -960,14 +898,12 @@ struct DatabaseImage {
 impl DatabaseImage {
     fn open(path: &Path) -> io::Result<(Self, DatabaseHeader)> {
         let mut file = File::open(path)?;
-        let file_len = usize::try_from(file.metadata()?.len())
-            .map_err(|_| invalid_data("database length exceeds usize"))?;
+        let file_len =
+            usize::try_from(file.metadata()?.len()).map_err(|_| invalid_data("database length exceeds usize"))?;
         let mmap = mmap_with_advice(&file, Advice::Normal, "v3 B+Tree update");
         let mut fallback = Vec::new();
         if mmap.is_none() {
-            fallback
-                .try_reserve_exact(file_len)
-                .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+            fallback.try_reserve_exact(file_len).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
             file.read_to_end(&mut fallback)?;
         }
         let image = Self { mmap, fallback };
@@ -1079,9 +1015,7 @@ impl WriteTransaction {
             return Ok(page_id);
         }
         let page_id = self.next_header.next_page_id;
-        self.next_header.next_page_id = page_id
-            .checked_add(1)
-            .ok_or_else(|| invalid_input("next page id overflow"))?;
+        self.next_header.next_page_id = page_id.checked_add(1).ok_or_else(|| invalid_input("next page id overflow"))?;
         if !self.allocated_pages.insert(page_id) {
             return Err(invalid_data("appended page was allocated twice"));
         }
@@ -1233,9 +1167,7 @@ where
 
     pub fn prepare_upsert_batch(items: &[(&K, &V)]) -> io::Result<Vec<(K, Vec<u8>)>> {
         let mut prepared = Vec::new();
-        prepared
-            .try_reserve_exact(items.len())
-            .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+        prepared.try_reserve_exact(items.len()).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
         for (key, value) in items {
             prepared.push(((*key).clone(), binary_serialize(value)?));
         }
@@ -1424,9 +1356,7 @@ where
         self.flush_policy = FlushPolicy::Batch;
         let mut deleted = 0usize;
         let mut ordered = Vec::new();
-        ordered
-            .try_reserve_exact(keys.len())
-            .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+        ordered.try_reserve_exact(keys.len()).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
         ordered.extend_from_slice(keys);
         ordered.sort();
         for key in ordered {
@@ -1481,9 +1411,7 @@ where
             )
             .map_err(Into::into);
         }
-        BPlusTreeQuery::<K, V>::try_new(&self.filepath)
-            .and_then(|mut query| query.query_io(key))
-            .map_err(Into::into)
+        BPlusTreeQuery::<K, V>::try_new(&self.filepath).and_then(|mut query| query.query_io(key)).map_err(Into::into)
     }
 
     pub fn commit(&mut self) -> io::Result<()> {
@@ -1682,11 +1610,7 @@ impl<K, V> Drop for BPlusTreeSerialWriter<K, V> {
     }
 }
 
-fn minimum_tree_key(
-    transaction: &WriteTransaction,
-    base: &[u8],
-    mut page_id: u64,
-) -> io::Result<Option<Vec<u8>>> {
+fn minimum_tree_key(transaction: &WriteTransaction, base: &[u8], mut page_id: u64) -> io::Result<Option<Vec<u8>>> {
     let mut visited = HashSet::new();
     loop {
         if !visited.insert(page_id) {
@@ -1718,11 +1642,8 @@ fn validate_leaf_backlink(
     if sibling_id == 0 {
         return Ok(());
     }
-    let sibling = SlottedPage::open(
-        transaction.page(base, sibling_id)?,
-        sibling_id,
-        transaction.next_header.next_page_id,
-    )?;
+    let sibling =
+        SlottedPage::open(transaction.page(base, sibling_id)?, sibling_id, transaction.next_header.next_page_id)?;
     let backlink = if sibling_points_left { sibling.header().left } else { sibling.header().right };
     if sibling.header().page_type != PageType::Leaf || backlink != page_id {
         return Err(invalid_data("asymmetric leaf sibling link"));
@@ -1751,7 +1672,8 @@ fn validate_transaction_free_list(transaction: &WriteTransaction, base: &[u8]) -
     }
     for page_id in &transaction.allocated_pages {
         let page = transaction.page(base, *page_id)?;
-        if SlottedPage::open(page, *page_id, transaction.next_header.next_page_id)?.header().page_type == PageType::Free {
+        if SlottedPage::open(page, *page_id, transaction.next_header.next_page_id)?.header().page_type == PageType::Free
+        {
             return Err(invalid_data("allocated page still has free-page type"));
         }
     }
@@ -1790,8 +1712,7 @@ where
                     }
                     previous_key = Some(key);
                     if let LeafValueRef::Overflow { stored_len, head, crc32, .. } = cell.value {
-                        for overflow_page in
-                            validated_overflow_chain_pages(transaction, base, head, stored_len, crc32)?
+                        for overflow_page in validated_overflow_chain_pages(transaction, base, head, stored_len, crc32)?
                         {
                             if !owned_overflow_pages.insert(overflow_page) {
                                 return Err(invalid_data("overflow page is owned by multiple values"));
@@ -1801,7 +1722,8 @@ where
                 }
             }
             PageType::Internal => {
-                let preamble = InternalPreamble::decode(bytes.as_slice(), *page_id, transaction.next_header.next_page_id)?;
+                let preamble =
+                    InternalPreamble::decode(bytes.as_slice(), *page_id, transaction.next_header.next_page_id)?;
                 let child = SlottedPage::open(
                     transaction.page(base, preamble.leftmost_child)?,
                     preamble.leftmost_child,
@@ -1890,8 +1812,7 @@ fn locate_transaction_leaf<K: Ord + for<'de> Deserialize<'de>>(
             PageType::Leaf => return Ok((page_id, path)),
             PageType::Internal => {
                 let (position, child) = internal_child_position(&page, key)?;
-                path.try_reserve(1)
-                    .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+                path.try_reserve(1).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
                 path.push((page_id, position));
                 page_id = child;
             }
@@ -1900,11 +1821,7 @@ fn locate_transaction_leaf<K: Ord + for<'de> Deserialize<'de>>(
     }
 }
 
-fn overflow_chain_pages(
-    transaction: &WriteTransaction,
-    base: &[u8],
-    mut page_id: u64,
-) -> io::Result<Vec<u64>> {
+fn overflow_chain_pages(transaction: &WriteTransaction, base: &[u8], mut page_id: u64) -> io::Result<Vec<u64>> {
     let mut pages = Vec::new();
     let mut visited = HashSet::new();
     while page_id != 0 {
@@ -1915,9 +1832,7 @@ fn overflow_chain_pages(
         if page.header().page_type != PageType::Overflow || overflow_payload(&page)?.is_empty() {
             return Err(invalid_data("invalid overflow chain page"));
         }
-        pages
-            .try_reserve(1)
-            .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+        pages.try_reserve(1).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
         pages.push(page_id);
         page_id = page.header().right;
     }
@@ -1939,15 +1854,10 @@ fn validated_overflow_chain_pages(
     let mut actual = 0usize;
     let mut hasher = crc32fast::Hasher::new();
     for page_id in &pages {
-        let page = SlottedPage::open(
-            transaction.page(base, *page_id)?,
-            *page_id,
-            transaction.next_header.next_page_id,
-        )?;
+        let page =
+            SlottedPage::open(transaction.page(base, *page_id)?, *page_id, transaction.next_header.next_page_id)?;
         let payload = overflow_payload(&page)?;
-        actual = actual
-            .checked_add(payload.len())
-            .ok_or_else(|| invalid_data("overflow chain length overflow"))?;
+        actual = actual.checked_add(payload.len()).ok_or_else(|| invalid_data("overflow chain length overflow"))?;
         if actual > expected {
             return Err(invalid_data("overflow chain exceeds declared length"));
         }
@@ -1977,20 +1887,14 @@ fn write_overflow_chain(
         return Err(invalid_input("overflow value must not be empty"));
     }
     let mut pages = Vec::new();
-    pages
-        .try_reserve_exact(required)
-        .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+    pages.try_reserve_exact(required).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
     if old_pages.len() >= required {
         pages.extend_from_slice(
-            old_pages
-                .get(..required)
-                .ok_or_else(|| invalid_data("overflow reuse range is invalid"))?,
+            old_pages.get(..required).ok_or_else(|| invalid_data("overflow reuse range is invalid"))?,
         );
         free_pages(
             transaction,
-            old_pages
-                .get(required..)
-                .ok_or_else(|| invalid_data("overflow tail range is invalid"))?,
+            old_pages.get(required..).ok_or_else(|| invalid_data("overflow tail range is invalid"))?,
         )?;
     } else {
         for _ in 0..required {
@@ -2001,10 +1905,8 @@ fn write_overflow_chain(
     for (index, payload) in stored.chunks(OVERFLOW_PAYLOAD_LEN).enumerate() {
         let page_id = *pages.get(index).ok_or_else(|| invalid_data("overflow page allocation is missing"))?;
         let next = pages.get(index + 1).copied().unwrap_or(0);
-        transaction.write_page(
-            page_id,
-            encode_overflow_page(page_id, transaction.next_header.next_page_id, next, payload)?,
-        )?;
+        transaction
+            .write_page(page_id, encode_overflow_page(page_id, transaction.next_header.next_page_id, next, payload)?)?;
     }
     pages.first().copied().ok_or_else(|| invalid_data("overflow head is missing"))
 }
@@ -2071,8 +1973,7 @@ fn mutate_leaf(
     if used_leaf_bytes(&cells)? <= PAGE_SIZE {
         let next_page_id = transaction.next_header.next_page_id;
         let dirty = transaction.page_mut(base, leaf_id)?;
-        SlottedPage::open(dirty.as_mut_slice(), leaf_id, next_page_id)?
-            .rebuild_ordered(cells.iter().copied())?;
+        SlottedPage::open(dirty.as_mut_slice(), leaf_id, next_page_id)?.rebuild_ordered(cells.iter().copied())?;
         return Ok(None);
     }
 
@@ -2120,9 +2021,7 @@ fn insert_internal_promotion(
         cell_scratch,
     )?;
     let mut cells = Vec::<&[u8]>::new();
-    cells
-        .try_reserve_exact(count + 1)
-        .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+    cells.try_reserve_exact(count + 1).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
     for current in 0..count {
         if current == position {
             cells.push(cell_scratch);
@@ -2135,15 +2034,14 @@ fn insert_internal_promotion(
     if used_internal_bytes(cells.iter().copied())? <= PAGE_SIZE {
         let next_page_id = transaction.next_header.next_page_id;
         let dirty = transaction.page_mut(base, page_id)?;
-        SlottedPage::open(dirty.as_mut_slice(), page_id, next_page_id)?
-            .rebuild_ordered(cells.iter().copied())?;
+        SlottedPage::open(dirty.as_mut_slice(), page_id, next_page_id)?.rebuild_ordered(cells.iter().copied())?;
         return Ok(None);
     }
 
     let right_page_id = transaction.allocate_page(base)?;
     let split = choose_internal_split(&cells, page_id, transaction.next_header.next_page_id)?;
-    let leftmost = InternalPreamble::decode(snapshot.as_slice(), page_id, transaction.next_header.next_page_id)?
-        .leftmost_child;
+    let leftmost =
+        InternalPreamble::decode(snapshot.as_slice(), page_id, transaction.next_header.next_page_id)?.leftmost_child;
     let promoted = Promotion { key: split.promoted.key_bytes.to_vec(), right_child: right_page_id };
     let left_page = internal_page(page_id, leftmost, split.left_cells)?;
     let right_page = internal_page(right_page_id, split.right_leftmost_child, split.right_cells)?;
@@ -2160,7 +2058,8 @@ fn propagate_promotion(
     cell_scratch: &mut Vec<u8>,
 ) -> io::Result<()> {
     while let Some((parent, position)) = path.pop() {
-        let Some(next) = insert_internal_promotion(transaction, base, parent, position, &promotion, cell_scratch)? else {
+        let Some(next) = insert_internal_promotion(transaction, base, parent, position, &promotion, cell_scratch)?
+        else {
             return Ok(());
         };
         promotion = next;
@@ -2279,16 +2178,7 @@ where
             decompress_value_into(stored, logical_len, transaction_value_limit(transaction)?, scratch)?
         }
         LeafValueRef::Overflow { compression, logical_len, stored_len, head, crc32 } => {
-            read_transaction_overflow(
-                transaction,
-                base,
-                compression,
-                logical_len,
-                stored_len,
-                head,
-                crc32,
-                scratch,
-            )?
+            read_transaction_overflow(transaction, base, compression, logical_len, stored_len, head, crc32, scratch)?
         }
     };
     binary_deserialize(bytes).map(Some)
@@ -2319,9 +2209,7 @@ fn read_transaction_overflow<'a>(
         return Err(invalid_data("overflow value exceeds allocation limit"));
     }
     scratch.clear();
-    scratch
-        .try_reserve(stored_len)
-        .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+    scratch.try_reserve(stored_len).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
     for page_id in overflow_chain_pages(transaction, base, head)? {
         let page = SlottedPage::open(transaction.page(base, page_id)?, page_id, transaction.next_header.next_page_id)?;
         let payload = overflow_payload(&page)?;
@@ -2373,9 +2261,7 @@ where
     let preamble = InternalPreamble::decode(page.as_bytes(), page.page_id(), page.next_page_id())?;
     let count = usize::from(page.header().cell_count);
     let mut separators = Vec::new();
-    separators
-        .try_reserve_exact(count)
-        .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+    separators.try_reserve_exact(count).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
     for index in 0..count {
         let cell = InternalCellRef::decode(page.cell(index)?, page.page_id(), page.next_page_id())?;
         separators.push((decode_internal_key(cell.key_bytes)?, cell.right_child));
@@ -2415,7 +2301,8 @@ pub struct BPlusTreeQuery<K, V> {
 
 impl<K, V> BPlusTreeQuery<K, V> {
     fn from_file_unlocked(file: File) -> io::Result<Self> {
-        let file_len = usize::try_from(file.metadata()?.len()).map_err(|_| invalid_data("database length exceeds usize"))?;
+        let file_len =
+            usize::try_from(file.metadata()?.len()).map_err(|_| invalid_data("database length exceeds usize"))?;
         if file_len < PAGE_SIZE {
             return Err(invalid_data("database is shorter than its header page"));
         }
@@ -2430,7 +2317,8 @@ impl<K, V> BPlusTreeQuery<K, V> {
             return Err(invalid_data("database file length does not match header"));
         }
         let mmap = mmap_with_advice(&file, Advice::Normal, "v3 B+Tree query");
-        let page_count = usize::try_from(header.next_page_id).map_err(|_| invalid_data("next page id exceeds usize"))?;
+        let page_count =
+            usize::try_from(header.next_page_id).map_err(|_| invalid_data("next page id exceeds usize"))?;
         let mut page_validations = Vec::new();
         page_validations
             .try_reserve_exact(page_count)
@@ -2486,10 +2374,7 @@ impl<K, V> BPlusTreeQuery<K, V> {
             match recover_pending(filepath) {
                 Ok(()) => {}
                 Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
-                    ) =>
+                    if matches!(error.kind(), io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem) =>
                 {
                     return Err(recovery_required(filepath, error));
                 }
@@ -2521,8 +2406,10 @@ impl<K, V> BPlusTreeQuery<K, V> {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn clone_error_fixture() -> Self {
+    /// A query handle over an empty in-memory snapshot, for tests that need a
+    /// `BPlusTreeQuery` value without a database behind it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn clone_error_fixture() -> Self {
         Self {
             snapshot: Arc::new(QuerySnapshot {
                 file: None,
@@ -2551,16 +2438,12 @@ impl<K, V> BPlusTreeQuery<K, V> {
 
     pub fn filepath(&self) -> &Path { &self.snapshot.filepath }
 
-    pub(crate) fn snapshot_identity(&self) -> ([u8; 16], u64) {
-        (self.header.database_id, self.header.generation)
-    }
+    pub(crate) fn snapshot_identity(&self) -> ([u8; 16], u64) { (self.header.database_id, self.header.generation) }
 
     pub(crate) fn snapshot_metadata(&self) -> &BPlusTreeMetadata { &self.header.metadata }
 
     fn value_allocation_limit(&self) -> usize {
-        self.file_len
-            .saturating_mul(256)
-            .min(usize::try_from(u32::MAX).unwrap_or(usize::MAX))
+        self.file_len.saturating_mul(256).min(usize::try_from(u32::MAX).unwrap_or(usize::MAX))
     }
 
     fn assemble_overflow_chain(
@@ -2667,11 +2550,8 @@ impl<K, V> BPlusTreeQuery<K, V> {
             read(&page, scratch).map(|result| (result, validation))
         })?;
         if let Some(validation) = validation {
-            let slot = self
-                .snapshot
-                .page_validations
-                .get(index)
-                .ok_or_else(|| invalid_data("page id is outside cache"))?;
+            let slot =
+                self.snapshot.page_validations.get(index).ok_or_else(|| invalid_data("page id is outside cache"))?;
             let _ = slot.set(validation);
         }
         Ok(result)
@@ -2693,11 +2573,8 @@ impl<K, V> BPlusTreeQuery<K, V> {
 
     fn cache_internal_route(&self, page_id: u64, route: InternalRoute<K>) -> io::Result<()> {
         let index = usize::try_from(page_id).map_err(|_| invalid_data("page id exceeds usize"))?;
-        let slot = self
-            .snapshot
-            .internal_routes
-            .get(index)
-            .ok_or_else(|| invalid_data("page id is outside route cache"))?;
+        let slot =
+            self.snapshot.internal_routes.get(index).ok_or_else(|| invalid_data("page id is outside route cache"))?;
         let _ = slot.set(route);
         Ok(())
     }
@@ -2717,12 +2594,10 @@ impl<K, V> BPlusTreeQuery<K, V> {
                 depth += 1;
                 continue;
             }
-            let step = self.with_slotted_page(page_id, |page, _| {
-                match page.header().page_type {
-                    PageType::Leaf => Ok(LocateLeaf::Leaf),
-                    PageType::Internal => decode_internal_route(page).map(LocateLeaf::Internal),
-                    PageType::Overflow | PageType::Free => Err(invalid_data("tree references a non-tree page")),
-                }
+            let step = self.with_slotted_page(page_id, |page, _| match page.header().page_type {
+                PageType::Leaf => Ok(LocateLeaf::Leaf),
+                PageType::Internal => decode_internal_route(page).map(LocateLeaf::Internal),
+                PageType::Overflow | PageType::Free => Err(invalid_data("tree references a non-tree page")),
             })?;
             match step {
                 LocateLeaf::Internal(route) => {
@@ -2751,16 +2626,12 @@ impl<K, V> BPlusTreeQuery<K, V> {
                 depth += 1;
                 continue;
             }
-            let step = self.with_slotted_page(page_id, |page, _| {
-                match page.header().page_type {
-                    PageType::Internal => decode_internal_route(page).map(LocateCell::Internal),
-                    PageType::Leaf => search_leaf(page, key)?
-                        .ok()
-                        .map(|index| page.cell_range(index))
-                        .transpose()
-                        .map(LocateCell::Leaf),
-                    PageType::Overflow | PageType::Free => Err(invalid_data("tree references a non-tree page")),
+            let step = self.with_slotted_page(page_id, |page, _| match page.header().page_type {
+                PageType::Internal => decode_internal_route(page).map(LocateCell::Internal),
+                PageType::Leaf => {
+                    search_leaf(page, key)?.ok().map(|index| page.cell_range(index)).transpose().map(LocateCell::Leaf)
                 }
+                PageType::Overflow | PageType::Free => Err(invalid_data("tree references a non-tree page")),
             })?;
             match step {
                 LocateCell::Internal(route) => {
@@ -2784,13 +2655,11 @@ impl<K, V> BPlusTreeQuery<K, V> {
             if depth >= self.header.next_page_id {
                 return Err(invalid_data("tree descent contains a cycle"));
             }
-            let result = self.with_slotted_page(page_id, |page, _| {
-                match page.header().page_type {
-                    PageType::Leaf => Ok(None),
-                    PageType::Internal => InternalPreamble::decode(page.as_bytes(), page_id, page.next_page_id())
-                        .map(|preamble| Some(preamble.leftmost_child)),
-                    PageType::Overflow | PageType::Free => Err(invalid_data("tree references a non-tree page")),
-                }
+            let result = self.with_slotted_page(page_id, |page, _| match page.header().page_type {
+                PageType::Leaf => Ok(None),
+                PageType::Internal => InternalPreamble::decode(page.as_bytes(), page_id, page.next_page_id())
+                    .map(|preamble| Some(preamble.leftmost_child)),
+                PageType::Overflow | PageType::Free => Err(invalid_data("tree references a non-tree page")),
             })?;
             let Some(child) = result else { return Ok(page_id) };
             page_id = child;
@@ -2873,9 +2742,7 @@ where
                 }
                 let count = usize::from(page.header().cell_count);
                 ranges.clear();
-                ranges
-                    .try_reserve(count)
-                    .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+                ranges.try_reserve(count).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
                 for index in 0..count {
                     ranges.push(page.cell_range(index)?);
                 }
@@ -2974,9 +2841,7 @@ where
             }
             descending = false;
             record_page_visit(&mut visited, page_id, "right sibling chain contains a cycle")?;
-            result
-                .try_reserve(locators.len())
-                .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+            result.try_reserve(locators.len()).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
             for (locator, range) in locators {
                 let entry = self
                     .decode_entry_range(page_id, range)?
@@ -2994,9 +2859,7 @@ where
         let result: io::Result<bool> = (|| {
             let leaf_id = self.locate_leaf(key)?;
             let next_page_id = self.header.next_page_id;
-            let index = self.with_slotted_page(leaf_id, |page, _| {
-                search_leaf(page, key)
-            })?;
+            let index = self.with_slotted_page(leaf_id, |page, _| search_leaf(page, key))?;
             let Ok(index) = index else { return Ok(false) };
             self.with_slotted_page(leaf_id, |page, _| {
                 let cell = LeafCellRef::decode(page.cell(index)?, leaf_id, next_page_id)?;
@@ -3108,11 +2971,7 @@ where
 
     pub fn disk_iter(self) -> BPlusTreeDiskIteratorOwned<K, V> { BPlusTreeDiskIteratorOwned::new(self) }
 
-    pub fn range_iter(
-        &mut self,
-        start: Bound<&K>,
-        end: Bound<&K>,
-    ) -> BPlusTreeRangeIterator<'_, K, V>
+    pub fn range_iter(&mut self, start: Bound<&K>, end: Bound<&K>) -> BPlusTreeRangeIterator<'_, K, V>
     where
         K: Clone,
     {
@@ -3143,9 +3002,9 @@ where
         while result.len() < limit {
             match iterator.next() {
                 Some(Ok(entry)) => {
-                    result.try_reserve(1).map_err(|error| {
-                        BPlusTreeError::Io(io::Error::new(io::ErrorKind::OutOfMemory, error))
-                    })?;
+                    result
+                        .try_reserve(1)
+                        .map_err(|error| BPlusTreeError::Io(io::Error::new(io::ErrorKind::OutOfMemory, error)))?;
                     result.push(entry);
                 }
                 Some(Err(err)) => return Err(BPlusTreeError::Io(err)),
@@ -3208,9 +3067,7 @@ fn load_cursor_page<K, V>(query: &mut BPlusTreeQuery<K, V>, state: &mut CursorSt
         }
         let count = usize::from(page.header().cell_count);
         cell_ranges.clear();
-        cell_ranges
-            .try_reserve(count)
-            .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+        cell_ranges.try_reserve(count).map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
         for index in 0..count {
             cell_ranges.push(page.cell_range(index)?);
         }
@@ -3248,11 +3105,7 @@ where
                 Bound::Included(key) | Bound::Excluded(key) => query.locate_leaf(key)?,
                 Bound::Unbounded => query.leftmost_leaf()?,
             };
-            record_page_visit(
-                &mut state.visited_leaves,
-                state.leaf_page_id,
-                "right sibling chain contains a cycle",
-            )?;
+            record_page_visit(&mut state.visited_leaves, state.leaf_page_id, "right sibling chain contains a cycle")?;
             if let Bound::Included(key) | Bound::Excluded(key) = &state.start {
                 let page_id = state.leaf_page_id;
                 let next_page_id = query.header.next_page_id;
@@ -3315,9 +3168,7 @@ pub struct BPlusTreeDiskIterator<'a, K, V> {
 }
 
 impl<'a, K, V> BPlusTreeDiskIterator<'a, K, V> {
-    fn new(query: &'a mut BPlusTreeQuery<K, V>) -> Self {
-        Self { query, state: CursorState::new(Bound::Unbounded) }
-    }
+    fn new(query: &'a mut BPlusTreeQuery<K, V>) -> Self { Self { query, state: CursorState::new(Bound::Unbounded) } }
 
     fn from_bound(query: &'a mut BPlusTreeQuery<K, V>, start: Bound<K>) -> Self {
         Self { query, state: CursorState::new(start) }
@@ -3339,7 +3190,6 @@ where
             Some(Err(err)) => Err(err),
         }
     }
-
 }
 
 impl<K, V> Iterator for BPlusTreeDiskIterator<'_, K, V>
@@ -3376,7 +3226,6 @@ where
             Some(Err(err)) => Err(err),
         }
     }
-
 }
 
 impl<K, V> Iterator for BPlusTreeDiskIteratorOwned<K, V>
@@ -3531,19 +3380,16 @@ where
         match value {
             VerifyValue::Tombstone => continue,
             VerifyValue::Inline => {}
-            VerifyValue::Overflow(compression, logical_len, stored_len, head, crc32) => query
-                .assemble_overflow_chain(
-                    compression,
-                    logical_len,
-                    stored_len,
-                    head,
-                    crc32,
-                    Some(overflow_pages),
-                )?,
+            VerifyValue::Overflow(compression, logical_len, stored_len, head, crc32) => query.assemble_overflow_chain(
+                compression,
+                logical_len,
+                stored_len,
+                head,
+                crc32,
+                Some(overflow_pages),
+            )?,
         }
-        live_entries = live_entries
-            .checked_add(1)
-            .ok_or_else(|| invalid_data("live entry count overflow"))?;
+        live_entries = live_entries.checked_add(1).ok_or_else(|| invalid_data("live entry count overflow"))?;
     }
     Ok((VerifyLeaf { page_id, left, right, minimum, maximum }, live_entries))
 }
@@ -3578,7 +3424,8 @@ fn push_child_visits<K: Clone>(
     upper: Option<&K>,
 ) -> io::Result<()> {
     for index in (0..children.len()).rev() {
-        let child_lower = if index == 0 { lower.cloned() } else { children.get(index).and_then(|(_, key)| key.clone()) };
+        let child_lower =
+            if index == 0 { lower.cloned() } else { children.get(index).and_then(|(_, key)| key.clone()) };
         let child_upper = children.get(index + 1).and_then(|(_, key)| key.clone()).or_else(|| upper.cloned());
         let child = children
             .get(index)
@@ -3708,7 +3555,8 @@ where
     Ok(VerificationReport {
         live_entries,
         tree_pages: u64::try_from(tree_pages.len()).map_err(|_| invalid_data("tree page count exceeds u64"))?,
-        overflow_pages: u64::try_from(overflow_pages.len()).map_err(|_| invalid_data("overflow page count exceeds u64"))?,
+        overflow_pages: u64::try_from(overflow_pages.len())
+            .map_err(|_| invalid_data("overflow page count exceeds u64"))?,
         free_pages: u64::try_from(free_pages.len()).map_err(|_| invalid_data("free page count exceeds u64"))?,
     })
 }
@@ -3716,19 +3564,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::bplustree::{
+    use crate::{
+        codec::binary_serialize,
         v3::{
             format::{
-                encode_inline_leaf_cell, encode_internal_cell, encode_overflow_leaf_cell,
-                encode_tombstone_leaf_cell, encode_value, Compression, PageHeader, PageType,
-                OVERFLOW_PAYLOAD_LEN, PAGE_HEADER_LEN, PAGE_SIZE,
+                encode_inline_leaf_cell, encode_internal_cell, encode_overflow_leaf_cell, encode_tombstone_leaf_cell,
+                encode_value, Compression, PageHeader, PageType, OVERFLOW_PAYLOAD_LEN, PAGE_HEADER_LEN, PAGE_SIZE,
             },
-            page::{
-                encode_free_page, encode_overflow_page, page_open_count, reset_page_open_count, SlottedPage,
-            },
+            page::{encode_free_page, encode_overflow_page, page_open_count, reset_page_open_count, SlottedPage},
         },
-        codec::binary_serialize,
     };
+    use fs2::FileExt as _;
     use std::{
         fs, io,
         path::{Path, PathBuf},
@@ -3737,7 +3583,6 @@ mod tests {
         thread::{self, JoinHandle},
         time::Duration,
     };
-    use fs2::FileExt as _;
 
     const PAGE_ID: u64 = 7;
     const NEXT_PAGE_ID: u64 = 20;
@@ -3978,10 +3823,8 @@ mod tests {
     fn medium_stored_value_remains_inline() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("medium-inline.db");
-        let value = random_value()
-            .get(..300)
-            .ok_or_else(|| io::Error::other("random test value is too short"))?
-            .to_vec();
+        let value =
+            random_value().get(..300).ok_or_else(|| io::Error::other("random test value is too short"))?.to_vec();
         let mut tree = BPlusTree::new();
         tree.insert(7u32, value.clone());
 
@@ -4014,10 +3857,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("overflow-reuse.db");
         let large = random_value();
-        let smaller = large
-            .get(..5_000)
-            .ok_or_else(|| io::Error::other("random test value is too short"))?
-            .to_vec();
+        let smaller = large.get(..5_000).ok_or_else(|| io::Error::other("random test value is too short"))?.to_vec();
         let mut tree = BPlusTree::new();
         tree.insert(7u32, large);
         tree.store(&path)?;
@@ -4082,7 +3922,10 @@ mod tests {
         assert_eq!(after.root_page_id, before.root_page_id);
         assert_eq!(fs::metadata(&path)?.len(), before_len);
         let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
-        assert_eq!(query.iter().collect::<io::Result<Vec<_>>>()?, vec![(1, "one".into()), (2, "two".into()), (3, "three".into())]);
+        assert_eq!(
+            query.iter().collect::<io::Result<Vec<_>>>()?,
+            vec![(1, "one".into()), (2, "two".into()), (3, "three".into())]
+        );
         let _ = verify_full(&mut query)?;
         Ok(())
     }
@@ -4123,10 +3966,8 @@ mod tests {
     fn splitting_a_non_rightmost_leaf_repairs_the_former_neighbor() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("middle-leaf-split.db");
-        let value = random_value()
-            .get(..200)
-            .ok_or_else(|| io::Error::other("random test value is too short"))?
-            .to_vec();
+        let value =
+            random_value().get(..200).ok_or_else(|| io::Error::other("random test value is too short"))?.to_vec();
         let mut tree = BPlusTree::new();
         for key in (0..800u32).step_by(2) {
             tree.insert(key, value.clone());
@@ -4169,9 +4010,7 @@ mod tests {
         Ok(())
     }
 
-    fn long_split_key(index: u32, marker: char) -> String {
-        format!("{index:04}{marker}{}", "k".repeat(1_880))
-    }
+    fn long_split_key(index: u32, marker: char) -> String { format!("{index:04}{marker}{}", "k".repeat(1_880)) }
 
     #[test]
     fn leaf_promotion_recursively_splits_a_full_internal_root() -> io::Result<()> {
@@ -4314,7 +4153,6 @@ mod tests {
         Ok(())
     }
 
-
     /// Throughput benchmark for `BPlusTree::store` across three workload sizes.
     #[test]
     #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
@@ -4328,7 +4166,8 @@ mod tests {
                 })
                 .collect()
         };
-        for (label, count, size) in [("klein", 2_000u32, 800usize), ("mittel", 20_000, 2_000), ("gross", 60_000, 2_000)] {
+        for (label, count, size) in [("klein", 2_000u32, 800usize), ("mittel", 20_000, 2_000), ("gross", 60_000, 2_000)]
+        {
             let dir = tempfile::tempdir()?;
             let path = dir.path().join("bench.db");
             let mut tree = BPlusTree::<u32, Vec<u8>>::new();
@@ -4374,7 +4213,8 @@ mod tests {
                 .collect()
         };
 
-        for (label, count, size) in [("klein", 2_000u32, 800usize), ("mittel", 20_000, 2_000), ("gross", 60_000, 2_000)] {
+        for (label, count, size) in [("klein", 2_000u32, 800usize), ("mittel", 20_000, 2_000), ("gross", 60_000, 2_000)]
+        {
             let dir = tempfile::tempdir()?;
             let path = dir.path().join("bench.db");
             let mut tree = BPlusTree::<u32, Vec<u8>>::new();
@@ -4387,20 +4227,16 @@ mod tests {
             // Fault the mapping in first; this benchmark measures lookup, not page-in.
             let mut checksum = 0u64;
             for key in 0..count {
-                checksum += query
-                    .query_zero_copy(&key)
-                    .map_err(BPlusTreeError::to_io)?
-                    .map_or(0, |value| u64::from(value[0]));
+                checksum +=
+                    query.query_zero_copy(&key).map_err(BPlusTreeError::to_io)?.map_or(0, |value| u64::from(value[0]));
             }
 
             let start = std::time::Instant::now();
             let mut key = 0u32;
             for _ in 0..LOOKUPS {
                 key = (key + STRIDE) % count;
-                checksum += query
-                    .query_zero_copy(&key)
-                    .map_err(BPlusTreeError::to_io)?
-                    .map_or(0, |value| u64::from(value[0]));
+                checksum +=
+                    query.query_zero_copy(&key).map_err(BPlusTreeError::to_io)?.map_or(0, |value| u64::from(value[0]));
             }
             let elapsed = start.elapsed();
 
@@ -4547,7 +4383,7 @@ mod tests {
     fn immediate_commit_clears_wal_then_invalidates_sorted_index() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("immediate.db");
-        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
+        let index_path = crate::common::get_file_path_for_db_index(&path);
         let mut tree = BPlusTree::new();
         tree.insert(1u32, String::from("old"));
         tree.store(&path)?;
@@ -4587,7 +4423,7 @@ mod tests {
     fn missing_delete_and_empty_commit_are_true_noops() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("no-op.db");
-        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
+        let index_path = crate::common::get_file_path_for_db_index(&path);
         let mut tree = BPlusTree::new();
         tree.insert(1u32, String::from("one"));
         tree.store(&path)?;
@@ -4625,7 +4461,7 @@ mod tests {
     fn store_with_index_publishes_an_identity_bound_sorted_snapshot() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("indexed.db");
-        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
+        let index_path = crate::common::get_file_path_for_db_index(&path);
         let mut tree = BPlusTree::new();
         tree.insert(1u32, String::from("ccc"));
         tree.insert(2u32, String::from("a"));
@@ -4634,10 +4470,7 @@ mod tests {
         assert_ne!(tree.store_with_index(&path, String::len)?, 0);
 
         let query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
-        let mut sorted = crate::repository::bplustree::sorted_index::v4::OwnedIterator::<u32, String, usize>::open(
-            query,
-            &index_path,
-        )?;
+        let mut sorted = crate::sorted_index::v4::OwnedIterator::<u32, String, usize>::open(query, &index_path)?;
         assert_eq!(
             sorted.by_ref().collect::<io::Result<Vec<_>>>()?,
             vec![(2, String::from("a")), (3, String::from("bb")), (1, String::from("ccc"))]
@@ -4652,7 +4485,7 @@ mod tests {
     fn compact_rebuilds_only_live_data_with_a_fresh_identity() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("compact.db");
-        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
+        let index_path = crate::common::get_file_path_for_db_index(&path);
         let mut tree = BPlusTree::new();
         for key in 0..100u32 {
             tree.insert(
@@ -4693,7 +4526,7 @@ mod tests {
     fn compact_read_failure_preserves_database_and_index() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("compact-corrupt.db");
-        let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
+        let index_path = crate::common::get_file_path_for_db_index(&path);
         let mut tree = BPlusTree::new();
         tree.insert(1u32, String::from("one"));
         tree.store(&path)?;
@@ -4812,16 +4645,9 @@ mod tests {
         let active = updater.active.as_mut().ok_or_else(|| io::Error::other("test transaction is missing"))?;
         let leaf_id = active.transaction.next_header.root_page_id;
         let snapshot = active.transaction.page_copy(active.base.as_slice(), leaf_id)?;
-        let page = SlottedPage::open(
-            snapshot.as_slice(),
-            leaf_id,
-            active.transaction.next_header.next_page_id,
-        )?;
+        let page = SlottedPage::open(snapshot.as_slice(), leaf_id, active.transaction.next_header.next_page_id)?;
         let mut cells = page.cells().map(|cell| cell.map(<[u8]>::to_vec)).collect::<io::Result<Vec<_>>>()?;
-        let duplicate = cells
-            .first()
-            .cloned()
-            .ok_or_else(|| io::Error::other("test leaf has no cells"))?;
+        let duplicate = cells.first().cloned().ok_or_else(|| io::Error::other("test leaf has no cells"))?;
         *cells.get_mut(1).ok_or_else(|| io::Error::other("test leaf lacks a second cell"))? = duplicate;
         let next_page_id = active.transaction.next_header.next_page_id;
         let dirty = active.transaction.page_mut(active.base.as_slice(), leaf_id)?;
@@ -5046,7 +4872,7 @@ mod tests {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(crate::repository::bplustree::common::sidecar_lock_path(database))?;
+            .open(crate::common::sidecar_lock_path(database))?;
         match file.try_lock_exclusive() {
             Ok(()) => {
                 fs2::FileExt::unlock(&file)?;
@@ -5060,7 +4886,7 @@ mod tests {
     fn run_exclusive_probe_child(database: &Path, expected: &str) -> io::Result<()> {
         let status = Command::new(std::env::current_exe()?)
             .arg("--exact")
-            .arg("repository::bplustree::v3::tree::tests::exclusive_sidecar_probe_child")
+            .arg("v3::tree::tests::exclusive_sidecar_probe_child")
             .arg("--nocapture")
             .env("TULIPROX_V3_LOCK_PROBE_PATH", database)
             .env("TULIPROX_V3_LOCK_PROBE_EXPECTED", expected)
@@ -5239,9 +5065,7 @@ mod tests {
     }
 
     fn leaf_cell_of_footprint(footprint: usize) -> io::Result<Vec<u8>> {
-        let key_length = footprint
-            .checked_sub(4 + 24)
-            .ok_or_else(|| io::Error::other("footprint is too small"))?;
+        let key_length = footprint.checked_sub(4 + 24).ok_or_else(|| io::Error::other("footprint is too small"))?;
         if footprint <= 2032 {
             let key = vec![b'k'; key_length];
             let mut cell = Vec::new();
@@ -5295,8 +5119,21 @@ mod tests {
         encode_tombstone_leaf_cell(b"deleted", &mut cell)?;
         assert!(matches!(LeafCellRef::decode(&cell, PAGE_ID, NEXT_PAGE_ID)?.value, LeafValueRef::Tombstone));
 
-        encode_overflow_leaf_cell(b"large", 5000, Compression::None, 5000, 2, 0x1234_5678, PAGE_ID, NEXT_PAGE_ID, &mut cell)?;
-        assert!(matches!(LeafCellRef::decode(&cell, PAGE_ID, NEXT_PAGE_ID)?.value, LeafValueRef::Overflow { head: 2, .. }));
+        encode_overflow_leaf_cell(
+            b"large",
+            5000,
+            Compression::None,
+            5000,
+            2,
+            0x1234_5678,
+            PAGE_ID,
+            NEXT_PAGE_ID,
+            &mut cell,
+        )?;
+        assert!(matches!(
+            LeafCellRef::decode(&cell, PAGE_ID, NEXT_PAGE_ID)?.value,
+            LeafValueRef::Overflow { head: 2, .. }
+        ));
         Ok(())
     }
 
@@ -5346,25 +5183,15 @@ mod tests {
 
     #[test]
     fn adversarial_leaf_splits_reject_old_limit_and_accept_capped_cells() -> io::Result<()> {
-        let first_witness = [
-            leaf_cell_of_footprint(2026)?,
-            leaf_cell_of_footprint(2040)?,
-            leaf_cell_of_footprint(2038)?,
-        ];
+        let first_witness =
+            [leaf_cell_of_footprint(2026)?, leaf_cell_of_footprint(2040)?, leaf_cell_of_footprint(2038)?];
         invalid_input(choose_leaf_split(&first_witness))?;
 
-        let second_witness = [
-            leaf_cell_of_footprint(1984)?,
-            leaf_cell_of_footprint(2296)?,
-            leaf_cell_of_footprint(1984)?,
-        ];
+        let second_witness =
+            [leaf_cell_of_footprint(1984)?, leaf_cell_of_footprint(2296)?, leaf_cell_of_footprint(1984)?];
         invalid_input(choose_leaf_split(&second_witness))?;
 
-        let capped = [
-            leaf_cell_of_footprint(2026)?,
-            leaf_cell_of_footprint(2032)?,
-            leaf_cell_of_footprint(2032)?,
-        ];
+        let capped = [leaf_cell_of_footprint(2026)?, leaf_cell_of_footprint(2032)?, leaf_cell_of_footprint(2032)?];
         let split = choose_leaf_split(&capped)?;
         assert_eq!(split, 2);
         assert!(used_leaf_bytes(&capped[..split])? <= PAGE_SIZE);
@@ -5508,10 +5335,7 @@ mod tests {
             crc32: crc32fast::hash(&stored),
         };
         let mut scratch = Vec::new();
-        assert_eq!(
-            read_leaf_value(&database, &value, next_page_id, raw.len(), &mut scratch)?,
-            Some(raw.as_slice())
-        );
+        assert_eq!(read_leaf_value(&database, &value, next_page_id, raw.len(), &mut scratch)?, Some(raw.as_slice()));
         Ok(())
     }
 
@@ -5560,13 +5384,7 @@ mod tests {
             head: 2,
             crc32: crc32fast::hash(b"x"),
         };
-        invalid_data(read_leaf_value(
-            &database,
-            &empty_chain_value,
-            NEXT_PAGE_ID,
-            6000,
-            &mut scratch,
-        ))
+        invalid_data(read_leaf_value(&database, &empty_chain_value, NEXT_PAGE_ID, 6000, &mut scratch))
     }
 
     fn page_range(page_id: u64) -> io::Result<std::ops::Range<usize>> {
@@ -5579,7 +5397,7 @@ mod tests {
 
     fn rewrite_page_checksum(database: &mut [u8], page_id: u64) -> io::Result<()> {
         let range = page_range(page_id)?;
-        crate::repository::bplustree::v3::format::write_page_checksum(
+        crate::v3::format::write_page_checksum(
             database.get_mut(range).ok_or_else(|| io::Error::other("test page missing"))?,
         )
     }
@@ -5679,9 +5497,7 @@ mod tests {
         tree.store(&path)?;
 
         let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
-        let (page_id, range) = query
-            .locate_cell(&2)?
-            .ok_or_else(|| io::Error::other("test key missing"))?;
+        let (page_id, range) = query.locate_cell(&2)?.ok_or_else(|| io::Error::other("test key missing"))?;
         let next_page_id = query.header.next_page_id;
         let stored_offset = query.with_page(page_id, |bytes, _| {
             let cell = LeafCellRef::decode(
@@ -5698,9 +5514,7 @@ mod tests {
 
         let mut database = fs::read(&path)?;
         let absolute = page_range(page_id)?.start + stored_offset;
-        *database
-            .get_mut(absolute)
-            .ok_or_else(|| io::Error::other("test value byte missing"))? = 0xc1;
+        *database.get_mut(absolute).ok_or_else(|| io::Error::other("test value byte missing"))? = 0xc1;
         rewrite_page_checksum(&mut database, page_id)?;
         fs::write(&path, database)?;
 
@@ -5750,9 +5564,8 @@ mod tests {
         tree.store(&path)?;
 
         let mut query = BPlusTreeQuery::<u32, String>::try_new(&path)?;
-        let (entries, has_more) = query
-            .range_page(Bound::Unbounded, Bound::Unbounded, 0, usize::MAX)
-            .map_err(BPlusTreeError::to_io)?;
+        let (entries, has_more) =
+            query.range_page(Bound::Unbounded, Bound::Unbounded, 0, usize::MAX).map_err(BPlusTreeError::to_io)?;
         assert_eq!(entries, vec![(1, String::from("one")), (2, String::from("two"))]);
         assert!(!has_more);
         Ok(())
@@ -5793,16 +5606,10 @@ mod tests {
 
         let mut duplicate_child = database.clone();
         let root_start = page_range(root)?.start;
-        let leftmost = u64::from_le_bytes(
-            duplicate_child[root_start + 32..root_start + 40]
-                .try_into()
-                .map_err(io::Error::other)?,
-        );
-        let first_cell = u16::from_le_bytes(
-            duplicate_child[root_start + 40..root_start + 42]
-                .try_into()
-                .map_err(io::Error::other)?,
-        );
+        let leftmost =
+            u64::from_le_bytes(duplicate_child[root_start + 32..root_start + 40].try_into().map_err(io::Error::other)?);
+        let first_cell =
+            u16::from_le_bytes(duplicate_child[root_start + 40..root_start + 42].try_into().map_err(io::Error::other)?);
         let child_offset = root_start + usize::from(first_cell) + 4;
         duplicate_child[child_offset..child_offset + 8].copy_from_slice(&leftmost.to_le_bytes());
         rewrite_page_checksum(&mut duplicate_child, root)?;
@@ -5827,15 +5634,11 @@ mod tests {
         let mut inverted = database.clone();
         let first_start = page_range(first)?.start;
         let second_start = page_range(second)?.start;
-        let first_count = u16::from_le_bytes(
-            inverted[first_start + 2..first_start + 4]
-                .try_into()
-                .map_err(io::Error::other)?,
-        );
+        let first_count =
+            u16::from_le_bytes(inverted[first_start + 2..first_start + 4].try_into().map_err(io::Error::other)?);
         let last_slot = first_start + PAGE_HEADER_LEN + (usize::from(first_count) - 1) * SLOT_LEN;
-        let left_cell = usize::from(u16::from_le_bytes(
-            inverted[last_slot..last_slot + 2].try_into().map_err(io::Error::other)?,
-        ));
+        let left_cell =
+            usize::from(u16::from_le_bytes(inverted[last_slot..last_slot + 2].try_into().map_err(io::Error::other)?));
         let right_cell = usize::from(u16::from_le_bytes(
             inverted[second_start + PAGE_HEADER_LEN..second_start + PAGE_HEADER_LEN + 2]
                 .try_into()
@@ -5938,9 +5741,8 @@ mod tests {
         verify_rejects::<u32, Vec<u8>>(&cycle)?;
 
         let mut shared = database;
-        let start = page_range(second_leaf)?.start
-            + usize::try_from(second_cell_offset).map_err(io::Error::other)?
-            + 12;
+        let start =
+            page_range(second_leaf)?.start + usize::try_from(second_cell_offset).map_err(io::Error::other)? + 12;
         shared[start..start + 8].copy_from_slice(&first_head.to_le_bytes());
         rewrite_page_checksum(&mut shared, second_leaf)?;
         let _ = next_page_id;
@@ -5961,8 +5763,8 @@ mod tests {
         drop(query);
 
         let mut database = fs::read(&path)?;
-        let descriptor = page_range(second_leaf)?.start
-            + usize::try_from(second_cell_offset).map_err(io::Error::other)?;
+        let descriptor =
+            page_range(second_leaf)?.start + usize::try_from(second_cell_offset).map_err(io::Error::other)?;
         database[descriptor + 4..descriptor + 8].copy_from_slice(&u32::MAX.to_le_bytes());
         database[descriptor + 8..descriptor + 12].copy_from_slice(&u32::MAX.to_le_bytes());
         rewrite_page_checksum(&mut database, second_leaf)?;
@@ -5991,9 +5793,7 @@ mod tests {
             let slot = PAGE_HEADER_LEN
                 .checked_add(index.checked_mul(SLOT_LEN).ok_or_else(|| io::Error::other("test slot overflow"))?)
                 .ok_or_else(|| io::Error::other("test slot overflow"))?;
-            Ok(u16::from_le_bytes(
-                bytes[slot..slot + 2].try_into().map_err(io::Error::other)?,
-            ))
+            Ok(u16::from_le_bytes(bytes[slot..slot + 2].try_into().map_err(io::Error::other)?))
         })?;
         drop(query);
 
@@ -6018,11 +5818,10 @@ mod tests {
         new.insert(2u32, vec![2]);
         new.store(&temporary)?;
 
-        let error = publish_database(&temporary, &destination, |_| {
-            Err(io::Error::other("injected directory sync failure"))
-        })
-        .err()
-        .ok_or_else(|| io::Error::other("post-commit sync failure was hidden"))?;
+        let error =
+            publish_database(&temporary, &destination, |_| Err(io::Error::other("injected directory sync failure")))
+                .err()
+                .ok_or_else(|| io::Error::other("post-commit sync failure was hidden"))?;
         assert!(error.database_was_published());
         let error = io::Error::from(error);
         assert!(error.to_string().contains("database published but directory sync failed; durability unknown"));
@@ -6037,7 +5836,7 @@ mod tests {
     fn store_sync_failure_after_rename_invalidates_previous_sorted_index() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let destination = dir.path().join("database.db");
-        let index = crate::repository::bplustree::common::get_file_path_for_db_index(&destination);
+        let index = crate::common::get_file_path_for_db_index(&destination);
         let mut old = BPlusTree::new();
         old.insert(1u32, String::from("old"));
         let _ = old.store_with_index(&destination, String::clone)?;
@@ -6065,7 +5864,7 @@ mod tests {
     fn store_reports_sync_and_index_invalidation_failures_together() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let destination = dir.path().join("database.db");
-        let index = crate::repository::bplustree::common::get_file_path_for_db_index(&destination);
+        let index = crate::common::get_file_path_for_db_index(&destination);
         let mut old = BPlusTree::new();
         old.insert(1u32, String::from("old"));
         let _ = old.store(&destination)?;

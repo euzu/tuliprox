@@ -554,10 +554,7 @@ fn store_comparison_v2(path: &std::path::Path, entries: &[(String, ComparisonVal
     tree.store(path).map(|_| ())
 }
 
-fn store_comparison_v3(
-    path: &std::path::Path,
-    entries: &[(String, ComparisonValue)],
-) -> std::io::Result<()> {
+fn store_comparison_v3(path: &std::path::Path, entries: &[(String, ComparisonValue)]) -> std::io::Result<()> {
     let mut tree = super::v3::BPlusTree::new();
     for (key, value) in entries {
         tree.insert(key.clone(), value.clone());
@@ -565,10 +562,7 @@ fn store_comparison_v3(
     tree.store_with_index(path, |value| value.sort_key).map(|_| ())
 }
 
-fn comparison_runs(
-    name: &str,
-    mut operation: impl FnMut() -> std::io::Result<()>,
-) -> std::io::Result<Vec<Duration>> {
+fn comparison_runs(name: &str, mut operation: impl FnMut() -> std::io::Result<()>) -> std::io::Result<Vec<Duration>> {
     let mut runs = Vec::with_capacity(5);
     for _ in 0..5 {
         let started = Instant::now();
@@ -667,10 +661,11 @@ fn bplustree_v2_v3_comparison() -> std::io::Result<()> {
         black_box(values.len());
         Ok(())
     })?;
-    let index_path = crate::repository::bplustree::common::get_file_path_for_db_index(&v3_path);
+    let index_path = crate::common::get_file_path_for_db_index(&v3_path);
     comparison_runs("v3 locator sorted full scan", || {
         let query = super::v3::BPlusTreeQuery::<String, ComparisonValue>::try_new(&v3_path)?;
-        let iterator = super::sorted_index::v4::OwnedIterator::<String, ComparisonValue, u32>::open(query, &index_path)?;
+        let iterator =
+            super::sorted_index::v4::OwnedIterator::<String, ComparisonValue, u32>::open(query, &index_path)?;
         black_box(iterator.collect::<std::io::Result<Vec<_>>>()?.len());
         Ok(())
     })?;
@@ -722,9 +717,13 @@ fn bplustree_v2_v3_comparison() -> std::io::Result<()> {
     let grown_size = std::fs::metadata(&compact_path)?.len();
     let compact_runs = comparison_runs("v3 compaction", || updater.compact())?;
     let compacted_size = std::fs::metadata(&compact_path)?.len();
-    println!("v3 growth/compaction: grown={grown_size}, compacted={compacted_size}, median={:?}", comparison_median(&compact_runs));
+    println!(
+        "v3 growth/compaction: grown={grown_size}, compacted={compacted_size}, median={:?}",
+        comparison_median(&compact_runs)
+    );
 
-    let point_regression = comparison_median(&v3_point).as_secs_f64() / comparison_median(&v2_point).as_secs_f64() - 1.0;
+    let point_regression =
+        comparison_median(&v3_point).as_secs_f64() / comparison_median(&v2_point).as_secs_f64() - 1.0;
     let scan_regression = comparison_median(&v3_scan).as_secs_f64() / comparison_median(&v2_scan).as_secs_f64() - 1.0;
     println!("gate point-latency regression: {:+.2}%", point_regression * 100.0);
     println!("gate full-scan duration regression: {:+.2}%", scan_regression * 100.0);

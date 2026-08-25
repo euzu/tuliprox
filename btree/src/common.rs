@@ -1,18 +1,17 @@
 use log::warn;
-use memmap2::Mmap;
 #[cfg(unix)]
 pub(crate) use memmap2::Advice;
+use memmap2::Mmap;
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 use std::{
     ffi::OsString,
     fs::{self, File},
     io,
     path::{Path, PathBuf},
 };
-
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
 
 /// Windows/memmap2 has no madvise-style Advice API; keep a stub so callers stay portable.
 #[cfg(not(unix))]
@@ -132,26 +131,18 @@ pub(crate) fn resolved_path_identity(path: &Path) -> io::Result<PathBuf> {
                     format!("path has no file name for identity resolution: {}", path.display()),
                 )
             })?;
-            let parent = path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            fs::canonicalize(parent)
-                .map(|resolved_parent| resolved_parent.join(leaf))
-                .map_err(|parent_error| {
-                    io::Error::new(
-                        parent_error.kind(),
-                        format!(
-                            "failed to resolve parent directory for path identity {}: {parent_error}",
-                            path.display()
-                        ),
-                    )
-                })
+            let parent =
+                path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+            fs::canonicalize(parent).map(|resolved_parent| resolved_parent.join(leaf)).map_err(|parent_error| {
+                io::Error::new(
+                    parent_error.kind(),
+                    format!("failed to resolve parent directory for path identity {}: {parent_error}", path.display()),
+                )
+            })
         }
-        Err(error) => Err(io::Error::new(
-            error.kind(),
-            format!("failed to resolve path identity {}: {error}", path.display()),
-        )),
+        Err(error) => {
+            Err(io::Error::new(error.kind(), format!("failed to resolve path identity {}: {error}", path.display())))
+        }
     }
 }
 
@@ -178,10 +169,7 @@ pub(crate) fn remove_file_if_exists(path: &Path) -> io::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(io::Error::new(
-            error.kind(),
-            format!("failed to remove file {}: {error}", path.display()),
-        )),
+        Err(error) => Err(io::Error::new(error.kind(), format!("failed to remove file {}: {error}", path.display()))),
     }
 }
 
@@ -192,29 +180,23 @@ pub(crate) fn remove_file_if_exists(path: &Path) -> io::Result<()> {
 pub(crate) const FILE_SUFFIX_INDEX: &str = "idx";
 
 /// Path of the sorted-index sidecar belonging to `db_path`.
-pub fn get_file_path_for_db_index(db_path: &Path) -> PathBuf {
-    db_path.with_extension(FILE_SUFFIX_INDEX)
-}
+pub fn get_file_path_for_db_index(db_path: &Path) -> PathBuf { db_path.with_extension(FILE_SUFFIX_INDEX) }
 
 /// Buffer size for the engine's own buffered readers and writers.
 pub(crate) const IO_BUFFER_SIZE: usize = 256 * 1024;
 
-/// Only the v2 write path buffers writes, and that path is test-only.
-#[cfg(test)]
-pub(crate) fn file_writer<W: io::Write>(w: W) -> io::BufWriter<W> {
-    io::BufWriter::with_capacity(IO_BUFFER_SIZE, w)
-}
+/// Only the v2 write path buffers writes, and that path is a fixture builder.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn file_writer<W: io::Write>(w: W) -> io::BufWriter<W> { io::BufWriter::with_capacity(IO_BUFFER_SIZE, w) }
 
-pub(crate) fn file_reader<R: io::Read>(r: R) -> io::BufReader<R> {
-    io::BufReader::with_capacity(IO_BUFFER_SIZE, r)
-}
+pub(crate) fn file_reader<R: io::Read>(r: R) -> io::BufReader<R> { io::BufReader::with_capacity(IO_BUFFER_SIZE, r) }
 
 /// Move `src` onto `dest`, degrading to a copy when the rename fails.
 ///
 /// This is the semantics the v2 writer has always relied on: a rename that
 /// cannot be performed (for example across a filesystem boundary) falls back to
 /// a copy, and the source file is left in place for the caller to clean up.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn rename_or_copy(src: &Path, dest: &Path) -> io::Result<()> {
     if fs::rename(src, dest).is_err() {
         fs::copy(src, dest)?;
@@ -223,14 +205,10 @@ pub(crate) fn rename_or_copy(src: &Path, dest: &Path) -> io::Result<()> {
 }
 
 pub(crate) fn parent_or_dot(path: &Path) -> &Path {
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."))
+    path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
 }
 
-pub(crate) fn same_parent_directory(left: &Path, right: &Path) -> bool {
-    parent_or_dot(left) == parent_or_dot(right)
-}
+pub(crate) fn same_parent_directory(left: &Path, right: &Path) -> bool { parent_or_dot(left) == parent_or_dot(right) }
 
 pub(crate) fn require_same_parent_directory(staging: &Path, published: &Path) -> io::Result<()> {
     if same_parent_directory(staging, published) {

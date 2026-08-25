@@ -46,10 +46,7 @@ fn bytes_at<const N: usize>(bytes: &[u8], offset: usize) -> io::Result<[u8; N]> 
 
 fn write_at(bytes: &mut [u8], offset: usize, value: &[u8]) -> io::Result<()> {
     let end = checked_end(offset, value.len())?;
-    bytes
-        .get_mut(offset..end)
-        .ok_or_else(|| invalid_data("truncated format destination"))?
-        .copy_from_slice(value);
+    bytes.get_mut(offset..end).ok_or_else(|| invalid_data("truncated format destination"))?.copy_from_slice(value);
     Ok(())
 }
 
@@ -292,7 +289,8 @@ impl PageHeader {
             }
             PageType::Internal => {
                 if self.cell_count == 0
-                    || self.free_start != expected_slot_end(PAGE_HEADER_LEN + INTERNAL_PREAMBLE_LEN, self.cell_count, kind)?
+                    || self.free_start
+                        != expected_slot_end(PAGE_HEADER_LEN + INTERNAL_PREAMBLE_LEN, self.cell_count, kind)?
                     || self.free_end < self.free_start
                     || usize::from(self.free_end) >= PAGE_SIZE
                     || self.left != 0
@@ -426,9 +424,8 @@ impl InternalCellPrefix {
     }
 
     pub(crate) fn decode(bytes: &[u8], page_id: u64, next_page_id: u64) -> io::Result<Self> {
-        let prefix = bytes
-            .get(..INTERNAL_CELL_PREFIX_LEN)
-            .ok_or_else(|| invalid_data("truncated internal cell prefix"))?;
+        let prefix =
+            bytes.get(..INTERNAL_CELL_PREFIX_LEN).ok_or_else(|| invalid_data("truncated internal cell prefix"))?;
         require_zero(
             prefix.get(2..4).ok_or_else(|| invalid_data("missing internal cell reserved bytes"))?,
             "internal cell reserved bytes must be zero",
@@ -562,9 +559,7 @@ impl LeafCellPrefix {
     }
 
     pub(crate) fn decode(bytes: &[u8], page_id: u64, next_page_id: u64) -> io::Result<Self> {
-        let prefix = bytes
-            .get(..LEAF_CELL_PREFIX_LEN)
-            .ok_or_else(|| invalid_data("truncated leaf cell prefix"))?;
+        let prefix = bytes.get(..LEAF_CELL_PREFIX_LEN).ok_or_else(|| invalid_data("truncated leaf cell prefix"))?;
         let decoded = Self {
             key_length: read_u16(prefix, 0)?,
             value_kind: ValueKind::try_from(read_u8(prefix, 2)?)?,
@@ -594,9 +589,7 @@ impl OverflowHeader {
         write_at(page, PAGE_HEADER_LEN, &self.payload_length.to_le_bytes())?;
         write_at(page, PAGE_HEADER_LEN + 2, &[0; 6])?;
         let tail_start = checked_end(40, payload_length)?;
-        page.get_mut(tail_start..)
-            .ok_or_else(|| invalid_data("overflow payload exceeds page"))?
-            .fill(0);
+        page.get_mut(tail_start..).ok_or_else(|| invalid_data("overflow payload exceeds page"))?.fill(0);
         Ok(())
     }
 
@@ -621,9 +614,7 @@ impl OverflowHeader {
 
 pub(crate) fn encode_free_body(page: &mut [u8]) -> io::Result<()> {
     exact_page(page)?;
-    page.get_mut(PAGE_HEADER_LEN..)
-        .ok_or_else(|| invalid_data("missing free page body"))?
-        .fill(0);
+    page.get_mut(PAGE_HEADER_LEN..).ok_or_else(|| invalid_data("missing free page body"))?.fill(0);
     Ok(())
 }
 
@@ -659,10 +650,9 @@ impl StoredValue<'_> {
 }
 
 fn compression_is_beneficial(raw_length: usize, stored_length: usize) -> io::Result<bool> {
-    let threshold = raw_length
-        .checked_mul(COMPRESSION_PERCENT)
-        .ok_or_else(|| invalid_input("compression threshold overflow"))?
-        / 100;
+    let threshold =
+        raw_length.checked_mul(COMPRESSION_PERCENT).ok_or_else(|| invalid_input("compression threshold overflow"))?
+            / 100;
     Ok(stored_length < threshold)
 }
 
@@ -675,9 +665,7 @@ pub(crate) fn encode_value<'a>(raw: &'a [u8], scratch: &'a mut Vec<u8>) -> io::R
     let maximum = lz4_flex::block::get_maximum_output_size(raw.len())
         .checked_add(4)
         .ok_or_else(|| invalid_input("compressed value size overflow"))?;
-    scratch
-        .try_reserve(maximum)
-        .map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
+    scratch.try_reserve(maximum).map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
     scratch.resize(maximum, 0);
     write_at(scratch, 0, &raw_length.to_le_bytes())?;
     let output = scratch.get_mut(4..).ok_or_else(|| invalid_data("missing compression output"))?;
@@ -708,9 +696,7 @@ pub(crate) fn decompress_value_into<'a>(
     }
     let payload = stored.get(4..).ok_or_else(|| invalid_data("missing LZ4 payload"))?;
     scratch.clear();
-    scratch
-        .try_reserve(logical_length)
-        .map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
+    scratch.try_reserve(logical_length).map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
     scratch.resize(logical_length, 0);
     let decoded_length = lz4_flex::block::decompress_into(payload, scratch.as_mut_slice())
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("LZ4 decompression failed: {err}")))?;
@@ -728,19 +714,8 @@ pub(crate) struct LeafCellRef<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LeafValueRef<'a> {
-    Inline {
-        compression: Compression,
-        logical_len: u32,
-        stored: &'a [u8],
-        crc32: u32,
-    },
-    Overflow {
-        compression: Compression,
-        logical_len: u32,
-        stored_len: u32,
-        head: u64,
-        crc32: u32,
-    },
+    Inline { compression: Compression, logical_len: u32, stored: &'a [u8], crc32: u32 },
+    Overflow { compression: Compression, logical_len: u32, stored_len: u32, head: u64, crc32: u32 },
     Tombstone,
 }
 
@@ -750,9 +725,7 @@ impl<'a> LeafCellRef<'a> {
         let key_end = LEAF_CELL_PREFIX_LEN
             .checked_add(usize::from(prefix.key_length))
             .ok_or_else(|| invalid_data("leaf key range overflow"))?;
-        let key_bytes = cell
-            .get(LEAF_CELL_PREFIX_LEN..key_end)
-            .ok_or_else(|| invalid_data("truncated leaf key"))?;
+        let key_bytes = cell.get(LEAF_CELL_PREFIX_LEN..key_end).ok_or_else(|| invalid_data("truncated leaf key"))?;
         let value = match prefix.value_kind {
             ValueKind::Inline => {
                 let cell_end = key_end
@@ -813,9 +786,8 @@ impl<'a> InternalCellRef<'a> {
         if cell_end != cell.len() {
             return Err(invalid_data("invalid internal cell length"));
         }
-        let key_bytes = cell
-            .get(INTERNAL_CELL_PREFIX_LEN..cell_end)
-            .ok_or_else(|| invalid_data("truncated internal key"))?;
+        let key_bytes =
+            cell.get(INTERNAL_CELL_PREFIX_LEN..cell_end).ok_or_else(|| invalid_data("truncated internal key"))?;
         Ok(Self { key_bytes, right_child: prefix.right_child })
     }
 }
@@ -834,9 +806,7 @@ fn write_cell(output: &mut Vec<u8>, prefix: &[u8], key: &[u8], stored: &[u8]) ->
         .and_then(|value| value.checked_add(stored.len()))
         .ok_or_else(|| invalid_input("encoded cell length overflow"))?;
     output.clear();
-    output
-        .try_reserve(length)
-        .map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
+    output.try_reserve(length).map_err(|err| io::Error::new(io::ErrorKind::OutOfMemory, err))?;
     output.extend_from_slice(prefix);
     output.extend_from_slice(key);
     output.extend_from_slice(stored);
@@ -909,16 +879,16 @@ pub(crate) fn encode_internal_cell(
     next_page_id: u64,
     output: &mut Vec<u8>,
 ) -> io::Result<()> {
-    let prefix = InternalCellPrefix { key_length: encoded_key_length(key)?, right_child }
-        .encode(page_id, next_page_id)?;
+    let prefix =
+        InternalCellPrefix { key_length: encoded_key_length(key)?, right_child }.encode(page_id, next_page_id)?;
     write_cell(output, &prefix, key, &[])
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Locator {
-    pub(crate) leaf_page_id: u64,
-    pub(crate) slot_index: u16,
-    pub(crate) serialized_key_crc32: u32,
+    pub leaf_page_id: u64,
+    pub slot_index: u16,
+    pub serialized_key_crc32: u32,
 }
 
 impl Locator {
@@ -980,9 +950,7 @@ pub(crate) fn decompress_value_in_place(
     scratch.resize(total_length, 0);
     scratch.copy_within(0..stored_length, logical_length);
     let (output, encoded) = scratch.split_at_mut(logical_length);
-    let payload = encoded
-        .get(4..stored_length)
-        .ok_or_else(|| invalid_data("missing LZ4 payload"))?;
+    let payload = encoded.get(4..stored_length).ok_or_else(|| invalid_data("missing LZ4 payload"))?;
     let decoded_length = lz4_flex::block::decompress_into(payload, output)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("LZ4 decompression failed: {err}")))?;
     if decoded_length != logical_length {
@@ -995,7 +963,7 @@ pub(crate) fn decompress_value_in_place(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::bplustree::v3::BPlusTreeMetadata;
+    use crate::v3::BPlusTreeMetadata;
     use std::io;
 
     const PAGE_ID: u64 = 7;
@@ -1226,14 +1194,8 @@ mod tests {
     #[test]
     fn leaf_page_header_golden_bytes_round_trip() -> io::Result<()> {
         let expected = page_fixture(1, 2, 40, 4000, 6, 8, 0x88c9_dd55);
-        let header = PageHeader {
-            page_type: PageType::Leaf,
-            cell_count: 2,
-            free_start: 40,
-            free_end: 4000,
-            left: 6,
-            right: 8,
-        };
+        let header =
+            PageHeader { page_type: PageType::Leaf, cell_count: 2, free_start: 40, free_end: 4000, left: 6, right: 8 };
         let mut encoded = [0u8; PAGE_SIZE];
         header.encode_into(&mut encoded, PAGE_ID, NEXT_PAGE_ID)?;
         assert_eq!(encoded, expected);
@@ -1269,14 +1231,8 @@ mod tests {
         let mut expected = page_fixture(3, 0, 0, 0, 0, 8, 0x8731_d58d);
         expected[32..34].copy_from_slice(&3u16.to_le_bytes());
         expected[40..43].copy_from_slice(b"abc");
-        let header = PageHeader {
-            page_type: PageType::Overflow,
-            cell_count: 0,
-            free_start: 0,
-            free_end: 0,
-            left: 0,
-            right: 8,
-        };
+        let header =
+            PageHeader { page_type: PageType::Overflow, cell_count: 0, free_start: 0, free_end: 0, left: 0, right: 8 };
         let overflow = OverflowHeader { payload_length: 3 };
         let mut encoded = [0u8; PAGE_SIZE];
         encoded[40..43].copy_from_slice(b"abc");
@@ -1291,14 +1247,8 @@ mod tests {
     #[test]
     fn free_page_header_golden_bytes_round_trip() -> io::Result<()> {
         let expected = page_fixture(4, 0, 0, 0, 0, 8, 0x2864_f2d3);
-        let header = PageHeader {
-            page_type: PageType::Free,
-            cell_count: 0,
-            free_start: 0,
-            free_end: 0,
-            left: 0,
-            right: 8,
-        };
+        let header =
+            PageHeader { page_type: PageType::Free, cell_count: 0, free_start: 0, free_end: 0, left: 0, right: 8 };
         let mut encoded = [0u8; PAGE_SIZE];
         encode_free_body(&mut encoded)?;
         header.encode_into(&mut encoded, PAGE_ID, NEXT_PAGE_ID)?;
@@ -1383,9 +1333,7 @@ mod tests {
             overflow_head: 0,
             stored_crc32: 0x1122_3344,
         };
-        let leaf_bytes = [
-            3, 0, 0, 1, 128, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x44, 0x33, 0x22, 0x11,
-        ];
+        let leaf_bytes = [3, 0, 0, 1, 128, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x44, 0x33, 0x22, 0x11];
         assert_eq!(leaf.encode(PAGE_ID, NEXT_PAGE_ID)?, leaf_bytes);
         assert_eq!(LeafCellPrefix::decode(&leaf_bytes, PAGE_ID, NEXT_PAGE_ID)?, leaf);
         assert_eq!(stored_value_checksum(b"abc"), 0x3524_41c2);
@@ -1398,9 +1346,7 @@ mod tests {
         internal[2] = 1;
         invalid_data(InternalCellPrefix::decode(&internal, PAGE_ID, NEXT_PAGE_ID))?;
 
-        let mut leaf = [
-            3, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
-        ];
+        let mut leaf = [3, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
         leaf[2] = 9;
         invalid_data(LeafCellPrefix::decode(&leaf, PAGE_ID, NEXT_PAGE_ID))?;
         leaf[2] = 0;
@@ -1494,10 +1440,7 @@ mod tests {
         assert!(stored.as_slice().len() < compressible.len() * 85 / 100);
         assert_eq!(stored.as_slice(), expected);
         let mut decompression_scratch = Vec::new();
-        assert_eq!(
-            decompress_value_into(stored.as_slice(), 128, 128, &mut decompression_scratch)?,
-            compressible
-        );
+        assert_eq!(decompress_value_into(stored.as_slice(), 128, 128, &mut decompression_scratch)?, compressible);
         Ok(())
     }
 

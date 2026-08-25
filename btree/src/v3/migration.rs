@@ -1,5 +1,5 @@
 use super::{BPlusTree, BPlusTreeMetadata};
-use crate::repository::bplustree::v2;
+use crate::v2;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{File, OpenOptions},
@@ -83,14 +83,15 @@ fn legacy_metadata(path: &Path) -> io::Result<BPlusTreeMetadata> {
     if metadata_len > METADATA_MAX_SIZE {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "legacy metadata exceeds header capacity"));
     }
-    let metadata_len = usize::try_from(metadata_len).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let metadata_len =
+        usize::try_from(metadata_len).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let mut encoded = vec![0; metadata_len];
     file.read_exact(&mut encoded)?;
     match encoded.as_slice() {
         [] => Ok(BPlusTreeMetadata::Empty),
-        [1, value0, value1, value2, value3] => Ok(BPlusTreeMetadata::TargetIdMapping(u32::from_le_bytes([
-            *value0, *value1, *value2, *value3,
-        ]))),
+        [1, value0, value1, value2, value3] => {
+            Ok(BPlusTreeMetadata::TargetIdMapping(u32::from_le_bytes([*value0, *value1, *value2, *value3])))
+        }
         _ => Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported legacy B+Tree metadata")),
     }
 }
@@ -109,10 +110,7 @@ where
     )
 }
 
-pub fn migrate_v2_typed_with_index<K, V, SortKey, F>(
-    source: &Path,
-    sort_key: F,
-) -> io::Result<MigrationValidation>
+pub fn migrate_v2_typed_with_index<K, V, SortKey, F>(source: &Path, sort_key: F) -> io::Result<MigrationValidation>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     V: Serialize + for<'de> Deserialize<'de> + Clone,
@@ -125,8 +123,8 @@ where
         |tree, destination| tree.store_with_index_verified(destination, sort_key),
         |destination, entries| {
             let query = super::BPlusTreeQuery::<K, V>::try_new(destination)?;
-            let index = crate::repository::bplustree::common::get_file_path_for_db_index(destination);
-            let mut iterator = crate::repository::bplustree::sorted_index::v4::OwnedIterator::<K, V, SortKey>::open(query, &index)?;
+            let index = crate::common::get_file_path_for_db_index(destination);
+            let mut iterator = crate::sorted_index::v4::OwnedIterator::<K, V, SortKey>::open(query, &index)?;
             let indexed_entries = iterator.try_fold(0usize, |count, entry| {
                 let _ = entry?;
                 count
@@ -142,10 +140,7 @@ where
     )
 }
 
-pub fn migrate_v2_typed_map<K, SourceV, DestinationV, Map>(
-    source: &Path,
-    map: Map,
-) -> io::Result<MigrationValidation>
+pub fn migrate_v2_typed_map<K, SourceV, DestinationV, Map>(source: &Path, map: Map) -> io::Result<MigrationValidation>
 where
     K: Ord + Serialize + for<'de> Deserialize<'de> + Clone,
     SourceV: Serialize + for<'de> Deserialize<'de> + Clone,
@@ -180,7 +175,7 @@ where
     let normalized_source = migration_source(source, version)?;
     let read_path = normalized_source.as_deref().unwrap_or(source);
     let destination = migration_destination(source)?;
-    let destination_index = crate::repository::bplustree::common::get_file_path_for_db_index(&destination);
+    let destination_index = crate::common::get_file_path_for_db_index(&destination);
     let converted = (|| {
         let mut legacy = v2::BPlusTreeQuery::<K, SourceV>::try_new(read_path)?;
         let metadata = legacy_metadata(read_path)?;
@@ -223,7 +218,7 @@ where
         drop(query);
         validate(&destination, entries)?;
         if indexed {
-            publish(&destination_index, &crate::repository::bplustree::common::get_file_path_for_db_index(source))?;
+            publish(&destination_index, &crate::common::get_file_path_for_db_index(source))?;
         }
         publish(&destination, source)?;
         Ok(MigrationValidation { entries, database_id, generation })
@@ -248,14 +243,16 @@ fn publish(temporary: &Path, destination: &Path) -> io::Result<()> {
 
 fn cleanup_destination(destination: &Path) {
     let _ = std::fs::remove_file(destination);
-    let _ = std::fs::remove_file(crate::repository::bplustree::common::get_file_path_for_db_index(destination));
-    let _ = std::fs::remove_file(crate::repository::bplustree::common::sidecar_lock_path(destination));
+    let _ = std::fs::remove_file(crate::common::get_file_path_for_db_index(destination));
+    let _ = std::fs::remove_file(crate::common::sidecar_lock_path(destination));
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::page::{page_open_count, reset_page_open_count};
+    use super::{
+        super::page::{page_open_count, reset_page_open_count},
+        *,
+    };
 
     #[test]
     fn typed_migration_validates_the_v3_destination_once() -> io::Result<()> {
@@ -300,7 +297,10 @@ mod tests {
             assert_eq!(validation.generation, 1);
             assert_eq!(storage_version(&path)?, Some(3));
             let mut query = super::super::BPlusTreeQuery::<u32, String>::try_new(&path)?;
-            assert_eq!(query.iter().collect::<io::Result<Vec<_>>>()?, vec![(1, String::from("one")), (2, String::from("two"))]);
+            assert_eq!(
+                query.iter().collect::<io::Result<Vec<_>>>()?,
+                vec![(1, String::from("one")), (2, String::from("two"))]
+            );
         }
         Ok(())
     }
@@ -337,7 +337,8 @@ mod tests {
         let root_offset = u64::from_le_bytes(
             bytes[8..16].try_into().map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
         );
-        let root_start = usize::try_from(root_offset).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let root_start =
+            usize::try_from(root_offset).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let root_end = root_start
             .checked_add(v2::PAGE_SIZE_USIZE)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "fixture root end overflow"))?;
@@ -346,7 +347,8 @@ mod tests {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "fixture root is truncated"))?
             .to_vec();
         bytes.push(0);
-        let relocated_root = u64::try_from(bytes.len()).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let relocated_root =
+            u64::try_from(bytes.len()).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         bytes.extend_from_slice(&root);
         bytes[8..16].copy_from_slice(&relocated_root.to_le_bytes());
         std::fs::write(&path, bytes)?;
@@ -400,9 +402,9 @@ mod tests {
         let validation = migrate_v2_typed_with_index::<u32, String, usize, _>(&path, String::len)?;
         assert_eq!(validation.entries, 2);
         let query = super::super::BPlusTreeQuery::<u32, String>::try_new(&path)?;
-        let index = crate::repository::bplustree::common::get_file_path_for_db_index(&path);
-        let values = crate::repository::bplustree::sorted_index::v4::OwnedIterator::<u32, String, usize>::open(query, &index)
-            ?.collect::<io::Result<Vec<_>>>()?;
+        let index = crate::common::get_file_path_for_db_index(&path);
+        let values = crate::sorted_index::v4::OwnedIterator::<u32, String, usize>::open(query, &index)?
+            .collect::<io::Result<Vec<_>>>()?;
         assert_eq!(values, vec![(2, String::from("a")), (1, String::from("bbb"))]);
         Ok(())
     }

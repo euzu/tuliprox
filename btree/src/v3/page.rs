@@ -28,9 +28,9 @@ const _: () = assert!(PAGE_HEADER_LEN + INTERNAL_PREAMBLE_LEN <= PAGE_SIZE);
 fn slot_base(page_type: PageType) -> io::Result<usize> {
     match page_type {
         PageType::Leaf => Ok(PAGE_HEADER_LEN),
-        PageType::Internal => PAGE_HEADER_LEN
-            .checked_add(INTERNAL_PREAMBLE_LEN)
-            .ok_or_else(|| invalid_data("slot base overflow")),
+        PageType::Internal => {
+            PAGE_HEADER_LEN.checked_add(INTERNAL_PREAMBLE_LEN).ok_or_else(|| invalid_data("slot base overflow"))
+        }
         PageType::Overflow | PageType::Free => Err(invalid_input("chain pages do not contain slots")),
     }
 }
@@ -117,20 +117,12 @@ impl<B: AsRef<[u8]>> SlottedPage<B> {
             .and_then(|size| base.checked_add(size))
             .ok_or_else(|| invalid_data("slot offset overflow"))?;
         let end = checked_end(offset, SLOT_LEN, io::ErrorKind::InvalidData)?;
-        Slot::decode(
-            self.bytes
-                .as_ref()
-                .get(offset..end)
-                .ok_or_else(|| invalid_data("slot is outside page"))?,
-        )
+        Slot::decode(self.bytes.as_ref().get(offset..end).ok_or_else(|| invalid_data("slot is outside page"))?)
     }
 
     pub(crate) fn cell(&self, index: usize) -> io::Result<&[u8]> {
         let range = self.cell_range(index)?;
-        self.bytes
-            .as_ref()
-            .get(range)
-            .ok_or_else(|| invalid_data("cell is outside page"))
+        self.bytes.as_ref().get(range).ok_or_else(|| invalid_data("cell is outside page"))
     }
 
     pub(crate) fn cell_range(&self, index: usize) -> io::Result<std::ops::Range<usize>> {
@@ -192,30 +184,16 @@ pub(crate) fn encode_overflow_page(
         payload_length: u16::try_from(payload.len()).map_err(|_| invalid_input("overflow payload exceeds u16"))?,
     }
     .encode_into(&mut page)?;
-    PageHeader {
-        page_type: PageType::Overflow,
-        cell_count: 0,
-        free_start: 0,
-        free_end: 0,
-        left: 0,
-        right: next,
-    }
-    .encode_into(&mut page, page_id, next_page_id)?;
+    PageHeader { page_type: PageType::Overflow, cell_count: 0, free_start: 0, free_end: 0, left: 0, right: next }
+        .encode_into(&mut page, page_id, next_page_id)?;
     Ok(page)
 }
 
 pub(crate) fn encode_free_page(page_id: u64, next_page_id: u64, next: u64) -> io::Result<[u8; PAGE_SIZE]> {
     let mut page = [0; PAGE_SIZE];
     encode_free_body(&mut page)?;
-    PageHeader {
-        page_type: PageType::Free,
-        cell_count: 0,
-        free_start: 0,
-        free_end: 0,
-        left: 0,
-        right: next,
-    }
-    .encode_into(&mut page, page_id, next_page_id)?;
+    PageHeader { page_type: PageType::Free, cell_count: 0, free_start: 0, free_end: 0, left: 0, right: next }
+        .encode_into(&mut page, page_id, next_page_id)?;
     Ok(page)
 }
 
@@ -267,8 +245,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
         if self.header.page_type == PageType::Internal {
             // INTERNAL_PREAMBLE_LEN is a compile-time constant; the range is always in bounds.
             let preamble_end = PAGE_HEADER_LEN + INTERNAL_PREAMBLE_LEN; // 32 + 8 = 40
-            rebuilt[PAGE_HEADER_LEN..preamble_end]
-                .copy_from_slice(&self.bytes.as_ref()[PAGE_HEADER_LEN..preamble_end]);
+            rebuilt[PAGE_HEADER_LEN..preamble_end].copy_from_slice(&self.bytes.as_ref()[PAGE_HEADER_LEN..preamble_end]);
         }
 
         let mut count = 0u16;
@@ -282,9 +259,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
             // SLOT_LEN=4, count<=u16::MAX, base<=40 — overflow is impossible within PAGE_SIZE.
             let slot_offset = base + usize::from(count) * SLOT_LEN;
             let slot_end = slot_offset + SLOT_LEN;
-            let next_cell_start = cell_start
-                .checked_sub(cell.len())
-                .ok_or_else(|| invalid_input("cells exceed page capacity"))?;
+            let next_cell_start =
+                cell_start.checked_sub(cell.len()).ok_or_else(|| invalid_input("cells exceed page capacity"))?;
             if next_cell_start < slot_end {
                 return Err(invalid_input("cells exceed page capacity"));
             }
@@ -302,9 +278,8 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
         if self.header.page_type == PageType::Internal && count == 0 {
             return Err(invalid_input("internal pages must not be empty"));
         }
-        let slot_bytes = usize::from(count)
-            .checked_mul(SLOT_LEN)
-            .ok_or_else(|| invalid_input("slot directory size overflow"))?;
+        let slot_bytes =
+            usize::from(count).checked_mul(SLOT_LEN).ok_or_else(|| invalid_input("slot directory size overflow"))?;
         let free_start = base.checked_add(slot_bytes).ok_or_else(|| invalid_input("slot directory overflow"))?;
         let header = PageHeader {
             page_type: self.header.page_type,
@@ -335,8 +310,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
         if page.len() != PAGE_SIZE {
             return Err(invalid_data("page must be exactly 4096 bytes"));
         }
-        page
-            .get_mut(offset..end)
+        page.get_mut(offset..end)
             .ok_or_else(|| invalid_data("cell destination is outside page"))?
             .copy_from_slice(replacement);
         write_page_checksum(page)
@@ -346,7 +320,7 @@ impl<B: AsRef<[u8]> + AsMut<[u8]>> SlottedPage<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repository::bplustree::v3::format::{
+    use crate::v3::format::{
         encode_free_body, page_checksum, write_page_checksum, InternalPreamble, OverflowHeader, PageHeader, PageType,
         Slot, PAGE_HEADER_LEN, PAGE_SIZE, SLOT_LEN,
     };
@@ -367,7 +341,11 @@ mod tests {
     impl AsMut<[u8]> for ChangingMutView {
         fn as_mut(&mut self) -> &mut [u8] {
             self.calls += 1;
-            if self.calls == 1 { &mut self.bytes[..200] } else { &mut self.bytes[..32] }
+            if self.calls == 1 {
+                &mut self.bytes[..200]
+            } else {
+                &mut self.bytes[..32]
+            }
         }
     }
 
@@ -417,15 +395,11 @@ mod tests {
             .checked_add(slots.len().checked_mul(SLOT_LEN).ok_or_else(|| io::Error::other("test slot overflow"))?)
             .and_then(|value| u16::try_from(value).ok())
             .ok_or_else(|| io::Error::other("test slot overflow"))?;
-        PageHeader {
-            page_type: PageType::Leaf,
-            cell_count,
-            free_start,
-            free_end,
-            left: 0,
-            right: 0,
-        }
-        .encode_into(&mut page, PAGE_ID, NEXT_PAGE_ID)?;
+        PageHeader { page_type: PageType::Leaf, cell_count, free_start, free_end, left: 0, right: 0 }.encode_into(
+            &mut page,
+            PAGE_ID,
+            NEXT_PAGE_ID,
+        )?;
         Ok(page)
     }
 
@@ -436,15 +410,11 @@ mod tests {
             PageType::Free => encode_free_body(&mut page)?,
             PageType::Leaf | PageType::Internal => return Err(io::Error::other("test requires a chain page")),
         }
-        PageHeader {
-            page_type,
-            cell_count: 0,
-            free_start: 0,
-            free_end: 0,
-            left: 0,
-            right: 0,
-        }
-        .encode_into(&mut page, PAGE_ID, NEXT_PAGE_ID)?;
+        PageHeader { page_type, cell_count: 0, free_start: 0, free_end: 0, left: 0, right: 0 }.encode_into(
+            &mut page,
+            PAGE_ID,
+            NEXT_PAGE_ID,
+        )?;
         Ok(page)
     }
 
@@ -565,15 +535,8 @@ mod tests {
         InternalPreamble { leftmost_child: 3 }.encode_into(&mut page, 2, NEXT_PAGE_ID)?;
         page[40..44].copy_from_slice(&Slot { offset: 4095, length: 1 }.encode());
         page[4095] = b'x';
-        PageHeader {
-            page_type: PageType::Internal,
-            cell_count: 1,
-            free_start: 44,
-            free_end: 4095,
-            left: 0,
-            right: 0,
-        }
-        .encode_into(&mut page, 2, NEXT_PAGE_ID)?;
+        PageHeader { page_type: PageType::Internal, cell_count: 1, free_start: 44, free_end: 4095, left: 0, right: 0 }
+            .encode_into(&mut page, 2, NEXT_PAGE_ID)?;
 
         let mut changing = ChangingMutView { bytes: page, calls: 0 };
         let mut slotted = SlottedPage::open(&mut changing, 2, NEXT_PAGE_ID)?;
@@ -616,30 +579,14 @@ mod tests {
             (vec![Slot { offset: 4090, length: 0 }], 4090),
             (vec![Slot { offset: 35, length: 1 }], 36),
             (vec![Slot { offset: 4090, length: 10 }], 4090),
-            (
-                vec![Slot { offset: 4080, length: 8 }, Slot { offset: 4080, length: 8 }],
-                4080,
-            ),
-            (
-                vec![Slot { offset: 4080, length: 8 }, Slot { offset: 4090, length: 6 }],
-                4090,
-            ),
-            (
-                vec![Slot { offset: 4080, length: 16 }, Slot { offset: 4070, length: 16 }],
-                4070,
-            ),
-            (
-                vec![Slot { offset: 4080, length: 16 }, Slot { offset: 4064, length: 16 }],
-                4060,
-            ),
+            (vec![Slot { offset: 4080, length: 8 }, Slot { offset: 4080, length: 8 }], 4080),
+            (vec![Slot { offset: 4080, length: 8 }, Slot { offset: 4090, length: 6 }], 4090),
+            (vec![Slot { offset: 4080, length: 16 }, Slot { offset: 4070, length: 16 }], 4070),
+            (vec![Slot { offset: 4080, length: 16 }, Slot { offset: 4064, length: 16 }], 4060),
         ];
 
         for (slots, free_end) in cases {
-            invalid_data(SlottedPage::open(
-                leaf_with_slots(&slots, free_end)?.as_slice(),
-                PAGE_ID,
-                NEXT_PAGE_ID,
-            ))?;
+            invalid_data(SlottedPage::open(leaf_with_slots(&slots, free_end)?.as_slice(), PAGE_ID, NEXT_PAGE_ID))?;
         }
         Ok(())
     }
@@ -674,15 +621,8 @@ mod tests {
     fn open_validates_internal_preamble() -> io::Result<()> {
         let mut page = [0; PAGE_SIZE];
         InternalPreamble { leftmost_child: PAGE_ID }.encode_into(&mut page, 2, NEXT_PAGE_ID)?;
-        PageHeader {
-            page_type: PageType::Internal,
-            cell_count: 1,
-            free_start: 44,
-            free_end: 4095,
-            left: 0,
-            right: 0,
-        }
-        .encode_into(&mut page, 2, NEXT_PAGE_ID)?;
+        PageHeader { page_type: PageType::Internal, cell_count: 1, free_start: 44, free_end: 4095, left: 0, right: 0 }
+            .encode_into(&mut page, 2, NEXT_PAGE_ID)?;
         page[40..44].copy_from_slice(&Slot { offset: 4095, length: 1 }.encode());
         write_page_checksum(&mut page)?;
         SlottedPage::open(page.as_slice(), 2, NEXT_PAGE_ID)?;
@@ -698,15 +638,8 @@ mod tests {
         InternalPreamble { leftmost_child: 3 }.encode_into(&mut page, 2, NEXT_PAGE_ID)?;
         page[40..44].copy_from_slice(&Slot { offset: 4095, length: 1 }.encode());
         page[4095] = b'x';
-        PageHeader {
-            page_type: PageType::Internal,
-            cell_count: 1,
-            free_start: 44,
-            free_end: 4095,
-            left: 0,
-            right: 0,
-        }
-        .encode_into(&mut page, 2, NEXT_PAGE_ID)?;
+        PageHeader { page_type: PageType::Internal, cell_count: 1, free_start: 44, free_end: 4095, left: 0, right: 0 }
+            .encode_into(&mut page, 2, NEXT_PAGE_ID)?;
 
         {
             let mut slotted = SlottedPage::open(page.as_mut_slice(), 2, NEXT_PAGE_ID)?;
