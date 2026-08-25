@@ -47,6 +47,7 @@ use std::{
 // under their historical module names so `crate::model::X` and
 // `crate::utils::X` keep resolving across the backend.
 use tuliprox_core::{model, utils};
+use tuliprox_library::{library, media_enrichment};
 use tuliprox_media_server as media_server;
 use tuliprox_mpegts as mpegts;
 

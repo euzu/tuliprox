@@ -4458,6 +4458,7 @@ dependencies = [
  "tower_governor",
  "tuliprox-btree",
  "tuliprox-core",
+ "tuliprox-library",
  "tuliprox-media-server",
  "tuliprox-mpegts",
  "url",
@@ -4532,6 +4533,32 @@ dependencies = [
  "tuliprox-mpegts",
  "url",
  "zeroize",
+]
+
+[[package]]
+name = "tuliprox-library"
+version = "3.3.91"
+dependencies = [
+ "blake3",
+ "bytes",
+ "chrono",
+ "fancy-regex",
+ "filetime",
+ "log",
+ "paste",
+ "path-clean",
+ "quick-xml",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "shared",
+ "strsim",
+ "tempfile",
+ "tokio",
+ "tuliprox-core",
+ "url",
+ "uuid",
 ]
 
 [[package]]
