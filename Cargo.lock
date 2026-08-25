@@ -4463,6 +4463,7 @@ dependencies = [
  "tuliprox-messaging",
  "tuliprox-mpegts",
  "tuliprox-parser",
+ "tuliprox-repository",
  "url",
  "uuid",
  "vergen",
@@ -4633,6 +4634,41 @@ dependencies = [
  "tokio-util",
  "tuliprox-core",
  "url",
+]
+
+[[package]]
+name = "tuliprox-repository"
+version = "3.3.91"
+dependencies = [
+ "arc-swap",
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "crc32fast",
+ "env_logger",
+ "filetime",
+ "fs2",
+ "futures",
+ "indexmap",
+ "libc",
+ "log",
+ "lz4_flex",
+ "parking_lot",
+ "paste",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "shared",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tuliprox-btree",
+ "tuliprox-core",
+ "tuliprox-parser",
+ "url",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

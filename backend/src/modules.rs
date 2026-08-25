@@ -9,7 +9,6 @@ macro_rules! include_modules {
         pub mod config_loader;
         pub mod iptv;
         pub mod processing;
-        pub mod repository;
         pub mod runtime_config_report;
     };
 }

@@ -280,88 +280,82 @@ impl TaskRetryState {
     }
 }
 
-impl MetadataRetryDbKey {
-    fn from_task_key(task_key: &TaskKey) -> Self {
-        match task_key {
-            TaskKey::Vod(id) => Self::VodId(*id),
-            TaskKey::VodStr(id) => Self::VodText(id.as_ref().to_owned()),
-            TaskKey::Series(id) => Self::SeriesId(*id),
-            TaskKey::SeriesStr(id) => Self::SeriesText(id.as_ref().to_owned()),
-            TaskKey::Live(id) => Self::LiveId(*id),
-            TaskKey::LiveStr(id) => Self::LiveText(id.as_ref().to_owned()),
-            TaskKey::Stream { scope, id } => {
-                Self::Stream { scope: scope.as_ref().to_owned(), id: id.as_ref().to_owned() }
-            }
-        }
-    }
-
-    fn into_task_key(self) -> TaskKey {
-        match self {
-            Self::VodId(id) => TaskKey::Vod(id),
-            Self::VodText(id) => TaskKey::VodStr(Arc::from(id)),
-            Self::SeriesId(id) => TaskKey::Series(id),
-            Self::SeriesText(id) => TaskKey::SeriesStr(Arc::from(id)),
-            Self::LiveId(id) => TaskKey::Live(id),
-            Self::LiveText(id) => TaskKey::LiveStr(Arc::from(id)),
-            Self::Stream { scope, id } => TaskKey::Stream { scope: Arc::from(scope), id: Arc::from(id) },
+fn metadata_retry_key_from_task_key(task_key: &TaskKey) -> MetadataRetryDbKey {
+    match task_key {
+        TaskKey::Vod(id) => MetadataRetryDbKey::VodId(*id),
+        TaskKey::VodStr(id) => MetadataRetryDbKey::VodText(id.as_ref().to_owned()),
+        TaskKey::Series(id) => MetadataRetryDbKey::SeriesId(*id),
+        TaskKey::SeriesStr(id) => MetadataRetryDbKey::SeriesText(id.as_ref().to_owned()),
+        TaskKey::Live(id) => MetadataRetryDbKey::LiveId(*id),
+        TaskKey::LiveStr(id) => MetadataRetryDbKey::LiveText(id.as_ref().to_owned()),
+        TaskKey::Stream { scope, id } => {
+            MetadataRetryDbKey::Stream { scope: scope.as_ref().to_owned(), id: id.as_ref().to_owned() }
         }
     }
 }
 
-impl RetryStateDbValue {
-    fn from_retry_state(state: &RetryState) -> Self {
-        Self {
-            attempts: state.attempts,
-            next_allowed_at_ts: state.next_allowed_at_ts,
-            cooldown_until_ts: state.cooldown_until_ts,
-            last_error: state.last_error.clone(),
-            source_last_modified: state.source_last_modified,
-        }
-    }
-
-    fn into_retry_state(self) -> Option<RetryState> {
-        if self.attempts == 0
-            && self.next_allowed_at_ts <= 0
-            && self.cooldown_until_ts.is_none()
-            && self.source_last_modified.is_none()
-        {
-            return None;
-        }
-        Some(RetryState {
-            attempts: self.attempts,
-            next_allowed_at_ts: self.next_allowed_at_ts,
-            cooldown_until_ts: self.cooldown_until_ts,
-            last_error: self.last_error,
-            source_last_modified: self.source_last_modified,
-        })
+fn metadata_retry_key_into_task_key(value: MetadataRetryDbKey) -> TaskKey {
+    match value {
+        MetadataRetryDbKey::VodId(id) => TaskKey::Vod(id),
+        MetadataRetryDbKey::VodText(id) => TaskKey::VodStr(Arc::from(id)),
+        MetadataRetryDbKey::SeriesId(id) => TaskKey::Series(id),
+        MetadataRetryDbKey::SeriesText(id) => TaskKey::SeriesStr(Arc::from(id)),
+        MetadataRetryDbKey::LiveId(id) => TaskKey::Live(id),
+        MetadataRetryDbKey::LiveText(id) => TaskKey::LiveStr(Arc::from(id)),
+        MetadataRetryDbKey::Stream { scope, id } => TaskKey::Stream { scope: Arc::from(scope), id: Arc::from(id) },
     }
 }
 
-impl MetadataRetryDbValue {
-    fn from_task_retry_state(state: &TaskRetryState, updated_at_ts: i64) -> Self {
-        Self {
-            resolve: state.resolve.as_ref().map(RetryStateDbValue::from_retry_state),
-            probe: state.probe.as_ref().map(RetryStateDbValue::from_retry_state),
-            tmdb: state.tmdb.as_ref().map(RetryStateDbValue::from_retry_state),
-            updated_at_ts,
-        }
+fn retry_state_db_from_retry_state(state: &RetryState) -> RetryStateDbValue {
+    RetryStateDbValue {
+        attempts: state.attempts,
+        next_allowed_at_ts: state.next_allowed_at_ts,
+        cooldown_until_ts: state.cooldown_until_ts,
+        last_error: state.last_error.clone(),
+        source_last_modified: state.source_last_modified,
     }
+}
 
-    fn into_task_retry_state(self) -> Option<TaskRetryState> {
-        let mut state = TaskRetryState {
-            resolve: self.resolve.and_then(RetryStateDbValue::into_retry_state),
-            probe: self.probe.and_then(RetryStateDbValue::into_retry_state),
-            tmdb: self.tmdb.and_then(RetryStateDbValue::into_retry_state),
-            updated_at_ts: self.updated_at_ts,
-        };
-        if state.is_empty() {
-            return None;
-        }
-        if state.updated_at_ts <= 0 {
-            state.updated_at_ts = state.max_domain_timestamp();
-        }
-        Some(state)
+fn retry_state_db_into_retry_state(value: RetryStateDbValue) -> Option<RetryState> {
+    if value.attempts == 0
+        && value.next_allowed_at_ts <= 0
+        && value.cooldown_until_ts.is_none()
+        && value.source_last_modified.is_none()
+    {
+        return None;
     }
+    Some(RetryState {
+        attempts: value.attempts,
+        next_allowed_at_ts: value.next_allowed_at_ts,
+        cooldown_until_ts: value.cooldown_until_ts,
+        last_error: value.last_error,
+        source_last_modified: value.source_last_modified,
+    })
+}
+
+fn metadata_retry_value_from_task_retry_state(state: &TaskRetryState, updated_at_ts: i64) -> MetadataRetryDbValue {
+    MetadataRetryDbValue {
+        resolve: state.resolve.as_ref().map(retry_state_db_from_retry_state),
+        probe: state.probe.as_ref().map(retry_state_db_from_retry_state),
+        tmdb: state.tmdb.as_ref().map(retry_state_db_from_retry_state),
+        updated_at_ts,
+    }
+}
+
+fn metadata_retry_value_into_task_retry_state(value: MetadataRetryDbValue) -> Option<TaskRetryState> {
+    let mut state = TaskRetryState {
+        resolve: value.resolve.and_then(retry_state_db_into_retry_state),
+        probe: value.probe.and_then(retry_state_db_into_retry_state),
+        tmdb: value.tmdb.and_then(retry_state_db_into_retry_state),
+        updated_at_ts: value.updated_at_ts,
+    };
+    if state.is_empty() {
+        return None;
+    }
+    if state.updated_at_ts <= 0 {
+        state.updated_at_ts = state.max_domain_timestamp();
+    }
+    Some(state)
 }
 
 fn ensure_metadata_retry_db(path: &Path) -> io::Result<()> {
@@ -380,8 +374,8 @@ fn load_metadata_retry_states_from_disk(path: &Path) -> io::Result<HashMap<TaskK
     let mut query = BPlusTreeQuery::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new(path)?;
     for entry in query.iter() {
         let (key, value) = entry?;
-        if let Some(state) = value.clone().into_task_retry_state() {
-            result.insert(key.into_task_key(), state);
+        if let Some(state) = metadata_retry_value_into_task_retry_state(value.clone()) {
+            result.insert(metadata_retry_key_into_task_key(key), state);
         } else {
             stale_keys.push(key);
         }
@@ -404,14 +398,14 @@ fn persist_metadata_retry_state_to_disk(
     task_key: &TaskKey,
     state: Option<&TaskRetryState>,
 ) -> io::Result<()> {
-    let db_key = MetadataRetryDbKey::from_task_key(task_key);
+    let db_key = metadata_retry_key_from_task_key(task_key);
 
     ensure_metadata_retry_db(path)?;
 
     let mut update = BPlusTreeUpdate::<MetadataRetryDbKey, MetadataRetryDbValue>::try_new_with_backoff(path)?;
     if let Some(retry_state) = state {
         let now_ts = chrono::Utc::now().timestamp();
-        let value = MetadataRetryDbValue::from_task_retry_state(retry_state, now_ts);
+        let value = metadata_retry_value_from_task_retry_state(retry_state, now_ts);
         update
             .upsert_batch(&[(&db_key, &value)])
             .map_err(|e| io::Error::other(format!("persist metadata retry state failed: {e}")))?;
