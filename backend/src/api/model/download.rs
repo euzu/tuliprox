@@ -969,7 +969,7 @@ impl DownloadQueue {
                 .start_at
                 .zip(download.duration_secs)
                 .is_some_and(|(start_at, duration_secs)| {
-                    crate::api::model::recording::recording_math::window_elapsed(
+                    shared::model::recording_math::window_elapsed(
                         start_at,
                         duration_secs,
                         now_ts,

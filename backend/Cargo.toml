@@ -22,6 +22,7 @@ tuliprox-parser = { version = "3", path = "../parser" }
 tuliprox-auth = { version = "3", path = "../auth" }
 tuliprox-config-loader = { version = "3", path = "../config-loader" }
 tuliprox-repository = { version = "3", path = "../repository" }
+tuliprox-session = { version = "3", path = "../session" }
 tuliprox-media-server = { version = "3", path = "../media-server" }
 tuliprox-mpegts = { version = "3", path = "../mpegts" }
 serde.workspace = true

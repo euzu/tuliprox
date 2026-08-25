@@ -1,12 +1,6 @@
 use crate::{
-    api::model::{
-        active_provider_manager::ConnectionKind, connection_manager::CleanupEvent, ActiveProviderManager,
-        CustomVideoStreamType, EventManager, EventMessage,
-    },
-    auth::Fingerprint,
-    model::{Config, ProxyUserCredentials},
-    repository::GeoIp,
-    utils::{debug_if_enabled, utc_day_from_secs},
+    active_provider_manager::ConnectionKind, connection_manager::CleanupEvent, ActiveProviderManager, EventManager,
+    EventMessage,
 };
 use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
@@ -17,8 +11,8 @@ use shared::{
         default_grace_period_millis, default_grace_period_timeout_secs, default_hls_session_ttl_secs, DASH_EXT, HLS_EXT,
     },
     model::{
-        ActiveUserConnectionChange, PlaylistItemType, StreamChannel, StreamInfo, StreamTechnicalInfo,
-        UserConnectionPermission, VirtualId,
+        ActiveUserConnectionChange, CustomVideoStreamType, PlaylistItemType, StreamChannel, StreamInfo,
+        StreamTechnicalInfo, UserConnectionPermission, VirtualId,
     },
     utils::{
         current_time_secs, extract_extension_from_url, is_catchup_session_token, sanitize_sensitive_info, strip_port,
@@ -39,6 +33,15 @@ use std::{
 };
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
+use tuliprox_core::{
+    model::{Config, Fingerprint, ProxyUserCredentials},
+    utils::{debug_if_enabled, utc_day_from_secs},
+};
+use tuliprox_repository::GeoIp;
+
+/// Capacity of the per-user divergence cache. A constant so the conversion
+/// cannot fail at runtime.
+const DIVERGENCE_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(256).unwrap();
 
 const USER_GC_TTL: u64 = 900; // 15 Min
 const USER_CON_TTL: u64 = 1_800; // 30 minutes
@@ -149,9 +152,9 @@ struct UserConnectionCounts {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ConnectionAdmission {
-    pub(crate) permission: UserConnectionPermission,
-    pub(crate) kind: Option<ConnectionKind>,
+pub struct ConnectionAdmission {
+    pub permission: UserConnectionPermission,
+    pub kind: Option<ConnectionKind>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -549,7 +552,7 @@ pub struct ActiveUserManager {
     cleanup_tx: tokio::sync::OnceCell<mpsc::Sender<CleanupEvent>>,
     provider_manager: tokio::sync::OnceCell<Arc<ActiveProviderManager>>,
     transition_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    pub(crate) dropped_cleanup_events: AtomicU64,
+    pub dropped_cleanup_events: AtomicU64,
     divergence_cache: Mutex<LruCache<String, DivergenceEntry>>,
     divergence_cooldown_secs: u64,
 }
@@ -642,7 +645,7 @@ impl ActiveUserManager {
             provider_manager: tokio::sync::OnceCell::new(),
             transition_gates: Mutex::new(HashMap::new()),
             dropped_cleanup_events: AtomicU64::new(0),
-            divergence_cache: Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap())),
+            divergence_cache: Mutex::new(LruCache::new(DIVERGENCE_CACHE_CAPACITY)),
             divergence_cooldown_secs: 300,
         }
     }
@@ -667,11 +670,7 @@ impl ActiveUserManager {
         transition_gates.retain(|_, gate| Arc::strong_count(gate) > 1);
     }
 
-    pub(crate) async fn acquire_playback_transition(
-        &self,
-        username: &str,
-        token: &str,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
+    pub async fn acquire_playback_transition(&self, username: &str, token: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let key = Self::transition_gate_key(username, token);
         let gate = {
             let mut transition_gates = self.transition_gates.lock().await;
@@ -681,7 +680,7 @@ impl ActiveUserManager {
         gate.lock_owned().await
     }
 
-    pub(crate) async fn acquire_user_admission(&self, username: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    pub async fn acquire_user_admission(&self, username: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let key = Self::admission_gate_key(username);
         let gate = {
             let mut transition_gates = self.transition_gates.lock().await;
@@ -696,14 +695,14 @@ impl ActiveUserManager {
             || incoming_channel.item_type.requires_provider_affinity()
     }
 
-    pub(crate) fn set_cleanup_sender(&self, tx: mpsc::Sender<CleanupEvent>) { let _ = self.cleanup_tx.set(tx); }
+    pub fn set_cleanup_sender(&self, tx: mpsc::Sender<CleanupEvent>) { let _ = self.cleanup_tx.set(tx); }
 
-    pub(crate) fn set_provider_manager(&self, provider_manager: Arc<ActiveProviderManager>) {
+    pub fn set_provider_manager(&self, provider_manager: Arc<ActiveProviderManager>) {
         let _ = self.provider_manager.set(provider_manager);
     }
 
     /// Collect a snapshot of all currently active streams for shutdown history recording.
-    pub(crate) async fn get_all_active_streams(&self) -> Vec<shared::model::StreamInfo> {
+    pub async fn get_all_active_streams(&self) -> Vec<shared::model::StreamInfo> {
         let connections = self.connections.read().await;
         connections
             .by_key
@@ -1175,7 +1174,7 @@ impl ActiveUserManager {
         )
     }
 
-    pub(crate) async fn connection_admission(
+    pub async fn connection_admission(
         &self,
         username: &str,
         max_connections: u32,
@@ -1200,7 +1199,7 @@ impl ActiveUserManager {
         self.connection_admission(username, max_connections, soft_connections).await.permission
     }
 
-    pub(crate) async fn connection_admission_for_session(
+    pub async fn connection_admission_for_session(
         &self,
         username: &str,
         max_connections: u32,
@@ -1255,7 +1254,7 @@ impl ActiveUserManager {
             .permission
     }
 
-    pub(crate) async fn refresh_session_connection_kind_for_origin_policy(
+    pub async fn refresh_session_connection_kind_for_origin_policy(
         &self,
         username: &str,
         max_connections: u32,
@@ -1311,11 +1310,7 @@ impl ActiveUserManager {
         connection_kind
     }
 
-    pub(crate) async fn get_eviction_candidates(
-        &self,
-        username: &str,
-        _client_ip: &str,
-    ) -> Vec<crate::api::model::EvictionCandidate> {
+    pub async fn get_eviction_candidates(&self, username: &str, _client_ip: &str) -> Vec<crate::EvictionCandidate> {
         let connections = self.connections.read().await;
         let Some(connection_data) = connections.by_key.get(username) else {
             return Vec::new();
@@ -1366,12 +1361,12 @@ impl ActiveUserManager {
                     addr_count == 1
                 }
             })
-            .map(|s| crate::api::model::EvictionCandidate { addr: s.addr, client_ip: s.client_ip.clone(), ts: s.ts })
+            .map(|s| crate::EvictionCandidate { addr: s.addr, client_ip: s.client_ip.clone(), ts: s.ts })
             .collect();
         candidates
     }
 
-    pub(crate) async fn grant_grace(&self, username: &str) -> bool {
+    pub async fn grant_grace(&self, username: &str) -> bool {
         if self.grace_period_millis.load(Ordering::Relaxed) == 0 {
             debug!("Grace grant denied, grace_period_millis is zero for {username}");
             return false;
@@ -1799,7 +1794,6 @@ impl ActiveUserManager {
         connection_data.streams.iter().any(|stream| stream.session_token.as_deref() == Some(session_token))
     }
 
-
     fn clear_session_counted_without_stream(connection_data: &mut UserConnectionData, session_token: &str) {
         if Self::session_has_stream(connection_data, session_token) {
             return;
@@ -1855,7 +1849,7 @@ impl ActiveUserManager {
         while connection_data.try_promote_soft_session_reservation() {}
     }
 
-    pub(crate) async fn connection_admission_for_session_activation(
+    pub async fn connection_admission_for_session_activation(
         &self,
         username: &str,
         max_connections: u32,
@@ -2791,7 +2785,7 @@ impl ActiveUserManager {
     }
 
     /// Session for target-scoped `virtual_id` and request token (used to recover leaked relative DVR segment paths).
-    pub(crate) async fn find_latest_session_for_target_stream(
+    pub async fn find_latest_session_for_target_stream(
         &self,
         username: &str,
         target_id: u16,
@@ -3388,17 +3382,14 @@ impl ActiveUserManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        api::model::EventManager,
-        auth::Fingerprint,
-        model::{Config, ProxyUserCredentials},
-    };
+    use crate::EventManager;
     use arc_swap::ArcSwapOption;
     use shared::{
         model::{PlaylistItemType, ProxyType, StreamChannel, StreamInfo, XtreamCluster},
         utils::Internable,
     };
     use std::{borrow::Cow, collections::HashMap, sync::Arc};
+    use tuliprox_core::model::{Config, Fingerprint, ProxyUserCredentials};
 
     fn test_channel(virtual_id: u32) -> StreamChannel {
         StreamChannel {
@@ -3525,26 +3516,21 @@ mod tests {
             }));
         }
 
-        let session = manager
-            .find_latest_session_for_target_stream(&user.username, 2, "input", 42, "tok-target-two")
-            .await;
+        let session =
+            manager.find_latest_session_for_target_stream(&user.username, 2, "input", 42, "tok-target-two").await;
         assert!(session.is_some(), "target-scoped session should resolve");
         let Some(session) = session else {
             return;
         };
         assert_eq!(session.token, "tok-target-two");
-        assert!(
-            manager
-                .find_latest_session_for_target_stream(&user.username, 3, "input", 42, "tok-target-two")
-                .await
-                .is_none()
-        );
-        assert!(
-            manager
-                .find_latest_session_for_target_stream(&user.username, 1, "input", 42, "tok-target-two")
-                .await
-                .is_none()
-        );
+        assert!(manager
+            .find_latest_session_for_target_stream(&user.username, 3, "input", 42, "tok-target-two")
+            .await
+            .is_none());
+        assert!(manager
+            .find_latest_session_for_target_stream(&user.username, 1, "input", 42, "tok-target-two")
+            .await
+            .is_none());
     }
 
     /// Session refresh normalizes Expired -> Prepared.
@@ -4630,20 +4616,13 @@ mod tests {
         // A counted session owns one logical slot. Active streams tied to that
         // session validate its kind below, but do not add another slot.
         for session in connection_data.sessions.iter().filter(|session| session.lifecycle.is_counted()) {
-            record_owned_slot(
-                &mut owned_slots,
-                session.connection_kind.unwrap_or(ConnectionKind::Normal),
-            );
+            record_owned_slot(&mut owned_slots, session.connection_kind.unwrap_or(ConnectionKind::Normal));
         }
 
         for stream in &connection_data.streams {
             let stream_kind = connection_data.stream_kinds.get(&stream.uid);
             if stream.preserved {
-                assert!(
-                    stream_kind.is_none(),
-                    "preserved stream {} must not own a real connection slot",
-                    stream.uid
-                );
+                assert!(stream_kind.is_none(), "preserved stream {} must not own a real connection slot", stream.uid);
                 continue;
             }
 
@@ -4688,11 +4667,7 @@ mod tests {
         assert_connection_ownership_invariants(connection_data);
     }
 
-    fn assert_active_stream_kind(
-        connection_data: &UserConnectionData,
-        stream_uid: u32,
-        expected_kind: ConnectionKind,
-    ) {
+    fn assert_active_stream_kind(connection_data: &UserConnectionData, stream_uid: u32, expected_kind: ConnectionKind) {
         assert!(
             connection_data.streams.iter().any(|stream| stream.uid == stream_uid && !stream.preserved),
             "stream {stream_uid} must remain active"
@@ -4738,11 +4713,7 @@ mod tests {
         addr: SocketAddr,
         connection_kind: ConnectionKind,
     ) {
-        let fingerprint = Fingerprint::new(
-            format!("fp-preserved-{stream_uid}"),
-            addr.ip().to_string(),
-            addr,
-        );
+        let fingerprint = Fingerprint::new(format!("fp-preserved-{stream_uid}"), addr.ip().to_string(), addr);
 
         manager.add_connection(&addr).await;
         manager
@@ -4819,7 +4790,7 @@ mod tests {
             [("tok-31", shared_addr, 1031u32), ("tok-32", shared_addr, 1032), ("tok-33", unique_addr, 1033)]
         {
             manager
-                .create_user_session(crate::api::model::CreateUserSessionParams {
+                .create_user_session(crate::CreateUserSessionParams {
                     user: &user,
                     session_token: token,
                     virtual_id: channel_id,
@@ -4895,7 +4866,7 @@ mod tests {
         let user = test_user_credentials("same-user", 2, 0);
         for (token, addr, channel_id) in [("tok-41", first_addr, 1041u32), ("tok-42", second_addr, 1042)] {
             manager
-                .create_user_session(crate::api::model::CreateUserSessionParams {
+                .create_user_session(crate::CreateUserSessionParams {
                     user: &user,
                     session_token: token,
                     virtual_id: channel_id,
@@ -8227,19 +8198,11 @@ mod tests {
         let session_token = "tok-preserved-activation";
         let stream_uid = 501;
 
-        commit_and_preserve_adaptive_session(
-            &manager,
-            &user,
-            session_token,
-            stream_uid,
-            addr,
-            ConnectionKind::Normal,
-        )
-        .await;
-
-        let virtual_admission = manager
-            .connection_admission(&user.username, user.max_connections, user.soft_connections)
+        commit_and_preserve_adaptive_session(&manager, &user, session_token, stream_uid, addr, ConnectionKind::Normal)
             .await;
+
+        let virtual_admission =
+            manager.connection_admission(&user.username, user.max_connections, user.soft_connections).await;
         assert_eq!(virtual_admission.permission, UserConnectionPermission::Exhausted);
 
         let admission = manager
@@ -8271,15 +8234,8 @@ mod tests {
         let session_token = "tok-preserved-eviction";
         let stream_uid = 601;
 
-        commit_and_preserve_adaptive_session(
-            &manager,
-            &user,
-            session_token,
-            stream_uid,
-            addr,
-            ConnectionKind::Normal,
-        )
-        .await;
+        commit_and_preserve_adaptive_session(&manager, &user, session_token, stream_uid, addr, ConnectionKind::Normal)
+            .await;
         let admission = manager
             .connection_admission_for_session_activation(
                 &user.username,
@@ -8326,15 +8282,8 @@ mod tests {
         let session_token = "tok-preserved-idle-cleanup";
         let stream_uid = 602;
 
-        commit_and_preserve_adaptive_session(
-            &manager,
-            &user,
-            session_token,
-            stream_uid,
-            addr,
-            ConnectionKind::Normal,
-        )
-        .await;
+        commit_and_preserve_adaptive_session(&manager, &user, session_token, stream_uid, addr, ConnectionKind::Normal)
+            .await;
         let admission = manager
             .connection_admission_for_session_activation(
                 &user.username,
@@ -8352,9 +8301,8 @@ mod tests {
         }
 
         // Shared-HLS lease-idle cleanup delegates to this manager operation.
-        let counter_changed = manager
-            .release_session_streams_and_counted_reservation(&user.username, session_token)
-            .await;
+        let counter_changed =
+            manager.release_session_streams_and_counted_reservation(&user.username, session_token).await;
         assert!(!counter_changed, "removing an uncounted preserved stream must not change real counters");
 
         let connections = manager.connections.read().await;
@@ -8379,10 +8327,9 @@ mod tests {
         let manager = ActiveUserManager::new(&config, &geoip, &event_manager);
 
         let user = test_user_credentials("user-preserved-repeat", 4, 0);
-        for (session_token, stream_uid, addr) in [
-            ("tok-preserved-repeat-one", 603, "127.0.0.1:55203"),
-            ("tok-preserved-repeat-two", 604, "127.0.0.1:55204"),
-        ] {
+        for (session_token, stream_uid, addr) in
+            [("tok-preserved-repeat-one", 603, "127.0.0.1:55203"), ("tok-preserved-repeat-two", 604, "127.0.0.1:55204")]
+        {
             let addr = addr.parse().unwrap();
             commit_and_preserve_adaptive_session(
                 &manager,
@@ -8404,9 +8351,8 @@ mod tests {
                 .await;
             assert_eq!(admission.permission, UserConnectionPermission::Allowed);
 
-            let counter_changed = manager
-                .release_session_streams_and_counted_reservation(&user.username, session_token)
-                .await;
+            let counter_changed =
+                manager.release_session_streams_and_counted_reservation(&user.username, session_token).await;
             assert!(!counter_changed, "cleanup must not release a slot that was never committed");
 
             let connections = manager.connections.read().await;
@@ -8429,15 +8375,8 @@ mod tests {
         let session_token = "tok-preserved-dashboard";
         let stream_uid = 605;
 
-        commit_and_preserve_adaptive_session(
-            &manager,
-            &user,
-            session_token,
-            stream_uid,
-            addr,
-            ConnectionKind::Normal,
-        )
-        .await;
+        commit_and_preserve_adaptive_session(&manager, &user, session_token, stream_uid, addr, ConnectionKind::Normal)
+            .await;
         assert_eq!(manager.active_users_and_connections().await, (0, 0));
 
         let admission = manager
@@ -8532,9 +8471,8 @@ mod tests {
             assert_single_normal_stream_slot(connection_data, normal_stream_uid);
         }
 
-        let counter_changed = manager
-            .release_session_streams_and_counted_reservation(&user.username, session_token)
-            .await;
+        let counter_changed =
+            manager.release_session_streams_and_counted_reservation(&user.username, session_token).await;
         assert!(!counter_changed, "preserved soft cleanup must not release an uncommitted slot");
         {
             let connections = manager.connections.read().await;
@@ -8549,10 +8487,7 @@ mod tests {
             assert_single_normal_stream_slot(connection_data, normal_stream_uid);
         }
 
-        manager
-            .release_stream_by_uid(&normal_addr, normal_stream_uid)
-            .await
-            .expect("normal stream should release");
+        manager.release_stream_by_uid(&normal_addr, normal_stream_uid).await.expect("normal stream should release");
         let connections = manager.connections.read().await;
         let connection_data = connections.by_key.get(&user.username).expect("user connection data");
         assert!(connection_data.streams.is_empty());

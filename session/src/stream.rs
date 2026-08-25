@@ -1,16 +1,13 @@
-use crate::{
-    api::model::{CustomVideoStreamType, ProviderHandle, StreamError},
-    model::GracePeriodOptions,
-};
 use axum::http::StatusCode;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use shared::{
     defaults::HLS_EXT,
-    model::{PlaylistItemType, StreamChannel},
+    model::{CustomVideoStreamType, PlaylistItemType, StreamChannel},
 };
 use std::{collections::HashMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
+use tuliprox_core::model::{GracePeriodOptions, ProviderHandle, StreamError};
 use url::Url;
 
 pub type BoxedProviderStream = BoxStream<'static, Result<Bytes, StreamError>>;
@@ -27,14 +24,14 @@ pub struct ProviderStreamFactoryResponse {
 
 /// Controls whether a provider stream preserves its origin representation or normalizes it to identity bytes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum ProviderContentRepresentationMode {
+pub enum ProviderContentRepresentationMode {
     #[default]
     PreserveOrigin,
     Identity,
 }
 
 impl ProviderContentRepresentationMode {
-    pub(crate) fn for_playback_extension(extension: &str) -> Self {
+    pub fn for_playback_extension(extension: &str) -> Self {
         if extension.eq_ignore_ascii_case(HLS_EXT) {
             Self::Identity
         } else {
@@ -43,7 +40,7 @@ impl ProviderContentRepresentationMode {
     }
 }
 
-pub(crate) fn uses_direct_body_idle_timeout(stream_channel: &StreamChannel) -> bool {
+pub fn uses_direct_body_idle_timeout(stream_channel: &StreamChannel) -> bool {
     !stream_channel.shared
         && matches!(
             stream_channel.item_type,
@@ -71,7 +68,7 @@ pub enum ProviderStreamState {
 
 pub struct StreamDetails {
     pub stream: Option<BoxedProviderStream>,
-    pub(crate) stream_info: ProviderStreamInfo,
+    pub stream_info: ProviderStreamInfo,
     pub provider_name: Option<Arc<str>>,
     pub request_url: Option<Arc<str>>,
     pub session_headers: Option<HashMap<String, String>>,
@@ -81,10 +78,10 @@ pub struct StreamDetails {
     pub disable_provider_grace: bool,
     pub reconnect_flag: Option<CancellationToken>,
     pub provider_handle: Option<ProviderHandle>,
-    pub(crate) content_representation: ProviderContentRepresentationMode,
+    pub content_representation: ProviderContentRepresentationMode,
     /// Set when the stream was admitted via a user-grace strategy. Carried through to
     /// `stream_grace_period` so remaining strategies can be evaluated if the grace fails.
-    pub(crate) grace_resolution_context: Option<crate::api::api_utils::GraceResolutionContext>,
+    pub grace_resolution_context: Option<crate::GraceResolutionContext>,
 }
 
 /// Manual Clone: stream cannot be cloned so we set it to None on the clone.

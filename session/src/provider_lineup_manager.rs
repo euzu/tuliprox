@@ -1,9 +1,4 @@
-use crate::model::{ProviderAllocation, ProviderConfig, ProviderConfigWrapper};
-use crate::{
-    api::model::{EventManager, ProviderConfigConnection, ProviderConnectionChangeCallback},
-    model::{is_input_expired, ConfigInput, GracePeriodOptions},
-    utils::debug_if_enabled,
-};
+use crate::EventManager;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use log::{debug, log_enabled};
@@ -17,6 +12,13 @@ use std::{
     },
 };
 use tokio::sync::RwLock;
+use tuliprox_core::{
+    model::{
+        is_input_expired, ConfigInput, GracePeriodOptions, ProviderAllocation, ProviderConfig,
+        ProviderConfigConnection, ProviderConfigWrapper, ProviderConnectionChangeCallback,
+    },
+    utils::debug_if_enabled,
+};
 
 macro_rules! gen_provider_search {
     ($fn_name:ident, $field: ident, $crit_type:ty) => {
@@ -65,8 +67,6 @@ fn get_or_create_provider_connection(
         .or_insert_with(|| Arc::new(RwLock::new(ProviderConfigConnection::default())))
         .clone()
 }
-
-
 
 /// This manages different types of provider lineups:
 ///
@@ -257,13 +257,12 @@ impl MultiProviderLineup {
     /// - Ensures fair provider allocation across multiple threads.
     ///
     /// # Example Usage
-    /// ```rust
+    /// ```text
     /// let lineup = MultiProviderLineup::new(&config);
-    /// match lineup.acquire_next_provider_from_group(priority_group) {
+    /// match lineup.acquire_next_provider_from_group(priority_group).await {
     ///    ProviderAllocation::Exhausted => println!("All providers exhausted"),
     ///    ProviderAllocation::Available(provider) =>  println!("Provider available {}", provider.name),
     ///    ProviderAllocation::GracePeriod(provider) =>  println!("Provider with grace period {}", provider.name),
-    /// }
     /// }
     /// ```
     async fn acquire_next_provider_from_group(
@@ -369,9 +368,9 @@ impl MultiProviderLineup {
     /// - Uses `RwLock` for thread-safe provider allocation.
     ///
     /// # Example Usage
-    /// ```rust
+    /// ```text
     /// let lineup = MultiProviderLineup::new(&config);
-    /// match lineup.acquire() {
+    /// match lineup.acquire().await {
     ///    ProviderAllocation::Exhausted => println!("All providers exhausted"),
     ///    ProviderAllocation::Available(provider) =>  println!("Provider available {}", provider.name),
     ///    ProviderAllocation::GracePeriod(provider) =>  println!("Provider with grace period {}", provider.name),
@@ -469,7 +468,7 @@ impl MultiProviderLineup {
     }
 }
 
-pub(in crate::api::model) struct ProviderLineupManager {
+pub struct ProviderLineupManager {
     grace_period_millis: AtomicU64,
     grace_period_timeout_secs: AtomicU64,
     snapshot: Arc<ArcSwap<LineupSnapshot>>,
@@ -704,7 +703,7 @@ impl ProviderLineupManager {
     }
 
     /// Acquire exactly the requested provider account while respecting its configured limits.
-    pub(crate) async fn acquire_exact_connection_with_grace_override(
+    pub async fn acquire_exact_connection_with_grace_override(
         &self,
         provider_name: &Arc<str>,
         allow_grace: bool,
@@ -725,7 +724,7 @@ impl ProviderLineupManager {
     ///
     /// When `allow_grace` is `false`, the lineup will not allocate providers in `GracePeriod`,
     /// even if a global grace period is configured.
-    pub(crate) async fn acquire_connection_with_grace_override(
+    pub async fn acquire_connection_with_grace_override(
         &self,
         input_name: &Arc<str>,
         allow_grace: bool,
@@ -906,16 +905,18 @@ impl ProviderLineupManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{model::ConfigInputAlias, Arc};
     use shared::{
         concat_string,
-        model::{InputFetchMethod, InputType},
+        model::{InputFetchMethod, InputType, StagedInputType},
         utils::Internable,
     };
-    use tokio::sync::Barrier;
-    use tokio::task::JoinSet;
-    use tokio::time::{sleep, Duration};
-    use shared::model::StagedInputType;
+    use std::sync::Arc;
+    use tokio::{
+        sync::Barrier,
+        task::JoinSet,
+        time::{sleep, Duration},
+    };
+    use tuliprox_core::model::ConfigInputAlias;
 
     macro_rules! should_available {
         ($lineup:expr, $provider_id:expr, $grace_period_timeout_secs: expr) => {

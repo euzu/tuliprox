@@ -1,0 +1,31 @@
+//! Provider allocation and the streaming-session runtime.
+//!
+//! This is the layer that decides *who gets a stream and from which provider*:
+//! provider allocation and lineup rotation, admission and eviction of
+//! connections, per-user session accounting, the event bus those parts talk
+//! over, connection metering, and the shared-stream fan-out that lets several
+//! clients ride one upstream connection.
+//!
+//! These pieces are one package rather than several because they are mutually
+//! recursive at the value level - `ConnectionManager` holds an
+//! `Arc<SharedStreamManager>`, which holds an `Arc<ActiveProviderManager>`,
+//! which holds a back-reference to the `SharedStreamManager`. Splitting them
+//! would require callback traits that exist only to break the cycle, which the
+//! modularization plan rules out.
+//!
+//! Nothing here names `AppState`: the runtime takes the handles it needs.
+
+pub mod active_provider_manager;
+pub mod active_user_manager;
+pub mod admission_strategy;
+pub mod connection_manager;
+pub mod event_manager;
+pub mod meter;
+pub mod provider_lineup_manager;
+pub mod stream;
+pub mod streams;
+
+pub use self::{
+    active_provider_manager::*, active_user_manager::*, admission_strategy::*, connection_manager::*, event_manager::*,
+    meter::*, provider_lineup_manager::*, stream::*, streams::*,
+};

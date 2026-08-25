@@ -1,6 +1,4 @@
-use crate::{
-    api::model::{BoxedProviderStream, StreamError, STREAM_IDLE_TIMEOUT},
-};
+use crate::BoxedProviderStream;
 use futures::{
     stream::Stream,
     task::{Context, Poll},
@@ -11,18 +9,19 @@ use std::{cmp::max, future::Future, pin::Pin, sync::Arc};
 use tokio::{
     select,
     sync::{
-        mpsc::{error::TrySendError, channel, Sender},
+        mpsc::{channel, error::TrySendError, Sender},
         Semaphore,
     },
     time::{sleep, Duration, Instant},
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
+use tuliprox_core::{model::StreamError, utils::network::request::STREAM_IDLE_TIMEOUT};
 
 pub const CHANNEL_SIZE: usize = 1024;
 pub const MAX_BUFFER_BYTES: usize = 5 * 1024 * 1024;
 
-pub(in crate::api::model) struct BufferedStream {
+pub struct BufferedStream {
     stream: ReceiverStream<Result<bytes::Bytes, StreamError>>,
     close_cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
     semaphore: Arc<Semaphore>,
@@ -180,12 +179,17 @@ impl Stream for BufferedStream {
 #[cfg(test)]
 mod tests {
     use super::BufferedStream;
-    use crate::api::model::StreamError;
     use bytes::Bytes;
     use futures::Stream;
-    use std::{future::Future, pin::Pin, task::{Context, Poll}, time::Duration};
+    use std::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll},
+        time::Duration,
+    };
     use tokio::sync::oneshot;
     use tokio_util::sync::CancellationToken;
+    use tuliprox_core::model::StreamError;
 
     struct GatedDropProbeStream {
         gate: oneshot::Receiver<()>,
@@ -224,11 +228,7 @@ mod tests {
         let (gate_tx, gate_rx) = oneshot::channel();
         let (dropped_tx, dropped_rx) = oneshot::channel();
         let cancel = CancellationToken::new();
-        let upstream = GatedDropProbeStream {
-            gate: gate_rx,
-            dropped: Some(dropped_tx),
-            yielded: false,
-        };
+        let upstream = GatedDropProbeStream { gate: gate_rx, dropped: Some(dropped_tx), yielded: false };
         let buffered = BufferedStream::new(Box::pin(upstream), 1, 0, cancel.clone(), "test");
 
         drop(buffered);

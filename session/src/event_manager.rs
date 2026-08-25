@@ -1,13 +1,15 @@
-use crate::api::model::{MeterReading, StreamMeterHandle};
+use crate::{MeterReading, StreamMeterHandle};
 use log::trace;
 use shared::model::{
-    ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse,
-    LibraryScanProgressEvent, PlaylistUpdateProgressEvent, PlaylistUpdateState, StreamMeterEntry,
-    SystemInfo,
+    ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse, LibraryScanProgressEvent,
+    PlaylistUpdateProgressEvent, PlaylistUpdateState, StreamMeterEntry, SystemInfo,
 };
 use std::{
     collections::HashMap,
-    sync::{atomic::AtomicUsize, atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tokio::sync::RwLock;
@@ -65,13 +67,7 @@ impl EventManager {
             meter_sampler_cancel.clone(),
         );
 
-        Self {
-            channel_tx,
-            meter_channel_tx,
-            meter_registry,
-            stream_meter_subscriber_count,
-            meter_sampler_cancel,
-        }
+        Self { channel_tx, meter_channel_tx, meter_registry, stream_meter_subscriber_count, meter_sampler_cancel }
     }
 
     fn spawn_meter_sampler(
@@ -210,7 +206,8 @@ impl EventManager {
 
             if let Some(old_meter_uid) = registry.client_to_meter.insert(client_uid, meter_uid) {
                 if old_meter_uid != meter_uid {
-                    let previous_client_uids = registry.meter_to_clients.get(&old_meter_uid).cloned().unwrap_or_default();
+                    let previous_client_uids =
+                        registry.meter_to_clients.get(&old_meter_uid).cloned().unwrap_or_default();
                     if previous_client_uids.len() == 1 && previous_client_uids[0] == client_uid {
                         carried_entry = registry
                             .meters
@@ -304,10 +301,7 @@ async fn sample_meter_entries(meter_registry: &RwLock<MeterRegistry>) -> Vec<Str
         return Vec::new();
     }
 
-    samples
-        .into_iter()
-        .filter_map(|(_meter_uid, reading, uids)| build_meter_entry(reading, uids))
-        .collect()
+    samples.into_iter().filter_map(|(_meter_uid, reading, uids)| build_meter_entry(reading, uids)).collect()
 }
 
 fn build_meter_entry(reading: MeterReading, uids: Vec<u32>) -> Option<StreamMeterEntry> {
@@ -319,12 +313,7 @@ fn build_meter_entry(reading: MeterReading, uids: Vec<u32>) -> Option<StreamMete
     let rate_kbps = u32::try_from(rate_kbps_u64).unwrap_or(u32::MAX);
     let total_kb = u32::try_from(reading.bytes_total / 1024).unwrap_or(u32::MAX);
 
-    Some(StreamMeterEntry {
-        meter_uid: reading.meter_uid,
-        uids,
-        rate_kbps,
-        total_kb,
-    })
+    Some(StreamMeterEntry { meter_uid: reading.meter_uid, uids, rate_kbps, total_kb })
 }
 
 impl Default for EventManager {
@@ -332,15 +321,13 @@ impl Default for EventManager {
 }
 
 impl Drop for EventManager {
-    fn drop(&mut self) {
-        self.meter_sampler_cancel.cancel();
-    }
+    fn drop(&mut self) { self.meter_sampler_cancel.cancel(); }
 }
 
 #[cfg(test)]
 mod tests {
     use super::EventManager;
-    use crate::api::model::StreamMeterHandle;
+    use crate::StreamMeterHandle;
     use std::sync::Arc;
     use tokio::time::{advance, Duration};
 
@@ -376,10 +363,7 @@ mod tests {
 
         let mut meter_events = manager.get_meter_channel();
         advance(Duration::from_secs(3)).await;
-        assert!(
-            meter_events.try_recv().is_err(),
-            "meter batches must stay idle without stream-meter subscribers"
-        );
+        assert!(meter_events.try_recv().is_err(), "meter batches must stay idle without stream-meter subscribers");
 
         manager.stream_meter_subscriber_connected();
         advance(Duration::from_secs(3)).await;
@@ -467,9 +451,6 @@ mod tests {
         old_meter.record_bytes(4096);
         manager.register_meter_client(91, 32).await;
 
-        assert!(
-            meter_events.try_recv().is_err(),
-            "shared meters must not emit carried totals during reassignment"
-        );
+        assert!(meter_events.try_recv().is_err(), "shared meters must not emit carried totals during reassignment");
     }
 }

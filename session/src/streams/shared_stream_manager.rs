@@ -1,11 +1,4 @@
-use crate::{
-    api::model::{
-        streams::buffered_stream::CHANNEL_SIZE, ActiveProviderManager, BoxedProviderStream, ProviderHandle,
-        ConnectionManager, StreamError, STREAM_IDLE_TIMEOUT,
-    },
-    model::{AppConfig, Config},
-    utils::{debug_if_enabled, trace_if_enabled},
-};
+use crate::{streams::buffered_stream::CHANNEL_SIZE, ActiveProviderManager, BoxedProviderStream, ConnectionManager};
 use bytes::Bytes;
 use futures::{stream::BoxStream, Stream, StreamExt};
 use log::{debug, warn};
@@ -28,6 +21,10 @@ use tokio::{
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
+use tuliprox_core::{
+    model::{AppConfig, Config, ProviderHandle, StreamError},
+    utils::{debug_if_enabled, network::request::STREAM_IDLE_TIMEOUT, trace_if_enabled},
+};
 
 const DEFAULT_SHARED_BUFFER_SIZE_BYTES: usize = 1024 * 1024 * 32;
 const YIELD_COUNTER: usize = 64;
@@ -42,7 +39,7 @@ struct ReceiverStreamWrapper<S> {
 
 impl<S> Stream for ReceiverStreamWrapper<S>
 where
-    S: Stream<Item=Bytes> + Unpin,
+    S: Stream<Item = Bytes> + Unpin,
 {
     type Item = Result<Bytes, StreamError>;
 
@@ -194,11 +191,7 @@ async fn send_burst_buffer(
     sent
 }
 
-async fn send_client_chunk(
-    client_tx: &Sender<Bytes>,
-    data: Bytes,
-    cancellation_token: &CancellationToken,
-) -> bool {
+async fn send_client_chunk(client_tx: &Sender<Bytes>, data: Bytes, cancellation_token: &CancellationToken) -> bool {
     if cancellation_token.is_cancelled() {
         return false;
     }
@@ -222,7 +215,7 @@ pub struct SharedStreamState {
     headers: Vec<(String, String)>,
     buf_size: usize,
     provider_guard: Option<ProviderHandle>,
-    low_priority_preempted: Option<crate::api::model::TransportStreamBuffer>,
+    low_priority_preempted: Option<tuliprox_mpegts::transport_stream_buffer::TransportStreamBuffer>,
     preempted_token: CancellationToken,
     subscribers: RwLock<HashMap<SubscriberId, SharedSubscriber>>,
     next_subscriber_id: AtomicU64,
@@ -239,11 +232,11 @@ impl SharedStreamState {
         buf_size: usize,
         provider_guard: Option<ProviderHandle>,
         min_burst_buffer_size: usize,
-        low_priority_preempted: Option<crate::api::model::TransportStreamBuffer>,
+        low_priority_preempted: Option<tuliprox_mpegts::transport_stream_buffer::TransportStreamBuffer>,
     ) -> Self {
         let base_channel_capacity = buf_size.max(CHANNEL_SIZE);
-        let burst_buffer_size_in_bytes = min_burst_buffer_size
-            .max(base_channel_capacity.saturating_mul(SHARED_BURST_BYTES_PER_BUFFER_SLOT));
+        let burst_buffer_size_in_bytes =
+            min_burst_buffer_size.max(base_channel_capacity.saturating_mul(SHARED_BURST_BYTES_PER_BUFFER_SLOT));
         Self {
             headers,
             buf_size: base_channel_capacity,
@@ -269,10 +262,7 @@ impl SharedStreamState {
 
     async fn register_subscriber(&self, addr: &SocketAddr, cancel_token: CancellationToken) -> SharedSubscriberOwner {
         let id = self.next_subscriber_id.fetch_add(1, Ordering::Relaxed);
-        let subscriber = SharedSubscriber {
-            id,
-            cancel_token,
-        };
+        let subscriber = SharedSubscriber { id, cancel_token };
         let previous = {
             let mut subs = self.subscribers.write().await;
             let previous = subs.insert(*addr, subscriber);
@@ -524,14 +514,9 @@ impl SharedStreamState {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn broadcast<S, E>(
-        self: &Arc<Self>,
-        stream_url: &str,
-        bytes_stream: S,
-        shared_streams: Arc<SharedStreamManager>,
-    )
+    fn broadcast<S, E>(self: &Arc<Self>, stream_url: &str, bytes_stream: S, shared_streams: Arc<SharedStreamManager>)
     where
-        S: Stream<Item=Result<Bytes, E>> + Unpin + 'static + Send,
+        S: Stream<Item = Result<Bytes, E>> + Unpin + 'static + Send,
         E: std::fmt::Debug + Send,
     {
         let streaming_url = stream_url.to_string();
@@ -708,7 +693,7 @@ pub struct SharedStreamCtx<'a> {
 }
 
 impl SharedStreamManager {
-    pub(crate) fn new(provider_manager: Arc<ActiveProviderManager>) -> Self {
+    pub fn new(provider_manager: Arc<ActiveProviderManager>) -> Self {
         Self {
             provider_manager,
             shared_streams: RwLock::new(SharedStreamsRegister::default()),
@@ -772,10 +757,7 @@ impl SharedStreamManager {
             }
 
             if send_stop_signal || remaining == 0 {
-                trace_if_enabled!(
-                    "Sending shared stream stop signal {}",
-                    sanitize_sensitive_info(stream_url)
-                );
+                trace_if_enabled!("Sending shared stream stop signal {}", sanitize_sensitive_info(stream_url));
                 shared_state.stop_token.cancel();
             }
         }
@@ -800,10 +782,7 @@ impl SharedStreamManager {
         self.meter_uids.write().await.remove(stream_url);
 
         if let Some(shared_state) = shared_state_opt {
-            debug_if_enabled!(
-                "Tearing down preempted shared stream {}",
-                sanitize_sensitive_info(stream_url)
-            );
+            debug_if_enabled!("Tearing down preempted shared stream {}", sanitize_sensitive_info(stream_url));
 
             shared_state.preempted_token.cancel();
             shared_state.stop_token.cancel();
@@ -907,7 +886,7 @@ impl SharedStreamManager {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn register_shared_stream<S, E>(
+    pub async fn register_shared_stream<S, E>(
         ctx: SharedStreamCtx<'_>,
         stream_url: &str,
         bytes_stream: S,
@@ -916,52 +895,41 @@ impl SharedStreamManager {
         buffer_size: usize,
         provider_handle: Option<ProviderHandle>,
         user_priority: i8,
-        connection_kind: crate::api::model::active_provider_manager::ConnectionKind,
+        connection_kind: crate::active_provider_manager::ConnectionKind,
     ) -> Option<(BoxedProviderStream, Option<Arc<str>>)>
     where
-        S: Stream<Item=Result<Bytes, E>> + Unpin + 'static + Send,
+        S: Stream<Item = Result<Bytes, E>> + Unpin + 'static + Send,
         E: std::fmt::Debug + Send,
     {
         let registration_started_at = Instant::now();
         let buf_size = CHANNEL_SIZE.max(buffer_size);
         let config = ctx.app_config.config.load();
         let min_buffer_bytes = resolve_min_burst_buffer_bytes(&config);
-        let low_priority_preempted = ctx
-            .app_config
-            .custom_stream_response
-            .load()
-            .as_ref()
-            .and_then(|c| c.low_priority_preempted.clone());
+        let low_priority_preempted =
+            ctx.app_config.custom_stream_response.load().as_ref().and_then(|c| c.low_priority_preempted.clone());
         let shared_state = Arc::new(
-            SharedStreamState::new(
-                headers,
-                buf_size,
-                provider_handle,
-                min_buffer_bytes,
-                low_priority_preempted,
-            )
-            .with_subscriber_idle_timeout_secs(
-                config
-                    .reverse_proxy
-                    .as_ref()
-                    .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
-                    .map_or(DEFAULT_SUBSCRIBER_IDLE_TIMEOUT_SECS, |stream| stream.shared_subscriber_idle_timeout_secs),
-            ),
+            SharedStreamState::new(headers, buf_size, provider_handle, min_buffer_bytes, low_priority_preempted)
+                .with_subscriber_idle_timeout_secs(
+                    config
+                        .reverse_proxy
+                        .as_ref()
+                        .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
+                        .map_or(DEFAULT_SUBSCRIBER_IDLE_TIMEOUT_SECS, |stream| {
+                            stream.shared_subscriber_idle_timeout_secs
+                        }),
+                ),
         );
         ctx.shared_stream_manager.register(addr, stream_url, Arc::clone(&shared_state)).await;
         ctx.active_provider.make_shared_connection(addr, stream_url).await;
-        let subscribed_stream = Self::subscribe_shared_stream(ctx, stream_url, addr, user_priority, connection_kind).await;
+        let subscribed_stream =
+            Self::subscribe_shared_stream(ctx, stream_url, addr, user_priority, connection_kind).await;
         debug_if_enabled!(
             "Shared stream startup register+subscribe completed for {} in {} ms",
             sanitize_sensitive_info(stream_url),
             registration_started_at.elapsed().as_millis()
         );
         if subscribed_stream.is_some() {
-            shared_state.broadcast(
-                stream_url,
-                bytes_stream,
-                Arc::clone(ctx.shared_stream_manager),
-            );
+            shared_state.broadcast(stream_url, bytes_stream, Arc::clone(ctx.shared_stream_manager));
             debug_if_enabled!(
                 "Created shared provider stream {} (channel_capacity={buf_size}, burst_buffer_min={min_buffer_bytes} bytes)",
                 sanitize_sensitive_info(stream_url)
@@ -980,25 +948,14 @@ impl SharedStreamManager {
         stream_url: &str,
         addr: &SocketAddr,
         user_priority: i8,
-        connection_kind: crate::api::model::active_provider_manager::ConnectionKind,
+        connection_kind: crate::active_provider_manager::ConnectionKind,
     ) -> Option<(BoxedProviderStream, Option<Arc<str>>)> {
         let manager = Arc::clone(ctx.shared_stream_manager);
         let connection_manager = Arc::clone(ctx.connection_manager);
-        if let Some(result) = ctx
-            .shared_stream_manager
-            .subscribe_stream(stream_url, addr, manager, connection_manager)
-            .await
+        if let Some(result) =
+            ctx.shared_stream_manager.subscribe_stream(stream_url, addr, manager, connection_manager).await
         {
-            match ctx
-                .active_provider
-                .add_shared_connection(
-                    addr,
-                    stream_url,
-                    user_priority,
-                    connection_kind,
-                )
-                .await
-            {
+            match ctx.active_provider.add_shared_connection(addr, stream_url, user_priority, connection_kind).await {
                 Ok(()) => Some(result),
                 Err(err) => {
                     warn!(
@@ -1024,13 +981,8 @@ mod tests {
         MIN_BURST_BUFFER_CHUNK_ACCOUNTING_BYTES,
     };
     use crate::{
-        api::model::{
-            ActiveProviderManager, ActiveUserConnectionParams, ActiveUserManager, ConnectionKind, ConnectionManager,
-            EventManager,
-        },
-        auth::Fingerprint,
-        model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, SourcesConfig},
-        utils::FileLockManager,
+        ActiveProviderManager, ActiveUserConnectionParams, ActiveUserManager, ConnectionKind, ConnectionManager,
+        EventManager,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use bytes::Bytes;
@@ -1039,11 +991,17 @@ mod tests {
         model::{ConfigPaths, InputFetchMethod, InputType, PlaylistItemType, StreamChannel, XtreamCluster},
         utils::Internable,
     };
-    use std::borrow::Cow;
-    use std::{collections::HashMap, net::SocketAddr, sync::Arc};
-    use tokio::{sync::mpsc, time::{timeout, Duration}};
+    use std::{borrow::Cow, collections::HashMap, net::SocketAddr, sync::Arc};
+    use tokio::{
+        sync::mpsc,
+        time::{timeout, Duration},
+    };
     use tokio_stream::wrappers::ReceiverStream;
     use tokio_util::sync::CancellationToken;
+    use tuliprox_core::{
+        model::{AppConfig, Config, ConfigInput, Fingerprint, MediaToolCapabilities, SourcesConfig},
+        utils::FileLockManager,
+    };
 
     fn create_test_app_config() -> AppConfig {
         let input = Arc::new(ConfigInput {
@@ -1119,13 +1077,8 @@ mod tests {
         let geoip = Arc::new(ArcSwapOption::default());
         let user_manager = Arc::new(ActiveUserManager::new(&Config::default(), &geoip, event_manager));
         let shared_manager = Arc::new(SharedStreamManager::new(Arc::clone(&provider_manager)));
-        let connection_manager = Arc::new(ConnectionManager::new(
-            &user_manager,
-            &provider_manager,
-            &shared_manager,
-            event_manager,
-            None,
-        ));
+        let connection_manager =
+            Arc::new(ConnectionManager::new(&user_manager, &provider_manager, &shared_manager, event_manager, None));
         (provider_manager, user_manager, shared_manager, connection_manager)
     }
 
@@ -1191,17 +1144,13 @@ mod tests {
     #[tokio::test]
     async fn send_client_chunk_returns_when_cancelled_while_queue_is_full() {
         let (tx, _rx) = mpsc::channel(1);
-        tx.send(Bytes::from_static(b"queued"))
-            .await
-            .unwrap_or_else(|_| panic!("initial send should fill queue"));
+        tx.send(Bytes::from_static(b"queued")).await.unwrap_or_else(|_| panic!("initial send should fill queue"));
         let cancel_token = CancellationToken::new();
         cancel_token.cancel();
 
-        let result = timeout(
-            Duration::from_secs(1),
-            send_client_chunk(&tx, Bytes::from_static(b"blocked"), &cancel_token),
-        )
-        .await;
+        let result =
+            timeout(Duration::from_secs(1), send_client_chunk(&tx, Bytes::from_static(b"blocked"), &cancel_token))
+                .await;
 
         assert!(result.is_ok(), "cancelled send must not wait for channel capacity");
         assert!(!result.unwrap_or_else(|_| unreachable!()));
@@ -1318,13 +1267,7 @@ mod tests {
         let addr_1: SocketAddr = "127.0.0.1:41001".parse().unwrap_or_else(|_| unreachable!());
         let addr_2: SocketAddr = "127.0.0.1:41002".parse().unwrap_or_else(|_| unreachable!());
 
-        let state = Arc::new(SharedStreamState::new(
-            Vec::new(),
-            CHANNEL_SIZE.max(8),
-            None,
-            1024,
-            None,
-        ));
+        let state = Arc::new(SharedStreamState::new(Vec::new(), CHANNEL_SIZE.max(8), None, 1024, None));
 
         {
             let mut reg = shared_manager.shared_streams.write().await;
@@ -1451,13 +1394,7 @@ mod tests {
 
         let stream_url = "https://example.invalid/live/single.ts";
         let addr_1: SocketAddr = "127.0.0.1:42001".parse().unwrap_or_else(|_| unreachable!());
-        let state = Arc::new(SharedStreamState::new(
-            Vec::new(),
-            CHANNEL_SIZE.max(8),
-            None,
-            1024,
-            None,
-        ));
+        let state = Arc::new(SharedStreamState::new(Vec::new(), CHANNEL_SIZE.max(8), None, 1024, None));
 
         {
             let mut reg = shared_manager.shared_streams.write().await;
@@ -1498,30 +1435,18 @@ mod tests {
         let geoip = Arc::new(ArcSwapOption::default());
         let user_manager = Arc::new(ActiveUserManager::new(&Config::default(), &geoip, &event_manager));
         let shared_manager = Arc::new(SharedStreamManager::new(Arc::clone(&provider_manager)));
-        let connection_manager = Arc::new(ConnectionManager::new(
-            &user_manager,
-            &provider_manager,
-            &shared_manager,
-            &event_manager,
-            None,
-        ));
+        let connection_manager =
+            Arc::new(ConnectionManager::new(&user_manager, &provider_manager, &shared_manager, &event_manager, None));
 
         let addr: SocketAddr = "127.0.0.1:43001".parse().unwrap_or_else(|_| unreachable!());
         let mut ts_packet = vec![0_u8; 188];
         ts_packet[0] = 0x47;
 
-        let low_priority_fallback = crate::api::model::TransportStreamBuffer::new(ts_packet);
-        let state = Arc::new(SharedStreamState::new(
-            Vec::new(),
-            CHANNEL_SIZE.max(8),
-            None,
-            1024,
-            Some(low_priority_fallback),
-        ));
+        let low_priority_fallback = tuliprox_mpegts::transport_stream_buffer::TransportStreamBuffer::new(ts_packet);
+        let state =
+            Arc::new(SharedStreamState::new(Vec::new(), CHANNEL_SIZE.max(8), None, 1024, Some(low_priority_fallback)));
 
-        let (mut stream, _provider) = state
-            .subscribe(&addr, Arc::clone(&shared_manager), connection_manager)
-            .await;
+        let (mut stream, _provider) = state.subscribe(&addr, Arc::clone(&shared_manager), connection_manager).await;
 
         state.preempted_token.cancel();
         drop(state);
@@ -1551,11 +1476,7 @@ mod tests {
         }
 
         let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(8);
-        state.broadcast(
-            stream_url,
-            ReceiverStream::new(rx),
-            Arc::clone(&shared_manager),
-        );
+        state.broadcast(stream_url, ReceiverStream::new(rx), Arc::clone(&shared_manager));
 
         assert!(
             timeout(Duration::from_millis(100), events.recv()).await.is_err(),
@@ -1563,9 +1484,7 @@ mod tests {
         );
 
         // Pushing data must also not emit a per-chunk health event.
-        tx.send(Ok(Bytes::from_static(b"payload-1")))
-            .await
-            .unwrap_or_else(|_| panic!("send chunk should succeed"));
+        tx.send(Ok(Bytes::from_static(b"payload-1"))).await.unwrap_or_else(|_| panic!("send chunk should succeed"));
         assert!(
             timeout(Duration::from_millis(100), events.recv()).await.is_err(),
             "pushing a chunk must not emit runtime events"

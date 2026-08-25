@@ -1,6 +1,6 @@
 use crate::{
-    api::model::{AppState, BoxedProviderStream},
-    model::StreamError,
+    api::model::{BoxedProviderStream, ConnectionManager},
+    model::{AppConfig, StreamError},
     utils::debug_if_enabled,
 };
 use bytes::Bytes;
@@ -23,7 +23,8 @@ use shared::model::DisconnectReason;
 
 enum TimeoutAction {
     Kick {
-        app_state: Arc<AppState>,
+        app_config: Arc<AppConfig>,
+        connection_manager: Arc<ConnectionManager>,
         addr: SocketAddr,
         virtual_id: VirtualId,
     },
@@ -42,7 +43,8 @@ pub struct TimedClientStream {
 
 impl TimedClientStream {
     pub(crate) fn new(
-        app_state: &Arc<AppState>,
+        app_config: &Arc<AppConfig>,
+        connection_manager: &Arc<ConnectionManager>,
         inner: BoxedProviderStream,
         duration: u32,
         addr: SocketAddr,
@@ -52,7 +54,12 @@ impl TimedClientStream {
         Self {
             inner,
             deadline,
-            timeout_action: TimeoutAction::Kick { app_state: Arc::clone(app_state), addr, virtual_id },
+            timeout_action: TimeoutAction::Kick {
+                app_config: Arc::clone(app_config),
+                connection_manager: Arc::clone(connection_manager),
+                addr,
+                virtual_id,
+            },
         }
     }
 
@@ -70,15 +77,14 @@ impl Stream for TimedClientStream {
         // wakes this task exactly when the deadline fires — even if the upstream
         // provider is stalled and emitting no data.
         if self.deadline.as_mut().poll(cx).is_ready() {
-            if let TimeoutAction::Kick { app_state, addr, virtual_id } = &self.timeout_action {
-                let kick_secs = app_state
-                    .app_config
+            if let TimeoutAction::Kick { app_config, connection_manager, addr, virtual_id } = &self.timeout_action {
+                let kick_secs = app_config
                     .config
                     .load()
                     .web_ui
                     .as_ref()
                     .map_or_else(default_kick_secs, |wc| wc.kick_secs);
-                let connection_manager = Arc::clone(&app_state.connection_manager);
+                let connection_manager = Arc::clone(connection_manager);
                 let addr = *addr;
                 let virtual_id = *virtual_id;
                 debug_if_enabled!(

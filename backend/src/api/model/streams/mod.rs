@@ -1,4 +1,3 @@
-mod buffered_stream;
 mod client_stream;
 mod custom_video_stream;
 mod provisioning_stream;
@@ -7,7 +6,6 @@ mod timed_client_stream;
 mod active_client_stream;
 mod provider_stream;
 mod provider_stream_factory;
-mod shared_stream_manager;
 mod metering_stream;
 mod throttled_stream;
 
@@ -15,11 +13,18 @@ mod throttled_stream;
 // their existing names.
 pub use crate::utils::network::persist_pipe::*;
 pub(crate) use crate::mpegts::transport_stream_buffer::*;
-pub(in crate::api) use self::buffered_stream::MAX_BUFFER_BYTES;
-pub(in crate::api) use self::shared_stream_manager::SharedStreamCtx;
+
+// Moved to `shared::model`: it is vocabulary shared between the code that
+// decides a substitution is needed and the code that performs it. Re-exported
+// so api call sites keep their existing names.
+pub(crate) use shared::model::CustomVideoStreamType;
+
+// Shared-stream fan-out and its buffer moved to `tuliprox-session`;
+// re-exported so api call sites keep their names, module paths included.
+pub(crate) use tuliprox_session::streams::buffered_stream;
 pub(in crate::api) use self::{
     active_client_stream::*, custom_video_stream::*, metering_stream::*, provider_stream::*,
-    provider_stream_factory::*, provisioning_stream::*, shared_stream_manager::*,
+    provider_stream_factory::*, provisioning_stream::*,
     throttled_stream::*, timed_client_stream::*,
 };
 

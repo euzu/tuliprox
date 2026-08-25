@@ -55,6 +55,14 @@ while IFS=$'\t' read -r from to; do
         "tuliprox -> tuliprox-parser") ;;
         "tuliprox -> tuliprox-repository") ;;
         "tuliprox -> tuliprox-auth") ;;
+        "tuliprox -> tuliprox-session") ;;
+        # Provider allocation and the streaming-session runtime. Reaches
+        # `repository` to persist stream history and resolve GeoIP, and `mpegts`
+        # for the transport-stream buffer it hands to preempted clients.
+        "tuliprox-session -> shared") ;;
+        "tuliprox-session -> tuliprox-core") ;;
+        "tuliprox-session -> tuliprox-mpegts") ;;
+        "tuliprox-session -> tuliprox-repository") ;;
         "tuliprox -> tuliprox-config-loader") ;;
         "tuliprox-auth -> shared") ;;
         "tuliprox-auth -> tuliprox-core") ;;

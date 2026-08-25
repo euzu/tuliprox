@@ -1,16 +1,14 @@
 use crate::{
-    api::model::{
-        ActiveProviderManager, ActiveUserConnectionParams, ActiveUserManager, CustomVideoStreamType, EventManager,
-        EventMessage, ProviderHandle, SharedStreamManager, uses_direct_body_idle_timeout,
-    },
-    model::StreamHistoryConfig,
-    auth::Fingerprint,
-    utils::debug_if_enabled,
+    uses_direct_body_idle_timeout, ActiveProviderManager, ActiveUserConnectionParams, ActiveUserManager, EventManager,
+    EventMessage, SharedStreamManager,
 };
 use arc_swap::ArcSwapOption;
 use log::{debug, warn};
 use shared::{
-    model::{ActiveUserConnectionChange, StreamChannel, StreamInfo, VirtualId},
+    model::{
+        ActiveUserConnectionChange, ConnectFailureReason, CustomVideoStreamType, DisconnectReason, FailureStage,
+        StreamChannel, StreamInfo, VirtualId,
+    },
     utils::sanitize_sensitive_info,
 };
 use std::{
@@ -27,15 +25,17 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, Notify};
-use shared::model::{ConnectFailureReason, DisconnectReason, FailureStage};
-use crate::model::{DisconnectQos, StreamHistoryRecord};
-use crate::repository::{recover_pending_files, StreamHistoryWriter};
+use tuliprox_core::{
+    model::{DisconnectQos, Fingerprint, ProviderHandle, StreamHistoryConfig, StreamHistoryRecord},
+    utils::debug_if_enabled,
+};
+use tuliprox_repository::{recover_pending_files, StreamHistoryWriter};
 
 // Maximum number of deferred cleanup actions buffered before producers must wait/drop.
 const CLEANUP_QUEUE_CAPACITY: usize = 4096;
-pub(crate) const PROVIDER_END_NOT_SET: u8 = 0;
-pub(crate) const PROVIDER_END_CLOSED: u8 = 1; // Provider EOF
-pub(crate) const PROVIDER_END_ERROR: u8 = 2; // Provider Err
+pub const PROVIDER_END_NOT_SET: u8 = 0;
+pub const PROVIDER_END_CLOSED: u8 = 1; // Provider EOF
+pub const PROVIDER_END_ERROR: u8 = 2; // Provider Err
 const PREEMPT_REENTRY_BLOCK_SECS: u64 = 3;
 // Rebuild the expiry heap when it grows beyond this multiple of the live index size.
 const SOCKET_EXPIRY_QUEUE_REBUILD_FACTOR: usize = 2;
@@ -63,10 +63,7 @@ where
     fn new(tx: mpsc::Sender<T>, queue_name: &'static str, overflow_capacity: usize) -> Self {
         Self {
             tx,
-            state: Arc::new(Mutex::new(BackpressureState {
-                overflow: VecDeque::new(),
-                draining: false,
-            })),
+            state: Arc::new(Mutex::new(BackpressureState { overflow: VecDeque::new(), draining: false })),
             queue_name,
             overflow_capacity,
             dropped_events: AtomicU64::new(0),
@@ -120,17 +117,15 @@ where
         let state = Arc::clone(&self.state);
         let queue_name = self.queue_name;
         if let Some(handle) = runtime {
-            handle.spawn(async move { Self::drain_async(&tx, &state, queue_name).await; });
+            handle.spawn(async move {
+                Self::drain_async(&tx, &state, queue_name).await;
+            });
         } else {
             thread::spawn(move || Self::drain_blocking(&tx, &state, queue_name));
         }
     }
 
-    async fn drain_async(
-        tx: &mpsc::Sender<T>,
-        state: &Arc<Mutex<BackpressureState<T>>>,
-        queue_name: &'static str,
-    ) {
+    async fn drain_async(tx: &mpsc::Sender<T>, state: &Arc<Mutex<BackpressureState<T>>>, queue_name: &'static str) {
         loop {
             let Some(event) = Self::next_event(state) else {
                 break;
@@ -143,11 +138,7 @@ where
         }
     }
 
-    fn drain_blocking(
-        tx: &mpsc::Sender<T>,
-        state: &Arc<Mutex<BackpressureState<T>>>,
-        queue_name: &'static str,
-    ) {
+    fn drain_blocking(tx: &mpsc::Sender<T>, state: &Arc<Mutex<BackpressureState<T>>>, queue_name: &'static str) {
         loop {
             let Some(event) = Self::next_event(state) else {
                 break;
@@ -175,9 +166,7 @@ where
         state.draining = false;
     }
 
-    fn dropped_count(&self) -> u64 {
-        self.dropped_events.load(Ordering::Relaxed)
-    }
+    fn dropped_count(&self) -> u64 { self.dropped_events.load(Ordering::Relaxed) }
 }
 
 fn lock_backpressure_state<T>(state: &Mutex<BackpressureState<T>>) -> MutexGuard<'_, BackpressureState<T>> {
@@ -197,12 +186,7 @@ struct SocketActivityTracker {
 }
 
 impl SocketActivityTracker {
-    fn new() -> Self {
-        Self {
-            pending: Arc::new(Mutex::new(HashMap::new())),
-            notify: Arc::new(Notify::new()),
-        }
-    }
+    fn new() -> Self { Self { pending: Arc::new(Mutex::new(HashMap::new())), notify: Arc::new(Notify::new()) } }
 
     fn track(&self, event: SocketActivityEvent) {
         let key = event.addr();
@@ -238,7 +222,7 @@ struct CleanupWorkerDeps {
     history_writer: Arc<ArcSwapOption<StreamHistoryWriter>>,
 }
 
-pub(crate) enum CleanupEvent {
+pub enum CleanupEvent {
     ReleaseStream {
         addr: SocketAddr,
         stream_uid: Option<u32>,
@@ -247,8 +231,12 @@ pub(crate) enum CleanupEvent {
         provider_error_class: Option<&'static str>,
         provider_http_status: Option<u16>,
     },
-    ReleaseConnection { addr: SocketAddr },
-    ReleaseProviderHandle { handle: Option<ProviderHandle> },
+    ReleaseConnection {
+        addr: SocketAddr,
+    },
+    ReleaseProviderHandle {
+        handle: Option<ProviderHandle>,
+    },
     ReleaseStreamAndProviderHandle {
         addr: SocketAddr,
         stream_uid: Option<u32>,
@@ -356,12 +344,10 @@ async fn handle_release_stream(
     )
     .await
     {
-        deps.event_manager.send_event(EventMessage::ActiveUser(
-            ActiveUserConnectionChange::DisconnectedStream {
-                addr: stream_info.addr,
-                uid: stream_info.uid,
-            },
-        ));
+        deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::DisconnectedStream {
+            addr: stream_info.addr,
+            uid: stream_info.uid,
+        }));
         notify_capacity(deps.capacity_notify.as_ref());
     }
 }
@@ -401,12 +387,10 @@ async fn handle_release_stream_and_provider_handle(
     )
     .await;
     if let Some(stream_info) = stream_released.as_ref() {
-        deps.event_manager.send_event(EventMessage::ActiveUser(
-            ActiveUserConnectionChange::DisconnectedStream {
-                addr: stream_info.addr,
-                uid: stream_info.uid,
-            },
-        ));
+        deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::DisconnectedStream {
+            addr: stream_info.addr,
+            uid: stream_info.uid,
+        }));
     }
     if provider_released || stream_released.is_some() {
         notify_capacity(deps.capacity_notify.as_ref());
@@ -425,8 +409,7 @@ async fn handle_update_detail_and_release_provider(
                 .block_user_for_stream(&addr, stream_info.channel.virtual_id, PREEMPT_REENTRY_BLOCK_SECS)
                 .await;
         }
-        deps.event_manager
-            .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
+        deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
     }
     if let Some(handle) = handle {
         deps.provider_manager.release_handle(&handle).await;
@@ -445,8 +428,7 @@ async fn handle_update_detail_and_release_provider_connection(
                 .block_user_for_stream(&addr, stream_info.channel.virtual_id, PREEMPT_REENTRY_BLOCK_SECS)
                 .await;
         }
-        deps.event_manager
-            .send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
+        deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
     }
     deps.provider_manager.release_connection(&addr).await;
     deps.shared_stream_manager.release_connection(&addr, false).await;
@@ -464,12 +446,10 @@ async fn handle_adaptive_session_expired(deps: &CleanupWorkerDeps, stream_info: 
         None,
         None,
     );
-    deps.event_manager.send_event(EventMessage::ActiveUser(
-        ActiveUserConnectionChange::DisconnectedStream {
-            addr: stream_info.addr,
-            uid: stream_info.uid,
-        },
-    ));
+    deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::DisconnectedStream {
+        addr: stream_info.addr,
+        uid: stream_info.uid,
+    }));
     notify_capacity(deps.capacity_notify.as_ref());
 }
 
@@ -518,12 +498,8 @@ struct SocketExpiryEntry {
 
 #[derive(Clone, Debug)]
 enum SocketActivityEvent {
-    HttpActivity {
-        addr: SocketAddr,
-    },
-    DirectBodyActivity {
-        addr: SocketAddr,
-    },
+    HttpActivity { addr: SocketAddr },
+    DirectBodyActivity { addr: SocketAddr },
 }
 
 impl SocketActivityEvent {
@@ -557,7 +533,7 @@ pub struct ConnectionParams<'a> {
     pub username: &'a str,
     pub max_connections: u32,
     pub soft_connections: u16,
-    pub connection_kind: crate::api::model::active_provider_manager::ConnectionKind,
+    pub connection_kind: crate::active_provider_manager::ConnectionKind,
     pub priority: i8,
     pub soft_priority: i8,
     pub fingerprint: &'a Fingerprint,
@@ -611,11 +587,7 @@ impl ConnectionManager {
             Arc::clone(&capacity_notify),
             history_writer,
         );
-        Self::spawn_socket_activity_worker(
-            socket_activity_tracker,
-            Arc::clone(user_manager),
-            socket_cleanup_tx,
-        );
+        Self::spawn_socket_activity_worker(socket_activity_tracker, Arc::clone(user_manager), socket_cleanup_tx);
 
         mgr
     }
@@ -632,9 +604,7 @@ impl ConnectionManager {
     }
 
     /// Returns a reference to the history writer.
-    pub(crate) fn history_writer(&self) -> &Arc<ArcSwapOption<StreamHistoryWriter>> {
-        &self.history_writer
-    }
+    pub fn history_writer(&self) -> &Arc<ArcSwapOption<StreamHistoryWriter>> { &self.history_writer }
 
     fn spawn_socket_activity_worker(
         activity_tracker: SocketActivityTracker,
@@ -646,7 +616,13 @@ impl ConnectionManager {
             let mut expiry_index: HashMap<SocketAddr, u64> = HashMap::new();
 
             loop {
-                Self::drain_pending_socket_activity(&activity_tracker, &mut expiry_queue, &mut expiry_index, &user_manager).await;
+                Self::drain_pending_socket_activity(
+                    &activity_tracker,
+                    &mut expiry_queue,
+                    &mut expiry_index,
+                    &user_manager,
+                )
+                .await;
 
                 let next_expiry = expiry_queue.peek().map(|entry| entry.0.expires_at);
                 if let Some(expires_at) = next_expiry {
@@ -729,10 +705,7 @@ impl ConnectionManager {
             if let Some(next_expires_at) = user_manager.socket_expiry_deadline(&addr).await {
                 if next_expires_at > now {
                     expiry_index.insert(addr, next_expires_at);
-                    expiry_queue.push(Reverse(SocketExpiryEntry {
-                        expires_at: next_expires_at,
-                        addr,
-                    }));
+                    expiry_queue.push(Reverse(SocketExpiryEntry { expires_at: next_expires_at, addr }));
                     Self::maybe_rebuild_socket_expiry_queue(expiry_queue, expiry_index);
                     continue;
                 }
@@ -771,10 +744,7 @@ impl ConnectionManager {
 
         *expiry_queue = expiry_index
             .iter()
-            .map(|(addr, expires_at)| Reverse(SocketExpiryEntry {
-                expires_at: *expires_at,
-                addr: *addr,
-            }))
+            .map(|(addr, expires_at)| Reverse(SocketExpiryEntry { expires_at: *expires_at, addr: *addr }))
             .collect();
     }
 
@@ -859,11 +829,15 @@ impl ConnectionManager {
         });
     }
 
-    pub(crate) fn send_cleanup(&self, event: CleanupEvent) { self.cleanup_sender.enqueue(event); }
+    pub fn send_cleanup(&self, event: CleanupEvent) { self.cleanup_sender.enqueue(event); }
 
-    pub fn dropped_cleanup_events(&self) -> u64 { self.cleanup_sender.dropped_count() + self.user_manager.dropped_cleanup_events.load(Ordering::Relaxed) }
+    pub fn dropped_cleanup_events(&self) -> u64 {
+        self.cleanup_sender.dropped_count() + self.user_manager.dropped_cleanup_events.load(Ordering::Relaxed)
+    }
 
-    pub fn get_close_connection_channel(&self) -> tokio::sync::broadcast::Receiver<CloseConnectionSignal> { self.close_socket_signal_tx.subscribe() }
+    pub fn get_close_connection_channel(&self) -> tokio::sync::broadcast::Receiver<CloseConnectionSignal> {
+        self.close_socket_signal_tx.subscribe()
+    }
 
     pub async fn kick_connection(&self, addr: &SocketAddr, virtual_id: VirtualId, block_secs: u64) -> bool {
         debug_if_enabled!(
@@ -871,8 +845,7 @@ impl ConnectionManager {
             self.user_manager.get_username_for_addr(addr).await.unwrap_or_default(),
             sanitize_sensitive_info(&addr.to_string())
         );
-        self.close_connection_with_reason_and_block(addr, virtual_id, block_secs, DisconnectReason::ClientKicked)
-            .await
+        self.close_connection_with_reason_and_block(addr, virtual_id, block_secs, DisconnectReason::ClientKicked).await
     }
 
     pub async fn close_connection_with_reason_and_block(
@@ -885,10 +858,7 @@ impl ConnectionManager {
         if block_secs > 0 {
             self.user_manager.block_user_for_stream(addr, virtual_id, block_secs).await;
         }
-        if let Err(e) = self
-            .close_socket_signal_tx
-            .send(CloseConnectionSignal::WithReason(*addr, reason))
-        {
+        if let Err(e) = self.close_socket_signal_tx.send(CloseConnectionSignal::WithReason(*addr, reason)) {
             debug_if_enabled!(
                 "No active receivers for close signal ({}): {e:?}",
                 sanitize_sensitive_info(&addr.to_string())
@@ -991,12 +961,10 @@ impl ConnectionManager {
                 None,
                 None,
             );
-            self.event_manager.send_event(EventMessage::ActiveUser(
-                ActiveUserConnectionChange::DisconnectedStream {
-                    addr: stream_info.addr,
-                    uid: stream_info.uid,
-                },
-            ));
+            self.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::DisconnectedStream {
+                addr: stream_info.addr,
+                uid: stream_info.uid,
+            }));
             notify_capacity(self.capacity_notify.as_ref());
         }
     }
@@ -1029,19 +997,13 @@ impl ConnectionManager {
         let guard = self.history_writer.load();
         let Some(writer) = guard.as_ref() else { return };
         let attempt_uid = self.next_stream_uid();
-        writer.send_record(StreamHistoryRecord::from_connect_failed(
-            info,
-            reason,
-            attempt_uid,
-            failure_stage,
-            target_name,
-        )
-        .with_provider_failure(provider_http_status, provider_error_class));
+        writer.send_record(
+            StreamHistoryRecord::from_connect_failed(info, reason, attempt_uid, failure_stage, target_name)
+                .with_provider_failure(provider_http_status, provider_error_class),
+        );
     }
 
-    pub fn capacity_notified(&self) -> Arc<Notify> {
-        Arc::clone(&self.capacity_notify)
-    }
+    pub fn capacity_notified(&self) -> Arc<Notify> { Arc::clone(&self.capacity_notify) }
 
     /// Emit disconnect records for all still-active streams and flush the history writer.
     /// Call once at graceful shutdown before dropping the `ConnectionManager`.
@@ -1070,14 +1032,12 @@ impl ConnectionManager {
         self.socket_activity_tracker.track(SocketActivityEvent::HttpActivity { addr: *addr });
     }
 
-    pub(crate) fn touch_direct_body_activity(&self, addr: &SocketAddr) {
-        self.socket_activity_tracker
-            .track(SocketActivityEvent::DirectBodyActivity { addr: *addr });
+    pub fn touch_direct_body_activity(&self, addr: &SocketAddr) {
+        self.socket_activity_tracker.track(SocketActivityEvent::DirectBodyActivity { addr: *addr });
     }
 
     pub async fn update_connection(&self, update: ConnectionParams<'_>) -> Option<StreamInfo> {
-        self.update_connection_with_history_mode(update, ConnectionHistoryMode::EmitConnect)
-            .await
+        self.update_connection_with_history_mode(update, ConnectionHistoryMode::EmitConnect).await
     }
 
     pub async fn update_connection_with_history_mode(
@@ -1108,9 +1068,7 @@ impl ConnectionManager {
             })
             .await
         {
-            self.event_manager
-                .register_meter_client(stream_info.uid, stream_info.meter_uid)
-                .await;
+            self.event_manager.register_meter_client(stream_info.uid, stream_info.meter_uid).await;
             if history_mode == ConnectionHistoryMode::EmitConnect {
                 emit_connect_record(&self.history_writer, &stream_info);
             }
@@ -1170,7 +1128,9 @@ fn resolve_disconnect_reason(provider_end_reason: u8, stream_info: &StreamInfo) 
             match video_type {
                 CustomVideoStreamType::LowPriorityPreempted => return DisconnectReason::Preempted,
                 CustomVideoStreamType::UserConnectionsExhausted => return DisconnectReason::UserConnectionsExhausted,
-                CustomVideoStreamType::ProviderConnectionsExhausted => return DisconnectReason::ProviderConnectionsExhausted,
+                CustomVideoStreamType::ProviderConnectionsExhausted => {
+                    return DisconnectReason::ProviderConnectionsExhausted
+                }
                 CustomVideoStreamType::ChannelUnavailable => {
                     return match provider_end_reason {
                         PROVIDER_END_CLOSED => DisconnectReason::ProviderClosed,
@@ -1206,17 +1166,16 @@ fn emit_disconnect_record(
     let guard = writer.load();
     let Some(w) = guard.as_ref() else { return };
     w.send_record(
-        StreamHistoryRecord::from_disconnect(
-            info,
-            reason,
-            qos,
-            resolve_disconnect_failure_stage(info, reason, qos),
-        )
-        .with_provider_failure(provider_http_status, provider_error_class),
+        StreamHistoryRecord::from_disconnect(info, reason, qos, resolve_disconnect_failure_stage(info, reason, qos))
+            .with_provider_failure(provider_http_status, provider_error_class),
     );
 }
 
-fn resolve_disconnect_failure_stage(info: &StreamInfo, reason: DisconnectReason, qos: &DisconnectQos) -> Option<FailureStage> {
+fn resolve_disconnect_failure_stage(
+    info: &StreamInfo,
+    reason: DisconnectReason,
+    qos: &DisconnectQos,
+) -> Option<FailureStage> {
     match reason {
         DisconnectReason::ProviderError | DisconnectReason::ProviderClosed => {
             if !info.channel.shared && qos.first_byte_latency_ms.is_none() {
@@ -1234,18 +1193,22 @@ fn resolve_disconnect_failure_stage(info: &StreamInfo, reason: DisconnectReason,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::model::{ActiveProviderManager, ActiveUserManager, CreateUserSessionParams, EventManager, SharedStreamManager};
-    use crate::model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProxyUserCredentials, SourcesConfig};
-    use crate::repository::GeoIp;
-    use crate::utils::FileLockManager;
+    use crate::{ActiveProviderManager, ActiveUserManager, CreateUserSessionParams, EventManager, SharedStreamManager};
     use arc_swap::{ArcSwap, ArcSwapOption};
-    use shared::model::{ConfigPaths, InputFetchMethod, InputType, ProxyType, UserConnectionPermission};
-    use shared::model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster};
-    use shared::utils::Internable;
-    use std::collections::HashMap;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
+    use shared::{
+        model::{
+            ConfigPaths, InputFetchMethod, InputType, PlaylistItemType, ProxyType, StreamChannel, StreamInfo,
+            UserConnectionPermission, XtreamCluster,
+        },
+        utils::Internable,
+    };
+    use std::{collections::HashMap, net::SocketAddr, sync::Arc};
     use tokio::sync::mpsc;
+    use tuliprox_core::{
+        model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProxyUserCredentials, SourcesConfig},
+        utils::FileLockManager,
+    };
+    use tuliprox_repository::GeoIp;
 
     fn make_stream_info(provider: &str, title: &str) -> StreamInfo {
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
@@ -1336,13 +1299,7 @@ mod tests {
         let config = app_cfg.config.load();
         let user_manager = Arc::new(ActiveUserManager::new(&config, &geo_ip, &event_manager));
 
-        Arc::new(ConnectionManager::new(
-            &user_manager,
-            &provider_manager,
-            &shared_manager,
-            &event_manager,
-            None,
-        ))
+        Arc::new(ConnectionManager::new(&user_manager, &provider_manager, &shared_manager, &event_manager, None))
     }
 
     fn create_test_proxy_user(username: &str) -> ProxyUserCredentials {
@@ -1364,14 +1321,8 @@ mod tests {
         sender.enqueue(3_u8);
 
         assert_eq!(rx.recv().await, Some(1));
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(),
-            Some(2)
-        );
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(),
-            Some(3)
-        );
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(), Some(2));
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(), Some(3));
     }
 
     #[tokio::test]
@@ -1395,14 +1346,8 @@ mod tests {
         sender.enqueue(4_u8);
 
         assert_eq!(rx.recv().await, Some(1));
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(),
-            Some(2)
-        );
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(),
-            Some(3)
-        );
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(), Some(2));
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.ok().flatten(), Some(3));
         let result = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
         assert!(result.is_err());
     }
@@ -1446,27 +1391,26 @@ mod tests {
                 stream_url: "http://provider-1.example/live.ts",
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
-                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                connection_kind: Some(crate::ConnectionKind::Normal),
                 socket_bound: true,
             })
             .await;
 
         manager.touch_http_activity(&user.username, "tok-touch", &addr).await;
 
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), async {
-                loop {
-                    if manager.user_manager.socket_expiry_deadline(&addr).await.is_some()
-                        && manager.user_manager.get_username_for_addr(&addr).await.as_deref() == Some(user.username.as_str())
-                    {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
+        assert!(tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if manager.user_manager.socket_expiry_deadline(&addr).await.is_some()
+                    && manager.user_manager.get_username_for_addr(&addr).await.as_deref()
+                        == Some(user.username.as_str())
+                {
+                    break;
                 }
-            })
-            .await
-            .is_ok()
-        );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok());
     }
 
     #[tokio::test]
@@ -1476,10 +1420,7 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
 
         assert!(manager.kick_connection(&addr, 1, 0).await);
-        assert_eq!(
-            rx.recv().await.ok(),
-            Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientKicked))
-        );
+        assert_eq!(rx.recv().await.ok(), Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientKicked)));
     }
 
     #[tokio::test]
@@ -1490,10 +1431,7 @@ mod tests {
 
         manager.release_connection_as_kicked(&addr).await;
         assert_eq!(
-            tokio::time::timeout(Duration::from_millis(100), rx.recv())
-                .await
-                .ok()
-                .and_then(Result::ok),
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await.ok().and_then(Result::ok),
             Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientKicked))
         );
     }
@@ -1505,10 +1443,7 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
 
         assert!(manager.close_connection_signal(&addr));
-        assert_eq!(
-            rx.recv().await.ok(),
-            Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientClosed))
-        );
+        assert_eq!(rx.recv().await.ok(), Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientClosed)));
     }
 
     #[tokio::test]
@@ -1517,15 +1452,8 @@ mod tests {
         let mut rx = manager.get_close_connection_channel();
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
 
-        assert!(
-            manager
-                .close_connection_with_reason_and_block(&addr, 7, 0, DisconnectReason::Provisioning)
-                .await
-        );
-        assert_eq!(
-            rx.recv().await.ok(),
-            Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::Provisioning))
-        );
+        assert!(manager.close_connection_with_reason_and_block(&addr, 7, 0, DisconnectReason::Provisioning).await);
+        assert_eq!(rx.recv().await.ok(), Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::Provisioning)));
     }
 
     #[tokio::test]
@@ -1533,7 +1461,7 @@ mod tests {
         let manager = create_test_connection_manager();
         let user = create_test_proxy_user("preempted-user");
         let addr: SocketAddr = "127.0.0.1:6234".parse().unwrap_or_else(|_| unreachable!());
-        let fingerprint = crate::auth::Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+        let fingerprint = tuliprox_core::model::Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
         let channel = StreamChannel {
             virtual_id: 409,
             title: "channel-409".intern(),
@@ -1551,7 +1479,7 @@ mod tests {
                 stream_url: "http://provider-1.example/live/409.ts",
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
-                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                connection_kind: Some(crate::ConnectionKind::Normal),
                 socket_bound: true,
             })
             .await;
@@ -1563,7 +1491,7 @@ mod tests {
                 username: &user.username,
                 max_connections: user.max_connections,
                 soft_connections: user.soft_connections,
-                connection_kind: crate::api::model::ConnectionKind::Normal,
+                connection_kind: crate::ConnectionKind::Normal,
                 priority: 9,
                 soft_priority: 9,
                 fingerprint: &fingerprint,
@@ -1586,10 +1514,7 @@ mod tests {
         handle_update_detail_and_release_provider(&deps, addr, CustomVideoStreamType::LowPriorityPreempted, None).await;
 
         assert!(
-            manager
-                .user_manager
-                .is_user_blocked_for_stream(&user.username, channel.virtual_id)
-                .await,
+            manager.user_manager.is_user_blocked_for_stream(&user.username, channel.virtual_id).await,
             "preempted playback should be blocked briefly to prevent immediate reconnect ping-pong"
         );
     }
@@ -1599,7 +1524,7 @@ mod tests {
         let manager = create_test_connection_manager();
         let user = create_test_proxy_user("preempted-hls-user");
         let addr: SocketAddr = "127.0.0.1:6235".parse().unwrap_or_else(|_| unreachable!());
-        let fingerprint = crate::auth::Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
+        let fingerprint = tuliprox_core::model::Fingerprint::new(format!("fp-{addr}"), addr.ip().to_string(), addr);
         let mut channel = make_stream_info("provider_1", "channel-410").channel;
         channel.virtual_id = 410;
         channel.item_type = PlaylistItemType::LiveHls;
@@ -1617,7 +1542,7 @@ mod tests {
                 stream_url: "http://provider-1.example/live/410.m3u8",
                 addr: &addr,
                 connection_permission: UserConnectionPermission::Allowed,
-                connection_kind: Some(crate::api::model::ConnectionKind::Normal),
+                connection_kind: Some(crate::ConnectionKind::Normal),
                 socket_bound: false,
             })
             .await;
@@ -1629,7 +1554,7 @@ mod tests {
                 username: &user.username,
                 max_connections: user.max_connections,
                 soft_connections: user.soft_connections,
-                connection_kind: crate::api::model::ConnectionKind::Normal,
+                connection_kind: crate::ConnectionKind::Normal,
                 priority: 9,
                 soft_priority: 9,
                 fingerprint: &fingerprint,
@@ -1652,10 +1577,7 @@ mod tests {
         handle_update_detail_and_release_provider(&deps, addr, CustomVideoStreamType::LowPriorityPreempted, None).await;
 
         assert!(
-            manager
-                .user_manager
-                .is_user_blocked_for_stream(&user.username, channel.virtual_id)
-                .await,
+            manager.user_manager.is_user_blocked_for_stream(&user.username, channel.virtual_id).await,
             "preempted HLS playback should be blocked briefly to prevent immediate reconnect ping-pong"
         );
     }
@@ -1795,11 +1717,7 @@ mod tests {
         let mut info = make_stream_info("some_provider", "Some Channel");
         info.channel.shared = true;
         assert_eq!(
-            resolve_disconnect_failure_stage(
-                &info,
-                DisconnectReason::ProviderError,
-                &DisconnectQos::default(),
-            ),
+            resolve_disconnect_failure_stage(&info, DisconnectReason::ProviderError, &DisconnectQos::default(),),
             Some(FailureStage::Streaming)
         );
     }

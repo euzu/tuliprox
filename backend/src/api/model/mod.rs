@@ -1,22 +1,15 @@
-mod active_provider_manager;
-mod active_user_manager;
-mod admission_strategy;
 mod app_state;
 mod byte_range;
-mod connection_manager;
 mod download;
-pub mod event_manager;
 mod hls_cache;
 mod hls_provisioning;
 mod metadata_update_manager;
 mod model_utils;
 mod provider_dns_manager;
-mod provider_lineup_manager;
 mod proxy;
 mod qos_aggregation_manager;
 pub(in crate::api) mod recording;
 mod request;
-mod stream;
 mod streams;
 mod xtream;
 
@@ -25,9 +18,8 @@ pub(in crate::api) use self::hls_provisioning::{
     build_hls_custom_video_manifest_body, hls_panel_provisioning_manifest_path,
 };
 pub use self::{
-    active_provider_manager::*, app_state::*, connection_manager::*, event_manager::*, hls_cache::*,
-    hls_provisioning::HlsProvisioningState, metadata_update_manager::*,
-    provider_dns_manager::*, proxy::*, recording::*, stream::*,
+    app_state::*, hls_cache::*, hls_provisioning::HlsProvisioningState, metadata_update_manager::*,
+    provider_dns_manager::*, proxy::*, recording::*,
 };
 mod playlist_cache_loader;
 pub use self::playlist_cache_loader::*;
@@ -39,13 +31,22 @@ pub use crate::model::update_guard::*;
 pub use crate::model::update_task::*;
 // Provider value types moved to `model`; re-exported so `api` keeps its names.
 pub use crate::model::provider::*;
-mod meter;
-pub use self::meter::*;
 pub use self::download::{DownloadKind, DownloadState};
 pub use crate::model::stream_error::*;
+
+// Provider allocation and the streaming-session runtime moved to
+// `tuliprox-session`; re-exported so `api` call sites keep their names, module
+// paths included.
+pub use tuliprox_session::{
+    active_provider_manager, active_user_manager, admission_strategy, connection_manager,
+    event_manager, meter, provider_lineup_manager, stream,
+};
+pub use tuliprox_session::{
+    active_provider_manager::*, active_user_manager::*, admission_strategy::*,
+    connection_manager::*, event_manager::*, meter::*, provider_lineup_manager::*, stream::*,
+    streams::*,
+};
 pub(in crate::api) use self::{
-    active_user_manager::*,
-    admission_strategy::{evaluate_strategy, AdmissionDecision, EvictionCandidate, GraceMode, StrategyContext},
     byte_range::{resolve_single_byte_range, SingleByteRange},
     download::*,
     hls_provisioning::{

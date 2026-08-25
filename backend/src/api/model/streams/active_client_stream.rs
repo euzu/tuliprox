@@ -135,7 +135,7 @@ struct GracePeriodParams {
     grace_active_version: Option<u64>,
     // Set when the stream was admitted via a user-grace strategy.
     // On user-grace failure, remaining strategies are evaluated before final deny.
-    grace_resolution_context: Option<crate::api::api_utils::GraceResolutionContext>,
+    grace_resolution_context: Option<crate::api::model::GraceResolutionContext>,
     // The `ConnectionKind` from the original admission decision.
     // Preserved in `GraceResolutionContext.kind` and also passed directly here
     // so the grace task can use the runtime value when evaluating remaining strategies.
@@ -262,7 +262,14 @@ impl ActiveClientStreamState {
             stream
         };
         if let Some(ctx) = self.timed_stream_context.as_ref() {
-            TimedClientStream::new(&ctx.app_state, stream, ctx.duration_secs, self.fingerprint.addr, ctx.virtual_id)
+            TimedClientStream::new(
+                &ctx.app_state.app_config,
+                &ctx.app_state.connection_manager,
+                stream,
+                ctx.duration_secs,
+                self.fingerprint.addr,
+                ctx.virtual_id,
+            )
                 .boxed()
         } else {
             stream
@@ -531,7 +538,15 @@ fn wrap_timed_client_stream_if_needed(
         Some(mins) => {
             let secs = u32::try_from((u64::from(mins) * 60).min(u64::from(u32::MAX))).unwrap_or(0);
             if secs > 0 {
-                TimedClientStream::new(app_state, stream, secs, addr, virtual_id).boxed()
+                TimedClientStream::new(
+                    &app_state.app_config,
+                    &app_state.connection_manager,
+                    stream,
+                    secs,
+                    addr,
+                    virtual_id,
+                )
+                .boxed()
             } else {
                 stream
             }
@@ -1356,9 +1371,9 @@ mod tests {
     };
     use crate::{
         api::{
-            api_utils::GraceResolutionContext,
             model::{
                 connection_manager::PROVIDER_END_NOT_SET, ActiveProviderManager, ActiveUserManager, AppState,
+                GraceResolutionContext,
                 BoxedProviderStream, CancelTokens, ConnectionManager, CreateUserSessionParams, CustomVideoStreamType,
                 DownloadQueue, EventManager, MetadataUpdateManager, PlaylistStorageState,
                 ProviderContentRepresentationMode, ProviderHandle, SharedStreamManager, StreamDetails, StreamError,

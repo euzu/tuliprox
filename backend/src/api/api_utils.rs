@@ -9,7 +9,8 @@ use crate::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream,
             get_custom_stream_response_error_status, get_stream_response_with_headers, is_custom_video_stream_enabled,
-            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason,
+            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, GraceResolutionContext,
+            PendingProviderReason,
             ProviderAllocation, ProviderConfig, ProviderHandle, ProviderStreamCustomReason,
             ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamCtx, SharedStreamManager,
             StreamDetails,
@@ -696,22 +697,6 @@ pub(in crate::api) fn get_stream_options(app_state: &Arc<AppState>) -> StreamOpt
     StreamOptions { stream_retry, buffer_enabled, buffer_size, buffer_max_bytes, pipe_provider_stream }
 }
 
-/// Metadata capturing which grace strategy was chosen and the original connection kind,
-/// used to reconstruct the remaining-strategies slice on user-grace failure.
-#[derive(Debug, Clone)]
-pub(crate) struct GraceResolutionContext {
-    /// Index of the grace strategy that was actually used.
-    pub(crate) strategy_index: usize,
-    /// Full effective strategy list for stable reconstruction of the remaining slice.
-    pub(crate) strategies: Vec<AdmissionStrategy>,
-    /// The original `ConnectionKind` from the admission decision that led to this grace.
-    /// Preserved so that the remaining-strategy fallback can return the correct kind
-    /// (e.g., `Soft`) even when the grace itself hardcoded `Normal`.
-    // Stored so the original admission kind remains available when follow-up
-    // grace fallback reconstruction starts using it again.
-    #[allow(dead_code)]
-    pub(crate) kind: Option<crate::api::model::ConnectionKind>,
-}
 
 /// Structured result of evaluating admission strategies.
 #[derive(Debug)]
@@ -1019,7 +1004,7 @@ struct SessionActivationRequest<'a> {
 struct PlaybackActivationResult {
     admission: crate::api::model::ConnectionAdmission,
     grace_mode: Option<crate::api::model::GraceMode>,
-    grace_context: Option<crate::api::api_utils::GraceResolutionContext>,
+    grace_context: Option<crate::api::model::GraceResolutionContext>,
     placeholder_transition_version: Option<u64>,
 }
 
@@ -1892,7 +1877,7 @@ async fn create_stream_response_details(
     session_headers: Option<&HashMap<String, String>>,
     accept_requested_stream_url: bool,
     grace_hold_override: Option<bool>,
-    grace_resolution_context: Option<crate::api::api_utils::GraceResolutionContext>,
+    grace_resolution_context: Option<crate::api::model::GraceResolutionContext>,
 ) -> Result<StreamDetails, TuliproxError> {
     let mut streaming_strategy = resolve_streaming_strategy(
         app_state,

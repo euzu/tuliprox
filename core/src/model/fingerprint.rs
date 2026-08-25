@@ -1,4 +1,4 @@
-use crate::Rejection;
+type Rejection = (StatusCode, &'static str);
 use axum::{
     extract::{ConnectInfo, FromRequestParts},
     http::{request::Parts, StatusCode},
@@ -16,6 +16,10 @@ fn validate_header(value: &str) -> Option<String> {
     }
 }
 
+/// The client identity a request is attributed to.
+///
+/// Derived from the request's headers and peer address. Both the auth layer and
+/// the connection layer key on it, so it lives here rather than with either.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Fingerprint {
     pub key: String,

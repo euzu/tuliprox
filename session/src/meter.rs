@@ -5,10 +5,11 @@
 //! stream type, which is what lets the event manager use them without pulling in
 //! the streaming layer.
 
-use crate::api::model::EventManager;
+use crate::EventManager;
 use std::{
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering}, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Weak,
     },
     time::Instant,
 };
@@ -46,7 +47,11 @@ impl StreamMeterHandle {
     /// Returns the first-byte latency in milliseconds, or `None` if no bytes were received.
     pub fn first_byte_latency_ms(&self) -> Option<u64> {
         let nanos = self.first_byte_elapsed_nanos.load(Ordering::Relaxed);
-        if nanos == 0 { None } else { Some(nanos / 1_000_000) }
+        if nanos == 0 {
+            None
+        } else {
+            Some(nanos / 1_000_000)
+        }
     }
 
     pub fn mark_attached(&self) { self.attached.store(true, Ordering::Release); }
@@ -58,7 +63,8 @@ impl StreamMeterHandle {
         // short-circuits — costs one relaxed load (~1ns) per subsequent chunk.
         if self.first_byte_elapsed_nanos.load(Ordering::Relaxed) == 0 {
             let elapsed = u64::try_from(self.created_at.elapsed().as_nanos()).unwrap_or(0);
-            let _ = self.first_byte_elapsed_nanos.compare_exchange(0, elapsed.max(1), Ordering::Relaxed, Ordering::Relaxed);
+            let _ =
+                self.first_byte_elapsed_nanos.compare_exchange(0, elapsed.max(1), Ordering::Relaxed, Ordering::Relaxed);
         }
     }
 

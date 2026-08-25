@@ -4467,6 +4467,7 @@ dependencies = [
  "tuliprox-mpegts",
  "tuliprox-parser",
  "tuliprox-repository",
+ "tuliprox-session",
  "url",
  "uuid",
  "vergen",
@@ -4738,6 +4739,30 @@ dependencies = [
  "url",
  "uuid",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tuliprox-session"
+version = "3.3.91"
+dependencies = [
+ "arc-swap",
+ "axum",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "futures",
+ "jsonwebtoken",
+ "log",
+ "lru",
+ "serde",
+ "shared",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tuliprox-core",
+ "tuliprox-mpegts",
+ "tuliprox-repository",
+ "url",
 ]
 
 [[package]]

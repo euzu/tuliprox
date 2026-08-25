@@ -29,9 +29,7 @@ pub fn recording_end_at(start_at: i64, duration_secs: u64) -> i64 {
 /// across callers. Use [`recording_math::recording_end_at`],
 /// `saturating_sub`, and the like on the result — never an unchecked
 /// arithmetic op.
-pub fn sat_i64_from_u64(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
+pub fn sat_i64_from_u64(value: u64) -> i64 { i64::try_from(value).unwrap_or(i64::MAX) }
 
 /// `true` when `now_ts` is at or past the end of the window.
 pub fn window_elapsed(start_at: i64, duration_secs: u64, now_ts: i64) -> bool {
