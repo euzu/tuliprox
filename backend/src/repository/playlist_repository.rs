@@ -2,7 +2,6 @@ use super::playlist_mem_cache::{PlaylistM3uStorage, PlaylistStorage, PlaylistSto
 use crate::model::Epg;
 use crate::model::{AppConfig, ConfigInput, ConfigTarget, TargetOutput};
 use crate::model::apply_filter_to_playlist;
-use crate::processing::processor::PlaylistProcessingContext;
 use crate::repository::epg_write_for_target;
 use crate::repository::write_strm_playlist;
 use crate::repository::FILE_SUFFIX_DB;
@@ -654,8 +653,11 @@ pub async fn persist_input_playlist(app_config: &Arc<AppConfig>, input: &ConfigI
     }
 }
 
-pub async fn load_input_playlist(ctx: &PlaylistProcessingContext, input: &ConfigInput, clusters: Option<&[XtreamCluster]>) -> Result<PlaylistSource, TuliproxError> {
-    let app_config = &ctx.config;
+pub async fn load_input_playlist(
+    app_config: &Arc<AppConfig>,
+    input: &ConfigInput,
+    clusters: Option<&[XtreamCluster]>,
+) -> Result<PlaylistSource, TuliproxError> {
     let cfg = app_config.config.load();
     let storage_path = get_input_storage_path(&input.name, &cfg.storage_dir).await
         .map_err(|e| TuliproxError::Config(format!("Error getting input path: {e}")))?;

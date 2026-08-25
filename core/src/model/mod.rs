@@ -15,12 +15,14 @@ mod xtream;
 pub mod playlist_filter;
 pub mod playlist_key;
 pub mod provider;
+pub mod stalker_record;
 pub mod stream_error;
 pub mod update_guard;
 pub mod update_task;
 
 pub use self::{
     config::*, healthcheck::*, input_source::*, mapping::*, messaging::*, playlist_filter::*, playlist_key::*,
-    provider::*, stream_error::*, stream_history::*, update_guard::*, update_task::*, xmltv::*, xtream::*,
+    provider::*, stalker_record::*, stream_error::*, stream_history::*, update_guard::*, update_task::*, xmltv::*,
+    xtream::*,
 };
 pub use shared::model::xtream_const::*;

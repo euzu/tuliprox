@@ -1,6 +1,6 @@
 use futures::StreamExt;
 use log::warn;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 use shared::utils::deserialize_as_option_string;
@@ -17,15 +17,10 @@ use crate::iptv::stalker::recipes::recipe_spec_for;
 /// A single EPG programme record. The portal wraps each entry in `{ ch_id, title, start,
 /// stop, ... }`. We accept any payload shape by deserialising into a permissive value
 /// first and then coercing the bits we actually need.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StalkerProgramRecord {
-    pub channel_id: Option<String>,
-    pub title: String,
-    pub start_epoch: Option<i64>,
-    pub stop_epoch: Option<i64>,
-    pub description: Option<String>,
-    pub category: Option<String>,
-}
+// The persisted shape lives in `tuliprox_core::model`; re-exported here for
+// this module's own call sites.
+pub use tuliprox_core::model::StalkerProgramRecord;
+
 
 #[derive(Debug, Default, Clone, Deserialize)]
 struct RawStalkerProgram {

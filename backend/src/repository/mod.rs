@@ -4,9 +4,6 @@ mod target_id_mapping;
 // Both read repository storage directly, so they belong here rather than in
 // `utils`, which must not depend on this layer.
 mod network_access;
-// Wraps a `PlaylistSource` for the duration of one fetch. It held a repository
-// type as a field, which is what made `model` depend on this layer.
-mod fetched_playlist;
 mod db_viewer;
 mod geoip;
 pub mod playlist_mem_cache;
@@ -42,7 +39,6 @@ pub use target_id_mapping::*;
 pub use tuliprox_btree as bplustree;
 pub use tuliprox_btree::*;
 pub use network_access::*;
-pub use fetched_playlist::*;
 pub use db_viewer::*;
 pub use geoip::*;
 pub use metadata_retry_record::*;

@@ -27,8 +27,8 @@ use crate::{
             xtream_series::playlist_resolve_series, xtream_vod::playlist_resolve_vod,
         },
     },
+    processing::fetched_playlist::FetchedPlaylist,
     repository::{
-        FetchedPlaylist,
         load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource,
         PlaylistSource,
     },
@@ -1040,7 +1040,7 @@ async fn load_cached_input_playlist(
     ctx: &PlaylistProcessingContext,
     input: &Arc<ConfigInput>,
 ) -> (PlaylistSource, Option<TuliproxError>) {
-    match load_input_playlist(ctx, input, None).await {
+    match load_input_playlist(&ctx.config, input, None).await {
         Ok(pl_source) => (pl_source, None),
         Err(err) => (MemoryPlaylistSource::default().into_source(), Some(err)),
     }
@@ -1150,7 +1150,7 @@ async fn download_input(
     let (mut playlist, mut error) = if let Some(preloaded) = preloaded_playlist {
         preloaded
     } else if playlist_download_result.was_cached || playlist_download_result.persisted {
-        match load_input_playlist(ctx, input, None).await {
+        match load_input_playlist(&ctx.config, input, None).await {
             Ok(pl_source) => (pl_source, None),
             Err(e) => (MemoryPlaylistSource::default().into_source(), Some(e)),
         }
@@ -1234,6 +1234,14 @@ pub struct PlaylistProcessingContext {
     pub user_targets: Arc<ProcessTargets>,
     pub event_manager: Option<Arc<EventManager>>,
     pub playlist_state: Option<Arc<PlaylistStorageState>>,
+    /// Reverse-proxy header suppression, carried from the composition root.
+    ///
+    /// Nothing in the pipeline reads this today. It became visible when
+    /// `load_input_playlist` stopped taking the whole context, and it is left in
+    /// place rather than deleted because the plumbing exists in the API layer
+    /// and in `exec_processing`'s signature: a configured value that is accepted
+    /// and ignored is a behaviour question, not a refactoring one.
+    #[allow(dead_code)]
     pub disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
 
     // Coordination

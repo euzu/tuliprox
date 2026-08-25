@@ -166,7 +166,6 @@ impl TVGuide {
 }
 
 impl TVGuide {
-    pub fn merge(epgs: Vec<Epg>) -> Option<Epg> { flatten_tvguide(epgs) }
 
     fn prepare_tag(id_cache: &mut EpgIdCache, tag: &mut XmlTag, smart_match: bool) {
         {
@@ -461,10 +460,14 @@ impl TVGuide {
         }
     }
 
+    // Exercised only by this module's own tests.
+    #[cfg(test)]
     pub async fn filter(&self, id_cache: &mut EpgIdCache) -> Option<Vec<Epg>> {
         self.filter_merged(id_cache).await.map(|epg| vec![epg])
     }
 
+    // Exercised only by this module's own tests.
+    #[cfg(test)]
     pub async fn filter_merged(&self, id_cache: &mut EpgIdCache) -> Option<Epg> {
         self.filter_merged_with_icon_overrides(id_cache).await.map(|(epg, _)| epg)
     }

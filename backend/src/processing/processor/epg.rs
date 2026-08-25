@@ -1,6 +1,6 @@
 use crate::{
     model::{Epg, EpgConfig, EpgSmartMatchConfig},
-    repository::FetchedPlaylist,
+    processing::fetched_playlist::FetchedPlaylist,
     processing::parser::xmltv::normalize_channel_name,
     utils::with_folded_epg_id,
 };
@@ -843,7 +843,8 @@ mod tests {
             PersistedEpgSourceKind,
         },
         processing::parser::xmltv::TVGuide,
-        repository::{FetchedPlaylist, MemoryPlaylistSource},
+        processing::fetched_playlist::FetchedPlaylist,
+        repository::{MemoryPlaylistSource},
     };
     use rand::{Rng, distr::Alphanumeric};
     use rphonetic::{DoubleMetaphone, Encoder};

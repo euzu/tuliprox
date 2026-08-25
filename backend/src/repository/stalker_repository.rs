@@ -23,7 +23,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use shared::error::TuliproxError;
 use shared::model::stalker_item::{StalkerPlaylistItem, StalkerSeasonItem};
 
-use crate::iptv::stalker::epg::StalkerProgramRecord;
+use crate::model::StalkerProgramRecord;
 
 use crate::model::{AppConfig, ConfigInput, ConfigTarget};
 use crate::repository::bplustree::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy};
