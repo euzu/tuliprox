@@ -1,6 +1,7 @@
+use crate::model::{AllocationId, ClientConnectionId, ProviderAllocation, ProviderHandle};
 use crate::{
     api::model::{
-        provider_lineup_manager::{ProviderAllocation, ProviderLineupManager},
+        provider_lineup_manager::ProviderLineupManager,
         EventManager, ProviderConfig, SharedStreamManager,
     },
     model::{AppConfig, ConfigInput, GracePeriodOptions},
@@ -23,8 +24,6 @@ use tokio::time::Instant as TokioInstant;
 use tokio_util::sync::CancellationToken;
 
 static DUMMY_ADDR: LazyLock<SocketAddr> = LazyLock::new(|| SocketAddr::from(([127, 0, 0, 1], 0)));
-pub type ClientConnectionId = SocketAddr;
-type AllocationId = u64;
 type SharedConnectionId = AllocationId;
 type PreemptionCandidate = (PriorityOwner, AllocationId, i8, Instant);
 // Key for BTreeMap priority index: (priority, Reverse<created_at>, AllocationId)
@@ -69,25 +68,6 @@ struct AcquireProviderParams<'a> {
     session_owner: Option<&'a str>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ProviderHandle {
-    pub client_id: ClientConnectionId,
-    pub allocation_id: AllocationId,
-    pub allocation: ProviderAllocation,
-    // Token to cancel the background task (e.g. internal probe) if preempted
-    pub cancel_token: Option<CancellationToken>,
-}
-
-impl ProviderHandle {
-    pub fn new(
-        client_id: ClientConnectionId,
-        allocation_id: AllocationId,
-        allocation: ProviderAllocation,
-        cancel_token: Option<CancellationToken>,
-    ) -> Self {
-        Self { client_id, allocation_id, allocation, cancel_token }
-    }
-}
 
 #[derive(Debug, Clone)]
 struct SharedAllocation {

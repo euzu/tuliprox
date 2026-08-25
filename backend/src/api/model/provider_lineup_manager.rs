@@ -1,8 +1,6 @@
+use crate::model::{ProviderAllocation, ProviderConfig, ProviderConfigWrapper};
 use crate::{
-    api::model::{
-        provider_config::ProviderConfigWrapper, EventManager, ProviderConfig, ProviderConfigConnection,
-        ProviderConnectionChangeCallback,
-    },
+    api::model::{EventManager, ProviderConfigConnection, ProviderConnectionChangeCallback},
     model::{is_input_expired, ConfigInput, GracePeriodOptions},
     utils::debug_if_enabled,
 };
@@ -68,61 +66,6 @@ fn get_or_create_provider_connection(
         .clone()
 }
 
-#[derive(Debug, Clone)]
-pub enum ProviderAllocation {
-    Exhausted,
-    Available(Arc<ProviderConfig>),
-    GracePeriod(Arc<ProviderConfig>),
-}
-
-impl ProviderAllocation {
-    pub fn short_key(&self) -> &str {
-        match self {
-            ProviderAllocation::Exhausted => "exhausted",
-            ProviderAllocation::Available(_) => "available",
-            ProviderAllocation::GracePeriod(_) => "grace_period",
-        }
-    }
-
-    pub fn new_available(config: Arc<ProviderConfig>) -> Self { ProviderAllocation::Available(config) }
-
-    pub fn new_grace_period(config: Arc<ProviderConfig>) -> Self { ProviderAllocation::GracePeriod(config) }
-
-    pub fn get_provider_name(&self) -> Option<Arc<str>> {
-        match self {
-            ProviderAllocation::Exhausted => None,
-            ProviderAllocation::Available(ref cfg) | ProviderAllocation::GracePeriod(ref cfg) => Some(cfg.name.clone()),
-        }
-    }
-
-    pub fn get_provider_id(&self) -> Option<u16> {
-        match self {
-            ProviderAllocation::Exhausted => None,
-            ProviderAllocation::Available(ref cfg) | ProviderAllocation::GracePeriod(ref cfg) => Some(cfg.id),
-        }
-    }
-
-    pub fn get_provider_config(&self) -> Option<Arc<ProviderConfig>> {
-        match self {
-            ProviderAllocation::Exhausted => None,
-            ProviderAllocation::Available(ref cfg) | ProviderAllocation::GracePeriod(ref cfg) => Some(Arc::clone(cfg)),
-        }
-    }
-
-    pub async fn release(&self) {
-        match &self {
-            ProviderAllocation::Exhausted => {}
-            ProviderAllocation::Available(config) | ProviderAllocation::GracePeriod(config) => {
-                config.release().await;
-            }
-        }
-    }
-
-    #[inline]
-    pub fn is_unlimited_provider(&self) -> bool {
-        matches!(self, Self::Available(c) | Self::GracePeriod(c) if c.is_unlimited())
-    }
-}
 
 impl PartialEq for ProviderAllocation {
     fn eq(&self, other: &Self) -> bool {

@@ -1,13 +1,102 @@
+//! Provider configuration, allocation and the handle that represents a claim.
+//!
+//! These are the value types of provider brokerage: what a provider is, whether
+//! one is available, and the handle a caller holds while using it. The manager
+//! that allocates them stays in `api`; these do not, because playlist processing
+//! passes them around and would otherwise have to name the API layer.
+
 use crate::{
-    api::model::ProviderAllocation,
     model::{is_input_expired, ConfigInput, ConfigInputAlias, InputUserInfo},
     utils::debug_if_enabled,
 };
 use jsonwebtoken::get_current_timestamp;
 use log::debug;
 use shared::{model::InputType, utils::sanitize_sensitive_info, write_if_some};
+use std::net::SocketAddr;
 use std::{fmt, ops::Deref, sync::Arc};
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
+
+/// Address of the client holding a provider connection.
+pub type ClientConnectionId = SocketAddr;
+/// Identifier of one allocation within a provider's lineup.
+pub type AllocationId = u64;
+
+#[derive(Debug, Clone)]
+pub enum ProviderAllocation {
+    Exhausted,
+    Available(Arc<ProviderConfig>),
+    GracePeriod(Arc<ProviderConfig>),
+}
+
+impl ProviderAllocation {
+    pub fn short_key(&self) -> &str {
+        match self {
+            ProviderAllocation::Exhausted => "exhausted",
+            ProviderAllocation::Available(_) => "available",
+            ProviderAllocation::GracePeriod(_) => "grace_period",
+        }
+    }
+
+    pub fn new_available(config: Arc<ProviderConfig>) -> Self { ProviderAllocation::Available(config) }
+
+    pub fn new_grace_period(config: Arc<ProviderConfig>) -> Self { ProviderAllocation::GracePeriod(config) }
+
+    pub fn get_provider_name(&self) -> Option<Arc<str>> {
+        match self {
+            ProviderAllocation::Exhausted => None,
+            ProviderAllocation::Available(ref cfg) | ProviderAllocation::GracePeriod(ref cfg) => Some(cfg.name.clone()),
+        }
+    }
+
+    pub fn get_provider_id(&self) -> Option<u16> {
+        match self {
+            ProviderAllocation::Exhausted => None,
+            ProviderAllocation::Available(ref cfg) | ProviderAllocation::GracePeriod(ref cfg) => Some(cfg.id),
+        }
+    }
+
+    pub fn get_provider_config(&self) -> Option<Arc<ProviderConfig>> {
+        match self {
+            ProviderAllocation::Exhausted => None,
+            ProviderAllocation::Available(ref cfg) | ProviderAllocation::GracePeriod(ref cfg) => Some(Arc::clone(cfg)),
+        }
+    }
+
+    pub async fn release(&self) {
+        match &self {
+            ProviderAllocation::Exhausted => {}
+            ProviderAllocation::Available(config) | ProviderAllocation::GracePeriod(config) => {
+                config.release().await;
+            }
+        }
+    }
+
+    #[inline]
+    pub fn is_unlimited_provider(&self) -> bool {
+        matches!(self, Self::Available(c) | Self::GracePeriod(c) if c.is_unlimited())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderHandle {
+    pub client_id: ClientConnectionId,
+    pub allocation_id: AllocationId,
+    pub allocation: ProviderAllocation,
+    // Token to cancel the background task (e.g. internal probe) if preempted
+    pub cancel_token: Option<CancellationToken>,
+}
+
+impl ProviderHandle {
+    pub fn new(
+        client_id: ClientConnectionId,
+        allocation_id: AllocationId,
+        allocation: ProviderAllocation,
+        cancel_token: Option<CancellationToken>,
+    ) -> Self {
+        Self { client_id, allocation_id, allocation, cancel_token }
+    }
+}
 
 pub type ProviderConnectionChangeCallback = Arc<dyn Fn(&Arc<str>, usize) + Send + Sync>;
 
@@ -320,7 +409,7 @@ impl ProviderConfig {
 }
 
 #[derive(Clone, Debug)]
-pub(in crate::api::model) struct ProviderConfigWrapper {
+pub(crate) struct ProviderConfigWrapper {
     inner: Arc<ProviderConfig>,
 }
 
@@ -331,7 +420,7 @@ impl fmt::Display for ProviderConfigWrapper {
 impl ProviderConfigWrapper {
     pub fn new(cfg: ProviderConfig) -> Self { Self { inner: Arc::new(cfg) } }
 
-    pub(in crate::api::model) fn config(&self) -> Arc<ProviderConfig> { Arc::clone(&self.inner) }
+    pub(crate) fn config(&self) -> Arc<ProviderConfig> { Arc::clone(&self.inner) }
 
     pub async fn try_allocate(&self, grace: bool, grace_period_timeout_secs: u64) -> ProviderAllocation {
         match self.inner.try_allocate(grace, grace_period_timeout_secs).await {
