@@ -25,7 +25,7 @@ pub use self::xtream_series::*;
 pub use self::stream_probe::*;
 pub(crate) use self::probe_handle_guard::*;
 pub use self::resolve_options::*;
-use crate::api::model::ProviderHandle;
+use crate::model::ProviderHandle;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const FOREGROUND_BATCH_SIZE: usize = 200;

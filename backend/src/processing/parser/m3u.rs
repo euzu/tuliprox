@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::AsyncBufReadExt;
 use indexmap::IndexMap;
-use crate::repository::CategoryKey;
+use crate::model::CategoryKey;
 
 /// User-configured episode pattern if set, else `CONSTANTS.re_episode_code`
 /// (`SxxEyy` / `NxNN` / "Season x Episode y" / "Episode y", compiled once at startup).

@@ -13,6 +13,7 @@ mod stream_history;
 // Playlist/library update semaphores. No dependencies of their own, and named
 // by both `api` and `processing`.
 pub mod playlist_filter;
+pub mod playlist_key;
 pub mod provider;
 pub mod update_task;
 pub mod update_guard;
@@ -30,5 +31,6 @@ pub use self::stream_history::*;
 pub use self::stream_error::*;
 pub use self::update_guard::*;
 pub use self::playlist_filter::*;
+pub use self::playlist_key::*;
 pub use self::provider::*;
 pub use self::update_task::*;

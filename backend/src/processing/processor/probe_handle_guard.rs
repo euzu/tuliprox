@@ -1,4 +1,5 @@
-use crate::api::model::{ActiveProviderManager, ProviderHandle};
+use crate::api::model::ActiveProviderManager;
+use crate::model::ProviderHandle;
 use std::sync::Arc;
 
 pub(crate) struct ProbeHandleGuard {

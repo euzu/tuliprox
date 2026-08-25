@@ -27,14 +27,8 @@ use shared::{concat_string };
 
 const THREE_DAYS_IN_SECS: i64 = 3 * 24 * 60 * 60;
 
-#[inline]
-pub fn get_xtream_stream_url_base(url: &str, username: &str, password: &str) -> String {
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("username", username)
-        .append_pair("password", password)
-        .finish();
-    format!("{url}/player_api.php?{query}")
-}
+// Moved to `model::playlist_key`; re-exported for this module's callers.
+pub use crate::model::get_xtream_stream_url_base;
 
 pub fn get_xtream_player_api_action_url(input: &ConfigInput, action: &str) -> Option<String> {
     if let Some(user_info) = input.get_user_info() {

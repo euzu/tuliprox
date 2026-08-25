@@ -77,7 +77,7 @@ pub async fn update_generic_stream_metadata(
     stream_url: &str,
     item_type: PlaylistItemType,
     active_provider: &Arc<ActiveProviderManager>,
-    active_handle: Option<&crate::api::model::ProviderHandle>,
+    active_handle: Option<&crate::model::ProviderHandle>,
     probe_priority: i8,
 ) -> Result<GenericProbeOutcome, TuliproxError> {
     let prepared = match prepare_generic_stream_metadata(
@@ -113,7 +113,7 @@ pub async fn probe_generic_stream_metadata(
     stream_url: &str,
     item_type: PlaylistItemType,
     active_provider: &Arc<ActiveProviderManager>,
-    active_handle: Option<&crate::api::model::ProviderHandle>,
+    active_handle: Option<&crate::model::ProviderHandle>,
     probe_priority: i8,
 ) -> Result<GenericProbeMetadataOutcome, TuliproxError> {
     let prepared = match prepare_generic_stream_metadata(
@@ -150,7 +150,7 @@ async fn prepare_generic_stream_metadata(
     stream_url: &str,
     item_type: PlaylistItemType,
     active_provider: &Arc<ActiveProviderManager>,
-    active_handle: Option<&crate::api::model::ProviderHandle>,
+    active_handle: Option<&crate::model::ProviderHandle>,
     probe_priority: i8,
 ) -> Result<PreparedGenericProbeOutcome, TuliproxError> {
     let storage_dir = &app_config.config.load().storage_dir;

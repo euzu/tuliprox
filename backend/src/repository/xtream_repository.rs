@@ -238,7 +238,8 @@ fn get_map_item_as_str(map: &serde_json::Map<String, Value>, key: &str) -> Optio
     None
 }
 
-pub type CategoryKey = (XtreamCluster, Arc<str>);
+// `CategoryKey` lives in `model`; re-exported for this layer's call sites.
+pub use crate::model::CategoryKey;
 
 // Because interner is not thread safe we can't use it currently for interning.
 // We leave the argument for later optimizations.
