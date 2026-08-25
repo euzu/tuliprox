@@ -39,6 +39,8 @@ pub use crate::model::update_guard::*;
 pub use crate::model::update_task::*;
 // Provider value types moved to `model`; re-exported so `api` keeps its names.
 pub use crate::model::provider::*;
+mod meter;
+pub use self::meter::*;
 pub use self::download::{DownloadKind, DownloadState};
 pub use crate::model::stream_error::*;
 pub(in crate::api) use self::{

@@ -3,8 +3,8 @@ use crate::messaging::send_message;
 use crate::model::{is_input_expired, xtream_mapping_option_from_target_options, AppConfig,
                    ConfigInput, ConfigInputFlags, ConfigTarget, MessageContent, XtreamTargetOutput};
 use crate::model::{InputSource, ProxyUserCredentials};
-use crate::processing::parser::xtream;
-use crate::processing::parser::xtream::parse_xtream_series_info;
+use crate::parser::xtream;
+use crate::parser::xtream::parse_xtream_series_info;
 use crate::repository::VirtualIdRecord;
 use crate::repository::{get_input_storage_path, get_target_storage_path};
 use crate::repository::{get_target_id_mapping, rewrite_provider_series_info_episode_virtual_id, ProviderEpisodeKey};

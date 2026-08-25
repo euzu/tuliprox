@@ -1,4 +1,4 @@
-use crate::api::model::streams::{MeterReading, StreamMeterHandle};
+use crate::api::model::{MeterReading, StreamMeterHandle};
 use log::trace;
 use shared::model::{
     ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse,

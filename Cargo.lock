@@ -4667,6 +4667,7 @@ dependencies = [
  "ctr",
  "indexmap",
  "log",
+ "regex",
  "serde",
  "serde_json",
  "shared",

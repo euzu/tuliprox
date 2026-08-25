@@ -21,7 +21,7 @@ use shared::utils::{fnv1a_32, stable_episode_storage_id, Internable};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::iptv::stalker::catalog::{
+use super::catalog::{
     StalkerCategory, StalkerRawItem, StalkerRawItemInfo, StalkerRawSeriesDetails, StalkerRawSeriesEpisode,
     StalkerRawSeriesItem, StalkerRawSeriesSeason,
 };
@@ -278,6 +278,9 @@ pub fn map_stalker_series_root(
 /// `used_episode_ids` is the set of storage ids already assigned within the current
 /// snapshot batch — pass one set for the whole refresh so storage-id collisions are
 /// detected and re-salted deterministically across all series.
+// The caller threads one set through a whole refresh; generalizing over the
+// hasher would buy nothing and complicate that call site.
+#[allow(clippy::implicit_hasher)]
 pub fn map_stalker_series_details(
     details: &StalkerRawSeriesDetails,
     parent: &StalkerPlaylistItem,

@@ -1,5 +1,5 @@
 use crate::model::{AppConfig, Config, ConfigInput, InputSource};
-use crate::processing::parser::m3u;
+use crate::parser::m3u;
 use crate::utils::prepare_file_path;
 use crate::utils::request;
 use shared::error::TuliproxError;

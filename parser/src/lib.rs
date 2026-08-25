@@ -10,5 +10,6 @@
 //! those references are resolved.
 
 pub mod ics;
+pub mod m3u;
 pub mod m3u_format;
 pub mod xtream;
