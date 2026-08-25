@@ -352,7 +352,7 @@ async fn xtream_player_api_stream(
         )
     );
 
-    if user.permission_denied(app_state) {
+    if user.permission_denied(&app_state.app_config) {
         let stream_channel = create_stream_channel_with_type(target.id, &pli, pli.item_type);
         if is_hls_playback_request(stream_ext, &pli) {
             return hls_admission_failure_manifest_response(
@@ -1704,7 +1704,7 @@ async fn xtream_player_api(
         );
     }
 
-    if user.permission_denied(app_state) {
+    if user.permission_denied(&app_state.app_config) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 

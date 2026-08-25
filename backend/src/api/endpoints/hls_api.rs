@@ -7784,7 +7784,7 @@ async fn hls_api_stream_resolved(
         format!("Can't find input {} for target {target_name}, stream_id {virtual_id}, hls", input_id)
     );
 
-    if user.permission_denied(&app_state) {
+    if user.permission_denied(&app_state.app_config) {
         let stream_channel = resolve_stream_channel(&app_state, &target, &input, virtual_id, "", None, None).await;
         return hls_admission_failure_manifest_response(
             &app_state,

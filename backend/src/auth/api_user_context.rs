@@ -130,7 +130,7 @@ pub fn resolve_api_user_context(
     app_state: &Arc<AppState>,
 ) -> Result<ApiUserContext, ApiUserAuthError> {
     // Permission check
-    if let Some(reason) = user.permission_denied_reason(app_state) {
+    if let Some(reason) = user.permission_denied_reason(&app_state.app_config) {
         debug!("User access denied for {}: {:?}", sanitize_sensitive_info(&user.username), reason);
         return Err(ApiUserAuthError::PermissionDenied(reason.into()));
     }
@@ -158,7 +158,7 @@ pub fn check_permission_and_network_access_only(
     app_state: &Arc<AppState>,
 ) -> Result<(), ApiUserAuthError> {
     // Permission check
-    if let Some(reason) = user.permission_denied_reason(app_state) {
+    if let Some(reason) = user.permission_denied_reason(&app_state.app_config) {
         debug!("User access denied for {}: {:?}", sanitize_sensitive_info(&user.username), reason);
         return Err(ApiUserAuthError::PermissionDenied(reason.into()));
     }

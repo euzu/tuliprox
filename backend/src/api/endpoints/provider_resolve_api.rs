@@ -180,7 +180,7 @@ async fn provider_resolve(
     if let Err(err) = check_network_access_only(&user, &fingerprint, &app_state) {
         return err.into_player_response(app_state.app_config.get_auth_error_status());
     }
-    if user.permission_denied(&app_state) || !user.allows_cluster(decoded.cluster) {
+    if user.permission_denied(&app_state.app_config) || !user.allows_cluster(decoded.cluster) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
     let Some(output_kind) = provider_resolve_output_kind(&target) else {

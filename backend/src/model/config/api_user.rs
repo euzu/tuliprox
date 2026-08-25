@@ -1,13 +1,11 @@
-use crate::api::model::AppState;
-use crate::model::{macros, Config, UserPlan};
+use crate::model::{macros, AppConfig, Config, UserPlan};
 use arc_swap::access::Access;
 use arc_swap::ArcSwap;
 use chrono::Local;
 use log::{debug, error, warn};
 use shared::foundation::{get_filter, BinaryOperator, Filter};
 use shared::model::{
-    ClusterFlags, NetworkAccessDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, TargetUserDto,
-    UserConnectionPermission, XtreamCluster,
+    ClusterFlags, NetworkAccessDto, ProxyType, ProxyUserCredentialsDto, ProxyUserStatus, TargetUserDto, XtreamCluster,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -282,16 +280,16 @@ impl ProxyUserCredentials {
     }
 
     #[inline]
-    pub fn has_permissions(&self, app_state: &AppState) -> bool {
-        self.permission_denied_reason(app_state).is_none()
+    pub fn has_permissions(&self, app_config: &AppConfig) -> bool {
+        self.permission_denied_reason(app_config).is_none()
     }
 
     #[inline]
-    pub fn permission_denied(&self, app_state: &AppState) -> bool {
-        !self.has_permissions(app_state)
+    pub fn permission_denied(&self, app_config: &AppConfig) -> bool {
+        !self.has_permissions(app_config)
     }
 
-    pub fn permission_denied_reason(&self, app_state: &AppState) -> Option<ProxyUserPermissionDenyReason> {
+    pub fn permission_denied_reason(&self, app_config: &AppConfig) -> Option<ProxyUserPermissionDenyReason> {
         // A plan reference that cannot be resolved must never fall back to
         // default clusters, unlimited connections and no filter.
         if self.t_has_unresolved_plan {
@@ -303,7 +301,7 @@ impl ProxyUserCredentials {
             debug!("User access denied, invalid filter: {}", self.username);
             return Some(ProxyUserPermissionDenyReason::InvalidFilter);
         }
-        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
+        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_config.config);
         if config.user_access_control {
             if let Some(exp_date) = self.exp_date.as_ref() {
                 let now = Local::now();
@@ -346,15 +344,6 @@ impl ProxyUserCredentials {
         self.output_clusters.has_cluster(item_type)
     }
 
-    pub async fn connection_permission(&self, app_state: &AppState) -> UserConnectionPermission {
-        let config = <Arc<ArcSwap<Config>> as Access<Config>>::load(&app_state.app_config.config);
-        if (self.max_connections > 0 || self.soft_connections > 0) && config.user_access_control {
-            return app_state
-                .get_connection_permission(&self.username, self.max_connections, self.soft_connections)
-                .await;
-        }
-        UserConnectionPermission::Allowed
-    }
 }
 
 impl Drop for ProxyUserCredentials {

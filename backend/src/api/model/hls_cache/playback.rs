@@ -226,7 +226,7 @@ async fn resolve_hls_access_lease_identity(
         .await;
         return Err(HlsAccessLeaseValidationError::UserSessionMissing { runtime_tail });
     };
-    if user.permission_denied(app_state) {
+    if user.permission_denied(&app_state.app_config) {
         warn!(
             "HLS access lease rejected: lease={} proxy_session={} user_session={} reason=user_account_expired",
             safe_hls_access_lease_id(&lease.lease_id),

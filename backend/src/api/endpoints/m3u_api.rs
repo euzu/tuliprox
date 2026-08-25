@@ -184,7 +184,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
-    if user.permission_denied(app_state) {
+    if user.permission_denied(&app_state.app_config) {
         if is_hls_manifest_request {
             return hls_admission_failure_manifest_response(
                 app_state,
@@ -812,7 +812,7 @@ async fn m3u_api_catchup(
     if let Err(err) = check_network_access_only(&user, &fingerprint, &app_state) {
         return err.into_player_response(app_state.app_config.get_auth_error_status());
     }
-    if user.permission_denied(&app_state) || !target.has_output(TargetType::M3u) {
+    if user.permission_denied(&app_state.app_config) || !target.has_output(TargetType::M3u) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
     let _user_guard = app_state.app_config.file_locks.write_lock_str(&user.username).await;
