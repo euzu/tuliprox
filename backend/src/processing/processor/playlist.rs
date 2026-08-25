@@ -12,7 +12,6 @@ use crate::{
         media_server_catalog_snapshot_to_playlist, refresh_media_server_catalog_complete_before_publish,
         MediaServerCatalogRefreshPolicy, MediaServerHttpClient,
     },
-    media_server::plex::client::PlexCatalogClient,
     model::{
         AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget,
         Epg, FetchedPlaylist, Mapping, MessageContent, ProcessTargets, ReverseProxyDisabledHeaderConfig, TVGuide,
@@ -460,7 +459,7 @@ async fn download_plex_media_server_playlist(
         );
     };
     let http_client = MediaServerHttpClient::new(client.clone());
-    let plex_client = match PlexCatalogClient::from_input(input, http_client) {
+    let plex_client = match input.plex_catalog_client(http_client) {
         Ok(client) => client,
         Err(error) => return (vec![], vec![TuliproxError::Download(error.to_string())]),
     };

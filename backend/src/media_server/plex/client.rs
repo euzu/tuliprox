@@ -9,13 +9,12 @@ use crate::media_server::{
     MediaServerMovie, MediaServerPage, MediaServerPageRequest, MediaServerResourceResponse, MediaServerSeason,
     MediaServerSeries, MediaServerStatus, MediaServerStreamRef, MediaServerStreamResponse,
 };
-use crate::model::{ConfigInput, MediaServerInputConfig};
 use futures::{StreamExt, TryStreamExt};
 use reqwest::header::{HeaderName, HeaderValue, RANGE};
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use shared::model::{InputType, MediaServerLibrarySelector};
+use shared::model::MediaServerLibrarySelector;
 use std::{
     collections::HashMap,
     sync::{Arc, LazyLock},
@@ -27,6 +26,23 @@ const PLEX_TV_RESOURCES_URL: &str = "https://plex.tv/api/resources";
 const X_PLEX_TOKEN: HeaderName = HeaderName::from_static("x-plex-token");
 static PLEX_CONNECTION_CACHE: LazyLock<Mutex<HashMap<PlexConnectionCacheKey, PlexConnectionState>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Everything a Plex catalog client needs in order to connect.
+///
+/// This is the boundary type: the caller resolves its own configuration - from a
+/// file, from environment variables, from anywhere - and hands over the resolved
+/// values. The client does not name the application's configuration model, which
+/// is what keeps this module a leaf.
+#[derive(Debug, Clone, Default)]
+pub struct PlexClientSettings {
+    pub token: Option<String>,
+    pub account_token: Option<String>,
+    pub server_id: Option<String>,
+    pub server_name: Option<String>,
+    pub prefer_https: bool,
+    pub allow_relay: bool,
+    pub libraries: Vec<MediaServerLibrarySelector>,
+}
 
 #[derive(Debug, Clone)]
 struct PlexClientConfig {
@@ -67,24 +83,10 @@ pub struct PlexCatalogClient {
 }
 
 impl PlexCatalogClient {
-    pub fn from_input(input: &ConfigInput, http: MediaServerHttpClient) -> Result<Self, MediaServerError> {
-        if input.input_type != InputType::Plex {
-            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
-                .provider("plex")
-                .detail("plex catalog client requires a plex input"));
-        }
-        let media_server = input.media_server.as_ref().ok_or_else(|| {
-            MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
-                .provider("plex")
-                .detail("plex input is missing media_server configuration")
-        })?;
-        Ok(Self::new(input.name.clone(), input.url.as_str(), media_server, http))
-    }
-
     pub fn new(
         input_name: Arc<str>,
         input_url: &str,
-        media_server: &MediaServerInputConfig,
+        media_server: &PlexClientSettings,
         http: MediaServerHttpClient,
     ) -> Self {
         Self {
@@ -808,7 +810,7 @@ mod tests {
         rt::{TokioExecutor, TokioIo},
         server::conn::auto::Builder,
     };
-    use shared::model::{MediaServerCatalogConfigDto, MediaServerImagePolicy, MediaServerLibrarySelectorDetailsDto, MediaServerPlaybackConfigDto};
+    use shared::model::MediaServerLibrarySelectorDetailsDto;
     use std::{
         convert::Infallible,
         sync::{
@@ -1073,20 +1075,11 @@ mod tests {
         Response::builder().status(status).body(Full::new(Bytes::from_static(body))).expect("response builds")
     }
 
-    fn plex_test_media_server_config() -> MediaServerInputConfig {
-        MediaServerInputConfig {
-            libraries: Vec::new(),
-            catalog: MediaServerCatalogConfigDto::default(),
-            playback: MediaServerPlaybackConfigDto::default(),
-            image_policy: MediaServerImagePolicy::default(),
+    fn plex_test_media_server_config() -> PlexClientSettings {
+        PlexClientSettings {
             token: Some(PLEX_TEST_TOKEN.to_string()),
-            api_key: None,
-            user_id: None,
-            account_token: None,
-            server_id: None,
-            server_name: None,
             prefer_https: true,
-            allow_relay: false,
+            ..PlexClientSettings::default()
         }
     }
 

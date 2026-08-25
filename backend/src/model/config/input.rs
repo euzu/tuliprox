@@ -1,4 +1,9 @@
 use crate::{
+    media_server::{
+        errors::{MediaServerError, MediaServerErrorKind},
+        plex::client::{PlexCatalogClient, PlexClientSettings},
+        client::MediaServerHttpClient,
+    },
     model::{macros, ConfigProvider, EpgConfig, PanelApiConfig},
     repository::get_csv_file_path,
 };
@@ -122,6 +127,49 @@ pub struct MediaServerInputConfig {
     pub server_name: Option<String>,
     pub prefer_https: bool,
     pub allow_relay: bool,
+}
+
+impl MediaServerInputConfig {
+    /// The subset of this configuration a Plex catalog client actually needs.
+    ///
+    /// The adapter lives here rather than in `media_server` so that the
+    /// media-server module never names the application's configuration model.
+    pub fn plex_client_settings(&self) -> PlexClientSettings {
+        PlexClientSettings {
+            token: self.token.clone(),
+            account_token: self.account_token.clone(),
+            server_id: self.server_id.clone(),
+            server_name: self.server_name.clone(),
+            prefer_https: self.prefer_https,
+            allow_relay: self.allow_relay,
+            libraries: self.libraries.clone(),
+        }
+    }
+}
+
+impl ConfigInput {
+    /// Builds the Plex catalog client this input describes.
+    ///
+    /// Previously `PlexCatalogClient::from_input`; it moved out of `media_server`
+    /// because it is the only thing there that knew what a `ConfigInput` is.
+    pub fn plex_catalog_client(&self, http: MediaServerHttpClient) -> Result<PlexCatalogClient, MediaServerError> {
+        if self.input_type != InputType::Plex {
+            return Err(MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
+                .provider("plex")
+                .detail("plex catalog client requires a plex input"));
+        }
+        let media_server = self.media_server.as_ref().ok_or_else(|| {
+            MediaServerError::new(MediaServerErrorKind::MediaServerDiscoveryFailed)
+                .provider("plex")
+                .detail("plex input is missing media_server configuration")
+        })?;
+        Ok(PlexCatalogClient::new(
+            self.name.clone(),
+            self.url.as_str(),
+            &media_server.plex_client_settings(),
+            http,
+        ))
+    }
 }
 
 #[derive(Debug, Clone)]

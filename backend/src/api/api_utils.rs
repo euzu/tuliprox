@@ -18,7 +18,6 @@ use crate::{
             media_server_stream_response as open_media_server_proxy_stream_response, parse_media_server_image_ref,
             parse_media_server_stream_ref,
         },
-        plex::client::PlexCatalogClient,
         MediaServerError, MediaServerErrorKind, MediaServerHttpClient, MediaServerImageRef,
     },
     model::{AppConfig, ConfigInput, ConfigTarget, InputUserInfo, ProxyUserCredentials},
@@ -2462,7 +2461,7 @@ async fn open_media_server_stream_for_input(
 
     let response = match input.input_type {
         InputType::Plex => {
-            let client = PlexCatalogClient::from_input(input, http_client)?;
+            let client = input.plex_catalog_client(http_client)?;
             open_media_server_proxy_stream_response(&client, &stream_ref, range).await?
         }
         InputType::Emby | InputType::Jellyfin => {
@@ -4071,7 +4070,7 @@ async fn open_media_server_image_resource(
 
     let response = match input.input_type {
         InputType::Plex => {
-            let client = PlexCatalogClient::from_input(&input, http_client)?;
+            let client = input.plex_catalog_client(http_client)?;
             open_media_server_proxy_image_response(&client, &image_ref).await?
         }
         InputType::Emby | InputType::Jellyfin => {
