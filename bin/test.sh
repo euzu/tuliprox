@@ -12,4 +12,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 cd "${REPO_ROOT}"
 export TMPDIR="${TMPDIR:-/tmp}"
 export TULIPROX_DISABLE_TEMP_DIR_OVERRIDE=1
+export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+# Default to `info` logging if the user hasn't set a level; can be overridden.
+export RUST_LOG="${RUST_LOG:-info}"
 exec cargo +stable test "$@"
