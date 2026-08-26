@@ -1,32 +1,16 @@
-use crate::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
-use crate::repository::{MetadataRetryDbKey, MetadataRetryDbValue, RetryStateDbValue};
-use crate::{
-    api::model::{AppState, BatchResultCollector, EventMessage, ProviderHandle},
-    model::MetadataUpdateConfig,
-    processing::processor::{
-        probe_generic_stream_metadata, update_generic_stream_metadata, update_live_stream_metadata,
-        update_properties, update_series_metadata, update_vod_metadata, GenericProbeMetadataOutcome,
-        GenericProbeOutcome, SeriesProbeSettings,
-    },
-    repository::{
-        get_input_storage_path, get_target_id_mapping_file, persist_input_live_info_batch,
-        persist_input_series_info_batch, persist_input_vod_info_batch, write_playlist_batch_item_upsert,
-        xtream_get_file_path, BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, TargetIdMapping,
-    },
-    utils::{debug_if_enabled, FileReadGuard},
-};
+use crate::ctx::MetadataUpdateCtx;
 use arc_swap::ArcSwap;
 use dashmap::{mapref::entry::Entry, DashMap};
 use log::{debug, error, info, warn};
 use parking_lot::Mutex as ParkingMutex;
 use shared::{
+    defaults::default_probe_user_priority,
     error::TuliproxError,
     model::{
         InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, StreamProperties, UUIDType,
         VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
     },
     utils::generate_provider_playlist_uuid,
-    defaults::default_probe_user_priority,
 };
 use std::{
     cmp::min,
@@ -35,12 +19,29 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
-        Arc, OnceLock, Weak,
+        Arc, OnceLock,
     },
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
+use tuliprox_core::{
+    model::{
+        BatchResultCollector, MetadataUpdateConfig, ProviderHandle, ProviderIdType, ResolveReason, ResolveReasonSet,
+        UpdateTask,
+    },
+    utils::{debug_if_enabled, FileReadGuard},
+};
+use tuliprox_processing::processor::{
+    probe_generic_stream_metadata, update_generic_stream_metadata, update_live_stream_metadata, update_properties,
+    update_series_metadata, update_vod_metadata, GenericProbeMetadataOutcome, GenericProbeOutcome, SeriesProbeSettings,
+};
+use tuliprox_repository::{
+    get_input_storage_path, get_target_id_mapping_file, persist_input_live_info_batch, persist_input_series_info_batch,
+    persist_input_vod_info_batch, write_playlist_batch_item_upsert, xtream_get_file_path, BPlusTree, BPlusTreeQuery,
+    BPlusTreeUpdate, MetadataRetryDbKey, MetadataRetryDbValue, RetryStateDbValue, TargetIdMapping,
+};
+use tuliprox_session::EventMessage;
 
 const METADATA_RETRY_STATE_FILE: &str = "metadata_retry_state.db";
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";
@@ -109,17 +110,15 @@ impl Default for MetadataUpdateRuntimeSettings {
 }
 
 impl MetadataUpdateRuntimeSettings {
-    fn from_app_state(app_state_weak: Option<&Weak<AppState>>) -> Self {
-        let metadata_update =
-            app_state_weak.and_then(Weak::upgrade).map_or_else(MetadataUpdateConfig::default, |app_state| {
-                app_state
-                    .app_config
-                    .config
-                    .load()
-                    .metadata_update
-                    .as_ref()
-                    .map_or_else(MetadataUpdateConfig::default, Clone::clone)
-            });
+    fn from_ctx(ctx: Option<&MetadataUpdateCtx>) -> Self {
+        let metadata_update = ctx.map_or_else(MetadataUpdateConfig::default, |ctx| {
+            ctx.app_config
+                .config
+                .load()
+                .metadata_update
+                .as_ref()
+                .map_or_else(MetadataUpdateConfig::default, Clone::clone)
+        });
         Self::from_metadata_update(&metadata_update)
     }
 
@@ -148,8 +147,6 @@ impl MetadataUpdateRuntimeSettings {
         }
     }
 }
-
-
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TaskKey {
@@ -450,7 +447,7 @@ pub struct MetadataUpdateManager {
     /// Terminal shutdown flag; once set, token rotation must not reactivate workers.
     is_shutdown_flag: AtomicBool,
     /// Global application state (weak reference to avoid cycles)
-    app_state: tokio::sync::Mutex<Option<Weak<AppState>>>,
+    ctx: tokio::sync::Mutex<Option<MetadataUpdateCtx>>,
     /// Global gate:
     /// - Foreground playlist updates hold WRITE lock.
     /// - Background metadata/probe tasks hold READ lock per task.
@@ -486,7 +483,7 @@ impl MetadataUpdateManager {
             workers: DashMap::new(),
             worker_lifecycle_lock: ParkingMutex::new(()),
             is_shutdown_flag: AtomicBool::new(false),
-            app_state: tokio::sync::Mutex::new(None),
+            ctx: tokio::sync::Mutex::new(None),
             update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token: ArcSwap::from_pointee(cancel_token),
             next_worker_id: AtomicU64::new(1),
@@ -541,9 +538,11 @@ impl MetadataUpdateManager {
         self.update_pause_gate.clone().write_owned().await
     }
 
-    pub async fn set_app_state(&self, app_state: Weak<AppState>) {
-        let mut guard = self.app_state.lock().await;
-        *guard = Some(app_state);
+    /// Bind the handles the worker reads. Called once, after the server's root
+    /// state is built - the worker itself is constructed before it.
+    pub async fn set_ctx(&self, ctx: MetadataUpdateCtx) {
+        let mut guard = self.ctx.lock().await;
+        *guard = Some(ctx);
     }
 
     fn scoped_task_key(input_name: &str, task: &UpdateTask) -> ScopedTaskKey {
@@ -562,8 +561,7 @@ impl MetadataUpdateManager {
             return;
         }
         self.last_resolve_enqueue_suppression_prune_at_ts.store(now_ts, Ordering::Relaxed);
-        self.resolve_enqueue_suppressions
-            .retain(|_, suppressed_until_ts| *suppressed_until_ts > now_ts);
+        self.resolve_enqueue_suppressions.retain(|_, suppressed_until_ts| *suppressed_until_ts > now_ts);
     }
 
     fn should_skip_enqueue_cached(&self, input_name: &str, task: &UpdateTask) -> bool {
@@ -606,25 +604,21 @@ impl MetadataUpdateManager {
             return;
         }
         let now_ts = chrono::Utc::now().timestamp();
-        if self
-            .enqueue_state_load_retry_at_ts
-            .get(input_name)
-            .is_some_and(|retry_at_ts| now_ts < *retry_at_ts)
-        {
+        if self.enqueue_state_load_retry_at_ts.get(input_name).is_some_and(|retry_at_ts| now_ts < *retry_at_ts) {
             return;
         }
 
-        let app_state_weak = {
-            let guard = self.app_state.lock().await;
+        let bound_ctx = {
+            let guard = self.ctx.lock().await;
             guard.clone()
         };
-        let runtime_settings = MetadataUpdateRuntimeSettings::from_app_state(app_state_weak.as_ref());
-        let Some(app_state) = app_state_weak.and_then(|weak| Weak::upgrade(&weak)) else {
+        let runtime_settings = MetadataUpdateRuntimeSettings::from_ctx(bound_ctx.as_ref());
+        let Some(ctx) = bound_ctx else {
             return;
         };
         let retry_at_ts = now_ts.saturating_add(runtime_settings.metadata_retry_load_retry_delay_secs);
 
-        let storage_dir = app_state.app_config.config.load().storage_dir.clone();
+        let storage_dir = ctx.app_config.config.load().storage_dir.clone();
         let Ok(storage_path) = get_input_storage_path(input_name, &storage_dir).await else {
             self.enqueue_state_load_retry_at_ts.insert(input_name.clone(), retry_at_ts);
             return;
@@ -642,15 +636,14 @@ impl MetadataUpdateManager {
 
         for (task_key, state) in states {
             if let Some(resolve_state) = state.resolve.as_ref() {
-                let suppressed_until_ts = resolve_state
-                    .cooldown_until_ts
-                    .unwrap_or(resolve_state.next_allowed_at_ts);
+                let suppressed_until_ts = resolve_state.cooldown_until_ts.unwrap_or(resolve_state.next_allowed_at_ts);
                 if suppressed_until_ts > now_ts {
                     let scoped_key = ScopedTaskKey::new(input_name_cloned.clone(), task_key.clone());
                     self.resolve_enqueue_suppressions.insert(scoped_key, suppressed_until_ts);
                 }
             }
-            if let Some(source_last_modified) = state.tmdb.as_ref().and_then(|tmdb_state| tmdb_state.source_last_modified)
+            if let Some(source_last_modified) =
+                state.tmdb.as_ref().and_then(|tmdb_state| tmdb_state.source_last_modified)
             {
                 let scoped_key = ScopedTaskKey::new(input_name_cloned.clone(), task_key.clone());
                 self.tmdb_source_markers.insert(scoped_key, source_last_modified);
@@ -715,11 +708,11 @@ impl MetadataUpdateManager {
         };
 
         // Read app state once and reuse for worker creation when needed.
-        let app_state_weak = {
-            let guard = self.app_state.lock().await;
+        let bound_ctx = {
+            let guard = self.ctx.lock().await;
             guard.clone()
         };
-        let runtime_settings = MetadataUpdateRuntimeSettings::from_app_state(app_state_weak.as_ref());
+        let runtime_settings = MetadataUpdateRuntimeSettings::from_ctx(bound_ctx.as_ref());
         let max_queue_size = runtime_settings.max_queue_size;
 
         let mut channel_closed_attempt: u32 = 0;
@@ -760,7 +753,7 @@ impl MetadataUpdateManager {
                                 receiver: rx,
                                 pending_tasks,
                                 pending_task_count,
-                                app_state_weak: app_state_weak.clone(),
+                                bound_ctx: bound_ctx.clone(),
                                 update_pause_gate: Arc::clone(&self.update_pause_gate),
                                 cancel_token: (*cancel_token).clone(),
                                 batch_buffer: BatchResultCollector::new(),
@@ -822,7 +815,7 @@ impl MetadataUpdateManager {
                 max_queue_size,
                 task_to_queue.clone(),
             )
-                .await
+            .await
             {
                 SubmitTaskResult::QueuedOrMerged => return,
                 SubmitTaskResult::QueueFull => {
@@ -968,7 +961,8 @@ impl MetadataUpdateManager {
             (
                 UpdateTask::ResolveVod { reason: r1, delay: d1, source_last_modified: lm1, .. },
                 UpdateTask::ResolveVod { reason: r2, delay: d2, source_last_modified: lm2, .. },
-            ) | (
+            )
+            | (
                 UpdateTask::ResolveSeries { reason: r1, delay: d1, source_last_modified: lm1, .. },
                 UpdateTask::ResolveSeries { reason: r2, delay: d2, source_last_modified: lm2, .. },
             ) => {
@@ -1064,7 +1058,7 @@ struct InputWorker {
     receiver: mpsc::Receiver<TaskKey>,
     pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
     pending_task_count: Arc<AtomicUsize>,
-    app_state_weak: Option<Weak<AppState>>,
+    bound_ctx: Option<MetadataUpdateCtx>,
     update_pause_gate: Arc<RwLock<()>>,
     cancel_token: CancellationToken,
     batch_buffer: BatchResultCollector,
@@ -1126,9 +1120,7 @@ macro_rules! collect_virtual_updates {
                     }
                     ProviderIdType::Text(provider_id_text) => {
                         let uuid = generate_provider_playlist_uuid(input_name, provider_id_text, $item_type);
-                        if let Some(virtual_id) =
-                            Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid)
-                        {
+                        if let Some(virtual_id) = Self::get_cached_uuid_virtual_id(mapping, uuid_virtual_ids, uuid) {
                             virtual_updates.insert(virtual_id, props);
                         }
                     }
@@ -1148,8 +1140,8 @@ macro_rules! collect_virtual_updates {
 macro_rules! apply_cascade_updates {
     ($fn_name:ident, $props_ty:ty, $cluster:expr, $variant:ident, $log_label:literal) => {
         async fn $fn_name(
-            app_state: &Arc<AppState>,
-            target: &crate::model::ConfigTarget,
+            ctx: &MetadataUpdateCtx,
+            target: &tuliprox_core::model::ConfigTarget,
             storage_path: &std::path::Path,
             virtual_updates: HashMap<u32, &$props_ty>,
         ) {
@@ -1164,24 +1156,26 @@ macro_rules! apply_cascade_updates {
 
             let updates = {
                 // Scope read lock to read-only query phase so write phase can acquire lock.
-                let _file_lock = app_state.app_config.file_locks.read_lock(&xtream_path).await;
+                let _file_lock = ctx.app_config.file_locks.read_lock(&xtream_path).await;
                 let xtream_path_clone = xtream_path.clone();
                 match spawn_blocking_limited(move || -> Result<Vec<XtreamPlaylistItem>, String> {
                     let mut updates = Vec::with_capacity(updates_input.len());
-                    let mut query = BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone)
-                        .map_err(|err| format!("failed to open {} query at {}: {err}", $log_label, xtream_path_clone.display()))?;
+                    let mut query =
+                        BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&xtream_path_clone).map_err(|err| {
+                            format!("failed to open {} query at {}: {err}", $log_label, xtream_path_clone.display())
+                        })?;
                     for (virtual_id, props) in updates_input {
-                        if let Some(mut item) = query
-                            .query_zero_copy(&virtual_id)
-                            .map_err(|err| format!("failed to query {} {} item {virtual_id}: {err}", $log_label, stringify!($variant)))?
-                        {
-                            item.additional_properties = Some(shared::model::StreamProperties::$variant(Box::new(props)));
+                        if let Some(mut item) = query.query_zero_copy(&virtual_id).map_err(|err| {
+                            format!("failed to query {} {} item {virtual_id}: {err}", $log_label, stringify!($variant))
+                        })? {
+                            item.additional_properties =
+                                Some(shared::model::StreamProperties::$variant(Box::new(props)));
                             updates.push(item);
                         }
                     }
                     Ok(updates)
                 })
-                    .await
+                .await
                 {
                     Ok(Ok(updates)) => updates,
                     Ok(Err(err)) => {
@@ -1199,15 +1193,13 @@ macro_rules! apply_cascade_updates {
                 return;
             }
 
-            if let Err(e) =
-                write_playlist_batch_item_upsert(&app_state.app_config, target_name, $cluster, &updates).await
-            {
+            if let Err(e) = write_playlist_batch_item_upsert(&ctx.app_config, target_name, $cluster, &updates).await {
                 error!("Failed to cascade {} updates to target {target_name}: {e}", $log_label);
                 return;
             }
 
             if target.use_memory_cache {
-                Self::update_memory_cache(app_state, target_name, $cluster, updates).await;
+                Self::update_memory_cache(ctx, target_name, $cluster, updates).await;
             }
         }
     };
@@ -1227,11 +1219,11 @@ impl InputWorker {
         let mut consecutive_resolve_tasks = 0_usize;
 
         let input_name = self.input_name.clone();
-        let app_state_weak = self.app_state_weak.clone();
+        let bound_ctx = self.bound_ctx.clone();
 
         let mut runtime_settings = self.runtime_settings();
         let mut last_runtime_settings_refresh_at = Instant::now();
-        self.ensure_metadata_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings).await;
+        self.ensure_metadata_retry_state_loaded(&input_name, bound_ctx.as_ref(), &runtime_settings).await;
 
         // Keep one prefetched task to minimize channel waits/lock churn.
         let mut next_task: Option<(TaskKey, UpdateTask, u64)> = None;
@@ -1269,7 +1261,7 @@ impl InputWorker {
                 break;
             }
             if !self.metadata_retry_loaded {
-                self.ensure_metadata_retry_state_loaded(&input_name, app_state_weak.as_ref(), &runtime_settings).await;
+                self.ensure_metadata_retry_state_loaded(&input_name, bound_ctx.as_ref(), &runtime_settings).await;
             }
             let now_ts = chrono::Utc::now().timestamp();
             self.prune_retry_tracking_maps_if_needed(now_ts, &runtime_settings).await;
@@ -1285,8 +1277,8 @@ impl InputWorker {
                 last_queue_log_at = Instant::now()
                     .checked_sub(runtime_settings.queue_log_interval + Duration::from_secs(1))
                     .unwrap_or_else(Instant::now);
-                if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
-                    app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesStarted(input_name.clone()));
+                if let Some(ctx) = bound_ctx.clone() {
+                    ctx.event_manager.send_event(EventMessage::InputMetadataUpdatesStarted(input_name.clone()));
                 }
                 if self.last_cycle_completed_at_ts.is_some_and(|last| {
                     now_ts.saturating_sub(last) >= runtime_settings.resolve_exhaustion_reset_gap_secs
@@ -1308,9 +1300,7 @@ impl InputWorker {
             if Self::is_resolve_task(&task_for_execution) && self.resolve_exhausted.contains_key(&current_key) {
                 debug!(
                     "[Metadata-Task] Skipping task (resolve exhausted) for input {}: {} (reset window: {}s)",
-                    input_name,
-                    task_for_execution,
-                    runtime_settings.resolve_exhaustion_reset_gap_secs
+                    input_name, task_for_execution, runtime_settings.resolve_exhaustion_reset_gap_secs
                 );
                 self.scheduled_requeues.remove(&current_key);
                 remove_current_task = true;
@@ -1396,11 +1386,8 @@ impl InputWorker {
                         if let Some(active_state) = state_bundle.get(active_retry_domain) {
                             if let Some(cooldown_until_ts) = active_state.cooldown_until_ts {
                                 if now_ts < cooldown_until_ts {
-                                    let cooldown_label = if active_retry_domain == RetryDomain::Probe {
-                                        "probe"
-                                    } else {
-                                        "resolve"
-                                    };
+                                    let cooldown_label =
+                                        if active_retry_domain == RetryDomain::Probe { "probe" } else { "resolve" };
                                     debug!(
                                         "[Metadata-Task] Skipping task ({} cooldown) for input {}: {} (cooldown_until={}, remaining={}s)",
                                         cooldown_label,
@@ -1478,13 +1465,13 @@ impl InputWorker {
                     };
                     Self::process_task_static(
                         &input_name,
-                        app_state_weak.as_ref(),
+                        bound_ctx.as_ref(),
                         &task_for_execution,
                         &mut self.batch_buffer,
                         &mut self.db_handles,
                         &mut self.failed_clusters,
                     )
-                        .await
+                    .await
                 };
 
                 match task_result {
@@ -1494,8 +1481,10 @@ impl InputWorker {
                         } else if Self::is_series_task_key(&current_key) {
                             processed_series_count += 1;
                         }
-                        let trigger_playlist_update =
-                            Self::should_trigger_playlist_update_for_task(&task_for_execution, task_outcome.task_changed);
+                        let trigger_playlist_update = Self::should_trigger_playlist_update_for_task(
+                            &task_for_execution,
+                            task_outcome.task_changed,
+                        );
                         cycle_had_changes |= trigger_playlist_update;
                         debug!(
                             "[Metadata-Task] Task succeeded for input {input_name}: {task_for_execution} (changed={}, trigger_playlist_update={}, tmdb_pending={}, probe_pending={})",
@@ -1607,8 +1596,9 @@ impl InputWorker {
                             self.recently_completed_no_change.insert(current_key.clone(), (Instant::now(), reasons));
                             // Set producer-side enqueue suppression so that future playlist
                             // processing cycles do not re-queue this task during the TTL.
-                            let suppressed_until_ts =
-                                now_ts.saturating_add(i64::try_from(runtime_settings.no_change_cache_ttl_secs).unwrap_or(i64::MAX));
+                            let suppressed_until_ts = now_ts.saturating_add(
+                                i64::try_from(runtime_settings.no_change_cache_ttl_secs).unwrap_or(i64::MAX),
+                            );
                             self.set_resolve_enqueue_suppression(&current_key, suppressed_until_ts);
                         } else {
                             self.recently_completed_no_change.remove(&current_key);
@@ -1641,7 +1631,9 @@ impl InputWorker {
                         if Self::is_permanent_not_found_error(e.message()) {
                             debug!(
                                 "[Task] Task failed with permanent not-found for input {}: {} (error={})",
-                                input_name, task_for_execution, e.message()
+                                input_name,
+                                task_for_execution,
+                                e.message()
                             );
                             let retry_domain = Self::retry_domain_for_task(&task_for_execution);
                             self.scheduled_requeues.remove(&current_key);
@@ -1831,7 +1823,7 @@ impl InputWorker {
                 let Some(_pause_guard) = self.wait_for_update_pause_window().await else {
                     break;
                 };
-                Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
+                Self::flush_batch_static(&input_name, bound_ctx.as_ref(), &mut self.batch_buffer).await;
             }
 
             if let Some(retry_at_ts) = schedule_requeue_at_ts {
@@ -1900,7 +1892,7 @@ impl InputWorker {
                 let Some(_pause_guard) = self.wait_for_update_pause_window().await else {
                     break;
                 };
-                Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
+                Self::flush_batch_static(&input_name, bound_ctx.as_ref(), &mut self.batch_buffer).await;
             }
 
             if queue_cycle_active && queue_completely_empty {
@@ -1911,8 +1903,8 @@ impl InputWorker {
                 consecutive_resolve_tasks = 0;
                 if cycle_had_changes {
                     info!("All pending metadata resolves completed for input {input_name} (with changes)");
-                    if let Some(app_state) = app_state_weak.as_ref().and_then(Weak::upgrade) {
-                        app_state.event_manager.send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
+                    if let Some(ctx) = bound_ctx.clone() {
+                        ctx.event_manager.send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
                     }
                 } else {
                     debug!("All pending metadata resolves completed for input {input_name} (no changes, skipping playlist update trigger)");
@@ -1925,7 +1917,7 @@ impl InputWorker {
         self.release_db_handles();
         if !self.batch_buffer.is_empty() {
             if let Some(_pause_guard) = self.wait_for_update_pause_window().await {
-                Self::flush_batch_static(&input_name, app_state_weak.as_ref(), &mut self.batch_buffer).await;
+                Self::flush_batch_static(&input_name, bound_ctx.as_ref(), &mut self.batch_buffer).await;
             }
         }
         self.flush_dirty_retry_states().await;
@@ -1936,7 +1928,7 @@ impl InputWorker {
     async fn ensure_metadata_retry_state_loaded(
         &mut self,
         input_name: &str,
-        app_state_weak: Option<&Weak<AppState>>,
+        bound_ctx: Option<&MetadataUpdateCtx>,
         runtime_settings: &MetadataUpdateRuntimeSettings,
     ) {
         if self.metadata_retry_loaded {
@@ -1947,13 +1939,13 @@ impl InputWorker {
             return;
         }
 
-        let Some(app_state) = app_state_weak.and_then(Weak::upgrade) else {
+        let Some(ctx) = bound_ctx else {
             self.metadata_retry_load_retry_at_ts =
                 Some(now_ts.saturating_add(runtime_settings.metadata_retry_load_retry_delay_secs));
             return;
         };
 
-        let storage_dir = app_state.app_config.config.load().storage_dir.clone();
+        let storage_dir = ctx.app_config.config.load().storage_dir.clone();
         let Ok(storage_path) = get_input_storage_path(input_name, &storage_dir).await else {
             warn!("Could not resolve storage path for metadata retry state on input {input_name}");
             self.metadata_retry_load_retry_at_ts =
@@ -2005,9 +1997,10 @@ impl InputWorker {
         let key_for_dirty = key.clone();
         let state = state.cloned();
         let input_name = self.input_name.clone();
-        let persist_result =
-            spawn_blocking_limited(move || persist_metadata_retry_state_to_disk(&path, &key_for_persist, state.as_ref()))
-                .await;
+        let persist_result = spawn_blocking_limited(move || {
+            persist_metadata_retry_state_to_disk(&path, &key_for_persist, state.as_ref())
+        })
+        .await;
 
         match persist_result {
             Ok(Ok(())) => {
@@ -2206,7 +2199,7 @@ impl InputWorker {
     }
 
     fn runtime_settings(&self) -> MetadataUpdateRuntimeSettings {
-        MetadataUpdateRuntimeSettings::from_app_state(self.app_state_weak.as_ref())
+        MetadataUpdateRuntimeSettings::from_ctx(self.bound_ctx.as_ref())
     }
 
     async fn wait_for_update_pause_window(&mut self) -> Option<tokio::sync::OwnedRwLockReadGuard<()>> {
@@ -2298,8 +2291,7 @@ impl InputWorker {
         }
 
         let no_change_ttl = Duration::from_secs(runtime_settings.no_change_cache_ttl_secs);
-        self.recently_completed_no_change
-            .retain(|_, (completed_at, _)| completed_at.elapsed() < no_change_ttl);
+        self.recently_completed_no_change.retain(|_, (completed_at, _)| completed_at.elapsed() < no_change_ttl);
     }
 
     fn release_db_handles(&mut self) {
@@ -2421,9 +2413,7 @@ impl InputWorker {
         task_for_execution: &UpdateTask,
         runtime_settings: &MetadataUpdateRuntimeSettings,
     ) -> bool {
-        let Some((completed_at, cached_reasons)) =
-            self.recently_completed_no_change.get(current_key).copied()
-        else {
+        let Some((completed_at, cached_reasons)) = self.recently_completed_no_change.get(current_key).copied() else {
             return false;
         };
 
@@ -2458,15 +2448,18 @@ impl InputWorker {
         self.tmdb_source_markers.remove(&scoped_key);
     }
 
-    fn sync_resolve_enqueue_suppression_from_retry_state(&self, current_key: &TaskKey, state: &TaskRetryState, now_ts: i64) {
+    fn sync_resolve_enqueue_suppression_from_retry_state(
+        &self,
+        current_key: &TaskKey,
+        state: &TaskRetryState,
+        now_ts: i64,
+    ) {
         let Some(resolve_state) = state.resolve.as_ref() else {
             self.clear_resolve_enqueue_suppression(current_key);
             return;
         };
 
-        let suppressed_until_ts = resolve_state
-            .cooldown_until_ts
-            .unwrap_or(resolve_state.next_allowed_at_ts);
+        let suppressed_until_ts = resolve_state.cooldown_until_ts.unwrap_or(resolve_state.next_allowed_at_ts);
         if suppressed_until_ts > now_ts {
             self.set_resolve_enqueue_suppression(current_key, suppressed_until_ts);
         } else {
@@ -2492,9 +2485,8 @@ impl InputWorker {
     #[inline]
     fn task_source_last_modified(task: &UpdateTask) -> Option<u64> {
         match task {
-            UpdateTask::ResolveVod { source_last_modified, .. } | UpdateTask::ResolveSeries { source_last_modified, .. } => {
-                *source_last_modified
-            }
+            UpdateTask::ResolveVod { source_last_modified, .. }
+            | UpdateTask::ResolveSeries { source_last_modified, .. } => *source_last_modified,
             _ => None,
         }
     }
@@ -2575,15 +2567,15 @@ impl InputWorker {
     // Changed to static method
     async fn flush_batch_static(
         input_name: &str,
-        app_state_weak: Option<&Weak<AppState>>,
+        bound_ctx: Option<&MetadataUpdateCtx>,
         batch_buffer: &mut BatchResultCollector,
     ) {
         if batch_buffer.is_empty() {
             return;
         }
 
-        let Some(app_state) = app_state_weak.and_then(Weak::upgrade) else { return };
-        let app_config = &app_state.app_config;
+        let Some(ctx) = bound_ctx else { return };
+        let app_config = &ctx.app_config;
         let cfg = app_config.config.load();
         let vod_updates = batch_buffer.take_vod_updates();
         let series_updates = batch_buffer.take_series_updates();
@@ -2610,7 +2602,7 @@ impl InputWorker {
                         input_name,
                         updates,
                     )
-                        .await
+                    .await
                     {
                         error!("Failed to flush VOD batch for input {input_name}: {e}");
                     }
@@ -2633,7 +2625,7 @@ impl InputWorker {
                         input_name,
                         updates,
                     )
-                        .await
+                    .await
                     {
                         error!("Failed to flush Series batch for input {input_name}: {e}");
                     }
@@ -2656,7 +2648,7 @@ impl InputWorker {
                         input_name,
                         updates,
                     )
-                        .await
+                    .await
                     {
                         error!("Failed to flush Live batch for input {input_name}: {e}");
                     }
@@ -2666,13 +2658,13 @@ impl InputWorker {
 
         let cascade_batch = BatchResultCollector { vod: vod_updates, series: series_updates, live: live_updates };
 
-        Self::cascade_updates(&app_state, &app_config.config.load(), input_name, &cascade_batch).await;
+        Self::cascade_updates(ctx, &app_config.config.load(), input_name, &cascade_batch).await;
     }
 
     #[allow(clippy::too_many_lines)]
     async fn cascade_updates(
-        app_state: &Arc<AppState>,
-        config: &crate::model::Config,
+        ctx: &MetadataUpdateCtx,
+        config: &tuliprox_core::model::Config,
         input_name: &str,
         batch: &BatchResultCollector,
     ) {
@@ -2682,7 +2674,7 @@ impl InputWorker {
 
         // Find targets affected by this input.
         let targets = {
-            let sources = app_state.app_config.sources.load();
+            let sources = ctx.app_config.sources.load();
             let mut affected_targets = Vec::new();
 
             for source in &sources.sources {
@@ -2701,17 +2693,17 @@ impl InputWorker {
 
         for target in targets {
             let target_name = &target.name;
-            let Some(target_path) = crate::repository::get_target_storage_path(config, target_name) else {
+            let Some(target_path) = tuliprox_repository::get_target_storage_path(config, target_name) else {
                 continue;
             };
-            let Some(storage_path) = crate::repository::xtream_get_storage_path(config, target_name) else {
+            let Some(storage_path) = tuliprox_repository::xtream_get_storage_path(config, target_name) else {
                 continue;
             };
             let mapping_file = get_target_id_mapping_file(&target_path);
 
             let mapping = {
                 // Scope read lock strictly to mapping load.
-                let _file_lock = app_state.app_config.file_locks.read_lock(&mapping_file).await;
+                let _file_lock = ctx.app_config.file_locks.read_lock(&mapping_file).await;
                 let mapping_file_clone = mapping_file.clone();
                 match spawn_blocking_limited(move || TargetIdMapping::new(&mapping_file_clone, false)).await {
                     Ok(Ok(mapping)) => mapping,
@@ -2736,7 +2728,7 @@ impl InputWorker {
                 &mut provider_virtual_ids,
                 &mut uuid_virtual_ids,
             );
-            Self::apply_vod_cascade_updates(app_state, &target, &storage_path, vod_virtual_updates).await;
+            Self::apply_vod_cascade_updates(ctx, &target, &storage_path, vod_virtual_updates).await;
 
             let series_virtual_updates = Self::collect_series_virtual_updates(
                 &mapping,
@@ -2745,7 +2737,7 @@ impl InputWorker {
                 &mut provider_virtual_ids,
                 &mut uuid_virtual_ids,
             );
-            Self::apply_series_cascade_updates(app_state, &target, &storage_path, series_virtual_updates).await;
+            Self::apply_series_cascade_updates(ctx, &target, &storage_path, series_virtual_updates).await;
 
             let live_virtual_updates = Self::collect_live_virtual_updates(
                 &mapping,
@@ -2754,7 +2746,7 @@ impl InputWorker {
                 &mut provider_virtual_ids,
                 &mut uuid_virtual_ids,
             );
-            Self::apply_live_cascade_updates(app_state, &target, &storage_path, live_virtual_updates).await;
+            Self::apply_live_cascade_updates(ctx, &target, &storage_path, live_virtual_updates).await;
         }
     }
 
@@ -2775,20 +2767,31 @@ impl InputWorker {
     // macro below. The macro body walks a single `BatchResultCollector` field
     // and builds a `HashMap<virtual_id, &Props>` of pending per-virtual updates.
     collect_virtual_updates!(collect_vod_virtual_updates, vod, VideoStreamProperties, PlaylistItemType::Video);
-    collect_virtual_updates!(collect_series_virtual_updates, series, SeriesStreamProperties, PlaylistItemType::SeriesInfo);
+    collect_virtual_updates!(
+        collect_series_virtual_updates,
+        series,
+        SeriesStreamProperties,
+        PlaylistItemType::SeriesInfo
+    );
     collect_virtual_updates!(collect_live_virtual_updates, live, LiveStreamProperties, PlaylistItemType::Live);
 
     apply_cascade_updates!(apply_vod_cascade_updates, VideoStreamProperties, XtreamCluster::Video, Video, "VOD");
-    apply_cascade_updates!(apply_series_cascade_updates, SeriesStreamProperties, XtreamCluster::Series, Series, "Series");
+    apply_cascade_updates!(
+        apply_series_cascade_updates,
+        SeriesStreamProperties,
+        XtreamCluster::Series,
+        Series,
+        "Series"
+    );
     apply_cascade_updates!(apply_live_cascade_updates, LiveStreamProperties, XtreamCluster::Live, Live, "Live");
 
     async fn update_memory_cache(
-        app_state: &Arc<AppState>,
+        ctx: &MetadataUpdateCtx,
         target_name: &str,
         cluster: XtreamCluster,
         updates: Vec<XtreamPlaylistItem>,
     ) {
-        let mut playlists = app_state.playlists.data.write().await;
+        let mut playlists = ctx.playlists.data.write().await;
         if let Some(playlist) = playlists.get_mut(target_name) {
             if let Some(xtream_storage) = &mut playlist.xtream {
                 let storage = match cluster {
@@ -2804,7 +2807,7 @@ impl InputWorker {
     }
     async fn get_or_open_query(
         input_name: &str,
-        app_state: &Arc<AppState>,
+        ctx: &MetadataUpdateCtx,
         cluster: XtreamCluster,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
@@ -2814,16 +2817,16 @@ impl InputWorker {
         }
 
         if let std::collections::hash_map::Entry::Vacant(entry) = db_handles.entry(cluster) {
-            let cfg = app_state.app_config.config.load();
+            let cfg = ctx.app_config.config.load();
             if let Ok(storage_path) = get_input_storage_path(input_name, &cfg.storage_dir).await {
                 let file_path = xtream_get_file_path(&storage_path, cluster);
                 if file_path.exists() {
-                    let lock = app_state.app_config.file_locks.read_lock(&file_path).await;
+                    let lock = ctx.app_config.file_locks.read_lock(&file_path).await;
                     let file_path = file_path.clone();
                     let query = match spawn_blocking_limited(move || {
                         BPlusTreeQuery::<u32, XtreamPlaylistItem>::try_new(&file_path)
                     })
-                        .await
+                    .await
                     {
                         Ok(Ok(query)) => Some(query),
                         Ok(Err(err)) => {
@@ -2853,7 +2856,7 @@ impl InputWorker {
     // Helper for get_item_name with caching
     async fn get_item_name_static(
         input_name: &str,
-        app_state: &Arc<AppState>,
+        ctx: &MetadataUpdateCtx,
         task: &UpdateTask,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
@@ -2867,15 +2870,13 @@ impl InputWorker {
 
         if let ProviderIdType::Id(vid) = id {
             let stream_id = *vid;
-            if let Some(query) =
-                Self::get_or_open_query(input_name, app_state, cluster, db_handles, failed_clusters).await
-            {
+            if let Some(query) = Self::get_or_open_query(input_name, ctx, cluster, db_handles, failed_clusters).await {
                 let query = Arc::clone(&query);
                 let item = match spawn_blocking_limited(move || {
                     let mut guard = query.lock();
                     guard.query_zero_copy(&stream_id).ok().flatten()
                 })
-                    .await
+                .await
                 {
                     Ok(item) => item,
                     Err(err) => {
@@ -2895,16 +2896,16 @@ impl InputWorker {
     #[allow(clippy::too_many_lines)]
     async fn process_task_static(
         input_name: &Arc<str>,
-        app_state_weak: Option<&Weak<AppState>>,
+        bound_ctx: Option<&MetadataUpdateCtx>,
         task: &UpdateTask,
         collector: &mut BatchResultCollector,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
     ) -> Result<ProcessTaskOutcome, TuliproxError> {
-        let app_state =
-            app_state_weak.and_then(Weak::upgrade).ok_or_else(|| shared::error::TuliproxError::Config("AppState not available".to_string()))?;
+        let ctx =
+            bound_ctx.ok_or_else(|| shared::error::TuliproxError::Config("metadata context not bound".to_string()))?;
 
-        let Some(input_base) = app_state.app_config.get_input_by_name(input_name) else {
+        let Some(input_base) = ctx.app_config.get_input_by_name(input_name) else {
             return Err(shared::error::TuliproxError::Config(format!("Input {input_name} not found")));
         };
 
@@ -2914,7 +2915,7 @@ impl InputWorker {
 
         // Background metadata/probe tasks are low-priority.
         // Never run them while a foreground playlist update is active.
-        if let Some(guard) = app_state.update_guard.try_playlist() {
+        if let Some(guard) = ctx.update_guard.try_playlist() {
             drop(guard);
         } else {
             return Err(shared::error::TuliproxError::Config(TASK_ERR_UPDATE_IN_PROGRESS.to_string()));
@@ -2922,7 +2923,7 @@ impl InputWorker {
 
         let needs_probe_connection = Self::task_needs_provider_connection(task, input_base.input_type);
 
-        let probe_priority = app_state
+        let probe_priority = ctx
             .app_config
             .config
             .load()
@@ -2932,7 +2933,8 @@ impl InputWorker {
 
         // Reserve provider capacity only for actual probe work (ffprobe paths).
         let provider_handle = if needs_probe_connection {
-            let Some(handle) = app_state.active_provider.acquire_connection_for_probe(input_name, probe_priority).await else {
+            let Some(handle) = ctx.active_provider.acquire_connection_for_probe(input_name, probe_priority).await
+            else {
                 debug_if_enabled!("No provider connection available for background task {}, skipping...", task);
                 return Err(shared::error::TuliproxError::Config(TASK_ERR_NO_CONNECTION.to_string()));
             };
@@ -2941,7 +2943,7 @@ impl InputWorker {
             None
         };
 
-        let item_title = Self::get_item_name_static(input_name, &app_state, task, db_handles, failed_clusters).await;
+        let item_title = Self::get_item_name_static(input_name, ctx, task, db_handles, failed_clusters).await;
 
         let config_to_use = provider_handle.as_ref().and_then(|handle| handle.allocation.get_provider_config());
         let name_display = item_title.as_deref().map_or(String::new(), |n| format!(" \"{n}\""));
@@ -2965,10 +2967,10 @@ impl InputWorker {
             })
             .unwrap_or(input_base);
 
-        let client = if app_state.should_use_manual_redirects() {
-            app_state.http_client_no_redirect.load()
+        let client = if tuliprox_core::model::should_use_manual_redirects(&ctx.app_config) {
+            ctx.http_client_no_redirect.load()
         } else {
-            app_state.http_client.load()
+            ctx.http_client.load()
         };
 
         // Execute task; probe tasks get a reserved provider handle, resolve tasks don't.
@@ -2988,13 +2990,13 @@ impl InputWorker {
                             Err(shared::error::TuliproxError::Config(TASK_ERR_PREEMPTED.to_string()))
                         }
 
-                        res = Self::execute_task_inner_static(&app_state, &client, &input_to_use, task, item_title.as_deref(), Some(handle), probe_priority, collector, db_handles, failed_clusters) => {
+                        res = Self::execute_task_inner_static(ctx, &client, &input_to_use, task, item_title.as_deref(), Some(handle), probe_priority, collector, db_handles, failed_clusters) => {
                             res
                         }
                     }
                 } else {
                     Self::execute_task_inner_static(
-                        &app_state,
+                        ctx,
                         &client,
                         &input_to_use,
                         task,
@@ -3005,11 +3007,11 @@ impl InputWorker {
                         db_handles,
                         failed_clusters,
                     )
-                        .await
+                    .await
                 }
             } else {
                 Self::execute_task_inner_static(
-                    &app_state,
+                    ctx,
                     &client,
                     &input_to_use,
                     task,
@@ -3020,7 +3022,7 @@ impl InputWorker {
                     db_handles,
                     failed_clusters,
                 )
-                    .await
+                .await
             }
         };
         let needs_probe_timeout = Self::is_probe_task(task)
@@ -3043,7 +3045,7 @@ impl InputWorker {
         };
 
         if provider_handle.is_some() {
-            app_state.connection_manager.release_provider_handle(provider_handle).await;
+            ctx.connection_manager.release_provider_handle(provider_handle).await;
         }
         match res {
             Ok((tmdb_and_date_present, probe_pending)) => {
@@ -3075,7 +3077,7 @@ impl InputWorker {
             // Local library and media-server probing must not depend on IPTV provider capacity.
             UpdateTask::ProbeStream { .. } => {
                 !(matches!(input_type, InputType::Library) || input_type.is_media_server())
-            },
+            }
             // Resolve tasks handle their own probe connection acquisition internally.
             // This avoids holding a provider connection for the entire duration of
             // info fetch + TMDB resolve + probe, reducing "provider exhausted" errors.
@@ -3126,9 +3128,9 @@ impl InputWorker {
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     async fn execute_task_inner_static(
-        app_state: &Arc<AppState>,
+        ctx: &MetadataUpdateCtx,
         client: &reqwest::Client,
-        input: &Arc<crate::model::ConfigInput>,
+        input: &Arc<tuliprox_core::model::ConfigInput>,
         task: &UpdateTask,
         item_title: Option<&str>,
         active_handle: Option<&ProviderHandle>,
@@ -3157,19 +3159,18 @@ impl InputWorker {
                 let query_opt = if will_probe {
                     None
                 } else {
-                    Self::get_or_open_query(&input.name, app_state, XtreamCluster::Video, db_handles, failed_clusters)
-                        .await
+                    Self::get_or_open_query(&input.name, ctx, XtreamCluster::Video, db_handles, failed_clusters).await
                 };
 
                 let tmdb_and_date_present = AtomicBool::new(false);
                 let probe_pending = AtomicBool::new(false);
                 match update_vod_metadata(
-                    &app_state.app_config,
+                    &ctx.app_config,
                     client,
                     input,
                     id.clone(),
                     active_handle,
-                    &app_state.active_provider,
+                    &ctx.active_provider,
                     item_title,
                     false, // Batch collect
                     fetch_info,
@@ -3179,19 +3180,15 @@ impl InputWorker {
                     Some(&tmdb_and_date_present),
                     Some(&probe_pending),
                 )
-                    .await
+                .await
                 {
                     Ok(Some(props)) => {
                         collector.add_vod(id.clone(), props);
-                        Ok((
-                            tmdb_and_date_present.load(Ordering::Relaxed),
-                            probe_pending.load(Ordering::Relaxed),
-                        ))
+                        Ok((tmdb_and_date_present.load(Ordering::Relaxed), probe_pending.load(Ordering::Relaxed)))
                     }
-                    Ok(None) => Ok((
-                        tmdb_and_date_present.load(Ordering::Relaxed),
-                        probe_pending.load(Ordering::Relaxed),
-                    )),
+                    Ok(None) => {
+                        Ok((tmdb_and_date_present.load(Ordering::Relaxed), probe_pending.load(Ordering::Relaxed)))
+                    }
                     Err(e) => Err(e),
                 }
             }
@@ -3200,7 +3197,7 @@ impl InputWorker {
                 let resolve_tmdb = reason.contains(ResolveReason::Tmdb) || reason.contains(ResolveReason::Date);
                 let will_probe = reason.contains(ResolveReason::Probe);
                 let series_probe_settings = {
-                    let config = app_state.app_config.config.load();
+                    let config = ctx.app_config.config.load();
                     SeriesProbeSettings::from_metadata_update(config.metadata_update.as_ref())
                 };
 
@@ -3212,18 +3209,17 @@ impl InputWorker {
                 let query_opt = if will_probe {
                     None
                 } else {
-                    Self::get_or_open_query(&input.name, app_state, XtreamCluster::Series, db_handles, failed_clusters)
-                        .await
+                    Self::get_or_open_query(&input.name, ctx, XtreamCluster::Series, db_handles, failed_clusters).await
                 };
 
                 let tmdb_and_date_present = AtomicBool::new(false);
                 let probe_pending = AtomicBool::new(false);
                 match update_series_metadata(
-                    &app_state.app_config,
+                    &ctx.app_config,
                     client,
                     input,
                     id.clone(),
-                    &app_state.active_provider,
+                    &ctx.active_provider,
                     active_handle,
                     item_title,
                     false, // Batch collect
@@ -3235,19 +3231,15 @@ impl InputWorker {
                     Some(&tmdb_and_date_present),
                     Some(&probe_pending),
                 )
-                    .await
+                .await
                 {
                     Ok(Some(props)) => {
                         collector.add_series(id.clone(), props);
-                        Ok((
-                            tmdb_and_date_present.load(Ordering::Relaxed),
-                            probe_pending.load(Ordering::Relaxed),
-                        ))
+                        Ok((tmdb_and_date_present.load(Ordering::Relaxed), probe_pending.load(Ordering::Relaxed)))
                     }
-                    Ok(None) => Ok((
-                        tmdb_and_date_present.load(Ordering::Relaxed),
-                        probe_pending.load(Ordering::Relaxed),
-                    )),
+                    Ok(None) => {
+                        Ok((tmdb_and_date_present.load(Ordering::Relaxed), probe_pending.load(Ordering::Relaxed)))
+                    }
                     Err(e) => Err(e),
                 }
             }
@@ -3256,16 +3248,16 @@ impl InputWorker {
                 db_handles.remove(&XtreamCluster::Live);
 
                 match update_live_stream_metadata(
-                    &app_state.app_config,
+                    &ctx.app_config,
                     client,
                     input,
                     id.clone(),
                     false,
                     None,
                     active_handle,
-                    &app_state.active_provider,
+                    &ctx.active_provider,
                 )
-                    .await
+                .await
                 {
                     Ok(Some(props)) => {
                         collector.add_live(id.clone(), props);
@@ -3287,13 +3279,13 @@ impl InputWorker {
                         };
 
                         let outcome = probe_generic_stream_metadata(
-                            &app_state.app_config,
+                            &ctx.app_config,
                             client,
                             input.as_ref(),
                             unique_id,
                             url,
                             *item_type,
-                            &app_state.active_provider,
+                            &ctx.active_provider,
                             active_handle,
                             probe_priority,
                         )
@@ -3310,7 +3302,7 @@ impl InputWorker {
                         };
 
                         let Some(query) =
-                            Self::get_or_open_query(&input.name, app_state, cluster, db_handles, failed_clusters).await
+                            Self::get_or_open_query(&input.name, ctx, cluster, db_handles, failed_clusters).await
                         else {
                             warn!("Item not found in Xtream DB for generic probe: {unique_id}");
                             return Ok((false, false));
@@ -3363,17 +3355,17 @@ impl InputWorker {
                     db_handles.clear();
                 }
                 let outcome = update_generic_stream_metadata(
-                    &app_state.app_config,
+                    &ctx.app_config,
                     client,
                     input.as_ref(),
                     unique_id,
                     url,
                     *item_type,
-                    &app_state.active_provider,
+                    &ctx.active_provider,
                     active_handle,
                     probe_priority,
                 )
-                    .await?;
+                .await?;
 
                 match outcome {
                     GenericProbeOutcome::Updated | GenericProbeOutcome::Noop => Ok((false, false)),
@@ -3434,7 +3426,7 @@ mod tests {
             receiver,
             pending_tasks,
             pending_task_count,
-            app_state_weak: None,
+            bound_ctx: None,
             update_pause_gate: Arc::new(RwLock::new(())),
             cancel_token: CancellationToken::new(),
             batch_buffer: BatchResultCollector::new(),
@@ -3545,9 +3537,7 @@ mod tests {
         let scoped_key = ScopedTaskKey::new(Arc::from(input_name), TaskKey::from_task(&task));
         manager.tmdb_source_markers.insert(scoped_key, 777);
 
-        let prepared = manager
-            .strip_tmdb_reasons_for_enqueue(input_name, task)
-            .expect("probe reason should remain");
+        let prepared = manager.strip_tmdb_reasons_for_enqueue(input_name, task).expect("probe reason should remain");
         match prepared {
             UpdateTask::ResolveSeries { reason, source_last_modified, .. } => {
                 assert_eq!(source_last_modified, Some(777));
@@ -3615,9 +3605,7 @@ mod tests {
         let scoped_key = ScopedTaskKey::new(Arc::from(input_name), TaskKey::from_task(&task));
         manager.tmdb_source_markers.insert(scoped_key, 777);
 
-        let prepared = manager
-            .strip_tmdb_reasons_for_enqueue(input_name, task)
-            .expect("probe reason should remain");
+        let prepared = manager.strip_tmdb_reasons_for_enqueue(input_name, task).expect("probe reason should remain");
         match prepared {
             UpdateTask::ResolveVod { reason, source_last_modified, .. } => {
                 assert_eq!(source_last_modified, Some(777));
@@ -3677,7 +3665,7 @@ mod tests {
             queue_size,
             task_initial,
         )
-            .await;
+        .await;
 
         let task_merge = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
@@ -3693,7 +3681,7 @@ mod tests {
             queue_size,
             task_merge,
         )
-            .await;
+        .await;
 
         let first_signal = rx.try_recv().expect("first signal should be queued");
         assert_eq!(first_signal, TaskKey::Vod(42));
@@ -3737,7 +3725,7 @@ mod tests {
             queue_size,
             initial,
         )
-            .await;
+        .await;
 
         let identical_merge = UpdateTask::ResolveVod {
             id: ProviderIdType::Id(42),
@@ -3753,7 +3741,7 @@ mod tests {
             queue_size,
             identical_merge,
         )
-            .await;
+        .await;
 
         let first_signal = rx.try_recv().expect("first signal should be queued");
         assert_eq!(first_signal, TaskKey::Vod(42));
@@ -3789,7 +3777,7 @@ mod tests {
             queue_size,
             initial,
         )
-            .await;
+        .await;
 
         let merged_in = UpdateTask::ProbeStream {
             probe_scope: Arc::from("scope_a"),
@@ -3807,7 +3795,7 @@ mod tests {
             queue_size,
             merged_in,
         )
-            .await;
+        .await;
 
         let first_signal = rx.try_recv().expect("first signal should be queued");
         assert_eq!(first_signal, TaskKey::Stream { scope: Arc::from("scope_a"), id: Arc::from("uid_1") });
@@ -3864,7 +3852,7 @@ mod tests {
             MetadataUpdateRuntimeSettings::default().max_queue_size,
             incoming_task,
         )
-            .await;
+        .await;
 
         assert_eq!(result, SubmitTaskResult::ChannelClosed);
         assert!(!pending_tasks.contains_key(&key));
@@ -3918,10 +3906,7 @@ mod tests {
         let runtime_settings = MetadataUpdateRuntimeSettings::default();
 
         worker.scheduled_requeues.insert(key.clone(), chrono::Utc::now().timestamp().saturating_add(30));
-        worker.recently_completed_no_change.insert(
-            key.clone(),
-            (Instant::now(), ResolveReason::Info.into()),
-        );
+        worker.recently_completed_no_change.insert(key.clone(), (Instant::now(), ResolveReason::Info.into()));
         assert!(worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
         assert!(worker.recently_completed_no_change.contains_key(&key));
         assert!(!worker.scheduled_requeues.contains_key(&key));
@@ -3947,20 +3932,13 @@ mod tests {
         let mut worker = create_test_worker("input_c", tx, rx, pending_tasks, pending_task_count);
         let runtime_settings = MetadataUpdateRuntimeSettings::default();
 
-        worker.recently_completed_no_change.insert(
-            key.clone(),
-            (
-                Instant::now(),
-                ResolveReason::Info | ResolveReason::Probe,
-            ),
-        );
+        worker
+            .recently_completed_no_change
+            .insert(key.clone(), (Instant::now(), ResolveReason::Info | ResolveReason::Probe));
         assert!(!worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
         assert!(!worker.recently_completed_no_change.contains_key(&key));
 
-        worker.recently_completed_no_change.insert(
-            key.clone(),
-            (Instant::now(), ResolveReason::Info.into()),
-        );
+        worker.recently_completed_no_change.insert(key.clone(), (Instant::now(), ResolveReason::Info.into()));
         assert!(worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
         assert!(worker.recently_completed_no_change.contains_key(&key));
     }
@@ -3984,16 +3962,11 @@ mod tests {
         }
 
         let mut worker = create_test_worker("input_d", tx, rx, pending_tasks.clone(), pending_task_count);
-        let runtime_settings = MetadataUpdateRuntimeSettings {
-            no_change_cache_ttl_secs: 1,
-            ..MetadataUpdateRuntimeSettings::default()
-        };
+        let runtime_settings =
+            MetadataUpdateRuntimeSettings { no_change_cache_ttl_secs: 1, ..MetadataUpdateRuntimeSettings::default() };
 
         let stale_instant = Instant::now().checked_sub(Duration::from_secs(2)).unwrap_or_else(Instant::now);
-        worker.recently_completed_no_change.insert(
-            key.clone(),
-            (stale_instant, ResolveReason::Info.into()),
-        );
+        worker.recently_completed_no_change.insert(key.clone(), (stale_instant, ResolveReason::Info.into()));
         assert!(!worker.should_skip_recent_no_change_task(&key, &task, &runtime_settings));
         assert!(!worker.recently_completed_no_change.contains_key(&key));
 
@@ -4080,13 +4053,8 @@ mod tests {
 
             let mut provider_virtual_ids = HashMap::new();
             let mut uuid_virtual_ids = HashMap::new();
-            let updates = InputWorker::$fn_name(
-                &mapping,
-                $input_name,
-                &batch,
-                &mut provider_virtual_ids,
-                &mut uuid_virtual_ids,
-            );
+            let updates =
+                InputWorker::$fn_name(&mapping, $input_name, &batch, &mut provider_virtual_ids, &mut uuid_virtual_ids);
 
             assert!(updates.contains_key(&virtual_id));
         };
@@ -4131,10 +4099,8 @@ mod tests {
     #[test]
     fn generic_probe_uses_pending_vod_batch_as_update_base() {
         let mut batch = BatchResultCollector::new();
-        let pending_props = VideoStreamProperties {
-            container_extension: Arc::from("mkv"),
-            ..VideoStreamProperties::default()
-        };
+        let pending_props =
+            VideoStreamProperties { container_extension: Arc::from("mkv"), ..VideoStreamProperties::default() };
         batch.add_vod(ProviderIdType::Id(42), pending_props);
 
         let mut item = XtreamPlaylistItem {
@@ -4295,7 +4261,8 @@ mod tests {
         worker.flush_dirty_retry_states().await;
 
         assert!(!worker.dirty_retry_state_keys.contains(&key));
-        let loaded = load_metadata_retry_states_from_disk(&success_path).expect("state load should succeed after retry");
+        let loaded =
+            load_metadata_retry_states_from_disk(&success_path).expect("state load should succeed after retry");
         let loaded_state = loaded.get(&key).expect("retry state should be persisted on flush");
         let loaded_resolve = loaded_state.resolve.as_ref().expect("resolve retry state should be present");
         assert_eq!(loaded_resolve.attempts, 2);
@@ -4374,7 +4341,10 @@ mod tests {
 
         let bytes = rmp_serde::to_vec(&old).expect("old format should serialize");
         let result = rmp_serde::from_slice::<RetryStateDbValue>(&bytes);
-        assert!(result.is_ok(), "deserializing old 4-field format into new 5-field struct should succeed, got: {result:?}");
+        assert!(
+            result.is_ok(),
+            "deserializing old 4-field format into new 5-field struct should succeed, got: {result:?}"
+        );
         let loaded = result.unwrap();
         assert_eq!(loaded.attempts, 3);
         assert_eq!(loaded.cooldown_until_ts, Some(1_700_043_200));

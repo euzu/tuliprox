@@ -645,7 +645,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
 
     // Initialize metadata manager with weak ref to app_state
     // IMPORTANT: clone app_state here to keep it alive for the weak ref, but avoid moving it
-    app_state.metadata_manager.set_app_state(Arc::downgrade(&app_state)).await;
+    app_state.metadata_manager.set_ctx(app_state.metadata_update_ctx()).await;
 
     // Worker that processes manual playlist update requests one at a time.
     // The bounded channel ensures at most one pending request is queued.

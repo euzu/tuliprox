@@ -2,7 +2,7 @@ use crate::repository::GeoIp;
 use crate::{
     api::{
         endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
-        model::{ metadata_update_manager::MetadataUpdateManager,
+        model::{
             recording_rule_scheduler::spawn_recording_rule_scheduler, ActiveProviderManager, ActiveUserManager,
             ConnectionManager, DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, PlaylistStorage,
             PlaylistStorageState, SharedStreamManager, UpdateGuard,
@@ -22,6 +22,7 @@ use crate::{
     },
 };
 use tuliprox_session::{provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation};
+use tuliprox_metadata::manager::MetadataUpdateManager;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, info};
 use reqwest::Client;
@@ -886,6 +887,22 @@ impl AppState {
             connection_manager: Arc::clone(&self.connection_manager),
             http_client_no_redirect: Arc::clone(&self.http_client_no_redirect),
             public_http_client_no_redirect: Arc::clone(&self.public_http_client_no_redirect),
+        }
+    }
+}
+
+impl AppState {
+    /// The handles the metadata worker reads.
+    pub fn metadata_update_ctx(&self) -> tuliprox_metadata::ctx::MetadataUpdateCtx {
+        tuliprox_metadata::ctx::MetadataUpdateCtx {
+            app_config: Arc::clone(&self.app_config),
+            active_provider: Arc::clone(&self.active_provider),
+            connection_manager: Arc::clone(&self.connection_manager),
+            event_manager: Arc::clone(&self.event_manager),
+            playlists: Arc::clone(&self.playlists),
+            update_guard: self.update_guard.clone(),
+            http_client: Arc::clone(&self.http_client),
+            http_client_no_redirect: Arc::clone(&self.http_client_no_redirect),
         }
     }
 }

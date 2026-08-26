@@ -25,6 +25,7 @@ tuliprox-dvr = { version = "3", path = "../dvr" }
 tuliprox-repository = { version = "3", path = "../repository" }
 tuliprox-session = { version = "3", path = "../session" }
 tuliprox-media-server = { version = "3", path = "../media-server" }
+tuliprox-metadata = { version = "3", path = "../metadata" }
 tuliprox-mpegts = { version = "3", path = "../mpegts" }
 serde.workspace = true
 serde-saphyr.workspace = true

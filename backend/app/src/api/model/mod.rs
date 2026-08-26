@@ -1,6 +1,5 @@
 mod app_state;
 mod hls_provisioning;
-mod metadata_update_manager;
 mod proxy;
 mod streams;
 
@@ -9,7 +8,7 @@ pub(in crate::api) use self::hls_provisioning::{
     build_hls_custom_video_manifest_body, hls_panel_provisioning_manifest_path,
 };
 pub use self::{
-    app_state::*, hls_provisioning::HlsProvisioningState, metadata_update_manager::*,
+    app_state::*, hls_provisioning::HlsProvisioningState,
     proxy::*,
 };
 // In-memory playlist storage moved to `repository`; re-exported so `api` call
@@ -35,6 +34,9 @@ pub use tuliprox_session::response_headers::*;
 // `tuliprox-repository`. Re-exported so `api` call sites keep their names.
 pub use tuliprox_repository::playlist_cache_loader::*;
 pub use tuliprox_session::{provider_dns_manager::*, qos_aggregation_manager::*};
+// Background metadata resolution moved to `tuliprox-metadata`; re-exported so
+// `api` call sites keep their names.
+pub use tuliprox_metadata::{ctx::MetadataUpdateCtx, manager::*};
 pub use crate::model::stream_error::*;
 
 // The recording queue and the DVR moved to `tuliprox-dvr`; re-exported so `api`

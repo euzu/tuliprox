@@ -59,6 +59,14 @@ while IFS=$'\t' read -r from to; do
         "tuliprox -> tuliprox-dvr") ;;
         "tuliprox -> tuliprox-hls") ;;
         "tuliprox -> tuliprox-processing") ;;
+        "tuliprox -> tuliprox-metadata") ;;
+        # Background metadata resolution. Sits above the pipeline: it implements
+        # `MetadataUpdateSink`, which `processing` declares.
+        "tuliprox-metadata -> shared") ;;
+        "tuliprox-metadata -> tuliprox-core") ;;
+        "tuliprox-metadata -> tuliprox-processing") ;;
+        "tuliprox-metadata -> tuliprox-repository") ;;
+        "tuliprox-metadata -> tuliprox-session") ;;
         # The playlist pipeline. It states what it needs from the background
         # metadata worker as a trait (`MetadataUpdateSink`) that the binary
         # implements, so it does not depend on the worker itself.

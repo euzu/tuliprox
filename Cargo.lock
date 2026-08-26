@@ -4410,6 +4410,7 @@ dependencies = [
  "tuliprox-library",
  "tuliprox-media-server",
  "tuliprox-messaging",
+ "tuliprox-metadata",
  "tuliprox-mpegts",
  "tuliprox-parser",
  "tuliprox-processing",
@@ -4682,6 +4683,30 @@ dependencies = [
  "tokio",
  "tuliprox-core",
  "url",
+]
+
+[[package]]
+name = "tuliprox-metadata"
+version = "3.3.91"
+dependencies = [
+ "arc-swap",
+ "chrono",
+ "dashmap",
+ "fastrand",
+ "log",
+ "parking_lot",
+ "reqwest",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "shared",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tuliprox-core",
+ "tuliprox-processing",
+ "tuliprox-repository",
+ "tuliprox-session",
 ]
 
 [[package]]
