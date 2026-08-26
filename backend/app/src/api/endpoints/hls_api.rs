@@ -2125,7 +2125,7 @@ async fn validate_hls_proxy_access_context(
     admission_mode: HlsAccessAdmissionMode,
 ) -> Result<HlsAccessContext, HlsAccessLeaseValidationError> {
     validate_hls_access_lease(
-        app_state,
+        &app_state.hls_ctx(),
         fingerprint,
         proxy_session_id,
         &HlsAccessLeaseId(hls_access_lease_id.to_string()),

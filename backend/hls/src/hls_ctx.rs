@@ -26,6 +26,16 @@ pub struct HlsCtx {
 }
 
 impl HlsCtx {
+    /// The subset admission reads: it decides over connections and users, not
+    /// over the cache.
+    pub fn admission_ctx(&self) -> tuliprox_session::admission::AdmissionCtx {
+        tuliprox_session::admission::AdmissionCtx {
+            app_config: Arc::clone(&self.app_config),
+            active_users: Arc::clone(&self.active_users),
+            connection_manager: Arc::clone(&self.connection_manager),
+        }
+    }
+
     /// A weak handle, for state the proxy itself owns.
     pub fn downgrade(&self) -> WeakHlsCtx {
         WeakHlsCtx {

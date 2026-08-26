@@ -1,5 +1,4 @@
 mod app_state;
-mod hls_playback;
 mod hls_provisioning;
 mod metadata_update_manager;
 mod model_utils;
@@ -68,8 +67,6 @@ pub(crate) use self::streams::*;
 // their names, module path included.
 pub use tuliprox_hls as hls_cache;
 pub use tuliprox_hls::*;
-pub(in crate::api) use self::hls_playback::{
-    validate_hls_access_lease, HlsAccessAdmissionMode, HlsAccessContext, HlsAccessLeaseValidationError,
-};
+
 mod batch_result_collector;
 pub use self::batch_result_collector::*;

@@ -59,6 +59,7 @@ mod deadline;
 mod deterministic_conflict;
 pub mod hls_ctx;
 pub mod initial_strip;
+pub mod playback;
 pub mod transient_manifest;
 
 /// Redirect-following cap shared by manifest, resource and endpoint fetchers.
@@ -190,6 +191,7 @@ pub use self::{
     },
     origin_progress::publication_late_after_ms,
     paths::{HlsMapFile, HlsSegmentFile, TransientResourceFile},
+    playback::{validate_hls_access_lease, HlsAccessAdmissionMode, HlsAccessContext, HlsAccessLeaseValidationError},
     prefetch::{ManifestFetchQueueReport, SegmentFetchPriority, SegmentPrefetchQueue},
     qos::{HlsQosMeterInit, HlsQosRegistration, HlsQosRegistry, HlsQosRuntimeConfig},
     refresh::{
