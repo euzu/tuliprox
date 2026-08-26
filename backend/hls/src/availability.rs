@@ -3460,11 +3460,50 @@ mod tests {
         assert_eq!(fixture.ctx.hls_proxy.availability_reevaluations().owner_count(), 1);
     }
 
+    /// How long the owner gets to finish before the wait gives up.
+    ///
+    /// These tests run on a paused clock, so this is logical time and costs
+    /// nothing when the owner completes normally.
+    const AVAILABILITY_OWNER_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Number of observer revisions to accept before concluding the owner is
+    /// cycling without converging.
+    const AVAILABILITY_OWNER_MAX_REVISIONS: usize = 1_024;
+
     async fn wait_for_availability_owner_completion(fixture: &PostRefreshTerminalFixture) {
         let coordinator = fixture.ctx.hls_proxy.availability_reevaluations();
-        while let Some(mut observer) = coordinator.observe_owner(&fixture.proxy_session_id) {
-            let _ = observer.changed().await;
-        }
+        // Bounded twice over, because the two ways this can fail to converge
+        // need different guards. A parked owner never wakes the observer, and
+        // on a paused clock the runtime is idle, so the timeout fires. An owner
+        // that keeps re-arming a successor wakes the observer forever and keeps
+        // the runtime busy, so the clock never advances and only the revision
+        // count catches it. Either way the test fails with a diagnostic instead
+        // of hanging the suite.
+        let wait = async {
+            let mut revisions = 0usize;
+            while let Some(mut observer) = coordinator.observe_owner(&fixture.proxy_session_id) {
+                if matches!(
+                    observer.changed().await,
+                    crate::availability_reevaluation::HlsAvailabilityReevaluationObservation::OwnerFinished
+                ) {
+                    // The owner is gone; re-check the map and leave the loop.
+                    continue;
+                }
+                revisions += 1;
+                assert!(
+                    revisions <= AVAILABILITY_OWNER_MAX_REVISIONS,
+                    "availability owner for {:?} produced {revisions} revisions without completing",
+                    fixture.proxy_session_id
+                );
+            }
+        };
+        assert!(
+            tokio::time::timeout(AVAILABILITY_OWNER_COMPLETION_TIMEOUT, wait).await.is_ok(),
+            "availability owner for {:?} did not complete within {AVAILABILITY_OWNER_COMPLETION_TIMEOUT:?}; \
+             {} owner(s) still registered",
+            fixture.proxy_session_id,
+            coordinator.owner_count()
+        );
         assert_eq!(coordinator.owner_count(), 0);
     }
 
