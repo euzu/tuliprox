@@ -213,7 +213,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         let user_session =
             app_state.active_users.get_and_update_user_session(&user.username, &playback_session_token).await;
         let (admission, _grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
-            app_state,
+            &app_state.admission_ctx(),
             &user,
             fingerprint,
             pli.item_type,
@@ -356,7 +356,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     };
 
     let (connection_admission, grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
-        app_state,
+        &app_state.admission_ctx(),
         &user,
         fingerprint,
         pli.item_type,

@@ -9,7 +9,7 @@ use crate::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream,
             get_custom_stream_response_error_status, get_stream_response_with_headers, is_custom_video_stream_enabled,
-            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, GraceResolutionContext,
+            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType,
             PendingProviderReason,
             ProviderAllocation, ProviderConfig, ProviderHandle, ProviderStreamCustomReason,
             ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamCtx, SharedStreamManager,
@@ -81,7 +81,6 @@ use tokio::{
 use tokio_util::io::ReaderStream;
 use url::Url;
 
-const RECENT_EVICTION_REENTRY_TTL_SECS: u64 = 3;
 
 /// Per-`(input id, provider id)` single-flight guards so concurrent client requests
 /// for the same dead stalker stream trigger only one portal re-resolve at a time.
@@ -89,186 +88,6 @@ type StalkerResolveGuards = HashMap<(u16, u32), Arc<Mutex<()>>>;
 static STALKER_RE_RESOLVE_GUARDS: LazyLock<Mutex<StalkerResolveGuards>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[derive(Clone, Copy)]
-pub(crate) enum EvictionReentryGuard<'a> {
-    Session(&'a str),
-    SocketPlayback { virtual_id: VirtualId },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PlaybackRequestClass {
-    Prepare,
-    Activate,
-    FollowUp,
-    Terminate,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct PlaybackRequestFacts<'a> {
-    pub(crate) item_type: PlaylistItemType,
-    pub(crate) existing_session: Option<&'a UserSession>,
-    pub(crate) prepare_only: bool,
-    pub(crate) terminate: bool,
-}
-
-pub(crate) fn classify_playback_request(facts: PlaybackRequestFacts<'_>) -> PlaybackRequestClass {
-    if facts.terminate {
-        return PlaybackRequestClass::Terminate;
-    }
-    if facts.prepare_only {
-        return PlaybackRequestClass::Prepare;
-    }
-    if let Some(session) = facts.existing_session {
-        // FollowUp only for sessions that are actively counted.
-        // PendingProvider has no counted lease yet - activation is still pending.
-        // Prepared/Preserved/Expired sessions are not FollowUp.
-        if session.lifecycle.is_counted() {
-            return PlaybackRequestClass::FollowUp;
-        }
-    }
-    let _ = facts.item_type;
-    PlaybackRequestClass::Activate
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn resolve_playback_request_admission(
-    app_state: &Arc<AppState>,
-    user: &ProxyUserCredentials,
-    fingerprint: &Fingerprint,
-    item_type: PlaylistItemType,
-    user_session: Option<&UserSession>,
-    session_token: &str,
-    activate_unbound_session: bool,
-    eviction_reentry_guard: EvictionReentryGuard<'_>,
-    prepare_only: bool,
-    terminate: bool,
-) -> (crate::api::model::ConnectionAdmission, Option<crate::api::model::GraceMode>, PlaybackRequestClass) {
-    let request_class = classify_playback_request(PlaybackRequestFacts {
-        item_type,
-        existing_session: user_session,
-        prepare_only,
-        terminate,
-    });
-    let limits_enabled = (user.max_connections > 0 || user.soft_connections > 0)
-        && app_state.app_config.config.load().user_access_control;
-
-    // Handle explicit Terminate: run termination and return exhausted permission.
-    // No admission strategies are evaluated — termination immediately expires the playback.
-    if request_class == PlaybackRequestClass::Terminate {
-        if let Some(session) = user_session {
-            app_state.active_users.terminate_session(&user.username, session.token.as_str()).await;
-        }
-        return (
-            crate::api::model::ConnectionAdmission {
-                permission: UserConnectionPermission::Exhausted,
-                kind: user_session
-                    .and_then(|session| session.connection_kind)
-                    .or(Some(crate::api::model::ConnectionKind::Normal)),
-            },
-            None,
-            request_class,
-        );
-    }
-
-    // Handle Prepare: no admission cost, just prepare state. Return Allowed without
-    // running strategies or modifying counted state. Caller handles the actual activation.
-    if request_class == PlaybackRequestClass::Prepare {
-        return (
-            crate::api::model::ConnectionAdmission {
-                permission: UserConnectionPermission::Allowed,
-                kind: user_session
-                    .and_then(|session| session.connection_kind)
-                    .or(Some(crate::api::model::ConnectionKind::Normal)),
-            },
-            None,
-            request_class,
-        );
-    }
-
-    if request_class == PlaybackRequestClass::FollowUp || !limits_enabled {
-        return (
-            crate::api::model::ConnectionAdmission {
-                permission: user_session.map_or(UserConnectionPermission::Allowed, |session| session.permission),
-                kind: user_session
-                    .and_then(|session| session.connection_kind)
-                    .or(Some(crate::api::model::ConnectionKind::Normal)),
-            },
-            None,
-            request_class,
-        );
-    }
-
-    let result = resolve_admission_with_strategies(
-        app_state,
-        &user.username,
-        user.max_connections,
-        user.soft_connections,
-        &fingerprint.client_ip,
-        &fingerprint.addr,
-        true,
-        Some(session_token),
-        activate_unbound_session,
-        eviction_reentry_guard,
-    )
-    .await;
-
-    (result.admission, result.grace_mode, request_class)
-}
-
-async fn should_suppress_eviction_for_recent_request(
-    app_state: &Arc<AppState>,
-    username: &str,
-    client_ip: &str,
-    guard: EvictionReentryGuard<'_>,
-    target_addr: &std::net::SocketAddr,
-) -> bool {
-    match guard {
-        EvictionReentryGuard::Session(session_token) => app_state
-            .active_users
-            .recently_evicted_session_protected_addr(session_token)
-            .await
-            .is_some_and(|protected_addr| protected_addr == *target_addr),
-        EvictionReentryGuard::SocketPlayback { virtual_id } => app_state
-            .active_users
-            .recent_socket_reentry_protected_addr(username, client_ip, virtual_id)
-            .await
-            .is_some_and(|protected_addr| protected_addr == *target_addr),
-    }
-}
-
-async fn get_admission_for_request(
-    app_state: &Arc<AppState>,
-    username: &str,
-    max_connections: u32,
-    soft_connections: u16,
-    is_session_request: bool,
-    session_token: Option<&str>,
-    activate_unbound_session: bool,
-) -> crate::api::model::ConnectionAdmission {
-    if is_session_request {
-        if activate_unbound_session {
-            app_state
-                .get_connection_admission_for_session_activation(
-                    username,
-                    max_connections,
-                    soft_connections,
-                    session_token.unwrap_or_default(),
-                )
-                .await
-        } else {
-            app_state
-                .get_connection_admission_for_session(
-                    username,
-                    max_connections,
-                    soft_connections,
-                    session_token.unwrap_or_default(),
-                )
-                .await
-        }
-    } else {
-        app_state.get_connection_admission(username, max_connections, soft_connections).await
-    }
-}
 
 pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
     if is_media_server_playback_url(input, stream_url) {
@@ -489,7 +308,7 @@ pub use internal_server_error;
 use shared::{
     defaults::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs},
     error::TuliproxError,
-    model::{AdmissionStrategy, ConnectFailureReason, FailureStage},
+    model::{ConnectFailureReason, FailureStage},
 };
 pub use try_option_bad_request;
 pub use try_option_forbidden;
@@ -498,6 +317,13 @@ pub use try_result_not_found;
 pub use try_result_or_status;
 // Moved to `tuliprox-core` so crates outside `api` can build responses too.
 pub use tuliprox_core::try_unwrap_body;
+// Admission moved to `tuliprox-session`, where the types it decides over
+// already live. Re-exported so api call sites keep their names.
+pub(crate) use tuliprox_core::utils::request_headers::{get_headers_from_request, HeaderFilter};
+pub(crate) use tuliprox_session::stream_options::{get_stream_options, StreamOptions};
+pub(crate) use tuliprox_session::admission::{
+    classify_playback_request, connection_priority_for_kind, resolve_admission_with_strategies, resolve_playback_request_admission, EvictionReentryGuard, PlaybackRequestClass, PlaybackRequestFacts,
+};
 use crate::api::static_headers::CT_OCTET;
 
 pub fn get_server_time() -> String {
@@ -608,14 +434,6 @@ pub fn get_user_target<'a>(
     get_user_target_by_credentials(username, password, api_req, app_state)
 }
 
-pub struct StreamOptions {
-    pub stream_retry: bool,
-    pub buffer_enabled: bool,
-    pub buffer_size: usize,
-    pub buffer_max_bytes: usize,
-    pub pipe_provider_stream: bool,
-}
-
 struct StreamingAcquireOptions<'a> {
     force_provider: Option<&'a Arc<str>>,
     allow_forced_provider_fallback: bool,
@@ -626,12 +444,6 @@ struct StreamingAcquireOptions<'a> {
     accept_requested_stream_url: bool,
 }
 
-pub(crate) fn connection_priority_for_kind(user: &ProxyUserCredentials, kind: crate::api::model::ConnectionKind) -> i8 {
-    match kind {
-        crate::api::model::ConnectionKind::Normal => user.priority,
-        crate::api::model::ConnectionKind::Soft => user.soft_priority,
-    }
-}
 
 pub struct ForceStreamRequestContext<'a> {
     pub req_headers: &'a HeaderMap,
@@ -639,335 +451,6 @@ pub struct ForceStreamRequestContext<'a> {
     pub user: &'a ProxyUserCredentials,
     pub session_reservation_ttl_secs: u64,
     pub(crate) content_representation: crate::api::model::ProviderContentRepresentationMode,
-}
-
-/// Constructs a `StreamOptions` object based on the application's reverse proxy configuration.
-///
-/// This function retrieves streaming-related settings from the `AppState`:
-/// - `stream_retry`: whether retrying the stream is enabled,
-/// - `buffer_enabled`: whether stream buffering is enabled,
-/// - `buffer_size`: the size of the stream buffer.
-///
-/// If the reverse proxy or stream settings are not defined, default values are used:
-/// - retry: `true`
-/// - buffering: `false`
-/// - buffer size: `0`
-///
-/// Additionally, it computes `pipe_provider_stream` as `!stream_retry && !buffer_enabled`.
-/// This means direct provider piping is enabled only when retry is disabled and buffering is disabled.
-///
-/// Returns a `StreamOptions` instance with the resolved configuration.
-pub(in crate::api) fn get_stream_options(app_state: &Arc<AppState>) -> StreamOptions {
-    let (stream_retry, buffer_enabled, buffer_size, buffer_max_bytes) = app_state
-        .app_config
-        .config
-        .load()
-        .reverse_proxy
-        .as_ref()
-        .and_then(|reverse_proxy| reverse_proxy.stream.as_ref())
-        .map_or((true, false, 0, crate::api::model::MAX_BUFFER_BYTES), |stream| {
-            let (buffer_enabled, buffer_size, buffer_max_bytes) = stream.buffer.as_ref().map_or(
-                (false, 0, crate::api::model::MAX_BUFFER_BYTES),
-                |buffer| {
-                    let max_bytes = usize::try_from(buffer.max_bytes_mb.saturating_mul(1024 * 1024))
-                        .unwrap_or(crate::api::model::MAX_BUFFER_BYTES);
-                    (buffer.enabled, buffer.size, max_bytes)
-                },
-            );
-            (stream.retry, buffer_enabled, buffer_size, buffer_max_bytes)
-        });
-    let pipe_provider_stream = !stream_retry && !buffer_enabled;
-    StreamOptions { stream_retry, buffer_enabled, buffer_size, buffer_max_bytes, pipe_provider_stream }
-}
-
-
-/// Structured result of evaluating admission strategies.
-#[derive(Debug)]
-pub(crate) struct AdmissionStrategyResolution {
-    pub(crate) admission: crate::api::model::ConnectionAdmission,
-    pub(crate) grace_mode: Option<crate::api::model::GraceMode>,
-    /// Present only when the request was admitted via a user-grace strategy.
-    pub(crate) grace_context: Option<GraceResolutionContext>,
-}
-
-pub(in crate::api) fn get_effective_admission_strategies(app_state: &Arc<AppState>) -> Vec<AdmissionStrategy> {
-    let config = app_state.app_config.config.load();
-    let stream_config = config.reverse_proxy.as_ref().and_then(|rp| rp.stream.as_ref());
-    match stream_config {
-        Some(sc) if sc.admission_strategies.is_some() => sc.admission_strategies.clone().unwrap_or_default(),
-        Some(sc) if sc.grace_period_millis > 0 => {
-            vec![if sc.grace_period_hold_stream {
-                AdmissionStrategy::GraceHoldStream
-            } else {
-                AdmissionStrategy::GraceInstantStream
-            }]
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// Shared strategy-evaluation loop used by both the initial admission path
-/// (`resolve_admission_with_strategies`) and the remaining-strategies path
-/// (`evaluate_remaining_strategies_after_grace`).
-///
-/// Returns `Some(resolution)` when a Grace or a successful Eviction+Retry is found.
-/// Returns `None` when every strategy in `strategies` returns `NoMatch` — the caller
-/// is then responsible for constructing the final exhausted result with the correct
-/// `kind` (preserved from the original admission).
-#[allow(clippy::too_many_arguments)]
-async fn evaluate_admission_strategy_loop<'a, F>(
-    app_state: &'a Arc<AppState>,
-    username: &'a str,
-    max_connections: u32,
-    soft_connections: u16,
-    client_ip: &'a str,
-    request_addr: &'a std::net::SocketAddr,
-    use_session_admission: bool,
-    session_token: Option<&'a str>,
-    activate_unbound_session: bool,
-    eviction_reentry_guard: EvictionReentryGuard<'a>,
-    strategies: &'a [shared::model::AdmissionStrategy],
-    base_idx: usize,
-    admission: crate::api::model::ConnectionAdmission,
-    _kind_for_exhausted: Option<crate::api::model::ConnectionKind>,
-    build_grace_ctx: F,
-) -> Option<AdmissionStrategyResolution>
-where
-    F: Fn(usize) -> GraceResolutionContext,
-{
-    use crate::api::model::{evaluate_strategy, AdmissionDecision, StrategyContext};
-    use shared::model::UserConnectionPermission;
-    let mut candidates = app_state.active_users.get_eviction_candidates(username, client_ip).await;
-    let ctx = StrategyContext { username, client_ip };
-    let mut idx = 0usize;
-
-    for strategy in strategies {
-        match evaluate_strategy(*strategy, &ctx, &candidates) {
-            AdmissionDecision::NoMatch => {}
-            AdmissionDecision::Grace(mode) => {
-                if app_state.active_users.grant_grace(username).await {
-                    // Return a FRESH admission with GracePeriod permission (not the admission
-                    // parameter, which may have Exhausted permission). The kind is preserved from
-                    // the original admission.
-                    return Some(AdmissionStrategyResolution {
-                        admission: crate::api::model::ConnectionAdmission {
-                            permission: UserConnectionPermission::GracePeriod,
-                            kind: admission.kind,
-                        },
-                        grace_mode: Some(mode),
-                        grace_context: Some(build_grace_ctx(base_idx + idx)),
-                    });
-                }
-                debug!("Grace grant rejected for user {username}, continuing with later strategies");
-            }
-            AdmissionDecision::Evict(target) => {
-                if should_suppress_eviction_for_recent_request(
-                    app_state,
-                    username,
-                    client_ip,
-                    eviction_reentry_guard,
-                    &target.addr,
-                )
-                .await
-                {
-                    debug!(
-                        "Skipping eviction strategy {strategy:?} for recently evicted request of user {username} targeting {}",
-                        target.addr
-                    );
-                    continue;
-                }
-                debug!("Evicting connection {} for user {username}", target.addr);
-                app_state
-                    .active_users
-                    .mark_recent_eviction_guard_for_addr(&target.addr, *request_addr, RECENT_EVICTION_REENTRY_TTL_SECS)
-                    .await;
-                app_state.connection_manager.release_connection_as_kicked(&target.addr).await;
-                let retry_admission = get_admission_for_request(
-                    app_state,
-                    username,
-                    max_connections,
-                    soft_connections,
-                    use_session_admission,
-                    session_token,
-                    activate_unbound_session,
-                )
-                .await;
-                if retry_admission.permission == UserConnectionPermission::Allowed {
-                    return Some(AdmissionStrategyResolution {
-                        admission: retry_admission,
-                        grace_mode: None,
-                        grace_context: None,
-                    });
-                }
-                debug!("Admission still denied after eviction for user {username}, continuing with later strategies");
-                candidates = app_state.active_users.get_eviction_candidates(username, client_ip).await;
-            }
-        }
-        idx += 1;
-    }
-
-    // All strategies returned NoMatch — caller constructs the final exhausted result.
-    None
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(in crate::api) async fn resolve_admission_with_strategies(
-    app_state: &Arc<AppState>,
-    username: &str,
-    max_connections: u32,
-    soft_connections: u16,
-    client_ip: &str,
-    request_addr: &std::net::SocketAddr,
-    // This controls whether an existing logical playback session may reopen while the user is already at limit.
-    // It is intentionally independent from whether the session is socket-bound.
-    use_session_admission: bool,
-    session_token: Option<&str>,
-    activate_unbound_session: bool,
-    eviction_reentry_guard: EvictionReentryGuard<'_>,
-) -> AdmissionStrategyResolution {
-    use shared::model::UserConnectionPermission;
-
-    let admission = get_admission_for_request(
-        app_state,
-        username,
-        max_connections,
-        soft_connections,
-        use_session_admission,
-        session_token,
-        activate_unbound_session,
-    )
-    .await;
-
-    if admission.permission != UserConnectionPermission::Exhausted {
-        return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
-    }
-
-    let strategies = get_effective_admission_strategies(app_state);
-    if strategies.is_empty() {
-        debug!("No admission strategies configured, denying request for user {username}");
-        return AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None };
-    }
-
-    let build_grace_ctx = |global_idx: usize| GraceResolutionContext {
-        strategy_index: global_idx,
-        strategies: strategies.clone(),
-        kind: admission.kind,
-    };
-
-    let _admission_guard = app_state.active_users.acquire_user_admission(username).await;
-
-    if let Some(resolution) = evaluate_admission_strategy_loop(
-        app_state,
-        username,
-        max_connections,
-        soft_connections,
-        client_ip,
-        request_addr,
-        use_session_admission,
-        session_token,
-        activate_unbound_session,
-        eviction_reentry_guard,
-        &strategies,
-        0,
-        admission,
-        admission.kind,
-        build_grace_ctx,
-    )
-    .await
-    {
-        return resolution;
-    }
-
-    debug!("No admission strategy could admit user {username}");
-    AdmissionStrategyResolution { admission, grace_mode: None, grace_context: None }
-}
-
-/// Evaluates only the strategies that come AFTER the already-used grace strategy.
-/// This is called when a user-grace has failed and the system needs to determine
-/// whether a remaining eviction strategy can free a slot.
-///
-/// Rules:
-/// - Only `grace_context.strategies[(strategy_index + 1)..]` are evaluated
-/// - `NoMatch` -> continue to next strategy
-/// - `Evict` -> kick target, retry admission
-/// - `Grace` -> technically possible under current config (only one grace allowed), but handled
-/// - `Deny` -> final exhausted
-/// - Empty remaining slice -> final exhausted
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(in crate::api) async fn evaluate_remaining_strategies_after_grace(
-    app_state: &Arc<AppState>,
-    username: &str,
-    max_connections: u32,
-    soft_connections: u16,
-    client_ip: &str,
-    request_addr: &std::net::SocketAddr,
-    use_session_admission: bool,
-    session_token: Option<&str>,
-    activate_unbound_session: bool,
-    eviction_reentry_guard: EvictionReentryGuard<'_>,
-    grace_context: &GraceResolutionContext,
-    original_kind: Option<crate::api::model::ConnectionKind>,
-) -> AdmissionStrategyResolution {
-    use shared::model::UserConnectionPermission;
-
-    let remaining = grace_context.strategy_index + 1;
-    let strategies = &grace_context.strategies;
-    if remaining >= strategies.len() {
-        debug!("No remaining strategies after grace for user {username}");
-        return AdmissionStrategyResolution {
-            admission: crate::api::model::ConnectionAdmission {
-                permission: UserConnectionPermission::Exhausted,
-                kind: original_kind,
-            },
-            grace_mode: None,
-            grace_context: None,
-        };
-    }
-
-    // admission.kind is used only inside build_grace_ctx for the Grace case's
-    // GraceResolutionContext.kind. Both paths (helper early-return and caller
-    // exhausted construction) use original_kind, so this is safe.
-    let admission =
-        crate::api::model::ConnectionAdmission { permission: UserConnectionPermission::Exhausted, kind: original_kind };
-    let build_grace_ctx = |global_idx: usize| GraceResolutionContext {
-        strategy_index: global_idx,
-        strategies: strategies.clone(),
-        kind: original_kind,
-    };
-
-    let _admission_guard = app_state.active_users.acquire_user_admission(username).await;
-
-    if let Some(resolution) = evaluate_admission_strategy_loop(
-        app_state,
-        username,
-        max_connections,
-        soft_connections,
-        client_ip,
-        request_addr,
-        use_session_admission,
-        session_token,
-        activate_unbound_session,
-        eviction_reentry_guard,
-        &strategies[remaining..],
-        remaining,
-        admission,
-        original_kind,
-        build_grace_ctx,
-    )
-    .await
-    {
-        return resolution;
-    }
-
-    debug!("No remaining strategy could admit user {username}");
-    AdmissionStrategyResolution {
-        admission: crate::api::model::ConnectionAdmission {
-            permission: UserConnectionPermission::Exhausted,
-            kind: original_kind,
-        },
-        grace_mode: None,
-        grace_context: None,
-    }
 }
 
 struct SessionActivationRequest<'a> {
@@ -1164,7 +647,7 @@ async fn activate_session_before_stream_open(
     );
 
     let result = resolve_admission_with_strategies(
-        app_state,
+        &app_state.admission_ctx(),
         &user.username,
         user.max_connections,
         user.soft_connections,
@@ -2400,7 +1883,7 @@ pub async fn force_provider_stream_response(
 ) -> impl IntoResponse + Send {
     let _transition_guard =
         app_state.active_users.acquire_playback_transition(&ctx.user.username, &user_session.token).await;
-    let stream_options = get_stream_options(app_state);
+    let stream_options = get_stream_options(&app_state.app_config);
     let share_stream = false;
     let connection_permission = UserConnectionPermission::Allowed;
     let item_type = stream_channel.item_type;
@@ -2691,7 +2174,7 @@ pub(crate) async fn stream_response(
         .into_response();
     }
 
-    let stream_options = get_stream_options(app_state);
+    let stream_options = get_stream_options(&app_state.app_config);
     let session_state = app_state.active_users.get_and_update_user_session(&user.username, session_token).await;
     let mut stream_details = match create_stream_response_details(
         app_state,
@@ -3700,17 +3183,6 @@ pub fn is_hls_stream_share_enabled(target: &ConfigTarget) -> bool {
     target.options.as_ref().is_some_and(ConfigTargetOptions::share_live_hls_enabled)
 }
 
-pub type HeaderFilter = Option<Box<dyn Fn(&str) -> bool + Send>>;
-pub fn get_headers_from_request(req_headers: &HeaderMap, filter: &HeaderFilter) -> HashMap<String, Vec<u8>> {
-    req_headers
-        .iter()
-        .filter(|(k, _)| match &filter {
-            None => true,
-            Some(predicate) => predicate(k.as_str()),
-        })
-        .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
-        .collect()
-}
 
 fn get_add_cache_content(
     res_url: &str,
@@ -4505,6 +3977,12 @@ pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Resp
 
 #[cfg(test)]
 mod tests {
+    use shared::model::AdmissionStrategy;
+    use tuliprox_session::admission::{
+        evaluate_remaining_strategies_after_grace, get_effective_admission_strategies,
+    };
+    use tuliprox_session::GraceResolutionContext;
+    use tuliprox_session::admission::RECENT_EVICTION_REENTRY_TTL_SECS;
     use tuliprox_core::utils::response_compression::should_compress_response;
     use shared::model::GeoIpUnavailablePolicy;
     use super::*;
@@ -6516,7 +5994,7 @@ mod tests {
         user.max_connections = 1;
 
         let (admission, grace_mode, request_class) = resolve_playback_request_admission(
-            &app_state,
+            &app_state.admission_ctx(),
             &user,
             &fingerprint,
             PlaylistItemType::LiveHls,
@@ -6582,7 +6060,7 @@ mod tests {
         assert!(before.is_some(), "session should exist before terminate");
 
         let (admission, grace_mode, request_class) = resolve_playback_request_admission(
-            &app_state,
+            &app_state.admission_ctx(),
             &user,
             &fingerprint,
             PlaylistItemType::LiveHls,
@@ -6862,7 +6340,7 @@ mod tests {
         });
 
         assert_eq!(
-            get_effective_admission_strategies(&app_state),
+            get_effective_admission_strategies(&app_state.admission_ctx()),
             vec![shared::model::AdmissionStrategy::GraceHoldStream]
         );
     }
@@ -6885,7 +6363,7 @@ mod tests {
             admission_strategies: Some(vec![]),
         });
 
-        assert!(get_effective_admission_strategies(&app_state).is_empty());
+        assert!(get_effective_admission_strategies(&app_state.admission_ctx()).is_empty());
     }
 
     #[tokio::test]
@@ -6965,7 +6443,7 @@ mod tests {
 
         // Now the new request finds the slot exhausted and the grace strategy kicks in.
         let result = resolve_admission_with_strategies(
-            &app_state,
+            &app_state.admission_ctx(),
             &user.username,
             user.max_connections,
             user.soft_connections,
@@ -7058,7 +6536,7 @@ mod tests {
             .expect("stream should be created");
 
         let result = evaluate_remaining_strategies_after_grace(
-            &app_state,
+            &app_state.admission_ctx(),
             "remaining-evict",
             1,
             0,
@@ -7162,7 +6640,7 @@ mod tests {
             .expect("stream should be created");
 
         let result = evaluate_remaining_strategies_after_grace(
-            &app_state,
+            &app_state.admission_ctx(),
             "remaining-skip-no-match",
             1,
             0,
@@ -7211,7 +6689,7 @@ mod tests {
         let fingerprint = create_test_fingerprint(addr);
 
         let result = evaluate_remaining_strategies_after_grace(
-            &app_state,
+            &app_state.admission_ctx(),
             "no-remaining-strategies",
             1,
             0,
@@ -7265,7 +6743,7 @@ mod tests {
         let fingerprint = create_test_fingerprint(addr);
 
         let result = evaluate_remaining_strategies_after_grace(
-            &app_state,
+            &app_state.admission_ctx(),
             "soft-kind-user",
             1,
             0,
@@ -7370,7 +6848,7 @@ mod tests {
             .expect("stream should be created");
 
         let result = evaluate_remaining_strategies_after_grace(
-            &app_state,
+            &app_state.admission_ctx(),
             "remaining-no-retry",
             1,
             0,
@@ -7425,7 +6903,7 @@ mod tests {
         let fingerprint = create_test_fingerprint(addr);
 
         let result = evaluate_remaining_strategies_after_grace(
-            &app_state,
+            &app_state.admission_ctx(),
             "kind-mismatch-empty",
             1,
             0,
@@ -7528,7 +7006,7 @@ mod tests {
             .expect("stream should be created");
 
         let result = evaluate_remaining_strategies_after_grace(
-            &app_state,
+            &app_state.admission_ctx(),
             "kind-mismatch-grace",
             1,
             0,
@@ -7657,7 +7135,7 @@ mod tests {
             .await;
 
         let result = resolve_admission_with_strategies(
-            &app_state,
+            &app_state.admission_ctx(),
             "fallthrough",
             1,
             1,
@@ -7720,7 +7198,7 @@ mod tests {
             .await;
 
         let session_based = resolve_admission_with_strategies(
-            &app_state,
+            &app_state.admission_ctx(),
             &user.username,
             user.max_connections,
             user.soft_connections,
@@ -7735,7 +7213,7 @@ mod tests {
         assert_eq!(session_based.admission.permission, UserConnectionPermission::Allowed);
 
         let connection_based = resolve_admission_with_strategies(
-            &app_state,
+            &app_state.admission_ctx(),
             &user.username,
             user.max_connections,
             user.soft_connections,
@@ -7824,7 +7302,7 @@ mod tests {
         app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
         let result = resolve_admission_with_strategies(
-            &app_state,
+            &app_state.admission_ctx(),
             "loop-user",
             1,
             0,
@@ -7953,7 +7431,7 @@ mod tests {
         app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
         let result = resolve_admission_with_strategies(
-            &app_state,
+            &app_state.admission_ctx(),
             "loop-user-2",
             1,
             0,
@@ -8077,7 +7555,7 @@ mod tests {
         app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
         let result = resolve_admission_with_strategies(
-            &app_state,
+            &app_state.admission_ctx(),
             "loop-user-4",
             1,
             0,
@@ -8171,7 +7649,7 @@ mod tests {
         app_state.connection_manager.release_connection_as_kicked(&victim_addr).await;
 
         let result = resolve_admission_with_strategies(
-            &app_state,
+            &app_state.admission_ctx(),
             "loop-user-3",
             1,
             1,
@@ -8402,7 +7880,7 @@ mod tests {
             .expect("normal stream should register");
 
         let admission =
-            app_state.get_connection_admission(&user.username, user.max_connections, user.soft_connections).await;
+            app_state.active_users.connection_admission(&user.username, user.max_connections, user.soft_connections).await;
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
 
@@ -8911,7 +8389,7 @@ mod tests {
             .await;
 
         let first_admission = resolve_admission_with_strategies(
-            &app_state,
+            &app_state.admission_ctx(),
             &user.username,
             user.max_connections,
             user.soft_connections,
@@ -8924,7 +8402,7 @@ mod tests {
         )
         .await;
         let second_admission = resolve_admission_with_strategies(
-            &app_state,
+            &app_state.admission_ctx(),
             &user.username,
             user.max_connections,
             user.soft_connections,
@@ -9081,7 +8559,7 @@ mod tests {
 
         let mut close_rx = app_state.connection_manager.get_close_connection_channel();
         let result = resolve_admission_with_strategies(
-            &app_state,
+            &app_state.admission_ctx(),
             &user.username,
             user.max_connections,
             user.soft_connections,
@@ -9403,7 +8881,7 @@ mod tests {
         );
 
         let (ts_admission, ts_grace_mode, request_class) = resolve_playback_request_admission(
-            &app_state,
+            &app_state.admission_ctx(),
             &user,
             &ts_fingerprint,
             PlaylistItemType::Live,
@@ -9549,7 +9027,7 @@ mod tests {
 
         let mut details = create_stream_response_details(
             &app_state,
-            &get_stream_options(&app_state),
+            &get_stream_options(&app_state.app_config),
             stream_url,
             "deferred-user",
             &fingerprint,

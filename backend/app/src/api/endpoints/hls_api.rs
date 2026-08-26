@@ -5111,7 +5111,7 @@ async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
     let session_token =
         create_playback_session_fingerprint(fingerprint, &user.username, virtual_id, PlaylistItemType::LiveHls, None);
     let (connection_admission, _, _) = resolve_playback_request_admission(
-        app_state,
+        &app_state.admission_ctx(),
         user,
         fingerprint,
         PlaylistItemType::LiveHls,
@@ -7652,7 +7652,7 @@ async fn admit_recovered_archive_stream(
         .await));
     }
     let (connection_admission, grace_mode, _) = crate::api::api_utils::resolve_playback_request_admission(
-        app_state,
+        &app_state.admission_ctx(),
         user,
         fingerprint,
         PlaylistItemType::Catchup,
@@ -7911,7 +7911,7 @@ async fn hls_api_stream_resolved(
 
         let (connection_admission, grace_mode, request_class) =
             crate::api::api_utils::resolve_playback_request_admission(
-                &app_state,
+                &app_state.admission_ctx(),
                 &user,
                 &fingerprint,
                 if is_m3u_catchup_session_token(&session.token) || archive_reference.is_some() {

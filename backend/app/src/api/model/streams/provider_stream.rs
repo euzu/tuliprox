@@ -1,6 +1,5 @@
 use crate::{
     api::{
-        api_utils::{mark_response_as_uncompressed, try_unwrap_body, HeaderFilter},
         model::{
             stream::{BoxedProviderStream, ProviderStreamResponse},
             AppState, CleanupEvent, CustomVideoStream, ProvisioningStream, ThrottledStream, TimedClientStream,
@@ -9,6 +8,9 @@ use crate::{
     },
     model::AppConfig,
 };
+use tuliprox_core::utils::request_headers::HeaderFilter;
+use tuliprox_core::utils::response_compression::mark_response_as_uncompressed;
+use tuliprox_core::try_unwrap_body;
 use axum::response::IntoResponse;
 use log::trace;
 use reqwest::StatusCode;

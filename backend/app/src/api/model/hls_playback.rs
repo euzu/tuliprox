@@ -6,11 +6,13 @@ use tuliprox_hls::{
 };
 use crate::{
     api::{
-        api_utils::{connection_priority_for_kind, resolve_playback_request_admission, EvictionReentryGuard},
         model::{AppState, UserSession},
     },
     auth::Fingerprint,
     model::ProxyUserCredentials,
+};
+use tuliprox_session::admission::{
+    connection_priority_for_kind, resolve_playback_request_admission, EvictionReentryGuard,
 };
 use log::warn;
 use shared::model::{PlaylistItemType, UserConnectionPermission};
@@ -96,7 +98,7 @@ async fn validate_hls_access_lease_admission(
         resolve_hls_access_lease_identity(app_state, &lease, admission_mode, now_ms).await?;
 
     let (admission, _, _) = resolve_playback_request_admission(
-        app_state,
+        &app_state.admission_ctx(),
         &user,
         fingerprint,
         PlaylistItemType::LiveHls,

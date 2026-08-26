@@ -1,6 +1,6 @@
+use tuliprox_session::stream_options::get_stream_options;
 use crate::{
     api::{
-        api_utils::get_stream_options,
         model::{
             connection_manager::{PROVIDER_END_CLOSED, PROVIDER_END_ERROR, PROVIDER_END_NOT_SET},
             create_provider_stream, uses_direct_body_idle_timeout, AppState, BoxedProviderStream, CleanupEvent,
@@ -569,7 +569,7 @@ fn create_deferred_provider_open_future(
     let request_url = stream_details.request_url.as_deref()?;
     let input = find_input_by_provider_name(app_state.as_ref(), provider_name)?;
     let stream_url = url::Url::parse(request_url).ok()?;
-    let stream_options = get_stream_options(app_state);
+    let stream_options = get_stream_options(&app_state.app_config);
     let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
     let disabled_headers = app_state.get_disabled_headers();
     let mut provider_stream_factory_options =
@@ -1165,15 +1165,15 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                         // User-grace failed. Evaluate remaining strategies before final deny.
                         if let Some(ref ctx) = grace_resolution_context {
                             let eviction_guard = if socket_bound {
-                                crate::api::api_utils::EvictionReentryGuard::SocketPlayback { virtual_id }
+                                tuliprox_session::admission::EvictionReentryGuard::SocketPlayback { virtual_id }
                             } else {
-                                crate::api::api_utils::EvictionReentryGuard::Session(
+                                tuliprox_session::admission::EvictionReentryGuard::Session(
                                     // Defensive fallback: an empty token will not match any real session.
                                     session_token.as_deref().unwrap_or_default(),
                                 )
                             };
-                            let remaining_result = crate::api::api_utils::evaluate_remaining_strategies_after_grace(
-                                &app_state,
+                            let remaining_result = tuliprox_session::admission::evaluate_remaining_strategies_after_grace(
+                                &app_state.admission_ctx(),
                                 &username,
                                 max_connections,
                                 user.soft_connections,

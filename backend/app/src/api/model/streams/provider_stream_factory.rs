@@ -1,6 +1,7 @@
+use tuliprox_core::utils::request_headers::get_headers_from_request;
+use tuliprox_session::stream_options::StreamOptions;
 use crate::{
     api::{
-        api_utils::{get_headers_from_request, StreamOptions},
         model::{
             create_channel_unavailable_stream, extract_hls_provider_session_headers, get_header_filter_for_item_type,
             get_response_headers,

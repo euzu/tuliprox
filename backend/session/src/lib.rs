@@ -17,15 +17,17 @@
 
 pub mod active_provider_manager;
 pub mod active_user_manager;
+pub mod admission;
 pub mod admission_strategy;
 pub mod connection_manager;
 pub mod event_manager;
 pub mod meter;
 pub mod provider_lineup_manager;
 pub mod stream;
+pub mod stream_options;
 pub mod streams;
 
 pub use self::{
-    active_provider_manager::*, active_user_manager::*, admission_strategy::*, connection_manager::*, event_manager::*,
-    meter::*, provider_lineup_manager::*, stream::*, streams::*,
+    active_provider_manager::*, active_user_manager::*, admission::*, admission_strategy::*, connection_manager::*,
+    event_manager::*, meter::*, provider_lineup_manager::*, stream::*, streams::*,
 };

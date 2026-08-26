@@ -2,8 +2,7 @@ use crate::repository::GeoIp;
 use crate::{
     api::{
         endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
-        model::{
-            active_user_manager::ConnectionAdmission, metadata_update_manager::MetadataUpdateManager,
+        model::{ metadata_update_manager::MetadataUpdateManager,
             provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation,
             recording_rule_scheduler::spawn_recording_rule_scheduler, ActiveProviderManager, ActiveUserManager,
             ConnectionManager, DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, PlaylistStorage,
@@ -622,39 +621,6 @@ impl AppState {
         self.active_users.user_connections(username).await
     }
 
-    pub(crate) async fn get_connection_admission(
-        &self,
-        username: &str,
-        max_connections: u32,
-        soft_connections: u16,
-    ) -> ConnectionAdmission {
-        self.active_users.connection_admission(username, max_connections, soft_connections).await
-    }
-
-    pub(crate) async fn get_connection_admission_for_session(
-        &self,
-        username: &str,
-        max_connections: u32,
-        soft_connections: u16,
-        session_token: &str,
-    ) -> ConnectionAdmission {
-        self.active_users
-            .connection_admission_for_session(username, max_connections, soft_connections, session_token)
-            .await
-    }
-
-    pub(crate) async fn get_connection_admission_for_session_activation(
-        &self,
-        username: &str,
-        max_connections: u32,
-        soft_connections: u16,
-        session_token: &str,
-    ) -> ConnectionAdmission {
-        self.active_users
-            .connection_admission_for_session_activation(username, max_connections, soft_connections, session_token)
-            .await
-    }
-
     pub async fn get_connection_permission(
         &self,
         username: &str,
@@ -897,6 +863,17 @@ impl AppState {
             active_provider: Arc::clone(&self.active_provider),
             connection_manager: Arc::clone(&self.connection_manager),
             active_users: Arc::clone(&self.active_users),
+        }
+    }
+}
+
+impl AppState {
+    /// The handles admission needs, lifted out of the root state.
+    pub fn admission_ctx(&self) -> tuliprox_session::admission::AdmissionCtx {
+        tuliprox_session::admission::AdmissionCtx {
+            app_config: Arc::clone(&self.app_config),
+            active_users: Arc::clone(&self.active_users),
+            connection_manager: Arc::clone(&self.connection_manager),
         }
     }
 }
