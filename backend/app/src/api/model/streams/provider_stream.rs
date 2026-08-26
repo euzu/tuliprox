@@ -1,11 +1,9 @@
+use tuliprox_session::stream_ctx::ProviderStreamCtx;
 use crate::{
-    api::{
-        model::{
-            stream::{BoxedProviderStream, ProviderStreamResponse},
-            AppState, CleanupEvent, CustomVideoStream, ProvisioningStream, ThrottledStream, TimedClientStream,
+    api::model::{
+            stream::{BoxedProviderStream, ProviderStreamResponse}, CleanupEvent, CustomVideoStream, ProvisioningStream, ThrottledStream, TimedClientStream,
             TransportStreamBuffer,
         },
-    },
     model::AppConfig,
 };
 use tuliprox_core::utils::request_headers::HeaderFilter;
@@ -15,7 +13,7 @@ use axum::response::IntoResponse;
 use log::trace;
 use reqwest::StatusCode;
 use shared::model::{CustomVideoStreamType, PlaylistItemType};
-use std::{net::SocketAddr, sync::Arc};
+use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
 
 
@@ -203,11 +201,11 @@ pub fn create_panel_api_provisioning_stream_with_stop(
 }
 
 pub fn create_custom_video_stream_response(
-    app_state: &Arc<AppState>,
+    ctx: &ProviderStreamCtx,
     addr: &SocketAddr,
     video_response: CustomVideoStreamType,
 ) -> impl axum::response::IntoResponse + Send {
-    let config = &app_state.app_config;
+    let config = &ctx.app_config;
     if let (Some(stream), Some((headers, status_code, _, _))) = match video_response {
         CustomVideoStreamType::ChannelUnavailable => create_channel_unavailable_stream(config, &[], StatusCode::OK),
         CustomVideoStreamType::UserConnectionsExhausted => create_user_connections_exhausted_stream(config, &[]),
@@ -219,7 +217,7 @@ pub fn create_custom_video_stream_response(
         CustomVideoStreamType::Provisioning => create_panel_api_provisioning_stream(config, &[]),
         CustomVideoStreamType::HlsSessionOrLeaseExpired => create_hls_session_or_lease_expired_stream(config, &[]),
     } {
-        app_state.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProviderConnection {
+        ctx.connection_manager.send_cleanup(CleanupEvent::UpdateDetailAndReleaseProviderConnection {
             addr: *addr,
             video_type: video_response,
         });

@@ -1,17 +1,15 @@
+use tuliprox_session::stream_ctx::ProviderStreamCtx;
 use tuliprox_core::utils::request_headers::get_headers_from_request;
 use tuliprox_session::response_headers::{provider_response_headers, ProviderResponseHeaderError};
 use tuliprox_session::stream_options::StreamOptions;
 use crate::{
-    api::{
-        model::{
+    api::model::{
             create_channel_unavailable_stream, extract_hls_provider_session_headers, get_header_filter_for_item_type,
             get_response_headers,
             log_hls_origin_content_coding,
-            streams::{buffered_stream::BufferedStream, client_stream::ClientStream},
-            AppState, CustomVideoStreamType, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource,
+            streams::{buffered_stream::BufferedStream, client_stream::ClientStream}, CustomVideoStreamType, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource,
             ProviderContentRepresentationMode, ProviderStreamFactoryResponse, StreamError, STREAM_IDLE_TIMEOUT,
         },
-    },
     iptv::stalker::client::validate_public_playable_url,
     model::{AppConfig, ConfigProvider, ReverseProxyDisabledHeaderConfig},
     utils::{
@@ -346,7 +344,7 @@ fn merge_provider_request_headers(
 }
 
 fn record_provider_open_failure(
-    app_state: &Arc<AppState>,
+    ctx: &ProviderStreamCtx,
     stream_options: &ProviderStreamFactoryOptions,
     reason: ConnectFailureReason,
     provider_http_status: Option<StatusCode>,
@@ -358,8 +356,8 @@ fn record_provider_open_failure(
     let Some(info) = stream_options.build_connect_failed_stream_info(provider_name) else { return };
     // Resolve target_name from target_id using the stable target config name.
     let target_name =
-        app_state.app_config.get_target_by_id(info.channel.target_id).as_deref().map(|t| (&t.name).intern());
-    app_state.connection_manager.record_connect_failed_with_provider_failure(
+        ctx.app_config.get_target_by_id(info.channel.target_id).as_deref().map(|t| (&t.name).intern());
+    ctx.connection_manager.record_connect_failed_with_provider_failure(
         &info,
         reason,
         failure_stage,
@@ -807,12 +805,12 @@ fn provider_decoded_body_error(error: &io::Error) -> StreamError {
 
 #[allow(clippy::too_many_lines)]
 async fn provider_stream_request(
-    app_state: &Arc<AppState>,
+    ctx: &ProviderStreamCtx,
     request_client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, ProviderStreamRequestFailure> {
     let use_manual_redirects = stream_options.requires_public_destination()
-        || app_state.should_use_manual_redirects()
+        || tuliprox_core::model::should_use_manual_redirects(&ctx.app_config)
         || provider_headers_require_manual_redirects(stream_options.get_headers());
     if log_enabled!(log::Level::Debug) {
         let diagnostics =
@@ -825,18 +823,18 @@ async fn provider_stream_request(
     }
     let response_result = if use_manual_redirects {
         let client_no_redirect = if stream_options.requires_public_destination() {
-            app_state.public_http_client_no_redirect.load()
+            ctx.public_http_client_no_redirect.load()
         } else {
-            app_state.http_client_no_redirect.load()
+            ctx.http_client_no_redirect.load()
         };
-        send_with_manual_redirects(&client_no_redirect, stream_options, &app_state.app_config).await
+        send_with_manual_redirects(&client_no_redirect, stream_options, &ctx.app_config).await
     } else {
         // Use send_with_retry_and_provider for automatic failover support
         let url = stream_options.get_url();
         let provider = stream_options.get_provider().cloned();
 
         send_with_retry_and_provider_policy(
-            &app_state.app_config,
+            &ctx.app_config,
             url,
             provider.as_ref(),
             false,
@@ -962,7 +960,7 @@ async fn provider_stream_request(
 }
 
 async fn get_provider_stream(
-    app_state: &Arc<AppState>,
+    ctx: &ProviderStreamCtx,
     client: &reqwest::Client,
     stream_options: &ProviderStreamFactoryOptions,
 ) -> Result<Option<ProviderStreamFactoryResponse>, ProviderStreamRequestFailure> {
@@ -972,7 +970,7 @@ async fn get_provider_stream(
     let mut connect_err: u32 = 1;
 
     while stream_options.should_continue() {
-        match provider_stream_request(app_state, client, stream_options).await {
+        match provider_stream_request(ctx, client, stream_options).await {
             Ok(Some(stream_response)) => {
                 return Ok(Some(stream_response));
             }
@@ -1033,7 +1031,7 @@ async fn get_provider_stream(
     }
     debug_if_enabled!("Stopped reconnecting stream {}", sanitize_sensitive_info(stream_options.get_log_url().as_ref()));
     stream_options.cancel_reconnect();
-    app_state.connection_manager.release_provider_connection(&stream_options.addr).await;
+    ctx.connection_manager.release_provider_connection(&stream_options.addr).await;
     Err(ProviderStreamRequestFailure::Status {
         status: StatusCode::SERVICE_UNAVAILABLE,
         provider_error_class: "service_unavailable",
@@ -1043,11 +1041,11 @@ async fn get_provider_stream(
 
 #[allow(clippy::too_many_lines)]
 pub async fn create_provider_stream(
-    app_state: &Arc<AppState>,
+    ctx: &ProviderStreamCtx,
     client: &reqwest::Client,
     stream_options: ProviderStreamFactoryOptions,
 ) -> Option<ProviderStreamFactoryResponse> {
-    match get_provider_stream(app_state, client, &stream_options).await {
+    match get_provider_stream(ctx, client, &stream_options).await {
         Ok(Some(ProviderStreamFactoryResponse { stream: init_stream, info, provider_session_headers })) => {
             if let Some((_headers, _status, _response_url, Some(custom_video_type))) = &info {
                 let reason = match custom_video_type {
@@ -1059,7 +1057,7 @@ pub async fn create_provider_stream(
                     _ => None,
                 };
                 if let Some(reason) = reason {
-                    record_provider_open_failure(app_state, &stream_options, reason, None, None);
+                    record_provider_open_failure(ctx, &stream_options, reason, None, None);
                 }
             }
             let continue_signal = stream_options.get_reconnect_flag_clone();
@@ -1085,16 +1083,16 @@ pub async fn create_provider_stream(
         Ok(None) => None,
         Err(failure) => {
             let status = failure.status();
-            app_state.connection_manager.release_provider_connection(&stream_options.addr).await;
+            ctx.connection_manager.release_provider_connection(&stream_options.addr).await;
             record_provider_open_failure(
-                app_state,
+                ctx,
                 &stream_options,
                 ConnectFailureReason::ChannelUnavailable,
                 Some(status),
                 Some(failure.provider_error_class()),
             );
             if let (Some(boxed_provider_stream), response_info) = create_channel_unavailable_stream(
-                &app_state.app_config,
+                &ctx.app_config,
                 &get_response_headers(stream_options.get_headers()),
                 StatusCode::OK,
             ) {

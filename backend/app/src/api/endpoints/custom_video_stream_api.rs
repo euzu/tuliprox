@@ -232,7 +232,7 @@ async fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
             if !verify_access_token(token, &app_state.app_config.access_token_secret) {
                 return app_state.app_config.get_auth_error_status().into_response();
             }
-            return create_custom_video_stream_response(app_state, &fingerprint.addr, custom_video_type).into_response();
+            return create_custom_video_stream_response(&app_state.provider_stream_ctx(), &fingerprint.addr, custom_video_type).into_response();
         }
     }
 
@@ -246,7 +246,7 @@ async fn cvs_api_response(context: CvsApiResponseContext<'_>) -> Response {
 
     match route_kind {
         CvsRouteKind::Hls => StatusCode::NOT_FOUND.into_response(),
-        CvsRouteKind::Ts => create_custom_video_stream_response(app_state, &fingerprint.addr, custom_video_type)
+        CvsRouteKind::Ts => create_custom_video_stream_response(&app_state.provider_stream_ctx(), &fingerprint.addr, custom_video_type)
             .into_response(),
     }
 }
@@ -711,7 +711,7 @@ mod tests {
     async fn custom_video_stream_response_returns_ok_for_channel_unavailable() {
         let app_state = create_test_app_state();
         let response = crate::api::model::create_custom_video_stream_response(
-            &app_state,
+            &app_state.provider_stream_ctx(),
             &test_fingerprint().addr,
             crate::api::model::CustomVideoStreamType::ChannelUnavailable,
         )

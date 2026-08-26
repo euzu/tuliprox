@@ -662,7 +662,7 @@ impl Stream for ActiveClientStream {
                                     };
                                     let future = Box::pin(async move {
                                         match create_provider_stream(
-                                            &app_state,
+                                            &app_state.provider_stream_ctx(),
                                             &client,
                                             context.provider_stream_factory_options,
                                         )

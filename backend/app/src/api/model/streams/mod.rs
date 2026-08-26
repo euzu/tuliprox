@@ -1,3 +1,22 @@
+//! The streaming layer.
+//!
+//! This stays in `api` rather than joining `tuliprox-session`, and not because
+//! of `AppState`. Two independent things pin it here:
+//!
+//! - `active_client_stream` and `provider_stream` call panel provisioning
+//!   (`can_provision_on_exhausted`, `run_panel_api_provisioning_probe`,
+//!   `find_input_by_provider_name`), which takes the whole root state and does
+//!   HTTP against an external panel.
+//! - `provider_stream_factory` logs origin content-coding through
+//!   `tuliprox-hls`, and `tuliprox-hls` already depends on `tuliprox-session`,
+//!   so moving it down would close a cycle.
+//!
+//! Together those say something real: the streaming layer is where `session`,
+//! `hls`, `iptv` and panel provisioning are composed. That is what `api` is.
+//! The provider half no longer names `AppState` - it takes a
+//! `ProviderStreamCtx` - but not naming the root state is not the same as being
+//! able to leave.
+
 mod client_stream;
 mod custom_video_stream;
 mod provisioning_stream;

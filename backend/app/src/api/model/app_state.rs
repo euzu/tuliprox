@@ -878,6 +878,18 @@ impl AppState {
     }
 }
 
+impl AppState {
+    /// The handles the provider side of a stream needs.
+    pub fn provider_stream_ctx(&self) -> tuliprox_session::stream_ctx::ProviderStreamCtx {
+        tuliprox_session::stream_ctx::ProviderStreamCtx {
+            app_config: Arc::clone(&self.app_config),
+            connection_manager: Arc::clone(&self.connection_manager),
+            http_client_no_redirect: Arc::clone(&self.http_client_no_redirect),
+            public_http_client_no_redirect: Arc::clone(&self.public_http_client_no_redirect),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::model::{should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars};

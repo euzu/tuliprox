@@ -282,7 +282,7 @@ async fn xtream_player_api_stream(
             return auth_status.into_response();
         }
         return create_custom_video_stream_response(
-            app_state,
+            &app_state.provider_stream_ctx(),
             &fingerprint.addr,
             CustomVideoStreamType::ChannelUnavailable,
         )
@@ -302,7 +302,7 @@ async fn xtream_player_api_stream(
             .await;
         }
         return create_custom_video_stream_response(
-            app_state,
+            &app_state.provider_stream_ctx(),
             &fingerprint.addr,
             CustomVideoStreamType::ChannelUnavailable,
         )
@@ -331,7 +331,7 @@ async fn xtream_player_api_stream(
             .await;
         }
         return create_custom_video_stream_response(
-            app_state,
+            &app_state.provider_stream_ctx(),
             &fingerprint.addr,
             CustomVideoStreamType::ChannelUnavailable,
         )

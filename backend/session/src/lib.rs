@@ -27,6 +27,7 @@ pub mod provider_lineup_manager;
 pub mod qos_aggregation_manager;
 pub mod response_headers;
 pub mod stream;
+pub mod stream_ctx;
 pub mod stream_options;
 pub mod streams;
 

@@ -188,7 +188,7 @@ pub(crate) fn admission_failure_response(
         error!("Unsupported admission failure reason: {reason:?}");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    create_custom_video_stream_response(app_state, &fingerprint.addr, video_type).into_response()
+    create_custom_video_stream_response(&app_state.provider_stream_ctx(), &fingerprint.addr, video_type).into_response()
 }
 
 #[macro_export]
@@ -1494,7 +1494,7 @@ async fn create_stream_response_details(
 
                     let reconnect_flag = provider_stream_factory_options.get_reconnect_flag_clone();
                     let provider_stream = match create_provider_stream(
-                        app_state,
+                        &app_state.provider_stream_ctx(),
                         &app_state.http_client.load(),
                         provider_stream_factory_options,
                     )
@@ -1554,7 +1554,7 @@ async fn create_stream_response_details(
                                 options.require_public_destination();
                                 let retry_reconnect_flag = options.get_reconnect_flag_clone();
                                 let retried = create_provider_stream(
-                                    app_state,
+                                    &app_state.provider_stream_ctx(),
                                     &app_state.http_client.load(),
                                     options,
                                 )
@@ -2167,7 +2167,7 @@ pub(crate) async fn stream_response(
             failure_stage: FailureStage::Admission,
         });
         return create_custom_video_stream_response(
-            app_state,
+            &app_state.provider_stream_ctx(),
             &fingerprint.addr,
             CustomVideoStreamType::UserConnectionsExhausted,
         )
@@ -2928,7 +2928,7 @@ pub(crate) async fn local_stream_response(
                 failure_stage: FailureStage::Admission,
             });
             return create_custom_video_stream_response(
-                app_state,
+                &app_state.provider_stream_ctx(),
                 &fingerprint.addr,
                 CustomVideoStreamType::UserConnectionsExhausted,
             )
@@ -3082,7 +3082,7 @@ pub(crate) async fn local_stream_response(
                 )
                 .await;
             return create_custom_video_stream_response(
-                app_state,
+                &app_state.provider_stream_ctx(),
                 &fingerprint.addr,
                 CustomVideoStreamType::UserConnectionsExhausted,
             )

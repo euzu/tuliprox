@@ -172,7 +172,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
             .await;
         }
         return crate::api::model::create_custom_video_stream_response(
-            app_state,
+            &app_state.provider_stream_ctx(),
             &fingerprint.addr,
             crate::api::model::CustomVideoStreamType::ChannelUnavailable,
         )
@@ -673,7 +673,7 @@ async fn m3u_api_stream(
                 return axum::http::StatusCode::NOT_FOUND.into_response();
             }
             return crate::api::model::create_custom_video_stream_response(
-                app_state,
+                &app_state.provider_stream_ctx(),
                 &fingerprint.addr,
                 crate::api::model::CustomVideoStreamType::ChannelUnavailable,
             )
