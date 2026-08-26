@@ -119,11 +119,16 @@ pub fn filesystem_capacity_for(path: &Path) -> Option<(u64, u64)> {
         }
 
         let bsize = stat.f_frsize as u64;
-        let total = stat.f_blocks.saturating_mul(bsize);
+        // `fsblkcnt_t` is `u32` on Darwin and `u64` on Linux, so the conversion
+        // is real on one and reflexive on the other. Clippy only sees the
+        // reflexive case on the platform it happens to be running on.
+        #[allow(clippy::useless_conversion)]
+        let total = u64::from(stat.f_blocks).saturating_mul(bsize);
 
         // `f_bavail`, not `f_bfree`: the service user cannot use the
         // root-reserved blocks, so counting them would understate pressure.
-        let available = stat.f_bavail.saturating_mul(bsize);
+        #[allow(clippy::useless_conversion)]
+        let available = u64::from(stat.f_bavail).saturating_mul(bsize);
 
         Some((total, available))
     }
@@ -177,7 +182,12 @@ pub fn free_bytes_for(path: &Path) -> Option<u64> {
         // `f_bavail` is the bytes available to a non-privileged
         // caller — the worker runs as the service user and is
         // subject to the same reservation as any other user.
-        Some(stat.f_bavail.saturating_mul(bsize))
+        //
+        // `fsblkcnt_t` is `u32` on Darwin and `u64` on Linux; see
+        // `filesystem_capacity_for`.
+        #[allow(clippy::useless_conversion)]
+        let available = u64::from(stat.f_bavail).saturating_mul(bsize);
+        Some(available)
     }
     #[cfg(windows)]
     {
