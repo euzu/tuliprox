@@ -1,4 +1,5 @@
 mod app_state;
+mod app_state_view;
 mod hls_provisioning;
 mod proxy;
 mod streams;
@@ -8,7 +9,7 @@ pub(in crate::api) use self::hls_provisioning::{
     build_hls_custom_video_manifest_body, hls_panel_provisioning_manifest_path,
 };
 pub use self::{
-    app_state::*, hls_provisioning::HlsProvisioningState,
+    app_state::*, app_state_view::*, hls_provisioning::HlsProvisioningState,
     proxy::*,
 };
 // In-memory playlist storage moved to `repository`; re-exported so `api` call
