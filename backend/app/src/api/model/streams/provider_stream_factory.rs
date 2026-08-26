@@ -1,4 +1,5 @@
 use tuliprox_core::utils::request_headers::get_headers_from_request;
+use tuliprox_session::response_headers::{provider_response_headers, ProviderResponseHeaderError};
 use tuliprox_session::stream_options::StreamOptions;
 use crate::{
     api::{
@@ -6,7 +7,6 @@ use crate::{
             create_channel_unavailable_stream, extract_hls_provider_session_headers, get_header_filter_for_item_type,
             get_response_headers,
             log_hls_origin_content_coding,
-            model_utils::{provider_response_headers, ProviderResponseHeaderError},
             streams::{buffered_stream::BufferedStream, client_stream::ClientStream},
             AppState, CustomVideoStreamType, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource,
             ProviderContentRepresentationMode, ProviderStreamFactoryResponse, StreamError, STREAM_IDLE_TIMEOUT,

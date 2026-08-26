@@ -9,6 +9,8 @@ description = "Resolved configuration model and shared utilities for tuliprox"
 workspace = true
 
 [dependencies]
+http-body-util = "0.1.3"
+serde_html_form = "0.4.0"
 shared = { version = "3", path = "../../shared" }
 tuliprox-mpegts = { version = "3", path = "../mpegts" }
 tuliprox-media-server = { version = "3", path = "../media-server" }

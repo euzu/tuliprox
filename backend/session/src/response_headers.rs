@@ -1,13 +1,11 @@
-use crate::{
-    api::model::{ProviderContentRepresentationMode, ProviderStreamHeader},
-    utils::content_coding::parse_content_encoding_tokens,
-};
+use crate::stream::{ProviderContentRepresentationMode, ProviderStreamHeader};
 use reqwest::{
     header::{HeaderMap, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, TRANSFER_ENCODING},
     StatusCode,
 };
 use shared::utils::filter_response_header;
 use std::{collections::HashSet, str::FromStr};
+use tuliprox_core::utils::content_coding::parse_content_encoding_tokens;
 
 pub fn get_response_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
@@ -20,7 +18,7 @@ pub fn get_response_headers(headers: &HeaderMap) -> Vec<(String, String)> {
 /// Failures raised while selecting representation-sensitive provider response headers.
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum ProviderResponseHeaderError {
+pub enum ProviderResponseHeaderError {
     #[error("invalid Content-Encoding header")]
     InvalidContentEncoding,
 
@@ -32,7 +30,7 @@ pub(crate) enum ProviderResponseHeaderError {
 }
 
 /// Selects representation-consistent provider headers without widening the global response allowlist.
-pub(crate) fn provider_response_headers(
+pub fn provider_response_headers(
     headers: &HeaderMap,
     mode: ProviderContentRepresentationMode,
 ) -> Result<ProviderStreamHeader, ProviderResponseHeaderError> {
@@ -151,11 +149,11 @@ pub fn get_stream_response_with_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::content_coding::normalize_headers_after_content_decoding;
     use reqwest::header::{
         ACCEPT_RANGES, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, ETAG, PROXY_AUTHENTICATE, SET_COOKIE,
         WWW_AUTHENTICATE,
     };
+    use tuliprox_core::utils::content_coding::normalize_headers_after_content_decoding;
 
     fn selected_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
         headers.iter().find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.as_str()))

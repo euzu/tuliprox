@@ -1,4 +1,4 @@
-use crate::api::model::ProviderIdType;
+use crate::model::ProviderIdType;
 use shared::model::{LiveStreamProperties, SeriesStreamProperties, VideoStreamProperties};
 use std::mem;
 
@@ -6,9 +6,9 @@ const BATCH_THRESHOLD: usize = 200;
 
 #[derive(Debug, Default)]
 pub struct BatchResultCollector {
-    pub(crate) vod: Vec<(ProviderIdType, VideoStreamProperties)>,
-    pub(crate) series: Vec<(ProviderIdType, SeriesStreamProperties)>,
-    pub(crate) live: Vec<(ProviderIdType, LiveStreamProperties)>,
+    pub vod: Vec<(ProviderIdType, VideoStreamProperties)>,
+    pub series: Vec<(ProviderIdType, SeriesStreamProperties)>,
+    pub live: Vec<(ProviderIdType, LiveStreamProperties)>,
 }
 
 impl BatchResultCollector {

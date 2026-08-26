@@ -1,6 +1,8 @@
-use axum::extract::{FromRequest, Request};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::{
+    extract::{FromRequest, Request},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use http_body_util::LengthLimitError;
 use log::log_enabled;
 use std::error::Error as StdError;
@@ -68,14 +70,9 @@ where
     async fn from_request(req: Request, _state: &S) -> Result<Self, Self::Rejection> {
         let (parts, body) = req.into_parts();
 
-        let query_req = parse_query_request(parts.uri.query())
-            .map_err(ParseBodyError::into_response)?;
+        let query_req = parse_query_request(parts.uri.query()).map_err(ParseBodyError::into_response)?;
 
-        let content_type = parts
-            .headers
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+        let content_type = parts.headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("");
 
         let body_req = match parse_body(body, content_type).await {
             Ok(body_req) => Some(body_req),
@@ -87,15 +84,13 @@ where
 }
 
 async fn parse_body(body: axum::body::Body, content_type: &str) -> Result<UserApiRequest, ParseBodyError> {
-    let bytes = axum::body::to_bytes(body, MAX_BODY_SIZE_BYTES)
-        .await
-        .map_err(|e| {
-            if is_length_limit_error(&e) {
-                ParseBodyError::PayloadTooLarge(format!("Request body too large (max {MAX_BODY_SIZE_BYTES} bytes)"))
-            } else {
-                ParseBodyError::BadRequest(format!("Failed to read request body: {e}"))
-            }
-        })?;
+    let bytes = axum::body::to_bytes(body, MAX_BODY_SIZE_BYTES).await.map_err(|e| {
+        if is_length_limit_error(&e) {
+            ParseBodyError::PayloadTooLarge(format!("Request body too large (max {MAX_BODY_SIZE_BYTES} bytes)"))
+        } else {
+            ParseBodyError::BadRequest(format!("Failed to read request body: {e}"))
+        }
+    })?;
 
     if bytes.is_empty() {
         return Ok(UserApiRequest::default());
@@ -105,7 +100,8 @@ async fn parse_body(body: axum::body::Body, content_type: &str) -> Result<UserAp
         parse_multipart_body(&bytes, content_type)
     } else {
         // Treat as form-urlencoded (works for both explicit content-type and missing content-type)
-        serde_html_form::from_bytes(&bytes).map_err(|e| ParseBodyError::BadRequest(format!("Failed to parse form: {e}")))
+        serde_html_form::from_bytes(&bytes)
+            .map_err(|e| ParseBodyError::BadRequest(format!("Failed to parse form: {e}")))
     }
 }
 
@@ -194,10 +190,7 @@ fn extract_multipart_boundary(content_type: &str) -> Option<&str> {
         let (name, value) = param.split_once('=')?;
         if name.trim().eq_ignore_ascii_case("boundary") {
             let trimmed = value.trim();
-            let unquoted = trimmed
-                .strip_prefix('"')
-                .and_then(|inner| inner.strip_suffix('"'))
-                .unwrap_or(trimmed);
+            let unquoted = trimmed.strip_prefix('"').and_then(|inner| inner.strip_suffix('"')).unwrap_or(trimmed);
             if !unquoted.is_empty() {
                 return Some(unquoted);
             }
@@ -262,20 +255,48 @@ impl UserApiRequest {
         if log_enabled!(log::Level::Debug) {
             use std::fmt::Write;
             let mut msg = endpoint.to_string();
-            if !self.username.is_empty() { let _ = write!(msg, " username={}", self.username); }
-            if !self.password.is_empty() { msg.push_str(" password=***"); }
-            if !self.token.is_empty() { msg.push_str(" token=***"); }
-            if !self.action.is_empty() { let _ = write!(msg, " action={}", self.action); }
-            if !self.series_id.is_empty() { let _ = write!(msg, " series_id={}", self.series_id); }
-            if !self.vod_id.is_empty() { let _ = write!(msg, " vod_id={}", self.vod_id); }
-            if !self.stream_id.is_empty() { let _ = write!(msg, " stream_id={}", self.stream_id); }
-            if !self.category_id.is_empty() { let _ = write!(msg, " category_id={}", self.category_id); }
-            if !self.limit.is_empty() { let _ = write!(msg, " limit={}", self.limit); }
-            if !self.start.is_empty() { let _ = write!(msg, " start={}", self.start); }
-            if !self.end.is_empty() { let _ = write!(msg, " end={}", self.end); }
-            if !self.stream.is_empty() { let _ = write!(msg, " stream={}", self.stream); }
-            if !self.duration.is_empty() { let _ = write!(msg, " duration={}", self.duration); }
-            if !self.content_type.is_empty() { let _ = write!(msg, " type={}", self.content_type); }
+            if !self.username.is_empty() {
+                let _ = write!(msg, " username={}", self.username);
+            }
+            if !self.password.is_empty() {
+                msg.push_str(" password=***");
+            }
+            if !self.token.is_empty() {
+                msg.push_str(" token=***");
+            }
+            if !self.action.is_empty() {
+                let _ = write!(msg, " action={}", self.action);
+            }
+            if !self.series_id.is_empty() {
+                let _ = write!(msg, " series_id={}", self.series_id);
+            }
+            if !self.vod_id.is_empty() {
+                let _ = write!(msg, " vod_id={}", self.vod_id);
+            }
+            if !self.stream_id.is_empty() {
+                let _ = write!(msg, " stream_id={}", self.stream_id);
+            }
+            if !self.category_id.is_empty() {
+                let _ = write!(msg, " category_id={}", self.category_id);
+            }
+            if !self.limit.is_empty() {
+                let _ = write!(msg, " limit={}", self.limit);
+            }
+            if !self.start.is_empty() {
+                let _ = write!(msg, " start={}", self.start);
+            }
+            if !self.end.is_empty() {
+                let _ = write!(msg, " end={}", self.end);
+            }
+            if !self.stream.is_empty() {
+                let _ = write!(msg, " stream={}", self.stream);
+            }
+            if !self.duration.is_empty() {
+                let _ = write!(msg, " duration={}", self.duration);
+            }
+            if !self.content_type.is_empty() {
+                let _ = write!(msg, " type={}", self.content_type);
+            }
             log::debug!("{msg}");
         }
     }
@@ -292,9 +313,11 @@ impl UserApiRequest {
 #[cfg(test)]
 mod tests {
     use super::{parse_body, UserApiRequest, MAX_BODY_SIZE_BYTES};
-    use axum::body::Body;
-    use axum::extract::FromRequest;
-    use axum::http::{Request as HttpRequest, StatusCode};
+    use axum::{
+        body::Body,
+        extract::FromRequest,
+        http::{Request as HttpRequest, StatusCode},
+    };
 
     #[test]
     fn merge_prefer_primary_uses_fallback_for_empty_fields() {
@@ -403,7 +426,7 @@ mod tests {
             super::ParseBodyError::PayloadTooLarge(msg) => {
                 assert!(msg.contains("body too large"), "unexpected error: {msg}");
             }
-            other@ super::ParseBodyError::BadRequest(_) => panic!("unexpected error: {other:?}"),
+            other @ super::ParseBodyError::BadRequest(_) => panic!("unexpected error: {other:?}"),
         }
     }
 
@@ -416,7 +439,9 @@ mod tests {
             .body(Body::from(oversized))
             .expect("request should build");
 
-        let Err(response) = super::UserApiRequestQueryOrBody::from_request(request, &()).await else { panic!("oversized body should reject extractor") };
+        let Err(response) = super::UserApiRequestQueryOrBody::from_request(request, &()).await else {
+            panic!("oversized body should reject extractor")
+        };
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
@@ -432,12 +457,9 @@ mod tests {
             "--abc123--\r\n",
         );
 
-        let parsed = parse_body(
-            Body::from(body),
-            "Multipart/Form-Data; charset=utf-8; boundary=\"abc123\"",
-        )
-        .await
-        .expect("multipart body should parse");
+        let parsed = parse_body(Body::from(body), "Multipart/Form-Data; charset=utf-8; boundary=\"abc123\"")
+            .await
+            .expect("multipart body should parse");
 
         assert_eq!(parsed.username, "  alice  ");
         assert_eq!(parsed.password, "\t secret \t");
@@ -452,12 +474,9 @@ mod tests {
             "--abc123--\r\n",
         );
 
-        let parsed = parse_body(
-            Body::from(body),
-            "multipart/form-data; boundary=abc123",
-        )
-        .await
-        .expect("multipart body should parse");
+        let parsed = parse_body(Body::from(body), "multipart/form-data; boundary=abc123")
+            .await
+            .expect("multipart body should parse");
 
         assert_eq!(parsed.content_type, "m3u_plus");
     }
@@ -471,14 +490,10 @@ mod tests {
             "--abc123--\r\n",
         );
 
-        let parsed = parse_body(
-            Body::from(body),
-            "multipart/form-data; boundary=abc123",
-        )
-        .await
-        .expect("multipart body should parse");
+        let parsed = parse_body(Body::from(body), "multipart/form-data; boundary=abc123")
+            .await
+            .expect("multipart body should parse");
 
         assert_eq!(parsed.username, "alice");
     }
-
 }

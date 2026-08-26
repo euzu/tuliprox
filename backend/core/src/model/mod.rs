@@ -12,6 +12,7 @@ mod xtream;
 // in `api`.
 // Playlist/library update semaphores. No dependencies of their own, and named
 // by both `api` and `processing`.
+pub mod batch_result_collector;
 pub mod custom_stream_flags;
 pub mod fingerprint;
 pub mod playlist_filter;
@@ -22,10 +23,12 @@ pub mod stalker_record;
 pub mod stream_error;
 pub mod update_guard;
 pub mod update_task;
+pub mod user_api_request;
+pub mod xtream_response;
 
 pub use self::{
-    config::*, custom_stream_flags::*, fingerprint::*, healthcheck::*, input_source::*, mapping::*, messaging::*,
-    playlist_filter::*, playlist_key::*, provider::*, proxy_redirect::*, stalker_record::*, stream_error::*,
-    stream_history::*, update_guard::*, update_task::*, xmltv::*, xtream::*,
+    batch_result_collector::*, config::*, custom_stream_flags::*, fingerprint::*, healthcheck::*, input_source::*,
+    mapping::*, messaging::*, playlist_filter::*, playlist_key::*, provider::*, proxy_redirect::*, stalker_record::*,
+    stream_error::*, stream_history::*, update_guard::*, update_task::*, xmltv::*, xtream::*,
 };
 pub use shared::model::xtream_const::*;

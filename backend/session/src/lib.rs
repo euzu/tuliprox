@@ -23,6 +23,7 @@ pub mod connection_manager;
 pub mod event_manager;
 pub mod meter;
 pub mod provider_lineup_manager;
+pub mod response_headers;
 pub mod stream;
 pub mod stream_options;
 pub mod streams;

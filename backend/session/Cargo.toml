@@ -21,6 +21,8 @@ dashmap.workspace = true
 futures.workspace = true
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 log.workspace = true
+reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+thiserror.workspace = true
 lru = "0.16.3"
 serde.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros", "sync"] }

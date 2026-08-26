@@ -1,13 +1,10 @@
 mod app_state;
 mod hls_provisioning;
 mod metadata_update_manager;
-mod model_utils;
 mod provider_dns_manager;
 mod proxy;
 mod qos_aggregation_manager;
-mod request;
 mod streams;
-mod xtream;
 
 #[cfg(test)]
 pub(in crate::api) use self::hls_provisioning::{
@@ -30,6 +27,13 @@ pub use crate::model::provider::*;
 // HTTP range parsing moved to `tuliprox_core::utils`; re-exported so `api` call
 // sites keep their names.
 pub use tuliprox_core::utils::byte_range::{resolve_single_byte_range, SingleByteRange};
+// Dependency-free model types moved to `tuliprox-core`, and the provider
+// response-header helpers to `tuliprox-session` beside the header types they
+// operate on. Re-exported so `api` call sites keep their names.
+pub use tuliprox_core::model::{
+    batch_result_collector::*, user_api_request::*, xtream_response::*,
+};
+pub use tuliprox_session::response_headers::*;
 pub use crate::model::stream_error::*;
 
 // The recording queue and the DVR moved to `tuliprox-dvr`; re-exported so `api`
@@ -57,16 +61,10 @@ pub(in crate::api) use self::{
         parse_hls_panel_provisioning_segment_route_name, start_hls_panel_provisioning_once,
         try_hls_panel_provisioning_manifest_response, HlsPanelProvisioningRedirectPaths, HlsProvisioningStatus,
     },
-    model_utils::*,
     qos_aggregation_manager::*,
-    request::*,
-    xtream::*,
 };
 pub(crate) use self::streams::*;
 // The HLS proxy moved to `tuliprox-hls`; re-exported so `api` call sites keep
 // their names, module path included.
 pub use tuliprox_hls as hls_cache;
 pub use tuliprox_hls::*;
-
-mod batch_result_collector;
-pub use self::batch_result_collector::*;
