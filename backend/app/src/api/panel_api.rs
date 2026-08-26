@@ -1,3 +1,24 @@
+//! Provisioning accounts against an upstream Xtream panel.
+//!
+//! This stays in `api`, and the reason is a cycle rather than `AppState`. It
+//! reads only two fields off the root state - the configuration and the HTTP
+//! client - so the state is not what pins it. What pins it is
+//! `api::model::streams`:
+//!
+//! - this module calls `provider_stream::create_panel_api_provisioning_stream_with_stop`
+//!   and `create_provider_connections_exhausted_stream` to answer an exhausted
+//!   request with a provisioning clip;
+//! - `provider_stream` and `active_client_stream` call back here for
+//!   `can_provision_on_exhausted`, `run_panel_api_provisioning_probe` and
+//!   `find_input_by_provider_name`.
+//!
+//! So provisioning and streaming are one mutually recursive cluster, roughly
+//! 11.5k lines, and neither half moves without the other. Extracting them would
+//! mean moving both together into a package that also depends on `hls`,
+//! `session`, `iptv`, `repository` and `config-loader` - and `ConfigFile`, which
+//! mutates the root state directly, would have to move too. That is a
+//! deliberate not-yet, not an oversight.
+
 use crate::{
     api::{
         config_file::ConfigFile,
