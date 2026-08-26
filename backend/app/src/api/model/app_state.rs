@@ -3,7 +3,6 @@ use crate::{
     api::{
         endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
         model::{ metadata_update_manager::MetadataUpdateManager,
-            provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation,
             recording_rule_scheduler::spawn_recording_rule_scheduler, ActiveProviderManager, ActiveUserManager,
             ConnectionManager, DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, PlaylistStorage,
             PlaylistStorageState, SharedStreamManager, UpdateGuard,
@@ -22,6 +21,7 @@ use crate::{
         LRUResourceCache,
     },
 };
+use tuliprox_session::{provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, info};
 use reqwest::Client;
@@ -116,7 +116,7 @@ async fn update_target_caches(app_state: &Arc<AppState>, target_changes: Option<
                     match target.cache_status {
                         TargetCacheState::UnchangedFalse | TargetCacheState::UnchangedTrue => {} // skip this
                         TargetCacheState::ChangedToTrue => {
-                            load_target_into_memory_cache(app_state, &target.target).await;
+                            load_target_into_memory_cache(&app_state.app_config, &app_state.playlists, &target.target).await;
                         }
                         TargetCacheState::ChangedToFalse => {
                             to_remove.push(target.name.clone());
@@ -230,10 +230,10 @@ fn start_services(app_state: &Arc<AppState>, changes: &UpdateChanges) {
     }
 
     if changes.flags.contains(UpdateChangesFlags::ProviderDns) {
-        exec_provider_dns(app_state, &app_state.cancel_tokens.load().provider_dns);
+        exec_provider_dns(&app_state.app_config, &app_state.cancel_tokens.load().provider_dns);
     }
     if changes.flags.contains(UpdateChangesFlags::QosAggregation) {
-        exec_qos_aggregation(app_state, &app_state.cancel_tokens.load().qos_aggregation);
+        exec_qos_aggregation(&app_state.app_config, &app_state.cancel_tokens.load().qos_aggregation);
         let history_cfg =
             app_state.app_config.config.load().reverse_proxy.as_ref().and_then(|rp| rp.stream_history.clone());
         let connection_manager = Arc::clone(&app_state.connection_manager);

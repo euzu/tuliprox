@@ -2,23 +2,26 @@
 
 use chrono::NaiveDate;
 use log::{error, info, warn};
-use shared::utils::Internable;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
-
-use crate::api::model::AppState;
-use crate::model::{Config, StreamHistoryRecord};
-use crate::repository::{
-    extract_day_from_filename,
-    QosAggregationCheckpoint, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow,
-    StreamHistoryFileReader,
+use shared::{
+    model::{ConnectFailureReason, DisconnectReason, FailureStage, PlaylistItemType, StreamHistoryEventType},
+    utils::Internable,
 };
-use crate::utils::{current_utc_day, now_utc_secs};
-use shared::model::{ConnectFailureReason, DisconnectReason, FailureStage, PlaylistItemType, StreamHistoryEventType};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
+use tuliprox_core::{
+    model::{AppConfig, Config, StreamHistoryRecord},
+    utils::{current_utc_day, now_utc_secs},
+};
+use tuliprox_repository::{
+    extract_day_from_filename, QosAggregationCheckpoint, QosSnapshotDailyBucket, QosSnapshotRecord,
+    QosSnapshotRepository, QosSnapshotWindow, StreamHistoryFileReader,
+};
 
 const MAX_COMPLETED_DAY_PARTITIONS_PER_RUN: usize = 3;
 
@@ -33,23 +36,19 @@ struct AggregatedDayEntry {
     bucket: QosSnapshotDailyBucket,
 }
 
-pub(in crate::api) fn qos_aggregation_is_enabled(config: &Config) -> bool {
-    config
-        .reverse_proxy
-        .as_ref()
-        .and_then(|rp| rp.qos_aggregation.as_ref())
-        .is_some_and(|qos| {
-            qos.enabled
-                && config
+pub fn qos_aggregation_is_enabled(config: &Config) -> bool {
+    config.reverse_proxy.as_ref().and_then(|rp| rp.qos_aggregation.as_ref()).is_some_and(|qos| {
+        qos.enabled
+            && config
                 .reverse_proxy
                 .as_ref()
                 .and_then(|rp| rp.stream_history.as_ref())
                 .is_some_and(|history| history.stream_history_enabled)
-        })
+    })
 }
 
-pub(in crate::api) fn exec_qos_aggregation(app_state: &Arc<AppState>, cancel_token: &CancellationToken) {
-    let config = app_state.app_config.config.load();
+pub fn exec_qos_aggregation(app_config: &Arc<AppConfig>, cancel_token: &CancellationToken) {
+    let config = app_config.config.load();
     let Some(reverse_proxy) = config.reverse_proxy.as_ref() else {
         return;
     };
@@ -84,7 +83,10 @@ pub(in crate::api) fn exec_qos_aggregation(app_state: &Arc<AppState>, cancel_tok
             let history_dir_clone = history_dir.clone();
             if let Err(err) = tokio::task::spawn_blocking(move || {
                 run_aggregation_once(&repo_clone, &history_dir_clone, &today, compaction_interval_secs)
-            }).await.unwrap_or_else(|e| Err(std::io::Error::other(e.to_string()))) {
+            })
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))
+            {
                 warn!("QoS aggregation run failed: {err}");
             }
 
@@ -99,7 +101,7 @@ pub(in crate::api) fn exec_qos_aggregation(app_state: &Arc<AppState>, cancel_tok
     });
 }
 
-pub(crate) fn run_aggregation_once(
+pub fn run_aggregation_once(
     repo: &QosSnapshotRepository,
     history_dir: &Path,
     today_utc: &str,
@@ -117,7 +119,8 @@ fn run_aggregation_once_at(
 ) -> io::Result<()> {
     let mut checkpoint = repo.load_checkpoint()?;
     let days = discover_history_days(history_dir)?;
-    let completed_days = select_completed_days_to_process(&days, checkpoint.last_completed_day_utc.as_deref(), today_utc);
+    let completed_days =
+        select_completed_days_to_process(&days, checkpoint.last_completed_day_utc.as_deref(), today_utc);
 
     for day in completed_days.iter().take(MAX_COMPLETED_DAY_PARTITIONS_PER_RUN) {
         let day_entries = aggregate_day_entries(history_dir, day)?;
@@ -133,10 +136,8 @@ fn run_aggregation_once_at(
         apply_day_entries(repo, today_utc, &current_day_entries, today_utc)?;
     }
 
-    if let Some(last_completed_day_utc) = completed_days
-        .into_iter()
-        .take(MAX_COMPLETED_DAY_PARTITIONS_PER_RUN)
-        .next_back()
+    if let Some(last_completed_day_utc) =
+        completed_days.into_iter().take(MAX_COMPLETED_DAY_PARTITIONS_PER_RUN).next_back()
     {
         checkpoint.last_completed_day_utc = Some(last_completed_day_utc);
     }
@@ -174,27 +175,31 @@ where
     Ok(true)
 }
 
-pub(crate) fn fold_record_into_bucket(bucket: &mut QosSnapshotDailyBucket, record: &StreamHistoryRecord) {
+pub fn fold_record_into_bucket(bucket: &mut QosSnapshotDailyBucket, record: &StreamHistoryRecord) {
     match record.event_type {
         StreamHistoryEventType::Connect => {
             if record.shared_joined_existing.unwrap_or(false) {
                 return;
             }
             bucket.connect_count = bucket.connect_count.saturating_add(1);
-            bucket.last_success_ts = Some(bucket.last_success_ts.map_or(record.event_ts_utc, |ts| ts.max(record.event_ts_utc)));
+            bucket.last_success_ts =
+                Some(bucket.last_success_ts.map_or(record.event_ts_utc, |ts| ts.max(record.event_ts_utc)));
         }
         StreamHistoryEventType::ConnectFailed => {
             bucket.connect_failed_count = bucket.connect_failed_count.saturating_add(1);
             if matches!(
                 record.connect_failure_reason,
-                Some(ConnectFailureReason::UserConnectionsExhausted | ConnectFailureReason::ProviderConnectionsExhausted)
+                Some(
+                    ConnectFailureReason::UserConnectionsExhausted | ConnectFailureReason::ProviderConnectionsExhausted
+                )
             ) {
                 bucket.startup_capacity_failure_count = bucket.startup_capacity_failure_count.saturating_add(1);
             }
             if matches!(record.failure_stage, Some(FailureStage::ProviderOpen)) {
                 bucket.provider_open_failure_count = bucket.provider_open_failure_count.saturating_add(1);
             }
-            bucket.last_failure_ts = Some(bucket.last_failure_ts.map_or(record.event_ts_utc, |ts| ts.max(record.event_ts_utc)));
+            bucket.last_failure_ts =
+                Some(bucket.last_failure_ts.map_or(record.event_ts_utc, |ts| ts.max(record.event_ts_utc)));
         }
         StreamHistoryEventType::Disconnect => {
             if matches!(record.failure_stage, Some(FailureStage::FirstByte)) {
@@ -239,12 +244,13 @@ pub(crate) fn fold_record_into_bucket(bucket: &mut QosSnapshotDailyBucket, recor
             // Failure events represent intermediate disconnects within an HLS session.
             // Count them as runtime aborts since they reflect streaming failures.
             bucket.runtime_abort_count = bucket.runtime_abort_count.saturating_add(1);
-            bucket.last_failure_ts = Some(bucket.last_failure_ts.map_or(record.event_ts_utc, |ts| ts.max(record.event_ts_utc)));
+            bucket.last_failure_ts =
+                Some(bucket.last_failure_ts.map_or(record.event_ts_utc, |ts| ts.max(record.event_ts_utc)));
         }
     }
 }
 
-pub(crate) fn rebuild_windows(snapshot: &mut QosSnapshotRecord, today_utc: &str) {
+pub fn rebuild_windows(snapshot: &mut QosSnapshotRecord, today_utc: &str) {
     snapshot.window_24h = build_window(snapshot, today_utc, 1);
     snapshot.window_7d = build_window(snapshot, today_utc, 6);
     snapshot.window_30d = build_window(snapshot, today_utc, 29);
@@ -270,7 +276,8 @@ fn build_window(snapshot: &QosSnapshotRecord, today_utc: &str, max_day_distance:
             window.startup_capacity_failure_count.saturating_add(bucket.startup_capacity_failure_count);
         window.provider_open_failure_count =
             window.provider_open_failure_count.saturating_add(bucket.provider_open_failure_count);
-        window.first_byte_failure_count = window.first_byte_failure_count.saturating_add(bucket.first_byte_failure_count);
+        window.first_byte_failure_count =
+            window.first_byte_failure_count.saturating_add(bucket.first_byte_failure_count);
         window.runtime_abort_count = window.runtime_abort_count.saturating_add(bucket.runtime_abort_count);
         window.provider_closed_count = window.provider_closed_count.saturating_add(bucket.provider_closed_count);
         window.preempt_count = window.preempt_count.saturating_add(bucket.preempt_count);
@@ -304,24 +311,21 @@ fn build_window(snapshot: &QosSnapshotRecord, today_utc: &str, max_day_distance:
 fn compute_score(window: &QosSnapshotWindow) -> u8 {
     let startup_total = window.connect_count.saturating_add(window.connect_failed_count);
     let startup_success = ratio_score(window.connect_count, startup_total);
-    let runtime_total = window
-        .connect_count
-        .saturating_add(window.runtime_abort_count)
-        .saturating_add(window.provider_closed_count);
+    let runtime_total =
+        window.connect_count.saturating_add(window.runtime_abort_count).saturating_add(window.provider_closed_count);
     let runtime_success = ratio_score(
         runtime_total.saturating_sub(window.runtime_abort_count.saturating_add(window.provider_closed_count)),
         runtime_total,
     );
     let first_byte_total = window.connect_count.saturating_add(window.first_byte_failure_count);
-    let first_byte_success = ratio_score(first_byte_total.saturating_sub(window.first_byte_failure_count), first_byte_total);
+    let first_byte_success =
+        ratio_score(first_byte_total.saturating_sub(window.first_byte_failure_count), first_byte_total);
     let reconnect_score = window
         .avg_provider_reconnect_count
         .map_or(100, |avg| 100u8.saturating_sub(u8::try_from(avg.min(100)).unwrap_or(100)));
     let capacity_total = startup_total.max(window.startup_capacity_failure_count);
-    let capacity_score = ratio_score(
-        capacity_total.saturating_sub(window.startup_capacity_failure_count),
-        capacity_total,
-    );
+    let capacity_score =
+        ratio_score(capacity_total.saturating_sub(window.startup_capacity_failure_count), capacity_total);
     let freshness_score: u8 = if window.last_success_ts.is_some() { 100 } else { 0 };
 
     let weighted = u32::from(startup_success) * 30
@@ -346,9 +350,7 @@ fn ratio_score(successes: u64, total: u64) -> u8 {
     u8::try_from(percent.min(100)).unwrap_or(100)
 }
 
-fn average_opt(total: u64, samples: u64) -> Option<u64> {
-    total.checked_div(samples)
-}
+fn average_opt(total: u64, samples: u64) -> Option<u64> { total.checked_div(samples) }
 
 fn max_opt(lhs: Option<u64>, rhs: Option<u64>) -> Option<u64> {
     match (lhs, rhs) {
@@ -376,8 +378,7 @@ fn discover_history_days(history_dir: &Path) -> io::Result<Vec<String>> {
     if !history_dir.exists() {
         return Ok(Vec::new());
     }
-    let entries = std::fs::read_dir(history_dir)
-        .and_then(std::iter::Iterator::collect::<Result<Vec<_>, _>>)?;
+    let entries = std::fs::read_dir(history_dir).and_then(std::iter::Iterator::collect::<Result<Vec<_>, _>>)?;
 
     let mut days = BTreeSet::new();
     for entry in entries {
@@ -463,8 +464,7 @@ fn discover_day_files(history_dir: &Path, day_utc: &str) -> io::Result<Vec<Histo
     if !history_dir.exists() {
         return Ok(Vec::new());
     }
-    let entries = std::fs::read_dir(history_dir)
-        .and_then(std::iter::Iterator::collect::<Result<Vec<_>, _>>)?;
+    let entries = std::fs::read_dir(history_dir).and_then(std::iter::Iterator::collect::<Result<Vec<_>, _>>)?;
 
     let mut archives = Vec::new();
     let mut pending = Vec::new();
@@ -496,10 +496,8 @@ fn history_day_revision(history_dir: &Path, day_utc: &str) -> io::Result<Option<
     for file in day_files {
         let metadata = std::fs::metadata(&file.path)?;
         let modified = metadata.modified()?;
-        let secs = modified
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|err| io::Error::other(err.to_string()))?
-            .as_secs();
+        let secs =
+            modified.duration_since(std::time::UNIX_EPOCH).map_err(|err| io::Error::other(err.to_string()))?.as_secs();
         let len = metadata.len();
         revision = Some(revision.map_or((secs, len), |current| (current.0.max(secs), current.1.saturating_add(len))));
     }
@@ -548,7 +546,11 @@ fn apply_day_entries(
             snapshot.virtual_id = entry.virtual_id;
             snapshot.item_type = entry.item_type;
             snapshot.daily_buckets.insert(day_utc.to_string(), entry.bucket.clone());
-            snapshot.last_event_at = max_opt(Some(snapshot.last_event_at), max_opt(entry.bucket.last_success_ts, entry.bucket.last_failure_ts)).unwrap_or(snapshot.last_event_at);
+            snapshot.last_event_at = max_opt(
+                Some(snapshot.last_event_at),
+                max_opt(entry.bucket.last_success_ts, entry.bucket.last_failure_ts),
+            )
+            .unwrap_or(snapshot.last_event_at);
         } else {
             snapshot.daily_buckets.remove(day_utc);
         }
@@ -579,28 +581,30 @@ struct HistoryDayFile {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use super::{compact_if_due, compaction_is_due, fold_record_into_bucket, history_day_revision, qos_aggregation_is_enabled, rebuild_windows, run_aggregation_once};
-    use crate::model::{Config, QosAggregationConfig, ResourceRetryConfig, ReverseProxyConfig, StreamHistoryConfig, StreamHistoryRecord, RECORD_SCHEMA_VERSION};
-    use crate::repository::{
-        serialize_named, write_block_magic, write_file_magic, write_framed, BlockHeaderBody,
-        CompressionKind, FileHeaderBody,
-        QosAggregationCheckpoint, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository, QosSnapshotWindow,
-        RecordEncodingKind,
-        CONTAINER_FORMAT_VERSION, SOURCE_KIND_STREAM_HISTORY,
+    use super::{
+        compact_if_due, compaction_is_due, fold_record_into_bucket, history_day_revision, qos_aggregation_is_enabled,
+        rebuild_windows, run_aggregation_once,
     };
-    use crate::utils::current_utc_day;
-    use shared::model::{ConnectFailureReason, DisconnectReason, FailureStage, PlaylistItemType, StreamHistoryEventType};
-    use shared::utils::Internable;
+    use shared::{
+        model::{ConnectFailureReason, DisconnectReason, FailureStage, PlaylistItemType, StreamHistoryEventType},
+        utils::Internable,
+    };
+    use std::{collections::BTreeMap, io::Write as _};
     use tempfile::tempdir;
-    use std::io::Write as _;
+    use tuliprox_core::{
+        model::{
+            Config, QosAggregationConfig, ResourceRetryConfig, ReverseProxyConfig, StreamHistoryConfig,
+            StreamHistoryRecord, RECORD_SCHEMA_VERSION,
+        },
+        utils::current_utc_day,
+    };
+    use tuliprox_repository::{
+        serialize_named, write_block_magic, write_file_magic, write_framed, BlockHeaderBody, CompressionKind,
+        FileHeaderBody, QosAggregationCheckpoint, QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotRepository,
+        QosSnapshotWindow, RecordEncodingKind, CONTAINER_FORMAT_VERSION, SOURCE_KIND_STREAM_HISTORY,
+    };
 
-
-    fn write_pending_history_records(
-        history_dir: &std::path::Path,
-        records: &[StreamHistoryRecord],
-    ) {
+    fn write_pending_history_records(history_dir: &std::path::Path, records: &[StreamHistoryRecord]) {
         if records.is_empty() {
             return;
         }
@@ -766,7 +770,8 @@ mod tests {
 
         let history_dir_copy = history_dir.to_path_buf();
         let revision = tokio::task::spawn_blocking(move || history_day_revision(&history_dir_copy, "2026-04-02"))
-            .await.unwrap()
+            .await
+            .unwrap()
             .expect("revision should load")
             .expect("revision should exist");
         let pending_path = history_dir.join("stream-history-2026-04-02.pending");
@@ -840,10 +845,7 @@ mod tests {
                 cache: None,
                 rate_limit: None,
                 geoip: None,
-                stream_history: Some(StreamHistoryConfig {
-                    stream_history_enabled: false,
-                    ..Default::default()
-                }),
+                stream_history: Some(StreamHistoryConfig { stream_history_enabled: false, ..Default::default() }),
                 hls_cache: None,
                 qos_aggregation: Some(QosAggregationConfig {
                     enabled: true,
@@ -906,12 +908,12 @@ mod tests {
         let h_dir = history_dir.clone();
         let now = today.clone();
         tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c, &h_dir, &now, 0))
-            .await.unwrap().expect("aggregation should succeed");
+            .await
+            .unwrap()
+            .expect("aggregation should succeed");
 
-        let snapshot = repo
-            .get_snapshot("stream-a")
-            .expect("load snapshot should succeed")
-            .expect("snapshot should exist");
+        let snapshot =
+            repo.get_snapshot("stream-a").expect("load snapshot should succeed").expect("snapshot should exist");
         assert_eq!(snapshot.window_24h.connect_count, 1);
         assert!(snapshot.daily_buckets.contains_key(&today));
     }
@@ -940,18 +942,20 @@ mod tests {
         let h_dir1 = history_dir.clone();
         let t_day1 = today.clone();
         tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c1, &h_dir1, &t_day1, 0))
-            .await.unwrap().expect("first aggregation should succeed");
+            .await
+            .unwrap()
+            .expect("first aggregation should succeed");
 
         let repo_c2 = repo.clone();
         let h_dir2 = history_dir.clone();
         let t_day2 = today.clone();
         tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c2, &h_dir2, &t_day2, 0))
-            .await.unwrap().expect("second aggregation should succeed");
+            .await
+            .unwrap()
+            .expect("second aggregation should succeed");
 
-        let snapshot = repo
-            .get_snapshot("stream-a")
-            .expect("load snapshot should succeed")
-            .expect("snapshot should exist");
+        let snapshot =
+            repo.get_snapshot("stream-a").expect("load snapshot should succeed").expect("snapshot should exist");
         assert_eq!(snapshot.window_24h.connect_count, 1);
         assert_eq!(snapshot.daily_buckets.get(&today).map(|bucket| bucket.connect_count), Some(1));
     }
@@ -961,12 +965,9 @@ mod tests {
         let temp = tempdir().expect("tempdir should succeed");
         let history_dir = temp.path().join("stream_history");
 
-        for (day, session_id) in [
-            ("2036-04-01", 1_u64),
-            ("2036-04-02", 2_u64),
-            ("2036-04-03", 3_u64),
-            ("2036-04-04", 4_u64),
-        ] {
+        for (day, session_id) in
+            [("2036-04-01", 1_u64), ("2036-04-02", 2_u64), ("2036-04-03", 3_u64), ("2036-04-04", 4_u64)]
+        {
             let mut connect = base_record(StreamHistoryEventType::Connect);
             connect.partition_day_utc = day.to_string();
             connect.event_ts_utc = connect.event_ts_utc.saturating_add(session_id);
@@ -987,30 +988,30 @@ mod tests {
         let repo_c1 = repo.clone();
         let h_dir1 = history_dir.clone();
         tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c1, &h_dir1, "2036-04-05", 0))
-            .await.unwrap().expect("first aggregation should succeed");
+            .await
+            .unwrap()
+            .expect("first aggregation should succeed");
 
         let checkpoint = repo.load_checkpoint().expect("checkpoint should load");
         assert_eq!(checkpoint.last_completed_day_utc.as_deref(), Some("2036-04-03"));
 
-        let snapshot = repo
-            .get_snapshot("stream-a")
-            .expect("load snapshot should succeed")
-            .expect("snapshot should exist");
+        let snapshot =
+            repo.get_snapshot("stream-a").expect("load snapshot should succeed").expect("snapshot should exist");
         assert_eq!(snapshot.daily_buckets.len(), 3);
         assert_eq!(snapshot.window_7d.connect_count, 3);
 
         let repo_c2 = repo.clone();
         let h_dir2 = history_dir.clone();
         tokio::task::spawn_blocking(move || run_aggregation_once(&repo_c2, &h_dir2, "2036-04-05", 0))
-            .await.unwrap().expect("second aggregation should succeed");
+            .await
+            .unwrap()
+            .expect("second aggregation should succeed");
 
         let checkpoint = repo.load_checkpoint().expect("checkpoint should load");
         assert_eq!(checkpoint.last_completed_day_utc.as_deref(), Some("2036-04-04"));
 
-        let snapshot = repo
-            .get_snapshot("stream-a")
-            .expect("load snapshot should succeed")
-            .expect("snapshot should exist");
+        let snapshot =
+            repo.get_snapshot("stream-a").expect("load snapshot should succeed").expect("snapshot should exist");
         assert_eq!(snapshot.daily_buckets.len(), 4);
         assert_eq!(snapshot.window_7d.connect_count, 4);
     }

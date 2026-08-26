@@ -678,7 +678,7 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         )
     };
 
-    if let Err(err) = load_playlists_into_memory_cache(&app_state).await {
+    if let Err(err) = load_playlists_into_memory_cache(&app_state.app_config, &app_state.playlists).await {
         error!("Failed to load playlists into memory cache: {err}");
     }
 
@@ -694,8 +694,8 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
     exec_file_lock_prune(&app_state.app_config);
     exec_interner_prune(&app_state);
     exec_config_watch(&app_state, &cancel_token_file_watch);
-    exec_provider_dns(&app_state, &cancel_token_provider_dns);
-    exec_qos_aggregation(&app_state, &cancel_token_qos_aggregation);
+    exec_provider_dns(&app_state.app_config, &cancel_token_provider_dns);
+    exec_qos_aggregation(&app_state.app_config, &cancel_token_qos_aggregation);
     exec_hls_lifecycle(&app_state.hls_ctx(), &app_state.cancel_tokens.load().hls_cache);
     exec_hls_cache_gc(&app_state.hls_ctx(), &app_state.cancel_tokens.load().hls_cache);
 

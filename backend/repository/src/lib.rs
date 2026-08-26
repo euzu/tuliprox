@@ -14,6 +14,7 @@ mod m3u_playlist_iterator;
 mod m3u_repository;
 mod metadata_retry_record;
 mod network_access;
+pub mod playlist_cache_loader;
 pub mod playlist_mem_cache;
 mod playlist_repository;
 mod playlist_scratch;

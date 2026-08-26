@@ -1,9 +1,7 @@
 mod app_state;
 mod hls_provisioning;
 mod metadata_update_manager;
-mod provider_dns_manager;
 mod proxy;
-mod qos_aggregation_manager;
 mod streams;
 
 #[cfg(test)]
@@ -12,10 +10,8 @@ pub(in crate::api) use self::hls_provisioning::{
 };
 pub use self::{
     app_state::*, hls_provisioning::HlsProvisioningState, metadata_update_manager::*,
-    provider_dns_manager::*, proxy::*,
+    proxy::*,
 };
-mod playlist_cache_loader;
-pub use self::playlist_cache_loader::*;
 // In-memory playlist storage moved to `repository`; re-exported so `api` call
 // sites keep their names.
 pub use crate::repository::playlist_mem_cache::*;
@@ -34,6 +30,11 @@ pub use tuliprox_core::model::{
     batch_result_collector::*, user_api_request::*, xtream_response::*,
 };
 pub use tuliprox_session::response_headers::*;
+// Background workers moved to the layers they read: provider DNS and QoS
+// aggregation to `tuliprox-session`, the playlist cache loader to
+// `tuliprox-repository`. Re-exported so `api` call sites keep their names.
+pub use tuliprox_repository::playlist_cache_loader::*;
+pub use tuliprox_session::{provider_dns_manager::*, qos_aggregation_manager::*};
 pub use crate::model::stream_error::*;
 
 // The recording queue and the DVR moved to `tuliprox-dvr`; re-exported so `api`
@@ -61,7 +62,6 @@ pub(in crate::api) use self::{
         parse_hls_panel_provisioning_segment_route_name, start_hls_panel_provisioning_once,
         try_hls_panel_provisioning_manifest_response, HlsPanelProvisioningRedirectPaths, HlsProvisioningStatus,
     },
-    qos_aggregation_manager::*,
 };
 pub(crate) use self::streams::*;
 // The HLS proxy moved to `tuliprox-hls`; re-exported so `api` call sites keep

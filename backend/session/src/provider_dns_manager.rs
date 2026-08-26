@@ -1,17 +1,18 @@
-use crate::api::model::AppState;
-use crate::model::ConfigProvider;
-use crate::repository::{
+use log::{debug, warn};
+use shared::model::{DnsPrefer, OnResolveErrorPolicy};
+use std::{
+    collections::HashSet,
+    net::IpAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::net::lookup_host;
+use tokio_util::sync::CancellationToken;
+use tuliprox_core::model::{AppConfig, ConfigProvider};
+use tuliprox_repository::{
     load_persisted_dns_resolved, next_dns_writer_generation, prune_persisted_dns_resolved_to_runtime,
     queue_provider_resolved_snapshot, spawn_dns_resolved_writer, DnsResolvedWriteTx,
 };
-use log::{debug, warn};
-use shared::model::{DnsPrefer, OnResolveErrorPolicy};
-use std::collections::HashSet;
-use std::net::IpAddr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tokio::net::lookup_host;
-use tokio_util::sync::CancellationToken;
 
 fn filter_by_preference(ips: Vec<IpAddr>, prefer: DnsPrefer) -> Vec<IpAddr> {
     match prefer {
@@ -58,10 +59,7 @@ async fn resolve_provider(provider: &Arc<ConfigProvider>) -> ProviderResolveStat
     let hostnames = provider.hostnames_from_urls();
     stats.total = hostnames.len();
     if hostnames.is_empty() {
-        debug!(
-            "Provider dns task '{}' found no hostname URLs to resolve (urls={:?})",
-            provider.name, provider.urls
-        );
+        debug!("Provider dns task '{}' found no hostname URLs to resolve (urls={:?})", provider.name, provider.urls);
         return stats;
     }
 
@@ -106,7 +104,7 @@ async fn resolve_provider(provider: &Arc<ConfigProvider>) -> ProviderResolveStat
 }
 
 fn spawn_provider_dns_task(
-    app_state: Arc<AppState>,
+    app_config: Arc<AppConfig>,
     provider_name: Arc<str>,
     cancel: CancellationToken,
     writer_tx: DnsResolvedWriteTx,
@@ -114,7 +112,7 @@ fn spawn_provider_dns_task(
     tokio::spawn(async move {
         let mut refresh_secs = 300_u64;
         {
-            let sources = app_state.app_config.sources.load();
+            let sources = app_config.sources.load();
             if let Some(provider) = sources.get_provider_by_name(provider_name.as_ref()) {
                 refresh_secs = provider.get_dns_config().map_or(300, |dns| dns.refresh_secs.max(10));
             }
@@ -133,7 +131,7 @@ fn spawn_provider_dns_task(
                     let start = Instant::now();
                     debug!("Provider dns tick '{provider_name}' started");
                     let provider = {
-                        let sources = app_state.app_config.sources.load();
+                        let sources = app_config.sources.load();
                         sources.get_provider_by_name(provider_name.as_ref()).cloned()
                     };
                     let Some(provider) = provider else {
@@ -164,9 +162,9 @@ fn spawn_provider_dns_task(
     });
 }
 
-pub fn exec_provider_dns(app_state: &Arc<AppState>, cancel: &CancellationToken) {
+pub fn exec_provider_dns(app_config: &Arc<AppConfig>, cancel: &CancellationToken) {
     let generation = next_dns_writer_generation();
-    let sources = app_state.app_config.sources.load();
+    let sources = app_config.sources.load();
     let provider_names: Vec<_> = sources
         .provider
         .iter()
@@ -176,7 +174,7 @@ pub fn exec_provider_dns(app_state: &Arc<AppState>, cancel: &CancellationToken) 
     drop(sources);
 
     if provider_names.is_empty() {
-        let app_for_prune = Arc::clone(&app_state.app_config);
+        let app_for_prune = Arc::clone(app_config);
         tokio::spawn(async move {
             prune_persisted_dns_resolved_to_runtime(&app_for_prune).await;
         });
@@ -184,16 +182,16 @@ pub fn exec_provider_dns(app_state: &Arc<AppState>, cancel: &CancellationToken) 
         return;
     }
 
-    let app_for_start = Arc::clone(app_state);
+    let app_for_start = Arc::clone(app_config);
     let cancel_for_start = cancel.clone();
     tokio::spawn(async move {
         // Seed runtime caches first, then start writer/tasks to avoid startup races.
-        load_persisted_dns_resolved(&app_for_start.app_config).await;
+        load_persisted_dns_resolved(&app_for_start).await;
         if cancel_for_start.is_cancelled() {
             return;
         }
 
-        let writer_tx = spawn_dns_resolved_writer(Arc::clone(&app_for_start.app_config), cancel_for_start.clone(), generation);
+        let writer_tx = spawn_dns_resolved_writer(Arc::clone(&app_for_start), cancel_for_start.clone(), generation);
         debug!("Provider dns manager: starting {} provider task(s)", provider_names.len());
 
         for provider_name in provider_names {
