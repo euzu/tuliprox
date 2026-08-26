@@ -19,20 +19,20 @@
 #![allow(clippy::unreadable_literal)] // checked-in table constants
 #![allow(clippy::match_same_arms)] // arms kept separate to mirror the DTO variant order
 #![allow(clippy::struct_excessive_bools)] // config DTOs mirror the user-facing YAML shape
-#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::missing_panics_doc)] // legacy infallible helpers still expose panic contracts
 #![allow(clippy::unnecessary_wraps)] // signatures kept uniform across DTO conversions
-#![allow(clippy::manual_let_else)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::format_collect)]
-#![allow(clippy::assigning_clones)]
-#![allow(clippy::unused_self)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::needless_continue)]
-#![allow(clippy::float_cmp)]
-#![allow(clippy::needless_pass_by_value)]
-#![allow(clippy::missing_fields_in_debug)]
-#![allow(clippy::implicit_hasher)]
-#![allow(clippy::default_trait_access)]
+#![allow(clippy::manual_let_else)] // existing parser branches mirror input grammar
+#![allow(clippy::too_many_lines)] // large serde model conversion tables
+#![allow(clippy::format_collect)] // formatting iterators directly keeps DTO rendering local
+#![allow(clippy::assigning_clones)] // DTO updates intentionally retain their source values
+#![allow(clippy::unused_self)] // trait-compatible DTO helper methods
+#![allow(clippy::similar_names)] // domain vocabulary contains intentionally similar field names
+#![allow(clippy::needless_continue)] // parser loops keep exceptional branches explicit
+#![allow(clippy::float_cmp)] // exact sentinel and round-trip comparisons
+#![allow(clippy::needless_pass_by_value)] // serde and conversion APIs own their inputs
+#![allow(clippy::missing_fields_in_debug)] // redacted DTO debug output omits sensitive fields
+#![allow(clippy::implicit_hasher)] // public collection helpers preserve their established API
+#![allow(clippy::default_trait_access)] // explicit defaults identify the constructed DTO type
 
 pub mod defaults;
 pub mod error;

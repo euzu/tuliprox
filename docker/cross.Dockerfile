@@ -17,6 +17,35 @@ FROM mwader/static-ffmpeg:7.1 AS ffmpeg-static
 # The cross image provides the target compiler and sysroot, but no Rust toolchain.
 FROM rust:1.95 AS rust-toolchain
 
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY shared ./shared/
+COPY frontend/Cargo.toml frontend/Trunk.toml ./frontend/
+COPY backend/app/Cargo.toml backend/app/build.rs ./backend/app/
+COPY backend/auth/Cargo.toml ./backend/auth/
+COPY backend/btree/Cargo.toml ./backend/btree/
+COPY backend/config-loader/Cargo.toml ./backend/config-loader/
+COPY backend/core/Cargo.toml ./backend/core/
+COPY backend/dvr/Cargo.toml ./backend/dvr/
+COPY backend/hls/Cargo.toml ./backend/hls/
+COPY backend/iptv/Cargo.toml ./backend/iptv/
+COPY backend/library/Cargo.toml ./backend/library/
+COPY backend/media-server/Cargo.toml ./backend/media-server/
+COPY backend/messaging/Cargo.toml ./backend/messaging/
+COPY backend/mpegts/Cargo.toml ./backend/mpegts/
+COPY backend/parser/Cargo.toml ./backend/parser/
+COPY backend/repository/Cargo.toml ./backend/repository/
+COPY backend/session/Cargo.toml ./backend/session/
+
+RUN mkdir -p frontend/src backend/app/src/tools && \
+    printf 'fn main() {}\n' > frontend/src/main.rs && \
+    printf 'fn main() {}\n' > backend/app/src/main.rs && \
+    printf 'fn main() {}\n' > backend/app/src/tools/flags_builder.rs && \
+    for crate in auth btree config-loader core dvr hls iptv library media-server messaging mpegts parser repository session; do \
+      mkdir -p "backend/${crate}/src"; \
+      printf '\n' > "backend/${crate}/src/lib.rs"; \
+    done
+
 # -----------------------------------------------------------------
 # Stage 1: Build the Rust binary for production
 # -----------------------------------------------------------------
@@ -24,6 +53,7 @@ FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:main AS rust-build
 
 COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
 COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+COPY --from=rust-toolchain /src /src
 ENV CARGO_HOME=/usr/local/cargo \
     RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH
@@ -37,34 +67,21 @@ RUN rustup target add $RUST_TARGET
 # Set Rust compiler flags for better optimization and reproducibility
 ENV RUSTFLAGS='--remap-path-prefix $HOME=~ -C target-feature=+crt-static'
 
-# Copy dependency files first for better layer caching
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
-COPY backend ./backend/
-COPY frontend/Cargo.toml ./frontend/
-COPY shared ./shared/
-
-# Create a dummy frontend target to satisfy the workspace manifest
-RUN mkdir -p frontend/src && echo "fn main() {}" > frontend/src/main.rs
-
 # Build dependencies (this layer will be cached unless dependencies change)
-RUN cargo build -p tuliprox --target $RUST_TARGET --release || true
-RUN cargo build -p shared --target $RUST_TARGET --release || true
-
-# Now copy the actual source code and build the project
-COPY . .
-
 RUN cargo build -p tuliprox --target $RUST_TARGET --release
+
+# Copy the backend source only after its dependency layer is complete.
+COPY backend ./backend/
+RUN find backend -type f -name '*.rs' -exec touch {} + && \
+    cargo build -p tuliprox --target $RUST_TARGET --release
 
 # -----------------------------------------------------------------
 # Stage 2: Build the rust frontend
 # -----------------------------------------------------------------
-FROM rust:1.95 AS trunk-build
+FROM rust-toolchain AS trunk-build
 
 ARG RUST_TARGET=wasm32-unknown-unknown
-
-# Set working directory
-WORKDIR /src
 
 # Install dependencies for Trunk and WebAssembly
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -74,27 +91,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN rustup target add wasm32-unknown-unknown
 RUN cargo install --locked trunk wasm-bindgen-cli
 
-# Copy dependency files first for better layer caching
-COPY Cargo.toml Cargo.lock ./
-COPY backend ./backend/
-COPY frontend/Cargo.toml frontend/Trunk.toml ./frontend/
-COPY shared ./shared/
-
-# Create a dummy frontend target for the dependency build
-RUN mkdir -p frontend/src && echo "fn main() {}" > frontend/src/main.rs
-
 # Pre-build dependencies
 WORKDIR /src/frontend
-RUN cargo build --target wasm32-unknown-unknown --release || true
+RUN cargo build --target wasm32-unknown-unknown --release
 
-# Now copy the actual source code and build the project
+# Now copy the actual frontend source and build the project
 WORKDIR /src
-COPY . .
+COPY frontend ./frontend/
 
 WORKDIR /src/frontend
 
 # Run Trunk build
-RUN trunk build --release
+RUN find src -type f -name '*.rs' -exec touch {} + && trunk build --release
 
 # -----------------------------------------------------------------
 # Stage 3: Build video resources with ffmpeg

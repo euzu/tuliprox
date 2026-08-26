@@ -260,15 +260,11 @@ impl Config {
         set_sanitize_sensitive_info(self.log.as_ref().is_none_or(|l| l.sanitize_sensitive_info));
         let temp_path = PathBuf::from(&self.storage_dir).join(DEFAULT_STORAGE_TEMP_DIR);
         create_directories(self, &temp_path);
-        // `tempfile::env::override_temp_dir` mutates a process-global
-        // default. In production that is the point — every tempfile
-        // helper routes through the configured storage temp dir. In
-        // tests it poisons every parallel test in the same process:
-        // the first test to call `update_runtime` wins, and every
-        // later `tempdir()` from a sibling test lands in that test's
-        // `storage_dir/tmp/`. Gate the override to non-test builds.
-        #[cfg(not(test))]
-        let _ = tempfile::env::override_temp_dir(&temp_path);
+        // The override is process-global. Test runners disable it explicitly because
+        // this crate is compiled without `cfg(test)` when used as a dependency.
+        if std::env::var_os("TULIPROX_DISABLE_TEMP_DIR_OVERRIDE").is_none() {
+            let _ = tempfile::env::override_temp_dir(&temp_path);
+        }
     }
 
     pub fn get_hdhr_device_overview(&self) -> Option<HdHomeRunDeviceOverview> {

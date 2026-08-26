@@ -13,29 +13,29 @@
 #![allow(clippy::cast_possible_truncation)] // f64 -> integer pixel coordinates
 #![allow(clippy::cast_sign_loss)] // clamped non-negative pixel/scroll values
 #![allow(clippy::cast_possible_wrap)] // bounded indices and pixel offsets
-#![allow(clippy::cast_lossless)]
+#![allow(clippy::cast_lossless)] // explicit casts keep chart calculations visually aligned
 #![allow(clippy::trivially_copy_pass_by_ref)] // `&T` signatures required by Yew callbacks
 #![allow(clippy::ref_option)] // `&Option<T>` signatures required by Yew props
 #![allow(clippy::needless_pass_by_value)] // Yew props and callbacks take values by design
 #![allow(clippy::match_same_arms)] // arms kept separate to mirror view variants
-#![allow(clippy::assigning_clones)]
+#![allow(clippy::assigning_clones)] // component state retains values supplied by properties
 #![allow(clippy::too_many_lines)] // `html!` view bodies
 #![allow(clippy::struct_excessive_bools)] // props mirror the backend config DTOs
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::struct_field_names)]
-#![allow(clippy::map_unwrap_or)]
-#![allow(clippy::manual_let_else)]
-#![allow(clippy::unnecessary_wraps)]
-#![allow(clippy::items_after_statements)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::option_option)]
-#![allow(clippy::needless_for_each)]
-#![allow(clippy::default_trait_access)]
-#![allow(clippy::needless_continue)]
-#![allow(clippy::match_wildcard_for_single_variants)]
-#![allow(clippy::many_single_char_names)]
-#![allow(clippy::format_push_string)]
-#![allow(clippy::case_sensitive_file_extension_comparisons)]
+#![allow(clippy::fn_params_excessive_bools)] // form helpers mirror boolean component properties
+#![allow(clippy::struct_field_names)] // DTO-backed view models keep domain field names
+#![allow(clippy::map_unwrap_or)] // existing option mapping keeps view fallbacks adjacent
+#![allow(clippy::manual_let_else)] // branches follow Yew rendering flow
+#![allow(clippy::unnecessary_wraps)] // callback and validation signatures stay uniform
+#![allow(clippy::items_after_statements)] // local Yew helpers remain next to their use
+#![allow(clippy::similar_names)] // UI domain terms intentionally differ only by qualifier
+#![allow(clippy::option_option)] // nested options distinguish unchanged, cleared and set values
+#![allow(clippy::needless_for_each)] // side-effecting DOM and state iteration
+#![allow(clippy::default_trait_access)] // explicit defaults identify component state types
+#![allow(clippy::needless_continue)] // rendering loops keep skipped variants explicit
+#![allow(clippy::match_wildcard_for_single_variants)] // wildcard keeps views forward-compatible with DTO variants
+#![allow(clippy::many_single_char_names)] // coordinate maths uses conventional axis names
+#![allow(clippy::format_push_string)] // incremental HTML/text previews are intentionally assembled in place
+#![allow(clippy::case_sensitive_file_extension_comparisons)] // generated filenames use canonical lowercase extensions
 #![allow(clippy::float_cmp)] // exact comparisons in view-model unit tests
 
 pub mod app;

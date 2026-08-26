@@ -106,7 +106,12 @@ markdownlint: ## Install markdownlint-cli2 (requires npm)
 .PHONY: test
 test: ## Run all workspace tests (Stable)
 	@echo "==> Running tests (stable)"
-	$(CARGO_STABLE) test --workspace
+	./bin/test.sh --workspace
+
+.PHONY: architecture-check
+architecture-check: ## Verify workspace dependency direction
+	@echo "==> Checking workspace dependency direction"
+	./bin/check-workspace-deps.sh
 
 .PHONY: lint
 lint: ## Run clippy linter (Stable)

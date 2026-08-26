@@ -41,6 +41,9 @@ jobs:
         # This now works with cargo +nightly fmt
         run: make fmt-check
 
+      - name: Check workspace architecture
+        run: make architecture-check
+
       - name: Lint with Clippy
         run: make lint
 
