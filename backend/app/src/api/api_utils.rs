@@ -14,7 +14,7 @@ use crate::{
             ProviderAllocation, ProviderConfig, ProviderHandle, ProviderStreamCustomReason,
             ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamCtx, SharedStreamManager,
             StreamDetails,
-            StreamError, StreamingStrategy, ThrottledStream, UserApiRequest, UserSession, MAX_HLS_MANIFEST_BYTES,
+            StreamError, StreamingStrategy, ThrottledStream, UserApiRequest, UserSession,
         },
     },
     auth::Fingerprint,
@@ -38,6 +38,7 @@ use crate::{
     },
     BUILD_TIMESTAMP,
 };
+use tuliprox_hls::api::MAX_HLS_MANIFEST_BYTES;
 use arc_swap::ArcSwapOption;
 use axum::{
     body::Body,

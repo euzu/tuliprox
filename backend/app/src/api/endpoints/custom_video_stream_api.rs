@@ -7,14 +7,15 @@ use crate::{
         },
         model::{
             create_custom_video_stream_response, hls_custom_video_manifest_response_with_virtual_id,
-            finite_hls_immutable_media_response,
-            parse_hls_panel_provisioning_segment_route_name, resolve_hls_standalone_custom_segment,
-            AppState, CustomVideoStreamType, HlsAccessLeaseId, HlsStandaloneCustomSegmentAccess,
-            HlsStandaloneCustomSegmentError, TransportStreamBuffer,
+            parse_hls_panel_provisioning_segment_route_name, AppState, CustomVideoStreamType, TransportStreamBuffer,
         },
     },
     auth::{check_network_access_only, resolve_api_user_context, verify_access_token, Fingerprint},
     model::{ConfigTarget, ProxyUserCredentials},
+};
+use tuliprox_hls::api::{
+    finite_hls_immutable_media_response, resolve_hls_standalone_custom_segment, HlsAccessLeaseId,
+    HlsStandaloneCustomSegmentAccess, HlsStandaloneCustomSegmentError,
 };
 use axum::{
     http::{

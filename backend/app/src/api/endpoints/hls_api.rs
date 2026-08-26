@@ -24,63 +24,14 @@ use crate::{
             ConnectFailedAttempt, EvictionReentryGuard, HeaderFilter,
         },
         model::{
-            begin_hls_origin_account_io_bounded, build_hls_origin_session_owner, build_proxy_session_id,
-            commit_hls_runtime_custom_tail,
-            cold_start_retry_after_seconds,
-            derive_hls_lease_manifest_snapshot, extract_hls_provider_session_headers,
-            fetch_and_commit_hls_transient_origin_response_with_attempt_prepare,
-            fetch_hls_transient_origin_response_with_attempt_prepare, finite_hls_terminal_key_response,
-            force_identity_without_range,
-            hls_cached_manifest_options_for_requirement, hls_committed_manifest_body_for_request,
             hls_custom_video_manifest_response_for_access_lease,
             hls_custom_video_manifest_response_with_virtual_id,
-            hls_manifest_acceptance_directive_for_session, hls_manifest_commit_requirement, hls_object_body_deadline,
-            hls_origin_account_status, hls_provisioning_discontinuity_sequence,
-            hls_should_wait_for_initial_manifest_commit, hls_startup_admission_allows_snapshot,
-            hls_transient_object_fetch_failure, hls_transient_origin_response, hls_virtual_entry_redirect_response,
-            is_custom_video_stream_enabled, is_hls_provisioning_gap_segment, is_hls_provisioning_segment,
-            maybe_trigger_origin_refresh_with_outcome, new_hls_access_lease_id, origin_account_binding_from_allocation,
-            record_successful_transient_segment_fetch, record_temporary_transient_segment_fetch_failure,
-            register_hls_availability_reevaluation,
-            resolve_hls_transient_object_cache_action, safe_hls_access_lease_id,
-            safe_proxy_session_id, safe_session_key, safe_user_session_token, scrub_hls_origin_headers,
-            serve_hls_map_cache_outcome,
-            serve_hls_segment_cache_outcome, serve_hls_transient_object_cache_outcome,
-            serve_hls_transient_object_cache_response, should_remove_hls_origin_header,
-            start_hls_panel_provisioning_once,
-            try_hls_panel_provisioning_manifest_response, validate_hls_access_lease, AppState, CacheAccessState,
-            ConnectionHistoryMode, CustomVideoStreamType, HlsAccessAdmissionMode, HlsAccessContext, HlsAccessLease,
-            HlsAccessLeaseActivation, HlsAccessLeaseId, HlsAccessLeasePendingDeadline, HlsAccessLeaseState,
-            HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsAccessLeaseValidationError, HlsAccountBindingProtection,
-            HlsAccountOverlapTiming, HlsAvailabilityReevaluationObservation,
-            HlsAvailabilityReevaluationRegistration, HlsBoundAccountAcquireErrorKind, HlsCacheResponseContext,
-            HlsBandwidthPersistenceOutcome, HlsCachedManifestOptions, HlsCommittedManifestBody,
-            HlsEffectiveOriginAcquirePolicy,
-            GraceMode,
-            HlsLeaseManifestSnapshotInput, HlsLeasePlaybackMode, HlsManifestCommitRequirement, HlsMapFile,
-            HlsManifestAcceptanceDirective, HlsManifestAcceptanceEvaluationOutcome, HlsMediaActivityCommitOutcome,
-            HlsMediaActivityMarker, HlsMediaLeaseIdentity, HlsOriginAccountBinding, HlsOriginAccountBindingMode,
-            HlsOriginAccountDetachedReason, HlsOriginAccountStatus, HlsOriginIoContext,
-            HlsOriginRefreshTriggerOutcome, HlsOriginResourceClients,
-            HlsOriginResourceFetchError, HlsOriginSource, HlsOriginSourceKind, HlsOriginWorkClass,
-            HlsMasterBandwidth, HlsMasterBandwidthSelection,
-            HlsPanelProvisioningRedirectPaths, HlsPlaybackFamilyKey, HlsProvisioningStatus, HlsQosMeterInit,
-            HlsQosRuntimeConfig, HlsResourceFetchAttempt, HlsResourceServeFailure, HlsResourceServeOutcome,
-            HlsSegmentFile, HlsSession,
-            HlsSessionHandle, HlsSessionKey, HlsSessionMode, HlsSessionStoreOutcome, HlsTerminalSegmentPath,
-            HlsRuntimeCustomTailOutcome, HlsRuntimeCustomTailReason, HlsRuntimeCustomTailRequest,
-            HlsTransientCacheCommitContext,
-            HlsTransientDecodedOriginResponse, HlsTransientDirectResponseContext, HlsTransientObjectCacheAction,
-            HlsTransientObjectFetchFailure, HlsTransientObjectFetchFinalizer, HlsTransientOriginCacheFetchRequest,
-            HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard, LiveHlsOriginEntry, OriginRefreshRequest,
-            OriginSegmentKey, ProviderAllocation, ProviderConfig as RuntimeProviderConfig, ProviderHandle,
-            ProxySessionId, RetryPolicy, SegmentCacheKey, SegmentCacheStatus, SegmentDemandFetchOutcome,
-            SegmentFetchContext, SegmentFetchPolicy, StreamMeterHandle,
-            TransientObjectUnavailableState,
-            TransientResourceFile, TransientResourceRef, TransportStreamBuffer, UserSession,
-            HlsSingleVariantMasterPlaylist, trigger_origin_refresh_sync,
-            HLS_ACCESS_LEASE_ID_PLACEHOLDER, HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH,
-            HLS_PROVISIONING_SEGMENT_DURATION_MS, HLS_PROVISIONING_TARGET_DURATION_SECS, MAX_HLS_MANIFEST_BYTES,
+            hls_provisioning_discontinuity_sequence, hls_virtual_entry_redirect_response,
+            is_custom_video_stream_enabled, start_hls_panel_provisioning_once,
+            try_hls_panel_provisioning_manifest_response, AppState, ConnectionHistoryMode, CustomVideoStreamType,
+            GraceMode, HlsPanelProvisioningRedirectPaths, HlsProvisioningStatus, ProviderAllocation,
+            ProviderConfig as RuntimeProviderConfig, ProviderHandle, StreamMeterHandle, TransportStreamBuffer,
+            UserSession,
         },
         panel_api::can_provision_on_exhausted,
     },
@@ -99,6 +50,8 @@ use crate::{
     },
     utils::{content_coding::OutboundContentCodingPolicy, debug_if_enabled, request, request::is_file_url},
 };
+#[allow(clippy::wildcard_imports)]
+use tuliprox_hls::{api::*, HlsCtx, MAX_MANUAL_REDIRECTS};
 use axum::{
     body::Body,
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
@@ -128,7 +81,6 @@ const HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS: u64 = HLS_TEMPORARY_RESOURCE_RETRY_
 /// reduce time-to-first-manifest at the cost of more wakeups per waiting client.
 const HLS_MANIFEST_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-use crate::api::model::MAX_MANUAL_REDIRECTS;
 
 /// Recover archive EPG reference from `m3u-catchup|...|archive|{start}|{duration}` session keys.
 ///
@@ -776,7 +728,7 @@ async fn hls_cache_response_context(
     let qos_meter = app_state.hls_proxy.qos().meter_for_access_lease(&access_context.lease_id).await;
     let log_identity = {
         let session = session.read().await;
-        crate::api::model::HlsLogIdentity::from_session(&session)
+        HlsLogIdentity::from_session(&session)
     };
     HlsCacheResponseContext::new(
         access_context.lease_id.clone(),
@@ -1549,7 +1501,7 @@ async fn serve_hls_transient_passthrough_result(
                     now_ms: endpoint.now_ms,
                     log_identity: {
                         let session = endpoint.session.read().await;
-                        crate::api::model::HlsLogIdentity::from_session(&session)
+                        HlsLogIdentity::from_session(&session)
                     },
                 },
             )
@@ -1617,7 +1569,7 @@ async fn fetch_transient_origin_response_with_provider_io(
     };
     let log_identity = {
         let session = request.session.read().await;
-        crate::api::model::HlsLogIdentity::from_session(&session)
+        HlsLogIdentity::from_session(&session)
     };
     let fetch_request = HlsTransientOriginFetchRequest {
         resolved_origin_uri: request.resource.resolved_origin_uri.clone(),
@@ -1700,9 +1652,9 @@ struct HlsTransientEndpointCacheFetchContext<'a> {
     headers: &'a HeaderMap,
     access_context: &'a HlsAccessContext,
     lease_identity: HlsMediaLeaseIdentity,
-    resource: &'a crate::api::model::TransientResourceRef,
+    resource: &'a TransientResourceRef,
     resource_file: TransientResourceFile,
-    fetch_token: crate::api::model::TransientObjectFetchToken,
+    fetch_token: TransientObjectFetchToken,
     origin_headers: HeaderMap,
     origin_provider_session_headers: HeaderMap,
     range_header: Option<HeaderValue>,
@@ -1824,7 +1776,7 @@ async fn wait_for_transient_object_cache_fetch(context: TransientObjectWaitConte
     response
 }
 
-fn safe_transient_resource_id(resource_id: &crate::api::model::TransientResourceId) -> String {
+fn safe_transient_resource_id(resource_id: &TransientResourceId) -> String {
     // Truncate at the first char boundary at or before byte 8 to avoid allocating
     // a temporary `String` of 8 chars (and a second UTF-8 walk via `len()`).
     let full = resource_id.0.as_str();
@@ -1862,7 +1814,7 @@ async fn validate_hls_proxy_access_request(
         .await
         .is_some_and(|lease| {
             lease.state == HlsAccessLeaseState::Pending
-                && lease.startup_admission == crate::api::model::HlsLeaseStartupAdmissionState::Pending
+                && lease.startup_admission == HlsLeaseStartupAdmissionState::Pending
         });
     if startup_admission_pending {
         return Err(HlsAccessLeaseValidationError::AvailabilityPending);
@@ -2515,7 +2467,7 @@ async fn hls_transient_object_unavailable_response(
 ) -> axum::response::Response {
     let state = {
         let session = session.read().await;
-        let key = crate::api::model::TransientPassthroughState::transient_object_key(
+        let key = TransientPassthroughState::transient_object_key(
             &session.proxy_session_id,
             &resource_file.resource_id,
             resource_file.extension.clone(),
@@ -2553,7 +2505,7 @@ async fn fetch_and_cache_transient_origin_response(
     };
     let log_identity = {
         let session = context.session.read().await;
-        crate::api::model::HlsLogIdentity::from_session(&session)
+        HlsLogIdentity::from_session(&session)
     };
     let fetch_request = HlsTransientOriginFetchRequest {
         resolved_origin_uri: context.resource.resolved_origin_uri.clone(),
@@ -4520,7 +4472,7 @@ async fn create_hls_cache_entry_master_playlist_response(
     );
     app_state.hls_proxy.startup_observability().record_entry_master_response(
         access_lease_id.clone(),
-        crate::api::model::HlsLogIdentity::new(&session_key, &proxy_session_id),
+        HlsLogIdentity::new(&session_key, &proxy_session_id),
         current_time_millis(),
     );
     debug!(
@@ -4715,10 +4667,10 @@ impl HlsCanonicalOwnerFailureReason {
     fn response(self) -> axum::response::Response {
         let reason = match self {
             Self::DeadlineElapsed => {
-                crate::api::model::HlsTerminalFailedClosedReason::SafeCommitDeadlineElapsed
+                HlsTerminalFailedClosedReason::SafeCommitDeadlineElapsed
             }
             Self::Superseded | Self::LeaseUnavailable => {
-                crate::api::model::HlsTerminalFailedClosedReason::LeaseStateUnavailable
+                HlsTerminalFailedClosedReason::LeaseStateUnavailable
             }
         };
         hls_terminal_failed_closed_response(reason)
@@ -4997,7 +4949,7 @@ async fn trigger_hls_canonical_manifest_refresh(
                 .await
             else {
                 return Some(hls_terminal_failed_closed_response(
-                    crate::api::model::HlsTerminalFailedClosedReason::LeaseStateUnavailable,
+                    HlsTerminalFailedClosedReason::LeaseStateUnavailable,
                 ));
             };
             resolve_hls_terminal_manifest_state(
@@ -5462,12 +5414,12 @@ fn shared_hls_provisioning_segment_entry(
     content_length: u64,
     duration_ms: u64,
     now_ms: u64,
-) -> crate::api::model::SegmentEntry {
+) -> SegmentEntry {
     let origin_epoch = match plan.segment_kind {
         SharedHlsProvisioningLocalSegmentKind::Provisioning => HLS_PROVISIONING_ORIGIN_EPOCH,
         SharedHlsProvisioningLocalSegmentKind::Gap => HLS_PROVISIONING_GAP_ORIGIN_EPOCH,
     };
-    crate::api::model::SegmentEntry {
+    SegmentEntry {
         origin_key: OriginSegmentKey {
             origin_epoch,
             effective_host_id: 0,
@@ -5985,12 +5937,9 @@ async fn try_hls_cache_canonical_manifest_response(
     .await;
     let manifest_commit_requirement =
         hls_manifest_commit_requirement(&session, session_outcome, handoff_previous_rendered_at_ms, now_ms).await;
-    let acceptance_evaluation = hls_manifest_acceptance_directive_for_session(
-        &app_state.hls_ctx(),
-        &session,
-        path_proxy_session_id,
-    )
-    .await;
+    let hls_ctx = app_state.hls_ctx();
+    let acceptance_evaluation =
+        hls_manifest_acceptance_directive_for_session(&hls_ctx, &session, path_proxy_session_id).await;
     let (acceptance_directive, availability_reevaluation_owner_key) = match acceptance_evaluation {
         HlsManifestAcceptanceEvaluationOutcome::Evaluated(directive) => (directive, None),
         HlsManifestAcceptanceEvaluationOutcome::StateContention { owner_key } => {
@@ -6020,7 +5969,7 @@ async fn try_hls_cache_canonical_manifest_response(
     let origin_provider_session_headers = session.read().await.origin_provider_session_headers.clone();
     let mut preacquired_provider_handle = prepared_origin.preacquired_origin_account_handle;
     let mut origin_io = HlsOriginIoContext {
-        ctx: app_state.hls_ctx(),
+        ctx: hls_ctx.clone(),
         client_addr: fingerprint.addr,
         allow_grace: HlsOriginWorkClass::ManifestInteractive.allows_grace(),
         priority: origin_policy.priority,
@@ -6062,8 +6011,8 @@ async fn try_hls_cache_canonical_manifest_response(
         disabled_headers: app_state.get_disabled_headers(),
         now_ms,
         origin_io: Some(origin_io),
-        post_refresh_runtime: Some(crate::api::model::HlsPostRefreshRuntime {
-            ctx: app_state.hls_ctx().downgrade(),
+        post_refresh_runtime: Some(HlsPostRefreshRuntime {
+            ctx: hls_ctx.downgrade(),
         }),
     };
     let refresh_ordering = if session_outcome == HlsSessionStoreOutcome::Reused {
@@ -6099,7 +6048,7 @@ async fn try_hls_cache_canonical_manifest_response(
             safe_session_key(&session.key)
         };
         let registration = register_hls_availability_reevaluation(
-            app_state.hls_ctx(),
+            hls_ctx,
             Arc::clone(&session),
             owner_key,
             refresh_request,
@@ -6366,13 +6315,13 @@ async fn hls_origin_binding_needs_reacquire(session: &HlsSessionHandle) -> bool 
 }
 
 fn hls_transient_origin_binding_requires_runtime_prepare(
-    app_state: &Arc<AppState>,
+    hls_ctx: &HlsCtx,
     binding: &HlsOriginAccountBinding,
 ) -> bool {
     binding.is_detached()
         || (binding.is_active()
             && matches!(
-                hls_origin_account_status(&app_state.hls_ctx(), binding),
+                hls_origin_account_status(hls_ctx, binding),
                 HlsOriginAccountStatus::Missing | HlsOriginAccountStatus::Expired
             ))
 }
@@ -6427,14 +6376,15 @@ async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
     req_headers: &HeaderMap,
     now_ms: u64,
 ) -> Result<Option<HlsTransientOriginIoGuard>, HlsOriginRuntimeAcquireError> {
+    let hls_ctx = app_state.hls_ctx();
     let existing_binding = session.read().await.origin_account_binding.clone();
     let origin_policy = hls_effective_origin_acquire_policy(session).await;
     let reservation_ttl_secs = hls_origin_account_reservation_ttl_secs_for_session(session).await;
     if let Some(binding) = existing_binding.as_ref().filter(|binding| binding.is_active()) {
-        match hls_origin_account_status(&app_state.hls_ctx(), binding) {
+        match hls_origin_account_status(&hls_ctx, binding) {
             HlsOriginAccountStatus::Known => {
                 let origin_io = HlsOriginIoContext {
-                    ctx: app_state.hls_ctx(),
+                    ctx: hls_ctx.clone(),
                     client_addr: fingerprint.addr,
                     allow_grace: HlsOriginWorkClass::Demand.allows_grace(),
                     priority: origin_policy.priority,
@@ -6468,7 +6418,7 @@ async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
 
     if !existing_binding
         .as_ref()
-        .is_some_and(|binding| hls_transient_origin_binding_requires_runtime_prepare(app_state, binding))
+        .is_some_and(|binding| hls_transient_origin_binding_requires_runtime_prepare(&hls_ctx, binding))
     {
         return Ok(None);
     }
@@ -6506,7 +6456,7 @@ async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
         return Err(HlsOriginRuntimeAcquireError::Fatal(StatusCode::SERVICE_UNAVAILABLE));
     };
     let origin_io = HlsOriginIoContext {
-        ctx: app_state.hls_ctx(),
+        ctx: hls_ctx,
         client_addr: fingerprint.addr,
         allow_grace: HlsOriginWorkClass::Demand.allows_grace(),
         priority: origin_policy.priority,
@@ -7401,7 +7351,7 @@ async fn hls_manifest_preflight_refresh_ordering(
         )
         .unwrap_or_else(|| {
             hls_terminal_failed_closed_response(
-                crate::api::model::HlsTerminalFailedClosedReason::RuntimeUnavailable,
+                HlsTerminalFailedClosedReason::RuntimeUnavailable,
             )
         }))),
         HlsManifestTerminalPreflight::BootstrapPendingLease => Ok(HlsManifestRefreshOrdering::Background),
@@ -8108,7 +8058,8 @@ mod tests {
             ActiveProviderManager, ActiveUserManager,
             AppState, CacheAccessState, CancelTokens, ConnectionKind, ConnectionManager, CreateUserSessionParams,
             CustomVideoStreamType, EventManager, HlsAcceptanceEpisodeTiming, HlsAcceptanceEpisodeTimingInput,
-            HlsAccessContext, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeaseState, HlsAccessLeaseTiming,
+            HlsAccessAdmissionMode, HlsAccessContext, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeaseState,
+            HlsAccessLeaseTiming, HlsAccessLeaseTouch,
             HlsAccessLeaseValidationError, HlsAvailabilityReevaluationFinishReason,
             HlsAvailabilityReevaluationMode, HlsAvailabilityReevaluationRegistration,
             HlsBandwidthPersistenceState, HlsEffectiveOriginAcquirePolicy,
@@ -8127,7 +8078,8 @@ mod tests {
             HlsTerminalBaseMediaState, HlsTerminalBaseProtection,
             HlsTerminalBaseSegmentAvailability, HlsTerminalMediaAsset, HlsTerminalMediaPreparationState,
             HlsTerminalFailedClosedReason, HlsTerminalResolution, HlsTerminalTailBuildInput,
-            HlsTerminalSegmentPath, HlsTerminalTailCompatibility, HlsTerminalTailGeneration,
+            HlsTerminalSegmentPath, HlsTerminalTailCompatibility, HlsTerminalTailGeneration, HlsTerminalTailPlan,
+            HlsTerminalTailProtection,
             HlsTransitionMarginMs,
             ManualPlaylistUpdateRequest, MapCacheStatus, MapEntry, MetadataUpdateManager, OriginMapKey,
             OriginSegmentFetchRef, OriginSegmentKey, PlaybackLifecycle, PlaylistStorageState,
@@ -10915,7 +10867,7 @@ mod tests {
                     60_000,
                 )
                 .await,
-            crate::api::model::HlsAccessLeaseTouch::Denied
+            HlsAccessLeaseTouch::Denied
         );
 
         let pending =
@@ -11016,7 +10968,7 @@ mod tests {
             .hls_proxy
             .deny_access_lease(
                 &HlsAccessLeaseId(lease_id),
-                crate::api::model::HlsAccessLeaseDenialMode::PreserveCommittedFiniteTail,
+                tuliprox_hls::HlsAccessLeaseDenialMode::PreserveCommittedFiniteTail,
             )
             .await;
         assert!(!response_body(response).await.is_empty());
@@ -11653,7 +11605,7 @@ mod tests {
             "#EXTM3U\n#EXTINF:4.0,\n/hls/shared/live/proxy-id/{}/000123.ts\n",
             crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER
         );
-        let lease_id = crate::api::model::HlsAccessLeaseId("access-lease".to_string());
+        let lease_id = HlsAccessLeaseId("access-lease".to_string());
 
         let materialized = super::materialize_hls_access_manifest(&body, &lease_id, Some("/iptv"));
 
@@ -11714,15 +11666,15 @@ mod tests {
     fn hls_origin_source_kind_covers_xtream_m3u_and_direct_media_playlist() {
         assert_eq!(
             super::hls_origin_source_kind(InputType::Xtream),
-            crate::api::model::HlsOriginSourceKind::XtreamLive
+            HlsOriginSourceKind::XtreamLive
         );
         assert_eq!(
             super::hls_origin_source_kind(InputType::M3u),
-            crate::api::model::HlsOriginSourceKind::M3uMediaPlaylist
+            HlsOriginSourceKind::M3uMediaPlaylist
         );
         assert_eq!(
             super::hls_origin_source_kind(InputType::Library),
-            crate::api::model::HlsOriginSourceKind::DirectMediaPlaylist
+            HlsOriginSourceKind::DirectMediaPlaylist
         );
     }
 
@@ -11820,7 +11772,7 @@ mod tests {
         let source = super::build_hls_origin_source(&input, "stable-item");
 
         assert_eq!(origin.session_entry_url.as_str(), "http://media.example.com/live/channel/index.m3u8");
-        assert_eq!(source.source_kind, crate::api::model::HlsOriginSourceKind::M3uMediaPlaylist);
+        assert_eq!(source.source_kind, HlsOriginSourceKind::M3uMediaPlaylist);
         assert_eq!(source.session_key().stable_value(), "input:9|hls|stable-item");
     }
 
@@ -12700,9 +12652,10 @@ mod tests {
         let mut detached_binding = known_binding.clone();
         detached_binding.detach(HlsOriginAccountDetachedReason::AccountMissingOrExpired, 2_000);
 
-        assert!(!super::hls_transient_origin_binding_requires_runtime_prepare(&app_state, &known_binding));
-        assert!(super::hls_transient_origin_binding_requires_runtime_prepare(&app_state, &missing_binding));
-        assert!(super::hls_transient_origin_binding_requires_runtime_prepare(&app_state, &detached_binding));
+        let hls_ctx = app_state.hls_ctx();
+        assert!(!super::hls_transient_origin_binding_requires_runtime_prepare(&hls_ctx, &known_binding));
+        assert!(super::hls_transient_origin_binding_requires_runtime_prepare(&hls_ctx, &missing_binding));
+        assert!(super::hls_transient_origin_binding_requires_runtime_prepare(&hls_ctx, &detached_binding));
     }
 
     #[tokio::test]
@@ -14507,7 +14460,7 @@ mod tests {
             .await
             .expect("m3u hls should create shared session");
         let session = session.read().await;
-        assert_eq!(session.origin_source.source_kind, crate::api::model::HlsOriginSourceKind::M3uMediaPlaylist);
+        assert_eq!(session.origin_source.source_kind, HlsOriginSourceKind::M3uMediaPlaylist);
         let binding = session.origin_account_binding.as_ref().expect("m3u hls input still has account binding");
         assert_eq!(binding.input_name.as_ref(), "m3u-input");
         assert_eq!(binding.account_name.as_ref(), "m3u-input");
@@ -14737,7 +14690,7 @@ mod tests {
             asset: Arc::clone(&fixture.asset),
         })
         .expect("READY AES key permits safe terminal reset");
-        let protection = crate::api::model::HlsTerminalTailProtection {
+        let protection = HlsTerminalTailProtection {
             generation: plan.generation,
             base_proxy_seqs: Arc::clone(&plan.protected_base_proxy_seqs),
             key_bindings: plan.key_bindings(),
@@ -14984,7 +14937,7 @@ mod tests {
                 .access_lease_response_snapshot(&access_lease_id, &proxy_session_id, super::current_time_millis())
                 .await
                 .expect("lease remains available for strict cold-start handling");
-            assert_eq!(snapshot.playback_mode, crate::api::model::HlsLeasePlaybackMode::Live);
+            assert_eq!(snapshot.playback_mode, HlsLeasePlaybackMode::Live);
             assert!(snapshot.last_manifest_snapshot.is_none());
         }
         assert_eq!(rendered_bodies[0], rendered_bodies[1]);
@@ -15946,7 +15899,7 @@ mod tests {
                 &proxy_session_id,
                 &access_lease_id.0,
                 now_ms,
-                crate::api::model::HlsAccessAdmissionMode::ManifestPrepare,
+                HlsAccessAdmissionMode::ManifestPrepare,
             )
             .await
             .expect_err("denied lease must surface as admission denied");
@@ -16609,7 +16562,7 @@ mod tests {
                     super::hls_access_lease_ttl_ms(&app_state),
                 )
                 .await,
-            crate::api::model::HlsAccessLeaseTouch::Touched { .. }
+            HlsAccessLeaseTouch::Touched { .. }
         ));
 
         let second_response = super::create_hls_cache_entry_master_playlist_response(
@@ -17597,7 +17550,7 @@ mod tests {
 
     async fn wait_for_runtime_policy_terminal_plan(
         fixture: &RuntimePolicyEndpointFixture,
-    ) -> Arc<crate::api::model::HlsTerminalTailPlan> {
+    ) -> Arc<HlsTerminalTailPlan> {
         let plan = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 if let Some(HlsLeasePlaybackMode::TerminalTail(plan)) = fixture
@@ -18801,7 +18754,7 @@ mod tests {
             asset,
         })
         .expect("terminal test plan is compatible");
-        let protection = crate::api::model::HlsTerminalTailProtection {
+        let protection = HlsTerminalTailProtection {
             generation: plan.generation,
             base_proxy_seqs: Arc::clone(&plan.protected_base_proxy_seqs),
             key_bindings: plan.key_bindings(),
@@ -18897,7 +18850,7 @@ mod tests {
         let session = app_state
             .hls_proxy
             .sessions()
-            .get_by_proxy_session_id(&crate::api::model::ProxySessionId(proxy_session_id.clone()))
+            .get_by_proxy_session_id(&ProxySessionId(proxy_session_id.clone()))
             .await
             .expect("session should exist");
         let cache_key = {
@@ -18932,7 +18885,7 @@ mod tests {
         let session = app_state
             .hls_proxy
             .sessions()
-            .get_by_proxy_session_id(&crate::api::model::ProxySessionId(proxy_session_id.clone()))
+            .get_by_proxy_session_id(&ProxySessionId(proxy_session_id.clone()))
             .await
             .expect("session should exist");
         let cache_key = {
@@ -19189,7 +19142,7 @@ mod tests {
 
     async fn register_hls_cache_stream_for_stats_test(
         app_state: &Arc<AppState>,
-        session: &crate::api::model::HlsSessionHandle,
+        session: &HlsSessionHandle,
         proxy_session_id: &ProxySessionId,
         session_token: &str,
         fingerprint: &Fingerprint,
@@ -19762,7 +19715,7 @@ mod tests {
         let session = app_state
             .hls_proxy
             .sessions()
-            .get_by_proxy_session_id(&crate::api::model::ProxySessionId(proxy_session_id.clone()))
+            .get_by_proxy_session_id(&ProxySessionId(proxy_session_id.clone()))
             .await
             .expect("session should exist");
         session.write().await.segments.get_mut(&123).expect("segment should exist").origin_fetch_ref = None;
@@ -19816,7 +19769,7 @@ mod tests {
         let session = app_state
             .hls_proxy
             .sessions()
-            .get_by_proxy_session_id(&crate::api::model::ProxySessionId(proxy_session_id.clone()))
+            .get_by_proxy_session_id(&ProxySessionId(proxy_session_id.clone()))
             .await
             .expect("session should exist");
         session.write().await.segments.get_mut(&123).expect("segment should exist").origin_fetch_ref = None;
@@ -19866,7 +19819,7 @@ mod tests {
         let session = app_state
             .hls_proxy
             .sessions()
-            .get_by_proxy_session_id(&crate::api::model::ProxySessionId(proxy_session_id.clone()))
+            .get_by_proxy_session_id(&ProxySessionId(proxy_session_id.clone()))
             .await
             .expect("session should exist");
         session.write().await.mark_for_gc_removal();
@@ -19895,7 +19848,7 @@ mod tests {
         let session = app_state
             .hls_proxy
             .sessions()
-            .get_by_proxy_session_id(&crate::api::model::ProxySessionId(proxy_session_id.clone()))
+            .get_by_proxy_session_id(&ProxySessionId(proxy_session_id.clone()))
             .await
             .expect("session should exist");
         {
@@ -20122,7 +20075,7 @@ mod tests {
         let session = app_state
             .hls_proxy
             .sessions()
-            .get_by_proxy_session_id(&crate::api::model::ProxySessionId(proxy_session_id.clone()))
+            .get_by_proxy_session_id(&ProxySessionId(proxy_session_id.clone()))
             .await
             .expect("session should exist");
         {

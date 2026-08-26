@@ -67,7 +67,22 @@ pub(in crate::api) use self::{
     },
 };
 pub(crate) use self::streams::*;
-// The HLS proxy moved to `tuliprox-hls`; re-exported so `api` call sites keep
-// their names, module path included.
+// Keep the crate alias while call sites migrate to its explicit `api` facade.
 pub use tuliprox_hls as hls_cache;
-pub use tuliprox_hls::*;
+#[cfg(test)]
+#[allow(clippy::wildcard_imports)]
+pub use tuliprox_hls::api::*;
+#[cfg(test)]
+pub use tuliprox_hls::{
+    build_terminal_tail_plan, prepare_terminal_base_evidence, prepared_terminal_bundle_key,
+    snapshot_terminal_media_asset, HlsAcceptanceEpisodeTiming, HlsAcceptanceEpisodeTimingInput,
+    HlsAvailabilityReevaluationFinishReason, HlsAvailabilityReevaluationMode, HlsBandwidthPersistenceState,
+    HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestAcceptanceExhaustionReason,
+    HlsManifestAcceptanceTrigger, HlsManifestDeliveryMode, HlsManifestSourceRenderMarker, HlsMapSignature,
+    HlsMediaContainer, HlsObservedRecoveryLatency, HlsOperationTimeoutMs, HlsOriginPathCondition,
+    HlsPreparedTerminalBundleState, HlsRecoveryEtaMs, HlsRecoveryTimingPolicy, HlsRecoveryWorkload,
+    HlsRuntimeCustomTailAssetIdentity, HlsTerminalAssetIdentity, HlsTerminalBaseMediaState,
+    HlsTerminalBaseProtection, HlsTerminalBaseSegmentAvailability, HlsTerminalMediaAsset,
+    HlsTerminalMediaPreparationState, HlsTerminalTailBuildInput, HlsTerminalTailCompatibility,
+    HlsTerminalTailGeneration, HlsTransitionMarginMs, HLS_TERMINAL_TAIL_SEGMENT_COUNT,
+};

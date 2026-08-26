@@ -110,12 +110,12 @@ markdownlint: ## Install markdownlint-cli2 (requires npm)
 .PHONY: test
 test: ## Run all workspace tests (Stable) — use detected CPU count for parallelism
 	@echo "==> Running tests (stable) with $(CPU_COUNT) jobs/threads"
-	@TMPDIR="${TMPDIR:-/tmp}" RUST_TEST_THREADS=$(CPU_COUNT) ./bin/test.sh -j$(CPU_COUNT) --workspace -- --test-threads=$(CPU_COUNT)
+	@TMPDIR="$${TMPDIR:-/tmp}" RUST_TEST_THREADS=$(CPU_COUNT) ./bin/test.sh -j$(CPU_COUNT) --workspace -- --test-threads=$(CPU_COUNT)
 
 .PHONY: build
 build: ## Build the entire workspace in parallel using detected CPU count
 	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"
-	@TMPDIR="${TMPDIR:-/tmp}" $(CARGO_STABLE) build -j$(CARGO_BUILD_JOBS) --workspace
+	@TMPDIR="$${TMPDIR:-/tmp}" $(CARGO_STABLE) build -j$(CARGO_BUILD_JOBS) --workspace
 
 .PHONY: architecture-check
 architecture-check: ## Verify workspace dependency direction
@@ -123,14 +123,14 @@ architecture-check: ## Verify workspace dependency direction
 	./bin/check-workspace-deps.sh
 
 .PHONY: lint
-lint: ## Run clippy linter (Stable)
-	@echo "==> Running clippy (stable)"
-	$(CARGO_STABLE) clippy --workspace -- -D warnings
+lint: ## Run clippy linter (Nightly)
+	@echo "==> Running clippy (nightly)"
+	$(CARGO_NIGHTLY) clippy --workspace -- -D warnings
 
 .PHONY: lint-fix
-lint-fix: ## Automatically fix clippy suggestions (Stable)
+lint-fix: ## Automatically fix clippy suggestions (Nightly)
 	@echo "==> Applying clippy auto-fixes"
-	$(CARGO_STABLE) clippy --fix --workspace --allow-dirty --allow-staged -- -D clippy::uninlined_format_args
+	$(CARGO_NIGHTLY) clippy --fix --workspace --allow-dirty --allow-staged -- -D clippy::uninlined_format_args
 
 .PHONY: fmt
 fmt: ## Format all code using nightly rules (Compact)

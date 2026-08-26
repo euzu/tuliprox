@@ -1,13 +1,13 @@
 use crate::api::{
     api_utils::try_unwrap_body,
-    model::{
-        commit_terminal_tail_if_lease_reserve_requires_cutover, finite_hls_immutable_media_response,
-        finite_hls_media_head_response, finite_hls_media_response, publication_late_after_ms,
-        retry_after_secs_from_ms, terminal_tail_manifest_body,
-        AppState, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeaseState, HlsCacheResponseContext,
-        HlsLeasePlaybackMode, HlsSessionHandle, HlsTerminalFailedClosedReason, HlsTerminalResolution,
-        HlsTerminalSegmentPath, HlsTerminalTailPlan, ProxySessionId,
-    },
+    model::AppState,
+};
+use tuliprox_hls::api::{
+    commit_terminal_tail_if_lease_reserve_requires_cutover, finite_hls_immutable_media_response,
+    finite_hls_media_head_response, finite_hls_media_response, publication_late_after_ms, retry_after_secs_from_ms,
+    terminal_tail_manifest_body, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeaseState, HlsCacheResponseContext,
+    HlsLeasePlaybackMode, HlsSessionHandle, HlsTerminalFailedClosedReason, HlsTerminalResolution,
+    HlsTerminalSegmentPath, HlsTerminalTailPlan, ProxySessionId,
 };
 use axum::{
     body::Body,

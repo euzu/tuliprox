@@ -654,11 +654,6 @@ impl MetadataUpdateManager {
         self.enqueue_state_loaded_inputs.insert(input_name.clone(), ());
     }
 
-    pub async fn should_skip_enqueue(&self, input_name: Arc<str>, task: &UpdateTask) -> bool {
-        self.ensure_enqueue_state_loaded_for_input(&input_name).await;
-        self.should_skip_enqueue_cached(input_name.as_ref(), task)
-    }
-
     fn strip_tmdb_reasons_for_enqueue(&self, input_name: &str, task: UpdateTask) -> Option<UpdateTask> {
         let scoped_key = Self::scoped_task_key(input_name, &task);
         let current_last_modified = InputWorker::task_source_last_modified(&task);
@@ -3390,20 +3385,18 @@ impl tuliprox_processing::metadata_sink::MetadataUpdateSink for MetadataUpdateMa
         Box::pin(MetadataUpdateManager::acquire_update_pause_guard(self))
     }
 
-    fn queue_task(
-        &self,
-        input_name: Arc<str>,
-        task: UpdateTask,
-    ) -> tuliprox_processing::metadata_sink::SinkFuture<'_, ()> {
-        Box::pin(MetadataUpdateManager::queue_task(self, input_name, task))
+    fn prepare_enqueue_state(&self, input_name: Arc<str>) -> tuliprox_processing::metadata_sink::SinkFuture<'_, ()> {
+        Box::pin(async move {
+            self.ensure_enqueue_state_loaded_for_input(&input_name).await;
+        })
     }
 
-    fn should_skip_enqueue<'a>(
-        &'a self,
-        input_name: Arc<str>,
-        task: &'a UpdateTask,
-    ) -> tuliprox_processing::metadata_sink::SinkFuture<'a, bool> {
-        Box::pin(MetadataUpdateManager::should_skip_enqueue(self, input_name, task))
+    fn should_skip_enqueue(&self, input_name: &str, task: &UpdateTask) -> bool {
+        self.should_skip_enqueue_cached(input_name, task)
+    }
+
+    fn queue_task_background(self: Arc<Self>, input_name: Arc<str>, task: UpdateTask) {
+        MetadataUpdateManager::queue_task_background(&self, input_name, task);
     }
 }
 

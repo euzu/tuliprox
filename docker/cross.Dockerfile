@@ -31,9 +31,11 @@ COPY backend/hls/Cargo.toml ./backend/hls/
 COPY backend/iptv/Cargo.toml ./backend/iptv/
 COPY backend/library/Cargo.toml ./backend/library/
 COPY backend/media-server/Cargo.toml ./backend/media-server/
+COPY backend/metadata/Cargo.toml ./backend/metadata/
 COPY backend/messaging/Cargo.toml ./backend/messaging/
 COPY backend/mpegts/Cargo.toml ./backend/mpegts/
 COPY backend/parser/Cargo.toml ./backend/parser/
+COPY backend/processing/Cargo.toml ./backend/processing/
 COPY backend/repository/Cargo.toml ./backend/repository/
 COPY backend/session/Cargo.toml ./backend/session/
 
@@ -41,7 +43,7 @@ RUN mkdir -p frontend/src backend/app/src/tools && \
     printf 'fn main() {}\n' > frontend/src/main.rs && \
     printf 'fn main() {}\n' > backend/app/src/main.rs && \
     printf 'fn main() {}\n' > backend/app/src/tools/flags_builder.rs && \
-    for crate in auth btree config-loader core dvr hls iptv library media-server messaging mpegts parser repository session; do \
+    for crate in auth btree config-loader core dvr hls iptv library media-server metadata messaging mpegts parser processing repository session; do \
       mkdir -p "backend/${crate}/src"; \
       printf '\n' > "backend/${crate}/src/lib.rs"; \
     done

@@ -47,6 +47,12 @@ jobs:
       - name: Lint with Clippy
         run: make lint
 
+      - name: Validate native Docker workspace skeleton
+        run: docker build --target workspace-skeleton -f docker/Dockerfile .
+
+      - name: Validate cross Docker workspace skeleton
+        run: docker build --target rust-toolchain -f docker/cross.Dockerfile .
+
   docs:
     name: Documentation Build
     runs-on: ubuntu-latest

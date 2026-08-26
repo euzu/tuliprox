@@ -4,7 +4,7 @@ use crate::{
         endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
         model::{
             recording_rule_scheduler::spawn_recording_rule_scheduler, ActiveProviderManager, ActiveUserManager,
-            ConnectionManager, DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, PlaylistStorage,
+            ConnectionManager, DownloadQueue, EventManager, HlsProvisioningState, PlaylistStorage,
             PlaylistStorageState, SharedStreamManager, UpdateGuard,
         },
         tasks::{exec_config_watch, exec_scheduler},
@@ -23,6 +23,7 @@ use crate::{
 };
 use tuliprox_session::{provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation};
 use tuliprox_metadata::manager::MetadataUpdateManager;
+use tuliprox_hls::api::HlsProxyManager;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, info};
 use reqwest::Client;

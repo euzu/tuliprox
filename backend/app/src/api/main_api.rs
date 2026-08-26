@@ -21,10 +21,9 @@ use crate::{
         http_layers::create_cors_layer,
         model::{
             create_cache, create_http_client, create_http_client_no_redirect, create_public_http_client_no_redirect,
-            exec_provider_dns,
-            exec_hls_cache_gc, exec_hls_lifecycle, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens,
+            exec_provider_dns, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens,
             ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState, HlsProvisioningState,
-            HlsProxyManager, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
+            ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
             UpdateGuard, exec_qos_aggregation,
             recording_rule_scheduler::spawn_recording_rule_scheduler,
             recording_supervisor::start_recording_supervisors,
@@ -42,6 +41,7 @@ use crate::{
     utils::{exec_file_lock_prune, get_default_web_root_path},
     VERSION,
 };
+use tuliprox_hls::api::{exec_hls_cache_gc, exec_hls_lifecycle, HlsProxyManager};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::{
     extract::{connect_info::ConnectInfo, Request},

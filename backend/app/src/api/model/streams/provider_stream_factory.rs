@@ -4,10 +4,9 @@ use tuliprox_session::response_headers::{provider_response_headers, ProviderResp
 use tuliprox_session::stream_options::StreamOptions;
 use crate::{
     api::model::{
-            create_channel_unavailable_stream, extract_hls_provider_session_headers, get_header_filter_for_item_type,
+            create_channel_unavailable_stream, get_header_filter_for_item_type,
             get_response_headers,
-            log_hls_origin_content_coding,
-            streams::{buffered_stream::BufferedStream, client_stream::ClientStream}, CustomVideoStreamType, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource,
+            streams::{buffered_stream::BufferedStream, client_stream::ClientStream}, CustomVideoStreamType,
             ProviderContentRepresentationMode, ProviderStreamFactoryResponse, StreamError, STREAM_IDLE_TIMEOUT,
         },
     iptv::stalker::client::validate_public_playable_url,
@@ -23,6 +22,10 @@ use crate::{
             preview_request_target_for_logging, send_with_retry_and_provider_policy,
         },
     },
+};
+use tuliprox_hls::api::{
+    extract_hls_provider_session_headers, log_hls_origin_content_coding, HlsOriginContentCodingObjectKind,
+    HlsOriginContentCodingSource,
 };
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, log_enabled, warn};
