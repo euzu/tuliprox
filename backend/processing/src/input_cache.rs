@@ -1,10 +1,12 @@
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
-use std::time::{SystemTime, UNIX_EPOCH};
 use log::{error, warn};
-use crate::repository::{build_input_storage_path, get_input_storage_path};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tuliprox_repository::{build_input_storage_path, get_input_storage_path};
 
 pub const STATUS_FILE: &str = "status.json";
 
@@ -28,7 +30,9 @@ pub struct InputStatus {
 }
 
 pub async fn resolve_input_storage_path(storage_dir: &str, input_name: &str) -> PathBuf {
-    if let Ok(path) = get_input_storage_path(input_name, storage_dir).await { path } else {
+    if let Ok(path) = get_input_storage_path(input_name, storage_dir).await {
+        path
+    } else {
         build_input_storage_path(input_name, storage_dir)
     }
 }
@@ -51,8 +55,8 @@ pub fn save_input_status(path: &Path, status: &InputStatus) {
     let status_path = path.join(STATUS_FILE);
     if let Some(parent) = status_path.parent() {
         if let Err(e) = fs::create_dir_all(parent) {
-             error!("Failed to create input storage directory {}: {e}", parent.display());
-             return;
+            error!("Failed to create input storage directory {}: {e}", parent.display());
+            return;
         }
     }
     match serde_json::to_string_pretty(status) {
@@ -60,7 +64,7 @@ pub fn save_input_status(path: &Path, status: &InputStatus) {
             if let Err(e) = fs::write(&status_path, content) {
                 error!("Failed to write input status file {}: {e}", status_path.display());
             }
-        },
+        }
         Err(e) => error!("Failed to serialize input status: {e}"),
     }
 }
@@ -75,7 +79,7 @@ pub fn is_cache_valid(status: &InputStatus, cluster: &str, cache_duration_second
         }
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         if now >= cluster_status.timestamp {
-             return now - cluster_status.timestamp < cache_duration_seconds;
+            return now - cluster_status.timestamp < cache_duration_seconds;
         }
         // Timestamp in future? Invalid.
         return false;
@@ -85,8 +89,5 @@ pub fn is_cache_valid(status: &InputStatus, cluster: &str, cache_duration_second
 
 pub fn update_cluster_status(status: &mut InputStatus, cluster: &str, state: ClusterState) {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-    status.clusters.insert(cluster.to_string(), ClusterStatus {
-        status: state,
-        timestamp: now,
-    });
+    status.clusters.insert(cluster.to_string(), ClusterStatus { status: state, timestamp: now });
 }

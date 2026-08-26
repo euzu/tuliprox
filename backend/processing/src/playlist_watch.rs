@@ -1,17 +1,22 @@
-use std::collections::BTreeSet;
-use std::sync::Arc;
-use std::path::{Path};
-use log::{error};
-use shared::model::{PlaylistGroup};
-use crate::messaging::{send_message};
-use crate::model::{AppConfig, MessageContent, WatchChanges};
-use crate::utils;
-use crate::utils::{binary_deserialize, binary_serialize, file_exists_async};
+use log::error;
+use shared::model::PlaylistGroup;
+use std::{collections::BTreeSet, path::Path, sync::Arc};
+use tuliprox_core::{
+    model::{AppConfig, MessageContent, WatchChanges},
+    utils,
+    utils::{binary_deserialize, binary_serialize, file_exists_async},
+};
+use tuliprox_messaging::send_message;
 
 const WATCH_NOTIFICATION_LIST_LIMIT: usize = 120;
 const WATCH_NOTIFICATION_SUMMARY_THRESHOLD: usize = 500;
 
-pub async fn process_group_watch(app_config: &Arc<AppConfig>, client: &reqwest::Client, target_name: &str, pl: &PlaylistGroup) {
+pub async fn process_group_watch(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    target_name: &str,
+    pl: &PlaylistGroup,
+) {
     let mut new_tree = BTreeSet::new();
     pl.channels.iter().for_each(|chan| {
         let header = &chan.header;
@@ -19,7 +24,8 @@ pub async fn process_group_watch(app_config: &Arc<AppConfig>, client: &reqwest::
         new_tree.insert(title);
     });
 
-    let watch_filename = format!("{}/{}.bin", utils::sanitize_filename(target_name), utils::sanitize_filename(&pl.title));
+    let watch_filename =
+        format!("{}/{}.bin", utils::sanitize_filename(target_name), utils::sanitize_filename(&pl.title));
     let cfg = app_config.config.load();
     match utils::get_file_path(&cfg.storage_dir, Some(std::path::PathBuf::from(&watch_filename))) {
         Some(path) => {
@@ -32,7 +38,15 @@ pub async fn process_group_watch(app_config: &Arc<AppConfig>, client: &reqwest::
                     let removed_difference: BTreeSet<Arc<str>> = loaded_tree.difference(&new_tree).cloned().collect();
                     if !added_difference.is_empty() || !removed_difference.is_empty() {
                         changed = true;
-                        handle_watch_notification(app_config, client, &added_difference, &removed_difference, target_name, &pl.title).await;
+                        handle_watch_notification(
+                            app_config,
+                            client,
+                            &added_difference,
+                            &removed_difference,
+                            target_name,
+                            &pl.title,
+                        )
+                        .await;
                     }
                 } else {
                     error!("failed to load watch_file {}", path.to_str().unwrap_or_default());
@@ -56,7 +70,14 @@ pub async fn process_group_watch(app_config: &Arc<AppConfig>, client: &reqwest::
     }
 }
 
-async fn handle_watch_notification(app_config: &Arc<AppConfig>, client: &reqwest::Client, added: &BTreeSet<Arc<str>>, removed: &BTreeSet<Arc<str>>, target_name: &str, group_name: &str) {
+async fn handle_watch_notification(
+    app_config: &Arc<AppConfig>,
+    client: &reqwest::Client,
+    added: &BTreeSet<Arc<str>>,
+    removed: &BTreeSet<Arc<str>>,
+    target_name: &str,
+    group_name: &str,
+) {
     let added_count = added.len();
     let removed_count = removed.len();
     let total_changed = added_count.saturating_add(removed_count);
@@ -92,20 +113,15 @@ async fn handle_watch_notification(app_config: &Arc<AppConfig>, client: &reqwest
             }
         }
 
-        let changes = WatchChanges {
-            target: target_name.to_string(),
-            group: group_name.to_string(),
-            added,
-            removed
-        };
+        let changes = WatchChanges { target: target_name.to_string(), group: group_name.to_string(), added, removed };
 
         send_message(app_config, client, MessageContent::Watch(changes)).await;
     }
 }
 
 async fn load_watch_tree(path: &Path) -> Option<BTreeSet<Arc<str>>> {
-     let encoded = tokio::fs::read(path).await.ok()?;
-     binary_deserialize(&encoded[..]).ok()
+    let encoded = tokio::fs::read(path).await.ok()?;
+    binary_deserialize(&encoded[..]).ok()
 }
 
 async fn save_watch_tree(path: &Path, tree: &BTreeSet<Arc<str>>) -> std::io::Result<()> {

@@ -5,6 +5,5 @@ macro_rules! include_modules {
         extern crate env_logger;
         extern crate pest;
         pub mod api;
-        pub mod processing;
     };
 }

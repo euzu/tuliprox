@@ -6,36 +6,34 @@
 //!
 //! Reverse-proxy re-resolve (when a 4xx upstream error is observed) is implemented in the
 //! HLS/Xtream endpoints and reaches back into the API client via the helper
-//! [`crate::iptv::stalker::client::StalkerApiClient::create_link`].
+//! [`tuliprox_iptv::stalker::client::StalkerApiClient::create_link`].
 
 #![allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 
-use log::{debug, info, warn};
-use parking_lot::Mutex;
-use lru::LruCache;
-use shared::error::TuliproxError;
-use shared::model::stalker::StalkerStreamKind;
-use shared::model::stalker_item::StalkerPlaylistItem;
-use shared::model::{PlaylistGroup, PlaylistItem};
-use shared::utils::Internable;
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::num::NonZeroUsize;
-use std::sync::{Arc, LazyLock, Weak};
-use std::time::{Duration, Instant};
-
-use crate::model::{AppConfig, ConfigInput, ConfigInputFlags, StalkerInputConfig};
-use crate::processing::parser::stalker as parser;
-use crate::repository::stalker_repository::{
-    ensure_stalker_storage_path, load_stalker_items_at, read_stalker_item_at,
-};
-use crate::repository::stalker_generation_repository::{load_active_manifest, load_checkpoint};
 use super::stalker_refresh::{
     advance_stalker_refresh, StalkerClusterSelection, StalkerRefreshMode, StalkerRefreshOutcome,
 };
-use crate::iptv::stalker::client::StalkerApiClient;
-use crate::iptv::stalker::error::StalkerError;
-
+use log::{debug, info, warn};
+use lru::LruCache;
+use parking_lot::Mutex;
+use shared::{
+    error::TuliproxError,
+    model::{stalker::StalkerStreamKind, stalker_item::StalkerPlaylistItem, PlaylistGroup, PlaylistItem},
+    utils::Internable,
+};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    num::NonZeroUsize,
+    sync::{Arc, LazyLock, Weak},
+    time::{Duration, Instant},
+};
+use tuliprox_core::model::{AppConfig, ConfigInput, ConfigInputFlags, StalkerInputConfig};
+use tuliprox_iptv::stalker::{client::StalkerApiClient, error::StalkerError, parser};
+use tuliprox_repository::{
+    stalker_generation_repository::{load_active_manifest, load_checkpoint},
+    stalker_repository::{ensure_stalker_storage_path, load_stalker_items_at, read_stalker_item_at},
+};
 
 /// Cluster selector used by the Stalker processor. Mirrors the Xtream cluster split
 /// (Live/Video/Series) but uses Stalker-native kind names.
@@ -49,9 +47,8 @@ pub enum StalkerCluster {
 const DEFAULT_STALKER_CLUSTERS: [StalkerCluster; 3] =
     [StalkerCluster::Live, StalkerCluster::Vod, StalkerCluster::Series];
 
-static RUNTIME_STALKER_CLIENTS: LazyLock<Mutex<LruCache<String, Arc<StalkerApiClient>>>> = LazyLock::new(|| {
-    Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN)))
-});
+static RUNTIME_STALKER_CLIENTS: LazyLock<Mutex<LruCache<String, Arc<StalkerApiClient>>>> =
+    LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(64).unwrap_or(NonZeroUsize::MIN))));
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct RuntimeLinkKey {
@@ -66,9 +63,8 @@ struct RuntimeLink {
     expires_at: Instant,
 }
 
-static RUNTIME_STALKER_LINKS: LazyLock<Mutex<LruCache<RuntimeLinkKey, RuntimeLink>>> = LazyLock::new(|| {
-    Mutex::new(LruCache::new(NonZeroUsize::new(4096).unwrap_or(NonZeroUsize::MIN)))
-});
+static RUNTIME_STALKER_LINKS: LazyLock<Mutex<LruCache<RuntimeLinkKey, RuntimeLink>>> =
+    LazyLock::new(|| Mutex::new(LruCache::new(NonZeroUsize::new(4096).unwrap_or(NonZeroUsize::MIN))));
 
 static STALKER_REFRESH_LOCKS: LazyLock<tokio::sync::Mutex<HashMap<Arc<str>, Weak<tokio::sync::Semaphore>>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
@@ -98,10 +94,7 @@ fn cached_resolved_link(key: RuntimeLinkKey, force_refresh: bool) -> Option<Arc<
 }
 
 fn cache_resolved_link(key: RuntimeLinkKey, url: Arc<str>) {
-    RUNTIME_STALKER_LINKS.lock().put(
-        key,
-        RuntimeLink { url, expires_at: Instant::now() + Duration::from_secs(45) },
-    );
+    RUNTIME_STALKER_LINKS.lock().put(key, RuntimeLink { url, expires_at: Instant::now() + Duration::from_secs(45) });
 }
 
 /// Top-level orchestrator. Mirrors the `download_xtream_playlist` signature so the
@@ -132,10 +125,7 @@ pub async fn download_stalker_playlist(
 
     let skip_clusters = skip_clusters_for(input);
     let resolved_clusters: Vec<StalkerCluster> = clusters
-        .map_or_else(
-            || DEFAULT_STALKER_CLUSTERS.to_vec(),
-            <[StalkerCluster]>::to_vec,
-        )
+        .map_or_else(|| DEFAULT_STALKER_CLUSTERS.to_vec(), <[StalkerCluster]>::to_vec)
         .into_iter()
         .filter(|c| !skip_clusters.contains(c))
         .collect();
@@ -172,10 +162,7 @@ pub async fn download_stalker_playlist(
         Err(err) => {
             return (
                 vec![],
-                vec![TuliproxError::Io(format!(
-                    "could not prepare Stalker storage for input '{}': {err}",
-                    input.name
-                ))],
+                vec![TuliproxError::Io(format!("could not prepare Stalker storage for input '{}': {err}", input.name))],
                 false,
                 false,
             );
@@ -217,7 +204,7 @@ pub async fn download_stalker_playlist(
                     };
                     break StalkerRefreshOutcome::Yielded {
                         phase: checkpoint.as_ref().map_or(
-                            crate::repository::stalker_generation_repository::StalkerRefreshPhase::LiveBulk,
+                            tuliprox_repository::stalker_generation_repository::StalkerRefreshPhase::LiveBulk,
                             |state| state.phase.clone(),
                         ),
                         processed: checkpoint.as_ref().map_or(0, |state| state.processed),
@@ -239,12 +226,7 @@ pub async fn download_stalker_playlist(
             }
         }
     } else {
-        return (
-            Vec::new(),
-            Vec::new(),
-            app_config.config.load().disk_based_processing,
-            true,
-        );
+        return (Vec::new(), Vec::new(), app_config.config.load().disk_based_processing, true);
     };
 
     let yielded = matches!(&outcome, StalkerRefreshOutcome::Yielded { .. });
@@ -272,11 +254,9 @@ pub async fn download_stalker_playlist(
         }
     };
     if terminal {
-        if let Err(err) = crate::repository::stalker_generation_repository::cleanup_obsolete_generations(
-            &storage_path,
-            &manifest,
-        )
-        .await
+        if let Err(err) =
+            tuliprox_repository::stalker_generation_repository::cleanup_obsolete_generations(&storage_path, &manifest)
+                .await
         {
             errors.push(err);
         }
@@ -330,10 +310,7 @@ pub async fn download_stalker_playlist(
 fn resolve_stalker_portal_url(input: &ConfigInput) -> Result<String, TuliproxError> {
     let url = input.url.as_str();
     if url.trim().is_empty() {
-        return Err(TuliproxError::ConfigInput(format!(
-            "Stalker input '{}' has no URL configured",
-            input.name
-        )));
+        return Err(TuliproxError::ConfigInput(format!("Stalker input '{}' has no URL configured", input.name)));
     }
     input.resolve_url(url).map(Cow::into_owned)
 }
@@ -396,7 +373,7 @@ fn runtime_client_cache_key(portal_url: &str, cfg: &StalkerInputConfig) -> Strin
     format!("{portal_url}|{:016x}", cfg.identity_fingerprint(portal_url))
 }
 
-pub(crate) fn stalker_identity_fingerprint(portal_url: &str, cfg: &StalkerInputConfig) -> u64 {
+pub fn stalker_identity_fingerprint(portal_url: &str, cfg: &StalkerInputConfig) -> u64 {
     cfg.identity_fingerprint(portal_url)
 }
 
@@ -410,9 +387,8 @@ fn cached_runtime_stalker_client(
         return Ok(client);
     }
 
-    let client = Arc::new(
-        StalkerApiClient::new(http_client.clone(), portal_url, cfg.clone()).map_err(stalker_err_to_repo)?,
-    );
+    let client =
+        Arc::new(StalkerApiClient::new(http_client.clone(), portal_url, cfg.clone()).map_err(stalker_err_to_repo)?);
     RUNTIME_STALKER_CLIENTS.lock().put(key, Arc::clone(&client));
     Ok(client)
 }
@@ -451,29 +427,18 @@ pub async fn re_resolve_stalker_url(
         return Ok(None);
     };
     let Some(descriptor) = item.playback_descriptor.as_ref() else {
-                 debug!("Stalker re-resolve skipped: stream_id={} has no playback_descriptor", item.stream_id);
-                 return Ok(None);
-             };
+        debug!("Stalker re-resolve skipped: stream_id={} has no playback_descriptor", item.stream_id);
+        return Ok(None);
+    };
     if descriptor.candidates.is_empty() {
         debug!("Stalker re-resolve skipped: stream_id={} descriptor has no candidate", item.stream_id);
         return Ok(None);
     }
-    if descriptor
-        .candidates
-        .iter()
-        .all(|candidate| candidate.cmd.trim().is_empty())
-    {
-        debug!(
-            "Stalker re-resolve skipped: stream_id={} descriptor candidates are empty",
-            item.stream_id
-        );
+    if descriptor.candidates.iter().all(|candidate| candidate.cmd.trim().is_empty()) {
+        debug!("Stalker re-resolve skipped: stream_id={} descriptor candidates are empty", item.stream_id);
         return Ok(None);
     }
-    let api_client = cached_runtime_stalker_client(
-        http_client,
-        portal_url,
-        stalker_cfg,
-    )?;
+    let api_client = cached_runtime_stalker_client(http_client, portal_url, stalker_cfg)?;
     let handshake = api_client.handshake().await.map_err(stalker_err_to_repo)?;
     let series_number = (kind == StalkerStreamKind::Episode).then_some(item.number);
 
@@ -482,15 +447,7 @@ pub async fn re_resolve_stalker_url(
             continue;
         }
         match api_client
-            .create_link(
-                &handshake,
-                kind,
-                candidate.playback_mode,
-                &candidate.cmd,
-                series_number,
-                None,
-                None,
-            )
+            .create_link(&handshake, kind, candidate.playback_mode, &candidate.cmd, series_number, None, None)
             .await
         {
             Ok(resolved) => {
@@ -507,10 +464,7 @@ pub async fn re_resolve_stalker_url(
         }
     }
 
-    warn!(
-        "Stalker runtime re-resolve failed for stream_id={}, invalidating stale stream_url",
-        item.stream_id
-    );
+    warn!("Stalker runtime re-resolve failed for stream_id={}, invalidating stale stream_url", item.stream_id);
     RUNTIME_STALKER_LINKS.lock().pop(&link_key);
     Ok(None)
 }
@@ -519,9 +473,7 @@ pub async fn re_resolve_stalker_url(
 mod tests {
     use super::*;
 
-    fn runtime_cfg() -> StalkerInputConfig {
-        StalkerInputConfig::default()
-    }
+    fn runtime_cfg() -> StalkerInputConfig { StalkerInputConfig::default() }
 
     #[test]
     fn runtime_client_cache_key_changes_with_endpoint_preference() {
@@ -536,11 +488,8 @@ mod tests {
     fn runtime_client_cache_key_changes_with_size_caps() {
         let mut cfg = runtime_cfg();
         let key_a = runtime_client_cache_key("http://portal.example", &cfg);
-        cfg.size_caps = Some(crate::model::StalkerSizeCaps {
-            create_link_kb: 128,
-            ordered_list_mb: 8,
-            get_epg_mb: 64,
-        });
+        cfg.size_caps =
+            Some(tuliprox_core::model::StalkerSizeCaps { create_link_kb: 128, ordered_list_mb: 8, get_epg_mb: 64 });
         let key_b = runtime_client_cache_key("http://portal.example", &cfg);
         assert_ne!(key_a, key_b);
     }
@@ -572,9 +521,7 @@ mod tests {
         let second = cached_runtime_stalker_client(&http, "http://portal.example".to_string(), &cfg)?;
 
         assert!(weak.upgrade().is_some());
-        let upgraded = weak
-            .upgrade()
-            .ok_or_else(|| TuliproxError::ProviderConnection("client dropped".to_string()))?;
+        let upgraded = weak.upgrade().ok_or_else(|| TuliproxError::ProviderConnection("client dropped".to_string()))?;
         assert!(Arc::ptr_eq(&upgraded, &second));
         Ok(())
     }

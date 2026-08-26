@@ -1,17 +1,19 @@
-use crate::model::{ConfigTarget, TraktListItem, TraktMatchItem};
-use crate::model::{TraktCategoryConfig, TraktConfig, TraktMatchResult};
-use crate::utils::{extract_year_from_title, normalize_title_for_matching, TraktClient};
-use crate::utils::{trace_if_enabled, with};
-use log::{debug, info, trace, warn};
-use shared::error::TuliproxError;
-use shared::model::{
-    FieldGetAccessor, FieldSetAccessor, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType,
-    TraktContentType, UUIDType, XtreamCluster,
-};
-use shared::utils::{hash_string, Internable, CONSTANTS};
 use indexmap::IndexMap;
+use log::{debug, info, trace, warn};
+use shared::{
+    error::TuliproxError,
+    model::{
+        FieldGetAccessor, FieldSetAccessor, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType,
+        TraktContentType, UUIDType, XtreamCluster,
+    },
+    utils::{hash_string, Internable, CONSTANTS},
+};
 use std::{collections::HashMap, sync::Arc};
 use strsim::normalized_levenshtein;
+use tuliprox_core::{
+    model::{ConfigTarget, TraktCategoryConfig, TraktConfig, TraktListItem, TraktMatchItem, TraktMatchResult},
+    utils::{extract_year_from_title, normalize_title_for_matching, trace_if_enabled, with, TraktClient},
+};
 
 fn extract_quality(value: &str) -> Option<&str> {
     if let Some(caps) = CONSTANTS.re_quality.captures(value) {
@@ -21,7 +23,6 @@ fn extract_quality(value: &str) -> Option<&str> {
     }
     None
 }
-
 
 /// Utility functions for content type compatibility
 fn should_include_item(item: &TraktListItem, content_type: TraktContentType) -> bool {
@@ -43,7 +44,9 @@ fn is_compatible_content_type(cluster: XtreamCluster, content_type: TraktContent
 fn is_matchable_playlist_item(item_type: PlaylistItemType, content_type: TraktContentType) -> bool {
     match content_type {
         TraktContentType::Vod => item_type.is_video(),
-        TraktContentType::Series => matches!(item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo),
+        TraktContentType::Series => {
+            matches!(item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo)
+        }
         TraktContentType::Both => matches!(
             item_type,
             PlaylistItemType::Video
@@ -65,7 +68,11 @@ fn calculate_year_bonus(playlist_year: Option<u32>, trakt_year: Option<u32>) -> 
     0.0
 }
 
-fn find_best_fuzzy_match_for_item<'a>(channel: (&'a PlaylistItem, String, Option<u32>, Option<u32>), trakt_items: &'a [TraktMatchItem], category_config: &'a TraktCategoryConfig) -> Option<TraktMatchResult<'a>> {
+fn find_best_fuzzy_match_for_item<'a>(
+    channel: (&'a PlaylistItem, String, Option<u32>, Option<u32>),
+    trakt_items: &'a [TraktMatchItem],
+    category_config: &'a TraktCategoryConfig,
+) -> Option<TraktMatchResult<'a>> {
     // Try fuzzy matching if no exact match found
     let normalized_playlist_title = channel.1;
     let playlist_year = channel.2;
@@ -107,7 +114,11 @@ fn find_best_fuzzy_match_for_item<'a>(channel: (&'a PlaylistItem, String, Option
         //     MatchType::FuzzyTitle
         // };
 
-        trace_if_enabled!("Fuzzy match: '{}' -> '{}' (final: {combined_score:.3}" /*, type: {match_type:?})"*/, channel.0.header.title, trakt_item.title);
+        trace_if_enabled!(
+            "Fuzzy match: '{}' -> '{}' (final: {combined_score:.3}", /*, type: {match_type:?})"*/
+            channel.0.header.title,
+            trakt_item.title
+        );
 
         return Some(TraktMatchResult {
             playlist_item: channel.0,
@@ -152,19 +163,16 @@ fn create_category_from_matches<'a>(
     category_config: &'a TraktCategoryConfig,
     series_children_by_parent_code: &HashMap<Arc<str>, Vec<&'a PlaylistItem>>,
 ) -> Vec<PlaylistGroup> {
-    if matches.is_empty() { return vec![]; }
+    if matches.is_empty() {
+        return vec![];
+    }
 
     let mut matched_items_by_cluster: IndexMap<XtreamCluster, Vec<PlaylistItem>> = IndexMap::new();
 
     let mut sorted_matches = matches;
     sorted_matches.sort_by(|a, b| {
-        (
-            a.trakt_item.rank.unwrap_or(9999),
-            a.trakt_item.title.to_lowercase(),
-        ).cmp(&(
-            b.trakt_item.rank.unwrap_or(9999),
-            b.trakt_item.title.to_lowercase(),
-        ))
+        (a.trakt_item.rank.unwrap_or(9999), a.trakt_item.title.to_lowercase())
+            .cmp(&(b.trakt_item.rank.unwrap_or(9999), b.trakt_item.title.to_lowercase()))
     });
 
     let group_title = category_config.category_name.as_str().intern();
@@ -176,35 +184,32 @@ fn create_category_from_matches<'a>(
             &group_title,
         );
         let parent_uuid = modified_item.header.uuid.intern();
-        let is_series_info = matches!(
-            modified_item.header.item_type,
-            PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo
-        );
-        let child_lookup_keys = if is_series_info {
-            series_info_child_lookup_keys(match_result.playlist_item)
-        } else {
-            Vec::new()
-        };
+        let is_series_info =
+            matches!(modified_item.header.item_type, PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo);
+        let child_lookup_keys =
+            if is_series_info { series_info_child_lookup_keys(match_result.playlist_item) } else { Vec::new() };
         let cluster = modified_item.header.xtream_cluster;
         matched_items_by_cluster.entry(cluster).or_default().push(modified_item);
 
         if let Some(children) = child_lookup_keys.iter().find_map(|key| series_children_by_parent_code.get(key)) {
             for child in children {
-                let mut child = clone_item_for_trakt_category(child, category_config.category_name.as_str(), &group_title);
+                let mut child =
+                    clone_item_for_trakt_category(child, category_config.category_name.as_str(), &group_title);
                 child.header.parent_code = parent_uuid.clone();
                 matched_items_by_cluster.entry(child.header.xtream_cluster).or_default().push(child);
             }
         }
     }
 
-    matched_items_by_cluster.into_iter().map(|(cluster, channels)| {
-        PlaylistGroup {
+    matched_items_by_cluster
+        .into_iter()
+        .map(|(cluster, channels)| PlaylistGroup {
             id: 0,
             title: group_title.clone(),
             channels,
             xtream_cluster: cluster,
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 fn clone_item_for_trakt_category(item: &PlaylistItem, category_name: &str, group_title: &Arc<str>) -> PlaylistItem {
@@ -246,9 +251,7 @@ fn series_children_by_parent_code(playlist: &[PlaylistGroup]) -> HashMap<Arc<str
     let mut children = HashMap::<Arc<str>, Vec<&PlaylistItem>>::new();
     for playlist_group in playlist {
         for channel in &playlist_group.channels {
-            if channel.header.item_type.is_series()
-                && !channel.header.parent_code.is_empty()
-            {
+            if channel.header.item_type.is_series() && !channel.header.parent_code.is_empty() {
                 children.entry(channel.header.parent_code.clone()).or_default().push(channel);
             }
         }
@@ -267,7 +270,11 @@ fn match_trakt_items_with_playlist<'a>(
         .filter_map(TraktMatchItem::from_trakt_list_item)
         .collect();
 
-    debug!("Matching {} Trakt items against playlist for content type {:?}", trakt_match_items.len(), category_config.content_type);
+    debug!(
+        "Matching {} Trakt items against playlist for content type {:?}",
+        trakt_match_items.len(),
+        category_config.content_type
+    );
 
     let mut matches = Vec::new();
     for playlist_group in playlist {
@@ -278,7 +285,11 @@ fn match_trakt_items_with_playlist<'a>(
                 let normalized_title = normalize_title_for_matching(&channel.header.title);
                 let channel_year = extract_year_from_title(&channel.header.title);
                 let channel_tmdb_id = channel.get_tmdb_id();
-                if let Some(matched) = find_best_match_for_item((channel, normalized_title, channel_year, channel_tmdb_id), &trakt_match_items, category_config) {
+                if let Some(matched) = find_best_match_for_item(
+                    (channel, normalized_title, channel_year, channel_tmdb_id),
+                    &trakt_match_items,
+                    category_config,
+                ) {
                     matches.push(matched);
                 }
             }
@@ -333,7 +344,10 @@ impl TraktCategoriesProcessor {
                             total_matches += category.channels.len();
                             let category_len = category.channels.len();
                             new_categories.push(category);
-                            debug!("Created Trakt category '{}' with {category_len} items", category_config.category_name);
+                            debug!(
+                                "Created Trakt category '{}' with {category_len} items",
+                                category_config.category_name
+                            );
                         }
                     }
                 }
@@ -357,7 +371,10 @@ impl TraktCategoriesProcessor {
                             total_matches += category.channels.len();
                             let category_len = category.channels.len();
                             new_categories.push(category);
-                            debug!("Created Trakt category '{}' with {category_len} items", category_config.category_name);
+                            debug!(
+                                "Created Trakt category '{}' with {category_len} items",
+                                category_config.category_name
+                            );
                         }
                     }
                 }
@@ -391,7 +408,6 @@ pub async fn process_trakt_categories_for_target(
     let processor = TraktCategoriesProcessor::new(http_client, trakt_config);
     processor.process_trakt_categories(playlist, target, trakt_config).await
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -519,9 +535,7 @@ mod tests {
         assert!(categories.is_empty());
     }
 
-    fn list_config(tmdb_only: bool) -> TraktCategoryConfig {
-        named_list_config("category", tmdb_only)
-    }
+    fn list_config(tmdb_only: bool) -> TraktCategoryConfig { named_list_config("category", tmdb_only) }
 
     fn named_list_config(category_name: &str, tmdb_only: bool) -> TraktCategoryConfig {
         TraktCategoryConfig {
@@ -602,14 +616,19 @@ mod tests {
                     container_extension: "mkv".intern(),
                     video: None,
                     audio: None,
-                    plot: None
+                    plot: None,
                 }))),
                 ..PlaylistItemHeader::default()
             },
         }
     }
 
-    fn trakt_movie(title: &'static str, year: Option<u32>, tmdb_id: Option<u32>, trakt_id: u32) -> TraktMatchItem<'static> {
+    fn trakt_movie(
+        title: &'static str,
+        year: Option<u32>,
+        tmdb_id: Option<u32>,
+        trakt_id: u32,
+    ) -> TraktMatchItem<'static> {
         TraktMatchItem {
             title,
             normalized_title: normalize_title_for_matching(title),
@@ -628,7 +647,7 @@ mod tests {
             listed_at: String::new(),
             notes: None,
             item_type: "movie".to_string(),
-            movie: Some(crate::model::TraktMovie {
+            movie: Some(tuliprox_core::model::TraktMovie {
                 ids: trakt_ids(title, tmdb_id, trakt_id),
                 title: title.to_string(),
                 year,
@@ -646,7 +665,7 @@ mod tests {
             notes: None,
             item_type: "show".to_string(),
             movie: None,
-            show: Some(crate::model::TraktShow {
+            show: Some(tuliprox_core::model::TraktShow {
                 ids: trakt_ids(title, tmdb_id, trakt_id),
                 title: title.to_string(),
                 year,
@@ -655,8 +674,8 @@ mod tests {
         }
     }
 
-    fn trakt_ids(title: &str, tmdb_id: Option<u32>, trakt_id: u32) -> crate::model::TraktIds {
-        crate::model::TraktIds {
+    fn trakt_ids(title: &str, tmdb_id: Option<u32>, trakt_id: u32) -> tuliprox_core::model::TraktIds {
+        tuliprox_core::model::TraktIds {
             trakt: trakt_id,
             slug: title.to_string(),
             tvdb: None,

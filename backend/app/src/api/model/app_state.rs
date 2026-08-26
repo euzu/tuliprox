@@ -34,7 +34,6 @@ use shared::{
 };
 use std::{
     collections::HashMap,
-    ffi::OsStr,
     sync::{atomic::AtomicI8, Arc},
     time::Duration,
 };
@@ -43,7 +42,6 @@ use tokio::{
     task,
 };
 use tokio_util::sync::CancellationToken;
-use url::Url;
 
 macro_rules! cancel_service {
     ($field: ident, $flag:expr, $changes:expr, $cancel_tokens:expr) => {
@@ -777,67 +775,10 @@ impl AppState {
     pub fn get_grace_options(&self) -> GracePeriodOptions { self.app_config.get_grace_options() }
 
     pub fn should_use_manual_redirects(&self) -> bool {
-        let config = self.app_config.config.load();
-        config.proxy.as_ref().is_some_and(|proxy| should_use_manual_redirect_for_proxy(proxy.url.as_str()))
-            || proxy_env_present()
+        crate::model::should_use_manual_redirects(&self.app_config)
     }
 
     pub fn get_encrypt_secret(&self) -> [u8; 16] { self.app_config.get_encrypt_secret() }
-}
-
-fn proxy_env_present() -> bool { should_use_manual_redirects_for_env_vars(std::env::vars_os()) }
-
-fn parse_proxy_url_with_http_fallback(proxy_url: &str) -> Option<Url> {
-    let trimmed = proxy_url.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Ok(url) = Url::parse(trimmed) {
-        if matches!(url.scheme().to_ascii_lowercase().as_str(), "http" | "https") {
-            return Some(url);
-        }
-        if trimmed.contains("://") {
-            return None;
-        }
-    }
-
-    if trimmed.contains("://") {
-        return None;
-    }
-    if trimmed.starts_with('/') || trimmed.starts_with('\\') {
-        return None;
-    }
-
-    Url::parse(format!("http://{trimmed}").as_str()).ok()
-}
-
-fn should_use_manual_redirect_for_proxy(proxy_url: &str) -> bool {
-    parse_proxy_url_with_http_fallback(proxy_url).is_some_and(|url| {
-        matches!(url.scheme().to_ascii_lowercase().as_str(), "http" | "https") && url.host_str().is_some()
-    })
-}
-
-fn should_use_manual_redirects_for_env_vars<I, K, V>(vars: I) -> bool
-where
-    I: IntoIterator<Item=(K, V)>,
-    K: AsRef<OsStr>,
-    V: AsRef<OsStr>,
-{
-    const ENV_KEYS: [&str; 3] = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"];
-
-    vars.into_iter().any(|(key, value)| {
-        let Some(key) = key.as_ref().to_str() else {
-            return false;
-        };
-        let Some(value) = value.as_ref().to_str() else {
-            return false;
-        };
-        let value = value.trim();
-        ENV_KEYS.iter().any(|candidate| candidate.eq_ignore_ascii_case(key))
-            && !value.is_empty()
-            && should_use_manual_redirect_for_proxy(value)
-    })
 }
 
 fn schedules_changed(a: &[ScheduleConfig], b: &[ScheduleConfig]) -> bool {
@@ -962,9 +903,9 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::{should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars};
     use super::{
-        qos_aggregation_changed, schedules_changed, should_use_manual_redirect_for_proxy,
-        should_use_manual_redirects_for_env_vars, video_download_changed,
+        qos_aggregation_changed, schedules_changed, video_download_changed,
     };
     use crate::model::{Config, ScheduleConfig, VideoDownloadConfig};
     use shared::model::{

@@ -1,19 +1,17 @@
-use crate::{
-    model::AppConfig,
-    model::InputSource,
-    repository::get_geoip_path,
-    repository::GeoIp,
-    utils::request::download_text_content,
-};
 use log::{error, info};
 use shared::{
     model::{default_geoip_url, InputFetchMethod},
     utils::Internable,
 };
 use std::{collections::HashMap, io::Cursor, sync::Arc};
+use tuliprox_core::{
+    model::{AppConfig, InputSource},
+    utils::request::download_text_content,
+};
+use tuliprox_repository::{get_geoip_path, GeoIp};
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum GeoIpUpdateError {
+pub enum GeoIpUpdateError {
     #[error("GeoIp update is disabled")]
     Disabled,
     #[error("Failed to download geoip db: {0}")]
@@ -24,7 +22,7 @@ pub(crate) enum GeoIpUpdateError {
     UnknownProcessing,
 }
 
-pub(crate) async fn update_geoip_db(
+pub async fn update_geoip_db(
     app_config: &Arc<AppConfig>,
     http_client: &reqwest::Client,
     geoip_store: &arc_swap::ArcSwapOption<GeoIp>,
@@ -45,16 +43,7 @@ pub(crate) async fn update_geoip_db(
                 method: InputFetchMethod::GET,
                 headers: HashMap::default(),
             };
-            return match download_text_content(
-                app_config,
-                http_client,
-                &input_source,
-                None,
-                None,
-                false,
-            )
-            .await
-            {
+            return match download_text_content(app_config, http_client, &input_source, None, None, false).await {
                 Ok((content, _)) => {
                     let reader = Cursor::new(content);
                     let mut geoip = GeoIp::new();

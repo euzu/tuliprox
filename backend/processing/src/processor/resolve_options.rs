@@ -3,20 +3,16 @@ use shared::create_bitset;
 create_bitset!(u8, ResolveOptionsFlags, Resolve, TmdbMissing, Probe, Background);
 
 pub struct ResolveOptions {
-    pub(crate) flags: ResolveOptionsFlagsSet,
+    pub flags: ResolveOptionsFlagsSet,
     pub resolve_delay: u16,
 }
 
 impl ResolveOptions {
     #[inline]
-    pub fn has_flag(&self, flag: ResolveOptionsFlags) -> bool {
-        self.flags.contains(flag)
-    }
+    pub fn has_flag(&self, flag: ResolveOptionsFlags) -> bool { self.flags.contains(flag) }
 
     #[inline]
-    pub fn unset_flag(&mut self, flag: ResolveOptionsFlags) {
-        self.flags.unset(flag);
-    }
+    pub fn unset_flag(&mut self, flag: ResolveOptionsFlags) { self.flags.unset(flag); }
 }
 
 impl Default for ResolveOptions {

@@ -1,44 +1,58 @@
-use tuliprox_session::ActiveProviderManager;
-use crate::model::ProviderHandle;
-use crate::model::{ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask};
-use crate::library::{MediaMetadata, MetadataResolver, MetadataStorage};
-use crate::iptv::xtream;
-use crate::media_enrichment::policy::MissingFactEnrichmentPolicy;
-use crate::media_enrichment::xtream::{
-    apply_fact_patch_to_video, distinct_non_empty_title_candidates, video_fact_patch_from_metadata,
-    video_fact_patch_from_title_candidates,
+use crate::{
+    fetched_playlist::FetchedPlaylist,
+    input_cache::resolve_input_storage_path,
+    metadata_sink::queue_task_background,
+    processor::{
+        create_resolve_options_function_for_xtream_target, playlist::PlaylistProcessingContext,
+        process_foreground_retry_once, select_cancel_token, ProbeHandleGuard, ResolveOptions, ResolveOptionsFlags,
+        FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
+        FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
+    },
 };
-use crate::processing::fetched_playlist::FetchedPlaylist;
-use crate::model::InputSource;
-use crate::model::{AppConfig, ConfigTarget};
-use crate::model::{ConfigInput, ConfigInputFlags};
-use crate::processing::input_cache::resolve_input_storage_path;
-use crate::processing::processor::playlist::PlaylistProcessingContext;
-use crate::processing::processor::{
-    create_resolve_options_function_for_xtream_target, process_foreground_retry_once, select_cancel_token,
-    ProbeHandleGuard,
-    ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
-    FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
-};
-use crate::repository::persist_input_vod_info;
-use crate::repository::persist_input_vod_info_batch;
-use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
-use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
-use crate::utils::{debug_if_enabled, trace_if_enabled};
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use parking_lot::Mutex;
 use serde_json::Value;
-use shared::error::TuliproxError;
-use shared::model::{
-    MediaQuality, PlaylistEntry, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties,
-    VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo,
+use shared::{
+    defaults::default_probe_user_priority,
+    error::TuliproxError,
+    foundation::ValueProvider,
+    model::{
+        MediaQuality, PlaylistEntry, PlaylistItem, PlaylistItemType, StreamProperties, VideoStreamDetailProperties,
+        VideoStreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamVideoInfo,
+    },
 };
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use shared::foundation::ValueProvider;
-use shared::defaults::default_probe_user_priority;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
+use tuliprox_core::{
+    model::{
+        AppConfig, ConfigInput, ConfigInputFlags, ConfigTarget, InputSource, ProviderHandle, ProviderIdType,
+        ResolveReason, ResolveReasonSet, UpdateTask,
+    },
+    utils::{
+        debug_if_enabled,
+        ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome},
+        trace_if_enabled,
+    },
+};
+use tuliprox_iptv::xtream;
+use tuliprox_library::{
+    library::{MediaMetadata, MetadataResolver, MetadataStorage},
+    media_enrichment::{
+        policy::MissingFactEnrichmentPolicy,
+        xtream::{
+            apply_fact_patch_to_video, distinct_non_empty_title_candidates, video_fact_patch_from_metadata,
+            video_fact_patch_from_title_candidates,
+        },
+    },
+};
+use tuliprox_repository::{persist_input_vod_info, persist_input_vod_info_batch, xtream_get_file_path, BPlusTreeQuery};
+use tuliprox_session::ActiveProviderManager;
 
 create_resolve_options_function_for_xtream_target!(vod);
 
@@ -493,25 +507,24 @@ fn queue_background_vod_info(
             };
             if log_enabled!(Level::Debug) {
                 let has_details = pli.has_details();
-                let (has_tmdb, has_date, has_video, has_audio) =
-                    match pli.header.additional_properties.as_ref() {
-                        Some(StreamProperties::Video(props)) => {
-                            let details = props.details.as_ref();
-                            (
-                                props.tmdb.is_some(),
-                                details.and_then(|d| d.release_date.as_ref()).is_some(),
-                                MediaQuality::is_valid_media_info(details.and_then(|d| d.video.as_deref())),
-                                MediaQuality::is_valid_media_info(details.and_then(|d| d.audio.as_deref())),
-                            )
-                        }
-                        _ => (false, false, false, false),
-                    };
+                let (has_tmdb, has_date, has_video, has_audio) = match pli.header.additional_properties.as_ref() {
+                    Some(StreamProperties::Video(props)) => {
+                        let details = props.details.as_ref();
+                        (
+                            props.tmdb.is_some(),
+                            details.and_then(|d| d.release_date.as_ref()).is_some(),
+                            MediaQuality::is_valid_media_info(details.and_then(|d| d.video.as_deref())),
+                            MediaQuality::is_valid_media_info(details.and_then(|d| d.audio.as_deref())),
+                        )
+                    }
+                    _ => (false, false, false, false),
+                };
                 debug!(
                     "[Task] Creating ResolveVod task for input {}: id={}, reasons={}, has_details={}, has_tmdb={}, has_date={}, has_video_info={}, has_audio_info={}, title=\"{}\"",
                     input.name, provider_id, reasons, has_details, has_tmdb, has_date, has_video, has_audio, pli.header.title
                 );
             }
-            mgr.queue_task_background(input.name.clone(), task);
+            queue_task_background(mgr, input.name.clone(), task);
             queued += 1;
         }
     }
@@ -681,7 +694,7 @@ pub async fn update_vod_metadata(
                     if !content.is_empty() {
                         if let Ok(mut json_value) = serde_json::from_str::<Value>(&content) {
                             if let Some(info) = json_value.get_mut("info").and_then(|v| v.as_object_mut()) {
-                                crate::model::normalize_release_date(info);
+                                tuliprox_core::model::normalize_release_date(info);
                             }
 
                             if let Ok(info) = serde_json::from_value::<XtreamVideoInfo>(json_value) {
@@ -717,17 +730,22 @@ pub async fn update_vod_metadata(
             props = Some(new_props);
         } else {
             // We can't proceed without at least a name
-            return Err(shared::error::TuliproxError::Config(format!("No VOD properties available and no title found for {display_id}")));
+            return Err(shared::error::TuliproxError::Config(format!(
+                "No VOD properties available and no title found for {display_id}"
+            )));
         }
     }
 
     let Some(mut properties) = props else {
-        return Err(shared::error::TuliproxError::Config(format!("No VOD properties available after fallback creation for {display_id}")));
+        return Err(shared::error::TuliproxError::Config(format!(
+            "No VOD properties available after fallback creation for {display_id}"
+        )));
     };
 
     // Xtream's legacy ResolveTmdb input flag currently gates missing identity/temporal fact enrichment.
-    let missing_fact_policy =
-        MissingFactEnrichmentPolicy::fill_missing(resolve_missing_facts && input.has_flag(ConfigInputFlags::ResolveTmdb));
+    let missing_fact_policy = MissingFactEnrichmentPolicy::fill_missing(
+        resolve_missing_facts && input.has_flag(ConfigInputFlags::ResolveTmdb),
+    );
 
     // 2. Resolve missing TMDB/date facts if allowed for this input
     let missing_tmdb = properties.tmdb.is_none();
@@ -780,7 +798,9 @@ pub async fn update_vod_metadata(
                 if meta.as_ref().is_some_and(|m| m.tmdb_id().is_some()) {
                     break;
                 }
-                if Some(title) == playlist_title || existing_item.as_ref().is_some_and(|item| item.title.as_ref() == title) {
+                if Some(title) == playlist_title
+                    || existing_item.as_ref().is_some_and(|item| item.title.as_ref() == title)
+                {
                     debug!("Resolving TMDB for VOD using Playlist Title '{title}' (ID: {display_id})...");
                 } else if title == properties.name.as_ref() {
                     trace!("Fallback to API Name '{}'...", properties.name);
@@ -804,11 +824,7 @@ pub async fn update_vod_metadata(
     // Report whether TMDB data is present (regardless of whether we updated it this call).
     if let Some(out) = tmdb_resolved_out {
         let has_tmdb = properties.tmdb.is_some();
-        let has_date = properties
-            .details
-            .as_ref()
-            .and_then(|d| d.release_date.as_ref())
-            .is_some();
+        let has_date = properties.details.as_ref().and_then(|d| d.release_date.as_ref()).is_some();
         out.store(has_tmdb && has_date, Ordering::Relaxed);
     }
 
@@ -832,7 +848,7 @@ pub async fn update_vod_metadata(
             let input_url = input.url.as_str();
             let username = input.username.as_deref().unwrap_or("");
             let password = input.password.as_deref().unwrap_or("");
-            let stream_url = crate::processing::parser::xtream::create_xtream_url(
+            let stream_url = tuliprox_parser::xtream::create_xtream_url(
                 XtreamCluster::Video,
                 input_url,
                 username,
@@ -854,7 +870,6 @@ pub async fn update_vod_metadata(
             })?;
 
             if is_supported_probe_url(probe_url.as_ref()) {
-
                 let config = app_config.config.load();
                 let metadata_update = config.metadata_update.clone().unwrap_or_default();
                 let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
@@ -862,7 +877,10 @@ pub async fn update_vod_metadata(
                 let analyze_duration = metadata_update.ffprobe.analyze_duration_micros;
                 let probe_size = metadata_update.ffprobe.probe_size_bytes;
 
-                let probe_priority = config.metadata_update.as_ref().map_or(default_probe_user_priority(), |cfg| cfg.probe.user_priority);
+                let probe_priority = config
+                    .metadata_update
+                    .as_ref()
+                    .map_or(default_probe_user_priority(), |cfg| cfg.probe.user_priority);
 
                 // Acquire Connection logic
                 let temp_handle = if active_handle.is_some() {
@@ -876,13 +894,11 @@ pub async fn update_vod_metadata(
 
                 if active_handle.is_some() || temp_handle.is_some() {
                     debug_if_enabled!("Probing VOD '{}' (ID: {})", display_title, display_id);
-                    let cancel_token = select_cancel_token(
-                        temp_handle.as_ref().and_then(ProbeHandleGuard::handle),
-                        active_handle,
-                    );
+                    let cancel_token =
+                        select_cancel_token(temp_handle.as_ref().and_then(ProbeHandleGuard::handle), active_handle);
                     let is_remote_probe =
                         reqwest::Url::parse(probe_url.as_ref()).is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
-                    let probe_params = crate::utils::ffmpeg::ProbeParams {
+                    let probe_params = tuliprox_core::utils::ffmpeg::ProbeParams {
                         url: probe_url.as_ref(),
                         user_agent: user_agent.as_deref(),
                         analyze_duration,
@@ -890,18 +906,12 @@ pub async fn update_vod_metadata(
                         timeout_secs: ffprobe_timeout,
                     };
                     let probe_result = if is_remote_probe {
-                        FfmpegExecutor::new().probe_remote_seekable_url_with_cancel(
-                            client,
-                            &probe_params,
-                            cancel_token,
-                        )
+                        FfmpegExecutor::new()
+                            .probe_remote_seekable_url_with_cancel(client, &probe_params, cancel_token)
                             .await
                     } else {
-                        FfmpegExecutor::new().probe_url_with_cancel(
-                            &probe_params,
-                            config.proxy.as_ref(),
-                            cancel_token,
-                        )
+                        FfmpegExecutor::new()
+                            .probe_url_with_cancel(&probe_params, config.proxy.as_ref(), cancel_token)
                             .await
                     };
                     match probe_result {
@@ -950,7 +960,6 @@ pub async fn update_vod_metadata(
                     guard.release().await;
                 }
             } else {
-
                 debug_if_enabled!(
                     "Skipping unsupported VOD probe for '{}' (ID: {}): {}",
                     display_title,
@@ -965,15 +974,20 @@ pub async fn update_vod_metadata(
         out.store(probe_pending, Ordering::Relaxed);
     }
 
-    let probe_only_unresolved = do_probe && !fetch_info && !resolve_missing_facts && !properties_updated && !fetched_new;
+    let probe_only_unresolved =
+        do_probe && !fetch_info && !resolve_missing_facts && !properties_updated && !fetched_new;
     if probe_only_unresolved {
         if let Some(kind) = probe_failure {
             let err = match kind {
-                ProbeFailureKind::NotFound => {
-                    shared::error::TuliproxError::Config(format!("Probe failed with 404 Not Found for VOD {display_id}"))
+                ProbeFailureKind::NotFound => shared::error::TuliproxError::Config(format!(
+                    "Probe failed with 404 Not Found for VOD {display_id}"
+                )),
+                ProbeFailureKind::Other => {
+                    shared::error::TuliproxError::Config(format!("Probe failed for VOD {display_id}"))
                 }
-                ProbeFailureKind::Other => shared::error::TuliproxError::Config(format!("Probe failed for VOD {display_id}")),
-                ProbeFailureKind::Cancelled => shared::error::TuliproxError::Config(format!("Probe cancelled for VOD {display_id}")),
+                ProbeFailureKind::Cancelled => {
+                    shared::error::TuliproxError::Config(format!("Probe cancelled for VOD {display_id}"))
+                }
             };
             return Err(err);
         }

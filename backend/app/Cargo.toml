@@ -18,6 +18,7 @@ tuliprox-iptv = { version = "3", path = "../iptv" }
 tuliprox-library = { version = "3", path = "../library" }
 tuliprox-messaging = { version = "3", path = "../messaging" }
 tuliprox-parser = { version = "3", path = "../parser" }
+tuliprox-processing = { version = "3", path = "../processing" }
 tuliprox-auth = { version = "3", path = "../auth" }
 tuliprox-config-loader = { version = "3", path = "../config-loader" }
 tuliprox-dvr = { version = "3", path = "../dvr" }
@@ -105,6 +106,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Stora
 vergen = { version = "9.1.0", features = ["build"] }
 
 [dev-dependencies]
+tuliprox-processing = { version = "3", path = "../processing", features = ["test-support"] }
 tuliprox-hls = { version = "3", path = "../hls", features = ["test-support"] }
 # The migration and playlist-stream tests build legacy v2 databases and
 # sorted-index sidecars by hand; those builders live in the engine.

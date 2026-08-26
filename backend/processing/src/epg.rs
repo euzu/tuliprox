@@ -1,14 +1,19 @@
-use crate::processing::parser::xmltv::TVGuide;
-use crate::model::{
-    ConfigInput, EpgSource, EpgSourceType, PersistedEpgSource, PersistedEpgSourceKind, };
-use crate::processing::processor::PlaylistProcessingContext;
-use crate::repository::get_input_storage_path;
-use crate::utils::{add_prefix_to_filename, prepare_file_path, request};
+use crate::{parser::xmltv::TVGuide, processor::PlaylistProcessingContext};
 use log::{debug, warn};
-use shared::concat_string;
-use shared::error::TuliproxError;
-use shared::utils::{sanitize_sensitive_info, short_hash};
-use std::{collections::HashSet, path::{Path, PathBuf}};
+use shared::{
+    concat_string,
+    error::TuliproxError,
+    utils::{sanitize_sensitive_info, short_hash},
+};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
+use tuliprox_core::{
+    model::{ConfigInput, EpgSource, EpgSourceType, PersistedEpgSource, PersistedEpgSourceKind},
+    utils::{add_prefix_to_filename, prepare_file_path, request},
+};
+use tuliprox_repository::get_input_storage_path;
 
 pub async fn get_input_raw_epg_file_path(
     epg_source: &EpgSource,
@@ -35,7 +40,8 @@ pub async fn get_input_raw_epg_file_path(
 }
 
 // Used only by the playlist API's tests, which build EPG cache paths directly.
-#[cfg(test)]
+// Published under `test-support` because those tests live in another crate.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn get_input_raw_xmltv_file_path(
     url: &str,
     input: &ConfigInput,
@@ -145,7 +151,7 @@ fn epg_download_limit(epg_source: &EpgSource) -> Option<u64> {
 }
 
 async fn cleanup_unlisted_epg_files(
-    file_locks: &crate::utils::FileLockManager,
+    file_locks: &tuliprox_core::utils::FileLockManager,
     keep_files: &[PathBuf],
     suffix: &str,
 ) -> std::io::Result<()> {
@@ -213,10 +219,7 @@ pub async fn get_xmltv(
             if file_paths.is_empty() {
                 (None, errors)
             } else {
-                (
-                    Some(TVGuide::new(file_paths).with_file_locks(std::sync::Arc::clone(&ctx.config.file_locks))),
-                    errors,
-                )
+                (Some(TVGuide::new(file_paths).with_file_locks(std::sync::Arc::clone(&ctx.config.file_locks))), errors)
             }
         }
     }
@@ -229,9 +232,10 @@ fn persisted_source_from_config(
     let kind = match epg_source.source_type {
         EpgSourceType::Xmltv => PersistedEpgSourceKind::Xmltv,
         EpgSourceType::Ics => {
-            let channel_id = epg_source.channel_id.clone().ok_or_else(|| {
-                TuliproxError::ConfigEpg("channel_id is required for ICS EPG sources".to_string())
-            })?;
+            let channel_id = epg_source
+                .channel_id
+                .clone()
+                .ok_or_else(|| TuliproxError::ConfigEpg("channel_id is required for ICS EPG sources".to_string()))?;
             PersistedEpgSourceKind::Ics {
                 channel_id,
                 channel_title: epg_source.channel_title.clone(),
@@ -241,20 +245,15 @@ fn persisted_source_from_config(
         }
     };
 
-    Ok(PersistedEpgSource {
-        file_path,
-        priority: epg_source.priority,
-        logo_override: epg_source.logo_override,
-        kind,
-    })
+    Ok(PersistedEpgSource { file_path, priority: epg_source.priority, logo_override: epg_source.logo_override, kind })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{model::ConfigInput, utils::FileLockManager};
     use shared::utils::Internable;
     use tempfile::tempdir;
+    use tuliprox_core::{model::ConfigInput, utils::FileLockManager};
 
     fn source(source_type: EpgSourceType, url: &str, channel_id: Option<&str>) -> EpgSource {
         EpgSource {
@@ -272,10 +271,7 @@ mod tests {
     #[tokio::test]
     async fn epg_cache_path_uses_xmltv_suffix() {
         let dir = tempdir().expect("temp dir");
-        let input = ConfigInput {
-            name: "input".intern(),
-            ..ConfigInput::default()
-        };
+        let input = ConfigInput { name: "input".intern(), ..ConfigInput::default() };
         let path = get_input_raw_epg_file_path(
             &source(EpgSourceType::Xmltv, "https://example.com/xmltv.xml", None),
             &input,
@@ -289,10 +285,7 @@ mod tests {
     #[tokio::test]
     async fn epg_cache_path_uses_ics_suffix() {
         let dir = tempdir().expect("temp dir");
-        let input = ConfigInput {
-            name: "input".intern(),
-            ..ConfigInput::default()
-        };
+        let input = ConfigInput { name: "input".intern(), ..ConfigInput::default() };
         let path = get_input_raw_epg_file_path(
             &source(EpgSourceType::Ics, "https://example.com/f1.ics", Some("f1.calendar")),
             &input,
@@ -306,10 +299,7 @@ mod tests {
     #[tokio::test]
     async fn same_ics_url_with_different_channel_id_gets_different_cache_path() {
         let dir = tempdir().expect("temp dir");
-        let input = ConfigInput {
-            name: "input".intern(),
-            ..ConfigInput::default()
-        };
+        let input = ConfigInput { name: "input".intern(), ..ConfigInput::default() };
         let first = get_input_raw_epg_file_path(
             &source(EpgSourceType::Ics, "https://example.com/calendar.ics", Some("one")),
             &input,
@@ -355,9 +345,9 @@ mod tests {
     #[test]
     fn xmltv_source_does_not_apply_ics_download_limit() {
         let mut epg_source = source(EpgSourceType::Xmltv, "https://example.com/xmltv.xml", None);
-        epg_source.ics = Some(crate::model::IcsEpgSourceConfig {
+        epg_source.ics = Some(tuliprox_core::model::IcsEpgSourceConfig {
             max_download_bytes: 123,
-            ..crate::model::IcsEpgSourceConfig::default()
+            ..tuliprox_core::model::IcsEpgSourceConfig::default()
         });
 
         assert_eq!(epg_download_limit(&epg_source), None);
@@ -366,9 +356,9 @@ mod tests {
     #[test]
     fn ics_source_applies_configured_download_limit() {
         let mut epg_source = source(EpgSourceType::Ics, "https://example.com/calendar.ics", Some("calendar"));
-        epg_source.ics = Some(crate::model::IcsEpgSourceConfig {
+        epg_source.ics = Some(tuliprox_core::model::IcsEpgSourceConfig {
             max_download_bytes: 123,
-            ..crate::model::IcsEpgSourceConfig::default()
+            ..tuliprox_core::model::IcsEpgSourceConfig::default()
         });
 
         assert_eq!(epg_download_limit(&epg_source), Some(123));

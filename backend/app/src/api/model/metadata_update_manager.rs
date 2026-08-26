@@ -3386,6 +3386,35 @@ impl InputWorker {
     }
 }
 
+/// The pipeline's view of this manager.
+///
+/// `tuliprox-processing` needs three operations here and nothing else; the trait
+/// lives there so the pipeline does not have to name this type. The impl lives
+/// here because the type does.
+impl tuliprox_processing::metadata_sink::MetadataUpdateSink for MetadataUpdateManager {
+    fn acquire_update_pause_guard(
+        &self,
+    ) -> tuliprox_processing::metadata_sink::SinkFuture<'_, tokio::sync::OwnedRwLockWriteGuard<()>> {
+        Box::pin(MetadataUpdateManager::acquire_update_pause_guard(self))
+    }
+
+    fn queue_task(
+        &self,
+        input_name: Arc<str>,
+        task: UpdateTask,
+    ) -> tuliprox_processing::metadata_sink::SinkFuture<'_, ()> {
+        Box::pin(MetadataUpdateManager::queue_task(self, input_name, task))
+    }
+
+    fn should_skip_enqueue<'a>(
+        &'a self,
+        input_name: Arc<str>,
+        task: &'a UpdateTask,
+    ) -> tuliprox_processing::metadata_sink::SinkFuture<'a, bool> {
+        Box::pin(MetadataUpdateManager::should_skip_enqueue(self, input_name, task))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,10 +1,13 @@
-use crate::model::{ConfigSortRule, ConfigTarget};
-use shared::foundation::ValueProvider;
-use shared::model::{PlaylistGroup, SortOrder, SortTarget};
-use shared::utils::natural_cmp;
-use std::cmp::Ordering;
-use std::sync::Arc;
-use crate::utils::normalized_source_ordinal;
+use shared::{
+    foundation::ValueProvider,
+    model::{PlaylistGroup, SortOrder, SortTarget},
+    utils::natural_cmp,
+};
+use std::{cmp::Ordering, sync::Arc};
+use tuliprox_core::{
+    model::{ConfigSortRule, ConfigTarget},
+    utils::normalized_source_ordinal,
+};
 
 fn apply_sort_order(order: SortOrder, ordering: Ordering) -> Ordering {
     match (order, ordering) {
@@ -257,10 +260,7 @@ fn playlist_comparator(
 }
 
 fn get_group_source_ordinal(group: &PlaylistGroup) -> u32 {
-    group
-        .channels
-        .first()
-        .map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal))
+    group.channels.first().map_or(u32::MAX, |c| normalized_source_ordinal(c.header.source_ordinal))
 }
 
 fn compare_cached_rule_entries(
@@ -295,15 +295,10 @@ fn is_effective_rule(rule: &ConfigSortRule) -> bool {
     rule.order != SortOrder::None || rule.sequence.as_ref().is_some_and(|sequence| !sequence.is_empty())
 }
 
-pub(in crate::processing::processor) fn sort_playlist(
-    target: &ConfigTarget,
-    playlist: &mut Vec<PlaylistGroup>,
-) -> bool {
+pub(in crate::processor) fn sort_playlist(target: &ConfigTarget, playlist: &mut Vec<PlaylistGroup>) -> bool {
     let Some(sort) = &target.sort else {
         for group in &mut *playlist {
-            group
-                .channels
-                .sort_by_key(|a| normalized_source_ordinal(a.header.source_ordinal));
+            group.channels.sort_by_key(|a| normalized_source_ordinal(a.header.source_ordinal));
         }
         playlist.sort_by_key(get_group_source_ordinal);
         return true;
@@ -356,9 +351,7 @@ fn sort_channels_in_groups(groups: &mut [PlaylistGroup], rules: &[ConfigSortRule
 
     if channel_rules.is_empty() {
         for group in groups {
-            group
-                .channels
-                .sort_by_key(|a| normalized_source_ordinal(a.header.source_ordinal));
+            group.channels.sort_by_key(|a| normalized_source_ordinal(a.header.source_ordinal));
         }
         return;
     }
@@ -387,13 +380,12 @@ mod tests {
     use super::{
         compare_rule_entries, playlist_comparator, sort_channels_in_groups, sort_groups, PreparedRule, RuleCacheEntry,
     };
-    use crate::model::ConfigSortRule;
-    use shared::foundation::Filter;
-    use shared::model::{
-        ItemField, PlaylistGroup, PlaylistItem, PlaylistItemHeader, SortOrder, SortTarget, XtreamCluster,
+    use shared::{
+        foundation::Filter,
+        model::{ItemField, PlaylistGroup, PlaylistItem, PlaylistItemHeader, SortOrder, SortTarget, XtreamCluster},
     };
-    use std::cmp::Ordering;
-    use std::sync::Arc;
+    use std::{cmp::Ordering, sync::Arc};
+    use tuliprox_core::model::ConfigSortRule;
 
     fn make_group(id: u32, title: &str, channels: Vec<PlaylistItem>) -> PlaylistGroup {
         PlaylistGroup { id, title: title.into(), channels, xtream_cluster: XtreamCluster::Live }

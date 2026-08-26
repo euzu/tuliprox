@@ -1,19 +1,18 @@
-use crate::{
-    model::{Epg, EpgConfig, EpgSmartMatchConfig},
-    processing::fetched_playlist::FetchedPlaylist,
-    processing::parser::xmltv::normalize_channel_name,
-    utils::with_folded_epg_id,
-};
+use crate::{fetched_playlist::FetchedPlaylist, parser::xmltv::normalize_channel_name};
 use log::{debug, trace, warn};
 use rphonetic::{DoubleMetaphone, Encoder};
 use shared::{
     model::{EpgNamePrefix, EpgSmartMatchConfigDto, PlaylistItem, XtreamCluster},
-    utils::{CONSTANTS, Internable},
+    utils::{Internable, CONSTANTS},
 };
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     sync::Arc,
+};
+use tuliprox_core::{
+    model::{Epg, EpgConfig, EpgSmartMatchConfig},
+    utils::with_folded_epg_id,
 };
 
 const MIN_FUZZY_SCORE_MARGIN: u16 = 3;
@@ -90,7 +89,7 @@ impl EpgIdCache {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```text
     /// let cache = EpgIdCache::new(None);
     /// assert!(cache.is_empty());
     /// ```
@@ -134,7 +133,7 @@ impl EpgIdCache {
         with_folded_epg_id(id, |folded| self.channel_epg_id.contains(folded))
     }
 
-    pub(crate) fn needs_guide_names(&self, id: &str) -> bool { self.contains_channel_epg_id(id) }
+    pub fn needs_guide_names(&self, id: &str) -> bool { self.contains_channel_epg_id(id) }
 
     pub fn insert_processed_epg_id(&mut self, id: &str) {
         with_folded_epg_id(id, |folded| self.processed.insert(folded.intern()));
@@ -220,7 +219,7 @@ impl EpgIdCache {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```text
     /// let mut cache = EpgIdCache::new(None);
     /// cache.normalize_and_store("Discovery Channel", Some(&"discovery.epg".to_string()));
     /// assert!(cache.normalized.contains_key(&cache.normalize("Discovery Channel")));
@@ -258,16 +257,20 @@ impl EpgIdCache {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```text
     /// let cache = EpgIdCache::new(None);
     /// let normalized = cache.normalize("HBO HD");
     /// assert!(!normalized.is_empty());
     /// ```
     fn normalize(&self, name: &str) -> String { normalize_channel_name(name, &self.smart_match_config) }
 
-    pub(crate) fn phonetic(&self, name: &Arc<str>) -> Arc<str> {
+    pub fn phonetic(&self, name: &Arc<str>) -> Arc<str> {
         let result = self.metaphone.encode(name);
-        if result.is_empty() { name.clone() } else { result.intern() }
+        if result.is_empty() {
+            name.clone()
+        } else {
+            result.intern()
+        }
     }
 
     pub fn collect_epg_id(&mut self, fp: &mut FetchedPlaylist) {
@@ -740,7 +743,7 @@ fn referenced_live_epg_ids(fp: &mut FetchedPlaylist<'_>) -> HashSet<Arc<str>> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```text
 /// let mut new_epg = Vec::new();
 /// let mut playlist = FetchedPlaylist::default();
 /// let mut id_cache = EpgIdCache::new(None);
@@ -815,7 +818,7 @@ async fn assign_channel_epg(new_epg: &mut Vec<Epg>, fp: &mut FetchedPlaylist<'_>
 ///
 /// # Examples
 ///
-/// ```
+/// ```text
 /// let mut playlist = FetchedPlaylist::default();
 /// let mut epg_data = Vec::new();
 /// process_playlist_epg(&mut playlist, &mut epg_data);
@@ -837,16 +840,8 @@ pub async fn process_playlist_epg(fp: &mut FetchedPlaylist<'_>, epg: &mut Vec<Ep
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        model::{
-            ConfigInput, EpgConfig, EpgSmartMatchConfig, IcsEpgSourceConfig, PersistedEpgSource,
-            PersistedEpgSourceKind,
-        },
-        processing::parser::xmltv::TVGuide,
-        processing::fetched_playlist::FetchedPlaylist,
-        repository::{MemoryPlaylistSource},
-    };
-    use rand::{Rng, distr::Alphanumeric};
+    use crate::{fetched_playlist::FetchedPlaylist, parser::xmltv::TVGuide};
+    use rand::{distr::Alphanumeric, Rng};
     use rphonetic::{DoubleMetaphone, Encoder};
     use shared::{
         model::{ConfigInputDto, PlaylistGroup, PlaylistItemHeader, PlaylistItemType},
@@ -855,6 +850,10 @@ mod tests {
     use std::{collections::HashSet, fs, sync::Arc};
     use tempfile::tempdir;
     use tokio::time::Instant;
+    use tuliprox_core::model::{
+        ConfigInput, EpgConfig, EpgSmartMatchConfig, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
+    };
+    use tuliprox_repository::MemoryPlaylistSource;
 
     fn random_string() -> String { rand::rng().sample_iter(&Alphanumeric).take(30).map(char::from).collect() }
 
@@ -921,7 +920,7 @@ mod tests {
         xmltv: &str,
         channel_name: &str,
         current_epg_id: Option<&str>,
-    ) -> (Option<Arc<str>>, Vec<crate::model::Epg>) {
+    ) -> (Option<Arc<str>>, Vec<tuliprox_core::model::Epg>) {
         let (mut assigned_ids, epg) = run_smart_xmltv_matches(xmltv, &[(channel_name, current_epg_id)]).await;
         (assigned_ids.pop().flatten(), epg)
     }
@@ -929,7 +928,7 @@ mod tests {
     async fn run_smart_xmltv_matches(
         xmltv: &str,
         channels: &[(&str, Option<&str>)],
-    ) -> (Vec<Option<Arc<str>>>, Vec<crate::model::Epg>) {
+    ) -> (Vec<Option<Arc<str>>>, Vec<tuliprox_core::model::Epg>) {
         run_xmltv_matches(xmltv, channels, true).await
     }
 
@@ -937,7 +936,7 @@ mod tests {
         xmltv: &str,
         channels: &[(&str, Option<&str>)],
         smart_matching: bool,
-    ) -> (Vec<Option<Arc<str>>>, Vec<crate::model::Epg>) {
+    ) -> (Vec<Option<Arc<str>>>, Vec<tuliprox_core::model::Epg>) {
         let dir = tempdir().unwrap();
         let epg_path = dir.path().join("smart-match.xml");
         fs::write(&epg_path, xmltv).unwrap();

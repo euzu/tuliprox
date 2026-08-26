@@ -3,36 +3,36 @@ mod stalker;
 mod stalker_refresh;
 mod xtream;
 // mod affix;
-mod xtream_vod;
-mod xtream_series;
 mod deduplicate;
 mod epg;
-mod sort;
-mod trakt;
 mod library;
-mod stream_probe;
 mod probe_handle_guard;
 mod resolve_options;
-pub use self::playlist::*;
-pub(crate) use self::stalker::{
-    download_stalker_playlist, re_resolve_stalker_url, StalkerCluster,
+mod sort;
+mod stream_probe;
+mod trakt;
+mod xtream_series;
+mod xtream_vod;
+pub use self::{
+    epg::*,
+    playlist::*,
+    probe_handle_guard::*,
+    resolve_options::*,
+    stalker::{download_stalker_playlist, re_resolve_stalker_url, StalkerCluster},
+    stalker_refresh::StalkerRefreshMode,
+    stream_probe::*,
+    xtream::*,
+    xtream_series::*,
+    xtream_vod::*,
 };
-pub(crate) use self::stalker_refresh::StalkerRefreshMode;
-pub use self::epg::*;
-pub use self::xtream::*;
-pub use self::xtream_vod::*;
-pub use self::xtream_series::*;
-pub use self::stream_probe::*;
-pub(crate) use self::probe_handle_guard::*;
-pub use self::resolve_options::*;
-use crate::model::ProviderHandle;
 use tokio_util::sync::CancellationToken;
+use tuliprox_core::model::ProviderHandle;
 
-pub(crate) const FOREGROUND_BATCH_SIZE: usize = 200;
-pub(crate) const FOREGROUND_RETRY_BATCH_MAX_SIZE: usize = FOREGROUND_BATCH_SIZE * 4;
-pub(crate) const FOREGROUND_MIN_RETRY_DELAY_SECS: u64 = 1;
+pub const FOREGROUND_BATCH_SIZE: usize = 200;
+pub const FOREGROUND_RETRY_BATCH_MAX_SIZE: usize = FOREGROUND_BATCH_SIZE * 4;
+pub const FOREGROUND_MIN_RETRY_DELAY_SECS: u64 = 1;
 
-pub(crate) fn select_cancel_token<'a>(
+pub fn select_cancel_token<'a>(
     acquired_handle: Option<&'a ProviderHandle>,
     active_handle: Option<&'a ProviderHandle>,
 ) -> Option<&'a CancellationToken> {
@@ -41,7 +41,6 @@ pub(crate) fn select_cancel_token<'a>(
         .or_else(|| active_handle.and_then(|h| h.cancel_token.as_ref()))
 }
 
-
 //
 // fn get_resolve_<cluster>_options(target: &ConfigTarget, fpl: &FetchedPlaylist) -> bool
 //
@@ -49,7 +48,7 @@ pub(crate) fn select_cancel_token<'a>(
 macro_rules! create_resolve_options_function_for_xtream_target {
     ($cluster:ident) => {
         paste::paste! {
-            fn [<get_resolve_ $cluster _options>](target: &ConfigTarget, fpl: &FetchedPlaylist) -> $crate::processing::processor::ResolveOptions {
+            fn [<get_resolve_ $cluster _options>](target: &ConfigTarget, fpl: &FetchedPlaylist) -> $crate::processor::ResolveOptions {
                 match target.get_xtream_output() {
                     Some(_) => {
                         let input_options = fpl.input.options.as_ref();
@@ -63,11 +62,11 @@ macro_rules! create_resolve_options_function_for_xtream_target {
                             resolve_background
                         ) = if let Some(options) = input_options {
                             (
-                                options.has_flag($crate::model::ConfigInputFlags::ResolveTmdb),
-                                options.has_flag($crate::model::ConfigInputFlags::[<Resolve $cluster:camel>]),
-                                options.has_flag($crate::model::ConfigInputFlags::[<Probe $cluster:camel>]),
+                                options.has_flag(tuliprox_core::model::ConfigInputFlags::ResolveTmdb),
+                                options.has_flag(tuliprox_core::model::ConfigInputFlags::[<Resolve $cluster:camel>]),
+                                options.has_flag(tuliprox_core::model::ConfigInputFlags::[<Probe $cluster:camel>]),
                                 options.resolve_delay,
-                                options.has_flag($crate::model::ConfigInputFlags::ResolveBackground)
+                                options.has_flag(tuliprox_core::model::ConfigInputFlags::ResolveBackground)
                             )
                         } else {
                             (
@@ -83,25 +82,25 @@ macro_rules! create_resolve_options_function_for_xtream_target {
                         let probe_enabled = input_probe_enabled;
                         let resolve_delay = input_resolve_delay;
 
-                        let mut flags = $crate::processing::processor::ResolveOptionsFlagsSet::new();
+                        let mut flags = $crate::processor::ResolveOptionsFlagsSet::new();
                         if resolve_enabled && input_is_xtream {
-                            flags.set($crate::processing::processor::ResolveOptionsFlags::Resolve);
+                            flags.set($crate::processor::ResolveOptionsFlags::Resolve);
                         }
                         if resolve_tmdb_missing {
-                            flags.set($crate::processing::processor::ResolveOptionsFlags::TmdbMissing);
+                            flags.set($crate::processor::ResolveOptionsFlags::TmdbMissing);
                         }
                         if input_is_xtream && probe_enabled {
-                            flags.set($crate::processing::processor::ResolveOptionsFlags::Probe);
+                            flags.set($crate::processor::ResolveOptionsFlags::Probe);
                         }
                         if resolve_background {
-                            flags.set($crate::processing::processor::ResolveOptionsFlags::Background);
+                            flags.set($crate::processor::ResolveOptionsFlags::Background);
                         }
-                        $crate::processing::processor::ResolveOptions {
+                        $crate::processor::ResolveOptions {
                             flags,
                             resolve_delay,
                         }
                     },
-                    None => $crate::processing::processor::ResolveOptions::default(),
+                    None => $crate::processor::ResolveOptions::default(),
                 }
             }
         }
@@ -142,9 +141,9 @@ macro_rules! process_foreground_retry_once {
             }
 
             let __provider_id = if let Ok(__uid) = __pli.header.id.parse::<u32>() {
-                crate::model::ProviderIdType::Id(__uid)
+                tuliprox_core::model::ProviderIdType::Id(__uid)
             } else {
-                crate::model::ProviderIdType::from(&*__pli.header.id)
+                tuliprox_core::model::ProviderIdType::from(&*__pli.header.id)
             };
 
             if !$retry_once_ids.remove(&__provider_id) {
@@ -171,7 +170,7 @@ macro_rules! process_foreground_retry_once {
                         let __file_lock = $ctx.config.file_locks.read_lock(&$xtream_path).await;
                         let __xtream_path = $xtream_path.clone();
                         let __query = match tokio::task::spawn_blocking(move || {
-                            crate::repository::BPlusTreeQuery::<u32, shared::model::XtreamPlaylistItem>::try_new(
+                            tuliprox_repository::BPlusTreeQuery::<u32, shared::model::XtreamPlaylistItem>::try_new(
                                 &__xtream_path,
                             )
                         })
@@ -224,7 +223,7 @@ macro_rules! process_foreground_retry_once {
                                         // Foreground retry batches can include text provider IDs (e.g. M3U).
                                         // Persist batch functions for these paths are keyed by numeric Xtream IDs,
                                         // so text IDs are intentionally skipped here.
-                                        if let crate::model::ProviderIdType::Id(__vid) = __id {
+                                        if let tuliprox_core::model::ProviderIdType::Id(__vid) = __id {
                                             Some((*__vid, __props.clone()))
                                         } else {
                                             None
@@ -274,4 +273,6 @@ macro_rules! process_foreground_retry_once {
         }
     };
 }
+// `macro_rules!` without `#[macro_export]`: the re-export cannot be wider than
+// the crate.
 pub(crate) use process_foreground_retry_once;

@@ -1,28 +1,32 @@
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
-use shared::error::TuliproxError;
-use shared::model::stalker::StalkerStreamKind;
-use shared::model::stalker_item::StalkerPlaylistItem;
-
-use crate::model::{AppConfig, ConfigInput, ConfigInputFlags};
-use crate::processing::parser::stalker as parser;
-use crate::repository::stalker_generation_repository::{
-    cleanup_obsolete_generations, clear_checkpoint, generation_data_path, load_checkpoint,
-    publish_selection, save_checkpoint, StalkerCheckpoint, StalkerGenerationData, StalkerRefreshPhase,
-};
-use crate::repository::stalker_repository::{
-    load_stalker_items_after, prepare_stalker_episode_series_at, promote_stalker_file,
-    remove_stalker_file, snapshot_stalker_epg_at, snapshot_stalker_items_at,
-    upsert_stalker_epg_at, upsert_stalker_items_at,
-};
-use crate::iptv::stalker::catalog::{StalkerCategory, StalkerRawItem};
-use crate::iptv::stalker::client::StalkerApiClient;
-use crate::iptv::stalker::error::StalkerError;
-use crate::iptv::stalker::profile::StalkerHandshake;
 use super::stalker::StalkerCluster;
+use shared::{
+    error::TuliproxError,
+    model::{stalker::StalkerStreamKind, stalker_item::StalkerPlaylistItem},
+};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::Arc,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
+use tuliprox_core::model::{AppConfig, ConfigInput, ConfigInputFlags};
+use tuliprox_iptv::stalker::{
+    catalog::{StalkerCategory, StalkerRawItem},
+    client::StalkerApiClient,
+    error::StalkerError,
+    parser,
+    profile::StalkerHandshake,
+};
+use tuliprox_repository::{
+    stalker_generation_repository::{
+        cleanup_obsolete_generations, clear_checkpoint, generation_data_path, load_checkpoint, publish_selection,
+        save_checkpoint, StalkerCheckpoint, StalkerGenerationData, StalkerRefreshPhase,
+    },
+    stalker_repository::{
+        load_stalker_items_after, prepare_stalker_episode_series_at, promote_stalker_file, remove_stalker_file,
+        snapshot_stalker_epg_at, snapshot_stalker_items_at, upsert_stalker_epg_at, upsert_stalker_items_at,
+    },
+};
 
 const MAX_RETRIES: u8 = 3;
 const SKIPPED_SAMPLE_LIMIT: usize = 32;
@@ -43,9 +47,7 @@ pub enum StalkerRefreshMode {
 impl StalkerRefreshMode {
     pub fn budget(self) -> StalkerRefreshBudget {
         match self {
-            Self::ServerSlice => {
-                StalkerRefreshBudget::deadline(Instant::now() + std::time::Duration::from_mins(45))
-            }
+            Self::ServerSlice => StalkerRefreshBudget::deadline(Instant::now() + std::time::Duration::from_mins(45)),
             Self::Parallel => StalkerRefreshBudget::units(8),
             Self::Complete => StalkerRefreshBudget::unlimited(),
         }
@@ -112,10 +114,7 @@ impl StalkerClusterSelection {
     }
 
     fn mask(self) -> u8 {
-        u8::from(self.live)
-            | (u8::from(self.vod) << 1)
-            | (u8::from(self.series) << 2)
-            | (u8::from(self.epg) << 3)
+        u8::from(self.live) | (u8::from(self.vod) << 1) | (u8::from(self.series) << 2) | (u8::from(self.epg) << 3)
     }
 }
 
@@ -146,18 +145,17 @@ fn next_phase_after_vod(selection: StalkerClusterSelection) -> StalkerRefreshPha
 }
 
 fn next_phase_after_series(selection: StalkerClusterSelection) -> StalkerRefreshPhase {
-    if selection.epg { StalkerRefreshPhase::Epg } else { StalkerRefreshPhase::Complete }
+    if selection.epg {
+        StalkerRefreshPhase::Epg
+    } else {
+        StalkerRefreshPhase::Complete
+    }
 }
 
 #[derive(Debug)]
 pub enum StalkerRefreshOutcome {
     Complete,
-    Yielded {
-        phase: StalkerRefreshPhase,
-        processed: u64,
-        skipped: u64,
-        error: Option<TuliproxError>,
-    },
+    Yielded { phase: StalkerRefreshPhase, processed: u64, skipped: u64, error: Option<TuliproxError> },
     Terminal(TuliproxError),
 }
 
@@ -178,12 +176,8 @@ async fn load_or_start_checkpoint(
         }
     }
 
-    let mut state = StalkerCheckpoint::new(
-        identity_fingerprint,
-        generation_id(),
-        selection.mask(),
-        chrono::Utc::now().timestamp(),
-    );
+    let mut state =
+        StalkerCheckpoint::new(identity_fingerprint, generation_id(), selection.mask(), chrono::Utc::now().timestamp());
     state.phase = first_phase(selection);
     save_checkpoint(storage_path, &state).await?;
     Ok(state)
@@ -194,22 +188,14 @@ async fn finish_completed_refresh(
     identity_fingerprint: u64,
     checkpoint: &StalkerCheckpoint,
 ) -> Result<(), TuliproxError> {
-    let manifest = publish_selection(
-        storage_path,
-        identity_fingerprint,
-        checkpoint.generation,
-        checkpoint.selection_mask,
-    )
-    .await?;
+    let manifest =
+        publish_selection(storage_path, identity_fingerprint, checkpoint.generation, checkpoint.selection_mask).await?;
     clear_checkpoint(storage_path).await?;
     cleanup_obsolete_generations(storage_path, &manifest).await
 }
 
 fn category_map(categories: Vec<StalkerCategory>) -> HashMap<u32, StalkerCategory> {
-    categories
-        .into_iter()
-        .filter_map(|category| category.id.parse().ok().map(|id| (id, category)))
-        .collect()
+    categories.into_iter().filter_map(|category| category.id.parse().ok().map(|id| (id, category))).collect()
 }
 
 fn category_map_result(
@@ -227,10 +213,8 @@ fn map_items(
     raw_items
         .iter()
         .map(|raw| {
-            let category = raw
-                .category_id()
-                .and_then(|value| value.parse::<u32>().ok())
-                .and_then(|id| categories.get(&id));
+            let category =
+                raw.category_id().and_then(|value| value.parse::<u32>().ok()).and_then(|id| categories.get(&id));
             parser::map_stalker_to_playlist_item(raw, category, kind, added_at)
         })
         .collect()
@@ -238,9 +222,10 @@ fn map_items(
 
 fn catalog_page_signature<'a>(ids: impl Iterator<Item = Option<&'a str>>) -> u64 {
     ids.fold(14_695_981_039_346_656_037_u64, |hash, id| {
-        id.unwrap_or_default().bytes().chain([0]).fold(hash, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211)
-        })
+        id.unwrap_or_default()
+            .bytes()
+            .chain([0])
+            .fold(hash, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(1_099_511_628_211))
     })
 }
 
@@ -337,7 +322,8 @@ pub async fn advance_stalker_refresh(
                     }
                     Ok(raw) => {
                         let items = map_items(&raw, categories, StalkerStreamKind::Live, added_at);
-                        let path = generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::Live);
+                        let path =
+                            generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::Live);
                         snapshot_stalker_items_at(app_config, path.clone(), &items).await?;
                         checkpoint.processed = checkpoint.processed.saturating_add(items.len() as u64);
                         checkpoint.phase = next_phase_after_live(selection);
@@ -364,13 +350,9 @@ pub async fn advance_stalker_refresh(
                     Err(err) => return yield_after_error(storage_path, checkpoint, provider_error(&err)).await,
                 };
                 let signature = catalog_page_signature(response.items.iter().map(|item| item.id.as_deref()));
-                if let Err(err) = ensure_page_advanced(
-                    response.next_page,
-                    checkpoint.page_signature,
-                    signature,
-                    page,
-                    "itv",
-                ) {
+                if let Err(err) =
+                    ensure_page_advanced(response.next_page, checkpoint.page_signature, signature, page, "itv")
+                {
                     return yield_after_error(storage_path, checkpoint, err).await;
                 }
                 let items = map_items(&response.items, categories, StalkerStreamKind::Live, added_at);
@@ -400,13 +382,9 @@ pub async fn advance_stalker_refresh(
                     Err(err) => return yield_after_error(storage_path, checkpoint, provider_error(&err)).await,
                 };
                 let signature = catalog_page_signature(response.items.iter().map(|item| item.id.as_deref()));
-                if let Err(err) = ensure_page_advanced(
-                    response.next_page,
-                    checkpoint.page_signature,
-                    signature,
-                    page,
-                    "vod",
-                ) {
+                if let Err(err) =
+                    ensure_page_advanced(response.next_page, checkpoint.page_signature, signature, page, "vod")
+                {
                     return yield_after_error(storage_path, checkpoint, err).await;
                 }
                 let items = map_items(&response.items, categories, StalkerStreamKind::Movie, added_at);
@@ -436,13 +414,9 @@ pub async fn advance_stalker_refresh(
                     Err(err) => return yield_after_error(storage_path, checkpoint, provider_error(&err)).await,
                 };
                 let signature = catalog_page_signature(response.items.iter().map(|item| item.id.as_deref()));
-                if let Err(err) = ensure_page_advanced(
-                    response.next_page,
-                    checkpoint.page_signature,
-                    signature,
-                    page,
-                    "series",
-                ) {
+                if let Err(err) =
+                    ensure_page_advanced(response.next_page, checkpoint.page_signature, signature, page, "series")
+                {
                     return yield_after_error(storage_path, checkpoint, err).await;
                 }
                 let roots: Vec<_> = response
@@ -463,7 +437,8 @@ pub async fn advance_stalker_refresh(
                         root
                     })
                     .collect();
-                let roots_path = generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::SeriesRoots);
+                let roots_path =
+                    generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::SeriesRoots);
                 upsert_stalker_items_at(app_config, &roots_path, &roots).await?;
                 checkpoint.processed = checkpoint.processed.saturating_add(roots.len() as u64);
                 checkpoint.phase = match response.next_page {
@@ -479,7 +454,8 @@ pub async fn advance_stalker_refresh(
                 checkpoint.retry_count = 0;
             }
             StalkerRefreshPhase::SeriesDetails { provider_id } => {
-                let roots_path = generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::SeriesRoots);
+                let roots_path =
+                    generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::SeriesRoots);
                 let mut roots = load_stalker_items_after(app_config, &roots_path, provider_id, 1).await?;
                 let Some(root) = roots.pop() else {
                     checkpoint.phase = next_phase_after_series(selection);
@@ -491,14 +467,16 @@ pub async fn advance_stalker_refresh(
                 let series_id = root.series_id.unwrap_or(root.stream_id);
                 match api_client.get_series_details(handshake, series_id).await {
                     Ok(details) => {
-                        let path = generation_data_path(storage_path, checkpoint.generation, StalkerGenerationData::SeriesEpisodes);
+                        let path = generation_data_path(
+                            storage_path,
+                            checkpoint.generation,
+                            StalkerGenerationData::SeriesEpisodes,
+                        );
                         let used = if let Some(used) = &mut used_episode_ids {
                             used
                         } else {
-                            used_episode_ids.insert(
-                                prepare_stalker_episode_series_at(app_config, &path, series_id)
-                                    .await?,
-                            )
+                            used_episode_ids
+                                .insert(prepare_stalker_episode_series_at(app_config, &path, series_id).await?)
                         };
                         let episodes = parser::map_stalker_series_details(&details, &root, added_at, used);
                         upsert_stalker_items_at(app_config, &path, &episodes).await?;
@@ -611,7 +589,8 @@ mod tests {
         save_checkpoint(temp.path(), &checkpoint).await?;
         finish_completed_refresh(temp.path(), 17, &checkpoint).await?;
 
-        let manifest = crate::repository::stalker_generation_repository::load_active_manifest(temp.path(), 17).await?;
+        let manifest =
+            tuliprox_repository::stalker_generation_repository::load_active_manifest(temp.path(), 17).await?;
         assert_eq!(manifest.live.as_ref().map(|files| files.generation), Some(23));
         assert_eq!(manifest.vod.as_ref().map(|files| files.generation), Some(23));
         assert!(load_checkpoint(temp.path(), 17).await?.is_none());

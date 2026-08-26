@@ -1,18 +1,20 @@
-use parking_lot::Mutex;
-use std::sync::Arc;
-use shared::error::{TuliproxError};
-use crate::model::{AppConfig, ConfigInput, ConfigInputFlags};
-use shared::model::{LiveStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem};
-use crate::repository::{get_input_storage_path, persist_input_live_info, BPlusTreeQuery, xtream_get_file_path};
-use crate::utils::{debug_if_enabled};
-use crate::utils::ffmpeg::{
-    is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome,
-};
 use log::{debug, warn};
-use crate::processing::parser::xtream::create_xtream_url;
+use parking_lot::Mutex;
+use shared::{
+    error::TuliproxError,
+    model::{LiveStreamProperties, StreamProperties, XtreamCluster, XtreamPlaylistItem},
+};
+use std::sync::Arc;
+use tuliprox_core::{
+    model::{AppConfig, ConfigInput, ConfigInputFlags, ProviderHandle, ProviderIdType},
+    utils::{
+        debug_if_enabled,
+        ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome},
+    },
+};
+use tuliprox_parser::xtream::create_xtream_url;
+use tuliprox_repository::{get_input_storage_path, persist_input_live_info, xtream_get_file_path, BPlusTreeQuery};
 use tuliprox_session::ActiveProviderManager;
-use crate::model::ProviderHandle;
-use crate::model::{ProviderIdType};
 
 /// Updates metadata for a single Live stream (primarily probing)
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -27,13 +29,14 @@ pub async fn update_live_stream_metadata(
     _active_provider: &Arc<ActiveProviderManager>,
 ) -> Result<Option<LiveStreamProperties>, TuliproxError> {
     let storage_dir = &app_config.config.load().storage_dir;
-    let storage_path = get_input_storage_path(&input.name, storage_dir).await
+    let storage_path = get_input_storage_path(&input.name, storage_dir)
+        .await
         .map_err(|e| TuliproxError::Io(format!("Storage path error: {e}")))?;
 
     // Try to load existing info first to preserve data
     let mut props: Option<LiveStreamProperties> = None;
     let mut existing_item: Option<XtreamPlaylistItem> = None;
-    
+
     let stream_id_opt = if let ProviderIdType::Id(vid) = id { Some(vid) } else { None };
 
     if let Some(stream_id) = stream_id_opt {
@@ -95,10 +98,10 @@ pub async fn update_live_stream_metadata(
     let mut properties = if let Some(p) = props {
         p
     } else {
-         LiveStreamProperties {
+        LiveStreamProperties {
             stream_id: stream_id_opt.unwrap_or(0),
             // If item exists but no props, try to recover name
-            name: existing_item.as_ref().map_or_else(|| "".into(), |i| i.name.clone()), 
+            name: existing_item.as_ref().map_or_else(|| "".into(), |i| i.name.clone()),
             ..LiveStreamProperties::default()
         }
     };
@@ -115,19 +118,11 @@ pub async fn update_live_stream_metadata(
     let no_ext = input.has_flag(ConfigInputFlags::XtreamLiveStreamWithoutExtension);
 
     // We generate the URL to probe directly on the provider
-    let stream_url = create_xtream_url(
-        XtreamCluster::Live,
-        input_url, username, password,
-        &temp_stream_prop,
-        use_prefix, no_ext
-    );
+    let stream_url =
+        create_xtream_url(XtreamCluster::Live, input_url, username, password, &temp_stream_prop, use_prefix, no_ext);
     let probe_url_cow = input.resolve_url(&stream_url)?;
     if !is_supported_probe_url(probe_url_cow.as_ref()) {
-        debug!(
-            "Skipping unsupported live probe for input {}: {}",
-            input.name,
-            probe_url_cow.as_ref()
-        );
+        debug!("Skipping unsupported live probe for input {}: {}", input.name, probe_url_cow.as_ref());
         return Ok(None);
     }
     let config = app_config.config.load();
@@ -149,7 +144,7 @@ pub async fn update_live_stream_metadata(
     let mut not_found = false;
     let is_remote_probe =
         reqwest::Url::parse(probe_url_cow.as_ref()).is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
-    let probe_params = crate::utils::ffmpeg::ProbeParams {
+    let probe_params = tuliprox_core::utils::ffmpeg::ProbeParams {
         url: probe_url_cow.as_ref(),
         user_agent: user_agent.as_deref(),
         analyze_duration,
@@ -157,11 +152,9 @@ pub async fn update_live_stream_metadata(
         timeout_secs: ffprobe_timeout,
     };
     let probe_result = if is_remote_probe {
-        FfmpegExecutor::new().probe_remote_url(client, &probe_params)
-        .await
+        FfmpegExecutor::new().probe_remote_url(client, &probe_params).await
     } else {
-        FfmpegExecutor::new().probe_url(&probe_params, config.proxy.as_ref())
-        .await
+        FfmpegExecutor::new().probe_url(&probe_params, config.proxy.as_ref()).await
     };
     match probe_result {
         ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, stats) => {
@@ -187,20 +180,29 @@ pub async fn update_live_stream_metadata(
     // 4. Persist
     if save {
         if let Some(stream_id) = stream_id_opt {
-            persist_input_live_info(app_config, &storage_path, XtreamCluster::Live, &input.name, stream_id, &properties)
-                .await
-                .map_err(|e| shared::error::TuliproxError::Io(format!("Persist error: {e}")))?;
+            persist_input_live_info(
+                app_config,
+                &storage_path,
+                XtreamCluster::Live,
+                &input.name,
+                stream_id,
+                &properties,
+            )
+            .await
+            .map_err(|e| shared::error::TuliproxError::Io(format!("Persist error: {e}")))?;
         }
     }
-    
+
     if !success {
         if not_found {
-            return Err(shared::error::TuliproxError::Probe(format!("Probe failed with 404 Not Found for stream {display_id}")));
+            return Err(shared::error::TuliproxError::Probe(format!(
+                "Probe failed with 404 Not Found for stream {display_id}"
+            )));
         }
         // Return error to propagate failure up to task manager/logs
         return Err(shared::error::TuliproxError::Probe(format!("Probe failed for stream {display_id}")));
     }
-    
+
     Ok(Some(properties))
 }
 
@@ -226,25 +228,19 @@ fn apply_live_probe_success(
 #[cfg(test)]
 mod tests {
     use super::apply_live_probe_success;
-    use crate::utils::ffmpeg::ProbeStreamStats;
     use serde_json::json;
     use shared::model::LiveStreamProperties;
+    use tuliprox_core::utils::ffmpeg::ProbeStreamStats;
 
     #[test]
     fn apply_live_probe_success_persists_positive_bitrate() {
-        let mut properties = LiveStreamProperties {
-            bitrate: 1_500_000,
-            ..LiveStreamProperties::default()
-        };
+        let mut properties = LiveStreamProperties { bitrate: 1_500_000, ..LiveStreamProperties::default() };
 
         apply_live_probe_success(
             &mut properties,
             Some(json!({ "codec_name": "h264" })),
             Some(json!({ "codec_name": "aac" })),
-            ProbeStreamStats {
-                duration_secs: None,
-                bitrate: Some(2_500_000),
-            },
+            ProbeStreamStats { duration_secs: None, bitrate: Some(2_500_000) },
             123,
         );
 
@@ -257,10 +253,7 @@ mod tests {
             &mut properties,
             None,
             None,
-            ProbeStreamStats {
-                duration_secs: None,
-                bitrate: Some(2_000_000),
-            },
+            ProbeStreamStats { duration_secs: None, bitrate: Some(2_000_000) },
             124,
         );
         assert_eq!(properties.bitrate, 2_500_000);

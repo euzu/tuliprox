@@ -17,6 +17,7 @@ pub mod fingerprint;
 pub mod playlist_filter;
 pub mod playlist_key;
 pub mod provider;
+pub mod proxy_redirect;
 pub mod stalker_record;
 pub mod stream_error;
 pub mod update_guard;
@@ -24,7 +25,7 @@ pub mod update_task;
 
 pub use self::{
     config::*, custom_stream_flags::*, fingerprint::*, healthcheck::*, input_source::*, mapping::*, messaging::*,
-    playlist_filter::*, playlist_key::*, provider::*, stalker_record::*, stream_error::*, stream_history::*,
-    update_guard::*, update_task::*, xmltv::*, xtream::*,
+    playlist_filter::*, playlist_key::*, provider::*, proxy_redirect::*, stalker_record::*, stream_error::*,
+    stream_history::*, update_guard::*, update_task::*, xmltv::*, xtream::*,
 };
 pub use shared::model::xtream_const::*;

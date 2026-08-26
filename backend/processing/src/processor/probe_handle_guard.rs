@@ -1,24 +1,21 @@
-use tuliprox_session::ActiveProviderManager;
-use crate::model::ProviderHandle;
 use std::sync::Arc;
+use tuliprox_core::model::ProviderHandle;
+use tuliprox_session::ActiveProviderManager;
 
-pub(crate) struct ProbeHandleGuard {
+pub struct ProbeHandleGuard {
     manager: Arc<ActiveProviderManager>,
     handle: Option<ProviderHandle>,
 }
 
 impl ProbeHandleGuard {
-    pub(crate) fn new(manager: &Arc<ActiveProviderManager>, handle: ProviderHandle) -> Self {
-        Self {
-            manager: Arc::clone(manager),
-            handle: Some(handle),
-        }
+    pub fn new(manager: &Arc<ActiveProviderManager>, handle: ProviderHandle) -> Self {
+        Self { manager: Arc::clone(manager), handle: Some(handle) }
     }
 
     #[inline]
-    pub(crate) fn handle(&self) -> Option<&ProviderHandle> { self.handle.as_ref() }
+    pub fn handle(&self) -> Option<&ProviderHandle> { self.handle.as_ref() }
 
-    pub(crate) async fn release(mut self) {
+    pub async fn release(mut self) {
         if let Some(handle) = self.handle.take() {
             self.manager.release_handle(&handle).await;
         }
@@ -42,18 +39,18 @@ impl Drop for ProbeHandleGuard {
 #[cfg(test)]
 mod tests {
     use super::ProbeHandleGuard;
-    use crate::{
-        api::model::{ActiveProviderManager, EventManager},
+    use arc_swap::{ArcSwap, ArcSwapOption};
+    use shared::{
+        defaults::default_probe_user_priority,
+        model::{ConfigPaths, InputFetchMethod, InputType},
+        utils::Internable,
+    };
+    use std::{collections::HashMap, sync::Arc};
+    use tuliprox_core::{
         model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, SourcesConfig},
         utils::FileLockManager,
     };
-    use arc_swap::{ArcSwap, ArcSwapOption};
-    use shared::{
-        model::{ConfigPaths, InputFetchMethod, InputType},
-        utils::{Internable},
-        defaults::{default_probe_user_priority},
-    };
-    use std::{collections::HashMap, sync::Arc};
+    use tuliprox_session::{ActiveProviderManager, EventManager};
 
     fn create_test_app_config() -> AppConfig {
         let input = Arc::new(ConfigInput {

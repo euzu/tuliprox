@@ -58,6 +58,19 @@ while IFS=$'\t' read -r from to; do
         "tuliprox -> tuliprox-session") ;;
         "tuliprox -> tuliprox-dvr") ;;
         "tuliprox -> tuliprox-hls") ;;
+        "tuliprox -> tuliprox-processing") ;;
+        # The playlist pipeline. It states what it needs from the background
+        # metadata worker as a trait (`MetadataUpdateSink`) that the binary
+        # implements, so it does not depend on the worker itself.
+        "tuliprox-processing -> shared") ;;
+        "tuliprox-processing -> tuliprox-core") ;;
+        "tuliprox-processing -> tuliprox-iptv") ;;
+        "tuliprox-processing -> tuliprox-library") ;;
+        "tuliprox-processing -> tuliprox-media-server") ;;
+        "tuliprox-processing -> tuliprox-messaging") ;;
+        "tuliprox-processing -> tuliprox-parser") ;;
+        "tuliprox-processing -> tuliprox-repository") ;;
+        "tuliprox-processing -> tuliprox-session") ;;
         # The HLS proxy. Reads the running server through `HlsCtx`; needs
         # `session` for provider allocation and connection admission, `mpegts`
         # for transport-stream rendering and `parser` for origin manifests.

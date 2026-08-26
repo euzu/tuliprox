@@ -1,22 +1,26 @@
-use tuliprox_session::ActiveProviderManager;
-use crate::model::ConfigInput;
-use crate::model::AppConfig;
-use crate::processing::processor::{select_cancel_token, ProbeHandleGuard};
-use crate::repository::{
+use crate::processor::{select_cancel_token, ProbeHandleGuard};
+use log::{debug, info, warn};
+use shared::{
+    error::TuliproxError,
+    model::{
+        EpisodeStreamProperties, InputType, LiveStreamProperties, M3uPlaylistItem, PlaylistItemType, StreamProperties,
+        UUIDType, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
+    },
+    utils::sanitize_sensitive_info,
+};
+use std::{path::PathBuf, sync::Arc};
+use tuliprox_core::{
+    model::{AppConfig, ConfigInput},
+    utils::{
+        debug_if_enabled,
+        ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome},
+    },
+};
+use tuliprox_repository::{
     get_input_local_library_playlist_file_path, get_input_m3u_playlist_file_path, get_input_storage_path,
     xtream_get_file_path, BPlusTreeUpdate,
 };
-use crate::utils::debug_if_enabled;
-use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeStreamStats, ProbeUrlOutcome};
-use shared::utils::sanitize_sensitive_info;
-use log::{debug, info, warn};
-use shared::error::TuliproxError;
-use shared::model::{
-    EpisodeStreamProperties, InputType, LiveStreamProperties, M3uPlaylistItem, PlaylistItemType,
-    StreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
-};
-use shared::model::UUIDType;
-use std::{path::PathBuf, sync::Arc};
+use tuliprox_session::ActiveProviderManager;
 
 enum ProbeStorageKind {
     M3u,
@@ -77,7 +81,7 @@ pub async fn update_generic_stream_metadata(
     stream_url: &str,
     item_type: PlaylistItemType,
     active_provider: &Arc<ActiveProviderManager>,
-    active_handle: Option<&crate::model::ProviderHandle>,
+    active_handle: Option<&tuliprox_core::model::ProviderHandle>,
     probe_priority: i8,
 ) -> Result<GenericProbeOutcome, TuliproxError> {
     let prepared = match prepare_generic_stream_metadata(
@@ -113,7 +117,7 @@ pub async fn probe_generic_stream_metadata(
     stream_url: &str,
     item_type: PlaylistItemType,
     active_provider: &Arc<ActiveProviderManager>,
-    active_handle: Option<&crate::model::ProviderHandle>,
+    active_handle: Option<&tuliprox_core::model::ProviderHandle>,
     probe_priority: i8,
 ) -> Result<GenericProbeMetadataOutcome, TuliproxError> {
     let prepared = match prepare_generic_stream_metadata(
@@ -150,7 +154,7 @@ async fn prepare_generic_stream_metadata(
     stream_url: &str,
     item_type: PlaylistItemType,
     active_provider: &Arc<ActiveProviderManager>,
-    active_handle: Option<&crate::model::ProviderHandle>,
+    active_handle: Option<&tuliprox_core::model::ProviderHandle>,
     probe_priority: i8,
 ) -> Result<PreparedGenericProbeOutcome, TuliproxError> {
     let storage_dir = &app_config.config.load().storage_dir;
@@ -158,22 +162,21 @@ async fn prepare_generic_stream_metadata(
     // Check if probing is enabled globally
     let ffprobe_enabled = app_config.is_ffprobe_enabled().await;
     if !ffprobe_enabled {
-            return Ok(PreparedGenericProbeOutcome::Noop);
+        return Ok(PreparedGenericProbeOutcome::Noop);
     }
 
     // Determine storage file path based on input type
-    let storage_path = get_input_storage_path(&input.name, storage_dir).await
+    let storage_path = get_input_storage_path(&input.name, storage_dir)
+        .await
         .map_err(|e| TuliproxError::Io(format!("Storage path error: {e}")))?;
 
     let (db_path, storage_kind) = match input.input_type {
-        InputType::M3u | InputType::M3uBatch => (
-            get_input_m3u_playlist_file_path(&storage_path, &input.name),
-            ProbeStorageKind::M3u,
-        ),
-        InputType::Library => (
-            get_input_local_library_playlist_file_path(&storage_path, &input.name),
-            ProbeStorageKind::Library,
-        ),
+        InputType::M3u | InputType::M3uBatch => {
+            (get_input_m3u_playlist_file_path(&storage_path, &input.name), ProbeStorageKind::M3u)
+        }
+        InputType::Library => {
+            (get_input_local_library_playlist_file_path(&storage_path, &input.name), ProbeStorageKind::Library)
+        }
         InputType::Xtream | InputType::XtreamBatch => {
             let cluster = if item_type.is_live() {
                 XtreamCluster::Live
@@ -185,13 +188,14 @@ async fn prepare_generic_stream_metadata(
                 // Generic probing currently supports live/video/series payload shapes.
                 return Ok(PreparedGenericProbeOutcome::Noop);
             };
-            (
-                xtream_get_file_path(&storage_path, cluster),
-                ProbeStorageKind::Xtream,
-            )
+            (xtream_get_file_path(&storage_path, cluster), ProbeStorageKind::Xtream)
         }
-        InputType::Emby | InputType::Jellyfin | InputType::Plex
-        | InputType::Stalker | InputType::StalkerBatch | InputType::Staged => return Ok(PreparedGenericProbeOutcome::Noop),
+        InputType::Emby
+        | InputType::Jellyfin
+        | InputType::Plex
+        | InputType::Stalker
+        | InputType::StalkerBatch
+        | InputType::Staged => return Ok(PreparedGenericProbeOutcome::Noop),
     };
 
     if !db_path.exists() {
@@ -215,7 +219,9 @@ async fn prepare_generic_stream_metadata(
 
     if needs_provider_connection && active_handle.is_none() && acquired_handle.is_none() {
         warn!("Skipping probe for generic stream {unique_id} due to connection limits");
-        return Err(TuliproxError::Probe(format!("Skipping probe for generic stream {unique_id} due to connection limits")));
+        return Err(TuliproxError::Probe(format!(
+            "Skipping probe for generic stream {unique_id} due to connection limits"
+        )));
     }
 
     let probe_url = input.resolve_url(stream_url)?.into_owned();
@@ -230,24 +236,15 @@ async fn prepare_generic_stream_metadata(
     let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
     let user_agent = config.default_user_agent.clone();
     let (analyze_duration, probe_size) = if item_type.is_live() {
-        (
-            metadata_update.ffprobe.live_analyze_duration_micros,
-            metadata_update.ffprobe.live_probe_size_bytes,
-        )
+        (metadata_update.ffprobe.live_analyze_duration_micros, metadata_update.ffprobe.live_probe_size_bytes)
     } else {
-        (
-            metadata_update.ffprobe.analyze_duration_micros,
-            metadata_update.ffprobe.probe_size_bytes,
-        )
+        (metadata_update.ffprobe.analyze_duration_micros, metadata_update.ffprobe.probe_size_bytes)
     };
 
     debug_if_enabled!("Probing Generic Stream '{unique_id}'");
 
-    let cancel_token = select_cancel_token(
-        acquired_handle.as_ref().and_then(ProbeHandleGuard::handle),
-        active_handle,
-    );
-    let params = crate::utils::ffmpeg::ProbeParams {
+    let cancel_token = select_cancel_token(acquired_handle.as_ref().and_then(ProbeHandleGuard::handle), active_handle);
+    let params = tuliprox_core::utils::ffmpeg::ProbeParams {
         url: &probe_url,
         user_agent: user_agent.as_deref(),
         analyze_duration,
@@ -255,17 +252,11 @@ async fn prepare_generic_stream_metadata(
         timeout_secs: ffprobe_timeout,
     };
     let probe_data = if uses_seekable_remote_probe(item_type, is_remote_probe) {
-        FfmpegExecutor::new()
-            .probe_remote_seekable_url_with_cancel(client, &params, cancel_token)
-            .await
+        FfmpegExecutor::new().probe_remote_seekable_url_with_cancel(client, &params, cancel_token).await
     } else if is_remote_probe {
-        FfmpegExecutor::new()
-            .probe_remote_url_with_cancel(client, &params, cancel_token)
-            .await
+        FfmpegExecutor::new().probe_remote_url_with_cancel(client, &params, cancel_token).await
     } else {
-        FfmpegExecutor::new()
-            .probe_url_with_cancel(&params, config.proxy.as_ref(), cancel_token)
-            .await
+        FfmpegExecutor::new().probe_url_with_cancel(&params, config.proxy.as_ref(), cancel_token).await
     };
 
     if let Some(handle) = acquired_handle {
@@ -280,7 +271,9 @@ async fn prepare_generic_stream_metadata(
         ),
         ProbeUrlOutcome::Failed(ProbeFailureKind::NotFound) => {
             warn!("Probe target not found (404) for generic stream: {unique_id}");
-            return Err(shared::error::TuliproxError::Probe(format!("Probe target returned 404 Not Found for stream {unique_id}")));
+            return Err(shared::error::TuliproxError::Probe(format!(
+                "Probe target returned 404 Not Found for stream {unique_id}"
+            )));
         }
         ProbeUrlOutcome::Failed(ProbeFailureKind::Other) => {
             warn!("Probe failed or timed out for generic stream: {unique_id}");
@@ -332,9 +325,7 @@ async fn persist_prepared_generic_stream_metadata(
                         raw_audio,
                         stats,
                     );
-                    tree_update
-                        .update(&key, item)
-                        .map_err(|e| format!("Tree update error: {e}"))?;
+                    tree_update.update(&key, item).map_err(|e| format!("Tree update error: {e}"))?;
                     info!("Successfully updated M3U metadata for: {unique_id_for_update}");
                     updated = true;
                 } else {
@@ -356,9 +347,7 @@ async fn persist_prepared_generic_stream_metadata(
                         raw_audio,
                         stats,
                     );
-                    tree_update
-                        .update(&uuid, item)
-                        .map_err(|e| format!("Tree update error: {e}"))?;
+                    tree_update.update(&uuid, item).map_err(|e| format!("Tree update error: {e}"))?;
                     info!("Successfully updated Library metadata for: {unique_id_for_update}");
                     updated = true;
                 } else {
@@ -374,10 +363,7 @@ async fn persist_prepared_generic_stream_metadata(
                 let mut tree_update = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::try_new(&db_path_for_update)
                     .map_err(|e| format!("Failed to open Xtream tree update: {e}"))?;
 
-                if let Some(mut item) = tree_update
-                    .query(&provider_id)
-                    .map_err(|e| format!("Tree query error: {e}"))?
-                {
+                if let Some(mut item) = tree_update.query(&provider_id).map_err(|e| format!("Tree query error: {e}"))? {
                     update_properties(
                         &mut item.additional_properties,
                         item_type,
@@ -387,9 +373,7 @@ async fn persist_prepared_generic_stream_metadata(
                         raw_audio,
                         stats,
                     );
-                    tree_update
-                        .update(&provider_id, item)
-                        .map_err(|e| format!("Tree update error: {e}"))?;
+                    tree_update.update(&provider_id, item).map_err(|e| format!("Tree update error: {e}"))?;
                     info!("Successfully updated Xtream metadata for: {unique_id_for_update}");
                     updated = true;
                 } else {
@@ -422,19 +406,19 @@ pub fn update_properties(
     stats: ProbeStreamStats,
 ) {
     if item_type.is_video() {
-       let mut props = if let Some(StreamProperties::Video(p)) = props_opt {
-           *p.clone()
-       } else {
-           VideoStreamProperties {
-               name: name.into(),
-               stream_id: virtual_id,
-               container_extension: "".into(),
-               ..Default::default()
-           }
-       };
+        let mut props = if let Some(StreamProperties::Video(p)) = props_opt {
+            *p.clone()
+        } else {
+            VideoStreamProperties {
+                name: name.into(),
+                stream_id: virtual_id,
+                container_extension: "".into(),
+                ..Default::default()
+            }
+        };
 
-       if props.details.is_none() {
-           props.details = Some(VideoStreamDetailProperties::default());
+        if props.details.is_none() {
+            props.details = Some(VideoStreamDetailProperties::default());
         }
         if let Some(details) = props.details.as_mut() {
             if let Some(v) = raw_video {
@@ -443,33 +427,33 @@ pub fn update_properties(
             if let Some(a) = raw_audio {
                 details.audio = Some(a);
             }
-           if let Some(duration_secs) = stats.duration_secs {
-               details.duration_secs = Some(duration_secs.to_string().into());
-           }
-           if let Some(bitrate) = stats.bitrate {
-               details.bitrate = bitrate;
-           }
-       }
-       *props_opt = Some(StreamProperties::Video(Box::new(props)));
-    }
-    else if item_type.is_series() {
-       let mut props = if let Some(StreamProperties::Episode(p)) = props_opt {           *p.clone()
-       } else {
-           EpisodeStreamProperties {
-               episode_id: virtual_id,
-               episode: 0,
-               season: 0,
-               added: None,
-               release_date: None,
-               series_release_date: None,
-               plot: None,
-               tmdb: None,
-               movie_image: "".into(),
-               container_extension: "".into(),
-               video: None,
-               audio: None,
-           }
-       };
+            if let Some(duration_secs) = stats.duration_secs {
+                details.duration_secs = Some(duration_secs.to_string().into());
+            }
+            if let Some(bitrate) = stats.bitrate {
+                details.bitrate = bitrate;
+            }
+        }
+        *props_opt = Some(StreamProperties::Video(Box::new(props)));
+    } else if item_type.is_series() {
+        let mut props = if let Some(StreamProperties::Episode(p)) = props_opt {
+            *p.clone()
+        } else {
+            EpisodeStreamProperties {
+                episode_id: virtual_id,
+                episode: 0,
+                season: 0,
+                added: None,
+                release_date: None,
+                series_release_date: None,
+                plot: None,
+                tmdb: None,
+                movie_image: "".into(),
+                container_extension: "".into(),
+                video: None,
+                audio: None,
+            }
+        };
 
         if let Some(v) = raw_video {
             props.video = Some(v);
@@ -477,18 +461,13 @@ pub fn update_properties(
         if let Some(a) = raw_audio {
             props.audio = Some(a);
         }
-       *props_opt = Some(StreamProperties::Episode(Box::new(props)));
-    }
-    else if matches!(item_type, PlaylistItemType::Live | PlaylistItemType::LiveHls | PlaylistItemType::LiveDash) {
-       let mut props = if let Some(StreamProperties::Live(p)) = props_opt {
-           *p.clone()
-       } else {
-           LiveStreamProperties {
-               name: name.into(),
-               stream_id: virtual_id,
-               ..LiveStreamProperties::default()
-           }
-       };
+        *props_opt = Some(StreamProperties::Episode(Box::new(props)));
+    } else if matches!(item_type, PlaylistItemType::Live | PlaylistItemType::LiveHls | PlaylistItemType::LiveDash) {
+        let mut props = if let Some(StreamProperties::Live(p)) = props_opt {
+            *p.clone()
+        } else {
+            LiveStreamProperties { name: name.into(), stream_id: virtual_id, ..LiveStreamProperties::default() }
+        };
 
         if let Some(v) = raw_video {
             props.video = Some(v);
@@ -500,18 +479,18 @@ pub fn update_properties(
             props.bitrate = props.bitrate.max(bitrate);
         }
 
-       let now = chrono::Utc::now().timestamp();
-       props.last_probed_timestamp = Some(now);
-       props.last_success_timestamp = Some(now);
-       
-       *props_opt = Some(StreamProperties::Live(Box::new(props)));
+        let now = chrono::Utc::now().timestamp();
+        props.last_probed_timestamp = Some(now);
+        props.last_success_timestamp = Some(now);
+
+        *props_opt = Some(StreamProperties::Live(Box::new(props)));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::ffmpeg::ProbeStreamStats;
+    use tuliprox_core::utils::ffmpeg::ProbeStreamStats;
 
     #[test]
     fn library_probe_does_not_require_provider_connection() {
@@ -528,19 +507,13 @@ mod tests {
     #[test]
     fn m3u_probe_requires_provider_connection() {
         assert!(requires_provider_connection_for_generic_probe(InputType::M3u));
-        assert!(requires_provider_connection_for_generic_probe(
-            InputType::M3uBatch
-        ));
+        assert!(requires_provider_connection_for_generic_probe(InputType::M3uBatch));
     }
 
     #[test]
     fn xtream_probe_requires_provider_connection() {
-        assert!(requires_provider_connection_for_generic_probe(
-            InputType::Xtream
-        ));
-        assert!(requires_provider_connection_for_generic_probe(
-            InputType::XtreamBatch
-        ));
+        assert!(requires_provider_connection_for_generic_probe(InputType::Xtream));
+        assert!(requires_provider_connection_for_generic_probe(InputType::XtreamBatch));
     }
 
     #[test]
@@ -563,10 +536,7 @@ mod tests {
             77,
             None,
             None,
-            ProbeStreamStats {
-                duration_secs: Some(1_541),
-                bitrate: Some(3_100_000),
-            },
+            ProbeStreamStats { duration_secs: Some(1_541), bitrate: Some(3_100_000) },
         );
 
         let Some(StreamProperties::Video(video)) = props_opt else {
@@ -591,10 +561,7 @@ mod tests {
             77,
             None,
             None,
-            ProbeStreamStats {
-                duration_secs: None,
-                bitrate: Some(3_100_000),
-            },
+            ProbeStreamStats { duration_secs: None, bitrate: Some(3_100_000) },
         );
 
         let Some(StreamProperties::Live(live)) = props_opt else {
@@ -610,10 +577,7 @@ mod tests {
             77,
             None,
             None,
-            ProbeStreamStats {
-                duration_secs: None,
-                bitrate: Some(2_000_000),
-            },
+            ProbeStreamStats { duration_secs: None, bitrate: Some(2_000_000) },
         );
         let Some(StreamProperties::Live(live)) = props_opt else {
             panic!("expected live properties");

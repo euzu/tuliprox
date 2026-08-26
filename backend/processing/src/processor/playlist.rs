@@ -1,66 +1,37 @@
-use crate::processing::parser::xmltv::TVGuide;
 use crate::{
-    api::{
-        model::{
-            ActiveProviderManager, EventManager, EventMessage, MetadataUpdateManager, PlaylistStorageState,
-            ProviderIdType, ResolveReason, UpdateGuard, UpdateTask,
-        },
+    epg,
+    fetched_playlist::FetchedPlaylist,
+    input_cache,
+    input_cache::ClusterState,
+    metadata_sink::{queue_task_background, MetadataUpdateSink},
+    parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator, TVGuide},
+    playlist_watch::process_group_watch,
+    processor::{
+        epg::process_playlist_epg, library, sort::sort_playlist, stalker, trakt::process_trakt_categories_for_target,
+        xtream_series::playlist_resolve_series, xtream_vod::playlist_resolve_vod, StalkerRefreshMode,
     },
-    iptv::{m3u, xtream},
-    messaging::send_message,
-    media_server::{
-        media_server_catalog_snapshot_to_playlist, refresh_media_server_catalog_complete_before_publish,
-        MediaServerCatalogRefreshPolicy, MediaServerHttpClient,
-    },
-    model::{
-        AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename, ConfigTarget,
-        is_valid, Epg, Mapping, MessageContent, ProcessTargets, ReverseProxyDisabledHeaderConfig,
-        },
-    processing::{
-        input_cache,
-        input_cache::ClusterState,
-        parser::xmltv::{flatten_tvguide, EpgMergeAccumulator, merge_epg_trees},
-        playlist_watch::process_group_watch,
-        processor::{
-            epg::process_playlist_epg, library, sort::sort_playlist, stalker, StalkerRefreshMode,
-            trakt::process_trakt_categories_for_target,
-            xtream_series::playlist_resolve_series, xtream_vod::playlist_resolve_vod,
-        },
-    },
-    processing::fetched_playlist::FetchedPlaylist,
-    repository::{
-        load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource,
-        PlaylistSource,
-    },
-    processing::epg,
-    utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
 };
-use std::future::Future;
-use std::pin::Pin;
 use futures::{FutureExt, StreamExt};
 use indexmap::IndexMap;
 use log::{debug, error, info, log_enabled, warn, Level};
 use path_clean::PathClean;
 use shared::{
     concat_string,
+    defaults::{default_as_default, default_probe_delay_secs, default_probe_live_interval},
     error::{get_errors_notify_message, TuliproxError},
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
         ClusterFlags, CounterModifier, FieldGetAccessor, FieldSetAccessor, InputStats, InputType, ItemField,
-        MappingStage, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, ProcessingOrder, SourceStats,
-        StreamProperties, TargetStats, UUIDType, XtreamCluster,
+        MappingStage, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateProgressEvent,
+        ProcessingOrder, SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
     },
-    utils::{
-        create_alias_uuid, interner_gc,
-        Internable,
-    },
-    defaults::{
-        default_as_default, default_probe_delay_secs, default_probe_live_interval,
-    }
+    utils::{create_alias_uuid, interner_gc, Internable},
 };
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
     path::PathBuf,
+    pin::Pin,
     sync::{Arc, Weak},
     time::{Duration, Instant},
 };
@@ -68,7 +39,25 @@ use tokio::{
     sync::{watch, Mutex, OwnedRwLockWriteGuard, RwLock},
     task::JoinSet,
 };
-use shared::model::PlaylistUpdateProgressEvent;
+use tuliprox_core::{
+    model::{
+        is_valid, AppConfig, ConfigFavourites, ConfigInput, ConfigInputFlags, ConfigInputOptions, ConfigRename,
+        ConfigTarget, Epg, Mapping, MessageContent, ProcessTargets, ProviderIdType, ResolveReason,
+        ReverseProxyDisabledHeaderConfig, UpdateGuard, UpdateTask,
+    },
+    utils::{debug_if_enabled, log_memory_snapshot, trace_if_enabled, StepMeasure, StepMeasureCallback},
+};
+use tuliprox_iptv::{m3u, xtream};
+use tuliprox_media_server::{
+    media_server_catalog_snapshot_to_playlist, refresh_media_server_catalog_complete_before_publish,
+    MediaServerCatalogRefreshPolicy, MediaServerHttpClient,
+};
+use tuliprox_messaging::send_message;
+use tuliprox_repository::{
+    load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource, PlaylistSource,
+    PlaylistStorageState,
+};
+use tuliprox_session::{ActiveProviderManager, EventManager, EventMessage};
 
 const PLAYLIST_UPDATE_MAX_DURATION_SECS: u64 = 3600;
 const MAX_CONCURRENT_TARGET_FINALIZERS: usize = 2;
@@ -88,29 +77,29 @@ fn target_waiting_message(target: &str, input: &str) -> String {
     format!("Target '{target}' is waiting for input '{input}'")
 }
 
-fn target_mutated_resources(config: &crate::model::Config, target: &ConfigTarget) -> HashSet<PathBuf> {
+fn target_mutated_resources(config: &tuliprox_core::model::Config, target: &ConfigTarget) -> HashSet<PathBuf> {
     let mut resources = HashSet::new();
-    if let Some(path) = crate::repository::get_target_storage_path(config, &target.name) {
+    if let Some(path) = tuliprox_repository::get_target_storage_path(config, &target.name) {
         resources.insert(path.clean());
     }
     for output in &target.output {
         match output {
-            crate::model::TargetOutput::M3u(output) => {
-                if let Some(path) = crate::utils::get_file_path(
+            tuliprox_core::model::TargetOutput::M3u(output) => {
+                if let Some(path) = tuliprox_core::utils::get_file_path(
                     &config.storage_dir,
                     output.filename.as_deref().map(PathBuf::from),
                 ) {
                     resources.insert(path.clean());
                 }
             }
-            crate::model::TargetOutput::Strm(output) => {
+            tuliprox_core::model::TargetOutput::Strm(output) => {
                 if let Some(path) =
-                    crate::utils::get_file_path(&config.storage_dir, Some(PathBuf::from(&output.directory)))
+                    tuliprox_core::utils::get_file_path(&config.storage_dir, Some(PathBuf::from(&output.directory)))
                 {
                     resources.insert(path.clean());
                 }
             }
-            crate::model::TargetOutput::Xtream(_) | crate::model::TargetOutput::HdHomeRun(_) => {}
+            tuliprox_core::model::TargetOutput::Xtream(_) | tuliprox_core::model::TargetOutput::HdHomeRun(_) => {}
         }
     }
     resources
@@ -152,7 +141,6 @@ pub fn apply_filter_to_source(source: &mut PlaylistSource, filter: &Filter) -> O
 fn filter_playlist(source: &mut PlaylistSource, target: &ConfigTarget) -> Option<Vec<PlaylistGroup>> {
     apply_filter_to_source(source, &target.filter)
 }
-
 
 fn assign_channel_no_playlist(new_playlist: &mut [PlaylistGroup]) {
     let assigned_chnos: HashSet<u32> =
@@ -283,10 +271,10 @@ fn map_playlist_at_stage(
     } else {
         None
     };
-    let iter: Box<dyn Iterator<Item=PlaylistItem>> = Box::new(source.into_items());
+    let iter: Box<dyn Iterator<Item = PlaylistItem>> = Box::new(source.into_items());
     let mapped_iter = valid_mappings.fold(iter, |iter, mapping| {
         Box::new(iter.flat_map(move |chan| map_channel_and_flatten(chan, mapping)))
-            as Box<dyn Iterator<Item=PlaylistItem>>
+            as Box<dyn Iterator<Item = PlaylistItem>>
     });
     let mut next_groups: IndexMap<CategoryKey, PlaylistGroup> = IndexMap::new();
     let mut grp_id: u32 = 0;
@@ -368,7 +356,7 @@ fn is_target_enabled(target: &ConfigTarget, user_targets: &ProcessTargets) -> bo
 }
 
 async fn with_sequential_group<T>(
-    file_locks: &crate::utils::FileLockManager,
+    file_locks: &tuliprox_core::utils::FileLockManager,
     group: Option<u32>,
     process_parallel: bool,
     future: impl std::future::Future<Output = T>,
@@ -469,29 +457,22 @@ fn apply_staged_overlay_groups(
     provider_groups: Vec<PlaylistGroup>,
     staged_groups: Vec<PlaylistGroup>,
 ) -> Vec<PlaylistGroup> {
-    let mut groups: Vec<PlaylistGroup> = provider_groups
-        .into_iter()
-        .filter(|group| !cluster_selected(group.xtream_cluster, clusters))
-        .collect();
+    let mut groups: Vec<PlaylistGroup> =
+        provider_groups.into_iter().filter(|group| !cluster_selected(group.xtream_cluster, clusters)).collect();
 
-    groups.extend(
-        staged_groups
-            .into_iter()
-            .filter(|group| cluster_selected(group.xtream_cluster, clusters))
-            .map(|mut group| {
-                for item in &mut group.channels {
-                    item.header.input_name = Arc::clone(provider_name);
-                }
-                group
-            }),
-    );
+    groups.extend(staged_groups.into_iter().filter(|group| cluster_selected(group.xtream_cluster, clusters)).map(
+        |mut group| {
+            for item in &mut group.channels {
+                item.header.input_name = Arc::clone(provider_name);
+            }
+            group
+        },
+    ));
 
     groups
 }
 
-fn should_apply_staged_overlay(download_result: &PlaylistDownloadResult) -> bool {
-    !download_result.was_cached
-}
+fn should_apply_staged_overlay(download_result: &PlaylistDownloadResult) -> bool { !download_result.was_cached }
 
 #[allow(clippy::too_many_lines)]
 async fn playlist_download_from_input(
@@ -558,7 +539,7 @@ async fn playlist_download_from_input(
                     input,
                     Some(xtream_clusters_to_download.as_slice()),
                 )
-                    .await;
+                .await;
                 let xtream_error_count = e.len();
                 (p, e, persisted, 0, xtream_error_count, false)
             }
@@ -688,10 +669,7 @@ async fn process_input_job_inner(
     let (mut errors, mut source, storage_error, partial) = download_input(ctx, input, false).await;
     let storage_failed = storage_error.is_some();
     if let Some(err) = storage_error {
-        broadcast_step(
-            "Playlist download",
-            &format!("Failed to persist/load input '{}' playlist", input.name),
-        );
+        broadcast_step("Playlist download", &format!("Failed to persist/load input '{}' playlist", input.name));
         error!("Failed to persist input playlist {}", input.name);
         errors.push(err);
     }
@@ -760,9 +738,7 @@ fn collect_target_task_result(
 ) {
     match result {
         Ok(result) => results.push(result),
-        Err(err) => errors.push(TuliproxError::RepositoryPlaylist(format!(
-            "Target finalization task failed: {err}"
-        ))),
+        Err(err) => errors.push(TuliproxError::RepositoryPlaylist(format!("Target finalization task failed: {err}"))),
     }
 }
 
@@ -795,8 +771,7 @@ async fn process_targets(
                 prepare_playlist_for_target(ctx, playlists, target, input_stats, errors, consume_input_source).await;
             match result {
                 Ok(prepared) => {
-                    let (result, mut finalization_errors) =
-                        finalize_prepared_target(Arc::clone(ctx), prepared).await;
+                    let (result, mut finalization_errors) = finalize_prepared_target(Arc::clone(ctx), prepared).await;
                     errors.append(&mut finalization_errors);
                     match result {
                         Ok(()) => target_stats.push(TargetStats::success(&target.name)),
@@ -947,10 +922,9 @@ async fn process_source(
             errors.append(&mut result.errors);
             input_stats.insert(result.input_name.clone(), result.stat);
             if result.state == InputJobState::Ready {
-                if let (Some(input), Some(source)) = (
-                    sources.get_input_by_name(&result.input_name),
-                    result.source.take(),
-                ) {
+                if let (Some(input), Some(source)) =
+                    (sources.get_input_by_name(&result.input_name), result.source.take())
+                {
                     source_playlists.push(FetchedPlaylist { input, source, epg: result.epg });
                 }
             } else {
@@ -968,10 +942,7 @@ async fn process_source(
             if !blockers.is_empty() {
                 for target in source.targets.iter().filter(|target| is_target_enabled(target, &ctx.user_targets)) {
                     for input_name in &blockers {
-                        broadcast_step(
-                            "Playlist download",
-                            &target_waiting_message(&target.name, input_name),
-                        );
+                        broadcast_step("Playlist download", &target_waiting_message(&target.name, input_name));
                     }
                 }
             } else if source_playlists.is_empty() {
@@ -1000,9 +971,9 @@ async fn process_source(
         }
     }
     log_memory_snapshot(format!("source[{source_idx}] end").as_str());
-    let ordered_input_stats = sources.get_source_at(source_idx).map_or_else(Vec::new, |source| {
-        source.inputs.iter().filter_map(|name| input_stats.remove(name)).collect()
-    });
+    let ordered_input_stats = sources
+        .get_source_at(source_idx)
+        .map_or_else(Vec::new, |source| source.inputs.iter().filter_map(|name| input_stats.remove(name)).collect());
     (ordered_input_stats, target_stats, errors)
 }
 
@@ -1097,10 +1068,7 @@ async fn download_input(
         // retry once before forcing a refresh.
         let must_force_refresh = cached_error.is_some();
         if must_force_refresh {
-            warn!(
-                "Input '{}' cache hit produced unreadable playlist; retrying cached load once",
-                input.name
-            );
+            warn!("Input '{}' cache hit produced unreadable playlist; retrying cached load once", input.name);
             let (retry_playlist, retry_error) = load_cached_input_playlist(ctx, input).await;
             if retry_error.is_none() {
                 preloaded_playlist = Some((retry_playlist, None));
@@ -1112,10 +1080,7 @@ async fn download_input(
                 // repaired the cache between our earlier retry and lock acquisition.
                 let (locked_retry_playlist, locked_retry_error) = load_cached_input_playlist(ctx, input).await;
                 if locked_retry_error.is_none() {
-                    warn!(
-                        "Input '{}' cache became readable after lock re-check; skipping refresh",
-                        input.name
-                    );
+                    warn!("Input '{}' cache became readable after lock re-check; skipping refresh", input.name);
                     preloaded_playlist = Some((locked_retry_playlist, None));
                 } else {
                     warn!(
@@ -1123,13 +1088,8 @@ async fn download_input(
                         input.name
                     );
                     invalidate_input_cache_status(ctx, input).await;
-                    playlist_download_result = playlist_download_from_input(
-                        &ctx.client,
-                        &ctx.config,
-                        input,
-                        ctx.stalker_refresh_mode,
-                    )
-                    .await;
+                    playlist_download_result =
+                        playlist_download_from_input(&ctx.client, &ctx.config, input, ctx.stalker_refresh_mode).await;
                 }
             }
         } else {
@@ -1251,7 +1211,7 @@ pub struct PlaylistProcessingContext {
 
     // New field for STRM probes & background updates
     pub provider_manager: Option<Arc<ActiveProviderManager>>,
-    pub metadata_manager: Option<Arc<MetadataUpdateManager>>,
+    pub metadata_manager: Option<Arc<dyn MetadataUpdateSink>>,
     pub pre_processed_inputs: Option<Arc<HashSet<Arc<str>>>>,
     pub stalker_refresh_mode: StalkerRefreshMode,
     pub partial_refresh: Arc<std::sync::atomic::AtomicBool>,
@@ -1334,9 +1294,8 @@ async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<Sou
             Ok(result) => source_results.push(result),
             Err(err) => {
                 error!("Playlist processing task failed: {err:?}");
-                errors.push(TuliproxError::RepositoryPlaylist(format!(
-                    "Playlist source processing task failed: {err}"
-                )));
+                errors
+                    .push(TuliproxError::RepositoryPlaylist(format!("Playlist source processing task failed: {err}")));
             }
         }
     }
@@ -1464,8 +1423,8 @@ async fn prepare_playlist_for_target(
             format!("target '{}' input '{}' before_pipe", target.name, provider_fpl.input.name).as_str(),
         );
         step.broadcast("Executing transformations on '{}' playlist", &target.name);
-        let mut processed_fpl =
-            execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source).map_err(|err| vec![err])?;
+        let mut processed_fpl = execute_pipe(target, &pipe, provider_fpl, &mut duplicates, consume_input_source)
+            .map_err(|err| vec![err])?;
         log_memory_snapshot(
             format!("target '{}' input '{}' after_pipe", target.name, provider_fpl.input.name).as_str(),
         );
@@ -1512,8 +1471,8 @@ async fn prepare_playlist_for_target(
 /// this function call — all temp files are removed by the
 /// `DiskEpgSource` drop guards before this function returns.
 fn spill_epg_to_disk(sources: Vec<Epg>) -> Result<Option<Epg>, TuliproxError> {
-    let dir = tempfile::tempdir()
-        .map_err(|e| TuliproxError::RepositoryXtream(format!("tempdir for EPG spill: {e}")))?;
+    let dir =
+        tempfile::tempdir().map_err(|e| TuliproxError::RepositoryXtream(format!("tempdir for EPG spill: {e}")))?;
     let mut disk_sources = Vec::with_capacity(sources.len());
     for (source_order, guide) in sources.into_iter().enumerate() {
         let mut acc = EpgMergeAccumulator::new();
@@ -1574,10 +1533,7 @@ async fn finalize_prepared_target(
         log_memory_snapshot(format!("target '{}' after_playlist_merge", target.name).as_str());
 
         if let Some(dedup_config) = target.options.as_ref().and_then(|options| options.deduplicate.as_ref()) {
-            let removed = crate::processing::processor::deduplicate::deduplicate_playlist(
-                *dedup_config,
-                &mut flat_new_playlist,
-            );
+            let removed = crate::processor::deduplicate::deduplicate_playlist(*dedup_config, &mut flat_new_playlist);
             if removed > 0 {
                 info!("Deduplicated {removed} channels for target {}", target.name);
             }
@@ -1629,7 +1585,7 @@ async fn finalize_prepared_target(
             target,
             ctx.playlist_state.as_ref(),
         )
-            .await;
+        .await;
         step.stop("Persisting playlists");
         log_memory_snapshot(format!("target '{}' after_persist", target.name).as_str());
         (result, errors)
@@ -1751,7 +1707,6 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
     let probe_filter = fpl.input.options.as_ref().and_then(|o| o.probe_filter.as_ref());
 
     for item in fpl.items() {
-
         if !is_probe_supported_item_type(item.header.item_type) {
             continue;
         }
@@ -1807,7 +1762,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                                         input_name, provider_id, last_probed, cutoff_ts, interval_secs, item.header.title
                                     );
                                 }
-                                mgr.queue_task_background(input_name.clone(), task);
+                                queue_task_background(mgr, input_name.clone(), task);
                                 queued_live_count += 1;
                             }
                         }
@@ -1864,7 +1819,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
             "[Task] Creating ProbeStream task for input {}: scope={}, unique_id={}, item_type={:?}, title=\"{}\"",
             input_name, probe_scope, unique_id, item.header.item_type, item.header.title
         );
-        mgr.queue_task_background(input_name.clone(), task);
+        queue_task_background(mgr, input_name.clone(), task);
         queued_stream_count += 1;
     }
 
@@ -1947,8 +1902,8 @@ async fn process_watch(
                 .filter(|pl| watches.iter().any(|r| r.is_match(&pl.title)))
                 .map(|pl| process_group_watch(app_config, client, &target.name, pl)),
         )
-            .for_each_concurrent(16, |f| f)
-            .await;
+        .for_each_concurrent(16, |f| f)
+        .await;
 
         true
     } else {
@@ -1961,9 +1916,11 @@ async fn process_watch(
 ///
 /// This was an `Option<Arc<AppState>>` used for exactly one call. Passing the
 /// call instead of the state keeps `processing` from naming the server state.
-pub type PlaylistUpdateBootstrap =
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+pub type PlaylistUpdateBootstrap = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
+// `pre_processed_inputs` is always built with the default hasher here;
+// generalising a private signature would buy nothing.
+#[allow(clippy::implicit_hasher)]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub async fn exec_processing(
     client: &reqwest::Client,
@@ -1975,9 +1932,9 @@ pub async fn exec_processing(
     update_guard: Option<UpdateGuard>,
     disabled_headers: Option<ReverseProxyDisabledHeaderConfig>,
     provider_manager: Option<Arc<ActiveProviderManager>>,
-    metadata_manager: Option<Arc<MetadataUpdateManager>>,
+    metadata_manager: Option<Arc<dyn MetadataUpdateSink>>,
     pre_processed_inputs: Option<HashSet<Arc<str>>>,
-    acquired_permit: Option<crate::model::UpdateGuardPermit>,
+    acquired_permit: Option<tuliprox_core::model::UpdateGuardPermit>,
 ) {
     let max_update_duration = Duration::from_secs(PLAYLIST_UPDATE_MAX_DURATION_SECS);
     let playlist_guard = if let Some(permit) = acquired_permit {
@@ -2045,11 +2002,9 @@ pub async fn exec_processing(
     };
 
     let start_time = Instant::now();
-    let process_result = tokio::time::timeout(
-        max_update_duration,
-        std::panic::AssertUnwindSafe(process_sources(&ctx)).catch_unwind(),
-    )
-        .await;
+    let process_result =
+        tokio::time::timeout(max_update_duration, std::panic::AssertUnwindSafe(process_sources(&ctx)).catch_unwind())
+            .await;
     let (stats, errors) = match process_result {
         Ok(Ok((stats, errors))) => (stats, errors),
         Ok(Err(_)) => {
@@ -2124,14 +2079,16 @@ pub async fn exec_processing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::foundation::{get_filter, MapperScript, ValueProvider};
-    use shared::model::{
-        ClusterFlags, ConfigInputDto, ConfigRenameDto, ConfigTargetDto, ConfigTargetOptions, M3uPlaylistItem,
-        MappingStage, PlaylistEntry, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster,
-        XtreamPlaylistItem,
+    use shared::{
+        foundation::{get_filter, MapperScript, ValueProvider},
+        model::{
+            ClusterFlags, ConfigInputDto, ConfigRenameDto, ConfigTargetDto, ConfigTargetOptions, M3uPlaylistItem,
+            MappingStage, PlaylistEntry, PlaylistItem, PlaylistItemHeader, PlaylistItemType, XtreamCluster,
+            XtreamPlaylistItem,
+        },
+        utils::Internable,
     };
-    use shared::utils::Internable;
-    use crate::model::Config;
+    use tuliprox_core::model::Config;
 
     fn serialize_without_trailing_fields<T: serde::Serialize>(value: &T, trailing_fields: &[u8]) -> Vec<u8> {
         let mut encoded = rmp_serde::to_vec(value).expect("playlist item should serialize");
@@ -2203,15 +2160,11 @@ mod tests {
     #[test]
     fn mapper_changes_id_without_changing_frozen_input_stream_id() {
         let mut item = PlaylistItem {
-            header: PlaylistItemHeader {
-                id: "origin-alpha".intern(),
-                name: "Channel".intern(),
-                ..Default::default()
-            },
+            header: PlaylistItemHeader { id: "origin-alpha".intern(), name: "Channel".intern(), ..Default::default() },
         };
         item.header.freeze_input_stream_id();
         let mapping = Mapping {
-            mapper: Some(vec![crate::model::Mapper {
+            mapper: Some(vec![tuliprox_core::model::Mapper {
                 filter: r#"name ~ ".*""#.to_string(),
                 script: r#"@id = "target-id""#.to_string(),
                 t_filter: Some(get_filter(r#"name ~ ".*""#, None).expect("filter should parse")),
@@ -2247,7 +2200,7 @@ mod tests {
         let mut legacy_item = PlaylistItem::from(&legacy_xtream);
         legacy_item.header.freeze_input_stream_id();
         let mapping = Mapping {
-            mapper: Some(vec![crate::model::Mapper {
+            mapper: Some(vec![tuliprox_core::model::Mapper {
                 filter: r#"name ~ ".*""#.to_string(),
                 script: r#"@id = "target-id""#.to_string(),
                 t_filter: Some(get_filter(r#"name ~ ".*""#, None).expect("filter should parse")),
@@ -2272,9 +2225,7 @@ mod tests {
     #[test]
     fn execute_pipe_freezes_input_stream_id_without_rename_or_mapper() {
         let input = ConfigInput::default();
-        let item = PlaylistItem {
-            header: PlaylistItemHeader { id: "origin-alpha".intern(), ..Default::default() },
-        };
+        let item = PlaylistItem { header: PlaylistItemHeader { id: "origin-alpha".intern(), ..Default::default() } };
         let source = MemoryPlaylistSource::new(vec![PlaylistGroup {
             id: 1,
             title: "Group".intern(),
@@ -2348,18 +2299,15 @@ mod tests {
             },
         };
 
-        let header: PlaylistItemHeader = rmp_serde::from_slice(&serialize_without_trailing_fields(&source.header, &[0xc0]))
-            .expect("previous header should deserialize");
-        let m3u: M3uPlaylistItem = rmp_serde::from_slice(&serialize_without_trailing_fields(
-            &M3uPlaylistItem::from(&source),
-            &[0xc0],
-        ))
-        .expect("previous M3U item should deserialize");
-        let xtream: XtreamPlaylistItem = rmp_serde::from_slice(&serialize_without_trailing_fields(
-            &XtreamPlaylistItem::from(&source),
-            &[0xc0],
-        ))
-        .expect("previous Xtream item should deserialize");
+        let header: PlaylistItemHeader =
+            rmp_serde::from_slice(&serialize_without_trailing_fields(&source.header, &[0xc0]))
+                .expect("previous header should deserialize");
+        let m3u: M3uPlaylistItem =
+            rmp_serde::from_slice(&serialize_without_trailing_fields(&M3uPlaylistItem::from(&source), &[0xc0]))
+                .expect("previous M3U item should deserialize");
+        let xtream: XtreamPlaylistItem =
+            rmp_serde::from_slice(&serialize_without_trailing_fields(&XtreamPlaylistItem::from(&source), &[0xc0]))
+                .expect("previous Xtream item should deserialize");
 
         assert_eq!(header.input_stream_id.as_ref(), "origin-alpha");
         assert_eq!(m3u.input_stream_id.as_ref(), "origin-alpha");
@@ -2372,15 +2320,11 @@ mod tests {
     #[test]
     fn messagepack_playlist_items_preserve_upstream_user_agent() -> Result<(), Box<dyn std::error::Error>> {
         let source = PlaylistItem {
-            header: PlaylistItemHeader {
-                upstream_user_agent: Some("Provider-UA".intern()),
-                ..Default::default()
-            },
+            header: PlaylistItemHeader { upstream_user_agent: Some("Provider-UA".intern()), ..Default::default() },
         };
 
         let header: PlaylistItemHeader = rmp_serde::from_slice(&rmp_serde::to_vec(&source.header)?)?;
-        let m3u: M3uPlaylistItem =
-            rmp_serde::from_slice(&rmp_serde::to_vec(&M3uPlaylistItem::from(&source))?)?;
+        let m3u: M3uPlaylistItem = rmp_serde::from_slice(&rmp_serde::to_vec(&M3uPlaylistItem::from(&source))?)?;
         let xtream: XtreamPlaylistItem =
             rmp_serde::from_slice(&rmp_serde::to_vec(&XtreamPlaylistItem::from(&source))?)?;
 
@@ -2473,7 +2417,7 @@ mod tests {
 
     #[test]
     fn collect_effective_skip_clusters_uses_input_skip_flags() {
-        use crate::model::{ConfigInputFlags, ConfigInputOptions};
+        use tuliprox_core::model::{ConfigInputFlags, ConfigInputOptions};
         let input = ConfigInput {
             name: "skip_live".intern(),
             input_type: InputType::Xtream,
@@ -2491,18 +2435,12 @@ mod tests {
 
     #[test]
     fn filter_skipped_clusters_removes_cached_groups() {
-        use crate::model::{ConfigInputFlags, ConfigInputOptions};
+        use tuliprox_core::model::{ConfigInputFlags, ConfigInputOptions};
         let live_item = PlaylistItem {
-            header: shared::model::PlaylistItemHeader {
-                xtream_cluster: XtreamCluster::Live,
-                ..Default::default()
-            },
+            header: shared::model::PlaylistItemHeader { xtream_cluster: XtreamCluster::Live, ..Default::default() },
         };
         let vod_item = PlaylistItem {
-            header: shared::model::PlaylistItemHeader {
-                xtream_cluster: XtreamCluster::Video,
-                ..Default::default()
-            },
+            header: shared::model::PlaylistItemHeader { xtream_cluster: XtreamCluster::Video, ..Default::default() },
         };
 
         let groups = vec![
@@ -2570,8 +2508,7 @@ mod tests {
             test_group(XtreamCluster::Series, "staged-series", "staged"),
         ];
 
-        let groups =
-            apply_staged_overlay_groups(&provider_name, ClusterFlags::Live, provider_groups, staged_groups);
+        let groups = apply_staged_overlay_groups(&provider_name, ClusterFlags::Live, provider_groups, staged_groups);
 
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].title.as_ref(), "provider-vod");
@@ -2587,14 +2524,9 @@ mod tests {
         assert!(!should_apply_staged_overlay(&result));
     }
 
-
     fn make_test_item(name: &str, item_type: PlaylistItemType) -> PlaylistItem {
-        let header = PlaylistItemHeader {
-            name: name.into(),
-            group: "Test Group".intern(),
-            item_type,
-            ..Default::default()
-        };
+        let header =
+            PlaylistItemHeader { name: name.into(), group: "Test Group".intern(), item_type, ..Default::default() };
         PlaylistItem { header }
     }
 
@@ -2633,12 +2565,8 @@ mod tests {
                 id: 1,
                 title: "Group A".intern(),
                 channels: vec![
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "A".intern(), chno: 10, ..Default::default() },
-                    },
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() },
-                    },
+                    PlaylistItem { header: PlaylistItemHeader { name: "A".intern(), chno: 10, ..Default::default() } },
+                    PlaylistItem { header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() } },
                 ],
                 xtream_cluster: XtreamCluster::Live,
             },
@@ -2646,12 +2574,8 @@ mod tests {
                 id: 2,
                 title: "Group C".intern(),
                 channels: vec![
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "C".intern(), chno: 1, ..Default::default() },
-                    },
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "D".intern(), chno: 0, ..Default::default() },
-                    },
+                    PlaylistItem { header: PlaylistItemHeader { name: "C".intern(), chno: 1, ..Default::default() } },
+                    PlaylistItem { header: PlaylistItemHeader { name: "D".intern(), chno: 0, ..Default::default() } },
                 ],
                 xtream_cluster: XtreamCluster::Live,
             },
@@ -2666,24 +2590,16 @@ mod tests {
 
     #[test]
     fn assign_channel_no_playlist_assigns_zero_chno_only() {
-        let mut groups = vec![
-            PlaylistGroup {
-                id: 1,
-                title: "Group A".intern(),
-                channels: vec![
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "A".intern(), chno: 0, ..Default::default() },
-                    },
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() },
-                    },
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "C".intern(), chno: 0, ..Default::default() },
-                    },
-                ],
-                xtream_cluster: XtreamCluster::Live,
-            },
-        ];
+        let mut groups = vec![PlaylistGroup {
+            id: 1,
+            title: "Group A".intern(),
+            channels: vec![
+                PlaylistItem { header: PlaylistItemHeader { name: "A".intern(), chno: 0, ..Default::default() } },
+                PlaylistItem { header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() } },
+                PlaylistItem { header: PlaylistItemHeader { name: "C".intern(), chno: 0, ..Default::default() } },
+            ],
+            xtream_cluster: XtreamCluster::Live,
+        }];
 
         assign_channel_no_playlist(&mut groups);
 
@@ -2695,34 +2611,24 @@ mod tests {
 
     #[test]
     fn assign_channel_no_playlist_skips_existing_nonzero_numbers() {
-        let mut groups = vec![
-            PlaylistGroup {
-                id: 1,
-                title: "Group A".intern(),
-                channels: vec![
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "A".intern(), chno: 5, ..Default::default() },
-                    },
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() },
-                    },
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "C".intern(), chno: 2, ..Default::default() },
-                    },
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "D".intern(), chno: 0, ..Default::default() },
-                    },
-                ],
-                xtream_cluster: XtreamCluster::Live,
-            },
-        ];
+        let mut groups = vec![PlaylistGroup {
+            id: 1,
+            title: "Group A".intern(),
+            channels: vec![
+                PlaylistItem { header: PlaylistItemHeader { name: "A".intern(), chno: 5, ..Default::default() } },
+                PlaylistItem { header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() } },
+                PlaylistItem { header: PlaylistItemHeader { name: "C".intern(), chno: 2, ..Default::default() } },
+                PlaylistItem { header: PlaylistItemHeader { name: "D".intern(), chno: 0, ..Default::default() } },
+            ],
+            xtream_cluster: XtreamCluster::Live,
+        }];
 
         assign_channel_no_playlist(&mut groups);
 
         // Existing non-zero numbers (2, 5) must be skipped when assigning new numbers
         assert_eq!(groups[0].channels[0].header.chno, 5); // preserved
         assert_eq!(groups[0].channels[2].header.chno, 2); // preserved
-        // B gets 1 (smallest available), D gets 3 (next available after 1 and existing 2)
+                                                          // B gets 1 (smallest available), D gets 3 (next available after 1 and existing 2)
         assert_eq!(groups[0].channels[1].header.chno, 1);
         assert_eq!(groups[0].channels[3].header.chno, 3);
     }
@@ -2734,23 +2640,17 @@ mod tests {
                 id: 1,
                 title: "Group 1".intern(),
                 channels: vec![
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "A".intern(), chno: 0, ..Default::default() },
-                    },
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() },
-                    },
+                    PlaylistItem { header: PlaylistItemHeader { name: "A".intern(), chno: 0, ..Default::default() } },
+                    PlaylistItem { header: PlaylistItemHeader { name: "B".intern(), chno: 0, ..Default::default() } },
                 ],
                 xtream_cluster: XtreamCluster::Live,
             },
             PlaylistGroup {
                 id: 2,
                 title: "Group 2".intern(),
-                channels: vec![
-                    PlaylistItem {
-                        header: PlaylistItemHeader { name: "C".intern(), chno: 0, ..Default::default() },
-                    },
-                ],
+                channels: vec![PlaylistItem {
+                    header: PlaylistItemHeader { name: "C".intern(), chno: 0, ..Default::default() },
+                }],
                 xtream_cluster: XtreamCluster::Live,
             },
         ];
@@ -2774,7 +2674,7 @@ mod tests {
             active.fetch_sub(1, Ordering::SeqCst);
         }
 
-        let locks = crate::utils::FileLockManager::default();
+        let locks = tuliprox_core::utils::FileLockManager::default();
         let active = AtomicUsize::new(0);
         let maximum = AtomicUsize::new(0);
         tokio::join!(
@@ -2793,7 +2693,7 @@ mod tests {
 
     #[tokio::test]
     async fn parallel_input_scheduler_releases_group_after_abort() {
-        let locks = Arc::new(crate::utils::FileLockManager::default());
+        let locks = Arc::new(tuliprox_core::utils::FileLockManager::default());
         let task_locks = Arc::clone(&locks);
         let task = tokio::spawn(async move {
             with_sequential_group(&task_locks, Some(7), true, std::future::pending::<()>()).await;
@@ -2847,12 +2747,7 @@ mod tests {
                 maximum.fetch_max(current, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 active.fetch_sub(1, Ordering::SeqCst);
-                TargetJobResult {
-                    index,
-                    name: format!("target-{index}"),
-                    result: Ok(()),
-                    errors: Vec::new(),
-                }
+                TargetJobResult { index, name: format!("target-{index}"), result: Ok(()), errors: Vec::new() }
             });
         }
         while let Some(result) = tasks.join_next().await {
@@ -2866,48 +2761,49 @@ mod tests {
 
     #[test]
     fn parallel_target_pipeline_normalizes_conflicting_output_resources() {
-        let config = Config {
-            storage_dir: "/tmp/tuliprox-target-resources".to_string(),
-            ..Config::default()
-        };
+        let config = Config { storage_dir: "/tmp/tuliprox-target-resources".to_string(), ..Config::default() };
 
         let mut spaced = ConfigTarget::from(&ConfigTargetDto::default());
         spaced.name = "A B".to_string();
         let mut underscored = ConfigTarget::from(&ConfigTargetDto::default());
         underscored.name = "A_B".to_string();
-        assert!(!target_mutated_resources(&config, &spaced)
-            .is_disjoint(&target_mutated_resources(&config, &underscored)));
+        assert!(
+            !target_mutated_resources(&config, &spaced).is_disjoint(&target_mutated_resources(&config, &underscored))
+        );
 
         spaced.name = "one".to_string();
-        spaced.output = vec![crate::model::TargetOutput::M3u(crate::model::M3uTargetOutput {
+        spaced.output = vec![tuliprox_core::model::TargetOutput::M3u(tuliprox_core::model::M3uTargetOutput {
             filename: Some("out/../x.m3u".to_string()),
             include_type_in_url: false,
             mask_redirect_url: false,
             filter: None,
         })];
         underscored.name = "two".to_string();
-        underscored.output = vec![crate::model::TargetOutput::M3u(crate::model::M3uTargetOutput {
+        underscored.output = vec![tuliprox_core::model::TargetOutput::M3u(tuliprox_core::model::M3uTargetOutput {
             filename: Some("x.m3u".to_string()),
             include_type_in_url: false,
             mask_redirect_url: false,
             filter: None,
         })];
-        assert!(!target_mutated_resources(&config, &spaced)
-            .is_disjoint(&target_mutated_resources(&config, &underscored)));
+        assert!(
+            !target_mutated_resources(&config, &spaced).is_disjoint(&target_mutated_resources(&config, &underscored))
+        );
     }
 
     mod mapping_stage {
         use super::*;
-        use crate::model::{
-            EpgConfig, EpgSmartMatchConfig, IcsEpgSourceConfig, Mapper, MediaToolCapabilities, PersistedEpgSource,
-            PersistedEpgSourceKind, SourcesConfig,
-        };
-        use crate::utils::FileLockManager;
         use arc_swap::{ArcSwap, ArcSwapOption};
         use shared::model::{ConfigPaths, EpgSmartMatchConfigDto};
         use std::sync::Arc;
         use tempfile::tempdir;
         use tokio::runtime::Runtime;
+        use tuliprox_core::{
+            model::{
+                EpgConfig, EpgSmartMatchConfig, IcsEpgSourceConfig, Mapper, MediaToolCapabilities, PersistedEpgSource,
+                PersistedEpgSourceKind, SourcesConfig,
+            },
+            utils::FileLockManager,
+        };
 
         fn build_mapping(id: &str, stage: MappingStage, script: &str) -> Mapping {
             let script = script.to_string();
@@ -3016,25 +2912,13 @@ mod tests {
         }
 
         fn channel_count(source: &mut PlaylistSource) -> usize {
-            source
-                .take_groups()
-                .iter()
-                .map(|g| g.channels.len())
-                .sum()
+            source.take_groups().iter().map(|g| g.channels.len()).sum()
         }
 
         #[test]
         fn map_playlist_applies_only_the_requested_stage() {
-            let processing = build_mapping(
-                "processing",
-                MappingStage::Processing,
-                r#"@name = concat(@Name, "-P")"#,
-            );
-            let after_epg = build_mapping(
-                "after_epg",
-                MappingStage::AfterEpg,
-                r#"@name = concat(@Name, "-E")"#,
-            );
+            let processing = build_mapping("processing", MappingStage::Processing, r#"@name = concat(@Name, "-P")"#);
+            let after_epg = build_mapping("after_epg", MappingStage::AfterEpg, r#"@name = concat(@Name, "-E")"#);
             let target = build_target(vec![processing, after_epg], false);
 
             let mut source = memory_source(vec![make_channel("Alpha")]);
@@ -3167,30 +3051,18 @@ match {
 
         #[test]
         fn after_epg_hook_runs_on_source_already_deduplicated_by_processing_pipe() {
-            let processing = build_mapping(
-                "processing",
-                MappingStage::Processing,
-                r#"@group = "PROCESSED""#,
-            );
+            let processing = build_mapping("processing", MappingStage::Processing, r#"@group = "PROCESSED""#);
             let after_epg = build_mapping("after_epg", MappingStage::AfterEpg, r#"add_favourite("Echo")"#);
             let target = build_target(vec![processing, after_epg], true);
 
             let input = ConfigInput::default();
             let channel = make_channel("Alpha");
-            let mut fetched = FetchedPlaylist {
-                input: &input,
-                source: memory_source(vec![channel.clone(), channel]),
-                epg: None,
-            };
+            let mut fetched =
+                FetchedPlaylist { input: &input, source: memory_source(vec![channel.clone(), channel]), epg: None };
             let mut duplicates = HashSet::new();
-            let mut processed = execute_pipe(
-                &target,
-                &get_processing_pipe(&target),
-                &mut fetched,
-                &mut duplicates,
-                false,
-            )
-            .expect("processing pipe must run");
+            let mut processed =
+                execute_pipe(&target, &get_processing_pipe(&target), &mut fetched, &mut duplicates, false)
+                    .expect("processing pipe must run");
             assert_eq!(processed.get_channel_count(), 1, "processing pipe must remove the duplicate");
 
             let groups = map_playlist_at_stage(&mut processed.source, &target, MappingStage::AfterEpg, None)
@@ -3211,11 +3083,8 @@ match {
                 let second = build_mapping("second", MappingStage::AfterEpg, r#"add_favourite("Echo")"#);
                 let target = build_target(vec![first, second], true);
                 let input = ConfigInput { name: "input".intern(), ..Default::default() };
-                let mut playlist = FetchedPlaylist {
-                    input: &input,
-                    source: memory_source(vec![make_channel("Alpha")]),
-                    epg: None,
-                };
+                let mut playlist =
+                    FetchedPlaylist { input: &input, source: memory_source(vec![make_channel("Alpha")]), epg: None };
                 let mut stats = HashMap::from([(
                     Arc::clone(&input.name),
                     create_input_stat(1, 1, 0, input.input_type, &input.name, 0),
@@ -3244,9 +3113,9 @@ match {
 #[cfg(test)]
 mod disk_epg_wireup_tests {
     use super::spill_epg_to_disk;
-    use crate::model::Epg;
     use shared::model::EpgChannel;
     use std::sync::Arc;
+    use tuliprox_core::model::Epg;
 
     /// Build an `Epg` with `channel_count` channels whose ids follow the
     /// `id_base` prefix. Two sources built with the same `id_base` and
@@ -3298,11 +3167,7 @@ mod disk_epg_wireup_tests {
 
         // 50 distinct channels, not 100 — the merge must have collapsed the
         // shared ids.
-        assert_eq!(
-            merged.children.len(),
-            50,
-            "shared channel ids must collapse to one entry, not be duplicated"
-        );
+        assert_eq!(merged.children.len(), 50, "shared channel ids must collapse to one entry, not be duplicated");
 
         // Every channel title comes from the lower-priority source. If the
         // merge logic is wrong, some titles will carry the "-7-" marker.
@@ -3317,12 +3182,7 @@ mod disk_epg_wireup_tests {
             // `add_channel_with_programmes` on the disk-merge path must
             // preserve the lower-priority source's single programme per
             // channel — `upsert_channel` would silently drop them.
-            assert_eq!(
-                ch.programmes.len(),
-                1,
-                "channel {:?} lost programmes through the disk-merge path",
-                ch.id
-            );
+            assert_eq!(ch.programmes.len(), 1, "channel {:?} lost programmes through the disk-merge path", ch.id);
             let prog = &ch.programmes[0];
             assert!(prog.title.is_none() || prog.title.as_deref() != Some("title-7"));
         }

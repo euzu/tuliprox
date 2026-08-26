@@ -1,26 +1,11 @@
-use crate::utils::FileLockManager;
-use crate::{
-    model::{
-        EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_DESC,
-        EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW, EPG_TAG_PROGRAMME, EPG_TAG_TITLE, EPG_TAG_TV,
-        EPG_TAG_PREVIOUSLY_SHOWN,
-        Epg, EpgSmartMatchConfig, IcsDummyPolicy, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
-        XmlTag, XmlTagIcon
-    },
-    processing::{parser::ics, processor::EpgIdCache},
-    repository::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy},
-    utils::{
-        arc_str_serde, async_file_reader, compressed_file_reader_async::CompressedFileReaderAsync, parse_xmltv_time,
-        with_folded_epg_id,
-    },
-};
+use crate::processor::EpgIdCache;
 use log::error;
 use quick_xml::events::{BytesStart, BytesText, Event};
 use serde::{Deserialize, Serialize};
 use shared::{
     concat_string,
     model::{EpgCategory, EpgChannel, EpgNamePrefix, EpgProgramme},
-    utils::{CONSTANTS, Internable, deunicode_string},
+    utils::{deunicode_string, Internable, CONSTANTS},
 };
 use std::{
     borrow::Cow,
@@ -30,6 +15,20 @@ use std::{
     sync::Arc,
 };
 use tokio::io::AsyncRead;
+use tuliprox_core::{
+    model::{
+        Epg, EpgSmartMatchConfig, IcsDummyPolicy, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
+        XmlTag, XmlTagIcon, EPG_ATTRIB_CHANNEL, EPG_ATTRIB_ID, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY, EPG_TAG_CHANNEL,
+        EPG_TAG_DESC, EPG_TAG_DISPLAY_NAME, EPG_TAG_ICON, EPG_TAG_LIVE, EPG_TAG_NEW, EPG_TAG_PREVIOUSLY_SHOWN,
+        EPG_TAG_PROGRAMME, EPG_TAG_TITLE, EPG_TAG_TV,
+    },
+    utils::{
+        arc_str_serde, async_file_reader, compressed_file_reader_async::CompressedFileReaderAsync, parse_xmltv_time,
+        with_folded_epg_id, FileLockManager,
+    },
+};
+use tuliprox_parser::ics;
+use tuliprox_repository::{BPlusTree, BPlusTreeQuery, BPlusTreeUpdate, FlushPolicy};
 
 struct IcsPersistedSource<'a> {
     channel_id: &'a Arc<str>,
@@ -44,7 +43,7 @@ struct IcsPersistedSource<'a> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```text
 /// let delimiters = vec!['.', '-', '_'];
 /// let (prefix, rest) = split_by_first_match("US.HBO", &delimiters);
 /// assert_eq!(prefix, Some("US"));
@@ -158,15 +157,12 @@ impl TVGuide {
     }
 
     #[inline]
-    pub fn get_epg_sources(&self) -> &Vec<PersistedEpgSource> {
-        &self.epg_sources
-    }
+    pub fn get_epg_sources(&self) -> &Vec<PersistedEpgSource> { &self.epg_sources }
 
     pub fn get_file_locks(&self) -> Option<&FileLockManager> { self.file_locks.as_deref() }
 }
 
 impl TVGuide {
-
     fn prepare_tag(id_cache: &mut EpgIdCache, tag: &mut XmlTag, smart_match: bool) {
         {
             let maybe_epg_id = { tag.get_attribute_value(&EPG_ATTRIB_ID.intern()).cloned() };
@@ -286,7 +282,7 @@ impl TVGuide {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```text
     /// let mut id_cache = EpgIdCache::default();
     /// let epg_source = PersistedEpgSource { file_path: Path::new("guide.xml.gz"), priority: 0 };
     /// if let Some(epg) = process_epg_file(&mut id_cache, &epg_source) {
@@ -472,7 +468,7 @@ impl TVGuide {
         self.filter_merged_with_icon_overrides(id_cache).await.map(|(epg, _)| epg)
     }
 
-    pub(crate) async fn filter_merged_with_icon_overrides(
+    pub async fn filter_merged_with_icon_overrides(
         &self,
         id_cache: &mut EpgIdCache,
     ) -> Option<MergedEpgWithIconOverrides> {
@@ -636,7 +632,7 @@ enum XmlTagType {
 
 impl XmlTagType {
     #[inline]
-    pub(crate) fn is_tv(self) -> bool { self == XmlTagType::Tv }
+    pub fn is_tv(self) -> bool { self == XmlTagType::Tv }
 }
 
 fn get_tag_type(name: &str) -> XmlTagType {
@@ -689,7 +685,7 @@ struct PreferredDummyPolicy {
 
 /// Carries the source rank required to select a preview dummy policy exactly like the main EPG merge.
 #[derive(Debug)]
-pub(crate) struct EpgDummyPolicySource {
+pub struct EpgDummyPolicySource {
     pub priority: i16,
     pub source_order: usize,
     pub channel_id: Arc<str>,
@@ -697,7 +693,7 @@ pub(crate) struct EpgDummyPolicySource {
 }
 
 type FinishedEpgChannels = (Option<HashMap<Arc<str>, Arc<str>>>, Vec<EpgChannel>);
-pub(crate) type MergedEpgWithIconOverrides = (Epg, HashSet<Arc<str>>);
+pub type MergedEpgWithIconOverrides = (Epg, HashSet<Arc<str>>);
 
 #[derive(Debug)]
 struct ProgrammeMergeEntry {
@@ -718,14 +714,14 @@ struct ChannelMergeAcc {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct EpgMergeAccumulator {
+pub struct EpgMergeAccumulator {
     attributes: Option<PreferredAttributes>,
     channels: HashMap<Arc<str>, ChannelMergeAcc>,
     dummy_policies: HashMap<Arc<str>, PreferredDummyPolicy>,
 }
 
 impl EpgMergeAccumulator {
-    pub(crate) fn new() -> Self { Self::default() }
+    pub fn new() -> Self { Self::default() }
 
     fn channel_ids_with_programmes(&self) -> HashSet<Arc<str>> {
         self.channels
@@ -741,7 +737,7 @@ impl EpgMergeAccumulator {
         self.channels.keys().cloned().collect()
     }
 
-    pub(crate) fn set_attributes_if_preferred(
+    pub fn set_attributes_if_preferred(
         &mut self,
         priority: i16,
         source_order: usize,
@@ -834,7 +830,7 @@ impl EpgMergeAccumulator {
         }
     }
 
-    pub(crate) fn add_channel_with_programmes(
+    pub fn add_channel_with_programmes(
         &mut self,
         priority: i16,
         source_order: usize,
@@ -925,12 +921,12 @@ impl EpgMergeAccumulator {
     /// for `set_attributes_if_preferred` at merge time. The accumulator
     /// itself does not aggregate them, so the caller — which knows the
     /// original Epg's `priority` and `source_order` — must hand them in.
-    pub(crate) fn finish_into_disk(
-        self,
-        path: PathBuf,
-        source_priority: i16,
-        source_order: u32,
-    ) -> io::Result<DiskEpgSource> {
+    ///
+    /// # Panics
+    ///
+    /// Panics if `source_order` exceeds `u32`, which would mean four billion
+    /// sources in one import.
+    pub fn finish_into_disk(self, path: PathBuf, source_priority: i16, source_order: u32) -> io::Result<DiskEpgSource> {
         // Fresh tree at the temp path. `store` creates the file; the
         // subsequent updater opens it for batched writes.
         BPlusTree::<EpgDiskChannelKey, EpgChannel>::new()
@@ -1039,7 +1035,7 @@ fn flush_batch(
 /// to lock the contract in source rather than rely on a derived behaviour.
 /// Same key type serialises through `rmp_serde` as a record.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) struct EpgDiskChannelKey {
+pub struct EpgDiskChannelKey {
     #[serde(with = "arc_str_serde")]
     pub folded_id: Arc<str>,
     pub priority: i16,
@@ -1074,7 +1070,7 @@ impl PartialOrd for EpgDiskChannelKey {
 /// rather than being reconstructed from the disk tree, because the disk
 /// tree only stores per-channel priorities (which can differ across
 /// channels if sources overlap), not a single source-level value.
-pub(crate) struct DiskEpgSource {
+pub struct DiskEpgSource {
     pub(super) path: PathBuf,
     pub(super) attributes: Option<HashMap<Arc<str>, Arc<str>>>,
     pub(super) source_priority: i16,
@@ -1082,7 +1078,7 @@ pub(crate) struct DiskEpgSource {
 }
 
 impl DiskEpgSource {
-    pub(crate) fn new(
+    pub fn new(
         path: PathBuf,
         attributes: Option<HashMap<Arc<str>, Arc<str>>>,
         source_priority: i16,
@@ -1175,7 +1171,7 @@ fn normalize_channel_programmes(acc: &mut ChannelMergeAcc) {
 }
 
 #[cfg(test)]
-pub(crate) fn merge_epg_channels_by_priority(channels_by_source: Vec<(i16, Vec<EpgChannel>)>) -> Vec<EpgChannel> {
+pub fn merge_epg_channels_by_priority(channels_by_source: Vec<(i16, Vec<EpgChannel>)>) -> Vec<EpgChannel> {
     let mut accumulator = EpgMergeAccumulator::new();
     for (source_order, (priority, channels)) in channels_by_source.into_iter().enumerate() {
         for channel in channels {
@@ -1185,7 +1181,7 @@ pub(crate) fn merge_epg_channels_by_priority(channels_by_source: Vec<(i16, Vec<E
     accumulator.finish_channels().map(|(_, channels)| channels).unwrap_or_default()
 }
 
-pub(crate) fn merge_epg_channels_by_priority_with_dummy_policies(
+pub fn merge_epg_channels_by_priority_with_dummy_policies(
     channels_by_source: Vec<(i16, Vec<EpgChannel>)>,
     dummy_policies: Vec<EpgDummyPolicySource>,
 ) -> Vec<EpgChannel> {
@@ -1242,7 +1238,7 @@ pub fn flatten_tvguide(tv_guides: Vec<Epg>) -> Option<Epg> {
 /// not the override metadata. If a caller later needs that set, the
 /// `MergedEpgWithIconOverrides` tuple is already in scope via this
 /// function's return type.
-pub(crate) fn merge_epg_trees(sources: Vec<DiskEpgSource>) -> io::Result<Option<MergedEpgWithIconOverrides>> {
+pub fn merge_epg_trees(sources: Vec<DiskEpgSource>) -> io::Result<Option<MergedEpgWithIconOverrides>> {
     let mut accumulator = EpgMergeAccumulator::new();
     for source in sources {
         if let Some(attrs) = &source.attributes {
@@ -1272,20 +1268,19 @@ pub(crate) fn merge_epg_trees(sources: Vec<DiskEpgSource>) -> io::Result<Option<
 #[cfg(test)]
 mod tests {
     use super::TVGuide;
-
-    use crate::{
-        model::{
-            Epg, EpgSmartMatchConfig, IcsDummyConfig, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
-            },
-        processing::parser::xmltv::{
-            EpgDummyPolicySource, EpgMergeAccumulator, flatten_tvguide, merge_epg_channels_by_priority,
-            merge_epg_channels_by_priority_with_dummy_policies, normalize_channel_name,
-        },
-        utils::FileLockManager,
+    use crate::parser::xmltv::{
+        flatten_tvguide, merge_epg_channels_by_priority, merge_epg_channels_by_priority_with_dummy_policies,
+        normalize_channel_name, EpgDummyPolicySource, EpgMergeAccumulator,
     };
     use shared::model::{EpgCategory, EpgChannel, EpgProgramme};
     use std::{collections::HashSet, fs, path::PathBuf, sync::Arc};
     use tempfile::tempdir;
+    use tuliprox_core::{
+        model::{
+            Epg, EpgSmartMatchConfig, IcsDummyConfig, IcsEpgSourceConfig, PersistedEpgSource, PersistedEpgSourceKind,
+        },
+        utils::FileLockManager,
+    };
 
     /// Run an async test body on a freshly-created multi-threaded tokio
     /// runtime. Centralizes the `Runtime::new()...block_on(...)` boilerplate
@@ -1306,7 +1301,7 @@ mod tests {
             priority,
             source_order,
             channel_id: "f1.calendar".intern(),
-            policy: crate::model::IcsDummyPolicy {
+            policy: tuliprox_core::model::IcsDummyPolicy {
                 timezone: "UTC".to_string(),
                 config: IcsDummyConfig {
                     enabled: true,
@@ -1664,7 +1659,7 @@ mod tests {
             let mut smart_cfg = EpgSmartMatchConfigDto { enabled: true, ..Default::default() };
             smart_cfg.prepare().expect("smart match config");
             let tv_guide = TVGuide::new(vec![xmltv_source(epg_path, 0, false)]);
-            let mut id_cache = EpgIdCache::new(Some(&crate::model::EpgConfig {
+            let mut id_cache = EpgIdCache::new(Some(&tuliprox_core::model::EpgConfig {
                 sources: vec![],
                 smart_match: Some(EpgSmartMatchConfig::from(smart_cfg)),
             }));
@@ -1955,9 +1950,10 @@ mod tests {
         let source_order_winner =
             merge(vec![dummy_policy_source(0, 2, "Later source"), dummy_policy_source(0, 1, "Earlier source")]);
         assert!(!source_order_winner.programmes.is_empty());
-        assert!(
-            source_order_winner.programmes.iter().all(|programme| programme.title.as_deref() == Some("Earlier source"))
-        );
+        assert!(source_order_winner
+            .programmes
+            .iter()
+            .all(|programme| programme.title.as_deref() == Some("Earlier source")));
     }
 
     #[ignore = "requires a local XMLTV fixture under /tmp"]
@@ -2014,7 +2010,7 @@ mod tests {
         assert_eq!("odisea.bg", normalize_channel_name("BG | ODISEA ᵁᴴᴰ ³⁸⁴⁰ᴾ", &epg_smart_cfg));
     }
 
-    use crate::processing::processor::EpgIdCache;
+    use crate::processor::EpgIdCache;
     use rphonetic::{Encoder, Metaphone};
     use shared::{
         model::{EpgNamePrefix, EpgSmartMatchConfigDto},
@@ -2109,7 +2105,7 @@ mod tests {
     /// regression to `Vec::new()` without breaking any visible behaviour.
     #[test]
     fn parse_tvguide_handles_giant_programme_description() {
-        use crate::processing::parser::xmltv::{EPG_TAG_DESC, EPG_TAG_PROGRAMME, parse_tvguide};
+        use crate::parser::xmltv::{parse_tvguide, EPG_TAG_DESC, EPG_TAG_PROGRAMME};
 
         run_async_test(async {
             // 200 KiB of text content — well beyond the 64 KiB preallocation.
@@ -2119,7 +2115,7 @@ mod tests {
             let xml = format!(
                 r#"<?xml version="1.0"?><tv><programme channel="c1"><title>t</title><desc>{big_text}</desc></programme></tv>"#
             );
-            let mut emitted_tags: Vec<crate::model::XmlTag> = Vec::new();
+            let mut emitted_tags: Vec<tuliprox_core::model::XmlTag> = Vec::new();
             parse_tvguide(xml.as_bytes(), &mut |tag| {
                 emitted_tags.push(tag);
             })
@@ -2199,7 +2195,7 @@ mod tests {
     /// optimisation is built on sand.
     #[test]
     fn disk_path_matches_in_memory_finish() {
-        use super::{EpgMergeAccumulator, merge_epg_trees};
+        use super::{merge_epg_trees, EpgMergeAccumulator};
 
         // Build one source by appending one programme per channel through the
         // accumulator's primary entry point. `add_channel_with_programmes` is

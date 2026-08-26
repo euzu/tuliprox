@@ -50,11 +50,11 @@ use tuliprox_config_loader as config_loader;
 // `crate::utils::X` keep resolving across the backend.
 use tuliprox_core::{model, utils};
 use tuliprox_iptv as iptv;
-use tuliprox_library::{library, media_enrichment};
+use tuliprox_library::library;
 use tuliprox_media_server as media_server;
 use tuliprox_messaging as messaging;
 use tuliprox_mpegts as mpegts;
-use tuliprox_parser as parser;
+use tuliprox_processing as processing;
 use tuliprox_repository as repository;
 
 #[allow(clippy::struct_excessive_bools)]

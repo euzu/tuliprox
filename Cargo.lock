@@ -4412,6 +4412,7 @@ dependencies = [
  "tuliprox-messaging",
  "tuliprox-mpegts",
  "tuliprox-parser",
+ "tuliprox-processing",
  "tuliprox-repository",
  "tuliprox-session",
  "url",
@@ -4716,6 +4717,43 @@ dependencies = [
  "tokio-util",
  "tuliprox-core",
  "url",
+]
+
+[[package]]
+name = "tuliprox-processing"
+version = "3.3.91"
+dependencies = [
+ "arc-swap",
+ "chrono",
+ "futures",
+ "indexmap",
+ "log",
+ "lru",
+ "parking_lot",
+ "paste",
+ "path-clean",
+ "quick-xml",
+ "rand 0.9.4",
+ "regex",
+ "reqwest",
+ "rmp-serde",
+ "rphonetic",
+ "serde",
+ "serde_json",
+ "shared",
+ "strsim",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tuliprox-core",
+ "tuliprox-iptv",
+ "tuliprox-library",
+ "tuliprox-media-server",
+ "tuliprox-messaging",
+ "tuliprox-parser",
+ "tuliprox-repository",
+ "tuliprox-session",
 ]
 
 [[package]]

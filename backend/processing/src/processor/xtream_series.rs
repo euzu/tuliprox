@@ -1,45 +1,60 @@
-use crate::model::UpdateTask;
-use tuliprox_session::ActiveProviderManager;
-use crate::model::ProviderHandle;
-use crate::model::{ProviderIdType, ResolveReason, ResolveReasonSet};
-use crate::library::{MetadataResolver, MetadataStorage};
-use crate::iptv::xtream;
-use crate::media_enrichment::policy::MissingFactEnrichmentPolicy;
-use crate::media_enrichment::xtream::{
-    apply_fact_patch_to_series, series_fact_patch_from_metadata, series_fact_patch_from_title_candidates,
+use crate::{
+    fetched_playlist::FetchedPlaylist,
+    metadata_sink::queue_task_background,
+    processor::{
+        create_resolve_options_function_for_xtream_target,
+        playlist::{PlaylistProcessingContext, ProcessingPipe},
+        process_foreground_retry_once, select_cancel_token, ProbeHandleGuard, ResolveOptions, ResolveOptionsFlags,
+        FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
+        FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
+    },
 };
-use crate::processing::fetched_playlist::FetchedPlaylist;
-use crate::model::{AppConfig, ConfigTarget, MetadataUpdateConfig};
-use crate::model::{ConfigInput, ConfigInputFlags, InputSource};
-use crate::processing::parser::xtream::create_xtream_series_episode_url;
-use crate::processing::parser::xtream::parse_xtream_series_info;
-use crate::processing::processor::playlist::{PlaylistProcessingContext, ProcessingPipe};
-use crate::processing::processor::{
-    create_resolve_options_function_for_xtream_target, process_foreground_retry_once, select_cancel_token,
-    ProbeHandleGuard,
-    ResolveOptions, ResolveOptionsFlags, FOREGROUND_BATCH_SIZE as BATCH_SIZE, FOREGROUND_MIN_RETRY_DELAY_SECS,
-    FOREGROUND_RETRY_BATCH_MAX_SIZE as RETRY_BATCH_MAX_SIZE,
-};
-use crate::repository::persists_input_series_info;
-use crate::repository::{get_input_storage_path, persist_input_series_info_batch, MemoryPlaylistSource};
-use crate::repository::{xtream_get_file_path, BPlusTreeQuery};
-use crate::utils::ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome};
-use crate::utils::debug_if_enabled;
 use log::{debug, error, info, log_enabled, trace, warn, Level};
 use parking_lot::Mutex;
 use serde_json::Value;
-use shared::error::TuliproxError;
-use shared::model::{
-    MediaQuality, PlaylistEntry, PlaylistItem, SeriesStreamProperties, StreamProperties, XtreamPlaylistItem,
-    XtreamSeriesInfo,
+use shared::{
+    defaults::default_probe_user_priority,
+    error::TuliproxError,
+    foundation::ValueProvider,
+    model::{
+        MediaQuality, PlaylistEntry, PlaylistGroup, PlaylistItem, PlaylistItemType, SeriesStreamProperties,
+        StreamProperties, XtreamCluster, XtreamPlaylistItem, XtreamSeriesInfo,
+    },
 };
-use shared::model::{PlaylistGroup, PlaylistItemType, XtreamCluster};
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use shared::foundation::ValueProvider;
-use shared::defaults::default_probe_user_priority;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
+use tuliprox_core::{
+    model::{
+        AppConfig, ConfigInput, ConfigInputFlags, ConfigTarget, InputSource, MetadataUpdateConfig, ProviderHandle,
+        ProviderIdType, ResolveReason, ResolveReasonSet, UpdateTask,
+    },
+    utils::{
+        debug_if_enabled,
+        ffmpeg::{is_supported_probe_url, FfmpegExecutor, ProbeFailureKind, ProbeUrlOutcome},
+    },
+};
+use tuliprox_iptv::xtream;
+use tuliprox_library::{
+    library::{MetadataResolver, MetadataStorage},
+    media_enrichment::{
+        policy::MissingFactEnrichmentPolicy,
+        xtream::{
+            apply_fact_patch_to_series, series_fact_patch_from_metadata, series_fact_patch_from_title_candidates,
+        },
+    },
+};
+use tuliprox_parser::xtream::{create_xtream_series_episode_url, parse_xtream_series_info};
+use tuliprox_repository::{
+    get_input_storage_path, persist_input_series_info_batch, persists_input_series_info, xtream_get_file_path,
+    BPlusTreeQuery, MemoryPlaylistSource,
+};
+use tuliprox_session::ActiveProviderManager;
 
 create_resolve_options_function_for_xtream_target!(series);
 
@@ -246,9 +261,7 @@ fn queue_background_series_info(
                 if log_enabled!(Level::Debug) {
                     let has_details = pli.has_details();
                     let (has_tmdb, has_date) = match pli.header.additional_properties.as_ref() {
-                        Some(StreamProperties::Series(props)) => {
-                            (props.tmdb.is_some(), props.release_date.is_some())
-                        }
+                        Some(StreamProperties::Series(props)) => (props.tmdb.is_some(), props.release_date.is_some()),
                         _ => (false, false),
                     };
                     debug!(
@@ -256,7 +269,7 @@ fn queue_background_series_info(
                         input_name_arc, provider_id, reasons, has_details, has_tmdb, has_date, pli.header.title
                     );
                 }
-                mgr.queue_task_background(input_name_arc.clone(), task);
+                queue_task_background(mgr, input_name_arc.clone(), task);
                 queued += 1;
             }
         }
@@ -788,12 +801,11 @@ pub async fn update_series_metadata(
             if content.is_empty() {
                 debug!("Series {display_id}: provider returned empty content for info fetch");
             } else {
-                let canonical_series_id =
-                    existing_item.as_ref().map_or(series_id, PlaylistEntry::get_virtual_id);
+                let canonical_series_id = existing_item.as_ref().map_or(series_id, PlaylistEntry::get_virtual_id);
                 match serde_json::from_str::<Value>(&content) {
                     Ok(mut json_value) => {
                         if let Some(info) = json_value.get_mut("info").and_then(|v| v.as_object_mut()) {
-                            crate::model::normalize_release_date(info);
+                            tuliprox_core::model::normalize_release_date(info);
                         }
 
                         match serde_json::from_value::<XtreamSeriesInfo>(json_value) {
@@ -833,17 +845,22 @@ pub async fn update_series_metadata(
             };
             props = Some(new_props);
         } else {
-            return Err(shared::error::TuliproxError::Config(format!("No Series properties available and no title found for {display_id}")));
+            return Err(shared::error::TuliproxError::Config(format!(
+                "No Series properties available and no title found for {display_id}"
+            )));
         }
     }
 
     let mut properties = props.ok_or_else(|| {
-        shared::error::TuliproxError::Config(format!("No Series properties available after fallback creation for {display_id}"))
+        shared::error::TuliproxError::Config(format!(
+            "No Series properties available after fallback creation for {display_id}"
+        ))
     })?;
 
     // Xtream's legacy ResolveTmdb input flag currently gates missing identity/temporal fact enrichment.
-    let missing_fact_policy =
-        MissingFactEnrichmentPolicy::fill_missing(resolve_missing_facts && input.has_flag(ConfigInputFlags::ResolveTmdb));
+    let missing_fact_policy = MissingFactEnrichmentPolicy::fill_missing(
+        resolve_missing_facts && input.has_flag(ConfigInputFlags::ResolveTmdb),
+    );
 
     // 2. Resolve missing TMDB/date facts if allowed for this input
     let title_candidate = playlist_title.or_else(|| existing_item.as_ref().map(|i| i.title.as_ref()));
@@ -883,26 +900,19 @@ pub async fn update_series_metadata(
             if let Some(title) = title_candidate {
                 if !title.is_empty() {
                     trace!("Resolving TMDB for Series using Playlist Title '{title}' (ID: {display_id})...");
-                    meta = meta_resolver
-                        .resolve_from_title(title, properties.tmdb, false, true)
-                        .await;
+                    meta = meta_resolver.resolve_from_title(title, properties.tmdb, false, true).await;
                     tried_title = true;
                 }
             }
 
             // 3. API Name (fallback)
-            if (meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none()))) && !properties.name.is_empty() {
-                let title_already_tried = if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
+            if (meta.is_none() || (meta.as_ref().is_some_and(|m| m.tmdb_id().is_none()))) && !properties.name.is_empty()
+            {
+                let title_already_tried =
+                    if let Some(t) = title_candidate { t == properties.name.as_ref() } else { false };
                 if !tried_title || !title_already_tried {
                     debug!("Fallback to API Name '{}'...", properties.name);
-                    meta = meta_resolver
-                        .resolve_from_title(
-                            &properties.name,
-                            properties.tmdb,
-                            false,
-                            true,
-                        )
-                        .await;
+                    meta = meta_resolver.resolve_from_title(&properties.name, properties.tmdb, false, true).await;
                 }
             }
 
@@ -929,7 +939,10 @@ pub async fn update_series_metadata(
         if let Some(details) = properties.details.as_mut() {
             if let Some(episodes) = details.episodes.as_mut() {
                 let config = app_config.config.load();
-                let probe_priority = config.metadata_update.as_ref().map_or(default_probe_user_priority(), |cfg| cfg.probe.user_priority);
+                let probe_priority = config
+                    .metadata_update
+                    .as_ref()
+                    .map_or(default_probe_user_priority(), |cfg| cfg.probe.user_priority);
                 let user_agent = config.default_user_agent.clone();
 
                 let input_url = input.url.as_str();
@@ -1019,7 +1032,7 @@ pub async fn update_series_metadata(
                             );
                             let is_remote_probe = reqwest::Url::parse(probe_url.as_ref())
                                 .is_ok_and(|u| matches!(u.scheme(), "http" | "https"));
-                            let probe_params = crate::utils::ffmpeg::ProbeParams {
+                            let probe_params = tuliprox_core::utils::ffmpeg::ProbeParams {
                                 url: probe_url.as_ref(),
                                 user_agent: user_agent.as_deref(),
                                 analyze_duration: probe_settings.analyze_duration_micros,
@@ -1027,19 +1040,13 @@ pub async fn update_series_metadata(
                                 timeout_secs: probe_settings.timeout_secs,
                             };
                             let probe_result = if is_remote_probe {
-                                FfmpegExecutor::new().probe_remote_seekable_url_with_cancel(
-                                    client,
-                                    &probe_params,
-                                    cancel_token,
-                                )
-                                .await
+                                FfmpegExecutor::new()
+                                    .probe_remote_seekable_url_with_cancel(client, &probe_params, cancel_token)
+                                    .await
                             } else {
-                                FfmpegExecutor::new().probe_url_with_cancel(
-                                    &probe_params,
-                                    config.proxy.as_ref(),
-                                    cancel_token,
-                                )
-                                .await
+                                FfmpegExecutor::new()
+                                    .probe_url_with_cancel(&probe_params, config.proxy.as_ref(), cancel_token)
+                                    .await
                             };
                             match probe_result {
                                 ProbeUrlOutcome::Success(_quality, raw_video, raw_audio, _stats) => {
@@ -1096,15 +1103,20 @@ pub async fn update_series_metadata(
         out.store(probe_pending, Ordering::Relaxed);
     }
 
-    let probe_only_unresolved = do_probe && !fetch_info && !resolve_missing_facts && !properties_updated && !fetched_new;
+    let probe_only_unresolved =
+        do_probe && !fetch_info && !resolve_missing_facts && !properties_updated && !fetched_new;
     if probe_only_unresolved {
         if let Some(kind) = probe_failure {
             let err = match kind {
-                ProbeFailureKind::NotFound => {
-                    shared::error::TuliproxError::Config(format!("Probe failed with 404 Not Found for Series {display_id}"))
+                ProbeFailureKind::NotFound => shared::error::TuliproxError::Config(format!(
+                    "Probe failed with 404 Not Found for Series {display_id}"
+                )),
+                ProbeFailureKind::Other => {
+                    shared::error::TuliproxError::Config(format!("Probe failed for Series {display_id}"))
                 }
-                ProbeFailureKind::Other => shared::error::TuliproxError::Config(format!("Probe failed for Series {display_id}")),
-                ProbeFailureKind::Cancelled => shared::error::TuliproxError::Config(format!("Probe cancelled for Series {display_id}")),
+                ProbeFailureKind::Cancelled => {
+                    shared::error::TuliproxError::Config(format!("Probe cancelled for Series {display_id}"))
+                }
             };
             return Err(err);
         }
