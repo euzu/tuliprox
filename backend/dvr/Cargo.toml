@@ -1,0 +1,34 @@
+[package]
+name = "tuliprox-dvr"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Digital video recorder: the recording queue, scheduler, supervisors and retention"
+
+[lints]
+workspace = true
+
+[dependencies]
+shared = { version = "3", path = "../../shared" }
+tuliprox-auth = { version = "3", path = "../auth" }
+tuliprox-core = { version = "3", path = "../core" }
+tuliprox-messaging = { version = "3", path = "../messaging" }
+tuliprox-repository = { version = "3", path = "../repository" }
+tuliprox-session = { version = "3", path = "../session" }
+arc-swap.workspace = true
+chrono.workspace = true
+chrono-tz = "0.10.4"
+bytes.workspace = true
+libc = "0.2"
+futures.workspace = true
+log.workspace = true
+reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros", "sync", "process"] }
+tokio-util = { version = "0.7.18", features = ["io", "io-util"] }
+url.workspace = true
+
+[dev-dependencies]
+tempfile = "3.24.0"
+tokio = { workspace = true, features = ["test-util"] }

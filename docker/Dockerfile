@@ -27,24 +27,21 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # Set Rust compiler flags for static linking against musl
 ENV RUSTFLAGS='-C target-feature=+crt-static'
 
-# Copy dependency files and the full 'shared' crate for dependency caching
+# Copy dependency files and workspace crates for dependency caching
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY shared ./shared/
-COPY backend/Cargo.toml ./backend/
+COPY backend ./backend/
 COPY frontend/Cargo.toml ./frontend/
 
-# Create dummy main.rs for other crates to allow dependency build
-RUN mkdir -p backend/src frontend/src && \
-    echo "fn main() {}" > backend/src/main.rs && \
-    echo "fn main() {}" > frontend/src/main.rs
+# Create a dummy frontend target to satisfy the workspace manifest
+RUN mkdir -p frontend/src && echo "fn main() {}" > frontend/src/main.rs
 
 # Build dependencies (this layer will be cached unless dependencies or 'shared' change)
 RUN rustup target add ${RUST_TARGET}
 RUN cargo build -p tuliprox --target ${RUST_TARGET} --release || true
 
-# Now copy the rest of the source code and build the project
-COPY backend ./backend/
+# Now copy the remaining source code and build the project
 COPY frontend ./frontend/
 RUN cargo build -p tuliprox --target ${RUST_TARGET} --release
 
@@ -66,16 +63,14 @@ RUN cargo install --locked trunk wasm-bindgen-cli
 # Set working directory
 WORKDIR /src
 
-# Copy dependency files and the full 'shared' crate for dependency caching
+# Copy dependency files and workspace crates for dependency caching
 COPY Cargo.toml Cargo.lock ./
 COPY shared ./shared/
-COPY backend/Cargo.toml ./backend/
+COPY backend ./backend/
 COPY frontend/Cargo.toml frontend/Trunk.toml ./frontend/
 
-# Create dummy main.rs for BOTH frontend AND backend to satisfy workspace requirements
-RUN mkdir -p frontend/src backend/src && \
-    echo "fn main() {}" > frontend/src/main.rs && \
-    echo "fn main() {}" > backend/src/main.rs
+# Create a dummy frontend target for the dependency build
+RUN mkdir -p frontend/src && echo "fn main() {}" > frontend/src/main.rs
 
 # Pre-build dependencies
 WORKDIR /src/frontend

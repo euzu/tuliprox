@@ -47,7 +47,7 @@ artifacts
 /.vscode
 
 .envrc
-backend/Cargo.lock
+backend/app/Cargo.lock
 
 # Ignore markdown files
 *.md
@@ -65,4 +65,4 @@ backend/Cargo.lock
 
 # Scratch directory some backend tests create relative to the crate root.
 # Test output must never become tracked source.
-/backend/tmp/
+/backend/app/tmp/

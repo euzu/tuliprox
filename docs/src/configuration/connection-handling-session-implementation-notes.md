@@ -365,13 +365,13 @@ For live playback, following the redirected provider URL is still acceptable and
 
 Read these files together before changing session logic:
 
-- `backend/src/api/api_utils.rs`
-- `backend/src/api/endpoints/m3u_api.rs`
-- `backend/src/api/endpoints/xtream_api.rs`
-- `backend/src/api/endpoints/hls_api.rs`
-- `backend/src/api/model/active_user_manager.rs`
-- `backend/src/api/model/active_provider_manager.rs`
-- `backend/src/api/model/metadata_update_manager.rs`
+- `backend/app/src/api/api_utils.rs`
+- `backend/app/src/api/endpoints/m3u_api.rs`
+- `backend/app/src/api/endpoints/xtream_api.rs`
+- `backend/app/src/api/endpoints/hls_api.rs`
+- `backend/app/src/api/model/active_user_manager.rs`
+- `backend/app/src/api/model/active_provider_manager.rs`
+- `backend/app/src/api/model/metadata_update_manager.rs`
 - `shared/src/model/playlist.rs`
 
 ## Tests that should stay green

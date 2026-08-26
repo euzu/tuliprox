@@ -1,0 +1,28 @@
+[package]
+name = "tuliprox-media-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Anti-corruption layer for Emby/Jellyfin/Plex media servers"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes.workspace = true
+futures.workspace = true
+http = "1"
+quick-xml = { version = "0.41", features = ["async-tokio", "serialize"] }
+reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
+shared = { version = "3", path = "../../shared" }
+tokio = { workspace = true, features = ["rt-multi-thread", "parking_lot", "time", "macros"] }
+url.workspace = true
+
+[dev-dependencies]
+# The Plex client's tests stand up a local HTTP server to drive the client
+# against; hyper is not used by the module itself.
+http-body-util = "0.1.3"
+hyper = "1.10.1"
+hyper-util = "0.1.20"

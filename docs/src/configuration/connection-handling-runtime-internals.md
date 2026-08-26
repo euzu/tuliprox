@@ -16,12 +16,12 @@ It is intentionally about the current code path, not the pure target-state desig
 
 Primary implementation areas:
 
-- `backend/src/api/api_utils.rs`
-- `backend/src/api/model/active_user_manager.rs`
-- `backend/src/api/model/streams/active_client_stream.rs`
-- `backend/src/api/endpoints/m3u_api.rs`
-- `backend/src/api/endpoints/xtream_api.rs`
-- `backend/src/api/endpoints/hls_api.rs`
+- `backend/app/src/api/api_utils.rs`
+- `backend/app/src/api/model/active_user_manager.rs`
+- `backend/app/src/api/model/streams/active_client_stream.rs`
+- `backend/app/src/api/endpoints/m3u_api.rs`
+- `backend/app/src/api/endpoints/xtream_api.rs`
+- `backend/app/src/api/endpoints/hls_api.rs`
 
 ## Why this page exists
 

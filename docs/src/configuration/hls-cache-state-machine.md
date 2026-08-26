@@ -315,15 +315,15 @@ the old location.
 
 | Area | Main implementation files |
 | :--- | :--- |
-| Public routes, access checks, and request orchestration | `backend/src/api/endpoints/hls_api.rs` |
-| Immutable terminal manifest/segment responses | `backend/src/api/endpoints/hls_terminal_response.rs` |
-| Access lease model and store | `backend/src/api/model/hls_cache/lease.rs` |
-| Shared session model | `backend/src/api/model/hls_cache/session.rs` |
-| Session manager, lifecycle, runtime config | `backend/src/api/model/hls_cache/manager.rs` |
-| Session identity | `backend/src/api/model/hls_cache/ids.rs` |
-| Origin account binding/protection | `backend/src/api/model/hls_cache/origin.rs` |
-| Manifest refresh and render | `backend/src/api/model/hls_cache/refresh.rs`, `renderer.rs`, `timeline.rs` |
-| Critical lease selection and handoff evidence policy | `backend/src/api/model/hls_cache/critical_handoff.rs` |
+| Public routes, access checks, and request orchestration | `backend/app/src/api/endpoints/hls_api.rs` |
+| Immutable terminal manifest/segment responses | `backend/app/src/api/endpoints/hls_terminal_response.rs` |
+| Access lease model and store | `backend/app/src/api/model/hls_cache/lease.rs` |
+| Shared session model | `backend/app/src/api/model/hls_cache/session.rs` |
+| Session manager, lifecycle, runtime config | `backend/app/src/api/model/hls_cache/manager.rs` |
+| Session identity | `backend/app/src/api/model/hls_cache/ids.rs` |
+| Origin account binding/protection | `backend/app/src/api/model/hls_cache/origin.rs` |
+| Manifest refresh and render | `backend/app/src/api/model/hls_cache/refresh.rs`, `renderer.rs`, `timeline.rs` |
+| Critical lease selection and handoff evidence policy | `backend/app/src/api/model/hls_cache/critical_handoff.rs` |
 | Prepared terminal bundles and terminal CAS/retry | `prepared_terminal_bundle.rs`, `terminal_commit.rs` |
 | Read-only MPEG-TS compatibility inspection | `ts_inspector.rs` |
 | Segment and MAP fetching | `segment_fetcher.rs`, `map_fetcher.rs` |

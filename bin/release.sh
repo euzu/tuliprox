@@ -13,7 +13,7 @@ RESOURCES_DIR="$WORKING_DIR/resources"
 RELEASE_DIR="$WORKING_DIR/release"
 FRONTEND_DIR="${WORKING_DIR}/frontend"
 FRONTEND_BUILD_DIR="${FRONTEND_DIR}/dist"
-BACKEND_DIR="${WORKING_DIR}/backend"
+BACKEND_DIR="${WORKING_DIR}/backend/app"
 TARGET_DIR="${WORKING_DIR}/target"
 BRANCH=$(git branch --show-current)
 START_BRANCH="${BRANCH}"
@@ -606,7 +606,7 @@ esac
 # Marker: version bump push + trigger docker-build workflow (master)
 echo "📦 Committing version bump"
 echo
-FILES=(Cargo.lock backend/Cargo.lock backend/Cargo.toml frontend/Cargo.toml shared/Cargo.toml)
+FILES=(Cargo.lock backend/app/Cargo.lock backend/app/Cargo.toml frontend/Cargo.toml shared/Cargo.toml)
 for f in "${FILES[@]}"; do
   if [ -f "$f" ]; then
     git add "$f"

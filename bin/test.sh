@@ -3,7 +3,7 @@
 # activity through the system temp directory and skips the
 # `Config::update_runtime()`-induced `override_temp_dir` poison that
 # would otherwise dump every parallel test's `.tmp*` into
-# `backend/tmp/` (see backend/src/model/config/base.rs and the
+# `backend/app/tmp/` (see backend/core/src/model/config/base.rs and the
 # `cfg(not(test))` gate around `tempfile::env::override_temp_dir`).
 #
 # `bin/test.sh` is the only way to invoke `cargo test` from the

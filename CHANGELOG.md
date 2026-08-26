@@ -282,7 +282,7 @@
 
 - **Disk-Space Alerts**:
   - Added a threshold-based disk-usage monitor (Normal / Warn / Critical) implemented in
-    `backend/src/api/sys_usage.rs::DiskAlertMonitor`. The background sampler ticks every 2 seconds (fixed,
+    `backend/app/src/api/sys_usage.rs::DiskAlertMonitor`. The background sampler ticks every 2 seconds (fixed,
     not configurable — see `SYSTEM_USAGE_INTERVAL` in that file) and the state machine decides when to emit
     a `DiskAlert` to the existing messaging channels (Telegram, Discord, Pushover, REST).
   - The state machine emits a `DiskAlert` whenever the level is non-Normal **and** (`state_changed` **or**
@@ -559,7 +559,7 @@
   total on SSD); peak RAM cost drops proportionally.
 
 - **Positional file write helper**: new `write_all_at_offset` in
-  `backend/src/repository/bplustree/common.rs` mirrors the existing
+  `backend/btree/src/common.rs` mirrors the existing
   `read_exact_at_offset`. Uses `FileExt::write_all_at` on Unix and an explicit short-write
   retry loop on Windows. Previously a bug in this area would have left the database file
   silently truncated or scrambled; the short-write loop is the same pattern used by
@@ -826,9 +826,9 @@
     `grace_instant_stream`, `grace_hold_stream`.
 - **config.yml (`messaging.disk_alert`)**:
   - Added optional `disk_alert` block to enable disk-usage alerts via the existing messaging channels. The
-    background monitor in `backend/src/api/sys_usage.rs` samples the current working directory's mount on
+    background monitor in `backend/app/src/api/sys_usage.rs` samples the current working directory's mount on
     every fixed 2-second tick and feeds each sample to the `DiskAlertMonitor` state machine
-    (`backend/src/api/sys_usage.rs::DiskAlertMonitor`).
+    (`backend/app/src/api/sys_usage.rs::DiskAlertMonitor`).
   - Fields:
     - `warn_percent` (`f64`, default `80.0`): percent-used at or above which the `Warn` level is reached.
       Must be in `[0, 100]`.
@@ -891,7 +891,7 @@
 
 - **B+Tree v3 persistence engine**:
   - Consolidated the facade, v2 compatibility reader, v3 engine, migration, WAL, sorted index, and stress tests under
-    `backend/src/repository/bplustree/`.
+    `backend/btree/src/`.
   - Added checksummed 4 KiB Slotted Pages, WAL-before-data in-place updates, verified atomic full replacement, typed
     v1/v2 startup migration, identity-bound sorted indexes, and corruption-reporting iterators.
   - Reused mmap mappings, page validation, and decoded internal routes across cheap `BPlusTreeQuery` clones while

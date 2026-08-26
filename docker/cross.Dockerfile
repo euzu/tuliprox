@@ -14,18 +14,25 @@
 # Static ffmpeg image is multi-arch, so it pulls correct arch automatically
 FROM mwader/static-ffmpeg:7.1 AS ffmpeg-static
 
+# The cross image provides the target compiler and sysroot, but no Rust toolchain.
+FROM rust:1.95 AS rust-toolchain
+
 # -----------------------------------------------------------------
 # Stage 1: Build the Rust binary for production
 # -----------------------------------------------------------------
 FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:main AS rust-build
 
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:$PATH
+
 # Get target architecture
 ARG RUST_TARGET
 
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config musl-tools
-
-# Update Rust toolchain and add necessary target
-RUN rustup update && rustup target add $RUST_TARGET
+# Add the requested compilation target to the pinned Rust toolchain
+RUN rustup target add $RUST_TARGET
 
 # Set Rust compiler flags for better optimization and reproducibility
 ENV RUSTFLAGS='--remap-path-prefix $HOME=~ -C target-feature=+crt-static'
@@ -33,16 +40,12 @@ ENV RUSTFLAGS='--remap-path-prefix $HOME=~ -C target-feature=+crt-static'
 # Copy dependency files first for better layer caching
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY backend/Cargo.toml ./backend/
+COPY backend ./backend/
 COPY frontend/Cargo.toml ./frontend/
-COPY shared/Cargo.toml ./shared/
+COPY shared ./shared/
 
-# Create dummy source files to build dependencies only
-RUN mkdir -p src backend/src frontend/src shared/src && \
-    echo "fn main() {}" > src/main.rs && \
-    echo "fn main() {}" > backend/src/main.rs && \
-    echo "fn main() {}" > frontend/src/main.rs && \
-    echo "pub fn dummy() {}" > shared/src/lib.rs
+# Create a dummy frontend target to satisfy the workspace manifest
+RUN mkdir -p frontend/src && echo "fn main() {}" > frontend/src/main.rs
 
 # Build dependencies (this layer will be cached unless dependencies change)
 RUN cargo build -p tuliprox --target $RUST_TARGET --release || true
@@ -56,7 +59,7 @@ RUN cargo build -p tuliprox --target $RUST_TARGET --release
 # -----------------------------------------------------------------
 # Stage 2: Build the rust frontend
 # -----------------------------------------------------------------
-FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:main AS trunk-build
+FROM rust:1.95 AS trunk-build
 
 ARG RUST_TARGET=wasm32-unknown-unknown
 
@@ -65,7 +68,7 @@ WORKDIR /src
 
 # Install dependencies for Trunk and WebAssembly
 RUN apt-get update && apt-get install -y --no-install-recommends \
-  pkg-config libssl-dev curl libclang-dev binaryen
+  pkg-config libssl-dev curl binaryen
 
 # Add wasm target & install trunk
 RUN rustup target add wasm32-unknown-unknown
@@ -73,13 +76,12 @@ RUN cargo install --locked trunk wasm-bindgen-cli
 
 # Copy dependency files first for better layer caching
 COPY Cargo.toml Cargo.lock ./
+COPY backend ./backend/
 COPY frontend/Cargo.toml frontend/Trunk.toml ./frontend/
-COPY shared/Cargo.toml ./shared/
+COPY shared ./shared/
 
-# Create dummy source files
-RUN mkdir -p frontend/src shared/src && \
-    echo "fn main() {}" > frontend/src/main.rs && \
-    echo "pub fn dummy() {}" > shared/src/lib.rs
+# Create a dummy frontend target for the dependency build
+RUN mkdir -p frontend/src && echo "fn main() {}" > frontend/src/main.rs
 
 # Pre-build dependencies
 WORKDIR /src/frontend
