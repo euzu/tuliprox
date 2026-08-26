@@ -3,7 +3,7 @@ use crate::{
     fetched_playlist::FetchedPlaylist,
     input_cache,
     input_cache::ClusterState,
-    metadata_sink::{queue_task_background, MetadataUpdateSink},
+    metadata_sink::MetadataUpdateSink,
     parser::xmltv::{flatten_tvguide, merge_epg_trees, EpgMergeAccumulator, TVGuide},
     playlist_watch::process_group_watch,
     processor::{
@@ -1687,6 +1687,10 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
     }
 
     let input_name = fpl.input.name.clone();
+    // The first `should_skip_enqueue` for an input needs its persisted enqueue
+    // state on disk; inputs where no item reaches that check must not pay for
+    // the load, so it happens on first use rather than here.
+    let mut enqueue_state_prepared = false;
     let effective_input_type = fpl.input.get_download_input_type();
     let xtream_probe_handled = effective_input_type.is_xtream() && target.get_xtream_output().is_some();
     let live_probe_settings = if probe_live_enabled {
@@ -1749,7 +1753,11 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                                     delay: probe_delay,
                                     interval: interval_secs,
                                 };
-                                if mgr.should_skip_enqueue(input_name.clone(), &task).await {
+                                if !enqueue_state_prepared {
+                                    mgr.prepare_enqueue_state(input_name.clone()).await;
+                                    enqueue_state_prepared = true;
+                                }
+                                if mgr.should_skip_enqueue(&input_name, &task) {
                                     continue;
                                 }
                                 if log_enabled!(Level::Debug) {
@@ -1762,7 +1770,7 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
                                         input_name, provider_id, last_probed, cutoff_ts, interval_secs, item.header.title
                                     );
                                 }
-                                queue_task_background(mgr, input_name.clone(), task);
+                                Arc::clone(mgr).queue_task_background(input_name.clone(), task);
                                 queued_live_count += 1;
                             }
                         }
@@ -1812,14 +1820,18 @@ async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, 
             reason: ResolveReason::MissingDetails.into(),
             delay: opts.probe_delay,
         };
-        if mgr.should_skip_enqueue(input_name.clone(), &task).await {
+        if !enqueue_state_prepared {
+            mgr.prepare_enqueue_state(input_name.clone()).await;
+            enqueue_state_prepared = true;
+        }
+        if mgr.should_skip_enqueue(&input_name, &task) {
             continue;
         }
         debug!(
             "[Task] Creating ProbeStream task for input {}: scope={}, unique_id={}, item_type={:?}, title=\"{}\"",
             input_name, probe_scope, unique_id, item.header.item_type, item.header.title
         );
-        queue_task_background(mgr, input_name.clone(), task);
+        Arc::clone(mgr).queue_task_background(input_name.clone(), task);
         queued_stream_count += 1;
     }
 

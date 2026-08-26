@@ -1,10 +1,19 @@
-use crate::{api::{
-    api_utils::{internal_server_error, try_unwrap_body},
-    config_file::ConfigFile,
-    model::AppState,
-}, api::auth_middleware::permission_layer,
-    auth::{verify_token, AuthBearer}, iptv::xtream::{get_xtream_stream_url_base, xtream_login}, model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource, UserPlan}, utils::{request::download_text_content},
-    config_loader::{persist_messaging_templates, plans_file_path, prepare_sources_batch, prepare_users, read_api_proxy_file, read_plans_file, save_plans}};
+use crate::{
+    api::{
+        api_utils::{internal_server_error, try_unwrap_body},
+        auth_middleware::permission_layer,
+        config_file::ConfigFile,
+        model::AppState,
+    },
+    auth::{verify_token, AuthBearer},
+    config_loader::{
+        persist_messaging_templates, plans_file_path, prepare_sources_batch, prepare_users, read_api_proxy_file,
+        read_plans_file, save_plans,
+    },
+    iptv::xtream::{get_xtream_stream_url_base, xtream_login},
+    model::{validate_library_paths_from_dto, ApiProxyConfig, InputSource, UserPlan},
+    utils::request::download_text_content,
+};
 use axum::{
     http::{header::IF_MATCH, HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::IntoResponse,
@@ -12,19 +21,18 @@ use axum::{
 };
 use log::error;
 use serde_json::json;
-use shared::model::InputFetchMethod;
 use shared::{
     error::TuliproxError,
-    model::permission::{Permission, PermissionSet},
-    model::{ApiProxyConfigDto, ConfigDto, PlansConfigDto, SourcesConfigDto, XtreamLoginRequest},
+    model::{
+        permission::{Permission, PermissionSet},
+        ApiProxyConfigDto, ConfigDto, InputFetchMethod, PlansConfigDto, SourcesConfigDto, XtreamLoginRequest,
+    },
     utils::{
         parse_provider_scheme_url_parts, HEADER_CONFIG_API_PROXY_REVISION, HEADER_CONFIG_MAIN_REVISION,
         HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH, PROVIDER_SCHEME_PREFIX,
     },
 };
-use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 fn file_revision_from_bytes(bytes: &[u8]) -> String { blake3::hash(bytes).to_hex().to_string() }
 
@@ -231,17 +239,20 @@ async fn save_config_sources(
         return response;
     }
 
-    let templates_to_persist = match crate::config_loader::validate_source_config_for_persist(&app_state.app_config, &sources).await {
-        Ok(value) => value,
-        Err(err) => {
-            error!("Failed to validate source.yml {err}");
-            return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()})))
-                .into_response();
-        }
-    };
+    let templates_to_persist =
+        match crate::config_loader::validate_source_config_for_persist(&app_state.app_config, &sources).await {
+            Ok(value) => value,
+            Err(err) => {
+                error!("Failed to validate source.yml {err}");
+                return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()})))
+                    .into_response();
+            }
+        };
 
     if let Some(template_definition) = templates_to_persist.as_ref() {
-        if let Err(err) = crate::config_loader::persist_templates_config(&app_state.app_config, template_definition).await {
+        if let Err(err) =
+            crate::config_loader::persist_templates_config(&app_state.app_config, template_definition).await
+        {
             error!("Failed to save template config {err}");
             return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
                 .into_response();
@@ -322,12 +333,9 @@ async fn save_config_api_proxy_config(
             return internal_server_error!();
         }
     };
-    if let Some(response) = require_matching_revision(
-        &headers,
-        &current_revision,
-        HEADER_CONFIG_API_PROXY_REVISION,
-        "api-proxy.yml",
-    ) {
+    if let Some(response) =
+        require_matching_revision(&headers, &current_revision, HEADER_CONFIG_API_PROXY_REVISION, "api-proxy.yml")
+    {
         return response;
     }
 
@@ -353,17 +361,10 @@ async fn save_config_api_proxy_config(
     let stored_plans = updated_api_proxy.plans.clone();
     let mut updated_api_proxy_dto = ApiProxyConfigDto::from(&updated_api_proxy);
     if let Err(err) = updated_api_proxy_dto.prepare() {
-        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()})))
-            .into_response();
+        return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({"error": err.to_string()}))).into_response();
     }
 
-    if let Some(err) = intern_save_config_api_proxy(
-        &backup_dir,
-        &updated_api_proxy_dto,
-        &api_proxy_file_path,
-    )
-        .await
-    {
+    if let Some(err) = intern_save_config_api_proxy(&backup_dir, &updated_api_proxy_dto, &api_proxy_file_path).await {
         return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({"error": err.to_string()})))
             .into_response();
     }
@@ -386,11 +387,7 @@ async fn save_config_api_proxy_config(
 async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<PermissionSet>) -> axum::response::Response {
     let (config_file_path, sources_file_path, api_proxy_file_path) = {
         let paths = app_state.app_config.paths.load();
-        (
-            paths.config_file_path.clone(),
-            paths.sources_file_path.clone(),
-            paths.api_proxy_file_path.clone(),
-        )
+        (paths.config_file_path.clone(), paths.sources_file_path.clone(), paths.api_proxy_file_path.clone())
     };
 
     let main_revision = match read_file_revision(&config_file_path).await {
@@ -431,7 +428,8 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
                 filter_app_config_by_permissions(&mut app_config, permissions);
                 let response = axum::response::Json(app_config).into_response();
                 let response = response_with_revision_header(response, HEADER_CONFIG_MAIN_REVISION, &main_revision);
-                let response = response_with_revision_header(response, HEADER_CONFIG_SOURCES_REVISION, &sources_revision);
+                let response =
+                    response_with_revision_header(response, HEADER_CONFIG_SOURCES_REVISION, &sources_revision);
                 response_with_revision_header(response, HEADER_CONFIG_API_PROXY_REVISION, &api_proxy_revision)
             }
         }
@@ -442,7 +440,9 @@ async fn get_config_common(app_state: &Arc<AppState>, permissions: Option<Permis
     }
 }
 
-async fn config_unprotected(axum::extract::State(app_state): axum::extract::State<Arc<AppState>>) -> impl IntoResponse + Send {
+async fn config_unprotected(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl IntoResponse + Send {
     get_config_common(&app_state, None).await
 }
 
@@ -453,10 +453,7 @@ async fn config(
     let Some(permissions) = decode_permissions(&app_state, &token) else {
         return axum::http::StatusCode::UNAUTHORIZED.into_response();
     };
-    if !has_any_permission(
-        permissions,
-        &[Permission::ConfigRead, Permission::SourceRead, Permission::UserRead],
-    ) {
+    if !has_any_permission(permissions, &[Permission::ConfigRead, Permission::SourceRead, Permission::UserRead]) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
@@ -516,7 +513,7 @@ async fn config_batch_content(
                 None,
                 false,
             )
-                .await
+            .await
             {
                 Ok((content, _path)) => {
                     // Return CSV with explicit content-type
@@ -566,11 +563,7 @@ async fn get_xtream_login_info(
         Ok(login_info) => axum::Json(login_info.unwrap_or_default()).into_response(),
         Err(err) => {
             error!("Failed to get xtream login info: {err}");
-            (
-                StatusCode::BAD_GATEWAY,
-                axum::Json(json!({"error": "Failed to get Xtream login info"})),
-            )
-                .into_response()
+            (StatusCode::BAD_GATEWAY, axum::Json(json!({"error": "Failed to get Xtream login info"}))).into_response()
         }
     }
 }
@@ -582,22 +575,21 @@ fn build_xtream_login_input_source(
     let url = request.url.trim();
     let provider = if url.starts_with(PROVIDER_SCHEME_PREFIX) {
         let (provider_name, _) = parse_provider_scheme_url_parts(url)?;
-        let request_provider = request
-            .providers
-            .as_ref()
-            .and_then(|request_providers| {
-                request_providers
-                    .iter()
-                    .find(|provider| provider.name.as_ref() == provider_name)
-                    .map(crate::model::ConfigProvider::from)
-                    .map(Arc::new)
-            });
+        let request_provider = request.providers.as_ref().and_then(|request_providers| {
+            request_providers
+                .iter()
+                .find(|provider| provider.name.as_ref() == provider_name)
+                .map(crate::model::ConfigProvider::from)
+                .map(Arc::new)
+        });
         Some(
             request_provider
                 .into_iter()
                 .chain(providers.iter().cloned())
                 .find(|provider| provider.name.as_ref() == provider_name)
-                .ok_or_else(|| TuliproxError::ConfigInput(format!("Provider config for '{provider_name}' not found")))?,
+                .ok_or_else(|| {
+                    TuliproxError::ConfigInput(format!("Provider config for '{provider_name}' not found"))
+                })?,
         )
     } else {
         None
@@ -668,7 +660,10 @@ pub fn v1_api_config_register(router: Router<Arc<AppState>>) -> axum::Router<Arc
         .route("/config/xtream/login-info", axum::routing::post(get_xtream_login_info))
         .route("/config/main", axum::routing::post(save_config_main))
         .route("/config/sources", axum::routing::post(save_config_sources))
-        .route("/config/apiproxy", axum::routing::get(get_config_api_proxy_config_public).put(save_config_api_proxy_config))
+        .route(
+            "/config/apiproxy",
+            axum::routing::get(get_config_api_proxy_config_public).put(save_config_api_proxy_config),
+        )
 }
 pub fn v1_api_config_register_with_permissions(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     let base_read = Router::new()
@@ -695,12 +690,7 @@ pub fn v1_api_config_register_with_permissions(app_state: &Arc<AppState>) -> Rou
         .route("/config/plans", axum::routing::put(save_config_plans))
         .layer(permission_layer!(app_state, Permission::ConfigWrite));
 
-    Router::new()
-        .merge(base_read)
-        .merge(config_read)
-        .merge(source_read)
-        .merge(source_write)
-        .merge(config_write)
+    Router::new().merge(base_read).merge(config_read).merge(source_read).merge(source_write).merge(config_write)
 }
 
 #[cfg(test)]
@@ -711,11 +701,10 @@ mod tests {
     };
     use crate::model::ConfigProvider;
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
-    use shared::model::TemplateDefinitionDto;
     use shared::{
         model::{
             ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigDto, ConfigProviderDto, Permission,
-            PermissionSet, SourcesConfigDto, TargetUserDto, XtreamLoginRequest,
+            PermissionSet, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto, XtreamLoginRequest,
         },
         utils::{HEADER_CONFIG_SOURCES_REVISION, HEADER_IF_MATCH},
     };
@@ -724,12 +713,7 @@ mod tests {
     #[test]
     fn require_matching_revision_rejects_missing_if_match_header() {
         let headers = HeaderMap::new();
-        let response = require_matching_revision(
-            &headers,
-            "rev-a",
-            HEADER_CONFIG_SOURCES_REVISION,
-            "source.yml",
-        )
+        let response = require_matching_revision(&headers, "rev-a", HEADER_CONFIG_SOURCES_REVISION, "source.yml")
             .expect("missing if-match header must fail");
         assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
     }
@@ -737,16 +721,8 @@ mod tests {
     #[test]
     fn require_matching_revision_accepts_exact_match() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            HEADER_IF_MATCH,
-            HeaderValue::from_str("rev-a").expect("header value should be valid"),
-        );
-        let result = require_matching_revision(
-            &headers,
-            "rev-a",
-            HEADER_CONFIG_SOURCES_REVISION,
-            "source.yml",
-        );
+        headers.insert(HEADER_IF_MATCH, HeaderValue::from_str("rev-a").expect("header value should be valid"));
+        let result = require_matching_revision(&headers, "rev-a", HEADER_CONFIG_SOURCES_REVISION, "source.yml");
         assert!(result.is_none(), "exact revision match should be accepted");
     }
 
@@ -761,10 +737,7 @@ mod tests {
                 message: String::from("hello"),
                 path: None,
             }],
-            user: vec![TargetUserDto {
-                target: String::from("target-a"),
-                credentials: vec![],
-            }],
+            user: vec![TargetUserDto { target: String::from("target-a"), credentials: vec![] }],
             use_user_db: true,
             auth_error_status: 401,
         }
@@ -774,10 +747,7 @@ mod tests {
     fn filter_app_config_clears_unauthorized_sections() {
         let permissions: PermissionSet = Permission::ConfigRead.into();
         let mut app_config = AppConfigDto {
-            config: ConfigDto {
-                storage_dir: Some(String::from("storage")),
-                ..ConfigDto::default()
-            },
+            config: ConfigDto { storage_dir: Some(String::from("storage")), ..ConfigDto::default() },
             sources: SourcesConfigDto {
                 inputs: vec![],
                 sources: vec![],

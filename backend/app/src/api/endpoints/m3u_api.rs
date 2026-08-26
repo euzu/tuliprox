@@ -443,10 +443,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
     if is_session_request && extension == shared::defaults::HLS_EXT {
         let Some(stream_context) = HlsEntryStreamContext::from_playlist_item(&pli) else {
-            error!(
-                "HLS input stream identity missing for virtual_id={}; refresh target playlist",
-                pli.virtual_id
-            );
+            error!("HLS input stream identity missing for virtual_id={}; refresh target playlist", pli.virtual_id);
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
         let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id);
@@ -623,7 +620,9 @@ async fn m3u_api_stream(
     }
 
     if let Some((req_virtual_id, archive)) = parse_flat_flussonic_archive(stream_req.stream_id) {
-        let pli = match m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await {
+        let pli = match m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target)
+            .await
+        {
             Ok(pli) => pli,
             Err(err) => {
                 error!("Failed to read M3U item for native archive stream id {req_virtual_id}: {err}");
@@ -665,21 +664,22 @@ async fn m3u_api_stream(
 
     let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let pli = match m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await {
-        Ok(pli) => pli,
-        Err(err) => {
-            error!("Failed to read m3u item for stream id {req_virtual_id}: {err}");
-            if stream_ext == Some(HLS_EXT) {
-                return axum::http::StatusCode::NOT_FOUND.into_response();
+    let pli =
+        match m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await {
+            Ok(pli) => pli,
+            Err(err) => {
+                error!("Failed to read m3u item for stream id {req_virtual_id}: {err}");
+                if stream_ext == Some(HLS_EXT) {
+                    return axum::http::StatusCode::NOT_FOUND.into_response();
+                }
+                return crate::api::model::create_custom_video_stream_response(
+                    &app_state.provider_stream_ctx(),
+                    &fingerprint.addr,
+                    crate::api::model::CustomVideoStreamType::ChannelUnavailable,
+                )
+                .into_response();
             }
-            return crate::api::model::create_custom_video_stream_response(
-                &app_state.provider_stream_ctx(),
-                &fingerprint.addr,
-                crate::api::model::CustomVideoStreamType::ChannelUnavailable,
-            )
-            .into_response();
-        }
-    };
+        };
 
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),
@@ -728,13 +728,14 @@ async fn m3u_api_stream_nested(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
     let req_virtual_id: u32 = try_result_bad_request!(stream_req.stream_id.trim().parse());
-    let pli = match m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await {
-        Ok(pli) => pli,
-        Err(err) => {
-            error!("Failed to read M3U item for nested stream id {req_virtual_id}: {err}");
-            return axum::http::StatusCode::NOT_FOUND.into_response();
-        }
-    };
+    let pli =
+        match m3u_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target).await {
+            Ok(pli) => pli,
+            Err(err) => {
+                error!("Failed to read M3U item for nested stream id {req_virtual_id}: {err}");
+                return axum::http::StatusCode::NOT_FOUND.into_response();
+            }
+        };
     let input = try_option_bad_request!(
         app_state.app_config.get_input_by_name(&pli.input_name),
         true,
@@ -862,7 +863,13 @@ fn m3u_api_resource_auth(
 ) -> Result<(Arc<ProxyUserCredentials>, Arc<ConfigTarget>), ApiUserAuthError> {
     let (user, target) =
         get_user_target_by_credentials(username, password, api_req, app_state).ok_or(ApiUserAuthError::AuthFailed)?;
-    resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), &app_state.app_config, &app_state.geoip)?;
+    resolve_api_user_context(
+        user.clone(),
+        target.clone(),
+        fingerprint.clone(),
+        &app_state.app_config,
+        &app_state.geoip,
+    )?;
     Ok((user, target))
 }
 
@@ -892,13 +899,14 @@ async fn m3u_api_resource(
         debug!("Target has no m3u playlist {target_name}");
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
-    let m3u_item = match m3u_get_item_for_stream_id(m3u_stream_id, &app_state.app_config, &app_state.playlists, &target).await {
-        Ok(item) => item,
-        Err(err) => {
-            error!("Failed to get m3u url: {}", sanitize_sensitive_info(&err.to_string()));
-            return axum::http::StatusCode::NOT_FOUND.into_response();
-        }
-    };
+    let m3u_item =
+        match m3u_get_item_for_stream_id(m3u_stream_id, &app_state.app_config, &app_state.playlists, &target).await {
+            Ok(item) => item,
+            Err(err) => {
+                error!("Failed to get m3u url: {}", sanitize_sensitive_info(&err.to_string()));
+                return axum::http::StatusCode::NOT_FOUND.into_response();
+            }
+        };
 
     if !user.allows_item_type(m3u_item.item_type)
         || !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&m3u_item)))

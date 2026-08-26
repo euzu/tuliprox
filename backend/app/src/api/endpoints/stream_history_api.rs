@@ -1,26 +1,30 @@
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
-use std::io;
-use std::path::Path;
-use std::str::FromStr;
-use std::sync::Arc;
-
-use crate::api::api_utils::json_or_bin_response;
-use crate::api::endpoints::extract_accept_header::ExtractAcceptHeader;
-use crate::api::model::AppState;
-use crate::model::StreamHistoryRecord;
-use crate::repository::{QosSnapshotRecord, QosSnapshotRepository, StreamHistoryFileReader};
-use crate::repository::{discover_files, resolve_time_range, CompiledFilter, StreamHistoryQuery, TimeRange};
-
-use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use crate::{
+    api::{api_utils::json_or_bin_response, endpoints::extract_accept_header::ExtractAcceptHeader, model::AppState},
+    model::StreamHistoryRecord,
+    repository::{
+        discover_files, resolve_time_range, CompiledFilter, QosSnapshotRecord, QosSnapshotRepository,
+        StreamHistoryFileReader, StreamHistoryQuery, TimeRange,
+    },
+};
+use axum::{
+    extract::{Path as AxumPath, Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use shared::model::{
-    PageRequestDto, PagedResponseDto, SearchMode, StreamHistoryEventType, StreamHistoryPageRequestDto,
-    StreamHistoryProviderSummaryDto, StreamHistorySearchField, QosSnapshotRecordDto, StreamHistoryQueryRequestDto,
-    StreamHistoryRecordDto,
+    PageRequestDto, PagedResponseDto, QosSnapshotRecordDto, SearchMode, StreamHistoryEventType,
+    StreamHistoryPageRequestDto, StreamHistoryProviderSummaryDto, StreamHistoryQueryRequestDto, StreamHistoryRecordDto,
+    StreamHistorySearchField,
+};
+use std::{
+    cmp::Reverse,
+    collections::{BinaryHeap, HashMap},
+    io,
+    path::Path,
+    str::FromStr,
+    sync::Arc,
 };
 use strum::IntoEnumIterator;
 
@@ -30,9 +34,7 @@ fn compile_search_fields(fields: Option<Vec<String>>) -> Result<Vec<StreamHistor
     fields
         .unwrap_or_default()
         .into_iter()
-        .map(|field| {
-            StreamHistorySearchField::from_str(&field).map_err(|_| format!("Unknown search_field: {field}"))
-        })
+        .map(|field| StreamHistorySearchField::from_str(&field).map_err(|_| format!("Unknown search_field: {field}")))
         .collect()
 }
 
@@ -110,22 +112,19 @@ fn record_field_matches(record: &StreamHistoryRecord, field: StreamHistorySearch
         StreamHistorySearchField::BytesSent => {
             record.bytes_sent.is_some_and(|value| matcher.is_match(&value.to_string()))
         }
-        StreamHistorySearchField::FirstByteLatencyMs => record
-            .first_byte_latency_ms
-            .is_some_and(|value| matcher.is_match(&value.to_string())),
+        StreamHistorySearchField::FirstByteLatencyMs => {
+            record.first_byte_latency_ms.is_some_and(|value| matcher.is_match(&value.to_string()))
+        }
         StreamHistorySearchField::UserAgent => {
             record.user_agent.as_deref().is_some_and(|value| matcher.is_match(value))
         }
         StreamHistorySearchField::ItemType => {
             record.item_type.as_ref().is_some_and(|value| matcher.is_match(&value.to_string()))
         }
-        StreamHistorySearchField::Container => {
-            record.container.as_deref().is_some_and(|value| matcher.is_match(value))
+        StreamHistorySearchField::Container => record.container.as_deref().is_some_and(|value| matcher.is_match(value)),
+        StreamHistorySearchField::DisconnectReason => {
+            record.disconnect_reason.as_ref().is_some_and(|value| matcher.is_match(&value.to_string()))
         }
-        StreamHistorySearchField::DisconnectReason => record
-            .disconnect_reason
-            .as_ref()
-            .is_some_and(|value| matcher.is_match(&value.to_string())),
         StreamHistorySearchField::SourceAddr => {
             record.source_addr.as_deref().is_some_and(|value| matcher.is_match(value))
         }
@@ -166,20 +165,16 @@ impl HlsSessionAccumulator {
         self.total_bytes = self.total_bytes.saturating_add(record.bytes_sent.unwrap_or(0));
         match record.event_type {
             StreamHistoryEventType::Connect => {
-                let should_replace = self
-                    .first_connect
-                    .as_ref()
-                    .is_none_or(|current| record.event_ts_utc < current.event_ts_utc);
+                let should_replace =
+                    self.first_connect.as_ref().is_none_or(|current| record.event_ts_utc < current.event_ts_utc);
                 if should_replace {
                     self.first_connect = Some(record);
                 }
             }
             StreamHistoryEventType::Disconnect => {
                 self.disconnect_count = self.disconnect_count.saturating_add(1);
-                let should_replace = self
-                    .last_disconnect
-                    .as_ref()
-                    .is_none_or(|current| record.event_ts_utc >= current.event_ts_utc);
+                let should_replace =
+                    self.last_disconnect.as_ref().is_none_or(|current| record.event_ts_utc >= current.event_ts_utc);
                 if should_replace {
                     self.last_disconnect = Some(record);
                 }
@@ -304,13 +299,7 @@ impl TopHistoryPageCollector {
                 "Stream history page window too large: page={page}, page_size={page_size}, start={start}, capacity={capacity}, max={MAX_STREAM_HISTORY_PAGE_HEAP_CAPACITY}"
             ));
         }
-        Ok(Self {
-            capacity,
-            start,
-            limit,
-            total_items: 0,
-            heap: BinaryHeap::with_capacity(capacity),
-        })
+        Ok(Self { capacity, start, limit, total_items: 0, heap: BinaryHeap::with_capacity(capacity) })
     }
 
     fn push(&mut self, record: StreamHistoryRecord, matcher: Option<&Regex>, fields: &[StreamHistorySearchField]) {
@@ -323,9 +312,7 @@ impl TopHistoryPageCollector {
             return;
         }
 
-        let ranked = RankedHistoryRecord {
-            record,
-        };
+        let ranked = RankedHistoryRecord { record };
 
         if self.heap.len() < self.capacity {
             self.heap.push(Reverse(ranked));
@@ -360,10 +347,8 @@ fn push_hls_or_non_hls(
     fields: &[StreamHistorySearchField],
 ) {
     let is_hls = matches!(record.container.as_deref(), Some("mpegts" | "fmp4" | "hls"));
-    let is_hls_session_event = matches!(
-        record.event_type,
-        StreamHistoryEventType::Connect | StreamHistoryEventType::Disconnect
-    );
+    let is_hls_session_event =
+        matches!(record.event_type, StreamHistoryEventType::Connect | StreamHistoryEventType::Disconnect);
     if is_hls && is_hls_session_event {
         let key: HlsKey = (
             record.source_addr.clone(),
@@ -435,7 +420,9 @@ fn paginate_aggregated_records(
     }
     filtered.sort_unstable_by_key(|record| Reverse(record.event_ts_utc));
 
-    let Ok(mut collector) = TopHistoryPageCollector::new(page, page_size) else { return PagedResponseDto::new(Vec::new(), page, page_size, 0) };
+    let Ok(mut collector) = TopHistoryPageCollector::new(page, page_size) else {
+        return PagedResponseDto::new(Vec::new(), page, page_size, 0);
+    };
     for record in filtered {
         collector.push(record, None, &[]);
     }
@@ -468,12 +455,7 @@ pub(crate) async fn stream_history_page_query(
     };
 
     // Build time range
-    let query = StreamHistoryQuery {
-        from: params.from.clone(),
-        to: params.to.clone(),
-        path: None,
-        filter: None,
-    };
+    let query = StreamHistoryQuery { from: params.from.clone(), to: params.to.clone(), path: None, filter: None };
 
     let time_range = match resolve_time_range(&query) {
         Ok(tr) => tr,
@@ -486,33 +468,42 @@ pub(crate) async fn stream_history_page_query(
     };
     let page = page_req.page;
     let page_size = page_req.page_size;
-    let batch_records = if let Some(hw) = app_state
-        .connection_manager
-        .history_writer()
-        .load()
-        .as_ref()
-    {
+    let batch_records = if let Some(hw) = app_state.connection_manager.history_writer().load().as_ref() {
         hw.get_current_batch().await.unwrap_or_else(|_| Vec::new())
     } else {
         Vec::new()
     };
 
     let result = tokio::task::spawn_blocking(move || {
-        let empty_filter = CompiledFilter::compile(&HashMap::new())
-            .map(Arc::new)
-            .map_err(|err| StreamHistoryPageQueryError::Internal(format!("Failed to compile stream history filter: {err}")))?;
+        let empty_filter = CompiledFilter::compile(&HashMap::new()).map(Arc::new).map_err(|err| {
+            StreamHistoryPageQueryError::Internal(format!("Failed to compile stream history filter: {err}"))
+        })?;
 
         let file_iter = futures::executor::block_on(collect_records_iter(&history_dir, time_range, empty_filter))
-            .map_err(|err| StreamHistoryPageQueryError::Internal(format!("Failed to open stream history files: {err}")))?;
+            .map_err(|err| {
+                StreamHistoryPageQueryError::Internal(format!("Failed to open stream history files: {err}"))
+            })?;
 
-        paginate_stream_history_records(file_iter, batch_records, search_matcher.as_ref(), &search_fields, page, page_size)
-            .map_err(StreamHistoryPageQueryError::InvalidWindow)
-    }).await;
+        paginate_stream_history_records(
+            file_iter,
+            batch_records,
+            search_matcher.as_ref(),
+            &search_fields,
+            page,
+            page_size,
+        )
+        .map_err(StreamHistoryPageQueryError::InvalidWindow)
+    })
+    .await;
 
     match result {
         Ok(Ok(response)) => axum::Json(response).into_response(),
-        Ok(Err(StreamHistoryPageQueryError::InvalidWindow(message))) => error_response(StatusCode::BAD_REQUEST, message),
-        Ok(Err(StreamHistoryPageQueryError::Internal(message))) => error_response(StatusCode::INTERNAL_SERVER_ERROR, message),
+        Ok(Err(StreamHistoryPageQueryError::InvalidWindow(message))) => {
+            error_response(StatusCode::BAD_REQUEST, message)
+        }
+        Ok(Err(StreamHistoryPageQueryError::Internal(message))) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, message)
+        }
         Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Task failed: {e}")),
     }
 }
@@ -550,12 +541,7 @@ pub(crate) async fn stream_history_summary_query(
     };
 
     let filters_arc = Arc::new(filters);
-    let batch_records = if let Some(hw) = app_state
-        .connection_manager
-        .history_writer()
-        .load()
-        .as_ref()
-    {
+    let batch_records = if let Some(hw) = app_state.connection_manager.history_writer().load().as_ref() {
         hw.get_current_batch().await.unwrap_or_else(|_| Vec::new())
     } else {
         Vec::new()
@@ -570,14 +556,12 @@ pub(crate) async fn stream_history_summary_query(
 
     match result {
         Ok(Ok(summaries)) => json_or_bin_response(accept.as_deref(), &summaries).into_response(),
-        Ok(Err(err)) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to discover history files: {err}"),
-        ),
-        Err(err) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Stream history summary task failed: {err}"),
-        ),
+        Ok(Err(err)) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to discover history files: {err}"))
+        }
+        Err(err) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Stream history summary task failed: {err}"))
+        }
     }
 }
 
@@ -596,21 +580,16 @@ pub(crate) async fn qos_snapshot_query(
     };
     let limit = params.limit.unwrap_or(100).max(1);
 
-    let result = tokio::task::spawn_blocking(move || {
-        collect_filtered_qos_snapshots(Path::new(&storage_dir), &filters, limit)
-    })
-        .await;
+    let result =
+        tokio::task::spawn_blocking(move || collect_filtered_qos_snapshots(Path::new(&storage_dir), &filters, limit))
+            .await;
 
     match result {
         Ok(Ok(records)) => json_or_bin_response(accept.as_deref(), &records).into_response(),
-        Ok(Err(err)) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to read QoS snapshots: {err}"),
-        ),
-        Err(err) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("QoS snapshot query task failed: {err}"),
-        ),
+        Ok(Err(err)) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read QoS snapshots: {err}"))
+        }
+        Err(err) => error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("QoS snapshot query task failed: {err}")),
     }
 }
 
@@ -623,20 +602,17 @@ pub(crate) async fn qos_snapshot_detail_query(
         return error_response(StatusCode::SERVICE_UNAVAILABLE, "QoS aggregation is not enabled");
     };
 
-    let result = tokio::task::spawn_blocking(move || load_qos_snapshot(&storage_dir, &stream_identity_key))
-        .await;
+    let result = tokio::task::spawn_blocking(move || load_qos_snapshot(&storage_dir, &stream_identity_key)).await;
 
     match result {
         Ok(Ok(Some(record))) => json_or_bin_response(accept.as_deref(), &record).into_response(),
         Ok(Ok(None)) => error_response(StatusCode::NOT_FOUND, "QoS snapshot not found"),
-        Ok(Err(err)) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to read QoS snapshot detail: {err}"),
-        ),
-        Err(err) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("QoS snapshot detail task failed: {err}"),
-        ),
+        Ok(Err(err)) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to read QoS snapshot detail: {err}"))
+        }
+        Err(err) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("QoS snapshot detail task failed: {err}"))
+        }
     }
 }
 
@@ -645,7 +621,7 @@ pub(crate) async fn qos_snapshot_detail_query(
 /// Errors opening files or reading records are logged but do not stop iteration.
 struct RecordFileIter {
     files: std::vec::IntoIter<crate::repository::HistoryFile>,
-    current_iter: Option<Box<dyn Iterator<Item=std::io::Result<StreamHistoryRecord>>>>,
+    current_iter: Option<Box<dyn Iterator<Item = std::io::Result<StreamHistoryRecord>>>>,
     time_range: TimeRange,
     filters: Arc<CompiledFilter>,
 }
@@ -653,12 +629,7 @@ struct RecordFileIter {
 impl RecordFileIter {
     async fn new(dir: &str, time_range: TimeRange, filters: Arc<CompiledFilter>) -> io::Result<Self> {
         let files = discover_files(Path::new(dir), &time_range).await?;
-        Ok(Self {
-            files: files.into_iter(),
-            current_iter: None,
-            time_range,
-            filters,
-        })
+        Ok(Self { files: files.into_iter(), current_iter: None, time_range, filters })
     }
 }
 
@@ -671,7 +642,7 @@ impl Iterator for RecordFileIter {
         loop {
             if self.current_iter.is_none() {
                 let file = self.files.next()?;
-                let iter: Box<dyn Iterator<Item=io::Result<StreamHistoryRecord>>> = if file.is_archive {
+                let iter: Box<dyn Iterator<Item = io::Result<StreamHistoryRecord>>> = if file.is_archive {
                     match StreamHistoryFileReader::from_archive(&file.path, Some(self.time_range)) {
                         Ok((r, _)) => Box::new(r),
                         Err(e) => {
@@ -712,7 +683,6 @@ impl Iterator for RecordFileIter {
     }
 }
 
-
 /// Returns a lazy iterator over filtered records from history files.
 async fn collect_records_iter(
     dir: &str,
@@ -725,9 +695,7 @@ async fn collect_records_iter(
 #[cfg(test)]
 // Test-only baseline implementation used to validate the iterator-based summary
 // path against a simpler whole-slice aggregation.
-pub(crate) fn aggregate_provider_summaries(
-    records: &[StreamHistoryRecord],
-) -> Vec<StreamHistoryProviderSummaryDto> {
+pub(crate) fn aggregate_provider_summaries(records: &[StreamHistoryRecord]) -> Vec<StreamHistoryProviderSummaryDto> {
     #[derive(Default)]
     struct Acc {
         session_count: u64,
@@ -775,7 +743,7 @@ pub(crate) fn aggregate_provider_summaries(
 /// Lazily aggregates provider summaries from a (possibly infinite) iterator of records.
 /// Unlike `aggregate_provider_summaries` which collects into a Vec first, this processes
 /// records one-by-one without any intermediate allocation.
-pub fn aggregate_provider_summaries_from_iter<I: Iterator<Item=StreamHistoryRecord>>(
+pub fn aggregate_provider_summaries_from_iter<I: Iterator<Item = StreamHistoryRecord>>(
     records: I,
 ) -> Vec<StreamHistoryProviderSummaryDto> {
     #[derive(Default)]
@@ -847,9 +815,7 @@ impl CompiledQosSnapshotFilter {
     }
 
     fn matches(&self, snapshot: &QosSnapshotRecord) -> bool {
-        self.stream_identity_key
-            .as_ref()
-            .is_none_or(|value| snapshot.stream_identity_key == *value)
+        self.stream_identity_key.as_ref().is_none_or(|value| snapshot.stream_identity_key == *value)
             && self.input_name.as_ref().is_none_or(|value| snapshot.input_name.as_ref() == value)
             && self.provider_name.as_ref().is_none_or(|value| snapshot.provider_name.as_ref() == value)
             && self.item_type.as_ref().is_none_or(|value| snapshot.item_type.as_str() == value)
@@ -893,12 +859,14 @@ fn load_qos_snapshot(storage_dir: &str, stream_identity_key: &str) -> io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{QosAggregationConfig, ResourceRetryConfig, ReverseProxyConfig};
-    use crate::repository::{
-        QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotWindow,
+    use crate::{
+        model::{QosAggregationConfig, ResourceRetryConfig, ReverseProxyConfig},
+        repository::{QosSnapshotDailyBucket, QosSnapshotRecord, QosSnapshotWindow},
     };
-    use shared::model::{DisconnectReason, PlaylistItemType};
-    use shared::utils::Internable;
+    use shared::{
+        model::{DisconnectReason, PlaylistItemType},
+        utils::Internable,
+    };
 
     fn make_record(
         provider_name: &str,
@@ -1011,10 +979,12 @@ mod tests {
         connect.event_ts_utc = 100;
         connect.bytes_sent = None;
 
-        let mut first_disconnect = make_record("acme", Some(10), Some(120), Some(50), Some(DisconnectReason::ProviderError));
+        let mut first_disconnect =
+            make_record("acme", Some(10), Some(120), Some(50), Some(DisconnectReason::ProviderError));
         first_disconnect.event_ts_utc = 110;
 
-        let mut final_disconnect = make_record("acme", Some(10), Some(80), Some(50), Some(DisconnectReason::ClientClosed));
+        let mut final_disconnect =
+            make_record("acme", Some(10), Some(80), Some(50), Some(DisconnectReason::ClientClosed));
         final_disconnect.event_ts_utc = 120;
 
         let rows = aggregate_hls_session(&[&connect, &first_disconnect, &final_disconnect]);
@@ -1067,14 +1037,7 @@ mod tests {
             1,
             1,
         )?;
-        let second = paginate_stream_history_records(
-            vec![right, left].into_iter(),
-            Vec::new(),
-            None,
-            &[],
-            1,
-            1,
-        )?;
+        let second = paginate_stream_history_records(vec![right, left].into_iter(), Vec::new(), None, &[], 1, 1)?;
 
         assert_eq!(first.items.len(), 1);
         assert_eq!(second.items.len(), 1);
@@ -1099,11 +1062,7 @@ mod tests {
             item_type: PlaylistItemType::Live,
             updated_at: 100,
             last_event_at: 99,
-            window_24h: QosSnapshotWindow {
-                score: score_24h,
-                confidence: 70,
-                ..QosSnapshotWindow::default()
-            },
+            window_24h: QosSnapshotWindow { score: score_24h, confidence: 70, ..QosSnapshotWindow::default() },
             window_7d: QosSnapshotWindow::default(),
             window_30d: QosSnapshotWindow::default(),
             daily_buckets: std::collections::BTreeMap::<String, QosSnapshotDailyBucket>::new(),
@@ -1122,10 +1081,7 @@ mod tests {
         raw.insert("target_name".to_string(), "target-b".to_string());
         let filter = CompiledQosSnapshotFilter::compile(&raw).expect("qos snapshot filter should compile");
 
-        let mut filtered = snapshots
-            .into_iter()
-            .filter(|snapshot| filter.matches(snapshot))
-            .collect::<Vec<_>>();
+        let mut filtered = snapshots.into_iter().filter(|snapshot| filter.matches(snapshot)).collect::<Vec<_>>();
         filtered.sort_by(qos_snapshot_order);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].stream_identity_key, "stream-b");
@@ -1158,17 +1114,11 @@ mod tests {
         assert!(get_qos_storage_directory_from_config(&cfg).is_none());
 
         if let Some(reverse_proxy) = cfg.reverse_proxy.as_mut() {
-            reverse_proxy.qos_aggregation = Some(QosAggregationConfig {
-                enabled: true,
-                interval_secs: 300,
-                compaction_interval_secs: 86_400,
-            });
+            reverse_proxy.qos_aggregation =
+                Some(QosAggregationConfig { enabled: true, interval_secs: 300, compaction_interval_secs: 86_400 });
         }
 
-        assert_eq!(
-            get_qos_storage_directory_from_config(&cfg).as_deref(),
-            Some("/var/lib/tuliprox")
-        );
+        assert_eq!(get_qos_storage_directory_from_config(&cfg).as_deref(), Some("/var/lib/tuliprox"));
     }
 
     #[test]
@@ -1183,10 +1133,7 @@ mod tests {
         raw.insert("provider_name".to_string(), "provider-a".to_string());
         let filter = CompiledQosSnapshotFilter::compile(&raw).expect("qos snapshot filter should compile");
 
-        let mut filtered = snapshots
-            .into_iter()
-            .filter(|snapshot| filter.matches(snapshot))
-            .collect::<Vec<_>>();
+        let mut filtered = snapshots.into_iter().filter(|snapshot| filter.matches(snapshot)).collect::<Vec<_>>();
         filtered.sort_by(qos_snapshot_order);
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].stream_identity_key, "stream-b");

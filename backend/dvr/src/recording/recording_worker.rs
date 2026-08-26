@@ -333,15 +333,22 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
     use tokio::sync::{Notify, RwLock};
     use tokio_util::sync::CancellationToken;
 
+    /// The wall clock alone is not enough: these tests run in parallel and two of
+    /// them reading the same nanosecond share an output directory, so one test's
+    /// partial file makes another take the "resume is not supported" path.
+    static OUTPUT_SEQ: AtomicU64 = AtomicU64::new(0);
+
     fn unique_recording_output() -> (PathBuf, PathBuf, String) {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos();
-        let file_dir = std::env::temp_dir().join(format!("tuliprox_recording_test_{nanos}"));
-        let filename = format!("recording_{nanos}.ts");
+        let seq = OUTPUT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let file_dir = std::env::temp_dir().join(format!("tuliprox_recording_test_{nanos}_{seq}"));
+        let filename = format!("recording_{nanos}_{seq}.ts");
         let file_path = file_dir.join(&filename);
         (file_dir, file_path, filename)
     }

@@ -1,8 +1,10 @@
-use crate::api::model::AppState;
-use crate::messaging::send_message as send_messaging;
-use crate::model::{DiskAlertConfig, MessageContent};
 #[cfg(target_os = "linux")]
 use crate::utils::parse_ascii_u64_bytes;
+use crate::{
+    api::model::AppState,
+    messaging::send_message as send_messaging,
+    model::{DiskAlertConfig, MessageContent},
+};
 use shared::model::{DiskAlert, DiskAlertLevel, MsgKind, SystemInfo};
 use std::{
     sync::Arc,
@@ -26,9 +28,7 @@ struct DiskAlertMonitor {
 }
 
 impl DiskAlertMonitor {
-    fn new() -> Self {
-        Self { last_level: None, last_notified_at: None }
-    }
+    fn new() -> Self { Self { last_level: None, last_notified_at: None } }
 
     #[allow(clippy::cast_precision_loss)]
     fn inspect(&mut self, cfg: &DiskAlertConfig, total_bytes: u64, free_bytes: u64) -> Option<DiskAlert> {
@@ -51,9 +51,8 @@ impl DiskAlertMonitor {
 
         let now = Instant::now();
         let state_changed = new_level != self.last_level;
-        let rearm_elapsed = self
-            .last_notified_at
-            .is_none_or(|t| now.duration_since(t).as_secs() >= cfg.repeat_interval_secs);
+        let rearm_elapsed =
+            self.last_notified_at.is_none_or(|t| now.duration_since(t).as_secs() >= cfg.repeat_interval_secs);
 
         let should_notify = new_level.is_some() && (state_changed || rearm_elapsed);
 
@@ -203,7 +202,8 @@ pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<(
                 let Some(alert_cfg) = messaging.disk_alert.as_ref() else { continue };
                 alert_cfg.clone()
             };
-            let Some(alert) = disk_alert_monitor.inspect(&alert_cfg, info.disk_total_bytes, info.disk_free_bytes) else {
+            let Some(alert) = disk_alert_monitor.inspect(&alert_cfg, info.disk_total_bytes, info.disk_free_bytes)
+            else {
                 continue;
             };
             let http_client = state.http_client.load();
@@ -649,9 +649,7 @@ mod platform {
         let mut exited = unsafe { std::mem::zeroed::<FILETIME>() };
         let mut kernel = unsafe { std::mem::zeroed::<FILETIME>() };
         let mut user = unsafe { std::mem::zeroed::<FILETIME>() };
-        let ok = unsafe {
-            GetProcessTimes(process, &raw mut created, &raw mut exited, &raw mut kernel, &raw mut user)
-        };
+        let ok = unsafe { GetProcessTimes(process, &raw mut created, &raw mut exited, &raw mut kernel, &raw mut user) };
         if ok == 0 {
             return None;
         }
@@ -772,12 +770,7 @@ mod platform {
         let mut info = unsafe { zeroed::<MachTaskBasicInfo>() };
         let mut count = u32::try_from(size_of::<MachTaskBasicInfo>() / size_of::<libc::c_int>()).ok()?;
         let rc = unsafe {
-            task_info(
-                mach_task_self(),
-                MACH_TASK_BASIC_INFO,
-                (&raw mut info).cast::<libc::c_int>(),
-                &raw mut count,
-            )
+            task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (&raw mut info).cast::<libc::c_int>(), &raw mut count)
         };
         (rc == KERN_SUCCESS).then_some(info.resident_size)
     }
@@ -907,7 +900,8 @@ mod tests {
     fn test_net_tracker_reports_bytes_per_second() {
         let mut tracker = super::NetTracker::new();
         let _ = tracker.sample(1000, 500);
-        tracker.last_sample_at = tracker.last_sample_at.map(|instant| instant.checked_sub(Duration::from_secs(2)).unwrap());
+        tracker.last_sample_at =
+            tracker.last_sample_at.map(|instant| instant.checked_sub(Duration::from_secs(2)).unwrap());
         let sample = tracker.sample(3000, 1500);
         assert!((999.0..=1001.0).contains(&sample.rx_bytes_per_sec));
         assert!((499.0..=501.0).contains(&sample.tx_bytes_per_sec));

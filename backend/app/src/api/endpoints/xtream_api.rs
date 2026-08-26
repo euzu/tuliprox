@@ -8,11 +8,11 @@ use crate::{
             admission_failure_response, coalesce_byte_stream, create_api_proxy_user, create_catchup_session_key,
             create_m3u_catchup_session_key, create_playback_session_fingerprint, create_session_fingerprint,
             empty_json_response_as_array, empty_json_response_as_object, force_provider_stream_response,
-            get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials,
-            internal_server_error, is_seekable_media_request, is_session_based_playback, is_stream_share_enabled,
-            local_stream_response, redirect, redirect_response, resource_response, separate_number_and_remainder,
-            should_allow_exhausted_shared_reconnect, stream_response, try_option_bad_request, try_result_bad_request,
-            try_unwrap_body, RedirectParams, resolve_initial_stalker_playback_url,
+            get_session_reservation_ttl_secs, get_user_target, get_user_target_by_credentials, internal_server_error,
+            is_seekable_media_request, is_session_based_playback, is_stream_share_enabled, local_stream_response,
+            redirect, redirect_response, resolve_initial_stalker_playback_url, resource_response,
+            separate_number_and_remainder, should_allow_exhausted_shared_reconnect, stream_response,
+            try_option_bad_request, try_result_bad_request, try_unwrap_body, RedirectParams,
         },
         endpoints::{
             hls_api::{
@@ -40,9 +40,7 @@ use crate::{
         get_target_id_mapping, get_target_storage_path, storage_const, user_get_bouquet_filter,
         xtream_get_collection_path, xtream_get_item_for_stream_id, xtream_load_rewrite_playlist, VirtualIdRecord,
     },
-    utils::{
-        apply_timeshift, debug_if_enabled, file_exists_async, parse_timeshift, request, trace_if_enabled,
-    },
+    utils::{apply_timeshift, debug_if_enabled, file_exists_async, parse_timeshift, request, trace_if_enabled},
 };
 use axum::{http::HeaderMap, response::IntoResponse};
 use bytes::Bytes;
@@ -55,6 +53,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use shared::{
     concat_string,
+    defaults::{HLS_EXT, TS_EXT},
     error::TuliproxError,
     model::{
         create_stream_channel_with_type, ConnectFailureReason, PlaylistEntry, PlaylistItemType, ProxyType,
@@ -64,7 +63,6 @@ use shared::{
         deserialize_as_string, extract_extension_from_url, generate_provider_playlist_uuid, sanitize_sensitive_info,
         trim_slash, Internable,
     },
-    defaults::{HLS_EXT, TS_EXT},
 };
 use std::{
     fmt::{Display, Formatter, Write},
@@ -290,7 +288,9 @@ async fn xtream_player_api_stream(
     }
 
     let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
-    let Ok(mut pli) = xtream_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target, None).await else {
+    let Ok(mut pli) =
+        xtream_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target, None).await
+    else {
         error!("Failed to read xtream item for stream id {req_virtual_id}");
         if is_hls_manifest_request {
             return hls_custom_video_manifest_response(
@@ -319,7 +319,8 @@ async fn xtream_player_api_stream(
         user.allows_cluster(XtreamCluster::Live)
     } else {
         user.allows_item_type(pli.item_type)
-    }) && (user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli)));
+    }) && (user.t_filter.is_none()
+        || user.allows_content(&shared::model::PlaylistItem::from(&pli)));
     if !output_allowed {
         if is_hls_manifest_request {
             return hls_custom_video_manifest_response(
@@ -644,10 +645,7 @@ async fn xtream_player_api_stream(
     // Reverse proxy mode — only route genuine HLS into the HLS handler, not DASH
     if is_session_request && playback_ext == shared::defaults::HLS_EXT {
         let Some(stream_context) = HlsEntryStreamContext::from_playlist_item(&pli) else {
-            error!(
-                "HLS input stream identity missing for virtual_id={}; refresh target playlist",
-                pli.virtual_id
-            );
+            error!("HLS input stream identity missing for virtual_id={}; refresh target playlist", pli.virtual_id);
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
         let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id);
@@ -677,8 +675,8 @@ async fn xtream_player_api_stream(
     let archive_reference = m3u_archive_epg_reference_ts(stream_url.as_ref())
         .or_else(|| m3u_archive_epg_reference_ts(pli.url.as_ref()))
         .or_else(|| m3u_catchup_epg_reference_from_session_token(&session_key));
-    let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type)
-        .with_epg_reference_ts(archive_reference);
+    let stream_channel =
+        create_stream_channel_with_type(target.id, &pli, item_type).with_epg_reference_ts(archive_reference);
 
     let pinned_provider =
         user_session.as_ref().filter(|_| item_type.requires_provider_affinity()).map(|session| &session.provider);
@@ -766,23 +764,19 @@ fn resolve_m3u_xtream_timeshift(
         return Ok(None);
     }
     let (duration, start) = action_path.split_once('/').ok_or_else(|| {
-        TuliproxError::ApiXtream(
-            "M3U Xtream timeshift requires action_path in 'duration/start' form".to_string(),
-        )
+        TuliproxError::ApiXtream("M3U Xtream timeshift requires action_path in 'duration/start' form".to_string())
     })?;
-    let props = item.additional_properties.as_ref().ok_or_else(|| {
-        TuliproxError::ApiXtream("M3U Xtream timeshift item has no stream properties".to_string())
-    })?;
+    let props = item
+        .additional_properties
+        .as_ref()
+        .ok_or_else(|| TuliproxError::ApiXtream("M3U Xtream timeshift item has no stream properties".to_string()))?;
     let StreamProperties::Live(live) = props else {
-        return Err(TuliproxError::ApiXtream(
-            "M3U Xtream timeshift requires a live stream".to_string(),
-        ));
+        return Err(TuliproxError::ApiXtream("M3U Xtream timeshift requires a live stream".to_string()));
     };
-    let catchup = live.catchup.as_ref().ok_or_else(|| {
-        TuliproxError::ApiXtream(
-            "M3U Xtream timeshift item has no catch-up metadata".to_string(),
-        )
-    })?;
+    let catchup = live
+        .catchup
+        .as_ref()
+        .ok_or_else(|| TuliproxError::ApiXtream("M3U Xtream timeshift item has no catch-up metadata".to_string()))?;
     let resolved_source = input.resolve_url(&item.url)?;
     let resolved = resolve_xtream_m3u_catchup_url(resolved_source.as_ref(), catchup, start, duration)?;
     Ok(Some(resolved))
@@ -878,7 +872,14 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
         let (action_stream_id, stream_ext) = separate_number_and_remainder(stream_req.stream_id);
         let req_virtual_id: u32 = try_result_bad_request!(action_stream_id.trim().parse());
         let mut pli = try_result_bad_request!(
-            xtream_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, &target, Some(stream_req.context.cluster())).await,
+            xtream_get_item_for_stream_id(
+                req_virtual_id,
+                &app_state.app_config,
+                &app_state.playlists,
+                &target,
+                Some(stream_req.context.cluster())
+            )
+            .await,
             true,
             format!("Failed to read xtream item for stream id {req_virtual_id}")
         );
@@ -926,11 +927,8 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
             .into_response();
         }
 
-        let resolution_item_type = if stream_req.context == ApiStreamContext::Timeshift {
-            PlaylistItemType::Catchup
-        } else {
-            pli.item_type
-        };
+        let resolution_item_type =
+            if stream_req.context == ApiStreamContext::Timeshift { PlaylistItemType::Catchup } else { pli.item_type };
         pli.url = match resolve_initial_stalker_playback_url(
             app_state,
             &input,
@@ -1033,7 +1031,9 @@ async fn xtream_player_api_resource(
     else {
         return auth_status.into_response();
     };
-    if let Err(e) = check_permission_and_network_access_only(&user, fingerprint, &app_state.app_config, &app_state.geoip) {
+    if let Err(e) =
+        check_permission_and_network_access_only(&user, fingerprint, &app_state.app_config, &app_state.geoip)
+    {
         return e.into_player_response(auth_status);
     }
     let target_name = &target.name;
@@ -1277,7 +1277,10 @@ pub async fn xtream_get_stream_info_response(
         Err(_) => return try_unwrap_body!(empty_json_response_as_object()),
     };
 
-    let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target, Some(cluster)).await else {
+    let Ok(pli) =
+        xtream_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target, Some(cluster))
+            .await
+    else {
         return empty_stream_info_response(cluster);
     };
 
@@ -1383,17 +1386,18 @@ async fn xtream_get_short_epg(
             Err(_) => return get_empty_epg_response().into_response(),
         };
 
-        if let Ok(pli) = xtream_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target, None).await {
+        if let Ok(pli) =
+            xtream_get_item_for_stream_id(virtual_id, &app_state.app_config, &app_state.playlists, target, None).await
+        {
             // Content filter: hidden items expose no EPG either
             if !(user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&pli))) {
                 return axum::Json(json!(ShortEpgResultDto::default())).into_response();
             }
             let config = &app_state.app_config.config.load();
             let has_archive = pli_supports_archive(app_state, &pli);
-            if let (Some(epg_path), Some(channel_id)) = (
-                get_epg_path_for_target_by_type(config, target, TargetType::Xtream),
-                &pli.epg_channel_id,
-            ) {
+            if let (Some(epg_path), Some(channel_id)) =
+                (get_epg_path_for_target_by_type(config, target, TargetType::Xtream), &pli.epg_channel_id)
+            {
                 if file_exists_async(&epg_path).await {
                     return serve_short_epg(
                         app_state,
@@ -1424,7 +1428,10 @@ async fn xtream_get_short_epg(
                             return match api_utils::resolve_redirect_location(Some(&input), &info_url) {
                                 Ok(redirect_url) => redirect(redirect_url.as_ref()).into_response(),
                                 Err(err) => {
-                                    error!("Failed to resolve redirect url: {}", sanitize_sensitive_info(&err.to_string()));
+                                    error!(
+                                        "Failed to resolve redirect url: {}",
+                                        sanitize_sensitive_info(&err.to_string())
+                                    );
                                     axum::http::StatusCode::BAD_REQUEST.into_response()
                                 }
                             };
@@ -1500,9 +1507,7 @@ async fn xtream_player_api_handle_content_action(
                         )
                         .await
                         {
-                            categories.retain(|c| {
-                                c.category_id.parse::<u32>().is_ok_and(|id| visible.contains(&id))
-                            });
+                            categories.retain(|c| c.category_id.parse::<u32>().is_ok_and(|id| visible.contains(&id)));
                         }
                         return Some(axum::Json(categories).into_response());
                     }
@@ -1536,7 +1541,14 @@ async fn xtream_get_catchup_response(
     };
 
     let pli = try_result_bad_request!(
-        xtream_get_item_for_stream_id(req_virtual_id, &app_state.app_config, &app_state.playlists, target, Some(XtreamCluster::Live)).await
+        xtream_get_item_for_stream_id(
+            req_virtual_id,
+            &app_state.app_config,
+            &app_state.playlists,
+            target,
+            Some(XtreamCluster::Live)
+        )
+        .await
     );
 
     // Content filter: hidden items expose no catch-up table either, so a
@@ -1778,14 +1790,8 @@ async fn xtream_player_api(
 
     let category_id = api_req.category_id.trim().parse::<u32>().ok();
     // Handle general content actions
-    if let Some(response) = xtream_player_api_handle_content_action(
-        app_state,
-        &target,
-        action,
-        category_id,
-        &user,
-    )
-    .await
+    if let Some(response) =
+        xtream_player_api_handle_content_action(app_state, &target, action, category_id, &user).await
     {
         return response.into_response();
     }
@@ -1797,11 +1803,13 @@ async fn xtream_player_api(
         ),
         crate::model::XC_ACTION_GET_VOD_STREAMS => skip_flag_optional!(
             skip_vod,
-            xtream_load_rewrite_playlist(XtreamCluster::Video, &app_state.app_config, &target, category_id, &user).await
+            xtream_load_rewrite_playlist(XtreamCluster::Video, &app_state.app_config, &target, category_id, &user)
+                .await
         ),
         crate::model::XC_ACTION_GET_SERIES => skip_flag_optional!(
             skip_series,
-            xtream_load_rewrite_playlist(XtreamCluster::Series, &app_state.app_config, &target, category_id, &user).await
+            xtream_load_rewrite_playlist(XtreamCluster::Series, &app_state.app_config, &target, category_id, &user)
+                .await
         ),
         _ => Some(Err(TuliproxError::ApiXtream(format!("Unknown api call: {action} for target: {}", target.name)))),
     };
@@ -1845,9 +1853,11 @@ where
             Bytes::from(line)
         })
     });
-    coalesce_byte_stream(stream::once(async { Ok::<Bytes, String>(Bytes::from("[")) })
-        .chain(mapped)
-        .chain(stream::once(async { Ok::<Bytes, String>(Bytes::from("]")) })))
+    coalesce_byte_stream(
+        stream::once(async { Ok::<Bytes, String>(Bytes::from("[")) })
+            .chain(mapped)
+            .chain(stream::once(async { Ok::<Bytes, String>(Bytes::from("]")) })),
+    )
 }
 
 async fn xtream_player_api_get(
@@ -1956,31 +1966,29 @@ pub fn xtream_api_register() -> axum::Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        empty_stream_info_response, get_xtream_player_api_stream_url, resolve_m3u_xtream_timeshift,
-        is_hls_playback_request, override_live_hls_extension, recording_input_matches, resolve_xtream_playback_extension,
-        xtream_get_short_epg, xtream_player_api_stream, xtream_player_api_stream_with_token, ApiStreamContext,
-        ApiStreamRequest, XtreamApiTimeShiftRequest,
+        empty_stream_info_response, get_xtream_player_api_stream_url, is_hls_playback_request,
+        override_live_hls_extension, recording_input_matches, resolve_m3u_xtream_timeshift,
+        resolve_xtream_playback_extension, xtream_get_short_epg, xtream_player_api_stream,
+        xtream_player_api_stream_with_token, ApiStreamContext, ApiStreamRequest, XtreamApiTimeShiftRequest,
     };
-    use crate::auth::Fingerprint;
     use crate::{
-        api::model::{
-            create_test_app_state, AppState, PlaylistStorage, PlaylistXtreamStorage, UserApiRequest,
-        },
+        api::model::{create_test_app_state, AppState, PlaylistStorage, PlaylistXtreamStorage, UserApiRequest},
+        auth::Fingerprint,
         model::{
             Config, ConfigInput, ConfigTarget, Epg, IcsEpgSourceConfig, ProxyUserCredentials, SourcesConfig,
             TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput,
         },
         processing::parser::ics::parse_ics_file_to_channel,
         repository::{
-            epg_write_file, xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTree,
-            VirtualIdRecord,
+            epg_write_file, xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTree, VirtualIdRecord,
         },
     };
     use arc_swap::ArcSwapOption;
     use axum::{http::HeaderMap, response::IntoResponse};
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
-    use shared::{error::TuliproxError, foundation::Filter};
     use shared::{
+        error::TuliproxError,
+        foundation::Filter,
         model::{
             ClusterFlags, InputType, PlaylistItemType, ProcessingOrder, ProxyUserStatus, StreamProperties, UUIDType,
             VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
@@ -2143,22 +2151,14 @@ mod tests {
         .await
         .expect("parse ICS fixture");
 
-        let config = Config {
-            storage_dir: dir.path().to_string_lossy().into_owned(),
-            ..Config::default()
-        };
+        let config = Config { storage_dir: dir.path().to_string_lossy().into_owned(), ..Config::default() };
         let target = Arc::new(short_epg_target());
         let xtream_storage = xtream_get_storage_path(&config, &target.name).expect("xtream storage path");
         std::fs::create_dir_all(&xtream_storage).expect("create xtream storage");
         let epg_path = xtream_get_epg_file_path_for_target(&xtream_storage);
         epg_write_file(
             &target.name,
-            &Epg {
-                priority: 0,
-                logo_override: false,
-                attributes: None,
-                children: vec![Arc::new(channel)],
-            },
+            &Epg { priority: 0, logo_override: false, attributes: None, children: vec![Arc::new(channel)] },
             &epg_path,
             &std::collections::HashMap::<Arc<str>, Arc<str>>::new(),
             &shared::model::EpgOutputOptions::default(),
@@ -2195,9 +2195,7 @@ mod tests {
 
         let mut user = ProxyUserCredentials::default();
         user.output_clusters = ClusterFlags::all();
-        let response = xtream_get_short_epg(&app_state, &user, &target, "100", 4)
-            .await
-            .into_response();
+        let response = xtream_get_short_epg(&app_state, &user, &target, "100", 4).await.into_response();
         let body = response_body_text(response).await.expect("read short EPG response");
         let json: serde_json::Value = serde_json::from_str(&body).expect("parse short EPG JSON");
         let decode_listing_text = |field: &str| {
@@ -2211,12 +2209,7 @@ mod tests {
         assert_eq!(decode_listing_text("description"), "Imported from ICS");
     }
 
-    fn m3u_catchup_item(
-        name: &str,
-        input_name: &str,
-        url: &str,
-        catchup_source: Option<&str>,
-    ) -> XtreamPlaylistItem {
+    fn m3u_catchup_item(name: &str, input_name: &str, url: &str, catchup_source: Option<&str>) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
             virtual_id: 100,
             provider_id: 0,
@@ -2327,22 +2320,14 @@ mod tests {
         .await
         .expect("parse ICS fixture");
 
-        let config = Config {
-            storage_dir: dir.path().to_string_lossy().into_owned(),
-            ..Config::default()
-        };
+        let config = Config { storage_dir: dir.path().to_string_lossy().into_owned(), ..Config::default() };
         let target = Arc::new(short_epg_target());
         let xtream_storage = xtream_get_storage_path(&config, &target.name).expect("xtream storage path");
         std::fs::create_dir_all(&xtream_storage).expect("create xtream storage");
         let epg_path = xtream_get_epg_file_path_for_target(&xtream_storage);
         epg_write_file(
             &target.name,
-            &Epg {
-                priority: 0,
-                logo_override: false,
-                attributes: None,
-                children: vec![Arc::new(channel)],
-            },
+            &Epg { priority: 0, logo_override: false, attributes: None, children: vec![Arc::new(channel)] },
             &epg_path,
             &std::collections::HashMap::<Arc<str>, Arc<str>>::new(),
             &shared::model::EpgOutputOptions::default(),
@@ -2719,10 +2704,7 @@ mod tests {
             .expect("resolver ok")
             .expect("M3U input handled by bridge");
 
-        assert_eq!(
-            resolved.url,
-            "http://provider.example/channel/video-1704067200-3600.m3u8"
-        );
+        assert_eq!(resolved.url, "http://provider.example/channel/video-1704067200-3600.m3u8");
         assert!(!resolved.discriminator.is_empty());
     }
 
@@ -2738,11 +2720,7 @@ mod tests {
 
         assert_ne!(first.url, second.url);
         assert_ne!(first.discriminator, second.discriminator);
-        let fp = Fingerprint::new(
-            "fp".to_string(),
-            "127.0.0.1".to_string(),
-            "127.0.0.1:0".parse().unwrap(),
-        );
+        let fp = Fingerprint::new("fp".to_string(), "127.0.0.1".to_string(), "127.0.0.1:0".parse().unwrap());
         assert_ne!(
             crate::api::api_utils::create_m3u_catchup_session_key(&fp, "alice", 100, &first.discriminator),
             crate::api::api_utils::create_m3u_catchup_session_key(&fp, "alice", 100, &second.discriminator),
@@ -2757,8 +2735,8 @@ mod tests {
         }
         let input = m3u_timeshift_input();
 
-        let err = resolve_m3u_xtream_timeshift(&input, &item, "60/2024-01-01:00-00")
-            .expect_err("missing catchup must error");
+        let err =
+            resolve_m3u_xtream_timeshift(&input, &item, "60/2024-01-01:00-00").expect_err("missing catchup must error");
         assert!(matches!(err, TuliproxError::ApiXtream(_)));
     }
 
@@ -2776,8 +2754,7 @@ mod tests {
     #[test]
     fn m3u_timeshift_stream_url_uses_resolved_archive_for_credential_bearing_input() {
         let input = m3u_timeshift_input();
-        let resolved_url: Arc<str> =
-            Arc::from("http://provider.example/channel/video-1704067200-3600.m3u8");
+        let resolved_url: Arc<str> = Arc::from("http://provider.example/channel/video-1704067200-3600.m3u8");
 
         let url =
             get_xtream_player_api_stream_url(&input, ApiStreamContext::Timeshift, "60/2024-01-01:00-00", &resolved_url)
@@ -2830,10 +2807,7 @@ mod tests {
         use crate::auth::create_access_token;
 
         let dir = tempdir().expect("temp dir");
-        let config = Config {
-            storage_dir: dir.path().to_string_lossy().into_owned(),
-            ..Config::default()
-        };
+        let config = Config { storage_dir: dir.path().to_string_lossy().into_owned(), ..Config::default() };
         let app_state = create_test_app_state(config);
         let target = Arc::new(short_epg_target());
         let input = m3u_timeshift_input();
@@ -2847,12 +2821,7 @@ mod tests {
             &HeaderMap::new(),
             &app_state,
             target.id,
-            ApiStreamRequest::from_access_token(
-                ApiStreamContext::Timeshift,
-                &token,
-                "100.ts",
-                "",
-            ),
+            ApiStreamRequest::from_access_token(ApiStreamContext::Timeshift, &token, "100.ts", ""),
         )
         .await
         .into_response();

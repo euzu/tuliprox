@@ -1,47 +1,44 @@
 use crate::{
     api::{
         api_utils::{get_build_time, get_server_time},
-        tasks::exec_config_watch,
         endpoints::{
             custom_video_stream_api::cvs_api_register,
             download_api::{resume_download_worker_if_needed, spawn_download_services},
             hdhomerun_api::hdhr_api_register,
             hls_api::hls_api_register,
+            log_ws_api::log_ws_api_register,
             m3u_api::m3u_api_register,
             provider_resolve_api::provider_resolve_api_register,
             v1_api::v1_api_register,
             web_index::{index_register_with_path, index_register_without_path},
             websocket_api::ws_api_register,
-            log_ws_api::log_ws_api_register,
             xmltv_api::xmltv_api_register,
             xtream_api::xtream_api_register,
         },
         hdhomerun_proprietary::spawn_proprietary_tasks,
-        tasks::spawn_ssdp_discover_task,
         http_layers::create_cors_layer,
         model::{
             create_cache, create_http_client, create_http_client_no_redirect, create_public_http_client_no_redirect,
-            exec_provider_dns, ActiveProviderManager, ActiveUserManager, AppState, CancelTokens,
-            ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState, HlsProvisioningState,
-            ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
-            UpdateGuard, exec_qos_aggregation,
+            exec_provider_dns, exec_qos_aggregation, load_playlists_into_memory_cache,
             recording_rule_scheduler::spawn_recording_rule_scheduler,
-            recording_supervisor::start_recording_supervisors,
+            recording_supervisor::start_recording_supervisors, ActiveProviderManager, ActiveUserManager, AppState,
+            CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState,
+            HlsProvisioningState, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState,
+            SharedStreamManager, UpdateGuard,
         },
         panel_api::{sync_panel_api_exp_dates, sync_panel_api_exp_dates_on_boot},
-        tasks::{exec_interner_prune, exec_scheduler, exec_xtream_expiry_sync},
         serve::serve,
         sys_usage::exec_system_usage,
+        tasks::{
+            exec_config_watch, exec_interner_prune, exec_scheduler, exec_xtream_expiry_sync, spawn_ssdp_discover_task,
+        },
     },
     model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, ProcessTargets, RateLimitConfig},
     processing::processor::exec_processing,
-    api::model::load_playlists_into_memory_cache,
-    repository::get_geoip_path,
-    repository::GeoIp,
+    repository::{get_geoip_path, GeoIp},
     utils::{exec_file_lock_prune, get_default_web_root_path},
     VERSION,
 };
-use tuliprox_hls::api::{exec_hls_cache_gc, exec_hls_lifecycle, HlsProxyManager};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::{
     extract::{connect_info::ConnectInfo, Request},
@@ -58,13 +55,19 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
-    sync::{atomic::{AtomicI8, AtomicU64, Ordering}, Arc},
+    sync::{
+        atomic::{AtomicI8, AtomicU64, Ordering},
+        Arc,
+    },
 };
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
-use tower_http::compression::predicate::{DefaultPredicate, Predicate, SizeAbove};
-use tower_http::services::ServeDir;
+use tower_http::{
+    compression::predicate::{DefaultPredicate, Predicate, SizeAbove},
+    services::ServeDir,
+};
+use tuliprox_hls::api::{exec_hls_cache_gc, exec_hls_lifecycle, HlsProxyManager};
 
 const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
 static CORRUPT_DOWNLOADS_STATE_SUFFIX: AtomicU64 = AtomicU64::new(1);
@@ -104,9 +107,7 @@ async fn recover_persisted_downloads_state(downloads: &DownloadQueue) -> Result<
             }
             Ok(())
         }
-        Err(err) => Err(TuliproxError::Io(
-            format!("Failed to load persisted downloads: {err}"),
-        )),
+        Err(err) => Err(TuliproxError::Io(format!("Failed to load persisted downloads: {err}"))),
     }
 }
 
@@ -211,7 +212,7 @@ fn spawn_metadata_trigger_update(
                             Arc::clone(&app_config),
                             proc_targets,
                             Some(Arc::clone(&event_manager)),
-Some({
+                            Some({
                                 let state = Arc::clone(&app_state_clone);
                                 std::sync::Arc::new(move || {
                                     let state = Arc::clone(&state);
@@ -264,7 +265,10 @@ Some({
 fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, TuliproxError> {
     let web_dir_path = if web_root.is_empty() { get_default_web_root_path() } else { PathBuf::from(web_root) };
     if web_ui_enabled && (!&web_dir_path.exists() || !&web_dir_path.is_dir()) {
-        return Err(TuliproxError::Server(format!("web_root does not exist or is not a directory: {}", web_dir_path.display())));
+        return Err(TuliproxError::Server(format!(
+            "web_root does not exist or is not a directory: {}",
+            web_dir_path.display()
+        )));
     }
     Ok(web_dir_path)
 }
@@ -301,11 +305,7 @@ async fn ready(
     // No enabled input or alias left means no capacity can ever be served.
     let exhausted = slots.is_empty() || is_exhausted(slots, &sources.group_lookup);
     let status_label = if exhausted { "exhausted" } else { "ready" };
-    let status_code = if exhausted {
-        axum::http::StatusCode::SERVICE_UNAVAILABLE
-    } else {
-        axum::http::StatusCode::OK
-    };
+    let status_code = if exhausted { axum::http::StatusCode::SERVICE_UNAVAILABLE } else { axum::http::StatusCode::OK };
     (status_code, axum::Json(ReadyResponse { status: status_label }))
 }
 
@@ -338,10 +338,8 @@ async fn create_shared_data(
     let event_manager = Arc::new(EventManager::new());
     let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
     let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
-    let rewrite_secret = config
-        .reverse_proxy
-        .as_ref()
-        .map_or(app_config.encrypt_secret, |reverse_proxy| reverse_proxy.rewrite_secret);
+    let rewrite_secret =
+        config.reverse_proxy.as_ref().map_or(app_config.encrypt_secret, |reverse_proxy| reverse_proxy.rewrite_secret);
     let hls_proxy = Arc::new(HlsProxyManager::from_hls_cache_config_and_secret(
         config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref()),
         &rewrite_secret,
@@ -370,27 +368,27 @@ async fn create_shared_data(
     let (manual_update_sender, manual_update_rx) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
 
     let app_state = AppState {
-            forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
-            app_config: Arc::clone(app_config),
-            http_client: Arc::new(ArcSwap::from_pointee(client)),
-            http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
-            public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(public_client_no_redirect)),
-            downloads: Arc::new(DownloadQueue::new_with_state_file(Some(downloads_state_file))),
-            cache: Arc::new(ArcSwapOption::from(cache)),
-            shared_stream_manager,
-            hls_proxy,
-            hls_provisioning: Arc::new(HlsProvisioningState::new()),
-            active_users,
-            active_provider,
-            connection_manager,
-            event_manager,
-            cancel_tokens,
-            playlists: Arc::new(PlaylistStorageState::new()),
-            geoip,
-            update_guard: UpdateGuard::new(),
-            metadata_manager,
-            manual_update_sender,
-        };
+        forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
+        app_config: Arc::clone(app_config),
+        http_client: Arc::new(ArcSwap::from_pointee(client)),
+        http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
+        public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(public_client_no_redirect)),
+        downloads: Arc::new(DownloadQueue::new_with_state_file(Some(downloads_state_file))),
+        cache: Arc::new(ArcSwapOption::from(cache)),
+        shared_stream_manager,
+        hls_proxy,
+        hls_provisioning: Arc::new(HlsProvisioningState::new()),
+        active_users,
+        active_provider,
+        connection_manager,
+        event_manager,
+        cancel_tokens,
+        playlists: Arc::new(PlaylistStorageState::new()),
+        geoip,
+        update_guard: UpdateGuard::new(),
+        metadata_manager,
+        manual_update_sender,
+    };
 
     recover_persisted_downloads_state_for_startup(&app_state.downloads).await;
 
@@ -423,7 +421,8 @@ async fn run_manual_update_worker(
             Some(app_state.update_guard.clone()),
             app_state.get_disabled_headers(),
             Some(Arc::clone(&app_state.active_provider)),
-            Some(Arc::clone(&app_state.metadata_manager) as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>),
+            Some(Arc::clone(&app_state.metadata_manager)
+                as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>),
             None,
             Some(permit),
         )
@@ -444,9 +443,7 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     // Use the manager's shutdown() rather than cancelling the token directly so
     // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
     app_state.metadata_manager.shutdown();
-    if tokio::time::timeout(std::time::Duration::from_secs(30), app_state.connection_manager.shutdown())
-        .await
-        .is_err()
+    if tokio::time::timeout(std::time::Duration::from_secs(30), app_state.connection_manager.shutdown()).await.is_err()
     {
         warn!("Connection manager shutdown timed out after 30s, forcing exit");
     }
@@ -454,7 +451,7 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
 
 #[cfg(unix)]
 async fn wait_for_shutdown_signal() -> Result<&'static str, std::io::Error> {
-    use tokio::signal::unix::{SignalKind, signal};
+    use tokio::signal::unix::{signal, SignalKind};
 
     let mut terminate = signal(SignalKind::terminate())?;
     let mut quit = signal(SignalKind::quit())?;
@@ -550,9 +547,7 @@ fn allow_response_compression(
 }
 
 fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl Predicate> {
-    let predicate = DefaultPredicate::new()
-        .and(SizeAbove::new(1024))
-        .and(allow_response_compression);
+    let predicate = DefaultPredicate::new().and(SizeAbove::new(1024)).and(allow_response_compression);
     tower_http::compression::CompressionLayer::new()
         .br(false)
         .deflate(true)
@@ -873,10 +868,7 @@ fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTa
                                     continue;
                                 }
                                 // Add this input to the active set for this target
-                                active_target_inputs
-                                    .entry(target.name.clone())
-                                    .or_default()
-                                    .insert(input_name.clone());
+                                active_target_inputs.entry(target.name.clone()).or_default().insert(input_name.clone());
                                 // Mark target as potentially needing an update
                                 pending_targets.insert(target.name.clone());
                             }
@@ -944,13 +936,13 @@ async fn wait_for_shutdown_signal() -> Result<&'static str, std::io::Error> {
 mod tests {
     use super::{corrupt_downloads_state_path, recover_persisted_downloads_state};
     use crate::api::model::DownloadQueue;
-    use std::{path::PathBuf, time::{SystemTime, UNIX_EPOCH}};
+    use std::{
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn temp_state_file(name: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos();
         std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}.json"))
     }
 
@@ -969,10 +961,8 @@ mod tests {
         let state_file = temp_state_file("corrupt_downloads_state");
         std::fs::write(&state_file, "{ not valid json").expect("write corrupt state");
         let corrupt_dir = state_file.parent().expect("state dir").to_path_buf();
-        let expected_prefix = format!(
-            "{}_corrupt.",
-            state_file.file_stem().and_then(|stem| stem.to_str()).expect("state stem")
-        );
+        let expected_prefix =
+            format!("{}_corrupt.", state_file.file_stem().and_then(|stem| stem.to_str()).expect("state stem"));
         let expected_extension = state_file.extension().and_then(|ext| ext.to_str()).expect("state ext");
         let downloads = DownloadQueue::new_with_state_file(Some(state_file.clone()));
 
@@ -1010,7 +1000,7 @@ mod tests {
             },
             model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProcessTargets, SourcesConfig},
             repository::GeoIp,
-        utils::FileLockManager,
+            utils::FileLockManager,
         };
         use arc_swap::{ArcSwap, ArcSwapOption};
         use axum::response::IntoResponse;

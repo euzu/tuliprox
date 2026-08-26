@@ -1,11 +1,9 @@
 use crate::{
     api::{
-        api_utils::{
-            get_user_target_by_username, get_username_from_auth_header, try_unwrap_body,
-        },
+        api_utils::{get_user_target_by_username, get_username_from_auth_header, try_unwrap_body},
+        auth_middleware::validator_api_user,
         model::AppState,
     },
-    api::auth_middleware::validator_api_user,
     auth::AuthBearer,
     model::{AppConfig, ConfigTarget, PlaylistXtreamCategory},
     repository::{

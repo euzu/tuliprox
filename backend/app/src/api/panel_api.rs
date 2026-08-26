@@ -27,9 +27,10 @@ use crate::{
             StreamDetails,
         },
     },
+    config_loader::{persist_source_config, read_sources_file_from_path},
     model::{
-        is_input_expired, ConfigInput, ConfigInputAlias, GracePeriodOptions, InputSource, PanelApiConfig, PanelApiQueryParam,
-        ProxyUserCredentials,
+        is_input_expired, ConfigInput, ConfigInputAlias, GracePeriodOptions, InputSource, PanelApiConfig,
+        PanelApiQueryParam, ProxyUserCredentials,
     },
     repository::{
         compare_alias_exp_date_with_order, csv_patch_batch_append, csv_patch_batch_remove_expired,
@@ -37,9 +38,7 @@ use crate::{
         get_csv_file_path, AliasExpDateSortOrder,
     },
     utils::{debug_if_enabled, format_http_status, request},
-    config_loader::{persist_source_config, read_sources_file_from_path},
 };
-use smallvec::SmallVec;
 use axum::http::{header, HeaderMap, Method, StatusCode};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -51,15 +50,15 @@ use shared::{
     concat_string, create_bitset,
     error::{string_to_io_error, TuliproxError},
     model::{
-        ConfigInputAliasDto, ConfigInputDto, InputType, PanelApiAliasPoolSizeValue, PanelApiProvisioningMethod,
-        ProxyUserStatus, SourcesConfigDto, VirtualId,
+        ConfigInputAliasDto, ConfigInputDto, DisconnectReason, InputType, PanelApiAliasPoolSizeValue,
+        PanelApiProvisioningMethod, ProxyUserStatus, SourcesConfigDto, VirtualId,
     },
     utils::{
         get_base_url_from_str, get_credentials_from_url, get_credentials_from_url_str, get_i64_from_serde_value,
-        get_string_from_serde_value, parse_timestamp, sanitize_sensitive_info, Internable,
-        PROVIDER_SCHEME_PREFIX,
+        get_string_from_serde_value, parse_timestamp, sanitize_sensitive_info, Internable, PROVIDER_SCHEME_PREFIX,
     },
 };
+use smallvec::SmallVec;
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
@@ -71,7 +70,6 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 use url::Url;
-use shared::model::DisconnectReason;
 
 #[derive(Debug, Clone)]
 struct AccountCredentials {
@@ -256,10 +254,14 @@ fn validate_type_is_m3u(params: &[PanelApiQueryParam]) -> Result<(), TuliproxErr
 fn require_api_key_param(params: &[PanelApiQueryParam], section: &str) -> Result<(), TuliproxError> {
     let api_key = params.iter().find(|p| p.key.trim().eq_ignore_ascii_case("api_key"));
     let Some(api_key) = api_key else {
-        return Err(TuliproxError::ConfigPanelApi(format!("panel_api: {section} must contain query param 'api_key' (use value 'auto')")));
+        return Err(TuliproxError::ConfigPanelApi(format!(
+            "panel_api: {section} must contain query param 'api_key' (use value 'auto')"
+        )));
     };
     if api_key.value.trim().is_empty() {
-        return Err(TuliproxError::ConfigPanelApi(format!("panel_api: {section} query param 'api_key' must not be empty (use value 'auto')")));
+        return Err(TuliproxError::ConfigPanelApi(format!(
+            "panel_api: {section} query param 'api_key' must not be empty (use value 'auto')"
+        )));
     }
     Ok(())
 }
@@ -286,7 +288,9 @@ fn validate_client_new_params(params: &[PanelApiQueryParam]) -> Result<(), Tulip
     require_api_key_param(params, "query_parameter.client_new")?;
     validate_type_is_m3u(params)?;
     if params.iter().any(|p| p.key.trim().eq_ignore_ascii_case("user")) {
-        return Err(TuliproxError::ConfigPanelApi("panel_api: client_new must not contain query param 'user'".to_string()));
+        return Err(TuliproxError::ConfigPanelApi(
+            "panel_api: client_new must not contain query param 'user'".to_string(),
+        ));
     }
     Ok(())
 }
@@ -383,9 +387,12 @@ fn parse_panel_api_provisioning_offset_secs(offset: &str) -> Result<u64, Tulipro
             "panel_api.provisioning.offset must be a number with optional suffix s/m/h/d (e.g. 30m, 12h), got '{raw}'"
         )));
     }
-    let value: u64 =
-        num_part.parse().map_err(|_| TuliproxError::ConfigPanelApi(format!("panel_api.provisioning.offset is not a valid number: '{raw}'")))?;
-    value.checked_mul(multiplier).ok_or_else(|| TuliproxError::ConfigPanelApi(format!("panel_api.provisioning.offset is too large: '{raw}'")))
+    let value: u64 = num_part.parse().map_err(|_| {
+        TuliproxError::ConfigPanelApi(format!("panel_api.provisioning.offset is not a valid number: '{raw}'"))
+    })?;
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| TuliproxError::ConfigPanelApi(format!("panel_api.provisioning.offset is too large: '{raw}'")))
 }
 
 fn validate_panel_api_config(cfg: &PanelApiConfig) -> Result<(), TuliproxError> {
@@ -399,7 +406,9 @@ fn validate_panel_api_config(cfg: &PanelApiConfig) -> Result<(), TuliproxError> 
         return Err(TuliproxError::ConfigPanelApi("panel_api: api_key is missing".to_string()));
     }
     if cfg.query_parameter.client_info.is_empty() {
-        return Err(TuliproxError::ConfigPanelApi("panel_api: query_parameter.client_info must be configured".to_string()));
+        return Err(TuliproxError::ConfigPanelApi(
+            "panel_api: query_parameter.client_info must be configured".to_string(),
+        ));
     }
     validate_client_info_params(&cfg.query_parameter.client_info)?;
     if !cfg.query_parameter.client_new.is_empty() {
@@ -417,23 +426,31 @@ fn validate_panel_api_config(cfg: &PanelApiConfig) -> Result<(), TuliproxError> 
     let (min_val, max_val) = alias_pool_limit_values(cfg);
     if let Some(PanelApiAliasPoolSizeValue::Number(value)) = min_val {
         if *value == 0 {
-            return Err(TuliproxError::ConfigPanelApi("panel_api.alias_pool.size.min must be greater than 0".to_string()));
+            return Err(TuliproxError::ConfigPanelApi(
+                "panel_api.alias_pool.size.min must be greater than 0".to_string(),
+            ));
         }
     }
     if let Some(PanelApiAliasPoolSizeValue::Number(value)) = max_val {
         if *value == 0 {
-            return Err(TuliproxError::ConfigPanelApi("panel_api.alias_pool.size.max must be greater than 0".to_string()));
+            return Err(TuliproxError::ConfigPanelApi(
+                "panel_api.alias_pool.size.max must be greater than 0".to_string(),
+            ));
         }
     }
     let min = min_val.and_then(PanelApiAliasPoolSizeValue::as_number);
     let max = max_val.and_then(PanelApiAliasPoolSizeValue::as_number);
     if let (Some(min), Some(max)) = (min, max) {
         if min > max {
-            return Err(TuliproxError::ConfigPanelApi("panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max".to_string()));
+            return Err(TuliproxError::ConfigPanelApi(
+                "panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max".to_string(),
+            ));
         }
     }
     if cfg.provisioning.probe_interval_sec == 0 {
-        return Err(TuliproxError::ConfigPanelApi("panel_api.provisioning.probe_interval_sec must be greater than 0".to_string()));
+        return Err(TuliproxError::ConfigPanelApi(
+            "panel_api.provisioning.probe_interval_sec must be greater than 0".to_string(),
+        ));
     }
     if let Some(offset) = cfg.provisioning.offset.as_deref() {
         let _secs = parse_panel_api_provisioning_offset_secs(offset)?;
@@ -456,7 +473,9 @@ fn resolve_query_params(
         if value.eq_ignore_ascii_case("auto") {
             if key.eq_ignore_ascii_case("api_key") {
                 let Some(k) = api_key.filter(|s| !s.trim().is_empty()) else {
-                    return Err(TuliproxError::ConfigPanelApi(format!("panel_api: query param {key} uses 'auto' but panel_api.api_key is missing")));
+                    return Err(TuliproxError::ConfigPanelApi(format!(
+                        "panel_api: query param {key} uses 'auto' but panel_api.api_key is missing"
+                    )));
                 };
                 value = k.to_string();
             } else if key.eq_ignore_ascii_case("username") {
@@ -481,7 +500,8 @@ fn resolve_query_params(
 }
 
 fn build_panel_url(base_url: &str, query_params: &[(String, String)]) -> Result<Url, TuliproxError> {
-    let mut url = Url::parse(base_url).map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api: invalid url {base_url}: {e}")))?;
+    let mut url = Url::parse(base_url)
+        .map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api: invalid url {base_url}: {e}")))?;
     {
         let mut pairs = url.query_pairs_mut();
         for (k, v) in query_params {
@@ -528,10 +548,7 @@ fn sanitize_panel_api_json_for_log(value: &Value, sanitize_sensitive: bool) -> V
 
 fn panel_api_retryable_status(status: StatusCode) -> bool {
     status.is_server_error()
-        || matches!(
-            status,
-            StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_EARLY
-        )
+        || matches!(status, StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_EARLY)
 }
 
 fn panel_api_retry_after_from_header_value(raw: &str) -> Option<Duration> {
@@ -552,9 +569,7 @@ fn panel_api_retry_after_from_header_value(raw: &str) -> Option<Duration> {
     } else {
         u64::try_from(secs).unwrap_or(PANEL_API_DEFAULT_RETRY_AFTER_SECS)
     };
-    Some(Duration::from_secs(
-        secs.clamp(PANEL_API_DEFAULT_RETRY_AFTER_SECS, PANEL_API_MAX_RETRY_AFTER_SECS),
-    ))
+    Some(Duration::from_secs(secs.clamp(PANEL_API_DEFAULT_RETRY_AFTER_SECS, PANEL_API_MAX_RETRY_AFTER_SECS)))
 }
 
 fn panel_api_retry_after_from_headers(headers: &HeaderMap) -> Duration {
@@ -569,12 +584,7 @@ async fn panel_get_json(app_state: &AppState, url: Url) -> Result<Value, Tulipro
     let client = app_state.http_client.load();
     let sanitized = sanitize_sensitive_info(url.as_str());
     for attempt in 0..PANEL_API_RETRY_ATTEMPTS {
-        debug_if_enabled!(
-            "panel_api request attempt {} of {}: {}",
-            attempt + 1,
-            PANEL_API_RETRY_ATTEMPTS,
-            sanitized
-        );
+        debug_if_enabled!("panel_api request attempt {} of {}: {}", attempt + 1, PANEL_API_RETRY_ATTEMPTS, sanitized);
         let resp = client
             .get(url.clone())
             .timeout(Duration::from_secs(PANEL_API_REQUEST_TIMEOUT_SECS))
@@ -606,7 +616,8 @@ async fn panel_get_json(app_state: &AppState, url: Url) -> Result<Value, Tulipro
             .map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api read response failed: {e}")))?;
         let json: Value = serde_json::from_str(&body)
             .map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api invalid json (http {status}): {e}")))?;
-        let sanitize_sensitive = app_state.app_config.config.load().log.as_ref().is_none_or(|l| l.sanitize_sensitive_info);
+        let sanitize_sensitive =
+            app_state.app_config.config.load().log.as_ref().is_none_or(|l| l.sanitize_sensitive_info);
         let json_for_log = sanitize_panel_api_json_for_log(&json, sanitize_sensitive);
         if let Ok(json_str) = serde_json::to_string(&json_for_log) {
             debug_if_enabled!(
@@ -665,18 +676,18 @@ async fn user_api_get_json(app_state: &AppState, input_source: &InputSource) -> 
         input_source.get_provider(),
         false,
         |resolved_url| {
-            client
-                .get(resolved_url.clone())
-                .headers(headers.clone())
-                .timeout(std::time::Duration::from_secs(30))
+            client.get(resolved_url.clone()).headers(headers.clone()).timeout(std::time::Duration::from_secs(30))
         },
     )
     .await
-        .map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api user_api request failed: {e}")))?;
+    .map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api user_api request failed: {e}")))?;
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api user_api read response failed: {e}")))?;
-    let json: Value =
-        serde_json::from_str(&body).map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api user_api invalid json (http {status}): {e}")))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api user_api read response failed: {e}")))?;
+    let json: Value = serde_json::from_str(&body)
+        .map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api user_api invalid json (http {status}): {e}")))?;
     let sanitize_sensitive = app_state.app_config.config.load().log.as_ref().is_none_or(|l| l.sanitize_sensitive_info);
     let json_for_log = sanitize_panel_api_json_for_log(&json, sanitize_sensitive);
     if let Ok(json_str) = serde_json::to_string(&json_for_log) {
@@ -698,7 +709,9 @@ async fn panel_client_new(
     let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
-        return Err(TuliproxError::ConfigPanelApi("panel_api: client_new response is not a JSON object/array".to_string()));
+        return Err(TuliproxError::ConfigPanelApi(
+            "panel_api: client_new response is not a JSON object/array".to_string(),
+        ));
     };
     let status_ok = obj.get("status").is_some_and(parse_boolish);
     if !status_ok {
@@ -713,7 +726,9 @@ async fn panel_client_new(
             return Ok((u, p, base));
         }
     }
-    Err(TuliproxError::ConfigPanelApi("panel_api: client_new response missing username/password (and no parsable url)".to_string()))
+    Err(TuliproxError::ConfigPanelApi(
+        "panel_api: client_new response missing username/password (and no parsable url)".to_string(),
+    ))
 }
 
 async fn panel_client_renew(
@@ -728,7 +743,9 @@ async fn panel_client_renew(
     let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
-        return Err(TuliproxError::ConfigPanelApi("panel_api: client_renew response is not a JSON object/array".to_string()));
+        return Err(TuliproxError::ConfigPanelApi(
+            "panel_api: client_renew response is not a JSON object/array".to_string(),
+        ));
     };
     let status_ok = obj.get("status").is_some_and(parse_boolish);
     if !status_ok {
@@ -749,7 +766,9 @@ async fn panel_client_info_raw(
     let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
-        return Err(TuliproxError::ConfigPanelApi("panel_api: client_info response is not a JSON object/array".to_string()));
+        return Err(TuliproxError::ConfigPanelApi(
+            "panel_api: client_info response is not a JSON object/array".to_string(),
+        ));
     };
     let status_ok = obj.get("status").is_some_and(parse_boolish);
     if !status_ok {
@@ -877,9 +896,12 @@ async fn persist_panel_api_time_cache(
     cache: &PanelApiTimeCache,
 ) -> Result<(), TuliproxError> {
     if let Some(parent) = cache_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api: failed to create cache dir: {e}")))?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api: failed to create cache dir: {e}")))?;
     }
-    let content = serde_json::to_string_pretty(cache).map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api: {e}")))?;
+    let content =
+        serde_json::to_string_pretty(cache).map_err(|e| TuliproxError::ConfigPanelApi(format!("panel_api: {e}")))?;
     let _lock = app_state.app_config.file_locks.write_lock(cache_path).await;
     tokio::fs::write(cache_path, content)
         .await
@@ -902,7 +924,9 @@ async fn panel_account_info(
     let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
-        return Err(TuliproxError::ConfigPanelApi("panel_api: account_info response is not a JSON object/array".to_string()));
+        return Err(TuliproxError::ConfigPanelApi(
+            "panel_api: account_info response is not a JSON object/array".to_string(),
+        ));
     };
     let status_ok = obj.get("status").is_some_and(parse_boolish);
     if !status_ok {
@@ -927,7 +951,9 @@ async fn panel_client_adult_content(
     let url = build_panel_url(cfg.url.as_ref(), &params)?;
     let json = panel_get_json(app_state, url).await?;
     let Some(obj) = first_json_object(&json) else {
-        return Err(TuliproxError::ConfigPanelApi("panel_api: client_adult_content response is not a JSON object/array".to_string()));
+        return Err(TuliproxError::ConfigPanelApi(
+            "panel_api: client_adult_content response is not a JSON object/array".to_string(),
+        ));
     };
     let status_ok = obj.get("status").is_some_and(parse_boolish);
     if !status_ok {
@@ -1060,7 +1086,9 @@ fn resolve_alias_pool_limits(
     };
     if let (Some(min), Some(max)) = (min, max) {
         if min > max {
-            return Err(TuliproxError::ConfigPanelApi("panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max".to_string()));
+            return Err(TuliproxError::ConfigPanelApi(
+                "panel_api.alias_pool.size.min must be <= panel_api.alias_pool.size.max".to_string(),
+            ));
         }
     }
     Ok((min, max))
@@ -1410,9 +1438,11 @@ fn apply_sources_yml_patches(doc: &mut SourcesConfigDto, patches: &[SourcesYmlPa
     for patch in patches {
         match patch {
             SourcesYmlPatch::UpdatePanelApiCredits { input_name, credits } => {
-                let idx = *inputs_by_name
-                    .get(input_name.as_ref())
-                    .ok_or_else(|| TuliproxError::ConfigPanelApi(format!("panel_api: could not find input '{input_name}' in source.yml")))?;
+                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
+                    TuliproxError::ConfigPanelApi(format!(
+                        "panel_api: could not find input '{input_name}' in source.yml"
+                    ))
+                })?;
                 let Some(panel_api) = doc.inputs[idx].panel_api.as_mut() else {
                     return Err(TuliproxError::ConfigPanelApi(format!(
                         "panel_api: could not find panel_api for input '{input_name}' in source.yml"
@@ -1424,9 +1454,11 @@ fn apply_sources_yml_patches(doc: &mut SourcesConfigDto, patches: &[SourcesYmlPa
                 }
             }
             SourcesYmlPatch::SortAliases { input_name, order } => {
-                let idx = *inputs_by_name
-                    .get(input_name.as_ref())
-                    .ok_or_else(|| TuliproxError::ConfigPanelApi(format!("panel_api: could not find input '{input_name}' in source.yml")))?;
+                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
+                    TuliproxError::ConfigPanelApi(format!(
+                        "panel_api: could not find input '{input_name}' in source.yml"
+                    ))
+                })?;
                 let Some(aliases) = doc.inputs[idx].aliases.as_mut() else {
                     continue;
                 };
@@ -1437,9 +1469,11 @@ fn apply_sources_yml_patches(doc: &mut SourcesConfigDto, patches: &[SourcesYmlPa
                 }
             }
             SourcesYmlPatch::UpdateExpDate { input_name, account_name, exp_date } => {
-                let idx = *inputs_by_name
-                    .get(input_name.as_ref())
-                    .ok_or_else(|| TuliproxError::ConfigPanelApi(format!("panel_api: could not find input '{input_name}' in source.yml")))?;
+                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
+                    TuliproxError::ConfigPanelApi(format!(
+                        "panel_api: could not find input '{input_name}' in source.yml"
+                    ))
+                })?;
                 if account_name == input_name {
                     if doc.inputs[idx].exp_date != Some(*exp_date)
                         || !doc.inputs[idx].enabled
@@ -1457,25 +1491,21 @@ fn apply_sources_yml_patches(doc: &mut SourcesConfigDto, patches: &[SourcesYmlPa
                         "panel_api: could not find alias '{account_name}' under input '{input_name}' in source.yml"
                     )));
                 };
-                let aliases = doc.inputs[idx]
-                    .aliases
-                    .as_mut()
-                    .ok_or_else(|| TuliproxError::ConfigPanelApi(format!("panel_api: input '{input_name}' has no aliases")))?;
+                let aliases = doc.inputs[idx].aliases.as_mut().ok_or_else(|| {
+                    TuliproxError::ConfigPanelApi(format!("panel_api: input '{input_name}' has no aliases"))
+                })?;
                 if aliases[alias_idx].exp_date != Some(*exp_date) || aliases[alias_idx].max_connections != 1 {
                     aliases[alias_idx].exp_date = Some(*exp_date);
                     aliases[alias_idx].max_connections = 1;
                     changed = true;
                 }
             }
-            SourcesYmlPatch::UpdateRootCredentials {
-                input_name,
-                username,
-                password,
-                exp_date,
-            } => {
-                let idx = *inputs_by_name
-                    .get(input_name.as_ref())
-                    .ok_or_else(|| TuliproxError::ConfigPanelApi(format!("panel_api: could not find input '{input_name}' in source.yml")))?;
+            SourcesYmlPatch::UpdateRootCredentials { input_name, username, password, exp_date } => {
+                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
+                    TuliproxError::ConfigPanelApi(format!(
+                        "panel_api: could not find input '{input_name}' in source.yml"
+                    ))
+                })?;
                 let input = &mut doc.inputs[idx];
                 let exp_date_changed = exp_date.is_some() && input.exp_date != *exp_date;
                 if input.username.as_deref() != Some(username.as_str())
@@ -1494,9 +1524,11 @@ fn apply_sources_yml_patches(doc: &mut SourcesConfigDto, patches: &[SourcesYmlPa
                 }
             }
             SourcesYmlPatch::PersistProvisionedAccount { input_name, username, password, exp_date } => {
-                let idx = *inputs_by_name
-                    .get(input_name.as_ref())
-                    .ok_or_else(|| TuliproxError::ConfigPanelApi(format!("panel_api: could not find input '{input_name}' in source.yml")))?;
+                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
+                    TuliproxError::ConfigPanelApi(format!(
+                        "panel_api: could not find input '{input_name}' in source.yml"
+                    ))
+                })?;
                 let input = &mut doc.inputs[idx];
                 let current_root_is_usable =
                     input.exp_date.is_some() && !is_input_expired_at(input.exp_date, get_current_timestamp());
@@ -1552,18 +1584,19 @@ fn apply_sources_yml_patches(doc: &mut SourcesConfigDto, patches: &[SourcesYmlPa
                 }
             }
             SourcesYmlPatch::UpdateAliasCredentials { input_name, alias_name, username, password, exp_date } => {
-                let idx = *inputs_by_name
-                    .get(input_name.as_ref())
-                    .ok_or_else(|| TuliproxError::ConfigPanelApi(format!("panel_api: could not find input '{input_name}' in source.yml")))?;
+                let idx = *inputs_by_name.get(input_name.as_ref()).ok_or_else(|| {
+                    TuliproxError::ConfigPanelApi(format!(
+                        "panel_api: could not find input '{input_name}' in source.yml"
+                    ))
+                })?;
                 let Some(alias_idx) = alias_indices[idx].get(alias_name).copied() else {
                     return Err(TuliproxError::ConfigPanelApi(format!(
                         "panel_api: could not find alias '{alias_name}' under input '{input_name}' in source.yml"
                     )));
                 };
-                let aliases = doc.inputs[idx]
-                    .aliases
-                    .as_mut()
-                    .ok_or_else(|| TuliproxError::ConfigPanelApi(format!("panel_api: input '{input_name}' has no aliases")))?;
+                let aliases = doc.inputs[idx].aliases.as_mut().ok_or_else(|| {
+                    TuliproxError::ConfigPanelApi(format!("panel_api: input '{input_name}' has no aliases"))
+                })?;
                 let alias = &mut aliases[alias_idx];
                 let exp_date_changed = exp_date.is_some() && alias.exp_date != *exp_date;
                 if alias.username.as_deref() != Some(username.as_str())
@@ -1581,9 +1614,11 @@ fn apply_sources_yml_patches(doc: &mut SourcesConfigDto, patches: &[SourcesYmlPa
                 }
             }
             SourcesYmlPatch::AddAlias { input_name, alias_name, base_url, username, password, exp_date } => {
-                let idx = *inputs_by_name
-                    .get(input_name)
-                    .ok_or_else(|| TuliproxError::ConfigPanelApi(format!("panel_api: could not find input '{input_name}' in source.yml")))?;
+                let idx = *inputs_by_name.get(input_name).ok_or_else(|| {
+                    TuliproxError::ConfigPanelApi(format!(
+                        "panel_api: could not find input '{input_name}' in source.yml"
+                    ))
+                })?;
                 let alias_idx = append_sources_yml_alias(
                     input_name,
                     &mut doc.inputs[idx],
@@ -1597,9 +1632,11 @@ fn apply_sources_yml_patches(doc: &mut SourcesConfigDto, patches: &[SourcesYmlPa
                 changed = true;
             }
             SourcesYmlPatch::RemoveExpiredAliases { input_name } => {
-                let idx = *inputs_by_name
-                    .get(input_name)
-                    .ok_or_else(|| TuliproxError::ConfigPanelApi(format!("panel_api: could not find input '{input_name}' in source.yml")))?;
+                let idx = *inputs_by_name.get(input_name).ok_or_else(|| {
+                    TuliproxError::ConfigPanelApi(format!(
+                        "panel_api: could not find input '{input_name}' in source.yml"
+                    ))
+                })?;
                 let Some(aliases) = doc.inputs[idx].aliases.as_mut() else {
                     continue;
                 };
@@ -1765,9 +1802,12 @@ async fn try_renew_expired_account(
                             {
                                 debug_if_enabled!("panel_api failed to persist renew exp_date to csv: {}", err);
                             }
-                            if let Err(err) =
-                                csv_patch_batch_sort_by_exp_date(input.input_type, &csv_path, AliasExpDateSortOrder::NewestFirst)
-                                    .await
+                            if let Err(err) = csv_patch_batch_sort_by_exp_date(
+                                input.input_type,
+                                &csv_path,
+                                AliasExpDateSortOrder::NewestFirst,
+                            )
+                            .await
                             {
                                 debug_if_enabled!("panel_api failed to sort csv accounts after renew: {}", err);
                             }
@@ -1846,9 +1886,7 @@ async fn try_refresh_root_account_on_exhausted(
     let (outcome, active_username, active_password, credentials_changed) =
         if renew_enabled && !old_username.is_empty() && !old_password.is_empty() {
             match panel_client_renew(app_state, panel_cfg, old_username.as_str(), old_password.as_str()).await {
-                Ok(()) => {
-                    (PanelApiProvisionOutcome::Renewed, old_username.clone(), old_password.clone(), false)
-                }
+                Ok(()) => (PanelApiProvisionOutcome::Renewed, old_username.clone(), old_password.clone(), false),
                 Err(err) => {
                     debug_if_enabled!(
                         "panel_api client_renew failed for root {}: {}",
@@ -1921,15 +1959,12 @@ async fn try_refresh_root_account_on_exhausted(
         return None;
     }
 
-    let refreshed_exp_date = panel_client_info(app_state, panel_cfg, active_username.as_str(), active_password.as_str(), None)
-        .await
-        .ok()
-        .flatten();
-    let exp_date = if credentials_changed {
-        refreshed_exp_date
-    } else {
-        refreshed_exp_date.or(input.exp_date)
-    };
+    let refreshed_exp_date =
+        panel_client_info(app_state, panel_cfg, active_username.as_str(), active_password.as_str(), None)
+            .await
+            .ok()
+            .flatten();
+    let exp_date = if credentials_changed { refreshed_exp_date } else { refreshed_exp_date.or(input.exp_date) };
 
     if is_batch {
         let batch_url = input.t_batch_url.as_deref().unwrap_or_default();
@@ -1966,7 +2001,9 @@ async fn try_refresh_root_account_on_exhausted(
             debug_if_enabled!("panel_api failed to persist root provisioning to csv: {}", err);
             return None;
         }
-        if let Err(err) = csv_patch_batch_sort_by_exp_date(input.input_type, &csv_path, AliasExpDateSortOrder::NewestFirst).await {
+        if let Err(err) =
+            csv_patch_batch_sort_by_exp_date(input.input_type, &csv_path, AliasExpDateSortOrder::NewestFirst).await
+        {
             debug_if_enabled!("panel_api failed to sort csv accounts after root provisioning: {}", err);
             return None;
         }
@@ -2133,11 +2170,7 @@ pub async fn try_provision_account_on_exhausted(
     app_state: &Arc<AppState>,
     input_name: &Arc<str>,
 ) -> Option<PanelApiProvisionOutcome> {
-    let _input_lock = app_state
-        .app_config
-        .file_locks
-        .write_lock_str(format!("panel_api:{input_name}").as_str())
-        .await;
+    let _input_lock = app_state.app_config.file_locks.write_lock_str(format!("panel_api:{input_name}").as_str()).await;
     let current_input = find_input_by_provider_name(app_state.as_ref(), input_name.as_ref());
     let Some(input) = current_input.as_deref() else {
         debug_if_enabled!(
@@ -2185,7 +2218,8 @@ pub async fn try_provision_account_on_exhausted(
     let sources_path = PathBuf::from(&sources_file_path);
 
     if let Some(outcome) =
-        try_refresh_root_account_on_exhausted(app_state, input, panel_cfg, is_batch, sources_path.as_path(), optional).await
+        try_refresh_root_account_on_exhausted(app_state, input, panel_cfg, is_batch, sources_path.as_path(), optional)
+            .await
     {
         debug_if_enabled!(
             "panel_api: provisioning succeeded via root {} for input {}",
@@ -3586,7 +3620,8 @@ async fn sync_panel_api_for_input_on_boot(
     if panel_cfg.alias_pool.is_some() {
         if let Some(csv_path) = csv_path.as_ref() {
             let _csv_lock = app_state.app_config.file_locks.write_lock(csv_path).await;
-            match csv_patch_batch_sort_by_exp_date(input.input_type, csv_path, AliasExpDateSortOrder::NewestFirst).await {
+            match csv_patch_batch_sort_by_exp_date(input.input_type, csv_path, AliasExpDateSortOrder::NewestFirst).await
+            {
                 Ok(true) => any_change = true,
                 Ok(false) => {}
                 Err(err) => debug_if_enabled!(
@@ -4037,9 +4072,9 @@ pub(crate) async fn run_panel_api_provisioning_probe(
                 &addr,
                 virtual_id,
                 provisioning_kick_secs,
-            DisconnectReason::Provisioning,
-        )
-        .await;
+                DisconnectReason::Provisioning,
+            )
+            .await;
         return Ok(());
     }
 
@@ -4074,11 +4109,8 @@ pub fn create_panel_api_provisioning_stream_details(
 ) -> StreamDetails {
     let stop_signal = CancellationToken::new();
     let headers = [("connection".to_string(), "close".to_string())];
-    let (stream, stream_info) = create_panel_api_provisioning_stream_with_stop(
-        &app_state.app_config,
-        &headers,
-        stop_signal.clone(),
-    );
+    let (stream, stream_info) =
+        create_panel_api_provisioning_stream_with_stop(&app_state.app_config, &headers, stop_signal.clone());
 
     if stream.is_none() {
         debug_if_enabled!(
@@ -4139,11 +4171,12 @@ mod tests {
         AliasExpDateSortOrder, PanelApiProbeTarget, SourcesYmlPatch, PANEL_API_DEFAULT_RETRY_AFTER_SECS,
         PANEL_API_MAX_RETRY_AFTER_SECS,
     };
-    use axum::http::StatusCode;
     use crate::model::{ConfigInput, ConfigProvider};
-    use shared::model::{ConfigInputAliasDto, ConfigInputDto, ConfigProviderDto, InputType, ProviderUrlSelectionPolicy, SourcesConfigDto};
-    use std::time::Duration;
-    use std::sync::Arc;
+    use axum::http::StatusCode;
+    use shared::model::{
+        ConfigInputAliasDto, ConfigInputDto, ConfigProviderDto, InputType, ProviderUrlSelectionPolicy, SourcesConfigDto,
+    };
+    use std::{sync::Arc, time::Duration};
     use url::Url;
 
     fn source_alias(name: &str, exp_date: Option<i64>) -> ConfigInputAliasDto {
@@ -4369,10 +4402,7 @@ mod tests {
 
     #[test]
     fn panel_api_retry_after_header_is_short_and_bounded() {
-        assert_eq!(
-            panel_api_retry_after_from_header_value("2"),
-            Some(Duration::from_secs(2))
-        );
+        assert_eq!(panel_api_retry_after_from_header_value("2"), Some(Duration::from_secs(2)));
         assert_eq!(
             panel_api_retry_after_from_header_value("0"),
             Some(Duration::from_secs(PANEL_API_DEFAULT_RETRY_AFTER_SECS))
@@ -4406,8 +4436,7 @@ mod tests {
         );
 
         let parsed = Url::parse(result.as_str()).expect("expected valid provider url");
-        let pairs: Vec<(String, String)> =
-            parsed.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let pairs: Vec<(String, String)> = parsed.query_pairs().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         assert!(pairs.contains(&("foo".to_string(), "bar".to_string())));
         assert!(pairs.contains(&("username".to_string(), "new-user".to_string())));
         assert!(pairs.contains(&("password".to_string(), "new-pass".to_string())));
@@ -4427,12 +4456,8 @@ mod tests {
 
     #[test]
     fn resolve_base_url_falls_back_when_panel_response_is_literal_null() {
-        let result = resolve_provisioned_account_base_url(
-            "http://input.example.org/path?x=1",
-            Some("null"),
-            "new",
-            "secret",
-        );
+        let result =
+            resolve_provisioned_account_base_url("http://input.example.org/path?x=1", Some("null"), "new", "secret");
 
         assert_eq!(result, "http://input.example.org/path?x=1");
     }

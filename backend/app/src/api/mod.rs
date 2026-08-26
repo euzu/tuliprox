@@ -1,5 +1,5 @@
-pub mod auth_middleware;
 pub mod api_utils;
+pub mod auth_middleware;
 mod http_layers;
 pub mod model;
 mod panel_api;
@@ -10,6 +10,6 @@ mod endpoints;
 pub(crate) mod hdhomerun_proprietary;
 pub mod main_api;
 mod serve;
+pub(crate) mod static_headers;
 mod sys_usage;
 mod tasks;
-pub(crate) mod static_headers;

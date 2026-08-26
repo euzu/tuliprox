@@ -1,14 +1,4 @@
-use crate::api::{
-    api_utils::try_unwrap_body,
-    model::AppState,
-};
-use tuliprox_hls::api::{
-    commit_terminal_tail_if_lease_reserve_requires_cutover, finite_hls_immutable_media_response,
-    finite_hls_media_head_response, finite_hls_media_response, publication_late_after_ms, retry_after_secs_from_ms,
-    terminal_tail_manifest_body, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeaseState, HlsCacheResponseContext,
-    HlsLeasePlaybackMode, HlsSessionHandle, HlsTerminalFailedClosedReason, HlsTerminalResolution,
-    HlsTerminalSegmentPath, HlsTerminalTailPlan, ProxySessionId,
-};
+use crate::api::{api_utils::try_unwrap_body, model::AppState};
 use axum::{
     body::Body,
     http::{header, HeaderValue, StatusCode},
@@ -16,6 +6,13 @@ use axum::{
 };
 use log::warn;
 use std::sync::Arc;
+use tuliprox_hls::api::{
+    commit_terminal_tail_if_lease_reserve_requires_cutover, finite_hls_immutable_media_response,
+    finite_hls_media_head_response, finite_hls_media_response, publication_late_after_ms, retry_after_secs_from_ms,
+    terminal_tail_manifest_body, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeaseState, HlsCacheResponseContext,
+    HlsLeasePlaybackMode, HlsSessionHandle, HlsTerminalFailedClosedReason, HlsTerminalResolution,
+    HlsTerminalSegmentPath, HlsTerminalTailPlan, ProxySessionId,
+};
 
 const HLS_TERMINAL_ENDPOINT_MAX_REEVALUATIONS: usize = 2;
 const HLS_TERMINAL_SEGMENT_CACHE_CONTROL: &str = "private, max-age=300, immutable";
@@ -55,17 +52,13 @@ pub(super) async fn hls_manifest_terminal_preflight(
         return if lease.state == HlsAccessLeaseState::Pending {
             HlsManifestTerminalPreflight::BootstrapPendingLease
         } else {
-            HlsManifestTerminalPreflight::FailClosed {
-                reason: HlsTerminalFailedClosedReason::LeaseStateUnavailable,
-            }
+            HlsManifestTerminalPreflight::FailClosed { reason: HlsTerminalFailedClosedReason::LeaseStateUnavailable }
         };
     };
     let (publication_late, capacity_recovery_blocks_ready_timeline) = {
         let session = session.read().await;
-        let target_duration_ms = session
-            .origin_control
-            .target_duration_snapshot_ms
-            .unwrap_or(manifest.target_duration_ms);
+        let target_duration_ms =
+            session.origin_control.target_duration_snapshot_ms.unwrap_or(manifest.target_duration_ms);
         let ready_timeline = session.ready_timeline_snapshot(
             lease.playback_cursor.ready_timeline_start_proxy_seq(manifest.first_proxy_seq),
             now_ms,
@@ -91,9 +84,7 @@ pub(super) fn hls_terminal_endpoint_action(resolution: HlsTerminalResolution) ->
         HlsTerminalResolution::LiveAllowed => HlsTerminalEndpointAction::ServeLive,
         HlsTerminalResolution::Committed => HlsTerminalEndpointAction::ReloadTerminal,
         HlsTerminalResolution::Reevaluate => HlsTerminalEndpointAction::Reevaluate,
-        HlsTerminalResolution::Pending { retry_after_ms } => {
-            HlsTerminalEndpointAction::RetryAfter { retry_after_ms }
-        }
+        HlsTerminalResolution::Pending { retry_after_ms } => HlsTerminalEndpointAction::RetryAfter { retry_after_ms },
         HlsTerminalResolution::FailedClosed { reason } => HlsTerminalEndpointAction::FailClosed { reason },
     }
 }
@@ -198,9 +189,7 @@ pub(super) fn hls_terminal_playback_response(
     }
 }
 
-pub(super) fn hls_terminal_failed_closed_response(
-    reason: HlsTerminalFailedClosedReason,
-) -> axum::response::Response {
+pub(super) fn hls_terminal_failed_closed_response(reason: HlsTerminalFailedClosedReason) -> axum::response::Response {
     warn!("HLS terminal manifest failed closed: reason={}", reason.as_label());
     StatusCode::SERVICE_UNAVAILABLE.into_response()
 }
@@ -221,23 +210,18 @@ async fn current_hls_terminal_lease(
     access_lease_id: &HlsAccessLeaseId,
     now_ms: u64,
 ) -> Result<HlsAccessLease, Box<axum::response::Response>> {
-    app_state
-        .hls_proxy
-        .access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms)
-        .await
-        .ok_or_else(|| Box::new(hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::LeaseStateUnavailable)))
+    app_state.hls_proxy.access_lease_response_snapshot(access_lease_id, proxy_session_id, now_ms).await.ok_or_else(
+        || Box::new(hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::LeaseStateUnavailable)),
+    )
 }
 
 async fn current_hls_terminal_session(
     app_state: &Arc<AppState>,
     proxy_session_id: &ProxySessionId,
 ) -> Result<HlsSessionHandle, Box<axum::response::Response>> {
-    app_state
-        .hls_proxy
-        .sessions()
-        .get_by_proxy_session_id(proxy_session_id)
-        .await
-        .ok_or_else(|| Box::new(hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::LeaseStateUnavailable)))
+    app_state.hls_proxy.sessions().get_by_proxy_session_id(proxy_session_id).await.ok_or_else(|| {
+        Box::new(hls_terminal_failed_closed_response(HlsTerminalFailedClosedReason::LeaseStateUnavailable))
+    })
 }
 
 pub(super) async fn resolve_hls_terminal_manifest_state(

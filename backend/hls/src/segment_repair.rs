@@ -2268,9 +2268,9 @@ mod tests {
         RepairStatus, RepairVideoCodec, WarningCounters, REPAIR_METADATA_MAX_ENTRIES,
     };
     use crate::{
-        CacheAccessState, HlsAccessLeaseId, HlsSegmentCache, HlsSegmentEncryption, HlsSession, HlsSessionKey,
-        OriginSegmentKey, ProxySessionId, SegmentCacheKey, SegmentCacheStatus, SegmentEntry, TransientObjectCacheKey,
-        TransientResourceId, HLS_PROVISIONING_ORIGIN_EPOCH,
+        timeline::HLS_PROVISIONING_ORIGIN_EPOCH, CacheAccessState, HlsAccessLeaseId, HlsSegmentCache,
+        HlsSegmentEncryption, HlsSession, HlsSessionKey, OriginSegmentKey, ProxySessionId, SegmentCacheKey,
+        SegmentCacheStatus, SegmentEntry, TransientObjectCacheKey, TransientResourceId,
     };
     use shared::model::HlsSegmentRepairMode;
     use std::{sync::Arc, time::Duration};

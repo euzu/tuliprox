@@ -1,15 +1,9 @@
 use crate::{
     api::{
-        model::{
-            is_custom_video_stream_enabled, AppState, CustomVideoStreamType, TransportStreamBuffer,
-        },
+        model::{is_custom_video_stream_enabled, AppState, CustomVideoStreamType, TransportStreamBuffer},
         panel_api::{can_provision_on_exhausted, try_provision_account_on_exhausted},
     },
     model::{ConfigInput, CustomStreamResponse, ProxyUserCredentials},
-};
-use tuliprox_hls::api::{
-    build_hls_standalone_custom_plan, HlsAccessLease, HlsAccessLeaseId, HlsRuntimeCustomTailReason,
-    HlsStandaloneCustomAccess, ProxySessionId,
 };
 use axum::{
     body::Body,
@@ -18,11 +12,12 @@ use axum::{
 };
 use dashmap::DashMap;
 use log::{debug, error};
-use shared::{
-    utils::{sanitize_sensitive_info},
-    defaults::{CUSTOM_VIDEO_PREFIX}
-};
+use shared::{defaults::CUSTOM_VIDEO_PREFIX, utils::sanitize_sensitive_info};
 use std::sync::Arc;
+use tuliprox_hls::api::{
+    build_hls_standalone_custom_plan, HlsAccessLease, HlsAccessLeaseId, HlsRuntimeCustomTailReason,
+    HlsStandaloneCustomAccess, ProxySessionId,
+};
 
 const PROVISIONING_HLS_TARGET_DURATION_SECS: u64 = 2;
 const PROVISIONING_HLS_EXTINF: &str = "2.000000";
@@ -123,10 +118,8 @@ impl HlsProvisioningState {
             return 0;
         }
         if let Some(mut group) = self.jobs.get_mut(&input_name) {
-            let counted_jobs = group
-                .running_jobs
-                .saturating_add(group.ready_slots)
-                .saturating_add(group.recent_failed_jobs);
+            let counted_jobs =
+                group.running_jobs.saturating_add(group.ready_slots).saturating_add(group.recent_failed_jobs);
             if counted_jobs >= desired_jobs {
                 return 0;
             }
@@ -234,8 +227,7 @@ impl HlsProvisioningState {
     }
 
     pub(in crate::api) fn clear_consumer(&self, input_name: &Arc<str>, virtual_id: u32) {
-        self.consumers
-            .remove(&HlsProvisioningConsumerKey::new(Arc::clone(input_name), virtual_id));
+        self.consumers.remove(&HlsProvisioningConsumerKey::new(Arc::clone(input_name), virtual_id));
     }
 
     pub(in crate::api) fn mark_handoff_once(
@@ -292,25 +284,18 @@ impl HlsProvisioningState {
                     group.last_failed_at_ms = None;
                 }
             }
-            let latest_reference_ms = [
-                Some(group.last_started_at_ms),
-                group.last_ready_at_ms,
-                group.last_failed_at_ms,
-            ]
-            .into_iter()
-            .flatten()
-            .max()
-            .unwrap_or_default();
+            let latest_reference_ms = [Some(group.last_started_at_ms), group.last_ready_at_ms, group.last_failed_at_ms]
+                .into_iter()
+                .flatten()
+                .max()
+                .unwrap_or_default();
             group.running_jobs > 0
                 || group.ready_slots > 0
                 || group.recent_failed_jobs > 0
                 || latest_reference_ms.saturating_add(HLS_PROVISIONING_STALE_MARKER_MS) >= now_ms
         });
         self.consumers.retain(|_, consumer| {
-            consumer
-                .last_seen_at_ms
-                .max(consumer.created_at_ms)
-                .saturating_add(HLS_PROVISIONING_STALE_MARKER_MS)
+            consumer.last_seen_at_ms.max(consumer.created_at_ms).saturating_add(HLS_PROVISIONING_STALE_MARKER_MS)
                 >= now_ms
         });
         self.handoffs.retain(|_, marked_at_ms| {
@@ -341,10 +326,7 @@ pub(crate) fn hls_custom_video_type_configured(app_state: &Arc<AppState>, video_
         return false;
     }
     let custom_stream_response = app_state.app_config.custom_stream_response.load();
-    custom_stream_response
-        .as_ref()
-        .and_then(|response| custom_video_asset(response, video_type))
-        .is_some()
+    custom_stream_response.as_ref().and_then(|response| custom_video_asset(response, video_type)).is_some()
 }
 
 fn custom_video_asset(
@@ -389,9 +371,7 @@ pub(crate) fn hls_panel_provisioning_manifest_path(user: &ProxyUserCredentials, 
     )
 }
 
-pub(crate) fn hls_provisioning_discontinuity_sequence(_now_ms: u64) -> u64 {
-    0
-}
+pub(crate) fn hls_provisioning_discontinuity_sequence(_now_ms: u64) -> u64 { 0 }
 
 fn build_hls_panel_provisioning_manifest_body(mut segment_url: impl FnMut(usize) -> String) -> String {
     let media_sequence = 0;
@@ -423,9 +403,7 @@ pub(crate) fn build_hls_custom_video_manifest_body(
         return None;
     }
 
-    Some(build_hls_panel_provisioning_manifest_body(|index| {
-        hls_panel_provisioning_segment_url(base_url, user, index)
-    }))
+    Some(build_hls_panel_provisioning_manifest_body(|index| hls_panel_provisioning_segment_url(base_url, user, index)))
 }
 
 pub(crate) async fn hls_custom_video_manifest_response_with_virtual_id(
@@ -435,14 +413,7 @@ pub(crate) async fn hls_custom_video_manifest_response_with_virtual_id(
     fallback_status: StatusCode,
     _virtual_id: Option<u32>,
 ) -> axum::response::Response {
-    hls_custom_video_manifest_response_with_access(
-        app_state,
-        user,
-        video_type,
-        fallback_status,
-        None,
-    )
-    .await
+    hls_custom_video_manifest_response_with_access(app_state, user, video_type, fallback_status, None).await
 }
 
 pub(crate) async fn hls_custom_video_manifest_response_for_access_lease(
@@ -459,14 +430,7 @@ pub(crate) async fn hls_custom_video_manifest_response_for_access_lease(
         lease.issued_at_ms,
         lease.valid_until_ms,
     );
-    hls_custom_video_manifest_response_with_access(
-        app_state,
-        user,
-        video_type,
-        fallback_status,
-        Some(access),
-    )
-    .await
+    hls_custom_video_manifest_response_with_access(app_state, user, video_type, fallback_status, Some(access)).await
 }
 
 async fn hls_custom_video_manifest_response_with_access(
@@ -485,16 +449,15 @@ async fn hls_custom_video_manifest_response_with_access(
 
     let base_url = server_info.get_base_url();
     let manifest = if video_type == CustomVideoStreamType::Provisioning {
-        build_hls_panel_provisioning_manifest_body(|index| {
-            hls_panel_provisioning_segment_url(&base_url, user, index)
-        })
+        build_hls_panel_provisioning_manifest_body(|index| hls_panel_provisioning_segment_url(&base_url, user, index))
     } else {
         let Some(reason) = HlsRuntimeCustomTailReason::from_video_type(video_type) else {
             return fallback_status.into_response();
         };
         let access = access.unwrap_or_else(|| HlsStandaloneCustomAccess::for_user(user.username.clone()));
         let Ok(plan) =
-            build_hls_standalone_custom_plan(&app_state.hls_ctx(), &base_url, access, reason, current_time_millis()).await
+            build_hls_standalone_custom_plan(&app_state.hls_ctx(), &base_url, access, reason, current_time_millis())
+                .await
         else {
             return fallback_status.into_response();
         };
@@ -518,17 +481,12 @@ pub(crate) async fn try_hls_panel_provisioning_manifest_response(
     fallback_status: StatusCode,
 ) -> Option<axum::response::Response> {
     let now_ms = current_time_millis();
-    app_state
-        .hls_provisioning
-        .touch_consumer(Arc::clone(&input.name), virtual_id, now_ms);
+    app_state.hls_provisioning.touch_consumer(Arc::clone(&input.name), virtual_id, now_ms);
     let provisioning_enabled = can_provision_on_exhausted(app_state.as_ref(), input);
     if provisioning_enabled {
         start_hls_panel_provisioning_once(app_state, input);
     }
-    let status = if let Some(status) = app_state
-        .hls_provisioning
-        .consumer_status(&input.name, virtual_id, now_ms)
-    {
+    let status = if let Some(status) = app_state.hls_provisioning.consumer_status(&input.name, virtual_id, now_ms) {
         status
     } else if provisioning_enabled {
         HlsProvisioningStatus::InProgress
@@ -543,27 +501,24 @@ pub(crate) async fn try_hls_panel_provisioning_manifest_response(
             if !hls_custom_video_type_configured(app_state, CustomVideoStreamType::Provisioning) {
                 return Some(fallback_status.into_response());
             }
-            let server_path =
-                server_path.map(str::to_string).or_else(|| app_state.app_config.get_user_server_info(user).and_then(|server| server.path));
-            let manifest_path =
-                redirect_paths.waiting_manifest_path.map_or_else(|| hls_panel_provisioning_manifest_path(user, virtual_id), str::to_string);
-            Some(hls_virtual_entry_redirect_response(
-                &manifest_path,
-                server_path.as_deref(),
-            ))
+            let server_path = server_path
+                .map(str::to_string)
+                .or_else(|| app_state.app_config.get_user_server_info(user).and_then(|server| server.path));
+            let manifest_path = redirect_paths
+                .waiting_manifest_path
+                .map_or_else(|| hls_panel_provisioning_manifest_path(user, virtual_id), str::to_string);
+            Some(hls_virtual_entry_redirect_response(&manifest_path, server_path.as_deref()))
         }
-        HlsProvisioningStatus::ProviderExhausted => {
-            Some(
-                hls_custom_video_manifest_response_with_virtual_id(
-                    app_state,
-                    user,
-                    CustomVideoStreamType::ProviderConnectionsExhausted,
-                    fallback_status,
-                    Some(virtual_id),
-                )
-                .await,
+        HlsProvisioningStatus::ProviderExhausted => Some(
+            hls_custom_video_manifest_response_with_virtual_id(
+                app_state,
+                user,
+                CustomVideoStreamType::ProviderConnectionsExhausted,
+                fallback_status,
+                Some(virtual_id),
             )
-        }
+            .await,
+        ),
     }
 }
 
@@ -573,9 +528,7 @@ pub(crate) fn start_hls_panel_provisioning_once(app_state: &Arc<AppState>, input
     }
     let key = Arc::clone(&input.name);
     let now_ms = current_time_millis();
-    let jobs_to_start = app_state
-        .hls_provisioning
-        .start_jobs_for_waiting_consumers(&key, now_ms);
+    let jobs_to_start = app_state.hls_provisioning.start_jobs_for_waiting_consumers(&key, now_ms);
     if jobs_to_start == 0 {
         return false;
     }
@@ -594,9 +547,7 @@ pub(crate) fn start_hls_panel_provisioning_once(app_state: &Arc<AppState>, input
             if ready {
                 app_state.hls_provisioning.mark_job_ready(Arc::clone(&key), finished_at_ms);
             } else {
-                app_state
-                    .hls_provisioning
-                    .mark_job_provider_exhausted(Arc::clone(&key), finished_at_ms);
+                app_state.hls_provisioning.mark_job_provider_exhausted(Arc::clone(&key), finished_at_ms);
             }
             debug!(
                 "HLS panel provisioning completed: input={} outcome={} ready={}",
@@ -676,10 +627,7 @@ mod tests {
             state.job_status(&input, ready_at_ms + HLS_PROVISIONING_COMPLETED_REDIRECT_WINDOW_MS),
             Some(HlsProvisioningStatus::Ready)
         );
-        assert_eq!(
-            state.job_status(&input, ready_at_ms + HLS_PROVISIONING_COMPLETED_REDIRECT_WINDOW_MS + 1),
-            None
-        );
+        assert_eq!(state.job_status(&input, ready_at_ms + HLS_PROVISIONING_COMPLETED_REDIRECT_WINDOW_MS + 1), None);
     }
 
     #[test]
@@ -693,13 +641,7 @@ mod tests {
         assert!(!state.mark_handoff_once(&input, 57, Some(&proxy_session_id), Some(&access_lease_id), 1_100));
 
         let next_access_lease_id = HlsAccessLeaseId("next-access-lease".to_string());
-        assert!(state.mark_handoff_once(
-            &input,
-            57,
-            Some(&proxy_session_id),
-            Some(&next_access_lease_id),
-            1_200
-        ));
+        assert!(state.mark_handoff_once(&input, 57, Some(&proxy_session_id), Some(&next_access_lease_id), 1_200));
     }
 
     #[test]
@@ -710,13 +652,7 @@ mod tests {
         let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
         let marked_at_ms = 10_000;
 
-        assert!(state.mark_handoff_once(
-            &input,
-            57,
-            Some(&proxy_session_id),
-            Some(&access_lease_id),
-            marked_at_ms
-        ));
+        assert!(state.mark_handoff_once(&input, 57, Some(&proxy_session_id), Some(&access_lease_id), marked_at_ms));
         assert!(!state.mark_handoff_once(
             &input,
             57,

@@ -513,8 +513,9 @@ mod tests {
         RenderedManifestStoreOutcome, RenderedManifestStoreRejectReason,
     };
     use crate::{
-        manifest_origin_binding::HlsManifestOriginBinding, HlsSession, HlsSessionKey, MapCacheStatus,
-        SegmentCacheStatus, SegmentFetchPriority, HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH,
+        manifest_origin_binding::HlsManifestOriginBinding,
+        timeline::{HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH},
+        HlsSession, HlsSessionKey, MapCacheStatus, SegmentCacheStatus, SegmentFetchPriority,
     };
     use shared::model::HlsStripMode;
     use tuliprox_core::model::StripConfig;

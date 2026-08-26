@@ -1272,10 +1272,10 @@ mod tests {
         recovery_timing::{
             HlsLeaseCutoverTiming, HlsTerminalCommitWindow, HlsTerminalMediaPreparationState, HlsTransitionMarginMs,
         },
-        runtime_custom_tail::HlsRuntimeCustomTailRevision,
+        runtime_custom_tail::{HlsRuntimeCustomTailReason, HlsRuntimeCustomTailRevision},
         session_store::HlsSessionIncarnation,
         terminal_tail::{HlsMediaContainer, HlsTerminalAssetIdentity, HlsTerminalTailCompatibility},
-        HlsAccessLeaseId, HlsRuntimeCustomTailReason, HlsSession, HlsSessionKey, ProxySessionId,
+        HlsAccessLeaseId, HlsSession, HlsSessionKey, ProxySessionId,
     };
     use std::sync::Arc;
     use tokio::sync::RwLock;

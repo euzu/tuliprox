@@ -1,21 +1,21 @@
-use tuliprox_session::stream_ctx::ProviderStreamCtx;
 use crate::{
     api::model::{
-            stream::{BoxedProviderStream, ProviderStreamResponse}, CleanupEvent, CustomVideoStream, ProvisioningStream, ThrottledStream, TimedClientStream,
-            TransportStreamBuffer,
-        },
+        stream::{BoxedProviderStream, ProviderStreamResponse},
+        CleanupEvent, CustomVideoStream, ProvisioningStream, ThrottledStream, TimedClientStream, TransportStreamBuffer,
+    },
     model::AppConfig,
 };
-use tuliprox_core::utils::request_headers::HeaderFilter;
-use tuliprox_core::utils::response_compression::mark_response_as_uncompressed;
-use tuliprox_core::try_unwrap_body;
 use axum::response::IntoResponse;
 use log::trace;
 use reqwest::StatusCode;
 use shared::model::{CustomVideoStreamType, PlaylistItemType};
 use std::net::SocketAddr;
 use tokio_util::sync::CancellationToken;
-
+use tuliprox_core::{
+    try_unwrap_body,
+    utils::{request_headers::HeaderFilter, response_compression::mark_response_as_uncompressed},
+};
+use tuliprox_session::stream_ctx::ProviderStreamCtx;
 
 fn prepare_video_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
     let mut h: Vec<(String, String)> = headers

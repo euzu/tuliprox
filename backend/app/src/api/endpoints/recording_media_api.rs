@@ -268,11 +268,7 @@ async fn resolve_for_open(app_state: &AppState, claims: &Claims, uuid: &str) -> 
     let file_meta = no_follow_path_in_root(&recording_root, &abs_path)
         .await
         .ok_or_else(|| Box::new(access_error_to_response(&CatalogAccessError::NotFound)))?;
-    Ok(ResolvedMedia {
-        abs_path,
-        recording_root,
-        size: file_meta.len(),
-    })
+    Ok(ResolvedMedia { abs_path, recording_root, size: file_meta.len() })
 }
 
 /// `GET /library/recording/playback/{uuid}` — supports HTTP Range
@@ -410,7 +406,9 @@ mod tests {
     use crate::{api::model::create_test_app_state, auth::create_jwt_admin, model::Config};
     use axum::http::Request;
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-    use shared::model::{Permission, UserId, WebUiConfigDto, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, ROLE_ADMIN, TOKEN_NO_AUTH};
+    use shared::model::{
+        Permission, UserId, WebUiConfigDto, CURRENT_PERMISSION_SCHEMA_VERSION, PERM_ALL, ROLE_ADMIN, TOKEN_NO_AUTH,
+    };
 
     fn config_with_web_auth(enabled: bool, secret: &str) -> Config {
         let web_ui = WebUiConfigDto {
@@ -435,9 +433,7 @@ mod tests {
         }
         let request = builder.body(()).expect("request");
         let (mut parts, ()) = request.into_parts();
-        AuthClaims::from_request_parts(&mut parts, state)
-            .await
-            .map_err(Box::new)
+        AuthClaims::from_request_parts(&mut parts, state).await.map_err(Box::new)
     }
 
     #[tokio::test]

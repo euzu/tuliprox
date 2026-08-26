@@ -13,10 +13,7 @@ use notify::{
     event::{AccessKind, AccessMode},
     recommended_watcher, EventKind, RecursiveMode, Watcher,
 };
-use shared::{
-    error::TuliproxError,
-    model::ConfigPaths,
-};
+use shared::{error::TuliproxError, model::ConfigPaths};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -56,12 +53,11 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
         }
     });
 
-    let mut watcher = recommended_watcher(std_tx).map_err(|err| {
-        TuliproxError::Io(format!("Failed to init config file watcher {err}"))
-    })?;
-    watcher.watch(path, recursive_mode).map_err(|err| {
-        TuliproxError::Io(format!("Failed to start config file watcher {err}"))
-    })?;
+    let mut watcher = recommended_watcher(std_tx)
+        .map_err(|err| TuliproxError::Io(format!("Failed to init config file watcher {err}")))?;
+    watcher
+        .watch(path, recursive_mode)
+        .map_err(|err| TuliproxError::Io(format!("Failed to start config file watcher {err}")))?;
     info!("Watching config file changes {}", path.display());
 
     let event_manager = Arc::clone(&app_state.event_manager);
@@ -164,10 +160,7 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
     Ok(())
 }
 
-async fn has_external_source_write(
-    file_locks: &crate::utils::FileLockManager,
-    paths: &HashSet<PathBuf>,
-) -> bool {
+async fn has_external_source_write(file_locks: &crate::utils::FileLockManager, paths: &HashSet<PathBuf>) -> bool {
     for path in paths {
         if !file_locks.is_internal_write_revision(path).await {
             return true;

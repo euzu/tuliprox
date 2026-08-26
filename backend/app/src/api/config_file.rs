@@ -1,9 +1,12 @@
 use crate::{
     api::model::{update_app_state_config, update_app_state_sources, AppState, EventMessage},
+    config_loader::{
+        prepare_sources_batch, read_sources_file, read_sources_file_from_path_with_templates, read_templates,
+        resolve_template_and_mapping_paths,
+    },
     model::{Config, Mappings, ProcessTargets, SourcesConfig},
     utils,
     utils::{read_mappings_file_unprepared, read_mappings_file_with_templates},
-    config_loader::{prepare_sources_batch, read_sources_file, read_sources_file_from_path_with_templates, read_templates},
 };
 use log::{debug, error, info, warn};
 use shared::{
@@ -14,7 +17,6 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use crate::config_loader::resolve_template_and_mapping_paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConfigFile {
@@ -79,7 +81,9 @@ fn refresh_forced_targets(current: Arc<ProcessTargets>, sources: &SourcesConfig)
         match sources.validate_targets(Some(&still_valid)) {
             Ok(refreshed) => Arc::new(refreshed),
             Err(err) => {
-                warn!("Failed to re-validate remaining CLI-forced targets {still_valid:?}: {err}. Keeping previous IDs.");
+                warn!(
+                    "Failed to re-validate remaining CLI-forced targets {still_valid:?}: {err}. Keeping previous IDs."
+                );
                 current
             }
         }
@@ -110,7 +114,8 @@ impl ConfigFile {
             read_sources_file(paths.sources_file_path.as_str(), false, false, None, None).await?.templates;
 
         // Use robust fallbacks for mapping and template paths
-        let (effective_template_path, effective_mapping_path) = resolve_template_and_mapping_paths(paths, config.template_path.as_deref(), config.mapping_path.as_deref());
+        let (effective_template_path, effective_mapping_path) =
+            resolve_template_and_mapping_paths(paths, config.template_path.as_deref(), config.mapping_path.as_deref());
 
         let mapping_inline_templates = read_mappings_file_unprepared(effective_mapping_path.as_ref(), false)?
             .map(|(_, mapping)| mapping)
@@ -261,19 +266,24 @@ impl ConfigFile {
         let config_file = paths.config_file_path.clone();
 
         // ── Parse ────────────────────────────────────────────────────
-        let config_dto = crate::config_loader::read_config_file_with_options(config_file.as_str(), crate::config_loader::ReadConfigOptions::resolve_and_compute())?;
+        let config_dto = crate::config_loader::read_config_file_with_options(
+            config_file.as_str(),
+            crate::config_loader::ReadConfigOptions::resolve_and_compute(),
+        )?;
 
-        let current_mapping_path = paths.mapping_file_path.clone().unwrap_or_else(|| {
-            utils::resolve_mapping_file_path(paths.config_path.as_str(), None)
-        });
+        let current_mapping_path = paths
+            .mapping_file_path
+            .clone()
+            .unwrap_or_else(|| utils::resolve_mapping_file_path(paths.config_path.as_str(), None));
         let next_mapping_path = paths.mapping_file_path.clone().unwrap_or_else(|| {
             utils::resolve_mapping_file_path(paths.config_path.as_str(), config_dto.mapping_path.as_deref())
         });
         let mapping_changed = current_mapping_path != next_mapping_path;
 
-        let current_template_path = paths.template_file_path.clone().unwrap_or_else(|| {
-            utils::resolve_template_file_path(paths.config_path.as_str(), None)
-        });
+        let current_template_path = paths
+            .template_file_path
+            .clone()
+            .unwrap_or_else(|| utils::resolve_template_file_path(paths.config_path.as_str(), None));
         let next_template_path = paths.template_file_path.clone().unwrap_or_else(|| {
             utils::resolve_template_file_path(paths.config_path.as_str(), config_dto.template_path.as_deref())
         });
@@ -298,7 +308,8 @@ impl ConfigFile {
             PreparedFollowUp::Sources(prepared)
         } else if mapping_changed {
             // Only mapping path changed; templates are the same -> load templates once.
-            let prepared_templates = Self::load_prepared_global_templates_with_config(&effective_paths, &config).await?;
+            let prepared_templates =
+                Self::load_prepared_global_templates_with_config(&effective_paths, &config).await?;
             let prepared = Self::prepare_mapping_reload(
                 effective_paths.mapping_file_path.as_deref(),
                 prepared_templates.as_deref(),
@@ -344,7 +355,9 @@ impl ConfigFile {
                 );
             }
 
-            if let Err(rollback_err) = update_app_state_sources(app_state, previous_sources, Some(previous_forced_targets)).await {
+            if let Err(rollback_err) =
+                update_app_state_sources(app_state, previous_sources, Some(previous_forced_targets)).await
+            {
                 error!("Failed to rollback sources after dependent reload failure: {rollback_err}");
                 error!(
                     "Source rollback failed after dependent reload error; runtime state may be inconsistent. Please restart the service."

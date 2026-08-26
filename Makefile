@@ -119,6 +119,8 @@ build: ## Build the entire workspace in parallel using detected CPU count
 
 .PHONY: architecture-check
 architecture-check: ## Verify workspace dependency direction
+	@echo "==> Checking the architecture gate itself"
+	./bin/check-workspace-deps-test.sh
 	@echo "==> Checking workspace dependency direction"
 	./bin/check-workspace-deps.sh
 

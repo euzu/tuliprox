@@ -1,11 +1,10 @@
-use crate::repository::GeoIp;
 use crate::{
     api::{
         endpoints::download_api::{resume_download_worker_if_needed, spawn_download_services},
         model::{
-            recording_rule_scheduler::spawn_recording_rule_scheduler, ActiveProviderManager, ActiveUserManager,
-            ConnectionManager, DownloadQueue, EventManager, HlsProvisioningState, PlaylistStorage,
-            PlaylistStorageState, SharedStreamManager, UpdateGuard,
+            load_target_into_memory_cache, recording_rule_scheduler::spawn_recording_rule_scheduler,
+            ActiveProviderManager, ActiveUserManager, ConnectionManager, DownloadQueue, EventManager,
+            HlsProvisioningState, PlaylistStorage, PlaylistStorageState, SharedStreamManager, UpdateGuard,
         },
         tasks::{exec_config_watch, exec_scheduler},
     },
@@ -13,17 +12,13 @@ use crate::{
         AppConfig, Config, ConfigProvider, ConfigTarget, GracePeriodOptions, HdHomeRunConfig, HdHomeRunDeviceConfig,
         ProcessTargets, ReverseProxyDisabledHeaderConfig, ScheduleConfig, SourcesConfig,
     },
-    api::model::load_target_into_memory_cache,
-    repository::get_geoip_path,
+    repository::{get_geoip_path, GeoIp},
     utils::{
         reload_logger,
         request::{create_client, create_client_with_redirect, PublicIpResolver},
         LRUResourceCache,
     },
 };
-use tuliprox_session::{provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation};
-use tuliprox_metadata::manager::MetadataUpdateManager;
-use tuliprox_hls::api::HlsProxyManager;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use log::{error, info};
 use reqwest::Client;
@@ -43,6 +38,9 @@ use tokio::{
     task,
 };
 use tokio_util::sync::CancellationToken;
+use tuliprox_hls::api::HlsProxyManager;
+use tuliprox_metadata::manager::MetadataUpdateManager;
+use tuliprox_session::{provider_dns_manager::exec_provider_dns, qos_aggregation_manager::exec_qos_aggregation};
 
 macro_rules! cancel_service {
     ($field: ident, $flag:expr, $changes:expr, $cancel_tokens:expr) => {
@@ -742,9 +740,7 @@ impl AppState {
 
     pub fn get_grace_options(&self) -> GracePeriodOptions { self.app_config.get_grace_options() }
 
-    pub fn should_use_manual_redirects(&self) -> bool {
-        crate::model::should_use_manual_redirects(&self.app_config)
-    }
+    pub fn should_use_manual_redirects(&self) -> bool { crate::model::should_use_manual_redirects(&self.app_config) }
 
     pub fn get_encrypt_secret(&self) -> [u8; 16] { self.app_config.get_encrypt_secret() }
 }
@@ -841,11 +837,11 @@ pub struct HdHomerunAppState {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars};
-    use super::{
-        qos_aggregation_changed, schedules_changed, video_download_changed,
+    use super::{qos_aggregation_changed, schedules_changed, video_download_changed};
+    use crate::model::{
+        should_use_manual_redirect_for_proxy, should_use_manual_redirects_for_env_vars, Config, ScheduleConfig,
+        VideoDownloadConfig,
     };
-    use crate::model::{Config, ScheduleConfig, VideoDownloadConfig};
     use shared::model::{
         QosAggregationConfigDto, ReverseProxyConfigDto, ScheduleTaskType, StreamHistoryConfigDto, WebAuthConfigDto,
         WebUiConfigDto,

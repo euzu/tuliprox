@@ -2779,9 +2779,11 @@ mod tests {
         HlsTerminalCommitRequest, HlsTerminalTailPreparationRequest, HLS_SESSION_IDLE_PROTECTION_RETRY_MS,
     };
     use crate::{
-        build_terminal_tail_plan, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeasePendingDeadline, HlsAccessLeaseState,
-        HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsLeasePlaybackMode, HlsLeaseReserveAvailabilityBasis,
-        HlsLeaseReserveSnapshot, HlsManifestAcceptanceExhaustionReason, HlsManifestAcceptanceTrigger,
+        build_terminal_tail_plan,
+        media_reserve::{HlsLeaseReserveAvailabilityBasis, HlsLeaseReserveSnapshot},
+        terminal_tail::HlsLeasePlaybackMode,
+        HlsAccessLease, HlsAccessLeaseId, HlsAccessLeasePendingDeadline, HlsAccessLeaseState, HlsLeaseManifestSegment,
+        HlsLeaseManifestSnapshot, HlsManifestAcceptanceExhaustionReason, HlsManifestAcceptanceTrigger,
         HlsManifestDeliveryMode, HlsManifestSourceRenderMarker, HlsMediaContainer, HlsMediaLeaseIdentity,
         HlsPlaybackFamilyKey, HlsSegmentFailureObject, HlsSessionHandle, HlsSessionKey, HlsSessionStoreOutcome,
         HlsTerminalAssetIdentity, HlsTerminalBaseMediaState, HlsTerminalBaseProtection,

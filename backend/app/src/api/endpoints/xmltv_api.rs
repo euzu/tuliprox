@@ -2,18 +2,21 @@ use crate::{
     api::{
         api_utils::{
             coalesce_byte_stream, create_api_proxy_user, empty_json_response_as_array, get_user_target,
-            get_user_target_by_credentials, internal_server_error,
-            resource_response,
+            get_user_target_by_credentials, internal_server_error, resource_response,
             stream_json_or_bin_response_try_stream, try_unwrap_body,
         },
         model::{AppState, UserApiRequest, UserApiRequestQueryOrBody},
+        static_headers::CT_XML,
     },
-    auth::Fingerprint,
-    model::{Config, ConfigTarget, ProxyUserCredentials, EPG_ATTRIB_ID, EPG_TAG_CHANNEL},
+    auth::{resolve_api_user_context, Fingerprint},
+    model::{
+        ApiProxyServerInfo, Config, ConfigTarget, ProxyUserCredentials, EPG_ATTRIB_ID, EPG_ATTRIB_LANG,
+        EPG_TAG_CATEGORY, EPG_TAG_CHANNEL, EPG_TAG_LIVE, EPG_TAG_NEW,
+    },
     repository::{
-        epg_query_channels_by_storage_key, get_target_storage_path, m3u_get_epg_file_path_for_target,
-        storage_const, xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTreeQuery,
-        LockedReceiverStream, XML_PREAMBLE,
+        epg_query_channels_by_storage_key, get_target_storage_path, m3u_get_epg_file_path_for_target, storage_const,
+        xtream_get_epg_file_path_for_target, xtream_get_storage_path, BPlusTreeQuery, LockedReceiverStream,
+        XML_PREAMBLE,
     },
     utils,
     utils::{
@@ -34,13 +37,18 @@ use shared::{
     },
     utils::{concat_path, concat_path_leading_slash, obfuscate_text, Internable},
 };
-use std::{collections::HashMap, path::{Path, PathBuf}, sync::Arc};
-use tokio::{io::{AsyncWrite, AsyncWriteExt}, sync::mpsc, task};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::{
+    io::{AsyncWrite, AsyncWriteExt},
+    sync::mpsc,
+    task,
+};
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
-use crate::api::static_headers::CT_XML;
-use crate::auth::resolve_api_user_context;
-use crate::model::{ApiProxyServerInfo, EPG_ATTRIB_LANG, EPG_TAG_CATEGORY, EPG_TAG_LIVE, EPG_TAG_NEW};
 
 pub fn get_empty_epg_response() -> axum::response::Response {
     try_unwrap_body!(axum::response::Response::builder()
@@ -90,10 +98,7 @@ pub(in crate::api) fn get_epg_path_for_target_by_type(
         }
         TargetType::M3u => {
             if let Some(target_path) = get_target_storage_path(config, &target.name) {
-                return get_epg_path_for_target_of_type(
-                    &target.name,
-                    m3u_get_epg_file_path_for_target(&target_path),
-                );
+                return get_epg_path_for_target_of_type(&target.name, m3u_get_epg_file_path_for_target(&target_path));
             }
             None
         }
@@ -140,7 +145,8 @@ pub async fn serve_epg_web_ui(
             let query = match BPlusTreeQuery::<Arc<str>, EpgChannel>::try_new(&epg_path) {
                 Ok(query) => query,
                 Err(error) => {
-                    let message = format!("Failed to open epg db for target {target_name} {}: {error}", epg_path.display());
+                    let message =
+                        format!("Failed to open epg db for target {target_name} {}: {error}", epg_path.display());
                     error!("{message}");
                     let _ = tx.blocking_send(Err(message));
                     return;
@@ -169,19 +175,28 @@ pub async fn serve_epg_web_ui(
                     epg_path_for_log.display()
                 );
                 let _ = join_error_tx
-                    .send(Err(format!("EPG web UI producer task failed for target {} {}: {err}", target_name_for_log, epg_path_for_log.display())))
+                    .send(Err(format!(
+                        "EPG web UI producer task failed for target {} {}: {err}",
+                        target_name_for_log,
+                        epg_path_for_log.display()
+                    )))
                     .await;
             }
         });
 
-        let stream = LockedReceiverStream::new(rx, iter_lock)
-            .map(move |result| result.map(|channel| rewrite_epg_channel_resource_url(&encrypt_secret, &resource_url, channel)));
+        let stream = LockedReceiverStream::new(rx, iter_lock).map(move |result| {
+            result.map(|channel| rewrite_epg_channel_resource_url(&encrypt_secret, &resource_url, channel))
+        });
         return stream_json_or_bin_response_try_stream(accept, stream);
     }
     try_unwrap_body!(empty_json_response_as_array())
 }
 
-pub fn rewrite_epg_channel_resource_url(encrypt_secret: &[u8; 16], resource_url: &str, mut channel: EpgChannel) -> EpgChannel {
+pub fn rewrite_epg_channel_resource_url(
+    encrypt_secret: &[u8; 16],
+    resource_url: &str,
+    mut channel: EpgChannel,
+) -> EpgChannel {
     let Some(icon) = channel.icon.as_ref() else {
         return channel;
     };
@@ -210,9 +225,7 @@ async fn write_programme_classification_tags<W: AsyncWrite + Unpin>(
             elem.push_attribute((EPG_ATTRIB_LANG, lang.as_ref()));
         }
         writer.write_event_async(Event::Start(elem)).await?;
-        writer
-            .write_event_async(Event::Text(BytesText::new(category.value.as_ref())))
-            .await?;
+        writer.write_event_async(Event::Text(BytesText::new(category.value.as_ref()))).await?;
         writer.write_event_async(Event::End(BytesEnd::new(EPG_TAG_CATEGORY))).await?;
     }
 
@@ -238,23 +251,23 @@ async fn serve_epg_with_rewrites(
     }
 
     let epg_processing_options = get_epg_processing_options(&app_state.app_config, user, target);
-    let lowercase_display_names = target
-        .options
-        .as_ref()
-        .is_some_and(ConfigTargetOptions::lowercase_xmltv_display_names);
+    let lowercase_display_names =
+        target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_xmltv_display_names);
 
     let server_info = app_state.app_config.get_user_server_info(user);
     let base_url =
         if !matches!(epg_processing_options.time_shift, EpgTimeShift::None) || epg_processing_options.rewrite_urls {
-            server_info.as_ref().map(|si| concat_string!(
-                 &si.get_base_url(),
-                 "/",
-                 storage_const::EPG_RESOURCE_PATH,
-                 "/",
-                 &user.username,
-                 "/",
-                 &user.password
-             ))
+            server_info.as_ref().map(|si| {
+                concat_string!(
+                    &si.get_base_url(),
+                    "/",
+                    storage_const::EPG_RESOURCE_PATH,
+                    "/",
+                    &user.username,
+                    "/",
+                    &user.password
+                )
+            })
         } else {
             None
         };
@@ -317,7 +330,9 @@ async fn serve_epg_with_rewrites(
             error!("EPG: Failed to write xml header {err}");
             return;
         }
-        if let Err(err) = tx.write_all(format!(r#"<tv generator-info-name="X" generator-info-url="{generator_info}">"#).as_bytes()).await
+        if let Err(err) = tx
+            .write_all(format!(r#"<tv generator-info-name="X" generator-info-url="{generator_info}">"#).as_bytes())
+            .await
         {
             error!("EPG: Failed to write xml tv header {err}");
             return;
@@ -352,9 +367,7 @@ async fn serve_epg_with_rewrites(
                 continue_on_err!(writer.write_event_async(Event::Start(elem)).await);
                 let title: &str = channel.title.as_deref().unwrap_or("");
                 let display_name = lowercase_xmltv_text(title, lowercase_display_names);
-                continue_on_err!(writer
-                    .write_event_async(Event::Text(BytesText::new(display_name.as_ref())))
-                    .await);
+                continue_on_err!(writer.write_event_async(Event::Text(BytesText::new(display_name.as_ref()))).await);
 
                 let elem = BytesEnd::new("display-name");
                 continue_on_err!(writer.write_event_async(Event::End(elem)).await);
@@ -490,10 +503,7 @@ fn get_applied_epg_timeshift(
     (start_str, stop_str, start_ts, stop_ts)
 }
 
-fn get_applied_epg_timestamps(
-    programme: &EpgProgramme,
-    epg_processing_options: &EpgProcessingOptions,
-) -> (i64, i64) {
+fn get_applied_epg_timestamps(programme: &EpgProgramme, epg_processing_options: &EpgProcessingOptions) -> (i64, i64) {
     match &epg_processing_options.time_shift {
         EpgTimeShift::None | EpgTimeShift::TimeZone(_) => (programme.start, programme.stop),
         EpgTimeShift::Fixed(m) => {
@@ -503,9 +513,7 @@ fn get_applied_epg_timestamps(
     }
 }
 
-fn get_source_epg_timestamps(programme: &EpgProgramme) -> (i64, i64) {
-    (programme.start, programme.stop)
-}
+fn get_source_epg_timestamps(programme: &EpgProgramme) -> (i64, i64) { (programme.start, programme.stop) }
 
 fn format_epg_timeshift_strings(
     programme: &EpgProgramme,
@@ -569,10 +577,7 @@ pub async fn serve_short_epg(
     limit: u32,
     has_archive: bool,
 ) -> axum::response::Response {
-    let lowercase_ids = target
-        .options
-        .as_ref()
-        .is_some_and(ConfigTargetOptions::lowercase_epg_ids);
+    let lowercase_ids = target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids);
     let output_case = EpgIdOutputCase::from_lowercase(lowercase_ids);
     let storage_key = canonicalize_output_epg_id(channel_id, output_case);
     let response_channel_id = Arc::clone(&storage_key);
@@ -658,24 +663,16 @@ async fn serve_stream_epg(
     let live_now = chrono::Utc::now().timestamp();
 
     let PreparedStreamEpgRequest { entries: prepared_entries } = prepared;
-    let storage_keys = prepared_entries
-        .iter()
-        .map(|entry| Arc::clone(&entry.storage_key))
-        .collect();
+    let storage_keys = prepared_entries.iter().map(|entry| Arc::clone(&entry.storage_key)).collect();
 
-    let channels: Vec<Option<EpgChannel>> = match epg_query_channels_by_storage_key(
-        &app_state.app_config.file_locks,
-        epg_path,
-        storage_keys,
-    )
-    .await
-    {
-        Ok(results) => results.into_iter().map(|(_, channel)| channel).collect(),
-        Err(err) => {
-            error!("{err}");
-            std::iter::repeat_with(|| None).take(prepared_entries.len()).collect()
-        }
-    };
+    let channels: Vec<Option<EpgChannel>> =
+        match epg_query_channels_by_storage_key(&app_state.app_config.file_locks, epg_path, storage_keys).await {
+            Ok(results) => results.into_iter().map(|(_, channel)| channel).collect(),
+            Err(err) => {
+                error!("{err}");
+                std::iter::repeat_with(|| None).take(prepared_entries.len()).collect()
+            }
+        };
 
     let mut entries = Vec::with_capacity(channels.len());
 
@@ -684,7 +681,9 @@ async fn serve_stream_epg(
         let window_start = reference_ts.saturating_sub(STREAM_EPG_ARCHIVE_WINDOW_BACK_SECS);
         let window_end = reference_ts.saturating_add(STREAM_EPG_ARCHIVE_WINDOW_FWD_SECS);
         let programmes = match channel {
-            Some(ch) => stream_epg_programmes_for_channel(&ch.programmes, &epg_processing_options, window_start, window_end),
+            Some(ch) => {
+                stream_epg_programmes_for_channel(&ch.programmes, &epg_processing_options, window_start, window_end)
+            }
             None => Vec::new(),
         };
 
@@ -724,9 +723,7 @@ fn stream_epg_programmes_for_channel(
         .collect()
 }
 
-fn group_stream_epg_items(
-    items: Vec<StreamEpgItemRequest>,
-) -> Result<Vec<(u16, Vec<StreamEpgItemRequest>)>, String> {
+fn group_stream_epg_items(items: Vec<StreamEpgItemRequest>) -> Result<Vec<(u16, Vec<StreamEpgItemRequest>)>, String> {
     if items.is_empty() {
         return Err("items must not be empty".to_string());
     }
@@ -740,9 +737,7 @@ fn group_stream_epg_items(
             return Err("epg_channel_id must not be empty".to_string());
         }
         if item.epg_channel_id.len() > MAX_STREAM_EPG_CHANNEL_ID_BYTES {
-            return Err(format!(
-                "epg_channel_id must not exceed {MAX_STREAM_EPG_CHANNEL_ID_BYTES} bytes"
-            ));
+            return Err(format!("epg_channel_id must not exceed {MAX_STREAM_EPG_CHANNEL_ID_BYTES} bytes"));
         }
         let Some(target_id) = item.target_id else {
             return Err("all items must include target_id".to_string());
@@ -792,10 +787,9 @@ pub(crate) async fn stream_epg_api(
         let Some(target) = app_state.app_config.get_target_by_id(target_id) else {
             return stream_epg_bad_request(&format!("unknown target_id: {target_id}"));
         };
-        let output_case = EpgIdOutputCase::from_lowercase(target
-            .options
-            .as_ref()
-            .is_some_and(ConfigTargetOptions::lowercase_epg_ids));
+        let output_case = EpgIdOutputCase::from_lowercase(
+            target.options.as_ref().is_some_and(ConfigTargetOptions::lowercase_epg_ids),
+        );
         let prepared = prepare_stream_epg_request(&items, output_case);
 
         let Some(epg_path) = get_epg_path_for_target(config.as_ref(), &target) else {
@@ -810,11 +804,10 @@ pub(crate) async fn stream_epg_api(
     let result = StreamEpgResponse { entries };
 
     match serde_json::to_string(&result) {
-        Ok(json) => (
-            axum::http::StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())],
-            json,
-        ).into_response(),
+        Ok(json) => {
+            (axum::http::StatusCode::OK, [(axum::http::header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())], json)
+                .into_response()
+        }
         Err(_) => internal_server_error!(),
     }
 }
@@ -830,13 +823,23 @@ pub(crate) async fn stream_epg_api(
 /// let router = xmltv_api_register();
 /// // A GET request to /xmltv.php with valid query parameters will invoke this handler.
 /// ```
-async fn xmltv_api(fingerprint: &Fingerprint, api_req: UserApiRequest, app_state: &Arc<AppState>) -> impl IntoResponse + Send {
+async fn xmltv_api(
+    fingerprint: &Fingerprint,
+    api_req: UserApiRequest,
+    app_state: &Arc<AppState>,
+) -> impl IntoResponse + Send {
     api_req.log_sanitized("xmltv_api");
     let auth_status = app_state.app_config.get_auth_error_status();
     let Some((user, target)) = get_user_target(&api_req, app_state) else {
         return auth_status.into_response();
     };
-    if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), &app_state.app_config, &app_state.geoip) {
+    if let Err(e) = resolve_api_user_context(
+        user.clone(),
+        target.clone(),
+        fingerprint.clone(),
+        &app_state.app_config,
+        &app_state.geoip,
+    ) {
         return e.into_player_response(auth_status);
     }
 
@@ -875,7 +878,13 @@ async fn epg_api_resource(
     let Some((user, target)) = get_user_target_by_credentials(&username, &password, &api_req, &app_state) else {
         return auth_status.into_response();
     };
-    if let Err(e) = resolve_api_user_context(user.clone(), target.clone(), fingerprint.clone(), &app_state.app_config, &app_state.geoip) {
+    if let Err(e) = resolve_api_user_context(
+        user.clone(),
+        target.clone(),
+        fingerprint.clone(),
+        &app_state.app_config,
+        &app_state.geoip,
+    ) {
         return e.into_player_response(auth_status);
     }
 
@@ -911,27 +920,16 @@ pub fn xmltv_api_register() -> axum::Router<Arc<AppState>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        empty_stream_epg_entries,
-        from_programme,
-        get_epg_path_for_target,
-        get_epg_path_for_target_by_type,
-        group_stream_epg_items,
-        prepare_stream_epg_request,
-        rewrite_epg_channel_resource_url,
-        serve_epg,
-        serve_short_epg,
-        serve_stream_epg,
-        stream_epg_api,
-        stream_epg_programmes_for_channel,
-        write_programme_classification_tags,
-        MAX_STREAM_EPG_CHANNEL_ID_BYTES,
-        MAX_STREAM_EPG_ITEMS,
+        empty_stream_epg_entries, from_programme, get_epg_path_for_target, get_epg_path_for_target_by_type,
+        group_stream_epg_items, prepare_stream_epg_request, rewrite_epg_channel_resource_url, serve_epg,
+        serve_short_epg, serve_stream_epg, stream_epg_api, stream_epg_programmes_for_channel,
+        write_programme_classification_tags, MAX_STREAM_EPG_CHANNEL_ID_BYTES, MAX_STREAM_EPG_ITEMS,
     };
     use crate::{
         api::model::{create_test_app_state, AppState},
         model::{
-            Config, ConfigTarget, Epg, IcsEpgSourceConfig, M3uTargetOutput, ProxyUserCredentials,
-            TargetOutput, XtreamTargetFlagsSet, XtreamTargetOutput,
+            Config, ConfigTarget, Epg, IcsEpgSourceConfig, M3uTargetOutput, ProxyUserCredentials, TargetOutput,
+            XtreamTargetFlagsSet, XtreamTargetOutput,
         },
         processing::parser::ics::parse_ics_file_to_channel,
         repository::{epg_write_file, BPlusTree},
@@ -950,8 +948,7 @@ mod tests {
     };
     use std::{
         collections::HashMap,
-        fs,
-        io,
+        fs, io,
         pin::Pin,
         sync::Arc,
         task::{Context, Poll},
@@ -962,11 +959,7 @@ mod tests {
     struct ErroringWriter;
 
     impl AsyncWrite for ErroringWriter {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            _buf: &[u8],
-        ) -> Poll<Result<usize, io::Error>> {
+        fn poll_write(self: Pin<&mut Self>, _cx: &mut Context<'_>, _buf: &[u8]) -> Poll<Result<usize, io::Error>> {
             Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, "synthetic write failure")))
         }
 
@@ -1034,36 +1027,23 @@ mod tests {
     }
 
     fn test_config_with_storage(storage_dir: &str) -> Config {
-        Config {
-            storage_dir: storage_dir.to_string(),
-            ..Default::default()
-        }
+        Config { storage_dir: storage_dir.to_string(), ..Default::default() }
     }
 
-    fn test_app_state() -> Arc<AppState> {
-        create_test_app_state(Config::default())
-    }
+    fn test_app_state() -> Arc<AppState> { create_test_app_state(Config::default()) }
 
     fn test_target_with_epg_options(lowercase_ids: bool, lowercase_display_names: bool) -> Arc<ConfigTarget> {
         let mut target = test_target_with_xtream_only();
         target.options = Some(ConfigTargetOptions {
-            epg_output: EpgOutputOptions {
-                lowercase_ids,
-                lowercase_xmltv_display_names: lowercase_display_names,
-            },
+            epg_output: EpgOutputOptions { lowercase_ids, lowercase_xmltv_display_names: lowercase_display_names },
             ..ConfigTargetOptions::default()
         });
         Arc::new(target)
     }
 
-    fn write_test_epg_db(path: &std::path::Path, channel: EpgChannel) {
-        write_test_epg_channels(path, [channel]);
-    }
+    fn write_test_epg_db(path: &std::path::Path, channel: EpgChannel) { write_test_epg_channels(path, [channel]); }
 
-    fn write_test_epg_channels(
-        path: &std::path::Path,
-        channels: impl IntoIterator<Item = EpgChannel>,
-    ) {
+    fn write_test_epg_channels(path: &std::path::Path, channels: impl IntoIterator<Item = EpgChannel>) {
         let mut tree = BPlusTree::<Arc<str>, EpgChannel>::new();
         for channel in channels {
             tree.insert(Arc::clone(&channel.id), channel);
@@ -1071,14 +1051,17 @@ mod tests {
         tree.store(path).expect("test EPG DB should be written");
     }
 
-    fn stream_epg_item(id: impl Into<String>, target_id: Option<u16>, reference_ts: Option<i64>) -> StreamEpgItemRequest {
+    fn stream_epg_item(
+        id: impl Into<String>,
+        target_id: Option<u16>,
+        reference_ts: Option<i64>,
+    ) -> StreamEpgItemRequest {
         StreamEpgItemRequest { epg_channel_id: id.into(), target_id, reference_ts }
     }
 
     async fn response_body_text(response: axum::response::Response) -> String {
-        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .expect("response body should be readable");
+        let body =
+            axum::body::to_bytes(response.into_body(), 64 * 1024).await.expect("response body should be readable");
         String::from_utf8(body.to_vec()).expect("response body should be UTF-8")
     }
 
@@ -1104,23 +1087,14 @@ mod tests {
         )
         .expect("write ICS fixture");
 
-        let channel = parse_ics_file_to_channel(
-            &ics_path,
-            "f1.calendar".intern(),
-            None,
-            &IcsEpgSourceConfig::default(),
-        )
-        .await
-        .expect("parse ICS fixture");
+        let channel =
+            parse_ics_file_to_channel(&ics_path, "f1.calendar".intern(), None, &IcsEpgSourceConfig::default())
+                .await
+                .expect("parse ICS fixture");
         let epg_path = dir.path().join("epg.db");
         epg_write_file(
             "ics-target",
-            &Epg {
-                priority: 0,
-                logo_override: false,
-                attributes: None,
-                children: vec![Arc::new(channel)],
-            },
+            &Epg { priority: 0, logo_override: false, attributes: None, children: vec![Arc::new(channel)] },
             &epg_path,
             &HashMap::<Arc<str>, Arc<str>>::new(),
             &EpgOutputOptions::default(),
@@ -1130,17 +1104,8 @@ mod tests {
         let config = test_config_with_storage(dir.path().to_string_lossy().as_ref());
         let app_state = create_test_app_state(config);
         let target = Arc::new(test_target_with_xtream_and_m3u());
-        let response = serve_epg(
-            &app_state,
-            &epg_path,
-            &ProxyUserCredentials::default(),
-            &target,
-            None,
-        )
-        .await;
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read XMLTV response body");
+        let response = serve_epg(&app_state, &epg_path, &ProxyUserCredentials::default(), &target, None).await;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("read XMLTV response body");
         let xml = String::from_utf8(body.to_vec()).expect("XMLTV response is UTF-8");
 
         assert!(xml.contains(r#"<channel id="f1.calendar">"#));
@@ -1245,17 +1210,13 @@ mod tests {
         )])
         .unwrap_err();
 
-        assert_eq!(
-            err,
-            format!("epg_channel_id must not exceed {MAX_STREAM_EPG_CHANNEL_ID_BYTES} bytes")
-        );
+        assert_eq!(err, format!("epg_channel_id must not exceed {MAX_STREAM_EPG_CHANNEL_ID_BYTES} bytes"));
     }
 
     #[test]
     fn test_group_stream_epg_items_rejects_excessive_item_count() {
-        let items = (0..=MAX_STREAM_EPG_ITEMS)
-            .map(|index| stream_epg_item(format!("epg-{index}"), Some(1), None))
-            .collect();
+        let items =
+            (0..=MAX_STREAM_EPG_ITEMS).map(|index| stream_epg_item(format!("epg-{index}"), Some(1), None)).collect();
 
         let err = group_stream_epg_items(items).unwrap_err();
 
@@ -1279,17 +1240,14 @@ mod tests {
     async fn stream_epg_api_returns_bad_request_for_invalid_item() {
         let response = stream_epg_api(
             axum::extract::State(test_app_state()),
-            axum::extract::Json(StreamEpgRequest {
-                items: vec![stream_epg_item("", Some(1), None)],
-            }),
+            axum::extract::Json(StreamEpgRequest { items: vec![stream_epg_item("", Some(1), None)] }),
         )
         .await
         .into_response();
 
         assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
         let body = response_body_text(response).await;
-        let error = serde_json::from_str::<serde_json::Value>(&body)
-            .expect("bad-request response should contain JSON");
+        let error = serde_json::from_str::<serde_json::Value>(&body).expect("bad-request response should contain JSON");
         assert_eq!(error["error"], "epg_channel_id must not be empty");
     }
 
@@ -1347,11 +1305,7 @@ mod tests {
         ];
 
         let prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::LowercaseAscii);
-        let storage_keys = prepared
-            .entries
-            .iter()
-            .map(|entry| entry.storage_key.as_ref())
-            .collect::<Vec<_>>();
+        let storage_keys = prepared.entries.iter().map(|entry| entry.storage_key.as_ref()).collect::<Vec<_>>();
 
         assert_eq!(storage_keys, vec!["example.channel", "Äbc.id"]);
         assert_eq!(prepared.entries[0].reference_ts, Some(100));
@@ -1392,10 +1346,8 @@ mod tests {
 
     #[test]
     fn empty_stream_epg_entries_use_prepared_canonical_ids() {
-        let items = [
-            stream_epg_item("Example.Channel", Some(7), None),
-            stream_epg_item("example.CHANNEL", Some(7), None),
-        ];
+        let items =
+            [stream_epg_item("Example.Channel", Some(7), None), stream_epg_item("example.CHANNEL", Some(7), None)];
         let prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::LowercaseAscii);
 
         let entries = empty_stream_epg_entries(7, &prepared);
@@ -1416,19 +1368,9 @@ mod tests {
     fn short_epg_response_uses_canonical_id_for_both_id_fields() {
         let stream_id = "42".intern();
         let epg_id = "example.channel".intern();
-        let programme = EpgProgramme::new_all(
-            100,
-            200,
-            Arc::clone(&epg_id),
-            Some("News".intern()),
-            None,
-            None,
-        );
-        let options = EpgProcessingOptions {
-            rewrite_urls: false,
-            time_shift: EpgTimeShift::None,
-            encrypt_secret: [0; 16],
-        };
+        let programme = EpgProgramme::new_all(100, 200, Arc::clone(&epg_id), Some("News".intern()), None, None);
+        let options =
+            EpgProcessingOptions { rewrite_urls: false, time_shift: EpgTimeShift::None, encrypt_secret: [0; 16] };
 
         let result = from_programme(&stream_id, &epg_id, &programme, &options, false);
 
@@ -1440,19 +1382,9 @@ mod tests {
     fn from_programme_sets_has_archive_only_when_capability_true() {
         let stream_id = "42".intern();
         let epg_id = "example.channel".intern();
-        let programme = EpgProgramme::new_all(
-            100,
-            200,
-            Arc::clone(&epg_id),
-            Some("News".intern()),
-            None,
-            None,
-        );
-        let options = EpgProcessingOptions {
-            rewrite_urls: false,
-            time_shift: EpgTimeShift::None,
-            encrypt_secret: [0; 16],
-        };
+        let programme = EpgProgramme::new_all(100, 200, Arc::clone(&epg_id), Some("News".intern()), None, None);
+        let options =
+            EpgProcessingOptions { rewrite_urls: false, time_shift: EpgTimeShift::None, encrypt_secret: [0; 16] };
 
         let archived = from_programme(&stream_id, &epg_id, &programme, &options, true);
         let live_only = from_programme(&stream_id, &epg_id, &programme, &options, false);
@@ -1465,15 +1397,11 @@ mod tests {
     fn lowercased_xmltv_display_name_remains_xml_escaped() {
         let display_name = lowercase_xmltv_text("CAFÉ NETWORK & <HD>", true);
         let mut writer = quick_xml::Writer::new(Vec::new());
-        writer
-            .write_event(Event::Start(BytesStart::new("display-name")))
-            .expect("display-name start should serialize");
+        writer.write_event(Event::Start(BytesStart::new("display-name"))).expect("display-name start should serialize");
         writer
             .write_event(Event::Text(BytesText::new(display_name.as_ref())))
             .expect("display-name text should serialize");
-        writer
-            .write_event(Event::End(BytesEnd::new("display-name")))
-            .expect("display-name end should serialize");
+        writer.write_event(Event::End(BytesEnd::new("display-name"))).expect("display-name end should serialize");
 
         let xml = String::from_utf8(writer.into_inner()).expect("serialized XML should be UTF-8");
 
@@ -1510,18 +1438,13 @@ mod tests {
         let app_state = test_app_state();
         let target = test_target_with_epg_options(true, true);
 
-        let response = serve_epg(
-            &app_state,
-            &epg_path,
-            &ProxyUserCredentials::default(),
-            &target,
-            None,
-        )
-        .await;
+        let response = serve_epg(&app_state, &epg_path, &ProxyUserCredentials::default(), &target, None).await;
         let xml = response_body_text(response).await;
 
         assert!(xml.contains(r#"<channel id="example.channel">"#), "XMLTV output: {xml}");
-        assert!(xml.contains(r#"<programme start="19700101000140 +0000" stop="19700101000320 +0000" channel="example.channel">"#));
+        assert!(xml.contains(
+            r#"<programme start="19700101000140 +0000" stop="19700101000320 +0000" channel="example.channel">"#
+        ));
         assert!(xml.contains("<display-name>café network &amp; &lt;hd&gt;</display-name>"));
         assert!(xml.contains("<title>News &amp; Updates</title>"));
         assert!(xml.contains("<desc>Keep &lt;Case&gt;</desc>"));
@@ -1569,14 +1492,7 @@ mod tests {
         let app_state = test_app_state();
         let target = Arc::new(test_target_with_xtream_only());
 
-        let response = serve_epg(
-            &app_state,
-            &epg_path,
-            &ProxyUserCredentials::default(),
-            &target,
-            None,
-        )
-        .await;
+        let response = serve_epg(&app_state, &epg_path, &ProxyUserCredentials::default(), &target, None).await;
         let xml = response_body_text(response).await;
 
         assert!(xml.contains(r#"<channel id="Example.Channel">"#));
@@ -1608,14 +1524,7 @@ mod tests {
         let app_state = test_app_state();
         let target = Arc::new(test_target_with_xtream_only());
 
-        let response = serve_epg(
-            &app_state,
-            &epg_path,
-            &ProxyUserCredentials::default(),
-            &target,
-            None,
-        )
-        .await;
+        let response = serve_epg(&app_state, &epg_path, &ProxyUserCredentials::default(), &target, None).await;
         let xml = response_body_text(response).await;
         let first_position = xml.find(r#"<channel id="Z.Channel">"#).expect("first channel should exist");
         let second_position = xml.find(r#"<channel id="a.channel">"#).expect("second channel should exist");
@@ -1646,14 +1555,7 @@ mod tests {
         let app_state = test_app_state();
         let target = test_target_with_epg_options(false, true);
 
-        let response = serve_epg(
-            &app_state,
-            &epg_path,
-            &ProxyUserCredentials::default(),
-            &target,
-            None,
-        )
-        .await;
+        let response = serve_epg(&app_state, &epg_path, &ProxyUserCredentials::default(), &target, None).await;
         let xml = response_body_text(response).await;
 
         assert!(xml.contains(r#"<channel id="Example.Channel">"#));
@@ -1686,14 +1588,7 @@ mod tests {
         let app_state = test_app_state();
         let target = test_target_with_epg_options(true, false);
 
-        let response = serve_epg(
-            &app_state,
-            &epg_path,
-            &ProxyUserCredentials::default(),
-            &target,
-            None,
-        )
-        .await;
+        let response = serve_epg(&app_state, &epg_path, &ProxyUserCredentials::default(), &target, None).await;
         let xml = response_body_text(response).await;
 
         assert!(xml.contains(r#"<channel id="example.channel">"#));
@@ -1815,22 +1710,12 @@ mod tests {
         let target = test_target_with_epg_options(true, false);
         let items = [
             stream_epg_item("Example.Channel", Some(target.id), Some(first_reference)),
-            stream_epg_item(
-                "example.CHANNEL",
-                Some(target.id),
-                Some(first_reference + 7 * 24 * 3600),
-            ),
+            stream_epg_item("example.CHANNEL", Some(target.id), Some(first_reference + 7 * 24 * 3600)),
         ];
         let prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::LowercaseAscii);
 
-        let response = serve_stream_epg(
-            &app_state,
-            &ProxyUserCredentials::default(),
-            &target,
-            &epg_path,
-            prepared,
-        )
-        .await;
+        let response =
+            serve_stream_epg(&app_state, &ProxyUserCredentials::default(), &target, &epg_path, prepared).await;
 
         assert_eq!(response.entries.len(), 1);
         assert_eq!(response.entries[0].epg_channel_id, "example.channel");
@@ -1883,14 +1768,8 @@ mod tests {
         ];
         let prepared = prepare_stream_epg_request(&items, EpgIdOutputCase::Preserve);
 
-        let response = serve_stream_epg(
-            &app_state,
-            &ProxyUserCredentials::default(),
-            &target,
-            &epg_path,
-            prepared,
-        )
-        .await;
+        let response =
+            serve_stream_epg(&app_state, &ProxyUserCredentials::default(), &target, &epg_path, prepared).await;
 
         assert_eq!(response.entries.len(), 2);
         assert_eq!(response.entries[0].epg_channel_id, "Example.Channel");
@@ -1939,11 +1818,8 @@ mod tests {
     fn stream_epg_programmes_for_channel_filters_using_shifted_fixed_times() {
         let window_start = 10_000;
         let window_end = window_start + 8 * 3600;
-        let epg_processing_options = EpgProcessingOptions {
-            rewrite_urls: false,
-            time_shift: EpgTimeShift::Fixed(120),
-            encrypt_secret: [0; 16],
-        };
+        let epg_processing_options =
+            EpgProcessingOptions { rewrite_urls: false, time_shift: EpgTimeShift::Fixed(120), encrypt_secret: [0; 16] };
         let programmes = vec![
             EpgProgramme::new_all(
                 window_start - 7_300,
@@ -1981,5 +1857,4 @@ mod tests {
         assert_eq!(filtered[0].start_timestamp, window_start + 7_260);
         assert_eq!(filtered[0].stop_timestamp, window_start + 7_800);
     }
-
 }

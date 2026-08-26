@@ -39,9 +39,7 @@ impl Stream for ProvisioningStream {
 
         if let Some(chunk) = self.buffer.next_chunk() {
             // Reset idle deadline on each delivered chunk.
-            self.idle_deadline
-                .as_mut()
-                .reset(Instant::now() + Duration::from_secs(STREAM_IDLE_TIMEOUT));
+            self.idle_deadline.as_mut().reset(Instant::now() + Duration::from_secs(STREAM_IDLE_TIMEOUT));
             Poll::Ready(Some(Ok(chunk)))
         } else {
             self.buffer.register_waker(cx.waker());

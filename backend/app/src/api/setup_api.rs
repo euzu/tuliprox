@@ -1,9 +1,11 @@
 use crate::{
     api::{api_utils::serve_file, http_layers::create_cors_layer},
     auth::generate_password_from_input,
+    config_loader::{
+        read_api_proxy_file, read_config_file_with_options, read_sources_file, sanitize_sources_for_persist,
+    },
     model::validate_library_paths_from_dto,
     utils::{file_exists, get_default_web_root_path_for_home, read_templates_file, resolve_template_persist_file_path},
-    config_loader::{read_api_proxy_file, read_config_file_with_options, read_sources_file, sanitize_sources_for_persist},
 };
 use axum::{
     extract::{Path, State},
@@ -17,14 +19,14 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use shared::{
+    defaults::{default_kick_secs, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH, DEFAULT_PORT, DEFAULT_STORAGE_DIR, USER_FILE},
     error::TuliproxError,
     foundation::prepare_templates,
     model::{
         ApiProxyConfigDto, ApiProxyServerInfoDto, AppConfigDto, ConfigApiDto, ConfigDto, ConfigPaths, PatternTemplate,
         SourcesConfigDto, TemplateDefinitionDto, TokenResponse, WebAuthConfigDto, WebUiConfigDto, TOKEN_NO_AUTH,
     },
-    utils::{hex_encode},
-    defaults::{default_kick_secs, DEFAULT_PORT, DEFAULT_STORAGE_DIR, USER_FILE, DEFAULT_CUSTOM_STREAM_RESPONSE_PATH},
+    utils::hex_encode,
 };
 use std::{
     collections::HashSet,
@@ -37,7 +39,10 @@ use std::{
     },
 };
 use tokio::sync::{oneshot, Mutex, RwLock};
-use tower_http::{compression::predicate::{DefaultPredicate, Predicate, SizeAbove}, services::ServeDir};
+use tower_http::{
+    compression::predicate::{DefaultPredicate, Predicate, SizeAbove},
+    services::ServeDir,
+};
 
 const DEFAULT_SETUP_HOST: &str = "0.0.0.0";
 
@@ -49,10 +54,7 @@ pub struct SetupWebUserCredentialDto {
 
 impl fmt::Debug for SetupWebUserCredentialDto {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SetupWebUserCredentialDto")
-            .field("username", &self.username)
-            .field("password", &"***")
-            .finish()
+        f.debug_struct("SetupWebUserCredentialDto").field("username", &self.username).field("password", &"***").finish()
     }
 }
 
@@ -177,9 +179,7 @@ fn create_default_config_dto(home_path: &str) -> ConfigDto {
         api: ConfigApiDto {
             host: DEFAULT_SETUP_HOST.to_string(),
             port: DEFAULT_PORT,
-            web_root: get_default_web_root_path_for_home(FsPath::new(home_path))
-                .display()
-                .to_string(),
+            web_root: get_default_web_root_path_for_home(FsPath::new(home_path)).display().to_string(),
         },
         storage_dir: Some(DEFAULT_STORAGE_DIR.to_string()),
         custom_stream_response_path: Some(DEFAULT_CUSTOM_STREAM_RESPONSE_PATH.to_string()),
@@ -202,7 +202,10 @@ async fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
     let mut draft = create_default_draft(paths.home_path.as_str());
 
     if file_exists(&paths.config_file_path) {
-        match read_config_file_with_options(paths.config_file_path.as_str(), crate::config_loader::ReadConfigOptions { resolve_env: true, include_computed: false }) {
+        match read_config_file_with_options(
+            paths.config_file_path.as_str(),
+            crate::config_loader::ReadConfigOptions { resolve_env: true, include_computed: false },
+        ) {
             Ok(cfg) => draft.config = cfg,
             Err(err) => warn!("Setup mode: failed to load existing config.yml: {err}"),
         }
@@ -214,7 +217,7 @@ async fn build_initial_draft(paths: &ConfigPaths) -> AppConfigDto {
             false,
             false,
             draft.config.get_hdhr_device_overview().as_ref(),
-            None
+            None,
         )
         .await
         {
@@ -250,9 +253,7 @@ fn ensure_setup_defaults(config: &mut ConfigDto, home_path: &str) {
         config.api.port = DEFAULT_PORT;
     }
     if config.api.web_root.trim().is_empty() {
-        config.api.web_root = get_default_web_root_path_for_home(FsPath::new(home_path))
-            .display()
-            .to_string();
+        config.api.web_root = get_default_web_root_path_for_home(FsPath::new(home_path)).display().to_string();
     }
     if config.storage_dir.as_ref().is_none_or(|dir| dir.trim().is_empty()) {
         config.storage_dir = Some(DEFAULT_STORAGE_DIR.to_string());
@@ -308,10 +309,7 @@ fn resolve_setup_web_dir(web_root: &FsPath, home_path: &str) -> Option<PathBuf> 
 }
 
 fn default_api_proxy_config() -> ApiProxyConfigDto {
-    ApiProxyConfigDto {
-        server: vec![create_default_api_proxy_server()],
-        ..ApiProxyConfigDto::default()
-    }
+    ApiProxyConfigDto { server: vec![create_default_api_proxy_server()], ..ApiProxyConfigDto::default() }
 }
 
 fn api_proxy_or_default(draft: &AppConfigDto) -> ApiProxyConfigDto {
@@ -493,10 +491,7 @@ enum SetupPersistWriteError {
     Io(std::io::Error),
 }
 
-async fn persist_yaml_file<T: serde::Serialize>(
-    file_path: &FsPath,
-    payload: &T,
-) -> Result<(), SetupPersistWriteError> {
+async fn persist_yaml_file<T: serde::Serialize>(file_path: &FsPath, payload: &T) -> Result<(), SetupPersistWriteError> {
     let mut content = String::new();
     let options = serde_saphyr::ser_options! {prefer_block_scalars: false};
     serde_saphyr::to_fmt_writer_with_options(&mut content, payload, options)
@@ -513,19 +508,10 @@ async fn ensure_parent_dir(file_path: &FsPath) -> std::io::Result<()> {
 
 fn setup_io_error_response(file_path: &FsPath, operation: &str, err: &std::io::Error) -> axum::response::Response {
     let (status, message) = if err.kind() == ErrorKind::PermissionDenied {
-        error!(
-            "Setup mode: permission denied while trying to {operation} '{}': {err}",
-            file_path.display()
-        );
-        (
-            StatusCode::FORBIDDEN,
-            "Permission denied while accessing requested resource".to_string(),
-        )
+        error!("Setup mode: permission denied while trying to {operation} '{}': {err}", file_path.display());
+        (StatusCode::FORBIDDEN, "Permission denied while accessing requested resource".to_string())
     } else {
-        error!(
-            "Setup mode: failed to {operation} '{}': {err}",
-            file_path.display()
-        );
+        error!("Setup mode: failed to {operation} '{}': {err}", file_path.display());
         (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
     };
 
@@ -790,10 +776,7 @@ async fn setup_complete_inner(
                         "Setup mode: failed to serialize setup content for '{}': {serialize_err}",
                         target_path.display()
                     );
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        axum::Json(json!({ "error": "Internal server error" })),
-                    )
+                    (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(json!({ "error": "Internal server error" })))
                         .into_response()
                 }
             };
@@ -856,30 +839,28 @@ fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl 
     // Body-aware 1 KiB cutoff is delegated to `SizeAbove` so the two layers
     // share the same size-detection logic (Content-Length first, then
     // Body::size_hint::exact, defaulting to compress when size is unknown).
-    let predicate = DefaultPredicate::new()
-        .and(SizeAbove::new(1024))
-        .and(|
-        _status: axum::http::StatusCode,
-        _version: axum::http::Version,
-        headers: &axum::http::HeaderMap,
-        _extensions: &axum::http::Extensions,
-    | {
-        if let Some(content_type) = headers.get(axum::http::header::CONTENT_TYPE) {
-            if let Ok(ct) = content_type.to_str() {
-                // Disable compression for wasm , WebKit browser dont like it.
-                // Also skip compression for binary, already-compressed, or non-compressible types.
-                if ct.starts_with("application/wasm")
-                    || ct.starts_with("video/")
-                    || ct.starts_with("audio/")
-                    || ct.starts_with("image/")
-                    || ct.starts_with("application/octet-stream")
-                {
-                    return false;
+    let predicate = DefaultPredicate::new().and(SizeAbove::new(1024)).and(
+        |_status: axum::http::StatusCode,
+         _version: axum::http::Version,
+         headers: &axum::http::HeaderMap,
+         _extensions: &axum::http::Extensions| {
+            if let Some(content_type) = headers.get(axum::http::header::CONTENT_TYPE) {
+                if let Ok(ct) = content_type.to_str() {
+                    // Disable compression for wasm , WebKit browser dont like it.
+                    // Also skip compression for binary, already-compressed, or non-compressible types.
+                    if ct.starts_with("application/wasm")
+                        || ct.starts_with("video/")
+                        || ct.starts_with("audio/")
+                        || ct.starts_with("image/")
+                        || ct.starts_with("application/octet-stream")
+                    {
+                        return false;
+                    }
                 }
             }
-        }
-        true
-    });
+            true
+        },
+    );
     tower_http::compression::CompressionLayer::new()
         .br(false)
         .deflate(true)
@@ -891,8 +872,9 @@ fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl 
 pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -> Result<(), TuliproxError> {
     let draft = build_initial_draft(paths).await;
     let (host, port, web_root) = setup_bind_values(&draft, paths.home_path.as_str());
-    let web_dir = resolve_setup_web_dir(&web_root, paths.home_path.as_str())
-        .ok_or_else(|| TuliproxError::Server(format!("Setup mode requires a web directory. Tried '{}'", web_root.display())))?;
+    let web_dir = resolve_setup_web_dir(&web_root, paths.home_path.as_str()).ok_or_else(|| {
+        TuliproxError::Server(format!("Setup mode requires a web directory. Tried '{}'", web_root.display()))
+    })?;
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let state = Arc::new(SetupModeState {
@@ -963,12 +945,11 @@ pub async fn start_setup_server(paths: &ConfigPaths, missing_files: &[String]) -
 #[cfg(test)]
 mod tests {
     use super::api_proxy_or_default;
-    use shared::model::{ApiProxyConfigDto, AppConfigDto, TargetUserDto};
-
     #[cfg(unix)]
     use super::{setup_complete_inner, SetupCompleteRequestDto, SetupModeState, SetupWebUserCredentialDto};
     #[cfg(unix)]
     use axum::{body::to_bytes, http::StatusCode};
+    use shared::model::{ApiProxyConfigDto, AppConfigDto, TargetUserDto};
     #[cfg(unix)]
     use std::{
         path::PathBuf,
@@ -1009,8 +990,8 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn setup_complete_reports_permission_denied_for_unwritable_target_dir()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn setup_complete_reports_permission_denied_for_unwritable_target_dir(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         struct PermissionResetGuard(PathBuf);
         impl Drop for PermissionResetGuard {

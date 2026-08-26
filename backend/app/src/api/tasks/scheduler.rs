@@ -1,16 +1,21 @@
 use crate::{
     api::{
-        tasks::{spawn_library_scan, LibraryScanTaskOptions},
         model::AppState,
+        tasks::{spawn_library_scan, LibraryScanTaskOptions},
     },
     model::{AppConfig, ProcessTargets, ScheduleConfig},
-    processing::geoip::{update_geoip_db, GeoIpUpdateError},
-    processing::processor::exec_processing,
+    processing::{
+        geoip::{update_geoip_db, GeoIpUpdateError},
+        processor::exec_processing,
+    },
     utils::exit,
 };
 use chrono::{DateTime, FixedOffset, Local};
 use cron::Schedule;
-use shared::{model::ScheduleTaskType, utils::{interner_gc, interner_len}};
+use shared::{
+    model::ScheduleTaskType,
+    utils::{interner_gc, interner_len},
+};
 use std::{
     str::FromStr,
     sync::Arc,
@@ -33,11 +38,7 @@ pub fn datetime_to_instant(datetime: DateTime<FixedOffset>) -> Instant {
     Instant::now() + duration_until
 }
 
-pub fn exec_scheduler(
-    client: &reqwest::Client,
-    app_state: &Arc<AppState>,
-    cancel: &CancellationToken,
-) {
+pub fn exec_scheduler(client: &reqwest::Client, app_state: &Arc<AppState>, cancel: &CancellationToken) {
     let cfg = &app_state.app_config;
     let config = cfg.config.load();
     let schedules: Vec<ScheduleConfig> =
@@ -53,11 +54,7 @@ pub fn exec_scheduler(
                 .is_some_and(|geoip| geoip.enabled),
         };
         if !task_enabled {
-            log::info!(
-                "Skipping disabled scheduled task {:?} ({})",
-                schedule.task_type,
-                schedule.schedule
-            );
+            log::info!("Skipping disabled scheduled task {:?} ({})", schedule.task_type, schedule.schedule);
             continue;
         }
 
@@ -101,14 +98,7 @@ pub fn exec_scheduler(
             }
             ScheduleTaskType::LibraryScan | ScheduleTaskType::GeoIpUpdate => {
                 tokio::spawn(async move {
-                    start_scheduler(
-                        http_client,
-                        expression.as_str(),
-                        task_type,
-                        app_state_clone,
-                        cancel_token,
-                    )
-                    .await;
+                    start_scheduler(http_client, expression.as_str(), task_type, app_state_clone, cancel_token).await;
                 });
             }
         }
@@ -192,11 +182,7 @@ async fn run_playlist_update_inner(
     };
     // Re-resolve targets from the CURRENT sources and forced_targets each time,
     // so that input/target ID changes from hot-reloads are picked up.
-    let targets = get_process_targets(
-        &app_state.app_config,
-        &app_state.forced_targets.load(),
-        schedule_target_names,
-    );
+    let targets = get_process_targets(&app_state.app_config, &app_state.forced_targets.load(), schedule_target_names);
     exec_processing(
         client,
         Arc::clone(&app_state.app_config),
@@ -214,7 +200,8 @@ async fn run_playlist_update_inner(
         Some(app_state.update_guard.clone()),
         app_state.get_disabled_headers(),
         Some(Arc::clone(&app_state.active_provider)),
-        Some(Arc::clone(&app_state.metadata_manager) as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>),
+        Some(Arc::clone(&app_state.metadata_manager)
+            as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>),
         None,
         Some(permit),
     )
@@ -283,7 +270,8 @@ fn run_library_scan(client: &reqwest::Client, app_state: &Arc<AppState>) {
 fn run_geoip_update(app_state: &Arc<AppState>) {
     let app_state = Arc::clone(app_state);
     tokio::spawn(async move {
-        if let Err(err) = update_geoip_db(&app_state.app_config, &app_state.http_client.load(), &app_state.geoip).await {
+        if let Err(err) = update_geoip_db(&app_state.app_config, &app_state.http_client.load(), &app_state.geoip).await
+        {
             if !matches!(err, GeoIpUpdateError::Disabled) {
                 log::error!("Scheduled GeoIp update failed: {err}");
             }

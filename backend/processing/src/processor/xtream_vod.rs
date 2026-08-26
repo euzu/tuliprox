@@ -1,7 +1,6 @@
 use crate::{
     fetched_playlist::FetchedPlaylist,
     input_cache::resolve_input_storage_path,
-    metadata_sink::queue_task_background,
     processor::{
         create_resolve_options_function_for_xtream_target, playlist::PlaylistProcessingContext,
         process_foreground_retry_once, select_cancel_token, ProbeHandleGuard, ResolveOptions, ResolveOptionsFlags,
@@ -524,7 +523,7 @@ fn queue_background_vod_info(
                     input.name, provider_id, reasons, has_details, has_tmdb, has_date, has_video, has_audio, pli.header.title
                 );
             }
-            queue_task_background(mgr, input.name.clone(), task);
+            Arc::clone(mgr).queue_task_background(input.name.clone(), task);
             queued += 1;
         }
     }

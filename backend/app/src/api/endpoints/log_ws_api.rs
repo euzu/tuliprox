@@ -13,7 +13,7 @@ use axum::{
 use log::{trace, warn};
 use serde::Deserialize;
 use shared::{
-    model::{LogLevel, LogWsMessage, Permission, ROLE_ADMIN, WsCloseCode},
+    model::{LogLevel, LogWsMessage, Permission, WsCloseCode, ROLE_ADMIN},
     utils::concat_path_leading_slash,
 };
 use std::sync::Arc;
@@ -91,12 +91,7 @@ async fn wait_for_socket_auth(socket: &mut WebSocket, secret_key: Option<&[u8]>)
     }
 }
 
-async fn handle_socket(
-    mut socket: WebSocket,
-    app_state: Arc<AppState>,
-    auth_required: bool,
-    query: LogWsQuery,
-) {
+async fn handle_socket(mut socket: WebSocket, app_state: Arc<AppState>, auth_required: bool, query: LogWsQuery) {
     let secret_key = get_secret_key(&app_state, auth_required);
     let mut is_authorized = !auth_required;
     let mut min_level: Option<LogLevel> = query.min_level.as_deref().and_then(|s| s.parse().ok());
@@ -115,10 +110,8 @@ async fn handle_socket(
 
     // Send history
     let history = get_log_history();
-    let filtered_history: Vec<_> = history
-        .into_iter()
-        .filter(|e| min_level.is_none_or(|lvl| e.level.matches(lvl)))
-        .collect();
+    let filtered_history: Vec<_> =
+        history.into_iter().filter(|e| min_level.is_none_or(|lvl| e.level.matches(lvl))).collect();
 
     if let Ok(history_json) = serde_json::to_string(&LogWsMessage::History(filtered_history)) {
         if socket.send(Message::Text(history_json.into())).await.is_err() {
@@ -202,9 +195,11 @@ pub fn log_ws_api_register(web_auth_enabled: bool, web_ui_path: &str) -> axum::R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        auth::{create_jwt_admin, create_jwt_web_user},
+        model::WebAuthConfig,
+    };
     use shared::model::permission::PermissionSet;
-    use crate::model::WebAuthConfig;
-    use crate::auth::{create_jwt_admin, create_jwt_web_user};
 
     #[test]
     fn test_log_ws_query_parsing() {

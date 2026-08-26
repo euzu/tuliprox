@@ -1,8 +1,9 @@
 //! What the playlist pipeline needs from the background metadata worker.
 //!
-//! Three operations out of a manager several thousand lines long: hold off
-//! background work for the duration of an update, enqueue a detail-resolution
-//! task, and skip an enqueue that is already pending.
+//! Four operations out of a manager several thousand lines long: hold off
+//! background work for the duration of an update, load the per-input enqueue
+//! state, skip an enqueue that is already pending, and enqueue a
+//! detail-resolution task.
 //!
 //! The manager itself is server-coupled - it reads provider allocation,
 //! connection state, the playlist cache and both HTTP clients - so the pipeline
@@ -21,21 +22,21 @@ pub trait MetadataUpdateSink: Send + Sync + 'static {
     /// Held for the lifetime of an update; background work waits on it.
     fn acquire_update_pause_guard(&self) -> SinkFuture<'_, OwnedRwLockWriteGuard<()>>;
 
-    /// Enqueue a detail-resolution task for `input_name`.
-    fn queue_task(&self, input_name: Arc<str>, task: UpdateTask) -> SinkFuture<'_, ()>;
+    /// Load the per-input state that `should_skip_enqueue` reads.
+    ///
+    /// Idempotent, but the first call for an input reads from disk. Call it
+    /// once, lazily, before a run of `should_skip_enqueue` checks for the same
+    /// input - not eagerly, or inputs with nothing to enqueue pay for a load
+    /// they never use.
+    fn prepare_enqueue_state(&self, input_name: Arc<str>) -> SinkFuture<'_, ()>;
 
     /// `true` when an equivalent task is already pending or ran recently enough
     /// that enqueuing again would be redundant.
-    fn should_skip_enqueue<'a>(&'a self, input_name: Arc<str>, task: &'a UpdateTask) -> SinkFuture<'a, bool>;
-}
+    ///
+    /// Reads only state `prepare_enqueue_state` has already loaded, so it is
+    /// synchronous: the pipeline calls it once per playlist item.
+    fn should_skip_enqueue(&self, input_name: &str, task: &UpdateTask) -> bool;
 
-/// Enqueue without waiting: spawns the enqueue and returns immediately.
-///
-/// The manager used to own this as `queue_task_background`; doing it here keeps
-/// the trait to plain `&self` methods.
-pub fn queue_task_background(sink: &Arc<dyn MetadataUpdateSink>, input_name: Arc<str>, task: UpdateTask) {
-    let sink = Arc::clone(sink);
-    tokio::spawn(async move {
-        sink.queue_task(input_name, task).await;
-    });
+    /// Enqueue a detail-resolution task without waiting for it to be accepted.
+    fn queue_task_background(self: Arc<Self>, input_name: Arc<str>, task: UpdateTask);
 }

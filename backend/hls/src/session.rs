@@ -836,10 +836,11 @@ mod tests {
             HlsOperationTimeoutMs, HlsRecoveryEtaMs, HlsRecoveryTimingPolicy, HlsRecoveryWorkload,
             HlsTerminalMediaPreparationState, HlsTransitionMarginMs,
         },
+        timeline::{HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH},
         CacheAccessState, HlsAccessLeaseId, HlsAccountBindingProtection, HlsEffectiveOriginAcquirePolicy,
         HlsSegmentFailureObject, HlsSegmentFailureTransition, HlsSessionKey, HlsTerminalTailGeneration,
         OriginSegmentKey, RenderedManifest, RenderedManifestStoreOutcome, SegmentCacheKey, SegmentCacheStatus,
-        SegmentEntry, HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH,
+        SegmentEntry,
     };
     use shared::model::HlsManifestRecoveryBurstPlan;
     use std::sync::Arc;

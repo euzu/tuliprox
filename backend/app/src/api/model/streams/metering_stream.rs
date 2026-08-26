@@ -4,11 +4,7 @@ use futures::{
     stream::Stream,
     task::{Context, Poll},
 };
-use std::{
-    pin::Pin,
-    sync::Arc,
-};
-
+use std::{pin::Pin, sync::Arc};
 
 /// Thin stream wrapper that only counts bytes in a shared meter handle.
 pub struct MeteringStream {
@@ -51,12 +47,10 @@ impl Drop for MeteringStream {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::MeteringStream;
-    use crate::api::model::{MeterReading, StreamMeterHandle};
-    use crate::api::model::{BoxedProviderStream, EventManager, StreamError};
+    use crate::api::model::{BoxedProviderStream, EventManager, MeterReading, StreamError, StreamMeterHandle};
     use bytes::Bytes;
     use futures::{stream, StreamExt};
     use std::sync::Arc;
@@ -78,14 +72,7 @@ mod tests {
         while stream.next().await.is_some() {}
 
         let reading = meter.snapshot();
-        assert_eq!(
-            reading,
-            MeterReading {
-                meter_uid: 11,
-                bytes_total: 12,
-                bytes_window: 12,
-            }
-        );
+        assert_eq!(reading, MeterReading { meter_uid: 11, bytes_total: 12, bytes_window: 12 });
     }
 
     #[tokio::test(start_paused = true)]

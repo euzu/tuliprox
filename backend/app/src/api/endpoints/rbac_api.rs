@@ -3,6 +3,7 @@ use crate::{
     auth::{generate_password_from_input, verify_token, AuthBearer},
     model::{RbacGroup, WebAuthConfig, WebUiUser},
     utils,
+    utils::{get_default_user_file_path, get_default_user_group_file_path},
 };
 use axum::{
     extract::{Path, State},
@@ -14,17 +15,18 @@ use log::{info, warn};
 use rand::Rng;
 use serde::Deserialize;
 use serde_json::json;
-use shared::model::{
-    permission::{permission_from_name, Permission, PermissionSet, PERMISSION_NAMES},
-    RbacGroupDto, WebUiUserDto,
+use shared::{
+    defaults::{is_blank_or_default_user_file_path, is_blank_or_default_user_group_file_path},
+    model::{
+        permission::{permission_from_name, Permission, PermissionSet, PERMISSION_NAMES},
+        RbacGroupDto, WebUiUserDto,
+    },
 };
 use std::{
     collections::HashSet,
     path::{Path as FsPath, PathBuf},
     sync::Arc,
 };
-use shared::defaults::{is_blank_or_default_user_file_path, is_blank_or_default_user_group_file_path};
-use crate::utils::{get_default_user_file_path, get_default_user_group_file_path};
 
 const RBAC_MUTATION_LOCK: &str = "rbac:mutation";
 
@@ -96,7 +98,8 @@ async fn write_text_file_atomic(path: &FsPath, content: &str) -> Result<(), std:
 }
 
 fn serialize_users_file(users: &[WebUiUser]) -> String {
-    users.iter()
+    users
+        .iter()
         .map(|user| {
             if user.groups.is_empty() || (user.groups.len() == 1 && user.groups[0].eq_ignore_ascii_case("admin")) {
                 format!("{}:{}", user.username, user.password_hash)
@@ -109,7 +112,8 @@ fn serialize_users_file(users: &[WebUiUser]) -> String {
 }
 
 fn serialize_groups_file(groups: &[RbacGroup]) -> String {
-    groups.iter()
+    groups
+        .iter()
         .map(|group| {
             let permissions = PERMISSION_NAMES
                 .iter()
@@ -201,7 +205,9 @@ fn validate_permission_dependencies(permission_names: &[String]) -> Result<(), V
     }
 }
 
-fn user_has_admin_group(user: &WebUiUser) -> bool { user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin")) }
+fn user_has_admin_group(user: &WebUiUser) -> bool {
+    user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin"))
+}
 
 fn count_admin_users(users: &[WebUiUser]) -> usize { users.iter().filter(|user| user_has_admin_group(user)).count() }
 
@@ -356,11 +362,9 @@ async fn list_users(State(app_state): State<Arc<AppState>>) -> impl IntoResponse
         .and_then(|web_ui| web_ui.auth.as_ref())
         .and_then(|auth| auth.t_users.as_ref())
         .map(|users| {
-            users.iter()
-                .map(|user| WebUiUserDto {
-                    username: user.username.clone(),
-                    groups: user.groups.clone(),
-                })
+            users
+                .iter()
+                .map(|user| WebUiUserDto { username: user.username.clone(), groups: user.groups.clone() })
                 .collect()
         })
         .unwrap_or_default();
@@ -374,28 +378,18 @@ async fn list_users_unprotected() -> impl IntoResponse {
 
 async fn list_groups(State(app_state): State<Arc<AppState>>) -> impl IntoResponse {
     let config = app_state.app_config.config.load();
-    let mut groups = vec![RbacGroupDto {
-        name: "admin".to_string(),
-        permissions: vec!["*".to_string()],
-        builtin: true,
-    }];
+    let mut groups =
+        vec![RbacGroupDto { name: "admin".to_string(), permissions: vec!["*".to_string()], builtin: true }];
 
-    if let Some(parsed_groups) = config
-        .web_ui
-        .as_ref()
-        .and_then(|web_ui| web_ui.auth.as_ref())
-        .and_then(|auth| auth.t_groups.as_ref())
+    if let Some(parsed_groups) =
+        config.web_ui.as_ref().and_then(|web_ui| web_ui.auth.as_ref()).and_then(|auth| auth.t_groups.as_ref())
     {
         for group in parsed_groups {
             let permissions = PERMISSION_NAMES
                 .iter()
                 .filter_map(|(name, permission)| group.permissions.contains(*permission).then_some((*name).to_string()))
                 .collect();
-            groups.push(RbacGroupDto {
-                name: group.name.clone(),
-                permissions,
-                builtin: false,
-            });
+            groups.push(RbacGroupDto { name: group.name.clone(), permissions, builtin: false });
         }
     }
 
@@ -403,22 +397,14 @@ async fn list_groups(State(app_state): State<Arc<AppState>>) -> impl IntoRespons
 }
 
 async fn list_groups_unprotected() -> impl IntoResponse {
-    let groups = vec![RbacGroupDto {
-        name: "admin".to_string(),
-        permissions: vec!["*".to_string()],
-        builtin: true,
-    }];
+    let groups = vec![RbacGroupDto { name: "admin".to_string(), permissions: vec!["*".to_string()], builtin: true }];
     Json(groups)
 }
-
 
 async fn list_permissions() -> impl IntoResponse {
     let permissions = PERMISSION_NAMES
         .iter()
-        .map(|(name, permission)| PermissionInfo {
-            name,
-            reserved: matches!(permission, Permission::EpgWrite),
-        })
+        .map(|(name, permission)| PermissionInfo { name, reserved: matches!(permission, Permission::EpgWrite) })
         .collect::<Vec<_>>();
     Json(permissions)
 }
@@ -432,7 +418,8 @@ async fn create_user(
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "Username cannot be empty"}))).into_response();
     }
     if request.password.len() < 8 {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": "Password must be at least 8 characters"}))).into_response();
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "Password must be at least 8 characters"})))
+            .into_response();
     }
     let groups = normalize_groups(&request.groups);
     if let Err((status, error)) = reject_empty_groups(&groups) {
@@ -463,20 +450,18 @@ async fn create_user(
     let available_groups = web_auth.t_groups.clone().unwrap_or_default();
 
     if users.iter().any(|user| user.username.eq_ignore_ascii_case(&username)) {
-        return (StatusCode::CONFLICT, Json(json!({"error": format!("User '{username}' already exists")}))).into_response();
+        return (StatusCode::CONFLICT, Json(json!({"error": format!("User '{username}' already exists")})))
+            .into_response();
     }
     if let Err(err) = validate_group_names(&groups, &available_groups) {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": err}))).into_response();
     }
 
-    users.push(WebUiUser {
-        username: username.clone(),
-        password_hash: hash,
-        groups,
-    });
+    users.push(WebUiUser { username: username.clone(), password_hash: hash, groups });
 
     let (userfile_path, _) = resolve_auth_paths(&web_auth, &config_path);
-    if let Err(response) = save_and_reprepare_auth_file(&app_state, &userfile_path, &serialize_users_file(&users)).await {
+    if let Err(response) = save_and_reprepare_auth_file(&app_state, &userfile_path, &serialize_users_file(&users)).await
+    {
         return response.into_response();
     }
 
@@ -494,7 +479,8 @@ async fn update_user(
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "Username cannot be empty"}))).into_response();
     }
     if request.password.as_ref().is_some_and(|password| password.len() < 8) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": "Password must be at least 8 characters"}))).into_response();
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "Password must be at least 8 characters"})))
+            .into_response();
     }
 
     let groups = normalize_groups(&request.groups);
@@ -535,12 +521,10 @@ async fn update_user(
         return (StatusCode::NOT_FOUND, Json(json!({"error": format!("User '{username}' not found")}))).into_response();
     };
 
-    let removing_admin = user_has_admin_group(&users[user_index]) && !groups.iter().any(|group| group.eq_ignore_ascii_case("admin"));
+    let removing_admin =
+        user_has_admin_group(&users[user_index]) && !groups.iter().any(|group| group.eq_ignore_ascii_case("admin"));
     if removing_admin && count_admin_users(&users) == 1 {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({"error": "Cannot remove admin group from the last admin user"})),
-        )
+        return (StatusCode::CONFLICT, Json(json!({"error": "Cannot remove admin group from the last admin user"})))
             .into_response();
     }
 
@@ -550,7 +534,8 @@ async fn update_user(
     }
 
     let (userfile_path, _) = resolve_auth_paths(&web_auth, &config_path);
-    if let Err(response) = save_and_reprepare_auth_file(&app_state, &userfile_path, &serialize_users_file(&users)).await {
+    if let Err(response) = save_and_reprepare_auth_file(&app_state, &userfile_path, &serialize_users_file(&users)).await
+    {
         return response.into_response();
     }
 
@@ -568,7 +553,9 @@ async fn delete_user(
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "Username cannot be empty"}))).into_response();
     }
 
-    if current_username(&app_state, &token).is_some_and(|current_username| current_username.eq_ignore_ascii_case(&username)) {
+    if current_username(&app_state, &token)
+        .is_some_and(|current_username| current_username.eq_ignore_ascii_case(&username))
+    {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "Admin cannot delete themselves"}))).into_response();
     }
 
@@ -589,7 +576,8 @@ async fn delete_user(
     users.remove(user_index);
 
     let (userfile_path, _) = resolve_auth_paths(&web_auth, &config_path);
-    if let Err(response) = save_and_reprepare_auth_file(&app_state, &userfile_path, &serialize_users_file(&users)).await {
+    if let Err(response) = save_and_reprepare_auth_file(&app_state, &userfile_path, &serialize_users_file(&users)).await
+    {
         return response.into_response();
     }
 
@@ -623,16 +611,16 @@ async fn create_group(
     };
     let mut groups = web_auth.t_groups.clone().unwrap_or_default();
     if groups.iter().any(|group| group.name.eq_ignore_ascii_case(&name)) {
-        return (StatusCode::CONFLICT, Json(json!({"error": format!("Group '{name}' already exists")}))).into_response();
+        return (StatusCode::CONFLICT, Json(json!({"error": format!("Group '{name}' already exists")})))
+            .into_response();
     }
 
-    groups.push(RbacGroup {
-        name: name.clone(),
-        permissions: normalize_permissions(&request.permissions),
-    });
+    groups.push(RbacGroup { name: name.clone(), permissions: normalize_permissions(&request.permissions) });
 
     let (_, groupfile_path) = resolve_auth_paths(&web_auth, &config_path);
-    if let Err(response) = save_and_reprepare_auth_file(&app_state, &groupfile_path, &serialize_groups_file(&groups)).await {
+    if let Err(response) =
+        save_and_reprepare_auth_file(&app_state, &groupfile_path, &serialize_groups_file(&groups)).await
+    {
         return response.into_response();
     }
 
@@ -673,7 +661,9 @@ async fn update_group(
     groups[group_index].permissions = normalize_permissions(&request.permissions);
 
     let (_, groupfile_path) = resolve_auth_paths(&web_auth, &config_path);
-    if let Err(response) = save_and_reprepare_auth_file(&app_state, &groupfile_path, &serialize_groups_file(&groups)).await {
+    if let Err(response) =
+        save_and_reprepare_auth_file(&app_state, &groupfile_path, &serialize_groups_file(&groups)).await
+    {
         return response.into_response();
     }
 
@@ -681,10 +671,7 @@ async fn update_group(
     StatusCode::OK.into_response()
 }
 
-async fn delete_group(
-    State(app_state): State<Arc<AppState>>,
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+async fn delete_group(State(app_state): State<Arc<AppState>>, Path(name): Path<String>) -> impl IntoResponse {
     let name = normalize_name(&name);
     if name.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "Group name cannot be empty"}))).into_response();
@@ -723,7 +710,9 @@ async fn delete_group(
     groups.remove(group_index);
 
     let (_, groupfile_path) = resolve_auth_paths(&web_auth, &config_path);
-    if let Err(response) = save_and_reprepare_auth_file(&app_state, &groupfile_path, &serialize_groups_file(&groups)).await {
+    if let Err(response) =
+        save_and_reprepare_auth_file(&app_state, &groupfile_path, &serialize_groups_file(&groups)).await
+    {
         return response.into_response();
     }
 
@@ -770,24 +759,16 @@ pub fn rbac_api_register(app_state: Arc<AppState>) -> Router<Arc<AppState>> {
 
 pub fn rbac_api_register_unprotected(_app_state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
-        .route(
-            "/rbac/users", axum::routing::get(list_users_unprotected)
-        )
-        .route(
-            "/rbac/groups", axum::routing::get(list_groups_unprotected)
-        )
-        .route(
-            "/rbac/permissions", axum::routing::get(list_permissions)
-        )
+        .route("/rbac/users", axum::routing::get(list_users_unprotected))
+        .route("/rbac/groups", axum::routing::get(list_groups_unprotected))
+        .route("/rbac/permissions", axum::routing::get(list_permissions))
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::{reject_empty_groups, resolve_auth_paths, validate_permission_dependencies};
+    use crate::{model::WebAuthConfig, utils};
     use axum::http::StatusCode;
-    use crate::model::WebAuthConfig;
-    use crate::utils;
 
     #[test]
     fn rejects_write_permission_without_matching_read_permission() {
@@ -798,10 +779,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_group_assignments() {
-        assert_eq!(
-            reject_empty_groups(&[]),
-            Err((StatusCode::BAD_REQUEST, "At least one group must be assigned")),
-        );
+        assert_eq!(reject_empty_groups(&[]), Err((StatusCode::BAD_REQUEST, "At least one group must be assigned")),);
     }
 
     #[test]

@@ -1,6 +1,12 @@
 // Clippy policy lives in [workspace.lints.clippy] in the root Cargo.toml and is
 // opted into by backend/app/Cargo.toml's [lints] workspace = true.
 
+// Auto-trait resolution for this crate's deeply nested async call chains
+// exceeds the default 128-step recursion limit. Without this, rustc emits
+// `recursion_depth_exceeding_limit`, which is on its way to becoming a hard
+// error (rust-lang/rust#159228).
+#![recursion_limit = "256"]
+
 // #[cfg(target_os = "linux")]
 // #[global_allocator]
 // static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -14,10 +20,15 @@
 #[macro_use]
 extern crate tuliprox_core;
 
-#[macro_use]
-mod modules;
+extern crate core;
+extern crate env_logger;
+extern crate pest;
 
-include_modules!();
+// `api` used to be declared by an `include_modules!()` macro. rustfmt does not
+// expand macros, so it never walked into this module and silently skipped every
+// file under `api/` - `cargo fmt --all -- --check` passed on unformatted code.
+// Declaring the module directly is what puts that subtree back under the gate.
+pub mod api;
 
 // The media-server anti-corruption layer is its own package; aliased under its
 // historical module name so `crate::media_server::X` paths keep resolving.

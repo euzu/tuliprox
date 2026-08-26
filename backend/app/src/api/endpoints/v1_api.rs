@@ -1,6 +1,7 @@
 use crate::{
     api::{
         api_utils::{internal_server_error, json_or_bin_response, try_unwrap_body},
+        auth_middleware::permission_layer,
         endpoints::{
             download_api,
             extract_accept_header::ExtractAcceptHeader,
@@ -18,7 +19,6 @@ use crate::{
         },
         model::AppState,
     },
-    api::auth_middleware::permission_layer,
     processing::geoip::{update_geoip_db, GeoIpUpdateError},
     utils::ip_checker::get_ips,
     VERSION,

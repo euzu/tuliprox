@@ -7,10 +7,7 @@
 
 use crate::{
     api::{api_utils::get_username_from_auth_header, model::AppState},
-    auth::{
-        validate_token_claims, verify_token, verify_token_admin,
-        verify_token_api_user, AuthBearer, AuthError,
-    },
+    auth::{validate_token_claims, verify_token, verify_token_admin, verify_token_api_user, AuthBearer, AuthError},
 };
 use log::warn;
 use shared::model::permission::{permission_to_name, Permission};

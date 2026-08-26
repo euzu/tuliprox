@@ -1,4 +1,3 @@
-use tuliprox_session::stream_options::get_stream_options;
 use crate::{
     api::{
         model::{
@@ -33,6 +32,7 @@ use std::{
 };
 use tokio::sync::Notify;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
+use tuliprox_session::stream_options::get_stream_options;
 
 const DIRECT_BODY_IDLE_TIMEOUT_SECS: u64 = 90;
 const BODY_IDLE_TIMEOUT_ERROR_CLASS: &str = "body_idle_timeout";
@@ -270,7 +270,7 @@ impl ActiveClientStreamState {
                 self.fingerprint.addr,
                 ctx.virtual_id,
             )
-                .boxed()
+            .boxed()
         } else {
             stream
         }
@@ -668,11 +668,7 @@ impl Stream for ActiveClientStream {
                                         )
                                         .await
                                         {
-                                            Some(response)
-                                                if matches!(
-                                                    response.info,
-                                                    Some((_, _, _, Some(_)))
-                                                ) => {
+                                            Some(response) if matches!(response.info, Some((_, _, _, Some(_)))) => {
                                                 let Some((_headers, _status, _response_url, Some(custom_video_type))) =
                                                     response.info
                                                 else {
@@ -1172,21 +1168,22 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
                                     session_token.as_deref().unwrap_or_default(),
                                 )
                             };
-                            let remaining_result = tuliprox_session::admission::evaluate_remaining_strategies_after_grace(
-                                &app_state.admission_ctx(),
-                                &username,
-                                max_connections,
-                                user.soft_connections,
-                                &fingerprint.client_ip,
-                                &fingerprint.addr,
-                                true,
-                                session_token.as_deref(),
-                                true,
-                                eviction_guard,
-                                ctx,
-                                grace_kind,
-                            )
-                            .await;
+                            let remaining_result =
+                                tuliprox_session::admission::evaluate_remaining_strategies_after_grace(
+                                    &app_state.admission_ctx(),
+                                    &username,
+                                    max_connections,
+                                    user.soft_connections,
+                                    &fingerprint.client_ip,
+                                    &fingerprint.addr,
+                                    true,
+                                    session_token.as_deref(),
+                                    true,
+                                    eviction_guard,
+                                    ctx,
+                                    grace_kind,
+                                )
+                                .await;
                             match remaining_result.admission.permission {
                                 shared::model::UserConnectionPermission::Allowed
                                 | shared::model::UserConnectionPermission::GracePeriod => {
@@ -1362,23 +1359,19 @@ fn stream_grace_period(request: GracePeriodParams) -> (Option<Arc<AtomicU8>>, Op
 
 #[cfg(test)]
 mod tests {
-    use super::super::buffered_stream::BufferedStream;
     use super::{
-        create_active_client_stream, create_deferred_provider_open_future, should_use_direct_body_idle_timeout,
-        stream_grace_period, ActiveClientStream, ActiveClientStreamParams, ActiveClientStreamState, CustomVideoBuffers,
-        DeferredProviderOpenOutcome, DeferredProviderOpenState, DirectBodyIdleTimeout, GracePeriodParams, StreamMode,
-        TimedStreamContext, DIRECT_BODY_IDLE_TIMEOUT_SECS,
+        super::buffered_stream::BufferedStream, create_active_client_stream, create_deferred_provider_open_future,
+        should_use_direct_body_idle_timeout, stream_grace_period, ActiveClientStream, ActiveClientStreamParams,
+        ActiveClientStreamState, CustomVideoBuffers, DeferredProviderOpenOutcome, DeferredProviderOpenState,
+        DirectBodyIdleTimeout, GracePeriodParams, StreamMode, TimedStreamContext, DIRECT_BODY_IDLE_TIMEOUT_SECS,
     };
     use crate::{
-        api::{
-            model::{
-                connection_manager::PROVIDER_END_NOT_SET, ActiveProviderManager, ActiveUserManager, AppState,
-                GraceResolutionContext,
-                BoxedProviderStream, CancelTokens, ConnectionManager, CreateUserSessionParams, CustomVideoStreamType,
-                DownloadQueue, EventManager, MetadataUpdateManager, PlaylistStorageState,
-                ProviderContentRepresentationMode, ProviderHandle, SharedStreamManager, StreamDetails, StreamError,
-                UpdateGuard,
-            },
+        api::model::{
+            connection_manager::PROVIDER_END_NOT_SET, ActiveProviderManager, ActiveUserManager, AppState,
+            BoxedProviderStream, CancelTokens, ConnectionManager, CreateUserSessionParams, CustomVideoStreamType,
+            DownloadQueue, EventManager, GraceResolutionContext, MetadataUpdateManager, PlaylistStorageState,
+            ProviderContentRepresentationMode, ProviderHandle, SharedStreamManager, StreamDetails, StreamError,
+            UpdateGuard,
         },
         auth::Fingerprint,
         model::{

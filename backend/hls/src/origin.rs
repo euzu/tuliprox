@@ -1,4 +1,4 @@
-use super::{hls_ctx::HlsCtx, safe_proxy_session_id, HlsSession, HlsSessionHandle, HlsSessionKey, ProxySessionId};
+use super::{hls_ctx::HlsCtx, HlsSession, HlsSessionHandle, HlsSessionKey, ProxySessionId};
 use log::debug;
 use shared::utils::sanitize_sensitive_info;
 use std::{
@@ -856,10 +856,6 @@ pub fn origin_account_binding_from_allocation(
 ) -> Option<HlsOriginAccountBinding> {
     let account_name = allocation.get_provider_name()?;
     Some(HlsOriginAccountBinding::new(input_name, account_name, proxy_session_id, now_ms))
-}
-
-pub fn safe_hls_origin_owner(proxy_session_id: &ProxySessionId) -> String {
-    format!("hls-cache:{}", safe_proxy_session_id(proxy_session_id))
 }
 
 #[cfg(test)]

@@ -45,11 +45,16 @@
 // this crate nothing calls it, so `dead_code` fires on every helper; the lint is
 // relaxed only while that feature is on.
 #![cfg_attr(feature = "test-support", allow(dead_code))]
+// Auto-trait resolution for this crate's deeply nested async call chains
+// exceeds the default 128-step recursion limit. Without this, rustc emits
+// `recursion_depth_exceeding_limit`, which is on its way to becoming a hard
+// error (rust-lang/rust#159228).
+#![recursion_limit = "256"]
 
 // The transient-manifest rewriter and the initial-strip pass moved here from
 // `processing::parser`: unlike the rest of that parser they are written in terms
 // of this module's transient-resource types.
-pub mod availability;
+mod availability;
 mod availability_reevaluation;
 mod backpressure;
 mod cache;
@@ -57,20 +62,20 @@ mod critical_handoff;
 mod cutover;
 mod deadline;
 mod deterministic_conflict;
-pub mod hls_ctx;
+mod hls_ctx;
 pub mod initial_strip;
-pub mod playback;
-pub mod transient_manifest;
+mod playback;
+mod transient_manifest;
 
 /// Redirect-following cap shared by manifest, resource and endpoint fetchers.
 pub const MAX_MANUAL_REDIRECTS: usize = 10;
-pub mod gc;
+mod gc;
 pub mod header_policy;
 mod headers;
 mod ids;
-pub mod lease;
+mod lease;
 mod lifecycle;
-pub mod manager;
+mod manager;
 mod manifest_acceptance;
 mod manifest_commit;
 mod manifest_fetch;
@@ -81,20 +86,20 @@ mod map_fetcher;
 mod master_playlist;
 mod media_reserve;
 mod observability;
-pub mod origin;
+mod origin;
 mod origin_progress;
 mod paths;
-pub mod post_refresh_availability;
+mod post_refresh_availability;
 mod prefetch;
 mod prepared_terminal_bundle;
 mod qos;
 mod recovery_timing;
-pub mod refresh;
+mod refresh;
 mod renderer;
 mod resource_fetch;
 mod resource_identity;
 mod response;
-pub mod runtime_custom_tail;
+mod runtime_custom_tail;
 mod segment_fetcher;
 mod segment_repair;
 mod segment_watchdog;
@@ -121,100 +126,72 @@ pub use self::recovery_timing::{
 #[cfg(any(test, feature = "test-support"))]
 pub use self::terminal_tail::HlsTerminalTailGeneration;
 /// Public contract consumed by the server application.
+///
+/// Every name here has at least one call site in `tuliprox`; the list is grouped
+/// by the module that defines it, so a subsystem can be pruned or moved without
+/// reading the whole facade. Nothing is kept for a hypothetical future consumer.
 pub mod api {
     pub use super::{
         availability::{
             commit_terminal_tail_if_lease_reserve_requires_cutover, hls_manifest_acceptance_directive_for_session,
-            hls_recovery_timing_policy, hls_startup_admission_allows_snapshot, register_hls_availability_reevaluation,
+            hls_startup_admission_allows_snapshot, register_hls_availability_reevaluation,
             HlsManifestAcceptanceDirective, HlsManifestAcceptanceEvaluationOutcome, HlsTerminalFailedClosedReason,
-            HlsTerminalResolution, HLS_PLAYBACK_RATE_GUARD_MILLI,
+            HlsTerminalResolution,
         },
         availability_reevaluation::{HlsAvailabilityReevaluationObservation, HlsAvailabilityReevaluationRegistration},
-        backpressure::{classify_hls_backpressure, HlsBackpressureState},
-        cache::{
-            CacheInvalidationOutcome, CachedSegmentMetadata, HlsCacheCapacityReclaimOutcome,
-            HlsCacheCapacityReclaimRequest, HlsCacheCapacityReclaimer, HlsCacheCapacityRevision, HlsCacheObjectKey,
-            HlsSegmentCache, MapCacheKey, SegmentCacheKey, StagedCacheObject, TransientObjectCacheKey,
-            DEFAULT_HLS_CACHE_DURATION_SECS, DEFAULT_HLS_CACHE_PATH,
-        },
-        deadline::{hls_client_body_send_deadline, hls_object_body_deadline, refresh_hls_client_body_send_deadline},
-        gc::{
-            build_rewrite_secret_fingerprint, exec_hls_cache_gc, GarbageCollectionPolicy, GarbageCollectionReport,
-            HlsGarbageCollector, ProtectedSet,
-        },
+        cache::{SegmentCacheKey, TransientObjectCacheKey},
+        deadline::hls_object_body_deadline,
+        gc::exec_hls_cache_gc,
         headers::{
-            append_hls_provider_session_headers, extract_hls_provider_session_header_map,
-            extract_hls_provider_session_headers, force_identity_without_range,
-            hls_origin_headers_with_provider_session, sanitized_hls_origin_headers, scrub_hls_origin_headers,
+            extract_hls_provider_session_headers, force_identity_without_range, scrub_hls_origin_headers,
             should_remove_hls_origin_header,
         },
         ids::{build_proxy_session_id, HlsSessionKey, ProxySessionId, HLS_ACCESS_LEASE_ID_PLACEHOLDER},
         lease::{
             new_hls_access_lease_id, HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseId,
-            HlsAccessLeaseIdleRelease, HlsAccessLeaseLifecycleSnapshot, HlsAccessLeasePendingDeadline,
-            HlsAccessLeaseSessionSnapshot, HlsAccessLeaseState, HlsAccessLeaseStore, HlsAccessLeaseTiming,
-            HlsAccessLeaseTouch, HlsFreshManifestRequiredReason, HlsLeaseStartupAdmissionState, HlsMediaLeaseIdentity,
-            HlsPlaybackFamilyKey,
+            HlsAccessLeasePendingDeadline, HlsAccessLeaseState, HlsAccessLeaseTiming, HlsAccessLeaseTouch,
+            HlsFreshManifestRequiredReason, HlsLeaseStartupAdmissionState, HlsMediaLeaseIdentity, HlsPlaybackFamilyKey,
         },
-        lifecycle::{HlsLifecycleEvent, HlsLifecycleEventKey, HlsLifecycleManager},
-        manager::{exec_hls_lifecycle, HlsCriticalHandoffStateAccess, HlsMediaActivityCommitOutcome, HlsProxyManager},
+        lifecycle::{HlsLifecycleEvent, HlsLifecycleEventKey},
+        manager::{exec_hls_lifecycle, HlsMediaActivityCommitOutcome, HlsProxyManager},
         manifest_commit::{
             hls_cached_manifest_options_for_requirement, hls_committed_manifest_body_for_request,
             hls_manifest_commit_requirement, hls_should_wait_for_initial_manifest_commit, HlsCachedManifestOptions,
             HlsCommittedManifestBody,
         },
-        manifest_fetch::{
-            classify_origin_manifest_status, LiveHlsOriginEntry, OriginManifestStatusClass, RetryPolicy,
-            MAX_HLS_MANIFEST_BYTES,
-        },
+        manifest_fetch::{LiveHlsOriginEntry, RetryPolicy, MAX_HLS_MANIFEST_BYTES},
         manifest_snapshot::{derive_hls_lease_manifest_snapshot, HlsLeaseManifestSnapshotInput},
-        map::{MapCacheStatus, MapEntry, OriginMapFetchRef, OriginMapKey, ProxyMapId},
-        map_fetcher::{HlsMapWorkerPool, MapFetchContext},
+        map::{MapCacheStatus, MapEntry, OriginMapKey, ProxyMapId},
         master_playlist::{
             HlsBandwidthPersistenceOutcome, HlsMasterBandwidth, HlsMasterBandwidthSelection,
             HlsSingleVariantMasterPlaylist,
         },
-        media_reserve::{
-            evaluate_lease_reserve, HlsLeaseReserveInput, HlsPlaybackCompletionOutcome, HlsPlaybackRequestToken,
-        },
         observability::{
-            hls_manifest_recovery_log_fields, hls_origin_log_value, log_hls_origin_content_coding,
-            safe_hls_access_lease_id, safe_proxy_session_id, safe_session_key, safe_user_session_token,
-            HlsCacheMetrics, HlsCacheMetricsSnapshot, HlsLogIdentity, HlsOriginContentCodingObjectKind,
-            HlsOriginContentCodingSource, HlsRecoveryTriggerDiagnostic, HlsRecoveryTriggerSource,
+            log_hls_origin_content_coding, safe_hls_access_lease_id, safe_proxy_session_id, safe_session_key,
+            safe_user_session_token, HlsLogIdentity, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource,
         },
         origin::{
-            acquire_bound_hls_origin_account_handle, begin_hls_origin_account_io, begin_hls_origin_account_io_bounded,
-            build_hls_origin_session_owner, classify_account_binding_protection, finish_hls_origin_account_io,
-            finish_hls_origin_io, hls_origin_account_status, origin_account_binding_from_allocation,
-            safe_hls_origin_owner, HlsAccountBindingProtection, HlsAccountOverlapTiming,
-            HlsBoundAccountAcquireErrorKind, HlsEffectiveOriginAcquirePolicy, HlsEffectiveOriginAcquirePolicyState,
-            HlsOriginAccountBinding, HlsOriginAccountBindingMode, HlsOriginAccountDetachedReason,
-            HlsOriginAccountIoLease, HlsOriginAccountIoLeaseGuard, HlsOriginAccountRebindState, HlsOriginAccountStatus,
-            HlsOriginIoContext, HlsOriginSource, HlsOriginSourceKind, HlsOriginWorkClass,
+            begin_hls_origin_account_io, begin_hls_origin_account_io_bounded, build_hls_origin_session_owner,
+            finish_hls_origin_account_io, hls_origin_account_status, origin_account_binding_from_allocation,
+            HlsAccountBindingProtection, HlsAccountOverlapTiming, HlsBoundAccountAcquireErrorKind,
+            HlsEffectiveOriginAcquirePolicy, HlsOriginAccountBinding, HlsOriginAccountBindingMode,
+            HlsOriginAccountDetachedReason, HlsOriginAccountStatus, HlsOriginIoContext, HlsOriginSource,
+            HlsOriginSourceKind, HlsOriginWorkClass,
         },
         origin_progress::publication_late_after_ms,
         paths::{HlsMapFile, HlsSegmentFile, TransientResourceFile},
         playback::{
             validate_hls_access_lease, HlsAccessAdmissionMode, HlsAccessContext, HlsAccessLeaseValidationError,
         },
-        prefetch::{ManifestFetchQueueReport, SegmentFetchPriority, SegmentPrefetchQueue},
-        qos::{HlsQosMeterInit, HlsQosRegistration, HlsQosRegistry, HlsQosRuntimeConfig},
+        prefetch::SegmentFetchPriority,
+        qos::{HlsQosMeterInit, HlsQosRuntimeConfig},
         refresh::{
-            cold_start_retry_after_seconds, maybe_trigger_origin_refresh, maybe_trigger_origin_refresh_with_outcome,
-            trigger_origin_refresh_sync, HlsManifestCommitRequirement, HlsOriginRefreshTriggerOutcome,
-            HlsPostRefreshRuntime, OriginRefreshRequest, OriginRefreshState,
+            cold_start_retry_after_seconds, maybe_trigger_origin_refresh_with_outcome, trigger_origin_refresh_sync,
+            HlsManifestCommitRequirement, HlsOriginRefreshTriggerOutcome, HlsPostRefreshRuntime, OriginRefreshRequest,
         },
-        renderer::{
-            renderer_candidate_window_proxy_seqs, HlsManifestRenderer, RenderError, RenderPolicy, RenderedManifest,
-            RenderedManifestStoreOutcome, RenderedManifestStoreRejectReason,
-        },
+        renderer::RenderedManifest,
         resource_fetch::{
-            build_hls_origin_resource_headers, build_hls_origin_resource_headers_with_client_range,
-            retry_after_secs_from_ms, run_hls_origin_resource_retry_loop_with_attempt_prepare,
-            HlsOriginByteRangeExpectation, HlsOriginResourceBodyDeadline, HlsOriginResourceClients,
-            HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchAttempt, HlsResourceFetchKind,
-            HlsResourceFetchSource,
+            retry_after_secs_from_ms, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsResourceFetchAttempt,
         },
         response::{
             finite_hls_immutable_media_response, finite_hls_media_head_response, finite_hls_media_response,
@@ -227,56 +204,133 @@ pub mod api {
             HlsRuntimeCustomTailOutcome, HlsRuntimeCustomTailReason, HlsRuntimeCustomTailRequest,
             HlsStandaloneCustomAccess, HlsStandaloneCustomSegmentAccess, HlsStandaloneCustomSegmentError,
         },
-        segment_fetcher::{HlsSegmentWorkerPool, SegmentDemandFetchOutcome, SegmentFetchContext, SegmentFetchPolicy},
-        segment_repair::{
-            parse_ffmpeg_warnings, HlsRepairRenderedObjectId, HlsSegmentRepairManager, HlsSegmentRepairObjectContext,
-            HlsSegmentRepairSource, WarningCounters,
-        },
-        session::{
-            HlsSegmentFailureObject, HlsSegmentFailureTracker, HlsSegmentFailureTransition, HlsSession,
-            HlsSessionActivity, HlsSessionMode, HlsTerminalTailProtection, HlsTerminalTailProtectionInstall,
-            HlsTerminalTailProtectionRemoval, TransientPassthroughReason,
-        },
-        session_store::{
-            HlsExpiredSessionMarker, HlsExpiredSessionReason, HlsSessionHandle, HlsSessionStore, HlsSessionStoreOutcome,
-        },
-        startup_observability::{HlsStartupBodyObservation, HlsStartupObservability},
+        segment_fetcher::{SegmentDemandFetchOutcome, SegmentFetchContext, SegmentFetchPolicy},
+        session::{HlsSession, HlsSessionMode, HlsTerminalTailProtection, TransientPassthroughReason},
+        session_store::{HlsSessionHandle, HlsSessionStoreOutcome},
         terminal_tail::{
             terminal_tail_manifest_body, HlsLeasePlaybackMode, HlsTerminalSegmentPath, HlsTerminalTailPlan,
         },
         timeline::{
-            default_content_type_for_segment_ext, is_hls_provisioning_gap_segment, is_hls_provisioning_segment,
-            CacheAccessState, HlsSegmentEncryption, OriginSegmentFetchRef, OriginSegmentKey, SegmentCacheStatus,
-            SegmentEntry, TimelineMapError, HLS_PROVISIONING_GAP_ORIGIN_EPOCH, HLS_PROVISIONING_ORIGIN_EPOCH,
-            HLS_PROVISIONING_SEGMENT_DURATION_MS, HLS_PROVISIONING_TARGET_DURATION_SECS,
+            is_hls_provisioning_gap_segment, is_hls_provisioning_segment, CacheAccessState, OriginSegmentFetchRef,
+            OriginSegmentKey, SegmentCacheStatus, SegmentEntry, HLS_PROVISIONING_GAP_ORIGIN_EPOCH,
+            HLS_PROVISIONING_ORIGIN_EPOCH, HLS_PROVISIONING_SEGMENT_DURATION_MS, HLS_PROVISIONING_TARGET_DURATION_SECS,
         },
         transient::{
-            build_transient_resource_id, TransientObjectCacheEntry, TransientObjectCacheStatus,
-            TransientObjectFetchDecision, TransientObjectFetchToken, TransientObjectRemoval,
+            build_transient_resource_id, TransientObjectCacheStatus, TransientObjectFetchToken,
             TransientObjectUnavailableState, TransientPassthroughState, TransientResourceId, TransientResourceKind,
-            TransientResourceRef, TransientResourceStore,
+            TransientResourceRef,
         },
         transient_fetcher::{
             fetch_and_commit_hls_transient_origin_response_with_attempt_prepare,
             fetch_hls_transient_origin_response_with_attempt_prepare, hls_transient_object_fetch_failure,
-            hls_transient_origin_response, hls_transient_resource_fetch_kind,
-            is_hls_transient_full_object_cacheable_request, record_successful_transient_segment_fetch,
-            record_temporary_transient_segment_fetch_failure, resolve_hls_transient_object_cache_action,
-            HlsTransientCacheCommitContext, HlsTransientDecodedOriginResponse, HlsTransientDirectResponseContext,
-            HlsTransientObjectCacheAction, HlsTransientObjectCacheResolution, HlsTransientObjectFetchFailure,
-            HlsTransientObjectFetchFinalizer, HlsTransientOriginCacheFetchRequest, HlsTransientOriginFetchRequest,
-            HlsTransientOriginIoGuard,
+            hls_transient_origin_response, is_hls_transient_full_object_cacheable_request,
+            record_successful_transient_segment_fetch, record_temporary_transient_segment_fetch_failure,
+            resolve_hls_transient_object_cache_action, HlsTransientCacheCommitContext,
+            HlsTransientDecodedOriginResponse, HlsTransientDirectResponseContext, HlsTransientObjectCacheAction,
+            HlsTransientObjectFetchFailure, HlsTransientObjectFetchFinalizer, HlsTransientOriginCacheFetchRequest,
+            HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard,
         },
     };
 }
-
+// The crate-root names the modules in this crate use to reach each other.
+//
+// This is not the public API - that is `api` below, which re-exports from the
+// same modules for the server application. Keeping the two lists apart means
+// pruning one does not silently break the other, which a `pub(crate) use api::*`
+// could not give us.
+pub(crate) use self::{
+    availability::{hls_recovery_timing_policy, HlsManifestAcceptanceDirective, HLS_PLAYBACK_RATE_GUARD_MILLI},
+    availability_reevaluation::HlsAvailabilityReevaluationRegistration,
+    backpressure::{classify_hls_backpressure, HlsBackpressureState},
+    cache::{
+        CacheInvalidationOutcome, CachedSegmentMetadata, HlsCacheCapacityReclaimOutcome,
+        HlsCacheCapacityReclaimRequest, HlsCacheCapacityReclaimer, HlsCacheCapacityRevision, HlsCacheObjectKey,
+        HlsSegmentCache, MapCacheKey, SegmentCacheKey, StagedCacheObject, TransientObjectCacheKey,
+    },
+    deadline::{hls_client_body_send_deadline, hls_object_body_deadline, refresh_hls_client_body_send_deadline},
+    gc::{
+        build_rewrite_secret_fingerprint, GarbageCollectionPolicy, GarbageCollectionReport, HlsGarbageCollector,
+        ProtectedSet,
+    },
+    headers::{
+        append_hls_provider_session_headers, extract_hls_provider_session_header_map, force_identity_without_range,
+        hls_origin_headers_with_provider_session, sanitized_hls_origin_headers, scrub_hls_origin_headers,
+    },
+    ids::{build_proxy_session_id, HlsSessionKey, ProxySessionId, HLS_ACCESS_LEASE_ID_PLACEHOLDER},
+    lease::{
+        HlsAccessLease, HlsAccessLeaseActivation, HlsAccessLeaseId, HlsAccessLeaseLifecycleSnapshot,
+        HlsAccessLeasePendingDeadline, HlsAccessLeaseSessionSnapshot, HlsAccessLeaseState, HlsAccessLeaseStore,
+        HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsFreshManifestRequiredReason, HlsMediaLeaseIdentity,
+        HlsPlaybackFamilyKey,
+    },
+    lifecycle::{HlsLifecycleEvent, HlsLifecycleEventKey, HlsLifecycleManager},
+    manager::{HlsCriticalHandoffStateAccess, HlsMediaActivityCommitOutcome, HlsProxyManager},
+    map::{MapCacheStatus, MapEntry, OriginMapFetchRef, OriginMapKey, ProxyMapId},
+    map_fetcher::{HlsMapWorkerPool, MapFetchContext},
+    media_reserve::{
+        evaluate_lease_reserve, HlsLeaseReserveInput, HlsPlaybackCompletionOutcome, HlsPlaybackRequestToken,
+    },
+    observability::{
+        hls_manifest_recovery_log_fields, hls_origin_log_value, log_hls_origin_content_coding,
+        safe_hls_access_lease_id, safe_proxy_session_id, safe_session_key, safe_user_session_token, HlsCacheMetrics,
+        HlsLogIdentity, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource, HlsRecoveryTriggerDiagnostic,
+        HlsRecoveryTriggerSource,
+    },
+    origin::{
+        begin_hls_origin_account_io, begin_hls_origin_account_io_bounded, classify_account_binding_protection,
+        finish_hls_origin_account_io, HlsAccountBindingProtection, HlsAccountOverlapTiming,
+        HlsBoundAccountAcquireErrorKind, HlsEffectiveOriginAcquirePolicy, HlsEffectiveOriginAcquirePolicyState,
+        HlsOriginAccountBinding, HlsOriginAccountIoLease, HlsOriginAccountIoLeaseGuard, HlsOriginAccountRebindState,
+        HlsOriginIoContext, HlsOriginSource, HlsOriginWorkClass,
+    },
+    paths::{HlsMapFile, HlsSegmentFile, TransientResourceFile},
+    prefetch::{SegmentFetchPriority, SegmentPrefetchQueue},
+    qos::HlsQosRegistry,
+    refresh::{HlsManifestCommitRequirement, OriginRefreshState},
+    renderer::{
+        renderer_candidate_window_proxy_seqs, HlsManifestRenderer, RenderPolicy, RenderedManifest,
+        RenderedManifestStoreOutcome, RenderedManifestStoreRejectReason,
+    },
+    resource_fetch::{
+        build_hls_origin_resource_headers, build_hls_origin_resource_headers_with_client_range,
+        retry_after_secs_from_ms, run_hls_origin_resource_retry_loop_with_attempt_prepare,
+        HlsOriginByteRangeExpectation, HlsOriginResourceBodyDeadline, HlsOriginResourceClients,
+        HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsResourceFetchAttempt, HlsResourceFetchKind,
+        HlsResourceFetchSource,
+    },
+    segment_fetcher::{HlsSegmentWorkerPool, SegmentFetchContext, SegmentFetchPolicy},
+    segment_repair::{
+        HlsRepairRenderedObjectId, HlsSegmentRepairManager, HlsSegmentRepairObjectContext, HlsSegmentRepairSource,
+    },
+    session::{
+        HlsSegmentFailureObject, HlsSegmentFailureTransition, HlsSession, HlsSessionMode, HlsTerminalTailProtection,
+        HlsTerminalTailProtectionInstall, HlsTerminalTailProtectionRemoval, TransientPassthroughReason,
+    },
+    session_store::{
+        HlsExpiredSessionMarker, HlsExpiredSessionReason, HlsSessionHandle, HlsSessionStore, HlsSessionStoreOutcome,
+    },
+    startup_observability::{HlsStartupBodyObservation, HlsStartupObservability},
+    timeline::{
+        is_hls_provisioning_gap_segment, is_hls_provisioning_segment, CacheAccessState, HlsSegmentEncryption,
+        OriginSegmentFetchRef, OriginSegmentKey, SegmentCacheStatus, SegmentEntry, TimelineMapError,
+        HLS_PROVISIONING_TARGET_DURATION_SECS,
+    },
+    transient::{
+        TransientObjectCacheStatus, TransientObjectFetchDecision, TransientObjectFetchToken,
+        TransientObjectUnavailableState, TransientPassthroughState, TransientResourceId, TransientResourceKind,
+        TransientResourceRef, TransientResourceStore,
+    },
+    transient_fetcher::{
+        fetch_hls_transient_origin_response_with_attempt_prepare, HlsTransientObjectFetchFinalizer,
+        HlsTransientOriginFetchRequest,
+    },
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use self::{
     manifest_acceptance::{HlsManifestAcceptanceExhaustionReason, HlsManifestAcceptanceTrigger},
     master_playlist::HlsBandwidthPersistenceState,
     media_reserve::{
-        HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsLeaseReserveAvailabilityBasis, HlsLeaseReserveSnapshot,
-        HlsManifestDeliveryMode, HlsManifestSourceRenderMarker,
+        HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestDeliveryMode, HlsManifestSourceRenderMarker,
     },
     origin_progress::HlsOriginPathCondition,
     prepared_terminal_bundle::{prepared_terminal_bundle_key, HlsPreparedTerminalBundleState},
@@ -288,10 +342,6 @@ pub use self::{
         HlsTerminalTailCompatibility, HLS_TERMINAL_TAIL_SEGMENT_COUNT,
     },
 };
-// Internal modules still use the former crate-root names while the public API
-// is exposed only through `api`.
-#[allow(clippy::wildcard_imports)]
-pub(crate) use api::*;
 pub use hls_ctx::{HlsCtx, WeakHlsCtx};
 pub use tuliprox_mpegts::ts_inspector::{
     evaluate_mpeg_ts_splice_boundary, hls_aes128_cbc_iv, inspect_mpeg_ts_async, inspect_mpeg_ts_media_evidence_async,

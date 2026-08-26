@@ -1,9 +1,12 @@
+// Recording-source resolution moved into the recording subsystem so it no
+// longer has to call back into `endpoints`.
 use crate::{
     api::{
         api_utils::{
             create_api_proxy_user, json_or_bin_response, resource_response, try_option_bad_request,
             try_result_bad_request, try_unwrap_body,
         },
+        auth_middleware::permission_layer,
         endpoints::{
             api_playlist_utils::{
                 get_playlist_for_custom_provider, get_playlist_for_input, get_playlist_for_target,
@@ -17,9 +20,11 @@ use crate::{
                 xtream_player_api_stream_with_token, ApiStreamContext, ApiStreamRequest,
             },
         },
-        model::AppState,
+        model::{
+            recording::recording_source_resolution::{resolve_recording_config, resolve_recording_target},
+            AppState,
+        },
     },
-    api::auth_middleware::permission_layer,
     auth::{create_access_token, verify_access_token},
     iptv::{stalker::client::validate_public_playable_url, xtream},
     model::{
@@ -27,9 +32,10 @@ use crate::{
         ConfigInputOptions, EpgSource, EpgSourceType, IcsDummyPolicy, InputSource,
     },
     processing::{
+        epg::get_input_raw_epg_file_path,
         parser::{
-        ics::parse_ics_file_to_channel,
-        xmltv::{merge_epg_channels_by_priority_with_dummy_policies, EpgDummyPolicySource},
+            ics::parse_ics_file_to_channel,
+            xmltv::{merge_epg_channels_by_priority_with_dummy_policies, EpgDummyPolicySource},
         },
         processor::re_resolve_stalker_url,
     },
@@ -37,7 +43,6 @@ use crate::{
         iter_raw_m3u_target_playlist, iter_raw_xtream_target_playlist, m3u_get_item_for_stream_id,
         xtream_get_item_for_stream_id,
     },
-    processing::epg::get_input_raw_epg_file_path,
     utils::{file_exists_async, request},
 };
 use axum::{response::IntoResponse, Router};
@@ -57,9 +62,6 @@ use shared::{
 use std::{path::Path, str::FromStr, sync::Arc};
 use tokio_stream::StreamExt;
 use url::Url;
-// Recording-source resolution moved into the recording subsystem so it no
-// longer has to call back into `endpoints`.
-use crate::api::model::recording::recording_source_resolution::{resolve_recording_config, resolve_recording_target};
 
 fn create_config_input_for_m3u(url: &str) -> ConfigInput {
     ConfigInput {
@@ -176,7 +178,6 @@ fn build_recording_stream_url(
     Some(url.into())
 }
 
-
 pub(in crate::api) fn build_webplayer_recording_url(
     app_config: &crate::model::AppConfig,
     target_id: u16,
@@ -191,13 +192,7 @@ pub(in crate::api) fn build_webplayer_recording_url(
         .and_then(|web_ui| web_ui.player_server.as_ref())
         .map_or("default", |server_name| server_name.as_str());
     let server_info = app_config.get_server_info(server_name)?;
-    Some(build_playlist_webplayer_url(
-        &server_info.get_base_url(),
-        &access_token,
-        target_id,
-        virtual_id,
-        cluster,
-    ))
+    Some(build_playlist_webplayer_url(&server_info.get_base_url(), &access_token, target_id, virtual_id, cluster))
 }
 
 pub(in crate::api) fn build_stable_recording_url(
@@ -215,14 +210,7 @@ pub(in crate::api) fn build_stable_recording_url(
         .and_then(|web_ui| web_ui.player_server.as_ref())
         .map_or("default", |server_name| server_name.as_str());
     let server_info = app_config.get_server_info(server_name)?;
-    build_recording_stream_url(
-        &server_info.get_base_url(),
-        &access_token,
-        target_name,
-        input_name,
-        virtual_id,
-        cluster,
-    )
+    build_recording_stream_url(&server_info.get_base_url(), &access_token, target_name, input_name, virtual_id, cluster)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -230,9 +218,6 @@ pub(in crate::api) struct ResolvedRecordingSource {
     pub virtual_id: u32,
     pub input_name: String,
 }
-
-
-
 
 pub(in crate::api) async fn resolve_target_recording_source(
     app_config: &crate::model::AppConfig,
@@ -923,7 +908,8 @@ async fn stalker_resource_response(
     cluster: XtreamCluster,
     provider_id: u32,
 ) -> axum::response::Response {
-    let Some(input) = app_state.app_config.get_input_by_id(input_id).filter(|input| input.input_type.is_stalker()) else {
+    let Some(input) = app_state.app_config.get_input_by_id(input_id).filter(|input| input.input_type.is_stalker())
+    else {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     };
     let kind = match cluster {
@@ -1066,8 +1052,7 @@ async fn playlist_filter_preview(
     if target.has_output(TargetType::Xtream) {
         let mut any_cluster_read = false;
         for cluster in [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series] {
-            if let Some(mut iterator) = iter_raw_xtream_target_playlist(&app_state.app_config, &target, cluster).await
-            {
+            if let Some(mut iterator) = iter_raw_xtream_target_playlist(&app_state.app_config, &target, cluster).await {
                 any_cluster_read = true;
                 while let Some(entry) = iterator.next().await {
                     match entry {
@@ -1150,10 +1135,7 @@ pub fn v1_api_playlist_register_public(router: Router<Arc<AppState>>) -> axum::R
             "/playlist/webplayer/{token}/{target_id}/{cluster}/{stream_id}",
             axum::routing::get(playlist_webplayer_stream),
         )
-        .route(
-            "/playlist/recording/{token}/{cluster}/{virtual_id}",
-            axum::routing::get(playlist_recording_stream),
-        )
+        .route("/playlist/recording/{token}/{cluster}/{virtual_id}", axum::routing::get(playlist_recording_stream))
 }
 
 pub fn v1_api_playlist_register_with_permissions(
@@ -1191,8 +1173,14 @@ async fn playlist_episode_item(
         if let Some(target) = app_state.app_config.get_target_by_id(target_id) {
             if target.has_output(TargetType::Xtream) {
                 if let Ok(vid) = virtual_id.parse::<u32>() {
-                    if let Ok(pli) =
-                        xtream_get_item_for_stream_id(vid, &app_state.app_config, &app_state.playlists, &target, Some(XtreamCluster::Series)).await
+                    if let Ok(pli) = xtream_get_item_for_stream_id(
+                        vid,
+                        &app_state.app_config,
+                        &app_state.playlists,
+                        &target,
+                        Some(XtreamCluster::Series),
+                    )
+                    .await
                     {
                         return axum::Json(json!(UiPlaylistItem::from(pli))).into_response();
                     }
@@ -1206,29 +1194,28 @@ async fn playlist_episode_item(
 #[cfg(test)]
 mod tests {
     use super::resolve_provider_url_for_request;
-    use crate::api::model::recording::recording_source_resolution::resolve_recording_config;
     use crate::{
         api::model::{
-            ActiveProviderManager, ActiveUserManager, AppState, ConnectionManager, DownloadQueue, EventManager,
-            MetadataUpdateManager, PlaylistStorageState, SharedStreamManager,
+            recording::recording_source_resolution::resolve_recording_config, ActiveProviderManager, ActiveUserManager,
+            AppState, ConnectionManager, DownloadQueue, EventManager, MetadataUpdateManager, PlaylistStorageState,
+            SharedStreamManager,
         },
         model::{
-            AppConfig, Config, ConfigInput, ConfigProvider, ConfigSource, ConfigTarget, SourcesConfig,
-            StreamHistoryConfig, VideoDownloadConfig,
+            AppConfig, Config, ConfigInput, ConfigInputOptions, ConfigProvider, ConfigSource, ConfigTarget,
+            SourcesConfig, StreamHistoryConfig, VideoDownloadConfig,
         },
         processing::epg::{get_input_raw_epg_file_path, get_input_raw_xmltv_file_path},
+        repository::GeoIp,
     };
-    use crate::repository::GeoIp;
     use arc_swap::{ArcSwap, ArcSwapOption};
     use axum::{
-        extract::{Path as AxumPath, Query, State},
         body::Body,
+        extract::{Path as AxumPath, Query, State},
         http::{Request, StatusCode},
         response::IntoResponse,
         Json, Router,
     };
     use chrono::Utc;
-    use crate::model::ConfigInputOptions;
     use serde_json::json;
     use shared::{
         foundation::Filter,
@@ -1358,22 +1345,24 @@ mod tests {
     fn recording_target_resolution_uses_stable_name_and_input_across_runtime_ids() {
         let input_a = Arc::new(ConfigInput { id: 7, name: "input-a".intern(), ..Default::default() });
         let input_b = Arc::new(ConfigInput { id: 8, name: "input-b".intern(), ..Default::default() });
-        let target = |id, name: &str| Arc::new(ConfigTarget {
-            id,
-            enabled: true,
-            name: name.to_string(),
-            options: None,
-            sort: None,
-            filter: Filter::default(),
-            output: vec![],
-            rename: None,
-            mapping_ids: None,
-            mapping: Arc::default(),
-            favourites: None,
-            processing_order: ProcessingOrder::default(),
-            watch: None,
-            use_memory_cache: false,
-        });
+        let target = |id, name: &str| {
+            Arc::new(ConfigTarget {
+                id,
+                enabled: true,
+                name: name.to_string(),
+                options: None,
+                sort: None,
+                filter: Filter::default(),
+                output: vec![],
+                rename: None,
+                mapping_ids: None,
+                mapping: Arc::default(),
+                favourites: None,
+                processing_order: ProcessingOrder::default(),
+                watch: None,
+                use_memory_cache: false,
+            })
+        };
         let sources = |later_target_id| {
             let inputs = vec![Arc::clone(&input_a), Arc::clone(&input_b)];
             SourcesConfig {
@@ -2233,10 +2222,7 @@ mod tests {
             }),
             ..Default::default()
         });
-        let source = ConfigSource {
-            inputs: vec![Arc::clone(&input.name)],
-            targets: vec![],
-        };
+        let source = ConfigSource { inputs: vec![Arc::clone(&input.name)], targets: vec![] };
         let app_config = test_app_config(Arc::clone(&input), source);
         let mut sources = app_config.sources.load().as_ref().clone();
         sources.inputs.push(Arc::new(ConfigInput {
@@ -2290,7 +2276,10 @@ mod tests {
             .await
             .expect("resource response");
         assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT, "{resource_path}");
-        assert_eq!(response.headers().get("location").and_then(|value| value.to_str().ok()), Some("http://8.8.8.8/live/101"));
+        assert_eq!(
+            response.headers().get("location").and_then(|value| value.to_str().ok()),
+            Some("http://8.8.8.8/live/101")
+        );
 
         let response = router
             .clone()

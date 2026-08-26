@@ -1,7 +1,12 @@
-use crate::{api::{
-    model::AppState,
-    panel_api::{sync_panel_api_alias_pool_for_target, target_has_alias_pool_min},
-}, api::auth_middleware::permission_layer, model::{ApiProxyConfig, ProxyUserCredentials, TargetUser}, repository::store_api_user};
+use crate::{
+    api::{
+        auth_middleware::permission_layer,
+        model::AppState,
+        panel_api::{sync_panel_api_alias_pool_for_target, target_has_alias_pool_min},
+    },
+    model::{ApiProxyConfig, ProxyUserCredentials, TargetUser},
+    repository::store_api_user,
+};
 use axum::{response::IntoResponse, Router};
 use serde_json::json;
 use shared::{
@@ -49,12 +54,11 @@ async fn save_config_api_proxy_user(
     }
     // Trial plans: new users without an explicit expiry get the trial window.
     if !is_update {
-        if let Some(plan) =
-            credential.plan.as_ref().and_then(|name| api_proxy.plans.iter().find(|p| p.name == *name))
-        {
+        if let Some(plan) = credential.plan.as_ref().and_then(|name| api_proxy.plans.iter().find(|p| p.name == *name)) {
             if let Some(trial_secs) = plan.t_trial_duration_secs {
                 if credential.exp_date.is_none() {
-                    let expires = chrono::Utc::now().timestamp().saturating_add(i64::try_from(trial_secs).unwrap_or(i64::MAX));
+                    let expires =
+                        chrono::Utc::now().timestamp().saturating_add(i64::try_from(trial_secs).unwrap_or(i64::MAX));
                     credential.exp_date = Some(expires);
                 }
                 if credential.status.is_none() {
@@ -267,19 +271,9 @@ pub fn v1_api_user_register_with_permissions(
     app_state: &Arc<AppState>,
 ) -> axum::Router<Arc<AppState>> {
     let user_write_routes = Router::new()
-        .route(
-            "/{target}",
-            axum::routing::post(save_config_api_proxy_user)
-                .put(save_config_api_proxy_user)
-        )
-        .route(
-            "/{target}/{username}",
-            axum::routing::delete(delete_config_api_proxy_user)
-        )
-        .route(
-            "/{username}/session/{session_token}",
-            axum::routing::delete(terminate_user_session)
-        )
+        .route("/{target}", axum::routing::post(save_config_api_proxy_user).put(save_config_api_proxy_user))
+        .route("/{target}/{username}", axum::routing::delete(delete_config_api_proxy_user))
+        .route("/{username}/session/{session_token}", axum::routing::delete(terminate_user_session))
         .layer(permission_layer!(app_state, Permission::UserWrite));
 
     router.nest("/user", user_write_routes)

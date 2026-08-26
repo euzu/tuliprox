@@ -21,7 +21,6 @@ use tokio::{
 };
 
 pub const DEFAULT_HLS_CACHE_PATH: &str = "/tmp/tuliprox/cache/hls";
-pub const DEFAULT_HLS_CACHE_DURATION_SECS: u64 = 300;
 const TEMP_CREATE_ATTEMPTS: usize = 8;
 const MAX_CONCURRENT_OWNED_CACHE_OPERATIONS: usize = 64;
 const MAX_TEMP_FILE_CLEANUP_CANDIDATES_PER_RUN: usize = 128;
@@ -1863,7 +1862,7 @@ mod tests {
         CacheInvalidationOutcome, HlsCacheObjectKey, HlsSegmentCache, MapCacheKey, SegmentCacheKey,
         TransientObjectCacheKey, MAX_CONCURRENT_OWNED_CACHE_OPERATIONS, MAX_TEMP_FILE_CLEANUP_CANDIDATES_PER_RUN,
     };
-    use crate::{build_transient_resource_id, HlsOriginResourceFetchError, ProxySessionId};
+    use crate::{transient::build_transient_resource_id, HlsOriginResourceFetchError, ProxySessionId};
     use std::{
         collections::HashSet,
         future::Future,

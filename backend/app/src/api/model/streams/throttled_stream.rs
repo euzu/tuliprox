@@ -21,12 +21,7 @@ impl<S> ThrottledStream<S> {
     pub fn new(inner: S, throttle_kbps: usize) -> Self {
         assert!(throttle_kbps > 0, "Rate must be greater than 0");
         let rate_bytes_per_sec = (throttle_kbps as f64) * 1000.0 / 8.0;
-        Self {
-            inner,
-            rate_bytes_per_sec,
-            delay: Box::pin(sleep(Duration::ZERO)),
-            delay_active: false,
-        }
+        Self { inner, rate_bytes_per_sec, delay: Box::pin(sleep(Duration::ZERO)), delay_active: false }
     }
 }
 

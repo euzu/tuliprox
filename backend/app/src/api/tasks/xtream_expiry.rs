@@ -1,14 +1,18 @@
 use crate::{
     api::{config_file::ConfigFile, model::AppState},
+    config_loader::{persist_source_config, read_sources_file_from_path},
     iptv::xtream::get_xtream_stream_url_base,
     repository::{csv_patch_batch_update_exp_dates, get_csv_file_path, BatchExpDateUpdate},
-    utils::{request},
-    config_loader::{persist_source_config, read_sources_file_from_path},
+    utils::request,
 };
 use chrono::Utc;
 use log::{debug, warn};
 use shared::{error::TuliproxError, model::InputType};
-use std::{collections::{HashMap, HashSet}, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 
 const REFRESH_INTERVAL_SECS: i64 = 24 * 60 * 60;
@@ -248,14 +252,14 @@ fn prune_state(state: &mut ExpiryState, accounts: &[Account], now: i64) -> bool 
 
 fn collect_accounts(app_state: &AppState) -> Vec<Account> {
     let sources = app_state.app_config.sources.load();
-    sources.inputs.iter().filter(|input| input.enabled && input.input_type.is_xtream()).flat_map(|input| {
-        let batch_url = input.t_batch_url.clone();
-        let panel = Arc::<str>::from(panel_identity(&input.url, &input.name));
-        let root = input
-            .username
-            .as_ref()
-            .zip(input.password.as_ref())
-            .and_then(|(username, password)| {
+    sources
+        .inputs
+        .iter()
+        .filter(|input| input.enabled && input.input_type.is_xtream())
+        .flat_map(|input| {
+            let batch_url = input.t_batch_url.clone();
+            let panel = Arc::<str>::from(panel_identity(&input.url, &input.name));
+            let root = input.username.as_ref().zip(input.password.as_ref()).and_then(|(username, password)| {
                 input.resolve_url(&input.url).ok().map(|url| Account {
                     input_name: Arc::clone(&input.name),
                     name: Arc::clone(&input.name),
@@ -269,26 +273,31 @@ fn collect_accounts(app_state: &AppState) -> Vec<Account> {
                     panel: Arc::clone(&panel),
                 })
             });
-        root.into_iter().chain(input.aliases.iter().flatten().filter(|alias| alias.enabled).filter_map(move |alias| {
-            alias.username.as_ref().zip(alias.password.as_ref()).and_then(|(username, password)| {
-                input.resolve_url(&alias.url).ok().map(|url| Account {
-                    input_name: Arc::clone(&input.name),
-                    name: Arc::clone(&alias.name),
-                    batch_url: batch_url.clone(),
-                    url: url.into_owned(),
-                    source_url: alias.url.clone(),
-                    headers: input.headers.clone(),
-                    username: username.clone(),
-                    password: password.clone(),
-                    exp_date: alias.exp_date,
-                    panel: Arc::clone(&panel),
-                })
-            })
-        }))
-    }).collect()
+            root.into_iter().chain(input.aliases.iter().flatten().filter(|alias| alias.enabled).filter_map(
+                move |alias| {
+                    alias.username.as_ref().zip(alias.password.as_ref()).and_then(|(username, password)| {
+                        input.resolve_url(&alias.url).ok().map(|url| Account {
+                            input_name: Arc::clone(&input.name),
+                            name: Arc::clone(&alias.name),
+                            batch_url: batch_url.clone(),
+                            url: url.into_owned(),
+                            source_url: alias.url.clone(),
+                            headers: input.headers.clone(),
+                            username: username.clone(),
+                            password: password.clone(),
+                            exp_date: alias.exp_date,
+                            panel: Arc::clone(&panel),
+                        })
+                    })
+                },
+            ))
+        })
+        .collect()
 }
 
-fn account_url(account: &Account) -> String { get_xtream_stream_url_base(&account.url, &account.username, &account.password) }
+fn account_url(account: &Account) -> String {
+    get_xtream_stream_url_base(&account.url, &account.username, &account.password)
+}
 
 fn panel_identity(source_url: &str, fallback: &str) -> String {
     url::Url::parse(source_url).map_or_else(
@@ -368,18 +377,14 @@ fn account_is_current(account: &Account, current_keys: &HashSet<String>) -> bool
 
 async fn persist_updates(app_state: &Arc<AppState>, updates: &[(&Account, i64)]) -> Result<Vec<String>, TuliproxError> {
     let current_keys = collect_accounts(app_state).iter().map(account_key).collect::<HashSet<_>>();
-    let updates = updates
-        .iter()
-        .copied()
-        .filter(|(account, _)| account_is_current(account, &current_keys))
-        .collect::<Vec<_>>();
+    let updates =
+        updates.iter().copied().filter(|(account, _)| account_is_current(account, &current_keys)).collect::<Vec<_>>();
     if updates.is_empty() {
         return Ok(Vec::new());
     }
     let now = Utc::now().timestamp();
-    let requires_reload = updates
-        .iter()
-        .any(|(account, exp_date)| account.exp_date != Some(*exp_date) || is_expired_at(*exp_date, now));
+    let requires_reload =
+        updates.iter().any(|(account, exp_date)| account.exp_date != Some(*exp_date) || is_expired_at(*exp_date, now));
     let mut source_updates = Vec::new();
     let mut batch_updates = HashMap::<String, Vec<BatchExpDateUpdate>>::new();
     let mut updated_accounts = Vec::new();
@@ -413,7 +418,8 @@ async fn persist_updates(app_state: &Arc<AppState>, updates: &[(&Account, i64)])
         let mut source_changed = false;
         for (key, input_name, account_name, exp_date) in source_updates {
             if let Some(input) = sources.inputs.iter_mut().find(|input| input.name == input_name) {
-                source_changed |= input.update_account_expiration_date(&account_name, exp_date, is_expired_at(exp_date, now))?;
+                source_changed |=
+                    input.update_account_expiration_date(&account_name, exp_date, is_expired_at(exp_date, now))?;
                 updated_accounts.push(key);
             }
         }
@@ -441,12 +447,9 @@ async fn persist_updates(app_state: &Arc<AppState>, updates: &[(&Account, i64)])
         match csv_patch_batch_update_exp_dates(InputType::XtreamBatch, &csv_path, &updates, &backup_dir).await {
             Ok((batch_changed, matched_keys)) => {
                 if batch_changed {
-                    app_state
-                        .app_config
-                        .file_locks
-                        .mark_internal_write_revision(&csv_path)
-                        .await
-                        .map_err(|err| TuliproxError::Io(format!("Failed to track internal alias CSV update: {err}")))?;
+                    app_state.app_config.file_locks.mark_internal_write_revision(&csv_path).await.map_err(|err| {
+                        TuliproxError::Io(format!("Failed to track internal alias CSV update: {err}"))
+                    })?;
                 }
                 updated_accounts.extend(matched_keys);
             }
@@ -524,7 +527,10 @@ mod tests {
     };
     use reqwest::StatusCode;
     use shared::model::{ConfigInputAliasDto, ConfigInputDto};
-    use std::{collections::{HashMap, HashSet}, sync::Arc};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
 
     fn account(password: &str) -> Account {
         Account {
@@ -546,12 +552,7 @@ mod tests {
         let now = 1_000_000;
         assert!(super::is_expiry_refresh_due(None, None, None, now));
         assert!(!super::is_expiry_refresh_due(Some(now + 2 * 24 * 60 * 60), Some(now - 1), None, now));
-        assert!(super::is_expiry_refresh_due(
-            Some(now + 2 * 24 * 60 * 60),
-            Some(now - 24 * 60 * 60),
-            None,
-            now
-        ));
+        assert!(super::is_expiry_refresh_due(Some(now + 2 * 24 * 60 * 60), Some(now - 24 * 60 * 60), None, now));
         assert!(!super::is_expiry_refresh_due(Some(now + 4 * 24 * 60 * 60), None, None, now));
         assert!(!super::is_expiry_refresh_due(None, None, Some(now - 1), now));
     }
@@ -650,7 +651,10 @@ mod tests {
     #[test]
     fn expiry_response_accepts_xtream_string_and_number_formats() {
         assert_eq!(parse_expiry_date(&serde_json::json!({"user_info": {"exp_date": "2000000000"}})), Ok(2_000_000_000));
-        assert_eq!(parse_expiry_date(&serde_json::json!({"user_info": {"exp_date": 2_000_000_000}})), Ok(2_000_000_000));
+        assert_eq!(
+            parse_expiry_date(&serde_json::json!({"user_info": {"exp_date": 2_000_000_000}})),
+            Ok(2_000_000_000)
+        );
         assert_eq!(parse_expiry_date(&serde_json::json!({"user_info": {"exp_date": null}})), Err(FetchError::Account));
         assert_eq!(parse_expiry_date(&serde_json::json!({"user_info": {"exp_date": "0"}})), Err(FetchError::Account));
         assert_eq!(parse_expiry_date(&serde_json::json!({"user_info": {"exp_date": -1}})), Err(FetchError::Account));

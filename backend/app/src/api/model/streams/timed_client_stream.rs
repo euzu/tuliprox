@@ -6,20 +6,12 @@ use crate::{
 use bytes::Bytes;
 use futures::Stream;
 use shared::{
-    model::VirtualId,
-    utils::{sanitize_sensitive_info},
-    defaults::{default_kick_secs},
+    defaults::default_kick_secs,
+    model::{DisconnectReason, VirtualId},
+    utils::sanitize_sensitive_info,
 };
-use std::{
-    future::Future,
-    net::SocketAddr,
-    pin::Pin,
-    sync::Arc,
-    task::Poll,
-    time::Duration,
-};
+use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc, task::Poll, time::Duration};
 use tokio::time::{sleep_until, Instant, Sleep};
-use shared::model::DisconnectReason;
 
 enum TimeoutAction {
     Kick {
@@ -78,12 +70,8 @@ impl Stream for TimedClientStream {
         // provider is stalled and emitting no data.
         if self.deadline.as_mut().poll(cx).is_ready() {
             if let TimeoutAction::Kick { app_config, connection_manager, addr, virtual_id } = &self.timeout_action {
-                let kick_secs = app_config
-                    .config
-                    .load()
-                    .web_ui
-                    .as_ref()
-                    .map_or_else(default_kick_secs, |wc| wc.kick_secs);
+                let kick_secs =
+                    app_config.config.load().web_ui.as_ref().map_or_else(default_kick_secs, |wc| wc.kick_secs);
                 let connection_manager = Arc::clone(connection_manager);
                 let addr = *addr;
                 let virtual_id = *virtual_id;
@@ -93,12 +81,7 @@ impl Stream for TimedClientStream {
                 );
                 tokio::spawn(async move {
                     let _ = connection_manager
-                        .close_connection_with_reason_and_block(
-                            &addr,
-                            virtual_id,
-                            kick_secs,
-                            DisconnectReason::Timeout,
-                        )
+                        .close_connection_with_reason_and_block(&addr, virtual_id, kick_secs, DisconnectReason::Timeout)
                         .await;
                 });
             }

@@ -1,15 +1,16 @@
-use crate::{api::{
-    model::AppState,
-    tasks::{spawn_library_scan, LibraryScanTaskOptions},
-}, api::auth_middleware::permission_layer, library::{resolve_metadata_storage_path, LibraryProcessor, MetadataStorage}};
+use crate::{
+    api::{
+        auth_middleware::permission_layer,
+        model::AppState,
+        tasks::{spawn_library_scan, LibraryScanTaskOptions},
+    },
+    library::{resolve_metadata_storage_path, LibraryProcessor, MetadataStorage},
+};
 use axum::response::IntoResponse;
 use log::{debug, warn};
 use serde_json::json;
-use shared::model::{
-    permission::Permission, LibraryScanRequest, LibraryStatus, OperationRunAccepted,
-};
+use shared::model::{permission::Permission, LibraryScanRequest, LibraryStatus, OperationRunAccepted};
 use std::sync::Arc;
-
 
 // Triggers a library scan
 async fn scan_library(
@@ -64,13 +65,12 @@ async fn get_library_status(
         if config.enabled {
             let client = app_state.http_client.load_full().as_ref().clone();
             // Get statistics from processor
-            let processor =
-                LibraryProcessor::new(
-                    config.clone(),
-                    config_snapshot.metadata_update.as_ref(),
-                    client,
-                    &config_snapshot.storage_dir,
-                );
+            let processor = LibraryProcessor::new(
+                config.clone(),
+                config_snapshot.metadata_update.as_ref(),
+                client,
+                &config_snapshot.storage_dir,
+            );
             let entries = processor.get_all_entries().await;
 
             let movies = entries.iter().filter(|e| e.metadata.is_movie()).count();
@@ -82,9 +82,12 @@ async fn get_library_status(
                 movies,
                 series,
                 path: Some(
-                    resolve_metadata_storage_path(config_snapshot.metadata_update.as_ref(), &config_snapshot.storage_dir)
-                        .to_string_lossy()
-                        .to_string(),
+                    resolve_metadata_storage_path(
+                        config_snapshot.metadata_update.as_ref(),
+                        &config_snapshot.storage_dir,
+                    )
+                    .to_string_lossy()
+                    .to_string(),
                 ),
             };
 
@@ -114,10 +117,8 @@ async fn get_thumbnail(
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
 
-    let storage_path = resolve_metadata_storage_path(
-        config_snapshot.metadata_update.as_ref(),
-        &config_snapshot.storage_dir,
-    );
+    let storage_path =
+        resolve_metadata_storage_path(config_snapshot.metadata_update.as_ref(), &config_snapshot.storage_dir);
     let storage = MetadataStorage::new(storage_path);
 
     if let Some(entry) = storage.load_by_uuid(&id).await {

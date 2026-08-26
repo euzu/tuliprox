@@ -1,5 +1,4 @@
 use crate::api::model::{CloseConnectionSignal, ConnectionManager};
-use shared::model::DisconnectReason;
 use axum::{body::Body, extract::Request, response::Response};
 use futures::FutureExt;
 use hyper::body::Incoming;
@@ -9,6 +8,7 @@ use hyper_util::{
     service::TowerToHyperService,
 };
 use log::{debug, error, trace};
+use shared::model::DisconnectReason;
 use socket2::{SockRef, TcpKeepalive};
 use std::{convert::Infallible, fmt::Debug, net::SocketAddr, pin::pin, sync::Arc, time::Duration};
 use tokio::sync::watch;
@@ -267,11 +267,8 @@ mod tests {
             epg_reference_ts: None,
             upstream_user_agent: None,
         };
-        let upstream = PendingDropProbeStream {
-            dropped: Arc::clone(&state.upstream_dropped),
-        };
-        let stream_details =
-            StreamDetails::from_stream(Box::pin(upstream), GracePeriodOptions::default());
+        let upstream = PendingDropProbeStream { dropped: Arc::clone(&state.upstream_dropped) };
+        let stream_details = StreamDetails::from_stream(Box::pin(upstream), GracePeriodOptions::default());
         let stream = create_active_client_stream(ActiveClientStreamParams {
             stream_details,
             app_state: &state.app_state,
@@ -299,9 +296,8 @@ mod tests {
     async fn assert_socket_disconnect_cleans_direct_series(disconnect: ClientDisconnect) {
         let app_state = create_test_app_state(Config::default());
         let upstream_dropped = Arc::new(AtomicBool::new(false));
-        let router = Router::new()
-            .route("/series", get(pending_direct_series_response))
-            .with_state(DisconnectTestState {
+        let router =
+            Router::new().route("/series", get(pending_direct_series_response)).with_state(DisconnectTestState {
                 app_state: Arc::clone(&app_state),
                 upstream_dropped: Arc::clone(&upstream_dropped),
             });
@@ -335,9 +331,7 @@ mod tests {
             }
             ClientDisconnect::Reset => {
                 let client = client.into_std().expect("convert test client to std socket");
-                SockRef::from(&client)
-                    .set_linger(Some(Duration::ZERO))
-                    .expect("configure reset-on-close");
+                SockRef::from(&client).set_linger(Some(Duration::ZERO)).expect("configure reset-on-close");
                 drop(client);
             }
         }
@@ -355,16 +349,7 @@ mod tests {
         })
         .await
         .expect("socket disconnect should release registry state and drop the upstream");
-        assert_eq!(
-            app_state
-                .active_provider
-                .active_connections()
-                .await
-                .unwrap_or_default()
-                .values()
-                .sum::<usize>(),
-            0
-        );
+        assert_eq!(app_state.active_provider.active_connections().await.unwrap_or_default().values().sum::<usize>(), 0);
 
         server_cancel.cancel();
         tokio::time::timeout(Duration::from_secs(1), server)

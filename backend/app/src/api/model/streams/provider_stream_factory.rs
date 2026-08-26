@@ -1,14 +1,10 @@
-use tuliprox_session::stream_ctx::ProviderStreamCtx;
-use tuliprox_core::utils::request_headers::get_headers_from_request;
-use tuliprox_session::response_headers::{provider_response_headers, ProviderResponseHeaderError};
-use tuliprox_session::stream_options::StreamOptions;
 use crate::{
     api::model::{
-            create_channel_unavailable_stream, get_header_filter_for_item_type,
-            get_response_headers,
-            streams::{buffered_stream::BufferedStream, client_stream::ClientStream}, CustomVideoStreamType,
-            ProviderContentRepresentationMode, ProviderStreamFactoryResponse, StreamError, STREAM_IDLE_TIMEOUT,
-        },
+        create_channel_unavailable_stream, get_header_filter_for_item_type, get_response_headers,
+        streams::{buffered_stream::BufferedStream, client_stream::ClientStream},
+        CustomVideoStreamType, ProviderContentRepresentationMode, ProviderStreamFactoryResponse, StreamError,
+        STREAM_IDLE_TIMEOUT,
+    },
     iptv::stalker::client::validate_public_playable_url,
     model::{AppConfig, ConfigProvider, ReverseProxyDisabledHeaderConfig},
     utils::{
@@ -22,10 +18,6 @@ use crate::{
             preview_request_target_for_logging, send_with_retry_and_provider_policy,
         },
     },
-};
-use tuliprox_hls::api::{
-    extract_hls_provider_session_headers, log_hls_origin_content_coding, HlsOriginContentCodingObjectKind,
-    HlsOriginContentCodingSource,
 };
 use futures::{StreamExt, TryStreamExt};
 use log::{debug, log_enabled, warn};
@@ -48,6 +40,16 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
+use tuliprox_core::utils::request_headers::get_headers_from_request;
+use tuliprox_hls::api::{
+    extract_hls_provider_session_headers, log_hls_origin_content_coding, HlsOriginContentCodingObjectKind,
+    HlsOriginContentCodingSource,
+};
+use tuliprox_session::{
+    response_headers::{provider_response_headers, ProviderResponseHeaderError},
+    stream_ctx::ProviderStreamCtx,
+    stream_options::StreamOptions,
+};
 use url::Url;
 
 const RETRY_SECONDS: u64 = 5;
@@ -76,8 +78,8 @@ create_bitset!(
     BufferEnabled,
     ShareStream,
     PipeStream,
-    RangeRequested
-    ,PublicDestinationRequired
+    RangeRequested,
+    PublicDestinationRequired
 );
 
 #[derive(Debug, Clone)]
@@ -148,8 +150,7 @@ impl ProviderStreamFactoryOptions {
             .map(ToString::to_string);
         let filter_header = get_header_filter_for_item_type(*item_type);
         let mut req_headers = get_headers_from_request(req_headers, &filter_header);
-        let requested_range =
-            req_headers.remove(RANGE.as_str()).and_then(|value| HeaderValue::from_bytes(&value).ok());
+        let requested_range = req_headers.remove(RANGE.as_str()).and_then(|value| HeaderValue::from_bytes(&value).ok());
 
         let merged_input_headers = merge_provider_request_headers(*input_headers, *session_headers);
 
@@ -358,8 +359,7 @@ fn record_provider_open_failure(
         stream_options.get_provider().map_or_else(|| "unknown".intern(), |provider| provider.name.clone());
     let Some(info) = stream_options.build_connect_failed_stream_info(provider_name) else { return };
     // Resolve target_name from target_id using the stable target config name.
-    let target_name =
-        ctx.app_config.get_target_by_id(info.channel.target_id).as_deref().map(|t| (&t.name).intern());
+    let target_name = ctx.app_config.get_target_by_id(info.channel.target_id).as_deref().map(|t| (&t.name).intern());
     ctx.connection_manager.record_connect_failed_with_provider_failure(
         &info,
         reason,
@@ -548,11 +548,8 @@ fn prepare_client(
 }
 
 fn remove_sensitive_headers(headers: &mut axum::http::HeaderMap) {
-    let names_to_remove = headers
-        .keys()
-        .filter(|name| !is_safe_cross_origin_redirect_header(name.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
+    let names_to_remove =
+        headers.keys().filter(|name| !is_safe_cross_origin_redirect_header(name.as_str())).cloned().collect::<Vec<_>>();
     for name in names_to_remove {
         headers.remove(name);
     }
@@ -1078,7 +1075,8 @@ pub async fn create_provider_stream(
                 stream
             };
             Some(ProviderStreamFactoryResponse {
-                stream: ClientStream::new(stream, continue_signal.clone(), None, stream_options.get_url_as_str()).boxed(),
+                stream: ClientStream::new(stream, continue_signal.clone(), None, stream_options.get_url_as_str())
+                    .boxed(),
                 info,
                 provider_session_headers,
             })
@@ -1279,8 +1277,13 @@ mod tests {
         input_headers: Option<&HashMap<String, String>>,
         session_headers: Option<&HashMap<String, String>>,
     ) -> ProviderStreamFactoryOptions {
-        let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: false, buffer_size: 0, buffer_max_bytes: 0, pipe_provider_stream: false };
+        let stream_options = StreamOptions {
+            stream_retry: true,
+            buffer_enabled: false,
+            buffer_size: 0,
+            buffer_max_bytes: 0,
+            pipe_provider_stream: false,
+        };
         ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr: "127.0.0.1:8080".parse().unwrap(),
             item_type: PlaylistItemType::Catchup,
@@ -1425,22 +1428,11 @@ mod tests {
         let stream_url = Url::parse("http://provider.example/movie").unwrap();
         let client = reqwest::Client::new();
 
-        for requested_range in [
-            "bytes=100-199",
-            "bytes=100-",
-            "bytes=-100",
-            "bytes=0-0",
-            "bytes=0-0,200-299",
-        ] {
+        for requested_range in ["bytes=100-199", "bytes=100-", "bytes=-100", "bytes=0-0", "bytes=0-0,200-299"] {
             let mut req_headers = HeaderMap::new();
             req_headers.insert(reqwest::header::RANGE, requested_range.parse().unwrap());
-            let options = test_options(
-                ProviderContentRepresentationMode::PreserveOrigin,
-                &stream_url,
-                &req_headers,
-                None,
-                None,
-            );
+            let options =
+                test_options(ProviderContentRepresentationMode::PreserveOrigin, &stream_url, &req_headers, None, None);
 
             let (request, partial) =
                 prepare_client(&client, &options, None, ProviderRequestCredentialState::OriginalOrigin);
@@ -1468,15 +1460,11 @@ mod tests {
             None,
         );
 
-        let request = prepare_client(
-            &reqwest::Client::new(),
-            &options,
-            None,
-            ProviderRequestCredentialState::OriginalOrigin,
-        )
-        .0
-        .build()
-        .unwrap();
+        let request =
+            prepare_client(&reqwest::Client::new(), &options, None, ProviderRequestCredentialState::OriginalOrigin)
+                .0
+                .build()
+                .unwrap();
 
         assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=100-199");
     }
@@ -1485,8 +1473,13 @@ mod tests {
     fn test_provider_stream_factory_options_propagate_buffer_max_bytes() {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let stream_url = Url::parse("http://example.com/stream").unwrap();
-        let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, buffer_max_bytes: 4096, pipe_provider_stream: false };
+        let stream_options = StreamOptions {
+            stream_retry: true,
+            buffer_enabled: true,
+            buffer_size: 1024,
+            buffer_max_bytes: 4096,
+            pipe_provider_stream: false,
+        };
         let req_headers = HeaderMap::new();
         let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
@@ -1513,8 +1506,13 @@ mod tests {
     fn test_provider_stream_factory_options_range_logic() {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let stream_url = Url::parse("http://example.com/stream").unwrap();
-        let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, buffer_max_bytes: 0, pipe_provider_stream: false };
+        let stream_options = StreamOptions {
+            stream_retry: true,
+            buffer_enabled: true,
+            buffer_size: 1024,
+            buffer_max_bytes: 0,
+            pipe_provider_stream: false,
+        };
         let disabled_headers = None;
 
         // Case 1: VOD, no initial range requested
@@ -1612,8 +1610,13 @@ mod tests {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let stream_url = Url::parse("http://example.com/segment.ts").unwrap();
         let req_headers = HeaderMap::new();
-        let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, buffer_max_bytes: 0, pipe_provider_stream: false };
+        let stream_options = StreamOptions {
+            stream_retry: true,
+            buffer_enabled: true,
+            buffer_size: 1024,
+            buffer_max_bytes: 0,
+            pipe_provider_stream: false,
+        };
 
         let hls_options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
@@ -1662,8 +1665,13 @@ mod tests {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let stream_url = Url::parse("http://example.com/shared.ts").unwrap();
         let req_headers = HeaderMap::new();
-        let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, buffer_max_bytes: 0, pipe_provider_stream: false };
+        let stream_options = StreamOptions {
+            stream_retry: true,
+            buffer_enabled: true,
+            buffer_size: 1024,
+            buffer_max_bytes: 0,
+            pipe_provider_stream: false,
+        };
 
         let shared_options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
@@ -1694,8 +1702,13 @@ mod tests {
         let addr = "127.0.0.1:8080".parse().unwrap();
         let stream_url = Url::parse("http://example.com/stream").unwrap();
         let req_headers = HeaderMap::new();
-        let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, buffer_max_bytes: 0, pipe_provider_stream: false };
+        let stream_options = StreamOptions {
+            stream_retry: true,
+            buffer_enabled: true,
+            buffer_size: 1024,
+            buffer_max_bytes: 0,
+            pipe_provider_stream: false,
+        };
 
         let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
@@ -1739,7 +1752,10 @@ mod tests {
         assert_eq!(info.provider.as_ref(), "provider-a");
         assert_eq!(info.channel.input_name.as_ref(), "input-a");
         assert_eq!(info.channel.virtual_id, 77);
-        assert_eq!(options.headers.get(reqwest::header::USER_AGENT).and_then(|value| value.to_str().ok()), Some("Channel-UA"));
+        assert_eq!(
+            options.headers.get(reqwest::header::USER_AGENT).and_then(|value| value.to_str().ok()),
+            Some("Channel-UA")
+        );
     }
 
     #[test]
@@ -1768,8 +1784,13 @@ mod tests {
         let req_headers = HeaderMap::new();
         let mut session_headers = HashMap::new();
         session_headers.insert(String::from("cookie"), String::from("sid=abc; pref=1"));
-        let stream_options =
-            StreamOptions { stream_retry: true, buffer_enabled: true, buffer_size: 1024, buffer_max_bytes: 0, pipe_provider_stream: false };
+        let stream_options = StreamOptions {
+            stream_retry: true,
+            buffer_enabled: true,
+            buffer_size: 1024,
+            buffer_max_bytes: 0,
+            pipe_provider_stream: false,
+        };
 
         let options = ProviderStreamFactoryOptions::new(&ProviderStreamFactoryParams {
             addr,
@@ -1814,10 +1835,9 @@ mod tests {
         assert!(result.is_ok());
         if let Ok(response) = result {
             assert_eq!(response.provider_session_headers.get("cookie").map(String::as_str), Some("sid=abc"));
-            assert!(response
-                .info
-                .as_ref()
-                .is_some_and(|(headers, _, _, _)| headers.iter().all(|(name, _)| !name.eq_ignore_ascii_case("set-cookie"))));
+            assert!(response.info.as_ref().is_some_and(|(headers, _, _, _)| headers
+                .iter()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("set-cookie"))));
         }
     }
 
@@ -1855,15 +1875,11 @@ mod tests {
         let sensitive_headers = ["authorization", "cookie", "proxy-authorization", "x-api-key", "x-provider-token"];
 
         let same_origin = Url::parse("http://provider-a.example/live/failover.ts").unwrap();
-        let same_origin_request = prepare_client(
-            &client,
-            &options,
-            Some(&same_origin),
-            ProviderRequestCredentialState::OriginalOrigin,
-        )
-        .0
-        .build()
-        .unwrap();
+        let same_origin_request =
+            prepare_client(&client, &options, Some(&same_origin), ProviderRequestCredentialState::OriginalOrigin)
+                .0
+                .build()
+                .unwrap();
         for name in sensitive_headers {
             assert!(same_origin_request.headers().contains_key(name), "same-origin request lost {name}");
         }
@@ -1937,10 +1953,7 @@ mod tests {
             } else {
                 ProviderRequestCredentialState::OriginalOrigin
             };
-            let request = prepare_client(&client, &options, target, credential_state)
-                .0
-                .build()
-                .unwrap();
+            let request = prepare_client(&client, &options, target, credential_state).0.build().unwrap();
             assert_eq!(request.headers()[reqwest::header::ACCEPT_ENCODING], "identity");
             assert_eq!(request.headers()[reqwest::header::RANGE], "bytes=17-31");
             if target == Some(&cross_origin) {

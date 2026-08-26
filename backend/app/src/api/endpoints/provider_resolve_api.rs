@@ -1,11 +1,14 @@
 use crate::{
     api::{api_utils::redirect, model::AppState},
     auth::{check_network_access_only, Fingerprint},
-    model::{resolve_provider_scheme_url_with_provider_index, ApiProxyServerInfo, ConfigInput, ConfigTarget, ProxyUserCredentials},
+    model::{
+        resolve_provider_scheme_url_with_provider_index, ApiProxyServerInfo, ConfigInput, ConfigTarget,
+        ProxyUserCredentials,
+    },
     repository::{m3u_get_item_for_stream_id, storage_const, xtream_get_item_for_stream_id},
     utils::{
-        decode_provider_resolve_token, extract_extension_from_url, sanitize_sensitive_info,
-        ProviderResolveToken, PROVIDER_RESOLVE_ROUTE_PREFIX,
+        decode_provider_resolve_token, extract_extension_from_url, sanitize_sensitive_info, ProviderResolveToken,
+        PROVIDER_RESOLVE_ROUTE_PREFIX,
     },
 };
 use axum::{extract, response::IntoResponse};
@@ -58,8 +61,11 @@ fn provider_resolve_output_kind(target: &ConfigTarget) -> Option<ProviderResolve
 
 fn resolve_direct_provider_location(input: &ConfigInput, url: &str) -> Result<String, TuliproxError> {
     if let Some(provider) = input.get_resolve_provider(url) {
-        let (_, resolved) =
-            resolve_provider_scheme_url_with_provider_index(url, Some(Arc::clone(&provider)), provider.get_current_index())?;
+        let (_, resolved) = resolve_provider_scheme_url_with_provider_index(
+            url,
+            Some(Arc::clone(&provider)),
+            provider.get_current_index(),
+        )?;
         return Ok(resolved.into_owned());
     }
     input.resolve_url(url).map(Cow::into_owned)
@@ -82,10 +88,9 @@ fn resolve_provider_playlist_item_location(
     let ext = extract_extension_from_url(item.url).unwrap_or_default();
     let base_url = server_info.get_base_url();
     Ok(match output_kind {
-        ProviderResolveOutputKind::Xtream => format!(
-            "{base_url}/{stream_type}/{}/{}/{}{}",
-            user.username, user.password, item.virtual_id, ext
-        ),
+        ProviderResolveOutputKind::Xtream => {
+            format!("{base_url}/{stream_type}/{}/{}/{}{}", user.username, user.password, item.virtual_id, ext)
+        }
         ProviderResolveOutputKind::M3u => format!(
             "{base_url}/{}/{stream_type}/{}/{}/{}{}",
             storage_const::M3U_STREAM_PATH,
@@ -117,7 +122,9 @@ async fn load_provider_resolve_item(
 ) -> Result<ProviderResolveLoadedItem, TuliproxError> {
     match output_kind {
         ProviderResolveOutputKind::Xtream => xtream_get_item_for_stream_id(
-            decoded_virtual_id, &app_state.app_config, &app_state.playlists,
+            decoded_virtual_id,
+            &app_state.app_config,
+            &app_state.playlists,
             target,
             Some(decoded_cluster),
         )
@@ -126,16 +133,16 @@ async fn load_provider_resolve_item(
             virtual_id: item.virtual_id,
             item_type: item.item_type,
             cluster: item.xtream_cluster,
-            content_allowed: user.t_filter.is_none()
-                || user.allows_content(&shared::model::PlaylistItem::from(&item)),
+            content_allowed: user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&item)),
             url: item.url,
             input_name: item.input_name,
         })
         .map_err(|err| TuliproxError::RepositoryXtream(err.to_string())),
         ProviderResolveOutputKind::M3u => {
-            let item = m3u_get_item_for_stream_id(decoded_virtual_id, &app_state.app_config, &app_state.playlists, target)
-                .await
-                .map_err(|err| TuliproxError::RepositoryM3u(err.to_string()))?;
+            let item =
+                m3u_get_item_for_stream_id(decoded_virtual_id, &app_state.app_config, &app_state.playlists, target)
+                    .await
+                    .map_err(|err| TuliproxError::RepositoryM3u(err.to_string()))?;
             if !item.item_type.is_cluster(decoded_cluster) {
                 return Err(TuliproxError::RepositoryM3u(format!(
                     "M3U item {} is not in requested cluster {}",
@@ -191,13 +198,16 @@ async fn provider_resolve(
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     };
 
-    let item = match load_provider_resolve_item(output_kind, decoded.virtual_id, decoded.cluster, &app_state, &target, &user).await {
-        Ok(item) => item,
-        Err(err) => {
-            debug!("Provider resolve item lookup failed: {err}");
-            return axum::http::StatusCode::NOT_FOUND.into_response();
-        }
-    };
+    let item =
+        match load_provider_resolve_item(output_kind, decoded.virtual_id, decoded.cluster, &app_state, &target, &user)
+            .await
+        {
+            Ok(item) => item,
+            Err(err) => {
+                debug!("Provider resolve item lookup failed: {err}");
+                return axum::http::StatusCode::NOT_FOUND.into_response();
+            }
+        };
     if !user.allows_item_type(item.item_type) || !item.content_allowed {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
@@ -228,10 +238,8 @@ async fn provider_resolve(
 }
 
 pub fn provider_resolve_api_register() -> axum::Router<Arc<AppState>> {
-    axum::Router::new().route(
-        &format!("{PROVIDER_RESOLVE_ROUTE_PREFIX}/{{token}}"),
-        axum::routing::get(provider_resolve),
-    )
+    axum::Router::new()
+        .route(&format!("{PROVIDER_RESOLVE_ROUTE_PREFIX}/{{token}}"), axum::routing::get(provider_resolve))
 }
 
 #[cfg(test)]
@@ -263,9 +271,7 @@ mod tests {
         user
     }
 
-    fn input() -> ConfigInput {
-        input_with_provider_urls(vec!["http://provider.example.com".into()], None)
-    }
+    fn input() -> ConfigInput { input_with_provider_urls(vec!["http://provider.example.com".into()], None) }
 
     fn input_with_provider_urls(urls: Vec<Arc<str>>, current_index: Option<usize>) -> ConfigInput {
         let provider = Arc::new(ConfigProvider::from(&ConfigProviderDto {

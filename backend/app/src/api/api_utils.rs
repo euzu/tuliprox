@@ -1,6 +1,6 @@
 pub use crate::repository::{
-    evaluate_network_access, log_network_access_allowed_geoip_unavailable,
-    log_network_access_denied, NetworkAccessDecision, NetworkAccessDenyReason,
+    evaluate_network_access, log_network_access_allowed_geoip_unavailable, log_network_access_denied,
+    NetworkAccessDecision, NetworkAccessDenyReason,
 };
 use crate::{
     api::{
@@ -9,12 +9,11 @@ use crate::{
             create_active_client_stream, create_channel_unavailable_stream, create_custom_video_stream_response,
             create_provider_connections_exhausted_stream, create_provider_stream,
             get_custom_stream_response_error_status, get_stream_response_with_headers, is_custom_video_stream_enabled,
-            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType,
-            PendingProviderReason,
+            tee_stream, AppState, BoxedProviderStream, CustomVideoStreamType, PendingProviderReason,
             ProviderAllocation, ProviderConfig, ProviderHandle, ProviderStreamCustomReason,
-            ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamCtx, SharedStreamManager,
-            StreamDetails,
-            StreamError, StreamingStrategy, ThrottledStream, UserApiRequest, UserSession,
+            ProviderStreamFactoryOptions, ProviderStreamInfo, ProviderStreamState, SharedStreamCtx,
+            SharedStreamManager, StreamDetails, StreamError, StreamingStrategy, ThrottledStream, UserApiRequest,
+            UserSession,
         },
     },
     auth::Fingerprint,
@@ -38,7 +37,6 @@ use crate::{
     },
     BUILD_TIMESTAMP,
 };
-use tuliprox_hls::api::MAX_HLS_MANIFEST_BYTES;
 use arc_swap::ArcSwapOption;
 use axum::{
     body::Body,
@@ -80,15 +78,13 @@ use tokio::{
     sync::{Mutex, RwLock},
 };
 use tokio_util::io::ReaderStream;
+use tuliprox_hls::api::MAX_HLS_MANIFEST_BYTES;
 use url::Url;
-
 
 /// Per-`(input id, provider id)` single-flight guards so concurrent client requests
 /// for the same dead stalker stream trigger only one portal re-resolve at a time.
 type StalkerResolveGuards = HashMap<(u16, u32), Arc<Mutex<()>>>;
-static STALKER_RE_RESOLVE_GUARDS: LazyLock<Mutex<StalkerResolveGuards>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
+static STALKER_RE_RESOLVE_GUARDS: LazyLock<Mutex<StalkerResolveGuards>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub(crate) fn resolve_request_url_for_logging<'a>(input: &ConfigInput, stream_url: &'a str) -> Cow<'a, str> {
     if is_media_server_playback_url(input, stream_url) {
@@ -302,7 +298,10 @@ macro_rules! try_result_not_found {
 }
 
 use crate::{
-    api::panel_api::{can_provision_on_exhausted, create_panel_api_provisioning_stream_details},
+    api::{
+        panel_api::{can_provision_on_exhausted, create_panel_api_provisioning_stream_details},
+        static_headers::CT_OCTET,
+    },
     utils::LRUResourceCache,
 };
 pub use internal_server_error;
@@ -321,11 +320,13 @@ pub use tuliprox_core::try_unwrap_body;
 // Admission moved to `tuliprox-session`, where the types it decides over
 // already live. Re-exported so api call sites keep their names.
 pub(crate) use tuliprox_core::utils::request_headers::{get_headers_from_request, HeaderFilter};
-pub(crate) use tuliprox_session::stream_options::{get_stream_options, StreamOptions};
-pub(crate) use tuliprox_session::admission::{
-    classify_playback_request, connection_priority_for_kind, resolve_admission_with_strategies, resolve_playback_request_admission, EvictionReentryGuard, PlaybackRequestClass, PlaybackRequestFacts,
+pub(crate) use tuliprox_session::{
+    admission::{
+        classify_playback_request, connection_priority_for_kind, resolve_admission_with_strategies,
+        resolve_playback_request_admission, EvictionReentryGuard, PlaybackRequestClass, PlaybackRequestFacts,
+    },
+    stream_options::{get_stream_options, StreamOptions},
 };
-use crate::api::static_headers::CT_OCTET;
 
 pub fn get_server_time() -> String {
     chrono::offset::Local::now().with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S %Z").to_string()
@@ -444,7 +445,6 @@ struct StreamingAcquireOptions<'a> {
     session_owner: Option<&'a str>,
     accept_requested_stream_url: bool,
 }
-
 
 pub struct ForceStreamRequestContext<'a> {
     pub req_headers: &'a HeaderMap,
@@ -1243,11 +1243,7 @@ fn should_defer_provider_open_for_grace_hold(
     !(!item_type.is_live() && item_type.requires_provider_affinity() && is_reopen)
 }
 
-fn should_refresh_stalker_playback(
-    input_type: InputType,
-    request_url_valid: bool,
-    status: Option<StatusCode>,
-) -> bool {
+fn should_refresh_stalker_playback(input_type: InputType, request_url_valid: bool, status: Option<StatusCode>) -> bool {
     input_type.is_stalker() && (!request_url_valid || status.is_some_and(|status| status.is_client_error()))
 }
 
@@ -1303,20 +1299,14 @@ pub(crate) async fn resolve_initial_stalker_playback_url(
     if !needs_initial_stalker_resolution(input.input_type, stream_url) {
         return Ok(Arc::clone(stream_url));
     }
-    re_resolve_stalker_url_singleflight(
-        app_state,
-        input,
-        provider_id,
-        stalker_stream_kind(cluster, item_type),
-        false,
-    )
-    .await?
-    .ok_or_else(|| {
-        TuliproxError::RepositoryStalker(format!(
-            "Stalker playback URL could not be resolved for input '{}' and provider id {provider_id}",
-            input.name
-        ))
-    })
+    re_resolve_stalker_url_singleflight(app_state, input, provider_id, stalker_stream_kind(cluster, item_type), false)
+        .await?
+        .ok_or_else(|| {
+            TuliproxError::RepositoryStalker(format!(
+                "Stalker playback URL could not be resolved for input '{}' and provider id {provider_id}",
+                input.name
+            ))
+        })
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::fn_params_excessive_bools)]
@@ -1448,139 +1438,144 @@ async fn create_stream_response_details(
             };
             let (stream, stream_info, provider_session_headers, reconnect_flag) =
                 if defer_provider_stream_until_grace_check {
-                debug_if_enabled!(
-                    "Deferring provider stream open until grace check completes for {}",
-                    sanitize_sensitive_info(resolve_request_url_for_logging(input, request_url.as_ref()).as_ref())
-                );
-                (None, None, HashMap::new(), None)
-            } else if is_media_server_stream_ref_url(request_url.as_ref()) {
-                match open_media_server_stream_for_input(app_state, input, request_url.as_ref(), req_headers).await {
-                    Ok((stream, stream_info)) => (Some(stream), stream_info, HashMap::new(), None),
-                    Err(err) => {
-                        error!("Can't open media-server stream: {err}");
-                        (None, None, HashMap::new(), None)
-                    }
-                }
-            } else {
-                let parsed_url = Url::parse(&request_url);
-                let request_url_valid = parsed_url.is_ok();
-                let ((mut stream, mut stream_info, mut provider_session_headers), mut reconnect_flag) =
-                    if let Ok(url) = parsed_url {
-                    let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
-                    let disabled_headers = app_state.get_disabled_headers();
-                    let mut provider_stream_factory_options =
-                        ProviderStreamFactoryOptions::new(&crate::api::model::ProviderStreamFactoryParams {
-                            addr: fingerprint.addr,
-                            item_type,
-                            share_stream,
-                            stream_options,
-                            stream_url: &url,
-                            req_headers,
-                            input_headers: streaming_strategy.input_headers.as_ref(),
-                            session_headers,
-                            disabled_headers: disabled_headers.as_ref(),
-                            default_user_agent: default_user_agent.as_deref(),
-                            username: Some(username),
-                            client_ip: Some(&fingerprint.client_ip),
-                            stream_channel: Some(stream_channel),
-                            connect_failure_stage: Some(FailureStage::ProviderOpen),
-                            content_representation,
-                        });
-
-                    let provider_config = input.get_resolve_provider(url.as_ref());
-                    provider_stream_factory_options.set_provider(provider_config);
-                    if input.input_type.is_stalker() {
-                        provider_stream_factory_options.require_public_destination();
-                    }
-
-                    let reconnect_flag = provider_stream_factory_options.get_reconnect_flag_clone();
-                    let provider_stream = match create_provider_stream(
-                        &app_state.provider_stream_ctx(),
-                        &app_state.http_client.load(),
-                        provider_stream_factory_options,
-                    )
-                    .await
+                    debug_if_enabled!(
+                        "Deferring provider stream open until grace check completes for {}",
+                        sanitize_sensitive_info(resolve_request_url_for_logging(input, request_url.as_ref()).as_ref())
+                    );
+                    (None, None, HashMap::new(), None)
+                } else if is_media_server_stream_ref_url(request_url.as_ref()) {
+                    match open_media_server_stream_for_input(app_state, input, request_url.as_ref(), req_headers).await
                     {
-                        None => (None, None, HashMap::new()),
-                        Some(response) =>
-                            (Some(response.stream), response.info, response.provider_session_headers),
-                    };
-                    (provider_stream, Some(reconnect_flag))
+                        Ok((stream, stream_info)) => (Some(stream), stream_info, HashMap::new(), None),
+                        Err(err) => {
+                            error!("Can't open media-server stream: {err}");
+                            (None, None, HashMap::new(), None)
+                        }
+                    }
                 } else {
-                    ((None, None, HashMap::new()), None)
-                };
-                let should_refresh_stalker = should_refresh_stalker_playback(
-                    input.input_type,
-                    request_url_valid,
-                    stream_info.as_ref().map(|(_, status, _, _)| *status),
-                );
-                if should_refresh_stalker {
-                    let force_stalker_refresh = stream_info
-                        .as_ref()
-                        .is_some_and(|(_, status, _, _)| status.is_client_error());
-                    let kind = stalker_stream_kind(stream_channel.cluster, item_type);
-                    let resolve_result = re_resolve_stalker_url_singleflight(
-                        app_state,
-                        input,
-                        stream_channel.provider_id,
-                        kind,
-                        force_stalker_refresh,
-                    )
-                    .await;
-                    match resolve_result {
-                        Ok(Some(refreshed_url)) => {
-                            if let Ok(url) = Url::parse(&refreshed_url) {
-                                let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
-                                let disabled_headers = app_state.get_disabled_headers();
-                                let mut options = ProviderStreamFactoryOptions::new(
-                                    &crate::api::model::ProviderStreamFactoryParams {
-                                        addr: fingerprint.addr,
-                                        item_type,
-                                        share_stream,
-                                        stream_options,
-                                        stream_url: &url,
-                                        req_headers,
-                                        input_headers: streaming_strategy.input_headers.as_ref(),
-                                        session_headers,
-                                        disabled_headers: disabled_headers.as_ref(),
-                                        default_user_agent: default_user_agent.as_deref(),
-                                        username: Some(username),
-                                        client_ip: Some(&fingerprint.client_ip),
-                                        stream_channel: Some(stream_channel),
-                                        connect_failure_stage: Some(FailureStage::ProviderOpen),
-                                        content_representation,
-                                    },
-                                );
-                                options.set_provider(input.get_resolve_provider(url.as_ref()));
-                                options.require_public_destination();
-                                let retry_reconnect_flag = options.get_reconnect_flag_clone();
-                                let retried = create_provider_stream(
-                                    &app_state.provider_stream_ctx(),
-                                    &app_state.http_client.load(),
-                                    options,
-                                )
-                                .await;
-                                if let Some(response) = retried {
-                                    stream = Some(response.stream);
-                                    stream_info = response.info;
-                                    provider_session_headers = response.provider_session_headers;
-                                    reconnect_flag = Some(retry_reconnect_flag);
-                                    request_url = refreshed_url;
-                                } else {
-                                    // Keep the original stream/stream_info: the upstream response
-                                    // might still be serveable, and its status is needed for reporting.
-                                    debug!("Stalker re-resolve retry could not open a stream, keeping original provider response");
+                    let parsed_url = Url::parse(&request_url);
+                    let request_url_valid = parsed_url.is_ok();
+                    let ((mut stream, mut stream_info, mut provider_session_headers), mut reconnect_flag) =
+                        if let Ok(url) = parsed_url {
+                            let default_user_agent = app_state.app_config.config.load().default_user_agent.clone();
+                            let disabled_headers = app_state.get_disabled_headers();
+                            let mut provider_stream_factory_options =
+                                ProviderStreamFactoryOptions::new(&crate::api::model::ProviderStreamFactoryParams {
+                                    addr: fingerprint.addr,
+                                    item_type,
+                                    share_stream,
+                                    stream_options,
+                                    stream_url: &url,
+                                    req_headers,
+                                    input_headers: streaming_strategy.input_headers.as_ref(),
+                                    session_headers,
+                                    disabled_headers: disabled_headers.as_ref(),
+                                    default_user_agent: default_user_agent.as_deref(),
+                                    username: Some(username),
+                                    client_ip: Some(&fingerprint.client_ip),
+                                    stream_channel: Some(stream_channel),
+                                    connect_failure_stage: Some(FailureStage::ProviderOpen),
+                                    content_representation,
+                                });
+
+                            let provider_config = input.get_resolve_provider(url.as_ref());
+                            provider_stream_factory_options.set_provider(provider_config);
+                            if input.input_type.is_stalker() {
+                                provider_stream_factory_options.require_public_destination();
+                            }
+
+                            let reconnect_flag = provider_stream_factory_options.get_reconnect_flag_clone();
+                            let provider_stream = match create_provider_stream(
+                                &app_state.provider_stream_ctx(),
+                                &app_state.http_client.load(),
+                                provider_stream_factory_options,
+                            )
+                            .await
+                            {
+                                None => (None, None, HashMap::new()),
+                                Some(response) => {
+                                    (Some(response.stream), response.info, response.provider_session_headers)
+                                }
+                            };
+                            (provider_stream, Some(reconnect_flag))
+                        } else {
+                            ((None, None, HashMap::new()), None)
+                        };
+                    let should_refresh_stalker = should_refresh_stalker_playback(
+                        input.input_type,
+                        request_url_valid,
+                        stream_info.as_ref().map(|(_, status, _, _)| *status),
+                    );
+                    if should_refresh_stalker {
+                        let force_stalker_refresh =
+                            stream_info.as_ref().is_some_and(|(_, status, _, _)| status.is_client_error());
+                        let kind = stalker_stream_kind(stream_channel.cluster, item_type);
+                        let resolve_result = re_resolve_stalker_url_singleflight(
+                            app_state,
+                            input,
+                            stream_channel.provider_id,
+                            kind,
+                            force_stalker_refresh,
+                        )
+                        .await;
+                        match resolve_result {
+                            Ok(Some(refreshed_url)) => {
+                                if let Ok(url) = Url::parse(&refreshed_url) {
+                                    let default_user_agent =
+                                        app_state.app_config.config.load().default_user_agent.clone();
+                                    let disabled_headers = app_state.get_disabled_headers();
+                                    let mut options = ProviderStreamFactoryOptions::new(
+                                        &crate::api::model::ProviderStreamFactoryParams {
+                                            addr: fingerprint.addr,
+                                            item_type,
+                                            share_stream,
+                                            stream_options,
+                                            stream_url: &url,
+                                            req_headers,
+                                            input_headers: streaming_strategy.input_headers.as_ref(),
+                                            session_headers,
+                                            disabled_headers: disabled_headers.as_ref(),
+                                            default_user_agent: default_user_agent.as_deref(),
+                                            username: Some(username),
+                                            client_ip: Some(&fingerprint.client_ip),
+                                            stream_channel: Some(stream_channel),
+                                            connect_failure_stage: Some(FailureStage::ProviderOpen),
+                                            content_representation,
+                                        },
+                                    );
+                                    options.set_provider(input.get_resolve_provider(url.as_ref()));
+                                    options.require_public_destination();
+                                    let retry_reconnect_flag = options.get_reconnect_flag_clone();
+                                    let retried = create_provider_stream(
+                                        &app_state.provider_stream_ctx(),
+                                        &app_state.http_client.load(),
+                                        options,
+                                    )
+                                    .await;
+                                    if let Some(response) = retried {
+                                        stream = Some(response.stream);
+                                        stream_info = response.info;
+                                        provider_session_headers = response.provider_session_headers;
+                                        reconnect_flag = Some(retry_reconnect_flag);
+                                        request_url = refreshed_url;
+                                    } else {
+                                        // Keep the original stream/stream_info: the upstream response
+                                        // might still be serveable, and its status is needed for reporting.
+                                        debug!("Stalker re-resolve retry could not open a stream, keeping original provider response");
+                                    }
                                 }
                             }
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            warn!("Failed to refresh Stalker playback URL: {}", sanitize_sensitive_info(&err.to_string()));
+                            Ok(None) => {}
+                            Err(err) => {
+                                warn!(
+                                    "Failed to refresh Stalker playback URL: {}",
+                                    sanitize_sensitive_info(&err.to_string())
+                                );
+                            }
                         }
                     }
-                }
-                (stream, stream_info, provider_session_headers, reconnect_flag)
-            };
+                    (stream, stream_info, provider_session_headers, reconnect_flag)
+                };
 
             if log_enabled!(log::Level::Debug) {
                 if let Some((headers, status_code, response_url, _custom_video_type)) = stream_info.as_ref() {
@@ -2249,13 +2244,8 @@ pub(crate) async fn stream_response(
                 }
                 Err(err) => {
                     error!("Failed to inspect catch-up payload: {err}");
-                    cleanup_failed_detected_catchup_hls(
-                        app_state,
-                        &mut stream_details,
-                        &user.username,
-                        session_token,
-                    )
-                    .await;
+                    cleanup_failed_detected_catchup_hls(app_state, &mut stream_details, &user.username, session_token)
+                        .await;
                     return StatusCode::BAD_GATEWAY.into_response();
                 }
             }
@@ -2504,9 +2494,7 @@ struct DetectedCatchupHlsResponseParams<'a> {
     fallback_stream_url: &'a str,
 }
 
-async fn detected_catchup_hls_response(
-    params: DetectedCatchupHlsResponseParams<'_>,
-) -> axum::response::Response {
+async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<'_>) -> axum::response::Response {
     let DetectedCatchupHlsResponseParams {
         app_state,
         mut stream_details,
@@ -2583,26 +2571,14 @@ async fn detected_catchup_hls_response(
     }
     app_state
         .active_provider
-        .refresh_provider_reservation(
-            &provider,
-            &created_session_token,
-            get_catchup_session_ttl_secs(app_state),
-        )
+        .refresh_provider_reservation(&provider, &created_session_token, get_catchup_session_ttl_secs(app_state))
         .await;
     app_state.connection_manager.release_provider_handle(stream_details.provider_handle.take()).await;
     app_state
         .active_users
-        .release_unbound_session_reservation(
-            &user.username,
-            &created_session_token,
-            None,
-            false,
-        )
+        .release_unbound_session_reservation(&user.username, &created_session_token, None, false)
         .await;
-    app_state
-        .active_users
-        .clear_unbound_session_addr(&user.username, &created_session_token, &fingerprint.addr)
-        .await;
+    app_state.active_users.clear_unbound_session_addr(&user.username, &created_session_token, &fingerprint.addr).await;
 
     catchup_hls_manifest_response(rewritten)
 }
@@ -2628,10 +2604,7 @@ async fn cleanup_failed_detected_catchup_hls(
     app_state.active_provider.clear_provider_reservation(session_token).await;
 }
 
-async fn probe_catchup_payload(
-    stream: BoxedProviderStream,
-    deadline: Duration,
-) -> Result<CatchupPayload, StreamError> {
+async fn probe_catchup_payload(stream: BoxedProviderStream, deadline: Duration) -> Result<CatchupPayload, StreamError> {
     tokio::time::timeout(deadline, probe_catchup_payload_inner(stream))
         .await
         .map_err(|_| StreamError::Stream("catch-up payload probe timed out".to_string()))?
@@ -3184,7 +3157,6 @@ pub fn is_hls_stream_share_enabled(target: &ConfigTarget) -> bool {
     target.options.as_ref().is_some_and(ConfigTargetOptions::share_live_hls_enabled)
 }
 
-
 fn get_add_cache_content(
     res_url: &str,
     mime_type: Option<String>,
@@ -3543,11 +3515,7 @@ pub fn is_seek_request(cluster: XtreamCluster, req_headers: &HeaderMap) -> bool 
     false
 }
 
-pub fn is_seekable_media_request(
-    cluster: XtreamCluster,
-    req_headers: &HeaderMap,
-    extension: Option<&str>,
-) -> bool {
+pub fn is_seekable_media_request(cluster: XtreamCluster, req_headers: &HeaderMap, extension: Option<&str>) -> bool {
     !extension.is_some_and(|ext| ext.eq_ignore_ascii_case(HLS_EXT)) && is_seek_request(cluster, req_headers)
 }
 
@@ -3593,10 +3561,7 @@ where
     stream_json_array_stream(data)
 }
 
-pub fn stream_json_or_bin_response_try_stream<P, S, E>(
-    accept: Option<&str>,
-    data: S,
-) -> axum::response::Response
+pub fn stream_json_or_bin_response_try_stream<P, S, E>(accept: Option<&str>, data: S) -> axum::response::Response
 where
     P: serde::Serialize + Send + 'static,
     S: Stream<Item = Result<P, E>> + Send + Unpin + 'static,
@@ -3978,14 +3943,6 @@ pub fn empty_json_response_as_array() -> axum::http::Result<axum::response::Resp
 
 #[cfg(test)]
 mod tests {
-    use shared::model::AdmissionStrategy;
-    use tuliprox_session::admission::{
-        evaluate_remaining_strategies_after_grace, get_effective_admission_strategies,
-    };
-    use tuliprox_session::GraceResolutionContext;
-    use tuliprox_session::admission::RECENT_EVICTION_REENTRY_TTL_SECS;
-    use tuliprox_core::utils::response_compression::should_compress_response;
-    use shared::model::GeoIpUnavailablePolicy;
     use super::*;
     use crate::{
         api::model::{
@@ -4011,8 +3968,9 @@ mod tests {
         defaults::{default_catchup_session_ttl_secs, default_hls_session_ttl_secs},
         foundation::Filter,
         model::{
-            ClusterFlags, ConfigPaths, ConfigProviderDto, ConfigTargetOptions, InputFetchMethod, InputType,
-            PlaylistItemType, ProcessingOrder, ProviderUrlSelectionPolicy, ProxyType, StreamChannel, XtreamCluster,
+            AdmissionStrategy, ClusterFlags, ConfigPaths, ConfigProviderDto, ConfigTargetOptions,
+            GeoIpUnavailablePolicy, InputFetchMethod, InputType, PlaylistItemType, ProcessingOrder,
+            ProviderUrlSelectionPolicy, ProxyType, StreamChannel, XtreamCluster,
         },
         utils::Internable,
     };
@@ -4022,15 +3980,19 @@ mod tests {
         net::TcpListener,
         sync::{mpsc, RwLock},
     };
+    use tuliprox_core::utils::response_compression::should_compress_response;
+    use tuliprox_session::{
+        admission::{
+            evaluate_remaining_strategies_after_grace, get_effective_admission_strategies,
+            RECENT_EVICTION_REENTRY_TTL_SECS,
+        },
+        GraceResolutionContext,
+    };
 
     #[test]
     fn stalker_playback_refreshes_invalid_or_rejected_urls() {
         assert!(should_refresh_stalker_playback(InputType::Stalker, false, None));
-        assert!(should_refresh_stalker_playback(
-            InputType::Stalker,
-            true,
-            Some(StatusCode::UNAUTHORIZED)
-        ));
+        assert!(should_refresh_stalker_playback(InputType::Stalker, true, Some(StatusCode::UNAUTHORIZED)));
         assert!(!should_refresh_stalker_playback(InputType::Stalker, true, Some(StatusCode::OK)));
         assert!(!should_refresh_stalker_playback(InputType::Xtream, false, None));
     }
@@ -4040,10 +4002,7 @@ mod tests {
         assert!(needs_initial_stalker_resolution(InputType::Stalker, ""));
         assert!(!needs_initial_stalker_resolution(InputType::Stalker, "https://stream.example/live.ts"));
         assert!(!needs_initial_stalker_resolution(InputType::Xtream, ""));
-        assert_eq!(
-            stalker_stream_kind(XtreamCluster::Live, PlaylistItemType::Catchup),
-            StalkerStreamKind::Archive
-        );
+        assert_eq!(stalker_stream_kind(XtreamCluster::Live, PlaylistItemType::Catchup), StalkerStreamKind::Archive);
     }
 
     fn test_runtime_provider(url: &str, username: &str, password: &str) -> Arc<RuntimeProviderConfig> {
@@ -4123,11 +4082,8 @@ mod tests {
     #[tokio::test]
     async fn catchup_payload_probe_rejects_oversized_manifest() {
         let oversized = vec![b'x'; MAX_HLS_MANIFEST_BYTES];
-        let source = stream::iter([
-            Ok::<_, StreamError>(Bytes::from_static(b"#EXTM3U")),
-            Ok(Bytes::from(oversized)),
-        ])
-        .boxed();
+        let source =
+            stream::iter([Ok::<_, StreamError>(Bytes::from_static(b"#EXTM3U")), Ok(Bytes::from(oversized))]).boxed();
 
         let result = probe_catchup_payload(source, std::time::Duration::from_secs(1)).await;
 
@@ -4208,16 +4164,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("range", HeaderValue::from_static("bytes=0-"));
 
-        assert!(!is_seekable_media_request(
-            XtreamCluster::Video,
-            &headers,
-            Some(HLS_EXT)
-        ));
-        assert!(is_seekable_media_request(
-            XtreamCluster::Video,
-            &headers,
-            Some(".ts")
-        ));
+        assert!(!is_seekable_media_request(XtreamCluster::Video, &headers, Some(HLS_EXT)));
+        assert!(is_seekable_media_request(XtreamCluster::Video, &headers, Some(".ts")));
     }
 
     #[test]
@@ -5028,17 +4976,14 @@ mod tests {
     #[tokio::test]
     async fn resolve_streaming_strategy_accepts_stalker_portal_url() {
         let app_config = create_test_provider_app_config();
-        let Some(configured_input) = app_config.sources.load().inputs.first().cloned() else {
-            unreachable!()
-        };
+        let Some(configured_input) = app_config.sources.load().inputs.first().cloned() else { unreachable!() };
         let mut stalker_input = (*configured_input).clone();
         stalker_input.input_type = InputType::Stalker;
         stalker_input.username = None;
         stalker_input.password = None;
-        app_config.sources.store(Arc::new(SourcesConfig {
-            inputs: vec![Arc::new(stalker_input)],
-            ..SourcesConfig::default()
-        }));
+        app_config
+            .sources
+            .store(Arc::new(SourcesConfig { inputs: vec![Arc::new(stalker_input)], ..SourcesConfig::default() }));
         let app_state = create_test_app_state_for_config(Arc::new(app_config));
         let input_name = "provider_1".intern();
         let input = app_state
@@ -7880,8 +7825,10 @@ mod tests {
             .await
             .expect("normal stream should register");
 
-        let admission =
-            app_state.active_users.connection_admission(&user.username, user.max_connections, user.soft_connections).await;
+        let admission = app_state
+            .active_users
+            .connection_admission(&user.username, user.max_connections, user.soft_connections)
+            .await;
         assert_eq!(admission.permission, UserConnectionPermission::Allowed);
         assert_eq!(admission.kind, Some(crate::api::model::ConnectionKind::Soft));
 
@@ -8949,10 +8896,7 @@ mod tests {
         assert_eq!(app_state.active_users.active_users_and_connections().await, (1, 1));
         let active_streams = app_state.active_users.active_streams().await;
         assert_eq!(active_streams.len(), 1);
-        assert_eq!(
-            active_streams.first().and_then(|stream| stream.session_token.as_deref()),
-            Some(ts_token.as_str())
-        );
+        assert_eq!(active_streams.first().and_then(|stream| stream.session_token.as_deref()), Some(ts_token.as_str()));
         assert!(
             app_state
                 .active_users

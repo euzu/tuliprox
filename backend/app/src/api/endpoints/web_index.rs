@@ -52,8 +52,8 @@ async fn token(
                             .t_users
                             .as_ref()
                             .and_then(|users| users.iter().find(|user| user.username.eq_ignore_ascii_case(username)));
-                        let is_admin =
-                            user_entry.is_some_and(|user| user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin")));
+                        let is_admin = user_entry
+                            .is_some_and(|user| user.groups.iter().any(|group| group.eq_ignore_ascii_case("admin")));
                         let user_groups = user_entry.map(|user| user.groups.clone()).unwrap_or_default();
                         debug!(
                             "Web login success candidate: username='{username}', groups={user_groups:?}, is_admin={is_admin}, permissions={permissions}",
@@ -106,11 +106,7 @@ async fn token_refresh(
                 let claims = token_data.claims;
                 let username = claims.username.as_str();
 
-                if claims
-                    .roles
-                    .iter()
-                    .any(|role| role.eq_ignore_ascii_case(shared::model::ROLE_API_USER))
-                {
+                if claims.roles.iter().any(|role| role.eq_ignore_ascii_case(shared::model::ROLE_API_USER)) {
                     let Some(user) = app_state.app_config.get_user_credentials(username) else {
                         return axum::http::StatusCode::UNAUTHORIZED.into_response();
                     };
@@ -127,7 +123,8 @@ async fn token_refresh(
                 let Some(users) = web_auth.t_users.as_ref() else {
                     return axum::http::StatusCode::UNAUTHORIZED.into_response();
                 };
-                let Some(user) = users.iter().find(|candidate| candidate.username.eq_ignore_ascii_case(username)) else {
+                let Some(user) = users.iter().find(|candidate| candidate.username.eq_ignore_ascii_case(username))
+                else {
                     return axum::http::StatusCode::UNAUTHORIZED.into_response();
                 };
 
@@ -140,10 +137,7 @@ async fn token_refresh(
                 let resolved_permissions = web_auth.resolve_permissions(username);
                 debug!(
                     "Web token refresh: username='{}', groups={:?}, is_admin={}, permissions={}",
-                    username,
-                    user.groups,
-                    is_admin,
-                    resolved_permissions
+                    username, user.groups, is_admin, resolved_permissions
                 );
                 let new_token = if is_admin {
                     create_jwt_admin(web_auth, username, current_pwd_version)
@@ -416,7 +410,12 @@ pub fn index_register_with_path(web_dir_path: &Path, web_ui_path: &str) -> axum:
 #[cfg(test)]
 mod tests {
     use super::api_user_can_access_web_ui;
-    use axum::{body::Body, http::{Method, Request, StatusCode}, routing::{get, post}, Router};
+    use axum::{
+        body::Body,
+        http::{Method, Request, StatusCode},
+        routing::{get, post},
+        Router,
+    };
     use shared::utils::concat_path_leading_slash;
     use tower::ServiceExt;
 
@@ -440,13 +439,7 @@ mod tests {
             .nest(&format!("/{web_ui_path}/"), web_ui_router);
 
         let response = router
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/tuli/auth/token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().method(Method::POST).uri("/tuli/auth/token").body(Body::empty()).unwrap())
             .await
             .unwrap();
 

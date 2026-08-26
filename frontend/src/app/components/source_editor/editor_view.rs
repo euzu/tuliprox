@@ -1801,7 +1801,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             ))
                         } else {
                             // Single drag block
-                            if let Some(block) = { editor_state.get_block(block_id) } {
+                            if let Some(block) = editor_state.get_block(block_id) {
                                 let positions = vec![(block_id, block.position)];
                                 Some((mouse_x, mouse_y, editor_state.selection.group_anchor_mouse, positions))
                             } else {

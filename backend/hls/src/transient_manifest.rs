@@ -687,7 +687,7 @@ mod tests {
         apply_transient_discontinuity_sequence, materialize_transient_provisioning_handoff_view,
         transient_discontinuity_sequence, TransientManifestRewriter, TransientRewriteOptions,
     };
-    use crate::{build_transient_resource_id, ProxySessionId, TransientResourceKind};
+    use crate::{transient::build_transient_resource_id, ProxySessionId, TransientResourceKind};
     use shared::model::HlsStripMode;
     use tuliprox_core::model::StripConfig;
 

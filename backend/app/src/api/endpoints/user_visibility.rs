@@ -1,5 +1,7 @@
-use crate::model::{AppConfig, ConfigTarget, ProxyUserCredentials};
-use crate::repository::{iter_raw_m3u_target_playlist, iter_raw_xtream_target_playlist};
+use crate::{
+    model::{AppConfig, ConfigTarget, ProxyUserCredentials},
+    repository::{iter_raw_m3u_target_playlist, iter_raw_xtream_target_playlist},
+};
 use shared::model::{PlaylistItem, TargetType, XtreamCluster};
 use std::collections::HashSet;
 use tokio_stream::StreamExt;

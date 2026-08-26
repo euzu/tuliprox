@@ -1,6 +1,5 @@
 use crate::{
     fetched_playlist::FetchedPlaylist,
-    metadata_sink::queue_task_background,
     processor::{
         create_resolve_options_function_for_xtream_target,
         playlist::{PlaylistProcessingContext, ProcessingPipe},
@@ -269,7 +268,7 @@ fn queue_background_series_info(
                         input_name_arc, provider_id, reasons, has_details, has_tmdb, has_date, pli.header.title
                     );
                 }
-                queue_task_background(mgr, input_name_arc.clone(), task);
+                Arc::clone(mgr).queue_task_background(input_name_arc.clone(), task);
                 queued += 1;
             }
         }

@@ -11,7 +11,10 @@ workspace = true
 [features]
 # Exposes helpers that are otherwise `#[cfg(test)]`, so the backend's own tests
 # can drive the proxy. Enabled only from `[dev-dependencies]`; never in a build.
-test-support = []
+# Some of those helpers build `HlsTsSpliceEvidence` values, so they need the same
+# feature on `tuliprox-mpegts`; forwarding it here keeps the feature self-contained
+# instead of relying on the consumer to enable both.
+test-support = ["tuliprox-mpegts/test-support"]
 
 [dependencies]
 shared = { version = "3", path = "../../shared" }
