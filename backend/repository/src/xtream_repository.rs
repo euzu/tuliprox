@@ -4,7 +4,7 @@ use crate::{
         ensure_distinct_sidecar_lock_domains, publish_staged_database, BPlusTree, BPlusTreeError, BPlusTreeQuery,
         BPlusTreeStagingArtifacts, BPlusTreeUpdate, FlushPolicy,
     },
-    playlist_backend::{ensure_storage_path, iter_raw_playlist, PlaylistBackend, Xtream},
+    playlist_backend::{ensure_storage_path, iter_raw_playlist, PlaylistBackend, PlaylistKey, Xtream},
     playlist_scratch::PlaylistScratch,
     storage::{
         ensure_input_storage_path, get_input_storage_path, get_target_id_mapping_file, get_target_storage_path,
@@ -26,7 +26,7 @@ use shared::{
     concat_string,
     error::{string_to_io_error, TuliproxError},
     model::{
-        xtream_const::XTREAM_CLUSTER, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemType,
+        xtream_const::XTREAM_CLUSTER, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemType, ProviderId,
         SeriesStreamProperties, StreamProperties, VideoStreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
     },
     utils::{arc_str_serde, get_u32_from_serde_value, Internable},
@@ -89,19 +89,25 @@ pub async fn ensure_xtream_storage_path(cfg: &Config, target_name: &str) -> Resu
     ensure_storage_path::<Xtream>(cfg, target_name).await
 }
 
-#[derive(Debug, Copy, Clone)]
-enum StorageKey {
-    VirtualId,
-    ProviderId,
-}
-
-async fn write_playlists_to_file(
+/// Persist `collections`, keyed by whatever `key_of` extracts.
+///
+/// The key space is a type parameter rather than a runtime tag. These stores are
+/// keyed by [`VirtualId`] on the target path and by [`ProviderId`] on the input
+/// path -- the same file layout and value type, two different id spaces -- and a
+/// `StorageKey` enum matched per item used to be the only thing recording which.
+/// Both keys are `#[serde(transparent)]` over `u32`, so the on-disk encoding is
+/// unchanged either way (see the codec test in `backend/btree`).
+async fn write_playlists_to_file<K, F>(
     app_config: &Arc<AppConfig>,
     storage_path: &Path,
     with_index: bool,
-    storage_key: StorageKey,
+    key_of: F,
     collections: Vec<(XtreamCluster, Vec<XtreamPlaylistItem>)>,
-) -> Result<(), TuliproxError> {
+) -> Result<(), TuliproxError>
+where
+    K: PlaylistKey,
+    F: Fn(&XtreamPlaylistItem) -> K + Copy + Send + 'static,
+{
     for (cluster, playlist) in collections {
         if playlist.is_empty() {
             continue;
@@ -116,15 +122,10 @@ async fn write_playlists_to_file(
         let path_clone = xtream_path.clone();
         tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
             let _guard = file_lock;
-            let mut tree = BPlusTree::new();
+            let mut tree = BPlusTree::<K, XtreamPlaylistItem>::new();
             for item in playlist {
-                tree.insert(
-                    match storage_key {
-                        StorageKey::VirtualId => item.virtual_id.get(),
-                        StorageKey::ProviderId => item.provider_id,
-                    },
-                    item,
-                );
+                let key = key_of(&item);
+                tree.insert(key, item);
             }
             if with_index {
                 tree.store_with_index(&path_clone, |pli| pli.source_ordinal)?;
@@ -386,7 +387,7 @@ pub async fn xtream_write_playlist(
         }
         let data = col.iter().map(|item| XtreamPlaylistItem::from(&**item)).collect::<Vec<XtreamPlaylistItem>>();
         if let Err(err) =
-            write_playlists_to_file(app_cfg, &path, true, StorageKey::VirtualId, vec![(cluster, data)]).await
+            write_playlists_to_file(app_cfg, &path, true, |item| item.virtual_id, vec![(cluster, data)]).await
         {
             errors.push(format!("Persisting collection failed:{err}"));
         }
@@ -1554,7 +1555,7 @@ pub async fn persist_input_xtream_playlist(
             app_config,
             storage_path,
             false,
-            StorageKey::ProviderId,
+            |item| ProviderId::new(item.provider_id),
             vec![(cluster, col.iter().map(Into::into).collect::<Vec<XtreamPlaylistItem>>())],
         )
         .await
