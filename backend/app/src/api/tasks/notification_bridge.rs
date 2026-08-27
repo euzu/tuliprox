@@ -22,13 +22,12 @@ use crate::api::model::AppState;
 use log::{debug, warn};
 use shared::model::{
     notification::{registry, Severity},
-    PlaylistUpdateState,
+    EventMessage, PlaylistUpdateState,
 };
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 use tuliprox_core::model::NotificationEvent;
-use tuliprox_session::EventMessage;
 
 /// Subscribe to the event bus and forward what the config asks for.
 pub fn spawn_notification_bridge(app_state: &Arc<AppState>, cancel_token: &CancellationToken) {

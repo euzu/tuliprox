@@ -6,6 +6,7 @@ mod custom_video_stream_type;
 mod download;
 mod epg;
 mod epg_request;
+mod event;
 mod identity_registry;
 mod ids;
 mod info_doc_utils;
@@ -58,8 +59,8 @@ pub mod xtream_const;
 
 pub use self::{
     active_user_connection_change::*, auth::*, cluster_flags::*, config::*, custom_video_stream_type::*, download::*,
-    epg::*, epg_request::*, identity_registry::*, ip_check::*, item_field::*, library_request::*, log::*, mapping::*,
-    media_properties::*, messaging::*, notification::*, pagination::*, playlist::*, playlist_categories::*,
+    epg::*, epg_request::*, event::*, identity_registry::*, ip_check::*, item_field::*, library_request::*, log::*,
+    mapping::*, media_properties::*, messaging::*, notification::*, pagination::*, playlist::*, playlist_categories::*,
     playlist_info_document::*, playlist_request::*, processing_order::*, progress::*, recording::*, recording_math::*,
     regex_cache::*, search_fields::*, search_request::*, short_epg::*, stalker::*, stalker_item::*, stats::*,
     status_check::*, stream_history::*, stream_history_record::*, stream_info::*, stream_meter::*,

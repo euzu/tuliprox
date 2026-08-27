@@ -4,13 +4,12 @@ use crate::{
     api::{
         endpoints::recording_media_api::AuthClaims,
         model::{
-            event_manager::EventMessage,
             recording_quota,
             recording_rule_service::{DeleteFuture, RuleServiceError},
             recording_service::{
                 CreateRecordingInput, EditRecordingPatch, RecordingService, RecordingSourceInput, ServiceError,
             },
-            recording_ws, AppState, FileDownload,
+            recording_ws, AppState, EventMessage, FileDownload,
         },
     },
     repository::recording_rule_repository::RecordingRuleRepository,

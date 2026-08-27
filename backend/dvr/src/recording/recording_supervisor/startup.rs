@@ -33,10 +33,12 @@ use crate::{
     recording_reconciliation::ReconcileAction,
 };
 use log::{debug, error, info, warn};
-use shared::model::recording_rule::{RecordingRulesFile, RecordingTombstone, TombstoneKind};
+use shared::model::{
+    recording_rule::{RecordingRulesFile, RecordingTombstone, TombstoneKind},
+    EventMessage,
+};
 use std::{collections::HashSet, path::PathBuf};
 use tuliprox_repository::recording_rule_repository::RecordingRuleRepository;
-use tuliprox_session::EventMessage;
 
 /// Repair the DVR state left behind by the previous process.
 pub async fn run_startup_reconciliation(ctx: &RecordingCtx) {

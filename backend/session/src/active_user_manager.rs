@@ -1,6 +1,5 @@
 use crate::{
     active_provider_manager::ConnectionKind, connection_manager::CleanupEvent, ActiveProviderManager, EventManager,
-    EventMessage,
 };
 use arc_swap::ArcSwapOption;
 use jsonwebtoken::get_current_timestamp;
@@ -11,7 +10,7 @@ use shared::{
         default_grace_period_millis, default_grace_period_timeout_secs, default_hls_session_ttl_secs, DASH_EXT, HLS_EXT,
     },
     model::{
-        ActiveUserConnectionChange, CustomVideoStreamType, PlaylistItemType, StreamChannel, StreamInfo,
+        ActiveUserConnectionChange, CustomVideoStreamType, EventMessage, PlaylistItemType, StreamChannel, StreamInfo,
         StreamTechnicalInfo, UserConnectionPermission, VirtualId,
     },
     utils::{

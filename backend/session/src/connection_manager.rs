@@ -1,13 +1,13 @@
 use crate::{
     uses_direct_body_idle_timeout, ActiveProviderManager, ActiveUserConnectionParams, ActiveUserManager, EventManager,
-    EventMessage, SharedStreamManager,
+    SharedStreamManager,
 };
 use arc_swap::ArcSwapOption;
 use log::{debug, warn};
 use shared::{
     model::{
-        ActiveUserConnectionChange, ConnectFailureReason, CustomVideoStreamType, DisconnectReason, FailureStage,
-        StreamChannel, StreamInfo, VirtualId,
+        ActiveUserConnectionChange, ConnectFailureReason, CustomVideoStreamType, DisconnectReason, EventMessage,
+        FailureStage, StreamChannel, StreamInfo, VirtualId,
     },
     utils::sanitize_sensitive_info,
 };

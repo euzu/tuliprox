@@ -23,14 +23,13 @@ use crate::{
     recording_worker_runner::{DeleteOutcome, DiskConfig},
 };
 use log::{debug, error, info};
-use shared::model::Claims;
+use shared::model::{Claims, EventMessage};
 use std::{
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc},
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
-use tuliprox_session::EventMessage;
 
 /// Floor on how often the recording root is measured. `statvfs` is cheap
 /// but not free, and it would be wasteful to re-measure on a tick that

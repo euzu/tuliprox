@@ -21,9 +21,9 @@ use shared::{
     error::{get_errors_notify_message, TuliproxError},
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
-        ClusterFlags, CounterModifier, FieldGet, FieldSet, InputStats, InputType, ItemField, MappingStage,
-        PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateProgressEvent, ProcessingOrder,
-        SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
+        ClusterFlags, CounterModifier, EventMessage, FieldGet, FieldSet, InputStats, InputType, ItemField,
+        MappingStage, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateProgressEvent,
+        ProcessingOrder, SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
     },
     utils::{create_alias_uuid, interner_gc, Internable},
 };
@@ -57,7 +57,7 @@ use tuliprox_repository::{
     load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource, PlaylistSource,
     PlaylistStorageState,
 };
-use tuliprox_session::{ActiveProviderManager, EventManager, EventMessage};
+use tuliprox_session::{ActiveProviderManager, EventManager};
 
 const PLAYLIST_UPDATE_MAX_DURATION_SECS: u64 = 3600;
 const MAX_CONCURRENT_TARGET_FINALIZERS: usize = 2;

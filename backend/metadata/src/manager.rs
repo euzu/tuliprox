@@ -7,8 +7,8 @@ use shared::{
     defaults::default_probe_user_priority,
     error::TuliproxError,
     model::{
-        InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, StreamProperties, UUIDType,
-        VideoStreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
+        EventMessage, InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, StreamProperties,
+        UUIDType, VideoStreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
     },
     utils::generate_provider_playlist_uuid,
 };
@@ -41,7 +41,6 @@ use tuliprox_repository::{
     persist_input_vod_info_batch, write_playlist_batch_item_upsert, xtream_get_file_path, BPlusTree, BPlusTreeQuery,
     BPlusTreeUpdate, MetadataRetryDbKey, MetadataRetryDbValue, RetryStateDbValue, TargetIdMapping,
 };
-use tuliprox_session::EventMessage;
 
 const METADATA_RETRY_STATE_FILE: &str = "metadata_retry_state.db";
 const TASK_ERR_NO_CONNECTION: &str = "No connection available";

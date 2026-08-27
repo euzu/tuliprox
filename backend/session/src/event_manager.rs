@@ -1,9 +1,6 @@
 use crate::{MeterReading, StreamMeterHandle};
 use log::trace;
-use shared::model::{
-    ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse, LibraryScanProgressEvent,
-    PlaylistUpdateProgressEvent, PlaylistUpdateState, StreamMeterEntry, SystemInfo,
-};
+use shared::model::{EventMessage, StreamMeterEntry, SystemInfo};
 use std::{
     collections::HashMap,
     sync::{
@@ -17,25 +14,6 @@ use tokio_util::sync::CancellationToken;
 
 const STREAM_METER_INTERVAL: Duration = Duration::from_secs(3);
 const STREAM_METER_INTERVAL_SECS: u64 = STREAM_METER_INTERVAL.as_secs();
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq)]
-pub enum EventMessage {
-    ServerError(String),
-    ActiveUser(ActiveUserConnectionChange),
-    ActiveProvider(Arc<str>, usize),
-    ConfigChange(ConfigType),
-    PlaylistUpdate(PlaylistUpdateState),
-    PlaylistUpdateProgress(PlaylistUpdateProgressEvent),
-    SystemInfoUpdate(SystemInfo),
-    LibraryScanProgress(LibraryScanProgressEvent),
-    DownloadsUpdate(DownloadsResponse),
-    DownloadsDeltaUpdate(DownloadsDelta),
-    RecordingChanged,
-    RecordingRulesChanged,
-    InputMetadataUpdatesCompleted(Arc<str>),
-    InputMetadataUpdatesStarted(Arc<str>),
-}
 
 pub struct EventManager {
     channel_tx: tokio::sync::broadcast::Sender<EventMessage>,
