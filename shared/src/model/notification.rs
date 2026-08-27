@@ -664,6 +664,37 @@ mod tests {
         assert_eq!(json, "\"recording.completed\"");
     }
 
+    /// The docs carry a table of every event id. A registry entry that never
+    /// reaches the table is undiscoverable, and a table row for an id that no
+    /// longer exists is a lie - so the two are checked against each other
+    /// rather than maintained by hand.
+    #[test]
+    fn every_registered_event_appears_in_the_docs_table() {
+        const DOCS: &str = include_str!("../../../docs/src/configuration/config.md");
+        let table = DOCS
+            .split_once("<!-- BEGIN GENERATED EVENT TABLE -->")
+            .and_then(|(_, rest)| rest.split_once("<!-- END GENERATED EVENT TABLE -->"))
+            .map(|(table, _)| table)
+            .expect("docs must contain the generated event table markers");
+
+        for descriptor in registry::ALL {
+            let row = format!("| `{}` | {} | {} |", descriptor.id, descriptor.severity, descriptor.description);
+            assert!(
+                table.contains(&row),
+                "docs/src/configuration/config.md is missing this row - add it inside the generated table:\n{row}"
+            );
+        }
+
+        // And nothing in the table that the registry no longer knows about.
+        for line in table.lines().filter(|line| line.trim_start().starts_with("| `")) {
+            let id = line.trim_start().trim_start_matches("| `").split('`').next().unwrap_or_default();
+            assert!(
+                EventId::from_wire(id).is_some(),
+                "docs list `{id}`, which is not a registered event - remove the row or register the event"
+            );
+        }
+    }
+
     #[test]
     fn registry_has_no_duplicate_ids() {
         let mut seen = std::collections::HashSet::new();
