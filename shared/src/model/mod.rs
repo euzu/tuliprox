@@ -16,7 +16,7 @@ mod log;
 mod mapping;
 mod media_properties;
 mod messaging;
-mod notification;
+pub mod notification;
 mod pagination;
 mod playlist;
 mod playlist_categories;

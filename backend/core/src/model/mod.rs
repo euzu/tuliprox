@@ -3,6 +3,7 @@ mod healthcheck;
 mod input_source;
 mod mapping;
 pub mod messaging;
+pub mod notification;
 pub mod readiness;
 mod stream_history;
 mod xmltv;
@@ -28,7 +29,7 @@ pub mod xtream_response;
 
 pub use self::{
     batch_result_collector::*, config::*, custom_stream_flags::*, fingerprint::*, healthcheck::*, input_source::*,
-    mapping::*, messaging::*, playlist_filter::*, playlist_key::*, provider::*, proxy_redirect::*, stalker_record::*,
-    stream_error::*, stream_history::*, update_guard::*, update_task::*, xmltv::*, xtream::*,
+    mapping::*, messaging::*, notification::*, playlist_filter::*, playlist_key::*, provider::*, proxy_redirect::*,
+    stalker_record::*, stream_error::*, stream_history::*, update_guard::*, update_task::*, xmltv::*, xtream::*,
 };
 pub use shared::model::xtream_const::*;
