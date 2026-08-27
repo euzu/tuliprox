@@ -24,7 +24,7 @@ pub enum MsgKind {
     RecordingFailed,
 }
 impl MsgKind {
-    /// Stable snake_case wire name. Matches the `#[serde(rename = "...")]`
+    /// Stable `snake_case` wire name. Matches the `#[serde(rename = "...")]`
     /// annotation on the variant and is used for config keys, template
     /// filenames, and any other text format that needs a stable identifier
     /// independent of the Rust variant name.

@@ -14,7 +14,7 @@ pub fn UserlistList() -> Html {
     let translate = use_translation();
     let services = use_service_context();
     let userlist_ctx = use_context::<UserlistContext>().expect("Userlist context not found");
-    let search_fields = use_memo((), |_| {
+    let search_fields = use_memo((), |()| {
         vec![
             DropDownOption::new("username", html! { translate.t("LABEL.NAME") }, true),
             DropDownOption::new("playlist", html! { translate.t("LABEL.PLAYLIST") }, false),

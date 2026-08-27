@@ -69,7 +69,7 @@ impl StalkerEndpointPreference {
 }
 
 /// Playback strategy that the resolved stream URL supports. The chosen mode drives
-/// reverse-proxy headers and the create_link fallback chain.
+/// reverse-proxy headers and the `create_link` fallback chain.
 #[derive(
     Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq, Default, EnumIter, Display, EnumString, AsRefStr,
 )]
@@ -304,7 +304,7 @@ impl StalkerInputConfigDto {
 /// fallback chain observed in real-world Stalker portals.
 ///
 /// NOTE: this struct is embedded in [`crate::model::stalker_item::StalkerPlaylistItem`],
-/// which is persisted via positional MessagePack (`rmp_serde::to_vec`). Optional
+/// which is persisted via positional `MessagePack` (`rmp_serde::to_vec`). Optional
 /// fields must therefore NEVER use `skip_serializing_if` — a skipped field shifts
 /// every subsequent value one slot left on read and corrupts the record.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -326,7 +326,7 @@ impl Default for StalkerCommandVariantDto {
 /// Decoded portal capabilities detected from `get_profile` + `get_genres`.
 ///
 /// NOTE: embedded in the B+Tree-persisted `StalkerPlaylistItem` (positional
-/// MessagePack) — fields must NOT use `skip_serializing_if` (see
+/// `MessagePack`) — fields must NOT use `skip_serializing_if` (see
 /// `StalkerCommandVariantDto`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct StalkerPortalCapabilitiesDto {
@@ -395,7 +395,7 @@ fn is_default_bootstrap_strategy(value: &StalkerBootstrapStrategy) -> bool {
 /// Aggregated playback descriptor (primary mode + ordered candidates + capabilities).
 ///
 /// NOTE: embedded in the B+Tree-persisted `StalkerPlaylistItem` (positional
-/// MessagePack) — fields must NOT use `skip_serializing_if` (see
+/// `MessagePack`) — fields must NOT use `skip_serializing_if` (see
 /// `StalkerCommandVariantDto`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct StalkerPlaybackDescriptorDto {

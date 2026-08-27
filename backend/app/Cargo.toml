@@ -1,0 +1,129 @@
+[package]
+name = "tuliprox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lints]
+workspace = true
+
+[dependencies]
+lol_html = "2.9.0"
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
+tuliprox-hls = { workspace = true }
+tuliprox-iptv = { workspace = true }
+tuliprox-library = { workspace = true }
+tuliprox-messaging = { workspace = true }
+tuliprox-parser = { workspace = true }
+tuliprox-processing = { workspace = true }
+tuliprox-auth = { workspace = true }
+tuliprox-config-loader = { workspace = true }
+tuliprox-dvr = { workspace = true }
+tuliprox-repository = { workspace = true }
+tuliprox-session = { workspace = true }
+tuliprox-media-server = { workspace = true }
+tuliprox-metadata = { workspace = true }
+tuliprox-mpegts = { workspace = true }
+serde.workspace = true
+serde-saphyr.workspace = true
+serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
+quick-xml = { version = "0.41", features = ["async-tokio", "serialize"] }
+regex.workspace = true
+clap = { version = "4.6.6", features = ["derive"] }
+reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+url.workspace = true
+chrono.workspace = true
+iana-time-zone = "0.1.65"
+cron.workspace = true
+axum = { version = "0.8.9" , features = ["macros", "default", "ws"]}
+serde_html_form = "0.4.1"
+tower = "0.5.3"
+tower-http = { version = "0.6.11", features = ["cors", "auth", "fs", "compression-full", "trace"] }
+tower_governor = { version = "0.8.0", features = ["axum"] }
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
+futures.workspace = true
+path-clean.workspace = true
+pest.workspace = true
+thiserror.workspace = true
+aes = "0.8.4"
+mime = "0.3.17"
+log.workspace = true
+env_logger = "0.11.11"
+rmp-serde = "1.3.1"
+rand = "0.9.5"
+fastrand.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+tokio-stream = { version = "0.1.19", features = ["sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "parking_lot", "fs", "process", "signal", "time", "macros"] }
+#console-subscriber = "0"
+#tracing = "0.1"
+#tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tokio-util =  { version = "0.7.19", features = ["io", "io-util"] }
+tempfile = "3.27.0"
+strsim = "0.11.1"
+rphonetic = "3.1.0"
+base64.workspace = true
+sha2.workspace = true
+paste.workspace = true
+indexmap.workspace = true
+parking_lot = "0.12.5"
+brotli.workspace = true
+smallvec = "1.15.2"
+notify = "8.2.0"
+arc-swap.workspace = true
+dashmap.workspace = true
+hyper = "1.11.0"
+hyper-util = "0.1.20"
+socket2 = { version = "0.6.5", features = ["all"] }
+async-compression = { version = "0.4.43", features = ["tokio", "brotli", "deflate", "gzip", "zlib", "zstd"] }
+chrono-tz = "0.10.4"
+zeroize.workspace = true
+uuid = { version = "1.26.0", features = ["v4"] }
+mime_guess = "2.0.5"
+crc32fast = "1.5.1"
+http-body-util = "0.1.5"
+lru = "0.16.4"
+strum.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+sysinfo = { version = "0.38.4", default-features = false, features = ["system", "network"] }
+[target.'cfg(target_os = "windows")'.dependencies]
+
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
+#[target.'cfg(target_os = "linux")'.dependencies]
+#mimalloc = "0.1"
+#[target.'cfg(not(target_env = "msvc"))'.dependencies]
+#tikv-jemallocator =  "0.6"
+# tikv-jemallocator =  { version = "*", features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
+
+[build-dependencies]
+vergen = { version = "9.1.0", features = ["build"] }
+
+[dev-dependencies]
+tuliprox-processing = { workspace = true, features = ["test-support"] }
+tuliprox-hls = { workspace = true, features = ["test-support"] }
+# The migration and playlist-stream tests build legacy v2 databases and
+# sorted-index sidecars by hand; those builders live in the engine.
+tuliprox-btree = { workspace = true, features = ["test-support"] }
+# HLS tests assert on the segment render/finalize counters.
+tuliprox-mpegts = { workspace = true, features = ["test-support"] }
+# API tests build a GeoIp that answers a fixed country.
+tuliprox-repository = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util", "macros"] }
+rcgen = "0.14.9"
+rustls = "0.23.43"
+tokio-rustls = "0.26.4"
+
+[features]
+proxy-auth-regression = []
+
+
+[[bin]]
+name = "flags_builder"
+path = "src/tools/flags_builder.rs"

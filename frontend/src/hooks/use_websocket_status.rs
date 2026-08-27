@@ -9,7 +9,7 @@ pub fn use_websocket_status() -> UseStateHandle<bool> {
     {
         let services = services.clone();
         let status = status.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             let services_ctx = services.clone();
             let status = status.clone();
             let subid = services_ctx.event.subscribe(move |msg| {

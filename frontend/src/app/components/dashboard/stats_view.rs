@@ -117,7 +117,7 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
     let render_streams_embedded = || {
         let cache = status_ctx.status.as_ref().map_or_else(
             || loading_label.clone(),
-            |status| status.cache.as_ref().map_or_else(|| "n/a".to_string(), |c| c.clone()),
+            |status| status.cache.as_ref().map_or_else(|| "n/a".to_string(), std::clone::Clone::clone),
         );
 
         html! {
@@ -176,7 +176,9 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
             match &status_ctx.status {
                 Some(stats) => {
                     if let Some(map) = &stats.active_provider_connections {
-                        if !map.is_empty() {
+                        if map.is_empty() {
+                            empty_card()
+                        } else {
                             let cards = map
                                 .iter()
                                 .filter(|(_provider, connections)| **connections > 0)
@@ -194,8 +196,6 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
                                 .collect::<Html>();
 
                             cards
-                        } else {
-                            empty_card()
                         }
                     } else {
                         empty_card()
@@ -209,7 +209,7 @@ pub fn StatsView(props: &StatsViewProps) -> Html {
             || (loading_label.clone(), loading_label.clone(), loading_label.clone()),
             |status| {
                 (
-                    status.cache.as_ref().map_or_else(|| "n/a".to_string(), |c| c.clone()),
+                    status.cache.as_ref().map_or_else(|| "n/a".to_string(), std::clone::Clone::clone),
                     status.active_users.to_string(),
                     status.active_user_connections.to_string(),
                 )

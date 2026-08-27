@@ -85,7 +85,7 @@ pub fn PlaylistUpdateView() -> Html {
     {
         let services = services_ctx.clone();
         let log_lines = log_lines.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             let services_for_cleanup = services.clone();
             let sub_id = services.event.subscribe(move |msg| match msg {
                 EventMessage::PlaylistUpdateProgress(progress) => {
@@ -128,10 +128,10 @@ pub fn PlaylistUpdateView() -> Html {
         let selected_targets = selected_targets.clone();
         Callback::from(move |target: Rc<ConfigTargetDto>| {
             let exists = selected_targets.current().iter().any(|t| t.id == target.id);
-            if !exists {
-                selected_targets.push(target);
-            } else {
+            if exists {
                 selected_targets.retain(|t: &Rc<ConfigTargetDto>| t.id != target.id);
+            } else {
+                selected_targets.push(target);
             }
         })
     };
@@ -157,7 +157,7 @@ pub fn PlaylistUpdateView() -> Html {
                     let targets = selected_targets.current();
                     targets.iter().map(|t| t.name.clone()).collect::<Vec<String>>()
                 };
-                let update_target_names = target_names.iter().map(|t| t.as_str()).collect::<Vec<&str>>();
+                let update_target_names = target_names.iter().map(std::string::String::as_str).collect::<Vec<&str>>();
                 if services.playlist.update_targets(&update_target_names).await {
                     services.toastr.success(translate.t("MESSAGES.PLAYLIST_UPDATE.SUCCESS"));
                 } else {

@@ -48,7 +48,7 @@ impl FlagsService {
         F: FnMut(bool) -> U,
     {
         let fut = self.loaded_channel.signal_cloned().for_each(callback);
-        fut.await
+        fut.await;
     }
 
     pub async fn ensure_loaded_from_assets(&self) -> Result<FlagsLoadState, Error> {

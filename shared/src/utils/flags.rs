@@ -53,8 +53,8 @@ pub fn country_code_to_index(code: &str) -> Option<u16> {
     if bytes.len() != 2 {
         return None;
     }
-    let first = bytes[0].checked_sub(b'A')? as u16;
-    let second = bytes[1].checked_sub(b'A')? as u16;
+    let first = u16::from(bytes[0].checked_sub(b'A')?);
+    let second = u16::from(bytes[1].checked_sub(b'A')?);
     if first > 25 || second > 25 {
         return None;
     }

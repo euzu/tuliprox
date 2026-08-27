@@ -1,0 +1,1169 @@
+use crate::{
+    api::{
+        api_utils::{get_build_time, get_server_time},
+        endpoints::{
+            custom_video_stream_api::cvs_api_register,
+            download_api::{resume_download_worker_if_needed, spawn_download_services},
+            hdhomerun_api::hdhr_api_register,
+            hls_api::hls_api_register,
+            log_ws_api::log_ws_api_register,
+            m3u_api::m3u_api_register,
+            provider_resolve_api::provider_resolve_api_register,
+            v1_api::v1_api_register,
+            web_index::{index_register_with_path, index_register_without_path},
+            websocket_api::ws_api_register,
+            xmltv_api::xmltv_api_register,
+            xtream_api::xtream_api_register,
+        },
+        hdhomerun_proprietary::spawn_proprietary_tasks,
+        http_layers::create_cors_layer,
+        model::{
+            create_cache, create_http_client, create_http_client_no_redirect, create_public_http_client_no_redirect,
+            exec_provider_dns, exec_qos_aggregation, load_playlists_into_memory_cache,
+            recording_rule_scheduler::spawn_recording_rule_scheduler,
+            recording_supervisor::start_recording_supervisors, ActiveProviderManager, ActiveUserManager, AppState,
+            CancelTokens, ConnectionManager, DownloadQueue, EventManager, EventMessage, HdHomerunAppState,
+            HlsProvisioningState, ManualPlaylistUpdateRequest, MetadataUpdateManager, PlaylistStorageState,
+            SharedStreamManager, UpdateGuard,
+        },
+        panel_api::{sync_panel_api_exp_dates, sync_panel_api_exp_dates_on_boot},
+        serve::serve,
+        sys_usage::exec_system_usage,
+        tasks::{
+            exec_config_watch, exec_interner_prune, exec_scheduler, exec_xtream_expiry_sync, spawn_ssdp_discover_task,
+        },
+    },
+    model::{AppConfig, Config, HdHomeRunFlags, Healthcheck, ProcessTargets, RateLimitConfig},
+    processing::processor::exec_processing,
+    repository::{get_geoip_path, GeoIp},
+    utils::{exec_file_lock_prune, get_default_web_root_path},
+    VERSION,
+};
+use arc_swap::{ArcSwap, ArcSwapOption};
+use axum::{
+    extract::{connect_info::ConnectInfo, Request},
+    middleware::Next,
+    Router,
+};
+use dashmap::DashSet;
+use log::{debug, error, info, warn};
+use shared::{
+    error::TuliproxError,
+    utils::{concat_path_leading_slash, sanitize_sensitive_info},
+};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicI8, AtomicU64, Ordering},
+        Arc,
+    },
+};
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use tower_governor::key_extractor::SmartIpKeyExtractor;
+use tower_http::{
+    compression::predicate::{DefaultPredicate, Predicate, SizeAbove},
+    services::ServeDir,
+};
+use tuliprox_hls::api::{exec_hls_cache_gc, exec_hls_lifecycle, HlsProxyManager};
+
+const METADATA_TRIGGER_WAIT_CYCLE_LIMIT: u32 = 900;
+static CORRUPT_DOWNLOADS_STATE_SUFFIX: AtomicU64 = AtomicU64::new(1);
+
+fn corrupt_downloads_state_path(state_file: &std::path::Path) -> PathBuf {
+    let now = chrono::Utc::now();
+    let suffix = CORRUPT_DOWNLOADS_STATE_SUFFIX.fetch_add(1, Ordering::Relaxed);
+    let timestamp = format!("{}{:09}.{:016x}", now.format("%Y%m%d%H%M%S"), now.timestamp_subsec_nanos(), suffix);
+    let stem = state_file.file_stem().and_then(|stem| stem.to_str()).unwrap_or("downloads_state");
+    let extension = state_file.extension().and_then(|ext| ext.to_str()).unwrap_or("json");
+    state_file.with_file_name(format!("{stem}_corrupt.{timestamp}.{extension}"))
+}
+
+async fn recover_persisted_downloads_state(downloads: &DownloadQueue) -> Result<(), TuliproxError> {
+    match downloads.load_from_disk().await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+            if let Some(state_file) = downloads.state_file.as_ref() {
+                let corrupt_path = corrupt_downloads_state_path(state_file);
+                match tokio::fs::rename(state_file, &corrupt_path).await {
+                    Ok(()) => error!(
+                        "Persisted downloads state is corrupted. Renamed {} to {} and starting with an empty queue: {}",
+                        state_file.display(),
+                        corrupt_path.display(),
+                        err
+                    ),
+                    Err(rename_err) => error!(
+                        "Persisted downloads state is corrupted. Failed to rename {} to {}: {}. Starting with an empty queue anyway: {}",
+                        state_file.display(),
+                        corrupt_path.display(),
+                        rename_err,
+                        err
+                    ),
+                }
+            } else {
+                error!("Persisted downloads state is corrupted. Starting with an empty queue: {err}");
+            }
+            Ok(())
+        }
+        Err(err) => Err(TuliproxError::Io(format!("Failed to load persisted downloads: {err}"))),
+    }
+}
+
+async fn recover_persisted_downloads_state_for_startup(downloads: &DownloadQueue) {
+    if let Err(err) = recover_persisted_downloads_state(downloads).await {
+        error!("Failed to recover persisted downloads state during startup; continuing with downloads paused: {err}");
+    }
+}
+
+async fn resume_downloads_after_bind(app_state: &Arc<AppState>, download_cfg: &crate::model::VideoDownloadConfig) {
+    spawn_download_services(app_state.as_ref(), &app_state.cancel_tokens.load().downloads);
+    // Reconcile the DVR state the previous process left behind *before*
+    // the rule scheduler can plan against it, then start the retention
+    // and notification supervisors. Without this the queue keeps tasks
+    // stuck in `Deleting` forever, retention never runs so the recording
+    // disk grows unbounded, and a lifecycle notification lost to a
+    // transient provider error is never retried.
+    // Cloned out of the `ArcSwap` guard first: the guard must not be held
+    // across the await below.
+    let downloads_cancel = app_state.cancel_tokens.load().downloads.clone();
+    start_recording_supervisors(&app_state.recording_ctx(), &downloads_cancel).await;
+    spawn_recording_rule_scheduler(&app_state.recording_ctx(), &downloads_cancel);
+    if let Err(err) = resume_download_worker_if_needed(app_state.as_ref(), download_cfg).await {
+        error!("Failed to resume persisted downloads during startup; continuing with downloads paused: {err}");
+    }
+}
+
+fn collect_rescheduled_targets(
+    targets_set: &HashSet<String>,
+    running_trigger_targets: &Arc<DashSet<String>>,
+    pending_trigger_targets: &Arc<DashSet<String>>,
+) -> Vec<String> {
+    let mut targets_to_respawn = Vec::new();
+    for target in targets_set {
+        running_trigger_targets.remove(target);
+        if pending_trigger_targets.remove(target).is_some() {
+            running_trigger_targets.insert(target.clone());
+            targets_to_respawn.push(target.clone());
+        }
+    }
+    targets_to_respawn
+}
+
+fn spawn_metadata_trigger_update(
+    app_state: &Arc<AppState>,
+    targets_to_spawn: &[String],
+    running_trigger_targets: &Arc<DashSet<String>>,
+    pending_trigger_targets: &Arc<DashSet<String>>,
+) {
+    if targets_to_spawn.is_empty() {
+        return;
+    }
+
+    let client = app_state.http_client.load().as_ref().clone();
+    let app_config = Arc::clone(&app_state.app_config);
+    let event_manager = Arc::clone(&app_state.event_manager);
+    let playlist_state = Arc::clone(&app_state.playlists);
+    let disabled_headers = app_state.get_disabled_headers();
+    let update_guard = app_state.update_guard.clone();
+    let app_state_clone = Arc::clone(app_state);
+    let running_trigger_targets_clone = Arc::clone(running_trigger_targets);
+    let pending_trigger_targets_clone = Arc::clone(pending_trigger_targets);
+    let mut current_targets = targets_to_spawn.to_vec();
+
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        loop {
+            if current_targets.is_empty() {
+                break;
+            }
+
+            info!("Triggering playlist update for targets due to metadata change completion: {current_targets:?}");
+            let targets_set: HashSet<String> = current_targets.iter().cloned().collect();
+
+            let (proc_targets, pre_processed_inputs) = {
+                let sources = app_config.sources.load();
+                match sources.validate_targets(Some(&current_targets)) {
+                    Ok(process_targets) => {
+                        let mut pre_processed_inputs: HashSet<Arc<str>> = HashSet::new();
+                        for source in &sources.sources {
+                            for target in &source.targets {
+                                if targets_set.contains(&target.name) {
+                                    for input in &source.inputs {
+                                        pre_processed_inputs.insert(input.clone());
+                                    }
+                                }
+                            }
+                        }
+                        (Some(Arc::new(process_targets)), Some(pre_processed_inputs))
+                    }
+                    Err(_) => (None, None),
+                }
+            };
+
+            if let Some(proc_targets) = proc_targets {
+                let mut wait_cycles: u32 = 0;
+                loop {
+                    if let Some(lock) = update_guard.try_playlist() {
+                        exec_processing(
+                            &client,
+                            Arc::clone(&app_config),
+                            proc_targets,
+                            Some(Arc::clone(&event_manager)),
+                            Some({
+                                let state = Arc::clone(&app_state_clone);
+                                std::sync::Arc::new(move || {
+                                    let state = Arc::clone(&state);
+                                    Box::pin(async move { sync_panel_api_exp_dates(&state).await })
+                                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                                })
+                            }),
+                            Some(Arc::clone(&playlist_state)),
+                            Some(update_guard.clone()),
+                            disabled_headers.clone(),
+                            Some(app_state_clone.active_provider.clone()),
+                            Some(app_state_clone.metadata_manager.clone()),
+                            pre_processed_inputs.clone(),
+                            Some(lock),
+                        )
+                        .await;
+                        break;
+                    }
+
+                    wait_cycles = wait_cycles.saturating_add(1);
+                    if wait_cycles >= METADATA_TRIGGER_WAIT_CYCLE_LIMIT {
+                        warn!(
+                            "Aborting metadata-triggered update after waiting ~{}s for playlist lock ({} cycles)",
+                            wait_cycles * 2,
+                            wait_cycles
+                        );
+                        break;
+                    }
+                    if wait_cycles.is_multiple_of(30) {
+                        debug!(
+                            "Metadata-triggered update is still waiting for active playlist update to finish (waited ~{}s)",
+                            wait_cycles * 2
+                        );
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            } else {
+                warn!("Failed to validate targets for triggered update: {current_targets:?}");
+            }
+
+            current_targets = collect_rescheduled_targets(
+                &targets_set,
+                &running_trigger_targets_clone,
+                &pending_trigger_targets_clone,
+            );
+        }
+    });
+}
+
+fn get_web_dir_path(web_ui_enabled: bool, web_root: &str) -> Result<PathBuf, TuliproxError> {
+    let web_dir_path = if web_root.is_empty() { get_default_web_root_path() } else { PathBuf::from(web_root) };
+    if web_ui_enabled && (!&web_dir_path.exists() || !&web_dir_path.is_dir()) {
+        return Err(TuliproxError::Server(format!(
+            "web_root does not exist or is not a directory: {}",
+            web_dir_path.display()
+        )));
+    }
+    Ok(web_dir_path)
+}
+
+fn create_healthcheck() -> Healthcheck {
+    Healthcheck {
+        status: "ok".to_string(),
+        version: VERSION.to_string(),
+        build_time: get_build_time(),
+        server_time: get_server_time(),
+    }
+}
+
+async fn healthcheck() -> impl axum::response::IntoResponse { axum::Json(create_healthcheck()) }
+
+#[derive(serde::Serialize)]
+struct ReadyResponse {
+    status: &'static str,
+}
+
+async fn ready(
+    axum::extract::State(app_state): axum::extract::State<Arc<AppState>>,
+) -> impl axum::response::IntoResponse {
+    use crate::model::readiness::build_provider_slots;
+    use shared::model::provider_saturation::is_exhausted;
+    let sources = app_state.app_config.sources.load();
+    let Some(connections) = app_state.active_provider.active_connections().await else {
+        // No live connections yet: either the lineups are still warming up, or
+        // there is no enabled input that could ever carry one.
+        let status = if sources.inputs.iter().any(|input| input.enabled) { "initializing" } else { "exhausted" };
+        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(ReadyResponse { status }));
+    };
+    let slots = build_provider_slots(&sources.inputs, &connections);
+    // No enabled input or alias left means no capacity can ever be served.
+    let exhausted = slots.is_empty() || is_exhausted(slots, &sources.group_lookup);
+    let status_label = if exhausted { "exhausted" } else { "ready" };
+    let status_code = if exhausted { axum::http::StatusCode::SERVICE_UNAVAILABLE } else { axum::http::StatusCode::OK };
+    (status_code, axum::Json(ReadyResponse { status: status_label }))
+}
+
+async fn create_shared_data(
+    app_config: &Arc<AppConfig>,
+    forced_targets: &Arc<ProcessTargets>,
+) -> Result<(AppState, mpsc::Receiver<ManualPlaylistUpdateRequest>), TuliproxError> {
+    let config = app_config.config.load();
+    let downloads_state_file = std::path::PathBuf::from(&config.storage_dir).join("downloads_state.json");
+
+    let use_geoip = config.is_geoip_enabled();
+    let geoip = if use_geoip {
+        let path = get_geoip_path(&config.storage_dir);
+        let _file_lock = app_config.file_locks.read_lock(&path).await;
+        match GeoIp::load(&path) {
+            Ok(db) => {
+                info!("GeoIp db loaded");
+                Arc::new(ArcSwapOption::from(Some(Arc::new(db))))
+            }
+            Err(err) => {
+                info!("No GeoIp db found: {err}");
+                Arc::new(ArcSwapOption::from(None))
+            }
+        }
+    } else {
+        Arc::new(ArcSwapOption::from(None))
+    };
+
+    let cache = create_cache(&config);
+    let event_manager = Arc::new(EventManager::new());
+    let active_provider = Arc::new(ActiveProviderManager::new(app_config, &event_manager));
+    let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
+    let rewrite_secret =
+        config.reverse_proxy.as_ref().map_or(app_config.encrypt_secret, |reverse_proxy| reverse_proxy.rewrite_secret);
+    let hls_proxy = Arc::new(HlsProxyManager::from_hls_cache_config_and_secret(
+        config.reverse_proxy.as_ref().and_then(|reverse_proxy| reverse_proxy.hls_cache.as_ref()),
+        &rewrite_secret,
+    ));
+    active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+    let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
+    active_users.start_adaptive_expiry_worker();
+
+    let history_config = config.reverse_proxy.as_ref().and_then(|r| r.stream_history.as_ref());
+    let connection_manager = Arc::new(ConnectionManager::new(
+        &active_users,
+        &active_provider,
+        &shared_stream_manager,
+        &event_manager,
+        history_config,
+    ));
+
+    let client = create_http_client(app_config)?;
+    let client_no_redirect = create_http_client_no_redirect(app_config)?;
+    let public_client_no_redirect = create_public_http_client_no_redirect(app_config)?;
+
+    let tokens = CancelTokens::default();
+    let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
+    let cancel_tokens = Arc::new(ArcSwap::from_pointee(tokens));
+
+    let (manual_update_sender, manual_update_rx) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
+
+    let app_state = AppState {
+        forced_targets: Arc::new(ArcSwap::new(Arc::clone(forced_targets))),
+        app_config: Arc::clone(app_config),
+        http_client: Arc::new(ArcSwap::from_pointee(client)),
+        http_client_no_redirect: Arc::new(ArcSwap::from_pointee(client_no_redirect)),
+        public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(public_client_no_redirect)),
+        downloads: Arc::new(DownloadQueue::new_with_state_file(Some(downloads_state_file))),
+        cache: Arc::new(ArcSwapOption::from(cache)),
+        shared_stream_manager,
+        hls_proxy,
+        hls_provisioning: Arc::new(HlsProvisioningState::new()),
+        active_users,
+        active_provider,
+        connection_manager,
+        event_manager,
+        cancel_tokens,
+        playlists: Arc::new(PlaylistStorageState::new()),
+        geoip,
+        update_guard: UpdateGuard::new(),
+        metadata_manager,
+        manual_update_sender,
+    };
+
+    recover_persisted_downloads_state_for_startup(&app_state.downloads).await;
+
+    Ok((app_state, manual_update_rx))
+}
+
+async fn run_manual_update_worker(
+    client: reqwest::Client,
+    app_state: Arc<AppState>,
+    mut rx: mpsc::Receiver<ManualPlaylistUpdateRequest>,
+) {
+    while let Some(request) = rx.recv().await {
+        let Some(permit) = app_state.update_guard.acquire_playlist_lock().await else {
+            break;
+        };
+        exec_processing(
+            &client,
+            Arc::clone(&app_state.app_config),
+            request.targets,
+            Some(Arc::clone(&app_state.event_manager)),
+            Some({
+                let state = Arc::clone(&app_state);
+                std::sync::Arc::new(move || {
+                    let state = Arc::clone(&state);
+                    Box::pin(async move { sync_panel_api_exp_dates(&state).await })
+                        as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                })
+            }),
+            Some(Arc::clone(&app_state.playlists)),
+            Some(app_state.update_guard.clone()),
+            app_state.get_disabled_headers(),
+            Some(Arc::clone(&app_state.active_provider)),
+            Some(Arc::clone(&app_state.metadata_manager)
+                as std::sync::Arc<dyn tuliprox_processing::metadata_sink::MetadataUpdateSink>),
+            None,
+            Some(permit),
+        )
+        .await;
+    }
+}
+
+async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
+    let cancel_tokens = app_state.cancel_tokens.load();
+    cancel_tokens.scheduler.cancel();
+    cancel_tokens.hdhomerun.cancel();
+    cancel_tokens.file_watch.cancel();
+    cancel_tokens.provider_dns.cancel();
+    cancel_tokens.qos_aggregation.cancel();
+    cancel_tokens.downloads.cancel();
+    cancel_tokens.hls_cache.cancel();
+    app_state.active_users.shutdown();
+    // Use the manager's shutdown() rather than cancelling the token directly so
+    // the is_shutdown flag is set and workers do not attempt to restart after cancellation.
+    app_state.metadata_manager.shutdown();
+    if tokio::time::timeout(std::time::Duration::from_secs(30), app_state.connection_manager.shutdown()).await.is_err()
+    {
+        warn!("Connection manager shutdown timed out after 30s, forcing exit");
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> Result<&'static str, std::io::Error> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut quit = signal(SignalKind::quit())?;
+    tokio::select! {
+        res = tokio::signal::ctrl_c() => {
+            res?;
+            Ok("Ctrl+C")
+        },
+        _ = terminate.recv() => Ok("SIGTERM"),
+        _ = quit.recv() => Ok("SIGQUIT")
+    }
+}
+
+fn exec_update_on_boot(client: &reqwest::Client, app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) -> bool {
+    let cfg = &app_state.app_config;
+    let update_on_boot = {
+        let config = cfg.config.load();
+        config.update_on_boot
+    };
+    if update_on_boot {
+        let app_config_clone = Arc::clone(&app_state.app_config);
+        let targets_clone = Arc::clone(targets);
+        let playlist_state = Arc::clone(&app_state.playlists);
+        let client = client.clone();
+        let update_guard = Some(app_state.update_guard.clone());
+        let disabled_headers = app_state.get_disabled_headers();
+        let provider_manager = Arc::clone(&app_state.active_provider);
+        let metadata_manager = Arc::clone(&app_state.metadata_manager);
+        let event_manager = Some(Arc::clone(&app_state.event_manager));
+        let app_state_clone = Arc::clone(app_state);
+
+        tokio::spawn(async move {
+            exec_processing(
+                &client,
+                app_config_clone,
+                targets_clone,
+                event_manager,
+                Some({
+                    let state = Arc::clone(&app_state_clone);
+                    std::sync::Arc::new(move || {
+                        let state = Arc::clone(&state);
+                        Box::pin(async move { sync_panel_api_exp_dates(&state).await })
+                            as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+                    })
+                }),
+                Some(playlist_state),
+                update_guard,
+                disabled_headers,
+                Some(provider_manager),
+                Some(metadata_manager),
+                None,
+                None,
+            )
+            .await;
+        });
+        return true;
+    }
+    false
+}
+
+fn is_web_auth_enabled(cfg: &Arc<Config>, web_ui_enabled: bool) -> bool {
+    if web_ui_enabled {
+        if let Some(web_auth) = &cfg.web_ui.as_ref().and_then(|c| c.auth.as_ref()) {
+            return web_auth.enabled;
+        }
+    }
+    false
+}
+
+fn allow_response_compression(
+    _status: axum::http::StatusCode,
+    _version: axum::http::Version,
+    headers: &axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+) -> bool {
+    if let Some(content_type) = headers.get(axum::http::header::CONTENT_TYPE) {
+        if let Ok(ct) = content_type.to_str() {
+            // Disable compression for wasm , WebKit browser dont like it.
+            // Also skip compression for binary, already-compressed, or non-compressible types.
+            if ct.starts_with("application/wasm")
+                || ct.starts_with("video/")
+                || ct.starts_with("audio/")
+                || ct.starts_with("image/")
+                || ct.starts_with("application/octet-stream")
+            {
+                return false;
+            }
+        }
+    }
+    // Body-aware 1 KiB cutoff lives on `SizeAbove` in the outer predicate
+    // chain. This closure only handles the content-type and extension checks.
+    crate::api::api_utils::should_compress_response_extensions(extensions)
+}
+
+fn create_compression_layer() -> tower_http::compression::CompressionLayer<impl Predicate> {
+    let predicate = DefaultPredicate::new().and(SizeAbove::new(1024)).and(allow_response_compression);
+    tower_http::compression::CompressionLayer::new()
+        .br(false)
+        .deflate(true)
+        .gzip(true)
+        .zstd(false)
+        .compress_when(predicate)
+}
+
+pub(in crate::api) fn start_hdhomerun(
+    app_config: &Arc<AppConfig>,
+    app_state: &Arc<AppState>,
+    infos: &mut Vec<String>,
+    cancel_token: &CancellationToken,
+) {
+    let config = app_config.config.load();
+    let host = config.api.host.clone();
+    let guard = app_config.hdhomerun.load();
+    if let Some(hdhomerun) = &*guard {
+        if hdhomerun.flags.contains(HdHomeRunFlags::Enabled) {
+            if hdhomerun.flags.contains(HdHomeRunFlags::SsdpDiscovery) {
+                info!("HDHomeRun SSDP discovery is enabled.");
+                spawn_ssdp_discover_task(Arc::clone(app_config), host.clone(), cancel_token.clone());
+            } else {
+                info!("HDHomeRun SSDP discovery is disabled.");
+            }
+
+            if hdhomerun.flags.contains(HdHomeRunFlags::ProprietaryDiscovery) {
+                info!("HDHomeRun proprietary discovery is enabled.");
+                spawn_proprietary_tasks(Arc::clone(app_state), host.clone(), cancel_token.clone());
+            } else {
+                info!("HDHomeRun proprietary discovery is disabled.");
+            }
+
+            for device in &hdhomerun.devices {
+                if device.t_enabled {
+                    let app_data = Arc::clone(app_state);
+                    let app_host = host.clone();
+                    let port = device.port;
+                    let device_clone = Arc::new(device.clone());
+                    let basic_auth = hdhomerun.flags.contains(HdHomeRunFlags::Auth);
+                    infos.push(format!("HdHomeRun Server '{}' running: http://{host}:{port}", device.name));
+                    let c_token = cancel_token.clone();
+                    let connection_manager = Arc::clone(&app_data.connection_manager);
+                    tokio::spawn(async move {
+                        let router = axum::Router::<Arc<HdHomerunAppState>>::new()
+                            .layer(create_cors_layer([
+                                axum::http::Method::GET,
+                                axum::http::Method::POST,
+                                axum::http::Method::OPTIONS,
+                                axum::http::Method::HEAD,
+                            ]))
+                            .layer(create_compression_layer())
+                            .merge(hdhr_api_register(basic_auth));
+
+                        let router: axum::Router<()> = router.with_state(Arc::new(HdHomerunAppState {
+                            app_state: Arc::clone(&app_data),
+                            device: Arc::clone(&device_clone),
+                            hd_scan_state: Arc::new(AtomicI8::new(-1)),
+                        }));
+
+                        match tokio::net::TcpListener::bind(format!("{}:{}", app_host.clone(), port)).await {
+                            Ok(listener) => {
+                                serve(listener, router, Some(c_token), &connection_manager).await;
+                            }
+                            Err(err) => error!("{err}"),
+                        }
+                    });
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTargets>) -> Result<(), TuliproxError> {
+    let mut infos = Vec::new();
+    let cfg = app_config.config.load();
+    let host = cfg.api.host.clone();
+    let port = cfg.api.port;
+    let web_ui_enabled = cfg.web_ui.as_ref().is_some_and(|c| c.enabled);
+    let web_dir_path = match get_web_dir_path(web_ui_enabled, cfg.api.web_root.as_str()) {
+        Ok(result) => result,
+        Err(err) => return Err(err),
+    };
+    if web_ui_enabled {
+        infos.push(format!("Web root: {}", web_dir_path.display()));
+    }
+    let (app_shared_data, manual_update_rx) = create_shared_data(&app_config, &targets).await?;
+    let app_state = Arc::new(app_shared_data);
+
+    // Initialize metadata manager with weak ref to app_state
+    // IMPORTANT: clone app_state here to keep it alive for the weak ref, but avoid moving it
+    app_state.metadata_manager.set_ctx(app_state.metadata_update_ctx()).await;
+
+    // Worker that processes manual playlist update requests one at a time.
+    // The bounded channel ensures at most one pending request is queued.
+    {
+        let worker_client = app_state.http_client.load().as_ref().clone();
+        let worker_state = Arc::clone(&app_state);
+        tokio::spawn(run_manual_update_worker(worker_client, worker_state, manual_update_rx));
+    }
+
+    // Start event listener for input metadata updates
+    // Clone app_state first to ensure it lives in the closure
+    // Explicitly creating a new Arc reference for this closure.
+    let app_state_for_listener = Arc::clone(&app_state);
+    exec_input_update_listener(&app_state_for_listener, &targets);
+
+    // Keep using the original `app_state` below, which is valid because `Arc::clone` borrows.
+    let shared_data = Arc::clone(&app_state);
+
+    let cancel_token_qos_aggregation = {
+        let cancel_tokens = app_state.cancel_tokens.load();
+        cancel_tokens.qos_aggregation.clone()
+    };
+    let (cancel_token_scheduler, cancel_token_hdhomerun, cancel_token_file_watch, cancel_token_provider_dns) = {
+        let cancel_tokens = app_state.cancel_tokens.load();
+        (
+            cancel_tokens.scheduler.clone(),
+            cancel_tokens.hdhomerun.clone(),
+            cancel_tokens.file_watch.clone(),
+            cancel_tokens.provider_dns.clone(),
+        )
+    };
+
+    if let Err(err) = load_playlists_into_memory_cache(&app_state.app_config, &app_state.playlists).await {
+        error!("Failed to load playlists into memory cache: {err}");
+    }
+
+    exec_system_usage(&app_state);
+
+    let client = shared_data.http_client.load();
+
+    if !exec_update_on_boot(client.as_ref(), &app_state, &targets) {
+        sync_panel_api_exp_dates_on_boot(&app_state).await;
+    }
+
+    exec_scheduler(client.as_ref(), &app_state, &cancel_token_scheduler);
+    exec_file_lock_prune(&app_state.app_config);
+    exec_interner_prune(&app_state);
+    exec_config_watch(&app_state, &cancel_token_file_watch);
+    exec_provider_dns(&app_state.app_config, &cancel_token_provider_dns);
+    exec_qos_aggregation(&app_state.app_config, &cancel_token_qos_aggregation);
+    exec_hls_lifecycle(&app_state.hls_ctx(), &app_state.cancel_tokens.load().hls_cache);
+    exec_hls_cache_gc(&app_state.hls_ctx(), &app_state.cancel_tokens.load().hls_cache);
+
+    let web_auth_enabled = is_web_auth_enabled(&cfg, web_ui_enabled);
+
+    if app_config.api_proxy.load().is_some() {
+        start_hdhomerun(&app_config, &app_state, &mut infos, &cancel_token_hdhomerun);
+    }
+
+    let web_ui_path = cfg.web_ui.as_ref().and_then(|c| c.path.as_ref()).cloned().unwrap_or_default();
+    infos.push(format!("Server running: http://{}:{}", cfg.api.host, cfg.api.port));
+    for info in &infos {
+        info!("{info}");
+    }
+
+    // Web Server
+    let mut router = axum::Router::new()
+        .route("/healthcheck", axum::routing::get(healthcheck))
+        .route("/ready", axum::routing::get(ready))
+        .nest_service("/.well-known", ServeDir::new(web_dir_path.join("static/.well-known")))
+        .merge(ws_api_register(web_auth_enabled, web_ui_path.as_str()))
+        .merge(log_ws_api_register(web_auth_enabled, web_ui_path.as_str()));
+    if web_ui_enabled {
+        router = router
+            .nest_service(
+                &concat_path_leading_slash(&web_ui_path, "static"),
+                tower_http::services::ServeDir::new(web_dir_path.join("static")),
+            )
+            .nest_service(
+                &concat_path_leading_slash(&web_ui_path, "assets"),
+                tower_http::services::ServeDir::new(web_dir_path.join("assets")),
+            )
+            .merge(v1_api_register(web_auth_enabled, &shared_data, web_ui_path.as_str()));
+        if !web_ui_path.is_empty() {
+            router = router.merge(index_register_with_path(&web_dir_path, web_ui_path.as_str()));
+        }
+    }
+
+    let mut api_router = axum::Router::new()
+        .merge(xtream_api_register())
+        .merge(m3u_api_register())
+        .merge(provider_resolve_api_register())
+        .merge(xmltv_api_register())
+        .merge(hls_api_register())
+        .merge(cvs_api_register());
+    if let Some(rate_limiter) = cfg.reverse_proxy.as_ref().and_then(|r| r.rate_limit.clone()) {
+        api_router = add_rate_limiter(api_router, &rate_limiter);
+    }
+
+    router = router.merge(api_router);
+
+    if web_ui_enabled && web_ui_path.is_empty() {
+        router = router.merge(index_register_without_path(&web_dir_path));
+    }
+
+    router = router
+        .layer(axum::middleware::from_fn(log_req))
+        .layer(create_cors_layer([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::OPTIONS,
+            axum::http::Method::HEAD,
+        ]))
+        .layer(create_compression_layer());
+
+    let router: axum::Router<()> = router.with_state(shared_data.clone());
+    let listener = tokio::net::TcpListener::bind(format!("{host}:{port}"))
+        .await
+        .map_err(|err| TuliproxError::Server(format!("Failed to bind to {host}:{port}, {err}")))?;
+
+    if let Some(download_cfg) = cfg.video.as_ref().and_then(|video| video.download.as_ref()) {
+        resume_downloads_after_bind(&app_state, download_cfg).await;
+    }
+
+    let server_cancel_token = CancellationToken::new();
+    exec_xtream_expiry_sync(&app_state, &server_cancel_token);
+    let server_cancel_token_signal = server_cancel_token.clone();
+    let app_state_signal = Arc::clone(&app_state);
+    tokio::spawn(async move {
+        match wait_for_shutdown_signal().await {
+            Ok(signal_name) => {
+                info!("Received shutdown signal ({signal_name}), cancelling all background services");
+                server_cancel_token_signal.cancel();
+                cancel_all_service_tokens(&app_state_signal).await;
+            }
+            Err(err) => {
+                error!("Failed to listen for shutdown signal: {err}");
+            }
+        }
+    });
+
+    serve(listener, router, Some(server_cancel_token), &shared_data.connection_manager).await;
+
+    // Final shutdown safeguard for all background services (idempotent).
+    cancel_all_service_tokens(&shared_data).await;
+    Ok(())
+}
+
+fn add_rate_limiter(router: Router<Arc<AppState>>, rate_limit_cfg: &RateLimitConfig) -> Router<Arc<AppState>> {
+    if rate_limit_cfg.enabled {
+        let governor_conf = tower_governor::governor::GovernorConfigBuilder::default()
+            .key_extractor(SmartIpKeyExtractor)
+            .per_millisecond(rate_limit_cfg.period_millis)
+            .burst_size(rate_limit_cfg.burst_size)
+            .finish();
+        if let Some(config) = governor_conf {
+            router.layer(tower_governor::GovernorLayer::new(Arc::new(config)))
+        } else {
+            error!("Failed to initialize rate limiter");
+            router
+        }
+    } else {
+        router
+    }
+}
+
+async fn log_req(req: Request, next: Next) -> impl axum::response::IntoResponse {
+    if !log::log_enabled!(log::Level::Debug) {
+        return next.run(req).await;
+    }
+
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+
+    let headers = req.headers();
+    let client_ip = headers
+        .get("x-real-ip")
+        .and_then(|h| h.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|v| v.split(',').next().map(str::trim))
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| req.extensions().get::<ConnectInfo<SocketAddr>>().map(|c| c.0.to_string()));
+
+    let safe_ip = client_ip.as_deref().map_or_else(|| sanitize_sensitive_info("<unknown>"), sanitize_sensitive_info);
+    let uri_string = uri.to_string();
+    let safe_uri = sanitize_sensitive_info(&uri_string);
+
+    debug!("Client request [{method}] -> {safe_uri} from {safe_ip}");
+    next.run(req).await
+}
+
+#[allow(clippy::too_many_lines)]
+fn exec_input_update_listener(app_state: &Arc<AppState>, targets: &Arc<ProcessTargets>) {
+    let app_state = Arc::clone(app_state);
+    let targets = Arc::clone(targets);
+
+    tokio::spawn(async move {
+        let mut rx = app_state.event_manager.get_event_channel();
+        // Map<TargetName, Set<InputName>>: Tracks which inputs are currently updating for a given target
+        let mut active_target_inputs: HashMap<String, HashSet<Arc<str>>> = HashMap::new();
+        // Set<TargetName>: Tracks which targets are pending an update once their inputs are done
+        let mut pending_targets: HashSet<String> = HashSet::new();
+        // Set<TargetName>: Tracks which targets have an active spawned playlist-update task (dedup guard)
+        let running_trigger_targets: Arc<DashSet<String>> = Arc::new(DashSet::new());
+        // Set<TargetName>: Tracks follow-up triggers that arrive while a target is already running.
+        let pending_trigger_targets: Arc<DashSet<String>> = Arc::new(DashSet::new());
+
+        loop {
+            match rx.recv().await {
+                Ok(EventMessage::InputMetadataUpdatesStarted(input_name)) => {
+                    let sources = app_state.app_config.sources.load();
+                    for source in &sources.sources {
+                        if source.inputs.iter().any(|i| i.as_ref() == input_name.as_ref()) {
+                            for target in &source.targets {
+                                // Check if this target is allowed by the global process targets
+                                if targets.enabled && !targets.target_names.contains(&target.name) {
+                                    continue;
+                                }
+                                // Add this input to the active set for this target
+                                active_target_inputs.entry(target.name.clone()).or_default().insert(input_name.clone());
+                                // Mark target as potentially needing an update
+                                pending_targets.insert(target.name.clone());
+                            }
+                        }
+                    }
+                }
+                Ok(EventMessage::InputMetadataUpdatesCompleted(input_name)) => {
+                    let mut targets_to_trigger = Vec::new();
+                    // Remove this input from all active sets in-place and collect targets
+                    // that became ready without cloning all keys first.
+                    active_target_inputs.retain(|target_name, inputs| {
+                        inputs.remove(&input_name);
+                        if inputs.is_empty() {
+                            if pending_targets.remove(target_name) {
+                                targets_to_trigger.push(target_name.clone());
+                            }
+                            false
+                        } else {
+                            true
+                        }
+                    });
+
+                    // Deduplicate: only spawn for targets that don't already have a running trigger task
+                    let targets_to_spawn: Vec<String> = {
+                        let mut to_spawn = Vec::new();
+                        for target in targets_to_trigger {
+                            if running_trigger_targets.insert(target.clone()) {
+                                to_spawn.push(target);
+                            } else {
+                                pending_trigger_targets.insert(target);
+                            }
+                        }
+                        to_spawn
+                    };
+
+                    if !targets_to_spawn.is_empty() {
+                        spawn_metadata_trigger_update(
+                            &app_state,
+                            &targets_to_spawn,
+                            &running_trigger_targets,
+                            &pending_trigger_targets,
+                        );
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!("Input update listener lagged by {skipped} messages. Resetting input-tracking state (active_targets={}, pending={}) while preserving trigger dedup state.",
+                        active_target_inputs.len(), pending_targets.len());
+                    active_target_inputs.clear();
+                    pending_targets.clear();
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> Result<&'static str, std::io::Error> {
+    tokio::signal::ctrl_c().await?;
+    Ok("Ctrl+C")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{corrupt_downloads_state_path, recover_persisted_downloads_state};
+    use crate::api::model::DownloadQueue;
+    use std::{
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temp_state_file(name: &str) -> PathBuf {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).expect("time").as_nanos();
+        std::env::temp_dir().join(format!("tuliprox_{name}_{nanos}.json"))
+    }
+
+    #[test]
+    fn corrupt_downloads_state_path_is_unique_for_rapid_calls() {
+        let state_file = temp_state_file("corrupt_downloads_unique");
+
+        let first = corrupt_downloads_state_path(&state_file);
+        let second = corrupt_downloads_state_path(&state_file);
+
+        assert_ne!(first, second);
+    }
+
+    #[tokio::test]
+    async fn recover_persisted_downloads_state_renames_corrupt_file_and_continues() {
+        let state_file = temp_state_file("corrupt_downloads_state");
+        std::fs::write(&state_file, "{ not valid json").expect("write corrupt state");
+        let corrupt_dir = state_file.parent().expect("state dir").to_path_buf();
+        let expected_prefix =
+            format!("{}_corrupt.", state_file.file_stem().and_then(|stem| stem.to_str()).expect("state stem"));
+        let expected_extension = state_file.extension().and_then(|ext| ext.to_str()).expect("state ext");
+        let downloads = DownloadQueue::new_with_state_file(Some(state_file.clone()));
+
+        recover_persisted_downloads_state(&downloads).await.expect("recovery should continue");
+
+        assert!(!state_file.exists());
+        let matching_corrupt_paths = std::fs::read_dir(&corrupt_dir)
+            .expect("read corrupt dir")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&expected_prefix) && name.ends_with(expected_extension))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(matching_corrupt_paths.len(), 1);
+        assert!(downloads.queue.lock().await.is_empty());
+        assert!(downloads.scheduled.read().await.is_empty());
+        assert!(downloads.active.read().await.is_none());
+        assert!(downloads.finished.read().await.is_empty());
+
+        for path in matching_corrupt_paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    mod ready_endpoint {
+        use super::super::ready;
+        use crate::{
+            api::model::{
+                ActiveProviderManager, ActiveUserManager, AppState, CancelTokens, ConnectionKind, ConnectionManager,
+                DownloadQueue, EventManager, HlsProvisioningState, HlsProxyManager, ManualPlaylistUpdateRequest,
+                MetadataUpdateManager, PlaylistStorageState, ProviderHandle, SharedStreamManager, UpdateGuard,
+            },
+            model::{AppConfig, Config, ConfigInput, MediaToolCapabilities, ProcessTargets, SourcesConfig},
+            repository::GeoIp,
+            utils::FileLockManager,
+        };
+        use arc_swap::{ArcSwap, ArcSwapOption};
+        use axum::response::IntoResponse;
+        use shared::{defaults::default_user_priority, model::provider_saturation::build_group_lookup};
+        use std::{net::SocketAddr, sync::Arc};
+        use tokio::sync::mpsc;
+        use tokio_util::sync::CancellationToken;
+
+        fn test_input(name: &'static str, max_connections: u16, enabled: bool) -> Arc<ConfigInput> {
+            Arc::new(ConfigInput {
+                name: name.into(),
+                input_type: shared::model::InputType::Xtream,
+                url: format!("http://{name}.example"),
+                username: Some("user".to_string()),
+                password: Some("pass".to_string()),
+                enabled,
+                max_connections,
+                ..ConfigInput::default()
+            })
+        }
+
+        fn test_app_config(inputs: Vec<Arc<ConfigInput>>) -> Arc<AppConfig> {
+            let sources = SourcesConfig {
+                batch_files: vec![],
+                templates: None,
+                provider: vec![],
+                group_lookup: build_group_lookup(&inputs),
+                inputs,
+                sources: vec![],
+            };
+            Arc::new(AppConfig {
+                config: Arc::new(ArcSwap::from_pointee(Config::default())),
+                sources: Arc::new(ArcSwap::from_pointee(sources)),
+                hdhomerun: Arc::new(ArcSwapOption::empty()),
+                api_proxy: Arc::new(ArcSwapOption::empty()),
+                file_locks: Arc::new(FileLockManager::default()),
+                paths: Arc::new(ArcSwap::from_pointee(shared::model::ConfigPaths {
+                    home_path: String::new(),
+                    config_path: String::new(),
+                    storage_path: String::new(),
+                    config_file_path: String::new(),
+                    sources_file_path: String::new(),
+                    mapping_file_path: None,
+                    mapping_files_used: None,
+                    template_file_path: None,
+                    template_files_used: None,
+                    api_proxy_file_path: String::new(),
+                    custom_stream_response_path: None,
+                })),
+                custom_stream_response: Arc::new(ArcSwapOption::empty()),
+                access_token_secret: [0; 32],
+                encrypt_secret: [0; 16],
+                media_tools: Arc::new(MediaToolCapabilities::default()),
+            })
+        }
+
+        fn test_app_state(app_cfg: Arc<AppConfig>) -> Arc<AppState> {
+            let event_manager = Arc::new(EventManager::new());
+            let active_provider = Arc::new(ActiveProviderManager::new(&app_cfg, &event_manager));
+            let shared_stream_manager = Arc::new(SharedStreamManager::new(Arc::clone(&active_provider)));
+            active_provider.set_shared_stream_manager(Arc::clone(&shared_stream_manager));
+            let geoip = Arc::new(ArcSwapOption::<GeoIp>::default());
+            let config = app_cfg.config.load();
+            let active_users = Arc::new(ActiveUserManager::new(&config, &geoip, &event_manager));
+            let connection_manager = Arc::new(ConnectionManager::new(
+                &active_users,
+                &active_provider,
+                &shared_stream_manager,
+                &event_manager,
+                None,
+            ));
+            let tokens = CancelTokens {
+                scheduler: CancellationToken::new(),
+                hdhomerun: CancellationToken::new(),
+                file_watch: CancellationToken::new(),
+                provider_dns: CancellationToken::new(),
+                metadata: CancellationToken::new(),
+                qos_aggregation: CancellationToken::new(),
+                downloads: CancellationToken::new(),
+                hls_cache: CancellationToken::new(),
+            };
+            let metadata_manager = Arc::new(MetadataUpdateManager::new(tokens.metadata.clone()));
+            let (manual_update_sender, _) = mpsc::channel::<ManualPlaylistUpdateRequest>(1);
+            Arc::new(AppState {
+                forced_targets: Arc::new(ArcSwap::from_pointee(ProcessTargets {
+                    enabled: false,
+                    inputs: Vec::new(),
+                    targets: Vec::new(),
+                    target_names: Vec::new(),
+                })),
+                app_config: app_cfg,
+                http_client: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+                http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+                public_http_client_no_redirect: Arc::new(ArcSwap::from_pointee(reqwest::Client::new())),
+                downloads: Arc::new(DownloadQueue::new()),
+                cache: Arc::new(ArcSwapOption::default()),
+                shared_stream_manager,
+                hls_proxy: Arc::new(HlsProxyManager::new()),
+                hls_provisioning: Arc::new(HlsProvisioningState::new()),
+                active_users,
+                active_provider,
+                connection_manager,
+                event_manager,
+                cancel_tokens: Arc::new(ArcSwap::from_pointee(tokens)),
+                playlists: Arc::new(PlaylistStorageState::new()),
+                geoip,
+                update_guard: UpdateGuard::new(),
+                metadata_manager,
+                manual_update_sender,
+            })
+        }
+
+        async fn call_ready(state: Arc<AppState>) -> (axum::http::StatusCode, String) {
+            let response = ready(axum::extract::State(state)).await.into_response();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("response body");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+            (status, body["status"].as_str().expect("status label").to_string())
+        }
+
+        async fn acquire(state: &Arc<AppState>, input: &'static str, addr: &'static str) -> ProviderHandle {
+            let addr: SocketAddr = addr.parse().expect("socket addr");
+            state
+                .active_provider
+                .acquire_connection(&input.into(), &addr, default_user_priority(), ConnectionKind::Normal)
+                .await
+                .expect("connection allocation")
+        }
+
+        #[tokio::test]
+        async fn ready_is_initializing_before_first_connection() {
+            let state = test_app_state(test_app_config(vec![test_input("prov", 4, true)]));
+            let (status, label) = call_ready(state).await;
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(label, "initializing");
+        }
+
+        #[tokio::test]
+        async fn ready_is_exhausted_without_enabled_inputs() {
+            let state = test_app_state(test_app_config(vec![test_input("prov", 4, false)]));
+            let (status, label) = call_ready(state).await;
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(label, "exhausted");
+        }
+
+        #[tokio::test]
+        async fn ready_is_ready_while_capacity_remains() {
+            let state = test_app_state(test_app_config(vec![test_input("prov", 2, true)]));
+            let allocation = acquire(&state, "prov", "127.0.0.1:45101").await;
+            let (status, label) = call_ready(state).await;
+            assert_eq!(status, axum::http::StatusCode::OK);
+            assert_eq!(label, "ready");
+            drop(allocation);
+        }
+
+        #[tokio::test]
+        async fn ready_is_exhausted_when_all_groups_are_full() {
+            let state = test_app_state(test_app_config(vec![test_input("prov", 1, true)]));
+            let allocation = acquire(&state, "prov", "127.0.0.1:45102").await;
+            let (status, label) = call_ready(state).await;
+            assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(label, "exhausted");
+            drop(allocation);
+        }
+    }
+}

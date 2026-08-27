@@ -473,7 +473,9 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                             </div>
                         </Card>
 
-                        { if !write_without_read_warnings.is_empty() {
+                        { if write_without_read_warnings.is_empty() {
+                            html! {}
+                        } else {
                             html! {
                                 <div class="tp__config-view-page__info">
                                     { for write_without_read_warnings.iter().map(|domain| {
@@ -485,8 +487,6 @@ pub fn GroupManagement(props: &GroupManagementProps) -> Html {
                                     })}
                                 </div>
                             }
-                        } else {
-                            html! {}
                         }}
                     </div>
 

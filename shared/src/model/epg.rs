@@ -169,7 +169,7 @@ pub struct EpgProgramme {
     #[serde(default)]
     pub is_new: bool,
     /// XMLTV `<previously-shown>` flag. Required for the
-    /// tri-state AiringStatus (Unknown / New / Repeat) used by
+    /// tri-state `AiringStatus` (Unknown / New / Repeat) used by
     /// new-episode rules. The legacy `is_new` field stays
     /// serialized for backward compatibility; new code should
     /// derive `airing_status()` from both flags.
@@ -240,7 +240,7 @@ impl EpgProgramme {
 }
 
 /// Request DTO for per-stream EPG lookup.
-/// The Vec allows future batch expansion (multiple epg_channel_ids) without a redesign.
+/// The Vec allows future batch expansion (multiple `epg_channel_ids`) without a redesign.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StreamEpgRequest {
     pub items: Vec<StreamEpgItemRequest>,
@@ -256,7 +256,7 @@ pub struct StreamEpgItemRequest {
 }
 
 /// Response DTO for per-stream EPG lookup.
-/// Contains entries per unique epg_channel_id, programmes already filtered to 8h window.
+/// Contains entries per unique `epg_channel_id`, programmes already filtered to 8h window.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StreamEpgResponse {
     pub entries: Vec<StreamEpgEntry>,

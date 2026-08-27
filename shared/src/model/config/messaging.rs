@@ -161,27 +161,27 @@ pub struct MessagingConfigDto {
 impl MessagingConfigDto {
     pub fn is_empty(&self) -> bool {
         self.notify_on.is_empty()
-            && (self.disk_alert.is_none() || self.disk_alert.as_ref().is_some_and(|c| c.is_empty()))
-            && (self.telegram.is_none() || self.telegram.as_ref().is_some_and(|c| c.is_empty()))
-            && (self.rest.is_none() || self.rest.as_ref().is_some_and(|c| c.is_empty()))
-            && (self.pushover.is_none() || self.pushover.as_ref().is_some_and(|c| c.is_empty()))
-            && (self.discord.is_none() || self.discord.as_ref().is_some_and(|c| c.is_empty()))
+            && (self.disk_alert.is_none() || self.disk_alert.as_ref().is_some_and(DiskAlertConfigDto::is_empty))
+            && (self.telegram.is_none() || self.telegram.as_ref().is_some_and(TelegramMessagingConfigDto::is_empty))
+            && (self.rest.is_none() || self.rest.as_ref().is_some_and(RestMessagingConfigDto::is_empty))
+            && (self.pushover.is_none() || self.pushover.as_ref().is_some_and(PushoverMessagingConfigDto::is_empty))
+            && (self.discord.is_none() || self.discord.as_ref().is_some_and(DiscordMessagingConfigDto::is_empty))
     }
 
     pub fn clean(&mut self) {
-        if self.telegram.as_ref().is_some_and(|c| c.is_empty()) {
+        if self.telegram.as_ref().is_some_and(TelegramMessagingConfigDto::is_empty) {
             self.telegram = None;
         }
-        if self.rest.as_ref().is_some_and(|c| c.is_empty()) {
+        if self.rest.as_ref().is_some_and(RestMessagingConfigDto::is_empty) {
             self.rest = None;
         }
-        if self.pushover.as_ref().is_some_and(|c| c.is_empty()) {
+        if self.pushover.as_ref().is_some_and(PushoverMessagingConfigDto::is_empty) {
             self.pushover = None;
         }
-        if self.discord.as_ref().is_some_and(|c| c.is_empty()) {
+        if self.discord.as_ref().is_some_and(DiscordMessagingConfigDto::is_empty) {
             self.discord = None;
         }
-        if self.disk_alert.as_ref().is_some_and(|c| c.is_empty()) {
+        if self.disk_alert.as_ref().is_some_and(DiskAlertConfigDto::is_empty) {
             self.disk_alert = None;
         }
     }

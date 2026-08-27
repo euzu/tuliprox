@@ -24,7 +24,7 @@ pub fn Login() -> Html {
     let app_logo = use_memo(services_ctx, |service| {
         let alt = format!("{} logo", service.config.ui_config.app_title.as_deref().unwrap_or("tuliprox"));
         match service.config.ui_config.app_logo.as_ref() {
-            Some(logo) => html! { <img src={logo.to_string()} alt={alt}/> },
+            Some(logo) => html! { <img src={logo.clone()} alt={alt}/> },
             None => html! { <AppIcon name="Logo"  width={"48"} height={"48"}/> },
         }
     });

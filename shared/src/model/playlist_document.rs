@@ -213,6 +213,9 @@ impl XtreamPlaylistItem {
         }
     }
 
+    // Clippy's method-path suggestion for `.intern()` names the private
+    // `utils::string_interner` module and does not compile; closures are kept.
+    #[allow(clippy::redundant_closure_for_method_calls)]
     fn series_to_document(&self, options: &XtreamMappingOptions, series: &SeriesStreamProperties) -> XtreamDocument {
         let empty_str = "".intern();
         XtreamDocument::Series(XtreamSeriesDoc {
@@ -257,13 +260,16 @@ impl XtreamPlaylistItem {
                 },
             ),
             youtube_trailer: series.youtube_trailer.clone(),
-            tmdb: series.tmdb.map(|v| v.intern()).unwrap_or_else(|| Arc::clone(&empty_str)),
+            tmdb: series.tmdb.map_or_else(|| Arc::clone(&empty_str), |v| v.intern()),
             episode_runtime: series.episode_run_time.clone().unwrap_or(empty_str),
             category_id: self.category_id.intern(),
             category_ids: vec![self.category_id],
         })
     }
 
+    // Clippy's method-path suggestion for `.intern()` names the private
+    // `utils::string_interner` module and does not compile; closures are kept.
+    #[allow(clippy::redundant_closure_for_method_calls)]
     fn video_to_document(&self, options: &XtreamMappingOptions, video: &VideoStreamProperties) -> XtreamDocument {
         let stream_icon = self.get_stream_icon(options);
         let empty_str = "".intern();
@@ -273,9 +279,9 @@ impl XtreamPlaylistItem {
             stream_type: video.stream_type.clone().unwrap_or_else(default_as_movie),
             stream_id: self.virtual_id,
             stream_icon,
-            rating: video.rating.map(|v| InfoDocUtils::limited(v).intern()).unwrap_or_else(|| Arc::clone(&empty_str)),
+            rating: video.rating.map_or_else(|| Arc::clone(&empty_str), |v| InfoDocUtils::limited(v).intern()),
             rating_5based: video.rating_5based.unwrap_or_default(),
-            tmdb: video.tmdb.map(|v| v.intern()).unwrap_or_else(|| Arc::clone(&empty_str)),
+            tmdb: video.tmdb.map_or_else(|| Arc::clone(&empty_str), |v| v.intern()),
             trailer: video.trailer.clone().unwrap_or_else(|| Arc::clone(&empty_str)),
             added: video.added.clone(),
             is_adult: video.is_adult,

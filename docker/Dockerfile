@@ -10,10 +10,44 @@
 # We use a static build to ensure it works in the scratch image without libraries
 FROM mwader/static-ffmpeg:7.1 AS ffmpeg-static
 
+# Workspace skeleton shared by the backend and frontend dependency builds.
+FROM rust:1.95 AS workspace-skeleton
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY shared ./shared/
+COPY frontend/Cargo.toml frontend/Trunk.toml ./frontend/
+COPY backend/app/Cargo.toml backend/app/build.rs ./backend/app/
+COPY backend/auth/Cargo.toml ./backend/auth/
+COPY backend/btree/Cargo.toml ./backend/btree/
+COPY backend/config-loader/Cargo.toml ./backend/config-loader/
+COPY backend/core/Cargo.toml ./backend/core/
+COPY backend/dvr/Cargo.toml ./backend/dvr/
+COPY backend/hls/Cargo.toml ./backend/hls/
+COPY backend/iptv/Cargo.toml ./backend/iptv/
+COPY backend/library/Cargo.toml ./backend/library/
+COPY backend/media-server/Cargo.toml ./backend/media-server/
+COPY backend/metadata/Cargo.toml ./backend/metadata/
+COPY backend/messaging/Cargo.toml ./backend/messaging/
+COPY backend/mpegts/Cargo.toml ./backend/mpegts/
+COPY backend/parser/Cargo.toml ./backend/parser/
+COPY backend/processing/Cargo.toml ./backend/processing/
+COPY backend/repository/Cargo.toml ./backend/repository/
+COPY backend/session/Cargo.toml ./backend/session/
+
+RUN mkdir -p frontend/src backend/app/src/tools && \
+    printf 'fn main() {}\n' > frontend/src/main.rs && \
+    printf 'fn main() {}\n' > backend/app/src/main.rs && \
+    printf 'fn main() {}\n' > backend/app/src/tools/flags_builder.rs && \
+    for crate in auth btree config-loader core dvr hls iptv library media-server metadata messaging mpegts parser processing repository session; do \
+      mkdir -p "backend/${crate}/src"; \
+      printf '\n' > "backend/${crate}/src/lib.rs"; \
+    done
+
 # -----------------------------------------------------------------
 # Stage 1: Build the Rust binary for production
 # -----------------------------------------------------------------
-FROM rust:1.95 AS rust-build
+FROM workspace-skeleton AS rust-build
 
 # Get target architecture from build argument
 ARG RUST_TARGET=x86_64-unknown-linux-musl
@@ -27,31 +61,19 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # Set Rust compiler flags for static linking against musl
 ENV RUSTFLAGS='-C target-feature=+crt-static'
 
-# Copy dependency files and the full 'shared' crate for dependency caching
-WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
-COPY shared ./shared/
-COPY backend/Cargo.toml ./backend/
-COPY frontend/Cargo.toml ./frontend/
-
-# Create dummy main.rs for other crates to allow dependency build
-RUN mkdir -p backend/src frontend/src && \
-    echo "fn main() {}" > backend/src/main.rs && \
-    echo "fn main() {}" > frontend/src/main.rs
-
-# Build dependencies (this layer will be cached unless dependencies or 'shared' change)
+# Build dependencies (this layer is cached until a manifest or shared code changes)
 RUN rustup target add ${RUST_TARGET}
-RUN cargo build -p tuliprox --target ${RUST_TARGET} --release || true
-
-# Now copy the rest of the source code and build the project
-COPY backend ./backend/
-COPY frontend ./frontend/
 RUN cargo build -p tuliprox --target ${RUST_TARGET} --release
+
+# Copy the backend source only after its dependency layer is complete.
+COPY backend ./backend/
+RUN find backend -type f -name '*.rs' -exec touch {} + && \
+    cargo build -p tuliprox --target ${RUST_TARGET} --release
 
 # -----------------------------------------------------------------
 # Stage 2: Build the rust frontend
 # -----------------------------------------------------------------
-FROM rust:1.95 AS trunk-build
+FROM workspace-skeleton AS trunk-build
 
 # Install dependencies for Trunk and WebAssembly
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -63,23 +85,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 RUN rustup target add wasm32-unknown-unknown
 RUN cargo install --locked trunk wasm-bindgen-cli
 
-# Set working directory
-WORKDIR /src
-
-# Copy dependency files and the full 'shared' crate for dependency caching
-COPY Cargo.toml Cargo.lock ./
-COPY shared ./shared/
-COPY backend/Cargo.toml ./backend/
-COPY frontend/Cargo.toml frontend/Trunk.toml ./frontend/
-
-# Create dummy main.rs for BOTH frontend AND backend to satisfy workspace requirements
-RUN mkdir -p frontend/src backend/src && \
-    echo "fn main() {}" > frontend/src/main.rs && \
-    echo "fn main() {}" > backend/src/main.rs
-
 # Pre-build dependencies
 WORKDIR /src/frontend
-RUN cargo build --target wasm32-unknown-unknown --release || true
+RUN cargo build --target wasm32-unknown-unknown --release
 
 # Now copy the rest of the source code and build the project
 WORKDIR /src
@@ -88,7 +96,7 @@ COPY frontend ./frontend/
 WORKDIR /src/frontend
 
 # Run Trunk build
-RUN trunk build --release
+RUN find src -type f -name '*.rs' -exec touch {} + && trunk build --release
 
 # -----------------------------------------------------------------
 # Stage 3: Build video resources with ffmpeg (from linuxserver used for build time only)

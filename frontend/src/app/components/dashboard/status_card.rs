@@ -20,7 +20,7 @@ pub struct StatusCardProps {
 #[component]
 pub fn StatusCard(props: &StatusCardProps) -> Html {
     html! {
-        <div class={classes!("tp__status-card", if props.classname.is_empty() { String::new() } else {props.classname.to_string()})}>
+        <div class={classes!("tp__status-card", if props.classname.is_empty() { String::new() } else {props.classname.clone()})}>
             <span class="tp__status-card__title">
                { html_if!(!props.icon.is_empty(), { <AppIcon name={props.icon.clone()} /> })}
                 {props.title.clone()}

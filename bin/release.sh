@@ -13,7 +13,7 @@ RESOURCES_DIR="$WORKING_DIR/resources"
 RELEASE_DIR="$WORKING_DIR/release"
 FRONTEND_DIR="${WORKING_DIR}/frontend"
 FRONTEND_BUILD_DIR="${FRONTEND_DIR}/dist"
-BACKEND_DIR="${WORKING_DIR}/backend"
+BACKEND_DIR="${WORKING_DIR}/backend/app"
 TARGET_DIR="${WORKING_DIR}/target"
 BRANCH=$(git branch --show-current)
 START_BRANCH="${BRANCH}"
@@ -606,7 +606,7 @@ esac
 # Marker: version bump push + trigger docker-build workflow (master)
 echo "📦 Committing version bump"
 echo
-FILES=(Cargo.lock backend/Cargo.lock backend/Cargo.toml frontend/Cargo.toml shared/Cargo.toml)
+FILES=(Cargo.toml Cargo.lock backend/*/Cargo.toml frontend/Cargo.toml shared/Cargo.toml)
 for f in "${FILES[@]}"; do
   if [ -f "$f" ]; then
     git add "$f"
@@ -617,9 +617,9 @@ if git diff --cached --quiet; then
   die "Version bump produced no changes to commit."
 fi
 
-BUMP_VERSION="$(grep '^version' "${BACKEND_DIR}/Cargo.toml" | head -n1 | cut -d'"' -f2)"
+BUMP_VERSION="$(grep -Po '^version\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' "${WORKING_DIR}/Cargo.toml" | head -n1)"
 if [ -z "${BUMP_VERSION}" ]; then
-  die "Failed to read version from '${BACKEND_DIR}/Cargo.toml' after bump."
+  die "Failed to read workspace version from '${WORKING_DIR}/Cargo.toml' after bump."
 fi
 
 RUN_KEY="$(uuidgen 2>/dev/null || true)"

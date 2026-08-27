@@ -42,7 +42,7 @@ pub fn AppIcon(props: &AppIconProps) -> Html {
             let viewport = definition
                 .viewport
                 .as_ref()
-                .map_or_else(|| AttrValue::Static("0 0 24 24"), |vp| AttrValue::from(vp.to_string()));
+                .map_or_else(|| AttrValue::Static("0 0 24 24"), |vp| AttrValue::from(vp.clone()));
             html! {
                 <SvgIcon path={(*definition.path).to_string()} name={name} width={props.width.clone()} height={props.height.clone()} viewport={viewport}/>
             }

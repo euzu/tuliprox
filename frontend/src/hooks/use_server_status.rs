@@ -86,7 +86,7 @@ fn dedupe_streams_by_identity(streams: &mut Vec<StreamInfo>) {
 
 /// Drop preserved sticky rows once the same user+IP has an active replacement row.
 /// Keeps soft-preserve during HLS segment gaps (no active row yet); clears zapped channels immediately
-/// instead of waiting for hls_session_ttl (~15s).
+/// instead of waiting for `hls_session_ttl` (~15s).
 fn prune_zapped_preserved_streams(streams: &mut Vec<StreamInfo>) {
     let users_with_active: HashSet<(String, String)> = streams
         .iter()

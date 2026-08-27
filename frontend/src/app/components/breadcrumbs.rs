@@ -48,7 +48,7 @@ pub fn Breadcrumbs(props: &BreadcrumbsProps) -> Html {
                         if i < len -1 {
                            html! { <span class="tp__breadcrumbs__selectable"
                             data-index={i.to_string()}
-                            data-name={ item.to_string() }
+                            data-name={ item.clone() }
                             onclick={ handle_click.clone() }>{ item }</span>
                           }
                         } else {

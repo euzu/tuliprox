@@ -302,7 +302,7 @@ pub fn downloads_view() -> Html {
 
     let request_downloads = {
         let services = services.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             let _ = services.websocket.send_message(ProtocolMessage::DownloadsRequest);
         })
     };
@@ -314,7 +314,7 @@ pub fn downloads_view() -> Html {
         let services = services.clone();
         let request_downloads_effect = request_downloads.clone();
         let initial_loaded = initial_loaded.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             request_downloads_effect.emit(());
             let sub_id = services.event.subscribe(move |msg| match msg {
                 crate::model::EventMessage::DownloadsUpdate(snapshot) => {
@@ -495,7 +495,7 @@ pub fn downloads_view() -> Html {
     let render_header_cell = {
         let translate = translate.clone();
         Callback::<usize, Html>::from(move |col| {
-            let header_text = HEADERS.get(col).copied().map(|key| translate.t(key)).unwrap_or_else(|| "".into());
+            let header_text = HEADERS.get(col).copied().map_or_else(String::new, |key| translate.t(key));
 
             html! { { header_text } }
         })

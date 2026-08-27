@@ -572,11 +572,11 @@ fn get_parser_expression(
             },
             Rule::comparison | Rule::expr => {
                 let expr = get_parser_expression(pair, templates, errors)?;
-                handle_expr!(bop, uop, stmts, expr)
+                handle_expr!(bop, uop, stmts, expr);
             }
             Rule::expr_group => {
                 let expr = get_parser_expression(pair.into_inner().next().unwrap(), templates, errors)?;
-                handle_expr!(bop, uop, stmts, Filter::Group(Box::new(expr)))
+                handle_expr!(bop, uop, stmts, Filter::Group(Box::new(expr)));
             }
             Rule::not => {
                 uop = Some(UnaryOperator::Not);
@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_numeric_round_trip() { assert_filter_round_trip(r#"Chno >= 100 AND Chno < 200 OR NOT Chno = 7"#); }
+    fn test_filter_numeric_round_trip() { assert_filter_round_trip(r"Chno >= 100 AND Chno < 200 OR NOT Chno = 7"); }
 
     #[test]
     fn test_filter_set_round_trip() {
@@ -1020,7 +1020,7 @@ mod tests {
 
     #[test]
     fn test_filter_quality_round_trip_and_eval() {
-        assert_filter_round_trip(r#"Quality >= 3 AND NOT Quality = 5"#);
+        assert_filter_round_trip(r"Quality >= 3 AND NOT Quality = 5");
 
         let filter = get_filter("Quality >= 3", None).expect("filter parses");
         let mut fhd = create_mock_pli("X", "G");

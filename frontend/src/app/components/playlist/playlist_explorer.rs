@@ -109,8 +109,7 @@ fn build_download_filename(title: &str, url: &str) -> String {
         .and_then(|base| base.rsplit('/').next())
         .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext))
         .filter(|ext| !ext.is_empty())
-        .map(|ext| format!(".{ext}"))
-        .unwrap_or_else(|| ".mp4".to_string());
+        .map_or_else(|| ".mp4".to_string(), |ext| format!(".{ext}"));
     if base.ends_with(&ext) {
         base
     } else {
@@ -178,15 +177,15 @@ pub fn PlaylistExplorer() -> Html {
             .and_then(|video| video.recording.as_ref());
         PaddingBounds {
             default_pre_roll_secs: rec.and_then(|c| c.default_pre_roll_secs).unwrap_or(0),
-            max_pre_roll_secs: rec.map(|c| c.max_pre_roll_secs).unwrap_or(900),
+            max_pre_roll_secs: rec.map_or(900, |c| c.max_pre_roll_secs),
             default_post_roll_secs: rec.and_then(|c| c.default_post_roll_secs).unwrap_or(0),
-            max_post_roll_secs: rec.map(|c| c.max_post_roll_secs).unwrap_or(1800),
+            max_post_roll_secs: rec.map_or(1800, |c| c.max_post_roll_secs),
         }
     };
     let recording_padding = Rc::new(recording_padding);
     let current_item = use_state(|| ExplorerLevel::Categories);
     let playlist = use_state(|| (*context.playlist).clone());
-    let search_fields = use_memo((), |_| {
+    let search_fields = use_memo((), |()| {
         let persisted: Vec<String> = crate::utils::get_local_storage_item(TP_EXPLORER_SEARCH_FIELDS_KEY)
             .map(|value| value.split(',').filter(|id| !id.is_empty()).map(str::to_string).collect())
             .unwrap_or_default();
@@ -392,27 +391,7 @@ pub fn PlaylistExplorer() -> Html {
                     ExplorerAction::CopyLinkProviderUrl => {
                         if let Some(dto) = &*selected_channel {
                             let url = dto.url.clone();
-                            if !url.is_empty() {
-                                if let Some(playlist_request) = playlist_ctx.playlist_request.as_ref() {
-                                    let copy_to_clipboard = copy_to_clipboard.clone();
-                                    let services = services.clone();
-                                    let playlist_request = playlist_request.clone();
-                                    spawn_local(async move {
-                                        let request = PlaylistUrlResolveRequest::Provider {
-                                            playlist_request,
-                                            url: url.to_string(),
-                                        };
-                                        let resolved = services
-                                            .playlist
-                                            .resolve_url(request)
-                                            .await
-                                            .unwrap_or_else(|| url.to_string());
-                                        copy_to_clipboard.emit(resolved);
-                                    });
-                                } else {
-                                    copy_to_clipboard.emit(url);
-                                }
-                            } else {
+                            if url.is_empty() {
                                 // Try to fetch episode
                                 if let Some(playlist_request) = playlist_ctx.playlist_request.as_ref() {
                                     let copy_to_clipboard = copy_to_clipboard.clone();
@@ -426,13 +405,26 @@ pub fn PlaylistExplorer() -> Html {
                                             let url = pli.url.to_string();
                                             let request = PlaylistUrlResolveRequest::Provider {
                                                 playlist_request,
-                                                url: url.to_string(),
+                                                url: url.clone(),
                                             };
                                             let resolved = services.playlist.resolve_url(request).await.unwrap_or(url);
                                             copy_to_clipboard.emit(resolved);
                                         }
                                     });
                                 }
+                            } else if let Some(playlist_request) = playlist_ctx.playlist_request.as_ref() {
+                                let copy_to_clipboard = copy_to_clipboard.clone();
+                                let services = services.clone();
+                                let playlist_request = playlist_request.clone();
+                                spawn_local(async move {
+                                    let request =
+                                        PlaylistUrlResolveRequest::Provider { playlist_request, url: url.clone() };
+                                    let resolved =
+                                        services.playlist.resolve_url(request).await.unwrap_or_else(|| url.clone());
+                                    copy_to_clipboard.emit(resolved);
+                                });
+                            } else {
+                                copy_to_clipboard.emit(url);
                             }
                         }
                     }
@@ -577,7 +569,7 @@ pub fn PlaylistExplorer() -> Html {
                                     .await
                                 {
                                     Ok(_) => {
-                                        services.toastr.success(translate_clone.t("MESSAGES.DOWNLOAD.DOWNLOAD_QUEUED"))
+                                        services.toastr.success(translate_clone.t("MESSAGES.DOWNLOAD.DOWNLOAD_QUEUED"));
                                     }
                                     Err(_) => services.toastr.error(translate_clone.t("MESSAGES.DOWNLOAD.FAIL")),
                                 }
@@ -606,12 +598,11 @@ pub fn PlaylistExplorer() -> Html {
                                 if !ensure_recording_available(&services, &translate_clone).await {
                                     return;
                                 }
-                                let target_name = match target_name {
-                                    Some(name) => name,
-                                    None => {
-                                        services.toastr.error(translate_clone.t("MESSAGES.RECORDING.NO_TARGET"));
-                                        return;
-                                    }
+                                let target_name = if let Some(name) = target_name {
+                                    name
+                                } else {
+                                    services.toastr.error(translate_clone.t("MESSAGES.RECORDING.NO_TARGET"));
+                                    return;
                                 };
                                 let source = RecordingSourceInput {
                                     target_id: target_name,
@@ -637,7 +628,7 @@ pub fn PlaylistExplorer() -> Html {
                                         *request_slot.borrow_mut() = Some(request);
                                     })
                                 };
-                                let on_cancel = Callback::from(|_| {});
+                                let on_cancel = Callback::from(|()| {});
                                 let body = html! {
                                     <RecordingForm
                                         prefill={prefill}
@@ -667,12 +658,11 @@ pub fn PlaylistExplorer() -> Html {
                                 if result != DialogResult::Ok {
                                     return;
                                 }
-                                let request = match request_slot.borrow_mut().take() {
-                                    Some(r) => r,
-                                    None => {
-                                        services.toastr.error(translate_clone.t("MESSAGES.RECORDING.NO_REQUEST"));
-                                        return;
-                                    }
+                                let request = if let Some(r) = request_slot.borrow_mut().take() {
+                                    r
+                                } else {
+                                    services.toastr.error(translate_clone.t("MESSAGES.RECORDING.NO_REQUEST"));
+                                    return;
                                 };
                                 let recording_svc = RecordingService::new();
                                 match recording_svc.create_task(request).await {
@@ -946,7 +936,7 @@ pub fn PlaylistExplorer() -> Html {
                     ToString::to_string,
                 );
                 (
-                    Some(backdrop.to_string()),
+                    Some(backdrop.clone()),
                     series_props.plot.as_deref().map(ToString::to_string).unwrap_or_default(),
                     series_props.cast.to_string(),
                     series_props.genre.as_deref().map(ToString::to_string).unwrap_or_default(),
@@ -958,9 +948,9 @@ pub fn PlaylistExplorer() -> Html {
             _ => (None, String::new(), String::new(), String::new(), String::new(), 0.0, None),
         };
 
-        if !series_info.logo.is_empty() && backdrop.as_ref().is_none_or(|v| v.is_empty()) {
+        if !series_info.logo.is_empty() && backdrop.as_ref().is_none_or(std::string::String::is_empty) {
             backdrop = Some(series_info.logo.to_string());
-        };
+        }
 
         let style = backdrop.as_ref().map(|b| format!("background-image: url(\"{b}\");")).unwrap_or_default();
 

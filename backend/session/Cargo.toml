@@ -1,0 +1,37 @@
+[package]
+name = "tuliprox-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Provider allocation and streaming-session runtime: admission, connections, users, events and shared streams"
+
+[lints]
+workspace = true
+
+[dependencies]
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
+tuliprox-mpegts = { workspace = true }
+tuliprox-repository = { workspace = true }
+arc-swap.workspace = true
+axum = { version = "0.8.9", features = ["macros", "default", "ws"] }
+bytes.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+futures.workspace = true
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
+log.workspace = true
+rand = "0.9.5"
+reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+thiserror.workspace = true
+lru = "0.16.4"
+serde.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "fs", "time", "macros", "sync"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
+tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
+url.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+crc32fast = "1.5.1"
+tokio = { workspace = true, features = ["test-util"] }

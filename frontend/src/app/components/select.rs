@@ -65,7 +65,7 @@ pub fn Select(props: &SelectProps) -> Html {
                      multi_select={props.multi_select}
                      options={props.options.clone()}
                      name={props.name.clone()}
-                     icon={props.icon.as_ref().map_or_else(|| "Popup".to_owned(), |i|i.to_string())}
+                     icon={props.icon.as_ref().map_or_else(|| "Popup".to_owned(), std::clone::Clone::clone)}
                      aria_label={props.name.clone()}
                      aria_required={props.required.then_some(true)}
                      aria_invalid={props.error.as_ref().map(|_| true)}

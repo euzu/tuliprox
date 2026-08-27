@@ -79,7 +79,7 @@ impl AuthService {
         F: FnMut(bool) -> U,
     {
         let fut = self.auth_channel.signal_cloned().for_each(callback);
-        fut.await
+        fut.await;
     }
 
     fn reset_auth_state(&self) {
@@ -112,7 +112,7 @@ impl AuthService {
         .await
         {
             Ok(Some(token)) => {
-                self.username.replace(token.username.to_string());
+                self.username.replace(token.username.clone());
                 self.handle_token(&token.token);
                 set_token(Some(&token.token));
                 self.auth_channel.set(true);
@@ -126,7 +126,7 @@ impl AuthService {
         check_dummy_token();
         match request_post::<(), TokenResponse>(&concat_path(&self.auth_path, "refresh"), (), None, None).await {
             Ok(Some(token)) => {
-                self.username.replace(token.username.to_string());
+                self.username.replace(token.username.clone());
                 self.handle_token(&token.token);
                 set_token(Some(&token.token));
                 self.auth_channel.set(true);
@@ -150,7 +150,7 @@ impl AuthService {
         }
 
         if let Some(claims) = decode_jwt_payload(token) {
-            for role in claims.roles.iter() {
+            for role in &claims.roles {
                 roles.push(role.clone());
             }
             *permissions = claims.permissions;

@@ -12,11 +12,11 @@ pub enum CellValue<'a> {
     U32(u32),
 }
 
-impl<'a> PartialOrd for CellValue<'a> {
+impl PartialOrd for CellValue<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) }
 }
 
-impl<'a> Ord for CellValue<'a> {
+impl Ord for CellValue<'_> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self, other) {
             (CellValue::Empty, CellValue::Empty) => std::cmp::Ordering::Equal,
@@ -54,8 +54,8 @@ impl<'a> Ord for CellValue<'a> {
     }
 }
 
-impl<'a> PartialEq for CellValue<'a> {
+impl PartialEq for CellValue<'_> {
     fn eq(&self, other: &Self) -> bool { self.cmp(other) == std::cmp::Ordering::Equal }
 }
 
-impl<'a> Eq for CellValue<'a> {}
+impl Eq for CellValue<'_> {}

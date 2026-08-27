@@ -100,15 +100,13 @@ pub fn Search(props: &SearchProps) -> Html {
                 if let Some(input) = input.cast::<HtmlInputElement>() {
                     let text = input.value();
                     if text.len() >= min_length {
-                        if !matches!(*regex, RegexState::Inactive) {
-                            if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
-                                regex.set(RegexState::Active);
-                                cb_search.emit(SearchRequest::Regexp(text, selected_fields));
-                            } else {
-                                regex.set(RegexState::Invalid);
-                            }
-                        } else {
+                        if matches!(*regex, RegexState::Inactive) {
                             cb_search.emit(SearchRequest::Text(text, selected_fields));
+                        } else if shared::model::REGEX_CACHE.get_or_compile(&text).is_ok() {
+                            regex.set(RegexState::Active);
+                            cb_search.emit(SearchRequest::Regexp(text, selected_fields));
+                        } else {
+                            regex.set(RegexState::Invalid);
                         }
                     } else if text.is_empty() {
                         cb_search.emit(SearchRequest::Clear);

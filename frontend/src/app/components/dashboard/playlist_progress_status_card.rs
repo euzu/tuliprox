@@ -16,7 +16,7 @@ pub fn PlaylistProgressStatusCard() -> Html {
     {
         let services_ctx = services.clone();
         let data_clone = data.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             let services_ctx = services_ctx.clone();
             let data_clone = data_clone.clone();
             let subid = services_ctx.event.subscribe(move |msg| {

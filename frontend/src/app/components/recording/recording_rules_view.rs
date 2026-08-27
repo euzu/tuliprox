@@ -179,7 +179,7 @@ pub fn recording_rules_view() -> Html {
     {
         let rules = rules.clone();
         let svc = services.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             wasm_bindgen_futures::spawn_local(async move {
                 if let Ok(r) = RecordingService::new().list_rules().await {
                     rules.set(Rc::new(r));
@@ -197,7 +197,7 @@ pub fn recording_rules_view() -> Html {
     {
         let rules = rules.clone();
         let svc = services.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             let sid = svc.event.subscribe(move |msg| {
                 if matches!(msg, EventMessage::RecordingRulesChanged) {
                     let rules = rules.clone();
@@ -218,7 +218,7 @@ pub fn recording_rules_view() -> Html {
         let rules = rules.clone();
         let editing = editing.clone();
         let creating = creating.clone();
-        Callback::from(move |_: ()| {
+        Callback::from(move |(): ()| {
             editing.set(None);
             creating.set(false);
             let rules = rules.clone();

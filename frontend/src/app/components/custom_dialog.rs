@@ -149,7 +149,7 @@ pub fn CustomDialog(props: &CustomDialogProps) -> Html {
         <div class={classes!("tp__custom-dialog-backdrop", if props.modal {"tp__custom-dialog-modal"} else {""})} onclick={on_backdrop_click}>
             <div
                 ref={dialog_ref}
-                class={classes!("tp__custom-dialog", props.class.as_ref().map_or_else(||"".to_owned(), |s|s.clone()))}
+                class={classes!("tp__custom-dialog", props.class.as_ref().map_or_else(String::new, std::clone::Clone::clone))}
                 role="dialog"
                 aria-modal={props.modal.to_string()}
                 aria-label={props.aria_label.clone()}

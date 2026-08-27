@@ -150,7 +150,7 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                     TargetTableAction::Refresh => {
                         let translate = translate.clone();
                         let services_ctx = services_ctx.clone();
-                        let dto_name = selected_dto.as_ref().map_or_else(String::new, |d| d.name.to_string());
+                        let dto_name = selected_dto.as_ref().map_or_else(String::new, |d| d.name.clone());
                         spawn_local(async move {
                             let targets = vec![dto_name.as_str()];
                             if services_ctx.playlist.update_targets(&targets).await {
@@ -165,7 +165,7 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                         let translator = translate.clone();
                         let services_ctx = services_ctx.clone();
                         let config_ctx = config_ctx.clone();
-                        let target_name = selected_dto.as_ref().map_or_else(String::new, |d| d.name.to_string());
+                        let target_name = selected_dto.as_ref().map_or_else(String::new, |d| d.name.clone());
                         spawn_local(async move {
                             let result = confirm.confirm(&translator.t("MESSAGES.CONFIRM_DELETE")).await;
                             if result != DialogResult::Ok {
@@ -175,7 +175,7 @@ pub fn TargetTable(props: &TargetTableProps) -> Html {
                                 return;
                             };
                             let mut sources = app_config.sources.clone();
-                            for source in sources.sources.iter_mut() {
+                            for source in &mut sources.sources {
                                 source.targets.retain(|t| t.name != target_name);
                             }
                             match services_ctx.config.save_sources(sources).await {

@@ -33,7 +33,7 @@ pub fn AccordionPanel(props: &AccordionPanelProps) -> Html {
     };
 
     html! {
-        <div class={classes!("tp__collapse-panel", if expanded {""} else {"tp__collapsed"}, props.class.to_string())}>
+        <div class={classes!("tp__collapse-panel", if expanded {""} else {"tp__collapsed"}, props.class.clone())}>
             <div class="tp__collapse-panel__header" onclick={toggle}>
                 <span class="tp__collapse-panel__header-title">
                     { props.title_content.clone().unwrap_or_else(|| html! { &props.title }) }

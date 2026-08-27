@@ -148,19 +148,7 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
     let render_main = || {
         let output_form_state_1 = output_form_state.clone();
         let output_form_state_2 = output_form_state.clone();
-        if !props.allow_write {
-            html! {
-                <Card class="tp__config-view__card">
-                    { config_field!(output_form_state.form, translate.t(LABEL_DIRECTORY), directory) }
-                    { config_field_optional!(output_form_state.form, translate.t(LABEL_USERNAME), username) }
-                    { config_field_custom!(translate.t(LABEL_EXPORT_STYLE), output_form_state.form.style.to_string()) }
-                    { config_field_custom!(
-                        translate.t(LABEL_FILTER),
-                        output_form_state.form.filter.clone().unwrap_or_default()
-                    ) }
-                </Card>
-            }
-        } else {
+        if props.allow_write {
             html! {
                 <Card class="tp__config-view__card">
                     { edit_field_text!(output_form_state, translate.t(LABEL_DIRECTORY), directory, StrmTargetOutputFormAction::Directory) }
@@ -188,11 +176,34 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
                     })}
                 </Card>
             }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                    { config_field!(output_form_state.form, translate.t(LABEL_DIRECTORY), directory) }
+                    { config_field_optional!(output_form_state.form, translate.t(LABEL_USERNAME), username) }
+                    { config_field_custom!(translate.t(LABEL_EXPORT_STYLE), output_form_state.form.style.to_string()) }
+                    { config_field_custom!(
+                        translate.t(LABEL_FILTER),
+                        output_form_state.form.filter.clone().unwrap_or_default()
+                    ) }
+                </Card>
+            }
         }
     };
 
     let render_options = || {
-        if !props.allow_write {
+        if props.allow_write {
+            html! {
+                <Card class="tp__config-view__card">
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_FLAT), flat, StrmTargetOutputFormAction::Flat) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_UNDERSCORE_WHITESPACE), underscore_whitespace, StrmTargetOutputFormAction::UnderscoreWhitespace) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_CLEANUP), cleanup, StrmTargetOutputFormAction::Cleanup) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_ADD_QUALITY_TO_FILENAME), add_quality_to_filename, StrmTargetOutputFormAction::AddQualityToFilename) }
+                    { edit_field_bool!(output_form_state, translate.t(LABEL_USE_METADATA), use_metadata, StrmTargetOutputFormAction::UseMetadata) }
+                    { edit_field_list_option!(output_form_state, translate.t(LABEL_STRM_PROPS), strm_props, StrmTargetOutputFormAction::StrmProps, translate.t(LABEL_ADD_PROPERTY)) }
+                </Card>
+            }
+        } else {
             html! {
                 <Card class="tp__config-view__card">
                     { config_field_bool!(output_form_state.form, translate.t(LABEL_FLAT), flat) }
@@ -204,17 +215,6 @@ pub fn StrmTargetOutputView(props: &StrmTargetOutputViewProps) -> Html {
                         translate.t(LABEL_STRM_PROPS),
                         output_form_state.form.strm_props.as_ref().map_or_else(String::new, |props| props.join(", "))
                     ) }
-                </Card>
-            }
-        } else {
-            html! {
-                <Card class="tp__config-view__card">
-                    { edit_field_bool!(output_form_state, translate.t(LABEL_FLAT), flat, StrmTargetOutputFormAction::Flat) }
-                    { edit_field_bool!(output_form_state, translate.t(LABEL_UNDERSCORE_WHITESPACE), underscore_whitespace, StrmTargetOutputFormAction::UnderscoreWhitespace) }
-                    { edit_field_bool!(output_form_state, translate.t(LABEL_CLEANUP), cleanup, StrmTargetOutputFormAction::Cleanup) }
-                    { edit_field_bool!(output_form_state, translate.t(LABEL_ADD_QUALITY_TO_FILENAME), add_quality_to_filename, StrmTargetOutputFormAction::AddQualityToFilename) }
-                    { edit_field_bool!(output_form_state, translate.t(LABEL_USE_METADATA), use_metadata, StrmTargetOutputFormAction::UseMetadata) }
-                    { edit_field_list_option!(output_form_state, translate.t(LABEL_STRM_PROPS), strm_props, StrmTargetOutputFormAction::StrmProps, translate.t(LABEL_ADD_PROPERTY)) }
                 </Card>
             }
         }

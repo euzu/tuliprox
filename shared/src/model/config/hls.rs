@@ -437,14 +437,14 @@ hls_cache:
 
     #[test]
     fn hls_cache_rejects_corrupt_segment_watchdog_command_version() {
-        let yaml = r#"
+        let yaml = r"
 rewrite_secret: 00112233445566778899aabbccddeeff
 hls_cache:
   segment_repair:
     corrupt_segment_watchdog:
       mode: sanitize
       command_version: 1
-"#;
+";
 
         let err = serde_saphyr::from_str::<ReverseProxyConfigDto>(yaml)
             .expect_err("command_version must be rejected as unknown config");

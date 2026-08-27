@@ -61,7 +61,7 @@ pub fn ContentDialog(props: &ContentDialogProps) -> Html {
                                     disabled={action.disabled}
                                     class={action.style.as_ref().map_or_else(String::new, ToString::to_string)}
                                     name={action.name.clone()}
-                                    icon={action.icon.as_ref().map_or_else(String::new, |i| i.clone())}
+                                    icon={action.icon.as_ref().map_or_else(String::new, std::clone::Clone::clone)}
                                     onclick={Callback::from(move |_| on_result(result.clone()))}
                                     title={translate.t(&action.label)}
                                 />
@@ -77,7 +77,7 @@ pub fn ContentDialog(props: &ContentDialogProps) -> Html {
     let on_close = {
         let on_result = on_result.clone();
         resolve_close_result(&props.actions).map(|result| {
-            Callback::from(move |_| {
+            Callback::from(move |()| {
                 on_result(result.clone());
             })
         })

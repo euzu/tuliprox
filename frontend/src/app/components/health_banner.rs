@@ -249,7 +249,7 @@ pub fn HealthBanner() -> Html {
     let update_popover_pos = {
         let banner_ref = banner_ref.clone();
         let popover_pos = popover_pos.clone();
-        Callback::from(move |_: ()| {
+        Callback::from(move |(): ()| {
             if let Some(el) = banner_ref.cast::<web_sys::Element>() {
                 let rect = el.get_bounding_client_rect();
                 let viewport_w = web_sys::window()

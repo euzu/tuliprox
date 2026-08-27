@@ -12,7 +12,7 @@ pub fn GithubActionCard() -> Html {
     let translate = use_translation();
 
     let handle_url = {
-        let mut github_link = services.config.ui_config.github.to_string();
+        let mut github_link = services.config.ui_config.github.clone();
         if github_link.is_empty() {
             github_link = String::from("https://github.com/euzu/tuliprox");
         }

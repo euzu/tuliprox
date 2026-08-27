@@ -24,7 +24,7 @@ pub fn DashboardView() -> Html {
             <div class="tp__dashboard__body-actions">
               <Card>
                  <VersionActionCard version={status_ctx.status.as_ref().map_or_else(String::new,  |s| s.version.clone())}
-                     build_time={status_ctx.status.as_ref().map_or_else(String::new,  |s| s.build_time.as_ref().map_or_else(String::new, |v| v.clone()))}/>
+                     build_time={status_ctx.status.as_ref().map_or_else(String::new,  |s| s.build_time.as_ref().map_or_else(String::new, std::clone::Clone::clone))}/>
               </Card>
               <Card><UserActionCard /></Card>
               <Card><DocumentationActionCard /></Card>

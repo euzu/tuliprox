@@ -53,7 +53,7 @@ impl PartialEq for CommonInputFormProps {
 pub(super) fn CommonInputForm(props: &CommonInputFormProps) -> Html {
     let translate = use_translation();
     let state = props.state.clone();
-    let fetch_methods = use_memo((), |_| {
+    let fetch_methods = use_memo((), |()| {
         [InputFetchMethod::GET, InputFetchMethod::POST].iter().map(ToString::to_string).collect::<Vec<_>>()
     });
     let method_selection = Rc::new(vec![state.form.method.to_string()]);

@@ -83,8 +83,7 @@ pub(crate) fn filter_disabled_grace_strategies(
 pub(crate) fn admission_strategy_tag_label(translate: &YewI18n, tag: &str) -> String {
     AdmissionStrategy::from_str(tag)
         .ok()
-        .map(|strategy| admission_strategy_label(translate, strategy))
-        .unwrap_or_else(|| tag.to_string())
+        .map_or_else(|| tag.to_string(), |strategy| admission_strategy_label(translate, strategy))
 }
 
 pub(crate) fn legacy_admission_strategy_tags(stream: &StreamConfigDto) -> Vec<String> {

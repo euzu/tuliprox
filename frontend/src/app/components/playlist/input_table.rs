@@ -68,7 +68,7 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                     5 => dto
                         .password
                         .as_ref()
-                        .map_or_else(|| html! {}, |pwd| html! { <HideContent content={pwd.to_string()}></HideContent>}),
+                        .map_or_else(|| html! {}, |pwd| html! { <HideContent content={pwd.clone()}></HideContent>}),
                     6 => dto.persist.as_ref().map_or_else(|| html! {}, |p| html! {p}),
                     7 => {
                         html! { <RevealContent preview={ html!{translator.t("LABEL.SETTINGS")}}><InputOptions input={dto.clone()} /></RevealContent> }
@@ -98,8 +98,7 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                         .exp_date
                         .as_ref()
                         .and_then(|ts| unix_ts_to_str(*ts))
-                        .map(|s| html! { { s } })
-                        .unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
+                        .map_or_else(|| html! { <AppIcon name="Unlimited" /> }, |s| html! { { s } }),
                     _ => html! {""},
                 },
                 InputRow::Alias(alias, _dto) => match col {
@@ -114,15 +113,14 @@ pub fn InputTable(props: &InputTableProps) -> Html {
                     5 => alias
                         .password
                         .as_ref()
-                        .map_or_else(|| html! {}, |pwd| html! { <HideContent content={pwd.to_string()}></HideContent>}),
+                        .map_or_else(|| html! {}, |pwd| html! { <HideContent content={pwd.clone()}></HideContent>}),
                     8 => html! { alias.priority.to_string() },
                     9 => html! { alias.max_connections.to_string() },
                     14 => alias
                         .exp_date
                         .as_ref()
                         .and_then(|ts| unix_ts_to_str(*ts))
-                        .map(|s| html! { { s } })
-                        .unwrap_or_else(|| html! { <AppIcon name="Unlimited" /> }),
+                        .map_or_else(|| html! { <AppIcon name="Unlimited" /> }, |s| html! { { s } }),
                     _ => html! {},
                 },
             }

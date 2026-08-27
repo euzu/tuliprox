@@ -272,7 +272,7 @@ impl EpgConfigDto {
                                 resolved.url = provider_url;
                                 self.t_sources.push(resolved);
                             }
-                            Err(err) => return Err(TuliproxError::ConfigEpg(err.to_string())),
+                            Err(err) => return Err(TuliproxError::ConfigEpg(err.clone())),
                         }
                     } else {
                         self.t_sources.push(epg_source.clone());
@@ -517,13 +517,13 @@ mod tests {
 
     #[test]
     fn aliases_field_is_rejected() {
-        let yaml = r#"
+        let yaml = r"
 type: ics
 url: https://example.com/f1.ics
 channel_id: f1.calendar
 aliases:
   - F1
-"#;
+";
         let err = serde_saphyr::from_str::<EpgSourceDto>(yaml).unwrap_err();
         assert!(err.to_string().contains("aliases") || err.to_string().contains("unknown field"));
     }

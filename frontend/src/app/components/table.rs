@@ -337,8 +337,8 @@ pub fn PagedTable<T: PartialEq + Clone + 'static>(props: &PagedTableProps<T>) ->
 
     let translate = use_translation();
 
-    let range_start = if total_items == 0 { 0 } else { ((page - 1) * page_size as u32) as u64 + 1 };
-    let range_end = (page as u64) * page_size as u64;
+    let range_start = if total_items == 0 { 0 } else { u64::from((page - 1) * u32::from(page_size)) + 1 };
+    let range_end = u64::from(page) * u64::from(page_size);
     let range_end = range_end.min(total_items);
     let pagination_items = build_pagination_items(page, total_pages);
     let first_page_label = translate.t("LABEL.FIRST_PAGE");

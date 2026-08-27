@@ -5,7 +5,7 @@ pub struct InfoDocUtils {}
 impl InfoDocUtils {
     pub fn extract_year_from_release_date(release_date: &str) -> Option<u32> {
         // collect only digits
-        let digits_only: String = release_date.chars().filter(|c| c.is_ascii_digit()).take(4).collect();
+        let digits_only: String = release_date.chars().filter(char::is_ascii_digit).take(4).collect();
 
         // do we have 4 digits?
         if digits_only.len() < 4 {

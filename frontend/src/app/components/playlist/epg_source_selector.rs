@@ -50,12 +50,11 @@ pub fn EpgSourceSelector(props: &EpgSourceSelectorProps) -> Html {
         let handle_source_download = handle_source_download.clone();
         let url_ref = url_ref.clone();
         Callback::from(move |_| {
-            let url = match url_ref.cast::<HtmlInputElement>() {
-                Some(input) => input.value().trim().to_owned(),
-                None => {
-                    services.toastr.error(translate.t("MESSAGES.PLAYLIST_UPDATE.URL_MANDATORY"));
-                    return;
-                }
+            let url = if let Some(input) = url_ref.cast::<HtmlInputElement>() {
+                input.value().trim().to_owned()
+            } else {
+                services.toastr.error(translate.t("MESSAGES.PLAYLIST_UPDATE.URL_MANDATORY"));
+                return;
             };
 
             let mut valid = true;

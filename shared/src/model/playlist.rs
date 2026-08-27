@@ -428,7 +428,9 @@ impl PlaylistItemHeader {
 
     #[inline]
     pub fn get_container_extension(&self) -> Option<Arc<str>> {
-        self.additional_properties.as_ref().and_then(|a| a.get_container_extension())
+        self.additional_properties
+            .as_ref()
+            .and_then(super::stream_properties::StreamProperties::get_container_extension)
     }
 }
 
@@ -1037,7 +1039,9 @@ impl XtreamPlaylistItem {
     }
 
     #[inline]
-    pub fn has_details(&self) -> bool { self.additional_properties.as_ref().is_some_and(|p| p.has_details()) }
+    pub fn has_details(&self) -> bool {
+        self.additional_properties.as_ref().is_some_and(super::stream_properties::StreamProperties::has_details)
+    }
 
     pub fn resolve_resource_url(&self, field: &str) -> Option<Arc<str>> {
         let bytes = field.as_bytes();
@@ -1278,10 +1282,12 @@ impl PlaylistItem {
         }
     }
 
-    pub fn has_details(&self) -> bool { self.header.additional_properties.as_ref().is_some_and(|p| p.has_details()) }
+    pub fn has_details(&self) -> bool {
+        self.header.additional_properties.as_ref().is_some_and(super::stream_properties::StreamProperties::has_details)
+    }
 
     pub fn get_tmdb_id(&self) -> Option<u32> {
-        self.header.additional_properties.as_ref().and_then(|p| p.get_tmdb_id())
+        self.header.additional_properties.as_ref().and_then(super::stream_properties::StreamProperties::get_tmdb_id)
     }
 }
 

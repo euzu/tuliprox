@@ -28,6 +28,10 @@ BOLD  := \033[1m
 
 .DEFAULT_GOAL := help
 
+# Number of CPUs (portable): try GNU `nproc`, then POSIX `getconf`, then macOS `sysctl`
+CPU_COUNT := $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+CARGO_BUILD_JOBS := $(CPU_COUNT)
+
 .PHONY: help
 help: ## Display this help
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make $(AQUA)<target>$(RESET)\n"} /^[a-zA-Z_0-9-]+:.*?##/ { printf "  $(AQUA)%-26s$(RESET) %s\n", $$1, $$2 } /^##@/ { printf "\n$(BOLD)%s$(RESET)\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
@@ -104,19 +108,31 @@ markdownlint: ## Install markdownlint-cli2 (requires npm)
 ##@ Development:
 
 .PHONY: test
-test: ## Run all workspace tests (Stable)
-	@echo "==> Running tests (stable)"
-	$(CARGO_STABLE) test --workspace
+test: ## Run all workspace tests (Stable) — use detected CPU count for parallelism
+	@echo "==> Running tests (stable) with $(CPU_COUNT) jobs/threads"
+	@TMPDIR="$${TMPDIR:-/tmp}" RUST_TEST_THREADS=$(CPU_COUNT) ./bin/test.sh -j$(CPU_COUNT) --workspace -- --test-threads=$(CPU_COUNT)
+
+.PHONY: build
+build: ## Build the entire workspace in parallel using detected CPU count
+	@echo "==> Building workspace with $(CARGO_BUILD_JOBS) jobs"
+	@TMPDIR="$${TMPDIR:-/tmp}" $(CARGO_STABLE) build -j$(CARGO_BUILD_JOBS) --workspace
+
+.PHONY: architecture-check
+architecture-check: ## Verify workspace dependency direction
+	@echo "==> Checking the architecture gate itself"
+	./bin/check-workspace-deps-test.sh
+	@echo "==> Checking workspace dependency direction"
+	./bin/check-workspace-deps.sh
 
 .PHONY: lint
-lint: ## Run clippy linter (Stable)
-	@echo "==> Running clippy (stable)"
-	$(CARGO_STABLE) clippy --workspace -- -D warnings
+lint: ## Run clippy linter (Nightly)
+	@echo "==> Running clippy (nightly)"
+	$(CARGO_NIGHTLY) clippy --workspace -- -D warnings
 
 .PHONY: lint-fix
-lint-fix: ## Automatically fix clippy suggestions (Stable)
+lint-fix: ## Automatically fix clippy suggestions (Nightly)
 	@echo "==> Applying clippy auto-fixes"
-	$(CARGO_STABLE) clippy --fix --workspace --allow-dirty --allow-staged -- -D clippy::uninlined_format_args
+	$(CARGO_NIGHTLY) clippy --fix --workspace --allow-dirty --allow-staged -- -D clippy::uninlined_format_args
 
 .PHONY: fmt
 fmt: ## Format all code using nightly rules (Compact)

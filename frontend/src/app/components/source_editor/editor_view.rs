@@ -569,7 +569,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     let check_mobile_state = {
         let is_mobile = is_mobile.clone();
         let sidebar_collapsed = sidebar_collapsed.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             let Some(browser_window) = window() else {
                 return;
             };
@@ -585,7 +585,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
 
     {
         let check_mobile_state = check_mobile_state.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             check_mobile_state.emit(());
             || {}
         });
@@ -623,7 +623,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let config_ctx = config_ctx.clone();
         let is_dirty = is_dirty.clone();
         let edit_revision = edit_revision.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             *edit_revision.borrow_mut() += 1;
             is_dirty.set(true);
             if let Some(on_sources_change) = on_sources_change.as_ref() {
@@ -719,7 +719,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                                     BlockInstance::Target(target_config.clone()),
                                 ));
                                 input_ids.iter().for_each(|input_id| {
-                                    gen_connections.push(Connection { from: *input_id, to: target_id })
+                                    gen_connections.push(Connection { from: *input_id, to: target_id });
                                 });
 
                                 for output in &target_config.output {
@@ -862,12 +862,12 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                     continue;
                 }
                 changed = true;
-                for block in editor_state.blocks.iter_mut() {
+                for block in &mut editor_state.blocks {
                     if block.id >= id {
                         block.id -= 1;
                     }
                 }
-                for conn in editor_state.connections.iter_mut() {
+                for conn in &mut editor_state.connections {
                     if conn.from >= id {
                         conn.from -= 1;
                     }
@@ -928,7 +928,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                 .blocks
                 .iter()
                 .filter_map(|b| match &b.instance {
-                    BlockInstance::Target(dto) => Some(dto.name.to_string()),
+                    BlockInstance::Target(dto) => Some(dto.name.clone()),
                     _ => None,
                 })
                 .collect();
@@ -983,7 +983,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
 
             // When a staged input and its provider are cloned together, point the
             // clone at the cloned provider instead of the original.
-            for block in new_blocks.iter_mut() {
+            for block in &mut new_blocks {
                 let replacement = if let BlockInstance::Input(dto) = &block.instance {
                     dto.staged
                         .as_ref()
@@ -1095,7 +1095,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
     let show_zoom_indicator = {
         let zoom_indicator_visible = zoom_indicator_visible.clone();
         let zoom_indicator_timeout = zoom_indicator_timeout.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             zoom_indicator_visible.set(true);
             if let Some(timeout) = zoom_indicator_timeout.borrow_mut().take() {
                 timeout.cancel();
@@ -1140,7 +1140,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let translate = translate.clone();
         let is_dirty = is_dirty.clone();
         let edit_revision = edit_revision.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             let base_sources = config_ctx.config.as_ref().map(|c| c.sources.clone()).unwrap_or_default();
             let editor_state = editor_state_ref.borrow();
             let sources_config = editor_state_to_sources_config(&base_sources, &editor_state);
@@ -1177,7 +1177,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
         let confirm = dialog.clone();
         let on_save = handle_save.clone();
         let translator = translate.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             let confirm = confirm.clone();
             let on_save = on_save.clone();
             let translator = translator.clone();
@@ -1639,8 +1639,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             if update_delete_circles {
                                 if let Some(doc) = &document {
                                     if let Some(circle_el) = doc.get_element_by_id(&format!("conn-del-{from}-{to}")) {
-                                        let mid_x = (fx + tx) / 2.0;
-                                        let mid_y = (fy + ty) / 2.0;
+                                        let mid_x = f32::midpoint(fx, tx);
+                                        let mid_y = f32::midpoint(fy, ty);
                                         let _ = circle_el.set_attribute("cx", &mid_x.to_string());
                                         let _ = circle_el.set_attribute("cy", &mid_y.to_string());
                                     }
@@ -1801,7 +1801,7 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                             ))
                         } else {
                             // Single drag block
-                            if let Some(block) = { editor_state.get_block(block_id) } {
+                            if let Some(block) = editor_state.get_block(block_id) {
                                 let positions = vec![(block_id, block.position)];
                                 Some((mouse_x, mouse_y, editor_state.selection.group_anchor_mouse, positions))
                             } else {
@@ -1961,11 +1961,11 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                         let touch_x = touch.client_x() as f32 - rect.left() as f32;
                         let touch_y = touch.client_y() as f32 - rect.top() as f32;
 
-                        let to_move = if !group_initial_positions.is_empty() {
-                            Some((touch_x, touch_y, group_anchor_mouse, group_initial_positions))
-                        } else {
+                        let to_move = if group_initial_positions.is_empty() {
                             single_block_position
                                 .map(|position| (touch_x, touch_y, group_anchor_mouse, vec![(block_id, position)]))
+                        } else {
+                            Some((touch_x, touch_y, group_anchor_mouse, group_initial_positions))
                         };
 
                         if let Some(move_it) = to_move {
@@ -2139,14 +2139,14 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
             editor_state.connections.retain(|c| c.from != block_id && c.to != block_id);
             let changed = before_blocks != editor_state.blocks.len();
 
-            for block in editor_state.blocks.iter_mut() {
+            for block in &mut editor_state.blocks {
                 if block.id >= block_id {
                     block.id -= 1;
                 }
             }
 
             // udpate connection ids
-            for conn in editor_state.connections.iter_mut() {
+            for conn in &mut editor_state.connections {
                 if conn.from >= block_id {
                     conn.from -= 1;
                 }
@@ -2390,8 +2390,8 @@ pub fn SourceEditor(props: &SourceEditorProps) -> Html {
                         <g>
                             <path id={format!("conn-{}-{}", c.from, c.to)} d={d} stroke={connection_color} fill="transparent" stroke-width="2"/>
                             { if *delete_mode && !editor_state.is_panning {
-                                let mid_x = (from_x + to_x) / 2.0;
-                                let mid_y = (from_y + to_y) / 2.0;
+                                let mid_x = f32::midpoint(from_x, to_x);
+                                let mid_y = f32::midpoint(from_y, to_y);
                                 let on_delete_connection = handle_delete_connection.clone();
                                 html! {
                                     <circle id={format!("conn-del-{}-{}", c.from, c.to)} cx={mid_x.to_string()} cy={mid_y.to_string()} r="6" fill="var(--source-editor-delete-color)" class="clickable"

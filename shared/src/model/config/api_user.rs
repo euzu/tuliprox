@@ -282,7 +282,7 @@ mod tests {
         assert!(na.is_some());
         if let Some(na) = na {
             assert_eq!(na.allowed_countries, Some(vec!["DE".to_string(), "AT".to_string()]));
-            assert_eq!(na.allowed_networks.as_ref().map(|n| n.len()), Some(2));
+            assert_eq!(na.allowed_networks.as_ref().map(std::vec::Vec::len), Some(2));
             assert!(na.allowed_networks.as_ref().is_some_and(|networks| networks.iter().any(|n| n == "10.0.0.0/8")));
             assert!(na
                 .allowed_networks

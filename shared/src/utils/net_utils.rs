@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-pub fn strip_port<'a>(input: &'a str) -> Cow<'a, str> {
+pub fn strip_port(input: &str) -> Cow<'_, str> {
     // IPv6 with port: [2001:db8::1]:8080
     if let Some(stripped) = input.strip_prefix('[') {
         if let Some(end) = stripped.find(']') {

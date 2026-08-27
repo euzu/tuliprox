@@ -45,8 +45,8 @@ pub fn LogConfigView() -> Html {
     let config_ctx = use_context::<ConfigContext>().expect("ConfigContext not found");
     let config_view_ctx = use_context::<ConfigViewContext>().expect("ConfigViewContext not found");
 
-    let log_level_options = use_memo((), |_| LOG_LEVELS.iter().map(ToString::to_string).collect::<Vec<String>>());
-    let runtime_report_format_options = use_memo((), |_| {
+    let log_level_options = use_memo((), |()| LOG_LEVELS.iter().map(ToString::to_string).collect::<Vec<String>>());
+    let runtime_report_format_options = use_memo((), |()| {
         RuntimeConfigReportFormat::iter().collect::<Vec<_>>().iter().map(ToString::to_string).collect::<Vec<String>>()
     });
 
@@ -91,7 +91,7 @@ pub fn LogConfigView() -> Html {
             <div class="tp__log-config-view__header tp__config-view-page__header">
                 { config_field_child!(translate.t(LABEL_LOG_LEVEL), "LOG_CONFIG.LOG_LEVEL", {
                     match log_state.form.log_level.as_ref() {
-                        Some(level) => html! { <div><Chip label={level.to_string()} /></div> },
+                        Some(level) => html! { <div><Chip label={level.clone()} /></div> },
                         None => html! { <div><Chip class="tp__text-button" label={"INFO".to_string()} /></div> },
                     }
                 })}

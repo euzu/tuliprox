@@ -39,7 +39,7 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                     }),
                     Rc::new(Tag {
                         class: convert_bool_to_chip_style(true),
-                        label: translate.t("LABEL.RESOLVE_BACKGROUND").to_string(),
+                        label: translate.t("LABEL.RESOLVE_BACKGROUND").clone(),
                     }),
                 ],
                 vec![
@@ -47,13 +47,10 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                         class: convert_bool_to_chip_style(false),
                         label: format!("{} / {}h", translate.t("LABEL.LIVE"), default_probe_live_interval()),
                     }),
+                    Rc::new(Tag { class: convert_bool_to_chip_style(false), label: translate.t("LABEL.VOD").clone() }),
                     Rc::new(Tag {
                         class: convert_bool_to_chip_style(false),
-                        label: translate.t("LABEL.VOD").to_string(),
-                    }),
-                    Rc::new(Tag {
-                        class: convert_bool_to_chip_style(false),
-                        label: translate.t("LABEL.SERIES").to_string(),
+                        label: translate.t("LABEL.SERIES").clone(),
                     }),
                     Rc::new(Tag {
                         class: convert_bool_to_chip_style(false),
@@ -103,7 +100,7 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                         }),
                         Rc::new(Tag {
                             class: convert_bool_to_chip_style(options.resolve_background),
-                            label: translate.t("LABEL.RESOLVE_BACKGROUND").to_string(),
+                            label: translate.t("LABEL.RESOLVE_BACKGROUND").clone(),
                         }),
                     ],
                     vec![
@@ -113,11 +110,11 @@ pub fn InputOptions(props: &InputOptionsProps) -> Html {
                         }),
                         Rc::new(Tag {
                             class: convert_bool_to_chip_style(options.probe_vod),
-                            label: translate.t("LABEL.VOD").to_string(),
+                            label: translate.t("LABEL.VOD").clone(),
                         }),
                         Rc::new(Tag {
                             class: convert_bool_to_chip_style(options.probe_series),
-                            label: translate.t("LABEL.SERIES").to_string(),
+                            label: translate.t("LABEL.SERIES").clone(),
                         }),
                         Rc::new(Tag {
                             class: convert_bool_to_chip_style(options.probe_delay != default_probe_delay_secs()),

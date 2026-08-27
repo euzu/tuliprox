@@ -313,7 +313,7 @@ mod tests {
             url: "https://media.example.invalid".to_string(),
             media_server: Some(MediaServerInputConfigDto {
                 token: Some("   ".to_string()),
-                api_key: Some("".to_string()),
+                api_key: Some(String::new()),
                 ..media_server_config_with_library()
             }),
             ..ConfigInputDto::default()
@@ -810,7 +810,7 @@ mod tests {
         let mut dto = ConfigInputDto {
             name: "xtream_missing_root_url".intern(),
             input_type: InputType::Xtream,
-            url: "".to_string(),
+            url: String::new(),
             username: Some("root_user".to_string()),
             password: Some("root_pass".to_string()),
             aliases: Some(vec![ConfigInputAliasDto {

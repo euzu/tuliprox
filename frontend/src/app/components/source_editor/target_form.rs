@@ -228,7 +228,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
             if let Some(target) = cfg {
                 target_form_state.dispatch(ConfigTargetFormAction::SetAll(target.as_ref().clone()));
                 target_options_state.dispatch(ConfigTargetOptionsFormAction::SetAll(
-                    target.options.as_ref().map_or_else(ConfigTargetOptions::default, |d| d.clone()),
+                    target.options.as_ref().map_or_else(ConfigTargetOptions::default, std::clone::Clone::clone),
                 ));
             } else {
                 target_form_state.dispatch(ConfigTargetFormAction::SetAll(ConfigTargetDto::default()));
@@ -278,50 +278,7 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                     </div>
                 }
             };
-        if !props.allow_write {
-            html! {
-                <Card class="tp__config-view__card">
-                    <div class="tp__target-options">
-                        { config_field_bool!(target_options_state.form, translate.t(LABEL_IGNORE_LOGO), ignore_logo) }
-                        <div class="tp__target-options__group">
-                            <div class="tp__target-options__heading">
-                                <span class="tp__form-field__label">{ translate.t(LABEL_SHARE_LIVE_STREAMS) }</span>
-                            </div>
-                            <div class="tp__target-options__children">
-                                { target_option_toggle(
-                                    translate.t(LABEL_HLS),
-                                    "CONFIG_TARGET_SHARE_LIVE_STREAMS.HLS",
-                                    target_options_state.form.share_live_hls_enabled(),
-                                    true,
-                                    Callback::noop(),
-                                ) }
-                                { target_option_toggle(
-                                    translate.t(LABEL_MPEG_TS),
-                                    "CONFIG_TARGET_SHARE_LIVE_STREAMS.MPEG_TS",
-                                    target_options_state.form.share_live_mpeg_ts_enabled(),
-                                    true,
-                                    Callback::noop(),
-                                ) }
-                            </div>
-                        </div>
-                        { config_field_bool!(target_options_state.form, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates) }
-                        { render_epg_output(true, Callback::noop(), Callback::noop()) }
-                        <div class="tp__target-options__group">
-                            <div class="tp__target-options__heading">
-                                <span class="tp__form-field__label">{ translate.t(LABEL_FORCE_REDIRECT) }</span>
-                            </div>
-                            <div class="tp__target-options__children">
-                                <div class="tp__target-options__child-content">
-                                    <span class="tp__form-field__value">
-                                        { target_options_state.form.force_redirect.map_or_else(String::new, |flags| flags.to_string()) }
-                                    </span>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </Card>
-            }
-        } else {
+        if props.allow_write {
             let share_live_hls_on_change = {
                 let target_options_state = target_options_state.clone();
                 Callback::from(move |value| {
@@ -397,36 +354,56 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                 </div>
                 </Card>
             }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                    <div class="tp__target-options">
+                        { config_field_bool!(target_options_state.form, translate.t(LABEL_IGNORE_LOGO), ignore_logo) }
+                        <div class="tp__target-options__group">
+                            <div class="tp__target-options__heading">
+                                <span class="tp__form-field__label">{ translate.t(LABEL_SHARE_LIVE_STREAMS) }</span>
+                            </div>
+                            <div class="tp__target-options__children">
+                                { target_option_toggle(
+                                    translate.t(LABEL_HLS),
+                                    "CONFIG_TARGET_SHARE_LIVE_STREAMS.HLS",
+                                    target_options_state.form.share_live_hls_enabled(),
+                                    true,
+                                    Callback::noop(),
+                                ) }
+                                { target_option_toggle(
+                                    translate.t(LABEL_MPEG_TS),
+                                    "CONFIG_TARGET_SHARE_LIVE_STREAMS.MPEG_TS",
+                                    target_options_state.form.share_live_mpeg_ts_enabled(),
+                                    true,
+                                    Callback::noop(),
+                                ) }
+                            </div>
+                        </div>
+                        { config_field_bool!(target_options_state.form, translate.t(LABEL_REMOVE_DUPLICATES), remove_duplicates) }
+                        { render_epg_output(true, Callback::noop(), Callback::noop()) }
+                        <div class="tp__target-options__group">
+                            <div class="tp__target-options__heading">
+                                <span class="tp__form-field__label">{ translate.t(LABEL_FORCE_REDIRECT) }</span>
+                            </div>
+                            <div class="tp__target-options__children">
+                                <div class="tp__target-options__child-content">
+                                    <span class="tp__form-field__value">
+                                        { target_options_state.form.force_redirect.map_or_else(String::new, |flags| flags.to_string()) }
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </Card>
+            }
         }
     };
 
     let render_target = || {
         let target_form_state_1 = target_form_state.clone();
         let target_form_state_2 = target_form_state.clone();
-        if !props.allow_write {
-            html! {
-                <Card class="tp__config-view__card">
-                    <div class="tp__config-view__cols-2">
-                        { config_field_bool!(target_form_state.form, translate.t(LABEL_ENABLED), enabled) }
-                        { config_field_bool!(target_form_state.form, translate.t(LABEL_USE_MEMORY_CACHE), use_memory_cache) }
-                    </div>
-                    { config_field!(target_form_state.form, translate.t(LABEL_NAME), name) }
-                    { config_field_custom!(translate.t(LABEL_FILTER), target_form_state.form.filter.clone()) }
-                    { config_field_custom!(
-                        translate.t(LABEL_PROCESSING_ORDER),
-                        target_form_state.form.processing_order.to_string()
-                    ) }
-                    { config_field_custom!(
-                        translate.t(LABEL_MAPPING),
-                        target_form_state.form.mapping.as_ref().map_or_else(String::new, |values| values.join(", "))
-                    ) }
-                    { config_field_custom!(
-                        translate.t(LABEL_WATCH),
-                        target_form_state.form.watch.as_ref().map_or_else(String::new, |values| values.join(", "))
-                    ) }
-                </Card>
-            }
-        } else {
+        if props.allow_write {
             html! {
                 <Card class="tp__config-view__card">
                 <div class="tp__config-view__cols-2">
@@ -458,6 +435,29 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
                    }})}
                 { edit_field_list_option!(target_form_state, translate.t(LABEL_MAPPING), mapping, ConfigTargetFormAction::Mapping, translate.t(LABEL_ADD_MAPPING)) }
                 { edit_field_list_option!(target_form_state, translate.t(LABEL_WATCH), watch, ConfigTargetFormAction::Watch, translate.t(LABEL_ADD_WATCH)) }
+                </Card>
+            }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                    <div class="tp__config-view__cols-2">
+                        { config_field_bool!(target_form_state.form, translate.t(LABEL_ENABLED), enabled) }
+                        { config_field_bool!(target_form_state.form, translate.t(LABEL_USE_MEMORY_CACHE), use_memory_cache) }
+                    </div>
+                    { config_field!(target_form_state.form, translate.t(LABEL_NAME), name) }
+                    { config_field_custom!(translate.t(LABEL_FILTER), target_form_state.form.filter.clone()) }
+                    { config_field_custom!(
+                        translate.t(LABEL_PROCESSING_ORDER),
+                        target_form_state.form.processing_order.to_string()
+                    ) }
+                    { config_field_custom!(
+                        translate.t(LABEL_MAPPING),
+                        target_form_state.form.mapping.as_ref().map_or_else(String::new, |values| values.join(", "))
+                    ) }
+                    { config_field_custom!(
+                        translate.t(LABEL_WATCH),
+                        target_form_state.form.watch.as_ref().map_or_else(String::new, |values| values.join(", "))
+                    ) }
                 </Card>
             }
         }
@@ -495,10 +495,10 @@ pub fn ConfigTargetView(props: &ConfigTargetViewProps) -> Html {
         Callback::from(move |_| {
             let mut target = target_form_state.data().clone();
             let target_options = target_options_state.data();
-            if !target_options.is_empty() {
-                target.options = Some(target_options.clone());
-            } else {
+            if target_options.is_empty() {
                 target.options = None;
+            } else {
+                target.options = Some(target_options.clone());
             }
             source_editor_ctx.on_form_change.emit((block_id, BlockInstance::Target(Rc::new(target))));
             source_editor_ctx.edit_mode.set(EditMode::Inactive);

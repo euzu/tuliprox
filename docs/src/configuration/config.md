@@ -559,10 +559,10 @@ Tuliprox monitors the free space on the **current working directory's mount** an
 standard messaging channels (Telegram, Discord, Pushover, REST) before the disk fills up. The feature is
 **opt-in**: no `disk_alert` block means no monitoring and no notifications.
 
-**How it works:** A background loop in `backend/src/api/sys_usage.rs` ticks every **2 seconds** (fixed
+**How it works:** A background loop in `backend/app/src/api/sys_usage.rs` ticks every **2 seconds** (fixed
 sampling interval — see `SYSTEM_USAGE_INTERVAL` in that file, **not configurable**) and compares the
 current working directory's percent-used against two thresholds. The `DiskAlertMonitor` state machine
-(`backend/src/api/sys_usage.rs::DiskAlertMonitor`) decides when to emit a `DiskAlert`:
+(`backend/app/src/api/sys_usage.rs::DiskAlertMonitor`) decides when to emit a `DiskAlert`:
 
 | Level      | Default Trigger                         | Operator Action                                |
 |:-----------|:----------------------------------------|:-----------------------------------------------|
@@ -613,7 +613,7 @@ messaging:
 
 > **Note on `mounts`:** Earlier drafts of this section described a `mounts` config field. The current
 > implementation has no such field — the disk probe is hard-coded to sample the current working directory's
-> mount (see `DiskProbe::for_cwd()` in `backend/src/api/sys_usage.rs`). If you need to monitor a different
+> mount (see `DiskProbe::for_cwd()` in `backend/app/src/api/sys_usage.rs`). If you need to monitor a different
 > path, change the working directory of the Tuliprox process.
 
 **Available Handlebars Variables** (all `disk_alert_*` templates):

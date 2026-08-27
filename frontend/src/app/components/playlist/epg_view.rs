@@ -247,9 +247,9 @@ pub fn EpgView() -> Html {
             .and_then(|video| video.recording.as_ref());
         Rc::new(PaddingBounds {
             default_pre_roll_secs: rec.and_then(|c| c.default_pre_roll_secs).unwrap_or(0),
-            max_pre_roll_secs: rec.map(|c| c.max_pre_roll_secs).unwrap_or(900),
+            max_pre_roll_secs: rec.map_or(900, |c| c.max_pre_roll_secs),
             default_post_roll_secs: rec.and_then(|c| c.default_post_roll_secs).unwrap_or(0),
-            max_post_roll_secs: rec.map(|c| c.max_post_roll_secs).unwrap_or(1800),
+            max_post_roll_secs: rec.map_or(1800, |c| c.max_post_roll_secs),
         })
     };
 
@@ -397,7 +397,7 @@ pub fn EpgView() -> Html {
     {
         let raf_id = raf_id.clone();
         let raf_closure = raf_closure.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             move || {
                 if let Some(id) = raf_id.borrow_mut().take() {
                     if let Some(win) = window() {
@@ -536,7 +536,7 @@ pub fn EpgView() -> Html {
                 let dx = f64::from(second.client_x() - first.client_x());
                 let dy = f64::from(second.client_y() - first.client_y());
                 let distance = (dx * dx + dy * dy).sqrt();
-                let midpoint_x = (f64::from(first.client_x()) + f64::from(second.client_x())) / 2.0;
+                let midpoint_x = f64::midpoint(f64::from(first.client_x()), f64::from(second.client_x()));
 
                 *pinch_state.borrow_mut() = Some(TimelinePinchState {
                     distance,
@@ -803,7 +803,7 @@ pub fn EpgView() -> Html {
         })
     };
 
-    let row_height = use_memo((), move |_| {
+    let row_height = use_memo((), move |()| {
         let row_height = window()
             .and_then(|win| {
                 let root = win.document()?.document_element()?;
@@ -820,7 +820,7 @@ pub fn EpgView() -> Html {
         let container_ref = container_ref.clone();
         let visible_range = visible_range.clone();
         let channel_row_height = *row_height;
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             let debounce_handle: Rc<RefCell<Option<Timeout>>> = Rc::new(RefCell::new(None));
             let onscroll_handle: OnScrollHandle = Rc::new(RefCell::new(None));
             let cleanup_container_ref = container_ref.clone();
@@ -931,7 +931,7 @@ pub fn EpgView() -> Html {
                         has_recording_write={can_write_recordings}
                         is_admin_role={is_admin_role}
                         on_submit={on_submit}
-                        on_cancel={Callback::from(|_| {})}
+                        on_cancel={Callback::from(|()| {})}
                     />
                 };
                 let actions = DialogActions {

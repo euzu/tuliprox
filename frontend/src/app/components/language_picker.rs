@@ -57,8 +57,7 @@ pub fn language_picker() -> Html {
         .languages
         .iter()
         .find(|l| l.code == language_state.active)
-        .map(crate::i18n::LanguageInfo::display_label)
-        .unwrap_or_else(|| language_state.active.to_uppercase());
+        .map_or_else(|| language_state.active.to_uppercase(), crate::i18n::LanguageInfo::display_label);
 
     html! {
         <>

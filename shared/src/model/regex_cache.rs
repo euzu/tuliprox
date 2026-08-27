@@ -28,6 +28,6 @@ impl RegexCache {
         Ok(self.cache.entry(pattern.to_owned()).or_insert(arc_regex).clone())
     }
 
-    /// Removes regexes that are only held by the cache itself (strong_count == 1).
+    /// Removes regexes that are only held by the cache itself (`strong_count` == 1).
     pub fn sweep(&self) { self.cache.retain(|_k, v| Arc::strong_count(v) > 1); }
 }

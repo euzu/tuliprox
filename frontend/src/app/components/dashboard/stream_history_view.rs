@@ -73,7 +73,7 @@ fn today_start_ts() -> i64 {
     #[cfg(not(target_arch = "wasm32"))]
     let today = Some(chrono::Utc::now().date_naive());
 
-    today.and_then(|date| date.and_hms_opt(0, 0, 0)).map(|dt| dt.and_utc().timestamp()).unwrap_or(0)
+    today.and_then(|date| date.and_hms_opt(0, 0, 0)).map_or(0, |dt| dt.and_utc().timestamp())
 }
 
 fn ts_to_filter_str(ts: i64, end_of_day: bool) -> String { format_local_day_boundary_utc(ts, end_of_day) }
@@ -362,15 +362,12 @@ pub fn StreamHistoryView() -> Html {
                         Ok(Some(items)) => summaries.set(items),
                         Ok(None) | Err(_) => summaries.set(Vec::new()),
                     }
-                    match qos_result {
-                        Ok(Some(items)) => {
-                            selected_qos_snapshot.set(None);
-                            qos_snapshots.set(items);
-                        }
-                        Ok(None) | Err(_) => {
-                            selected_qos_snapshot.set(None);
-                            qos_snapshots.set(Vec::new());
-                        }
+                    if let Ok(Some(items)) = qos_result {
+                        selected_qos_snapshot.set(None);
+                        qos_snapshots.set(items);
+                    } else {
+                        selected_qos_snapshot.set(None);
+                        qos_snapshots.set(Vec::new());
                     }
                     loading.set(false);
                 }
@@ -381,7 +378,7 @@ pub fn StreamHistoryView() -> Html {
     // Load on mount with default date range (today)
     {
         let handle_load = handle_load.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             handle_load.emit(String::new());
             || ()
         });
@@ -545,7 +542,7 @@ pub fn StreamHistoryView() -> Html {
                     },
                     12 => html! {
                         <span>
-                            {record.disconnect_reason.as_ref().map(ToString::to_string).unwrap_or_else(|| String::from("-")).replace('_', " ")}
+                            {record.disconnect_reason.as_ref().map_or_else(|| String::from("-"), ToString::to_string).replace('_', " ")}
                         </span>
                     },
                     13 => html! {

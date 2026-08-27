@@ -14,7 +14,7 @@ pub struct DialogProviderProps {
     pub children: Children,
 }
 
-/// Provides the [DialogService] context and mounts a [DialogHost] that owns
+/// Provides the [`DialogService`] context and mounts a [DialogHost] that owns
 /// the dialog stack. The stack state intentionally lives in `DialogHost`, so
 /// pushing or popping a dialog never re-renders the application children.
 #[component]
@@ -87,7 +87,7 @@ struct DialogHostProps {
     service: DialogService,
 }
 
-/// Owns the dialog stack and renders one [DialogLayer] per stacked dialog.
+/// Owns the dialog stack and renders one [`DialogLayer`] per stacked dialog.
 /// Only this component re-renders when the stack changes.
 #[component]
 fn DialogHost(props: &DialogHostProps) -> Html {
@@ -101,7 +101,7 @@ fn DialogHost(props: &DialogHostProps) -> Html {
         let service = props.service.clone();
         let dispatcher = dialog_stack.dispatcher();
 
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             service.register(Callback::from(move |request: DialogRequest| {
                 dispatcher.dispatch(DialogStackAction::Push(request));
             }));

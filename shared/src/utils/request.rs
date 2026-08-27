@@ -150,7 +150,7 @@ pub fn concat_path_leading_slash(first: &str, second: &str) -> String {
     format!("/{path}")
 }
 
-/// Internal helper to parse the provider URL into (host, path_and_query)
+/// Internal helper to parse the provider URL into (host, `path_and_query`)
 pub fn parse_provider_scheme_url_parts(stream_url: &str) -> Result<(&str, &str), TuliproxError> {
     let rest = stream_url.strip_prefix(PROVIDER_SCHEME_PREFIX).ok_or_else(|| {
         TuliproxError::Config(format!("Not a provider URL: '{}'", sanitize_sensitive_info(stream_url)))

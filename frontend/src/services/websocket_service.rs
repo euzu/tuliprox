@@ -25,7 +25,7 @@ const WS_RECONNECT_MAX_ATTEMPTS: u16 = 20;
 
 fn reconnect_delay(attempt: u16) -> u32 {
     if attempt < 6 {
-        let d = WS_RECONNECT_BASE_MS * (attempt as u32 + 1u32);
+        let d = WS_RECONNECT_BASE_MS * (u32::from(attempt) + 1u32);
         d.min(WS_RECONNECT_MAX_MS)
     } else {
         WS_RECONNECT_MAX_MS
@@ -91,15 +91,10 @@ impl WebSocketService {
     }
 
     pub fn connect_ws_with_backoff(&self) {
-        let has_active_socket = self
-            .ws
-            .borrow()
-            .as_ref()
-            .map(|ws| {
-                let state = ws.ready_state();
-                state == WebSocket::CONNECTING || state == WebSocket::OPEN
-            })
-            .unwrap_or(false);
+        let has_active_socket = self.ws.borrow().as_ref().is_some_and(|ws| {
+            let state = ws.ready_state();
+            state == WebSocket::CONNECTING || state == WebSocket::OPEN
+        });
         if has_active_socket {
             return;
         }
@@ -383,11 +378,10 @@ fn handle_socket_protocol_msg(
                         attempt_counter.set(0);
                         if let Some(token) = get_token() {
                             return Some(ProtocolMessage::Auth(token));
-                        } else {
-                            connected.set(true);
-                            flush_pending_messages(pending_messages, ws);
-                            event_service.broadcast(EventMessage::WebSocketStatus(true));
                         }
+                        connected.set(true);
+                        flush_pending_messages(pending_messages, ws);
+                        event_service.broadcast(EventMessage::WebSocketStatus(true));
                     }
                     ProtocolMessage::UserActionResponse(_success) => {
                         // Success is already handled in the UI component that initiated the action

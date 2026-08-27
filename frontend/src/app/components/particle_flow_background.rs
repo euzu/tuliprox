@@ -37,7 +37,7 @@ struct RenderRuntime {
     u_dpr: Option<WebGlUniformLocation>,
 }
 
-const VERTEX_SHADER: &str = r#"
+const VERTEX_SHADER: &str = r"
 attribute vec2 a_pos;
 attribute vec3 a_meta; // size, alpha, layer
 uniform float u_dpr;
@@ -51,9 +51,9 @@ void main() {
     v_alpha = a_meta.y;
     v_layer = a_meta.z;
 }
-"#;
+";
 
-const FRAGMENT_SHADER: &str = r#"
+const FRAGMENT_SHADER: &str = r"
 precision highp float;
 
 uniform vec3 u_accent1;
@@ -77,7 +77,7 @@ void main() {
     vec3 color = mix(u_accent1, u_accent2, clamp(v_layer * 0.35, 0.0, 1.0));
     gl_FragColor = vec4(color, alpha);
 }
-"#;
+";
 
 fn normalize(v: [f32; 2]) -> [f32; 2] {
     let len = (v[0] * v[0] + v[1] * v[1]).sqrt().max(0.00001);
@@ -102,27 +102,27 @@ fn parse_css_color_to_rgb(value: &str) -> Option<[f32; 3]> {
     if let Some(hex) = color.strip_prefix('#') {
         return match hex.len() {
             3 => {
-                let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()? as f32 / 255.0;
-                let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()? as f32 / 255.0;
-                let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()? as f32 / 255.0;
+                let r = f32::from(u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?) / 255.0;
+                let g = f32::from(u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?) / 255.0;
+                let b = f32::from(u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?) / 255.0;
                 Some([r, g, b])
             }
             4 => {
-                let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()? as f32 / 255.0;
-                let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()? as f32 / 255.0;
-                let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()? as f32 / 255.0;
+                let r = f32::from(u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?) / 255.0;
+                let g = f32::from(u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?) / 255.0;
+                let b = f32::from(u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?) / 255.0;
                 Some([r, g, b])
             }
             6 => {
-                let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
-                let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
-                let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
+                let r = f32::from(u8::from_str_radix(&hex[0..2], 16).ok()?) / 255.0;
+                let g = f32::from(u8::from_str_radix(&hex[2..4], 16).ok()?) / 255.0;
+                let b = f32::from(u8::from_str_radix(&hex[4..6], 16).ok()?) / 255.0;
                 Some([r, g, b])
             }
             8 => {
-                let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f32 / 255.0;
-                let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f32 / 255.0;
-                let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f32 / 255.0;
+                let r = f32::from(u8::from_str_radix(&hex[0..2], 16).ok()?) / 255.0;
+                let g = f32::from(u8::from_str_radix(&hex[2..4], 16).ok()?) / 255.0;
+                let b = f32::from(u8::from_str_radix(&hex[4..6], 16).ok()?) / 255.0;
                 Some([r, g, b])
             }
             _ => None,
@@ -188,8 +188,7 @@ fn read_alpha_boost_from_style(style: Option<&web_sys::CssStyleDeclaration>) -> 
         .get_property_value("--particle-flow-background-alpha-boost")
         .ok()
         .and_then(|v| v.trim().parse::<f32>().ok())
-        .map(|v| v.clamp(0.0, 4.0))
-        .unwrap_or(fallback)
+        .map_or(fallback, |v| v.clamp(0.0, 4.0))
 }
 
 fn pos_to_cell(pos: [f32; 2]) -> (usize, usize) {
@@ -485,7 +484,7 @@ pub fn ParticleFlowBackground() -> Html {
 
     {
         let canvas_ref = canvas_ref.clone();
-        use_effect_with((), move |_| {
+        use_effect_with((), move |()| {
             let Some(canvas) = canvas_ref.cast::<HtmlCanvasElement>() else {
                 return Box::new(|| ()) as Box<dyn FnOnce()>;
             };

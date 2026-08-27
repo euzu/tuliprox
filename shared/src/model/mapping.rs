@@ -188,7 +188,7 @@ impl MapperDto {
         let script = if templates.is_some() {
             apply_templates_to_pattern_single(&self.script, templates)?
         } else {
-            self.script.to_string()
+            self.script.clone()
         };
         trace!("Mapper script: {script}");
         self.t_script = Some(MapperScript::parse(&script, templates)?);

@@ -63,21 +63,7 @@ pub fn HdHomeRunTargetOutputView(props: &HdHomeRunTargetOutputViewProps) -> Html
     }
 
     let render_output = || {
-        if !props.allow_write {
-            html! {
-                <Card class="tp__config-view__card">
-                    { config_field!(output_form_state.form, translate.t(LABEL_DEVICE), device) }
-                    { config_field!(output_form_state.form, translate.t(LABEL_USERNAME), username) }
-                    { config_field_custom!(
-                        translate.t(LABEL_USE_OUTPUT),
-                        output_form_state
-                            .form
-                            .use_output
-                            .map_or_else(|| TargetType::M3u.to_string(), |output| output.to_string())
-                    ) }
-                </Card>
-            }
-        } else {
+        if props.allow_write {
             let output_form_state_1 = output_form_state.clone();
             html! {
                 <Card class="tp__config-view__card">
@@ -98,6 +84,20 @@ pub fn HdHomeRunTargetOutputView(props: &HdHomeRunTargetOutputViewProps) -> Html
                             />
                         }
                     })}
+                </Card>
+            }
+        } else {
+            html! {
+                <Card class="tp__config-view__card">
+                    { config_field!(output_form_state.form, translate.t(LABEL_DEVICE), device) }
+                    { config_field!(output_form_state.form, translate.t(LABEL_USERNAME), username) }
+                    { config_field_custom!(
+                        translate.t(LABEL_USE_OUTPUT),
+                        output_form_state
+                            .form
+                            .use_output
+                            .map_or_else(|| TargetType::M3u.to_string(), |output| output.to_string())
+                    ) }
                 </Card>
             }
         }

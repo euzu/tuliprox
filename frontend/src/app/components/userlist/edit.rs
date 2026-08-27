@@ -65,7 +65,7 @@ pub fn UserEdit() -> Html {
         None => vec![],
         Some(app_config) => match app_config.api_proxy.as_ref() {
             None => vec![],
-            Some(api_proxy) => api_proxy.server.to_vec(),
+            Some(api_proxy) => api_proxy.server.clone(),
         },
     });
 
@@ -85,7 +85,7 @@ pub fn UserEdit() -> Html {
 
     let handle_cancel = {
         let userlist_ctx = userlist_ctx.clone();
-        Callback::from(move |_| {
+        Callback::from(move |()| {
             userlist_ctx.active_page.set(UserlistPage::List);
             userlist_ctx.selected_user.set(None);
         })

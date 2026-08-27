@@ -442,7 +442,7 @@ Open the Browser and continue setup.
 
 ## Project layout
 
-- `backend/`: main server and processing pipeline
+- `backend/`: backend crates (`app/` contains the main server and processing pipeline)
 - `frontend/`: Yew Web UI
 - `shared/`: DTOs and shared logic
 - `config/`: example configuration

@@ -1,0 +1,61 @@
+[package]
+name = "tuliprox-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Resolved configuration model and shared utilities for tuliprox"
+
+[lints]
+workspace = true
+
+[dependencies]
+http-body-util = "0.1.5"
+serde_html_form = "0.4.1"
+shared = { workspace = true }
+tuliprox-mpegts = { workspace = true }
+tuliprox-media-server = { workspace = true }
+aes = "0.8.4"
+arc-swap.workspace = true
+async-compression = { version = "0.4.43", features = ["tokio", "brotli", "deflate", "gzip", "zlib", "zstd"] }
+axum = { version = "0.8.9", features = ["macros", "default", "ws"] }
+base64.workspace = true
+blake3.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+chrono-tz = "0.10.4"
+ctr = "0.9.2"
+env_logger = "0.11.11"
+flate2 = "1.1.9"
+futures.workspace = true
+indexmap.workspace = true
+ipnet = "2"
+mime = "0.3.17"
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
+log.workspace = true
+parking_lot = "0.12.5"
+paste.workspace = true
+path-clean.workspace = true
+quick-xml = { version = "0.41", features = ["async-tokio", "serialize"] }
+rand = "0.9.5"
+rmp-serde = "1.3.1"
+regex.workspace = true
+reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
+serde-saphyr.workspace = true
+strum.workspace = true
+tempfile = "3.27.0"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "parking_lot", "fs", "process", "signal", "time", "macros"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
+tokio-util = { version = "0.7.19", features = ["io", "io-util"] }
+url.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+sysinfo = { version = "0.38.4", default-features = false, features = ["system", "network"] }
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

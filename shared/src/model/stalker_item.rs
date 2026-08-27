@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// A single Stalker/Ministra playlist item persisted in the B+Tree store.
-/// Mirrors the StreamVault `StalkerPlaylistItem` Kotlin data class — all
+/// Mirrors the `StreamVault` `StalkerPlaylistItem` Kotlin data class — all
 /// Stalker-specific fields are captured so the runtime can decide between
 /// pre-resolved and on-demand `create_link` calls.
 ///
-/// IMPORTANT: this struct is persisted via positional MessagePack
+/// IMPORTANT: this struct is persisted via positional `MessagePack`
 /// (`rmp_serde::to_vec` in `binary_serialize`). Fields are encoded by
 /// position, not name — `skip_serializing_if` would shift every following
 /// field on read and corrupt the record. Optional fields use `#[serde(default)]`
@@ -154,7 +154,7 @@ impl StalkerPlaylistItem {
 
 /// A season entry that groups a list of episodes. Persisted alongside series items.
 ///
-/// NOTE: persisted via positional MessagePack — no `skip_serializing_if`
+/// NOTE: persisted via positional `MessagePack` — no `skip_serializing_if`
 /// (see `StalkerPlaylistItem`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct StalkerSeasonItem {
@@ -171,7 +171,7 @@ pub struct StalkerSeasonItem {
 /// Lightweight episode record that keeps the actual `StalkerPlaylistItem`
 /// in the live/episode store and only embeds the season-level summary here.
 ///
-/// NOTE: persisted via positional MessagePack — no `skip_serializing_if`
+/// NOTE: persisted via positional `MessagePack` — no `skip_serializing_if`
 /// (see `StalkerPlaylistItem`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StalkerEpisodeIndex {

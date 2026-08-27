@@ -41,6 +41,9 @@ pub fn is_none_or_empty_video(video: &Option<VideoConfigDto>) -> bool {
     video.as_ref().is_none_or(VideoConfigDto::is_empty)
 }
 
+// Clippy's method-path suggestion here names a private module and does not
+// compile; the closure is kept deliberately.
+#[allow(clippy::redundant_closure_for_method_calls)]
 pub fn is_config_target_options_empty(v: &Option<crate::model::ConfigTargetOptions>) -> bool {
     v.as_ref().is_none_or(|c| c.is_empty())
 }

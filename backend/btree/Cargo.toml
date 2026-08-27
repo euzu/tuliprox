@@ -1,0 +1,35 @@
+[package]
+name = "tuliprox-btree"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Persistent B+Tree storage engine used by tuliprox"
+
+[lints]
+workspace = true
+
+[features]
+# Publishes the fixture builders that construct legacy v2 databases and
+# sorted-index sidecars by hand. They are `#[cfg(test)]` inside this crate; the
+# feature exposes the same items to a dependent crate's tests, which need to
+# build the same fixtures to exercise startup migration and index fallback.
+# Enable it from `[dev-dependencies]` only - it is off for a normal build.
+test-support = []
+
+[dependencies]
+crc32fast = "1.5.1"
+fs2 = "0.4.3"
+log.workspace = true
+lz4_flex.workspace = true
+memmap2 = "0.9.11"
+parking_lot = "0.12.5"
+rmp-serde = "1.3.1"
+serde.workspace = true
+smallvec = "1.15.2"
+# `tempfile` and `uuid` are production dependencies here, not test-only: the v3
+# migration path stages its output through a uniquely named temporary file.
+tempfile = "3.27.0"
+uuid = { version = "1.26.0", features = ["v4"] }
+
+[dev-dependencies]
+rand = "0.9.5"

@@ -65,7 +65,7 @@ pub fn IpinfoActionCard() -> Html {
                     fetch_ip_info_cb.emit(exists);
                     future::ready(())
                 })
-                .await
+                .await;
         });
     }
 
@@ -73,8 +73,8 @@ pub fn IpinfoActionCard() -> Html {
         <ActionCard icon="Network" classname="tp__ipinfo" title={translate.t("LABEL.IP_INFO")}
         subtitle_html={if *config_exists {
             if let Some(ip_info) = &*ip_address {
-                let ip4 = ip_info.ipv4.as_ref().map_or_else(|| "n/a".to_string(), |ip| ip.to_string());
-                let ip6 = ip_info.ipv6.as_ref().map_or_else(|| "n/a".to_string(), |ip| ip.to_string());
+                let ip4 = ip_info.ipv4.as_ref().map_or_else(|| "n/a".to_string(), std::clone::Clone::clone);
+                let ip6 = ip_info.ipv6.as_ref().map_or_else(|| "n/a".to_string(), std::clone::Clone::clone);
                 format!("{}: {ip4}<br> {}: {ip6}", translate.t("LABEL.IPv4"), translate.t("LABEL.IPv6"))
             } else {
                 String::new()

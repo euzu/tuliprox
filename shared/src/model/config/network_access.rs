@@ -1,6 +1,6 @@
 use crate::error::TuliproxError;
 
-fn is_empty_vec<T>(v: &Option<Vec<T>>) -> bool { v.as_ref().is_none_or(|v| v.is_empty()) }
+fn is_empty_vec<T>(v: &Option<Vec<T>>) -> bool { v.as_ref().is_none_or(std::vec::Vec::is_empty) }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct NetworkAccessDto {
@@ -81,10 +81,10 @@ impl NetworkAccessDto {
             }
             *networks = deduped;
         }
-        if self.allowed_countries.as_ref().is_some_and(|c| c.is_empty()) {
+        if self.allowed_countries.as_ref().is_some_and(std::vec::Vec::is_empty) {
             self.allowed_countries = None;
         }
-        if self.allowed_networks.as_ref().is_some_and(|n| n.is_empty()) {
+        if self.allowed_networks.as_ref().is_some_and(std::vec::Vec::is_empty) {
             self.allowed_networks = None;
         }
         Ok(())

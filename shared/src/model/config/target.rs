@@ -118,8 +118,7 @@ impl ConfigTargetOptions {
             && !self.remove_duplicates
             && self.deduplicate.is_none()
             && self.epg_output.is_empty()
-            && (self.force_redirect.is_none()
-                || self.force_redirect.is_some_and(|f| f.has_full_flags() || f.is_empty()))
+            && self.force_redirect.is_none_or(|f| f.has_full_flags() || f.is_empty())
     }
 
     pub const fn lowercase_epg_ids(&self) -> bool { self.epg_output.lowercase_ids }
@@ -605,11 +604,11 @@ mod tests {
 
     #[test]
     fn target_options_deserialize_structured_share_live_streams() {
-        let yaml = r#"
+        let yaml = r"
 share_live_streams:
   hls: true
   mpeg_ts: true
-"#;
+";
 
         let options: ConfigTargetOptions =
             serde_saphyr::from_str(yaml).expect("structured share_live_streams should deserialize");
@@ -621,9 +620,9 @@ share_live_streams:
 
     #[test]
     fn target_options_maps_legacy_true_share_live_streams_to_both_modes() {
-        let yaml = r#"
+        let yaml = r"
 share_live_streams: true
-"#;
+";
 
         let options = serde_saphyr::from_str::<ConfigTargetOptions>(yaml);
 
@@ -635,9 +634,9 @@ share_live_streams: true
 
     #[test]
     fn target_options_maps_legacy_false_share_live_streams_to_both_modes() {
-        let yaml = r#"
+        let yaml = r"
 share_live_streams: false
-"#;
+";
 
         let options: ConfigTargetOptions =
             serde_saphyr::from_str(yaml).expect("legacy false share_live_streams should deserialize");
@@ -688,11 +687,11 @@ share_live_streams: false
 
     #[test]
     fn target_options_epg_output_roundtrips() {
-        let yaml = r#"
+        let yaml = r"
 epg_output:
   lowercase_ids: true
   lowercase_xmltv_display_names: true
-"#;
+";
 
         let options =
             serde_saphyr::from_str::<ConfigTargetOptions>(yaml).expect("configured epg_output should deserialize");
@@ -724,10 +723,10 @@ epg_output:
 
     #[test]
     fn target_options_reject_unknown_epg_output_fields() {
-        let yaml = r#"
+        let yaml = r"
 epg_output:
   lowercase_id: true
-"#;
+";
 
         let result = serde_saphyr::from_str::<ConfigTargetOptions>(yaml);
 

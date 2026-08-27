@@ -5,10 +5,10 @@ use crate::app::components::{Block, BlockType, Connection};
 /// Target can have multiple Inputs.
 /// Output can only have one Target.
 /// Target can connect to:
-///   - 1x OutputM3u
-///   - 1x OutputXtream
-///   - 1x OutputHdhomerun
-///   - up to 4x OutputStrm
+///   - 1x `OutputM3u`
+///   - 1x `OutputXtream`
+///   - 1x `OutputHdhomerun`
+///   - up to 4x `OutputStrm`
 pub fn can_connect(from_block: &Block, to_block: &Block, connections: &[Connection], blocks: &[Block]) -> bool {
     // Prevent self-connection
     if from_block.id == to_block.id {

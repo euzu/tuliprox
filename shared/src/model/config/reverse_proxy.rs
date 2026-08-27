@@ -66,13 +66,15 @@ pub struct ReverseProxyConfigDto {
 impl ReverseProxyConfigDto {
     pub fn is_empty(&self) -> bool {
         !self.resource_rewrite_disabled
-            && self.disabled_header.as_ref().is_none_or(|d| d.is_empty())
+            && self.disabled_header.as_ref().is_none_or(ReverseProxyDisabledHeaderConfigDto::is_empty)
             && self.resource_retry.as_ref().is_none_or(ResourceRetryConfigDto::is_default)
-            && (self.stream.is_none() || self.stream.as_ref().is_some_and(|s| s.is_empty()))
-            && (self.cache.is_none() || self.cache.as_ref().is_some_and(|c| c.is_empty()))
-            && (self.rate_limit.is_none() || self.rate_limit.as_ref().is_some_and(|r| r.is_empty()))
-            && (self.geoip.is_none() || self.geoip.as_ref().is_some_and(|g| g.is_empty()))
-            && (self.stream_history.is_none() || self.stream_history.as_ref().is_some_and(|s| s.is_empty()))
+            && (self.stream.is_none() || self.stream.as_ref().is_some_and(super::stream::StreamConfigDto::is_empty))
+            && (self.cache.is_none() || self.cache.as_ref().is_some_and(super::cache::CacheConfigDto::is_empty))
+            && (self.rate_limit.is_none()
+                || self.rate_limit.as_ref().is_some_and(super::rate_limit::RateLimitConfigDto::is_empty))
+            && (self.geoip.is_none() || self.geoip.as_ref().is_some_and(super::geoip::GeoIpConfigDto::is_empty))
+            && (self.stream_history.is_none()
+                || self.stream_history.as_ref().is_some_and(super::stream_history::StreamHistoryConfigDto::is_empty))
             && (self.qos_aggregation.is_none()
                 || self.qos_aggregation.as_ref().is_some_and(QosAggregationConfigDto::is_empty))
             && (self.hls_cache.is_none() || self.hls_cache.as_ref().is_some_and(HlsCacheConfigDto::is_empty))
@@ -296,14 +298,14 @@ mod tests {
 
     #[test]
     fn qos_aggregation_deserializes_under_reverse_proxy() {
-        let yaml = r#"
+        let yaml = r"
 rewrite_secret: 00112233445566778899aabbccddeeff
 stream_history:
   stream_history_enabled: true
 qos_aggregation:
   enabled: true
   interval_secs: 300
-"#;
+";
 
         let cfg: ReverseProxyConfigDto = serde_saphyr::from_str(yaml).expect("reverse_proxy should deserialize");
         let qos = cfg.qos_aggregation.expect("qos_aggregation should deserialize");

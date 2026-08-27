@@ -1,0 +1,384 @@
+use crate::{
+    library::{MediaClassification, MediaClassifier},
+    ptt::PttMetadata,
+};
+use log::{debug, error, info, trace, warn};
+use shared::model::LibraryContentType;
+use std::{
+    collections::HashMap,
+    fmt::{Display, Formatter},
+    path::{Path, PathBuf},
+};
+use tokio::{fs, io};
+use tuliprox_core::model::{LibraryConfig, LibraryScanDirectory};
+
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+pub struct SeriesKey {
+    pub title: String,
+    pub year: Option<u32>,
+    pub tmdb_id: Option<u32>,
+}
+
+impl Display for SeriesKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.title)?;
+        if let Some(year) = self.year {
+            write!(f, "-{year}")?;
+        }
+        if let Some(tmdb_id) = self.tmdb_id {
+            write!(f, "-{tmdb_id}")?;
+        }
+        Ok(())
+    }
+}
+
+pub enum MediaGroup {
+    Movie { file: ScannedMediaFile, metadata: Box<PttMetadata> },
+    Series { show_key: SeriesKey, episodes: Vec<SeriesEpisodeFile> },
+}
+
+impl Display for MediaGroup {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MediaGroup::Movie { file, .. } => write!(f, "{}", file.file_path),
+            MediaGroup::Series { show_key, .. } => write!(f, "{}", show_key.title),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SeriesEpisodeFile {
+    pub file: ScannedMediaFile,
+    pub season: u32,
+    pub episode: u32,
+    pub auto_assigned_episode: bool,
+    pub metadata: Box<PttMetadata>,
+}
+
+pub struct MediaGrouper;
+
+impl MediaGrouper {
+    pub fn group(files: Vec<ScannedMediaFile>) -> Vec<MediaGroup> {
+        let mut series_map: HashMap<SeriesKey, Vec<SeriesEpisodeFile>> = HashMap::new();
+        let mut movies = Vec::new();
+
+        let mut episode_counters = HashMap::new();
+        for file in files {
+            let classification = MediaClassifier::classify(&file, &mut episode_counters);
+            match classification {
+                MediaClassification::Movie { metadata } => {
+                    movies.push(MediaGroup::Movie { file, metadata: Box::new(metadata) });
+                }
+                MediaClassification::Series { key, metadata, season, episode, .. } => {
+                    let auto_assigned_episode = metadata.episodes.is_empty() || metadata.seasons.is_empty();
+                    series_map.entry(key).or_default().push(SeriesEpisodeFile {
+                        file,
+                        season,
+                        episode,
+                        auto_assigned_episode,
+                        metadata: Box::new(metadata),
+                    });
+                }
+                // Recordings are routed to a dedicated DVR section
+                // by the recording catalog projection. The scanner
+                // passes them through
+                // unchanged; the frontend reads the dedicated
+                // catalog.
+                MediaClassification::Recording { .. } => {}
+            }
+        }
+
+        let mut result = movies;
+        result.extend(series_map.into_iter().map(|(key, mut episodes)| {
+            assign_fallback_episode_numbers(&mut episodes);
+            episodes.sort_by(|a, b| {
+                (a.season, a.episode, a.file.modified_timestamp, &a.file.file_path).cmp(&(
+                    b.season,
+                    b.episode,
+                    b.file.modified_timestamp,
+                    &b.file.file_path,
+                ))
+            });
+            MediaGroup::Series { show_key: key, episodes }
+        }));
+
+        // remove empty groups
+        result
+            .into_iter()
+            .filter(|group| match group {
+                MediaGroup::Movie { .. } => true,
+                MediaGroup::Series { episodes, .. } => !episodes.is_empty(),
+            })
+            .collect()
+    }
+}
+
+fn assign_fallback_episode_numbers(episodes: &mut [SeriesEpisodeFile]) {
+    let next_fallback_episode = episodes
+        .iter()
+        .filter(|episode| !episode.auto_assigned_episode && episode.season == 1)
+        .map(|episode| episode.episode)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+
+    let mut fallback_indices: Vec<usize> =
+        episodes.iter().enumerate().filter_map(|(idx, episode)| episode.auto_assigned_episode.then_some(idx)).collect();
+
+    fallback_indices.sort_by(|left, right| {
+        let left_episode = &episodes[*left];
+        let right_episode = &episodes[*right];
+        (left_episode.file.modified_timestamp, &left_episode.file.file_path)
+            .cmp(&(right_episode.file.modified_timestamp, &right_episode.file.file_path))
+    });
+
+    for (offset, idx) in fallback_indices.into_iter().enumerate() {
+        episodes[idx].season = 1;
+        episodes[idx].episode = next_fallback_episode.saturating_add(u32::try_from(offset).unwrap_or(0));
+    }
+}
+
+/// Represents a discovered video file with its metadata
+#[derive(Debug, Clone)]
+pub struct ScannedMediaFile {
+    pub path: PathBuf,
+    pub file_path: String,
+    pub file_name: String,
+    pub extension: String,
+    pub size_bytes: u64,
+    pub modified_timestamp: i64,
+    pub content_type: LibraryContentType,
+}
+
+impl ScannedMediaFile {
+    /// Creates a new `ScannedMediaFile` from a path and metadata
+    pub async fn from_path(path: &Path, content_type: LibraryContentType) -> io::Result<Self> {
+        let metadata = fs::metadata(path).await?;
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+
+        let modified_timestamp = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| i64::try_from(d.as_secs()).ok())
+            .unwrap_or(0);
+
+        Ok(Self {
+            file_path: path.display().to_string(),
+            path: path.to_path_buf(),
+            file_name,
+            extension,
+            size_bytes: metadata.len(),
+            modified_timestamp,
+            content_type,
+        })
+    }
+}
+
+/// Library file scanner for local VOD directories
+pub struct LibraryScanner {
+    config: LibraryConfig,
+}
+
+impl LibraryScanner {
+    pub fn new(config: LibraryConfig) -> Self { Self { config } }
+
+    pub async fn scan_all(&self) -> Result<Vec<ScannedMediaFile>, io::Error> {
+        if !self.config.enabled {
+            info!("Library media scanning is disabled");
+            return Ok(Vec::new());
+        }
+
+        let mut all_files = Vec::new();
+
+        for scan_dir in &self.config.scan_directories {
+            if !scan_dir.enabled {
+                debug!("Skipping disabled scan directory: {}", scan_dir.path);
+                continue;
+            }
+
+            info!("Scanning directory: {}", scan_dir.path);
+            match self.scan_directory(scan_dir).await {
+                Ok(mut files) => {
+                    info!("Found {} video files in {}", files.len(), scan_dir.path);
+                    all_files.append(&mut files);
+                }
+                Err(err) => {
+                    error!("Failed to scan directory {}: {err}", scan_dir.path);
+                }
+            }
+        }
+
+        info!("Total video files found: {}", all_files.len());
+        Ok(all_files)
+    }
+
+    // Recursively scans a single directory for video files
+    async fn scan_directory(&self, scan_directory: &LibraryScanDirectory) -> io::Result<Vec<ScannedMediaFile>> {
+        let path = Path::new(&scan_directory.path);
+
+        if !fs::try_exists(path).await.unwrap_or(false) {
+            warn!("Directory does not exist or is not readable: {}", scan_directory.path);
+            return Ok(Vec::new());
+        }
+
+        let dir_metadata = fs::metadata(path).await?;
+        if !dir_metadata.is_dir() {
+            warn!("Path is not a directory: {}", scan_directory.path);
+            return Ok(Vec::new());
+        }
+
+        let mut files = Vec::new();
+        self.scan_directory_recursive(path, scan_directory.recursive, scan_directory.content_type, &mut files).await?;
+        Ok(files)
+    }
+
+    fn scan_directory_recursive<'a>(
+        &'a self,
+        path: &'a Path,
+        recursive: bool,
+        content_type: LibraryContentType,
+        files: &'a mut Vec<ScannedMediaFile>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut entries = fs::read_dir(path).await?;
+
+            while let Some(entry) = entries.next_entry().await? {
+                let entry_path = entry.path();
+                let metadata = match entry.metadata().await {
+                    Ok(m) => m,
+                    Err(err) => {
+                        error!("Failed to read metadata for {}: {err}", entry_path.display());
+                        continue;
+                    }
+                };
+
+                if metadata.is_dir() {
+                    if recursive {
+                        // Recursively scan subdirectories
+                        if let Err(err) =
+                            self.scan_directory_recursive(&entry_path, recursive, content_type, files).await
+                        {
+                            error!("Failed to scan subdirectory {}: {err}", entry_path.display());
+                        }
+                    }
+                } else if metadata.is_file() {
+                    // Check if file has a supported video extension
+                    if let Some(ext) = entry_path.extension().and_then(|e| e.to_str()) {
+                        let ext_lower = ext.to_lowercase();
+                        if self.config.supported_extensions.contains(&ext_lower) {
+                            match ScannedMediaFile::from_path(&entry_path, content_type).await {
+                                Ok(video_file) => {
+                                    trace!("Found video file: {}", video_file.file_path);
+                                    files.push(video_file);
+                                }
+                                Err(err) => {
+                                    error!("Failed to read metadata for {}: {err}", entry_path.display());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Ok(())
+        })
+    }
+
+    // Checks if a file has been modified since a given timestamp
+    pub async fn is_file_modified_since(path: &Path, since_timestamp: i64) -> bool {
+        match fs::metadata(path).await {
+            Ok(metadata) => {
+                if let Ok(modified) = metadata.modified() {
+                    if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+                        return i64::try_from(duration.as_secs()).unwrap_or(0) > since_timestamp;
+                    }
+                }
+                false
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use shared::utils::Internable;
+    use tuliprox_core::model::{LibraryMetadataConfig, LibraryMetadataReadConfig, LibraryPlaylistConfig};
+
+    fn create_test_config() -> LibraryConfig {
+        LibraryConfig {
+            enabled: true,
+            scan_directories: vec![],
+            supported_extensions: vec!["mp4".to_string(), "mkv".to_string(), "avi".to_string()],
+            metadata: LibraryMetadataConfig {
+                read_existing: LibraryMetadataReadConfig { kodi: false, jellyfin: false, plex: false },
+                fallback_to_filename: true,
+                formats: vec![],
+            },
+            playlist: LibraryPlaylistConfig {
+                movie_category: "Local Movies".intern(),
+                series_category: "Local Series".intern(),
+            },
+            thumbnails: tuliprox_core::model::ThumbnailConfig { enabled: false, width: 320, height: 180 },
+        }
+    }
+
+    fn create_group_test_file(
+        file_name: &str,
+        parent_path: &str,
+        modified_timestamp: i64,
+        content_type: LibraryContentType,
+    ) -> ScannedMediaFile {
+        let path = PathBuf::from(parent_path).join(file_name);
+        ScannedMediaFile {
+            file_path: path.display().to_string(),
+            path,
+            file_name: file_name.to_string(),
+            extension: "mkv".to_string(),
+            size_bytes: 1024,
+            modified_timestamp,
+            content_type,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scanner_creation() {
+        let config = create_test_config();
+        let scanner = LibraryScanner::new(config);
+        assert!(scanner.config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_disabled_scanner() {
+        let mut config = create_test_config();
+        config.enabled = false;
+        let scanner = LibraryScanner::new(config);
+        let result = scanner.scan_all().await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_group_assigns_fallback_episode_numbers_by_modified_time() {
+        let files = vec![
+            create_group_test_file("MyShow.2020.1080p.mkv", "/tv/MyShow", 200, LibraryContentType::Series),
+            create_group_test_file("MyShow.2020.S01E03.mkv", "/tv/MyShow", 300, LibraryContentType::Series),
+            create_group_test_file("MyShow.2021.720p.mkv", "/tv/MyShow", 100, LibraryContentType::Series),
+        ];
+
+        let groups = MediaGrouper::group(files);
+        let MediaGroup::Series { episodes, .. } = &groups[0] else {
+            panic!("Expected series group");
+        };
+
+        let episode_numbers: HashMap<_, _> =
+            episodes.iter().map(|episode| (episode.file.file_name.as_str(), episode.episode)).collect();
+
+        assert_eq!(episode_numbers["MyShow.2020.S01E03.mkv"], 3);
+        assert_eq!(episode_numbers["MyShow.2021.720p.mkv"], 4);
+        assert_eq!(episode_numbers["MyShow.2020.1080p.mkv"], 5);
+    }
+}

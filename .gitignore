@@ -47,7 +47,7 @@ artifacts
 /.vscode
 
 .envrc
-backend/Cargo.lock
+backend/app/Cargo.lock
 
 # Ignore markdown files
 *.md
@@ -58,3 +58,11 @@ backend/Cargo.lock
 
 # Ignore ai documentation files
 # no ai files
+
+# Local refactoring measurements (clippy inventories, cargo metadata, timings).
+# These are engineering artifacts of the modularization work, not project docs.
+/baselines/
+
+# Scratch directory some backend tests create relative to the crate root.
+# Test output must never become tracked source.
+/backend/app/tmp/
