@@ -6,6 +6,7 @@
 //! by this crate.
 
 pub mod channel;
+pub mod render;
 
 use chrono::Utc;
 use handlebars::{Context, Handlebars, Helper, HelperResult, Output, RenderContext};
