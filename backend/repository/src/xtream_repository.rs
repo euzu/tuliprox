@@ -27,7 +27,7 @@ use shared::{
     error::{string_to_io_error, TuliproxError},
     model::{
         xtream_const::XTREAM_CLUSTER, LiveStreamProperties, PlaylistGroup, PlaylistItem, PlaylistItemType,
-        SeriesStreamProperties, StreamProperties, VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
+        SeriesStreamProperties, StreamProperties, VideoStreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
     },
     utils::{arc_str_serde, get_u32_from_serde_value, Internable},
 };
@@ -120,7 +120,7 @@ async fn write_playlists_to_file(
             for item in playlist {
                 tree.insert(
                     match storage_key {
-                        StorageKey::VirtualId => item.virtual_id,
+                        StorageKey::VirtualId => item.virtual_id.get(),
                         StorageKey::ProviderId => item.provider_id,
                     },
                     item,
@@ -159,8 +159,9 @@ pub async fn write_playlist_item_update(
     }
 
     // Prepare encoded payload before opening the writer lock.
-    let prepared_items = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&[(&pli.virtual_id, pli)])
-        .map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to serialize value: {e}")))?;
+    let prepared_items =
+        BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&[(&pli.virtual_id.get(), pli)])
+            .map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to serialize value: {e}")))?;
 
     // Keep FileLockManager lock for cross-operation coordination (e.g. swap + update).
     let file_lock = app_config.file_locks.write_lock(&xtream_path).await;
@@ -203,7 +204,8 @@ pub async fn write_playlist_batch_item_upsert(
     }
 
     // Prepare encoded payload before opening the writer lock.
-    let batch_refs: Vec<(&u32, &XtreamPlaylistItem)> = pli_list.iter().map(|pli| (&pli.virtual_id, pli)).collect();
+    let virtual_ids: Vec<u32> = pli_list.iter().map(|pli| pli.virtual_id.get()).collect();
+    let batch_refs: Vec<(&u32, &XtreamPlaylistItem)> = virtual_ids.iter().zip(pli_list.iter()).collect();
     let prepared_items = BPlusTreeUpdate::<u32, XtreamPlaylistItem>::prepare_upsert_batch(&batch_refs)
         .map_err(|e| TuliproxError::RepositoryXtream(format!("Failed to serialize value: {e}")))?;
 
@@ -506,7 +508,7 @@ async fn xtream_get_item_for_stream_id_from_memory(
         return match (playlist.xtream.as_ref(), playlist.id_mapping.as_ref()) {
             (Some(xtream_storage), Some(id_mapping)) => {
                 let mapping = id_mapping
-                    .query(&virtual_id)
+                    .query(&VirtualId::new(virtual_id))
                     .ok_or_else(|| {
                         string_to_io_error(format!(
                             "Could not find mapping for target {} and id {}",
@@ -517,7 +519,7 @@ async fn xtream_get_item_for_stream_id_from_memory(
                 let result = match mapping.item_type {
                     PlaylistItemType::SeriesInfo | PlaylistItemType::LocalSeriesInfo => Ok(xtream_storage
                         .series
-                        .query(&mapping.virtual_id)
+                        .query(&mapping.virtual_id.get())
                         .ok_or_else(|| string_to_io_error(format!("Failed to read xtream item for id {virtual_id}")))?
                         .clone()),
                     PlaylistItemType::Series | PlaylistItemType::LocalSeries => {
@@ -525,7 +527,7 @@ async fn xtream_get_item_for_stream_id_from_memory(
 
                         if let Some(item) = xtream_storage.series.query(&virtual_id) {
                             Ok(item.clone())
-                        } else if let Some(item) = xtream_storage.series.query(&mapping.parent_virtual_id) {
+                        } else if let Some(item) = xtream_storage.series.query(&mapping.parent_virtual_id.get()) {
                             let mut xc_item = item.clone();
                             xc_item.provider_id = mapping.provider_id;
                             xc_item.item_type = PlaylistItemType::Series;
@@ -539,9 +541,9 @@ async fn xtream_get_item_for_stream_id_from_memory(
                         log::debug!("In-memory catchup item requested. VirtualID: {}, ParentVirtualID: {}, MappingProviderID: {}", virtual_id, mapping.parent_virtual_id, mapping.provider_id);
                         let cluster = cluster_or_item_type!(xtream_cluster, mapping.item_type);
                         let item = match cluster {
-                            XtreamCluster::Live => xtream_storage.live.query(&mapping.parent_virtual_id),
-                            XtreamCluster::Video => xtream_storage.vod.query(&mapping.parent_virtual_id),
-                            XtreamCluster::Series => xtream_storage.series.query(&mapping.parent_virtual_id),
+                            XtreamCluster::Live => xtream_storage.live.query(&mapping.parent_virtual_id.get()),
+                            XtreamCluster::Video => xtream_storage.vod.query(&mapping.parent_virtual_id.get()),
+                            XtreamCluster::Series => xtream_storage.series.query(&mapping.parent_virtual_id.get()),
                         };
 
                         if let Some(pl_item) = item {
@@ -639,9 +641,12 @@ pub async fn xtream_get_item_for_stream_id(
                         return Ok(episode);
                     }
 
-                    if let Ok(mut item) =
-                        xtream_read_series_item_for_stream_id(app_config, mapping.parent_virtual_id, &storage_path)
-                            .await
+                    if let Ok(mut item) = xtream_read_series_item_for_stream_id(
+                        app_config,
+                        mapping.parent_virtual_id.get(),
+                        &storage_path,
+                    )
+                    .await
                     {
                         item.provider_id = mapping.provider_id;
                         item.item_type = PlaylistItemType::Series;
@@ -659,9 +664,13 @@ pub async fn xtream_get_item_for_stream_id(
                         mapping.provider_id
                     );
                     let cluster = cluster_or_item_type!(xtream_cluster, mapping.item_type);
-                    let mut item =
-                        xtream_read_item_for_stream_id(app_config, mapping.parent_virtual_id, &storage_path, cluster)
-                            .await?;
+                    let mut item = xtream_read_item_for_stream_id(
+                        app_config,
+                        mapping.parent_virtual_id.get(),
+                        &storage_path,
+                        cluster,
+                    )
+                    .await?;
                     item.provider_id = mapping.provider_id;
                     item.item_type = PlaylistItemType::Catchup;
                     item.virtual_id = mapping.virtual_id;
@@ -1930,7 +1939,7 @@ mod tests {
     use shared::{
         model::{
             CatchupProperties, ConfigPaths, InputType, LiveStreamProperties, SeriesStreamProperties, StreamProperties,
-            VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
+            VideoStreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
         },
         utils::Internable,
     };
@@ -2200,7 +2209,7 @@ mod tests {
         bitrate: u32,
     ) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: provider_id,
+            virtual_id: VirtualId::new(provider_id),
             provider_id,
             name: "Live".intern(),
             logo: "".intern(),

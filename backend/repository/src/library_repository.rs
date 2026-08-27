@@ -176,7 +176,9 @@ pub async fn load_input_local_library_playlist(
 mod tests {
     use super::*;
     use shared::{
-        model::{EpisodeStreamProperties, VideoStreamDetailProperties, VideoStreamProperties, XtreamCluster},
+        model::{
+            EpisodeStreamProperties, VideoStreamDetailProperties, VideoStreamProperties, VirtualId, XtreamCluster,
+        },
         utils::Internable,
     };
 
@@ -199,7 +201,7 @@ mod tests {
         bitrate: u32,
     ) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 1,
+            virtual_id: VirtualId::new(1),
             provider_id: 1,
             name: "movie".intern(),
             logo: "".intern(),
@@ -234,7 +236,7 @@ mod tests {
 
     fn episode_item(url: &str, added: Option<&str>, video: Option<&str>, audio: Option<&str>) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 2,
+            virtual_id: VirtualId::new(2),
             provider_id: 2,
             name: "ep".intern(),
             logo: "".intern(),

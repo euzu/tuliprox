@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].xtream_cluster, XtreamCluster::Video);
         assert_eq!(groups[0].channels[0].header.item_type, PlaylistItemType::Video);
-        assert_eq!(groups[0].channels[0].header.virtual_id, 0);
+        assert_eq!(groups[0].channels[0].header.virtual_id, shared::model::VirtualId::default());
         assert!(groups[0].channels[0]
             .header
             .id

@@ -636,7 +636,7 @@ async fn activate_session_before_stream_open(
             .ensure_user_session_placeholder(crate::api::model::CreateUserSessionParams {
                 user,
                 session_token,
-                virtual_id,
+                virtual_id: virtual_id.get(),
                 provider: input.name.as_ref(),
                 stream_url,
                 addr: &fingerprint.addr,
@@ -1937,7 +1937,7 @@ pub async fn force_provider_stream_response(
         preferred_provider,
         allow_forced_provider_fallback,
         allow_provider_grace,
-        stream_channel.virtual_id,
+        VirtualId::new(stream_channel.virtual_id),
         connection_priority_for_kind(ctx.user, connection_kind),
         connection_kind,
         true,
@@ -2080,7 +2080,7 @@ pub(crate) async fn stream_response(
             user,
             session_token,
             request_class,
-            virtual_id,
+            virtual_id: VirtualId::new(virtual_id),
             item_type,
             stream_url,
             connection_permission,
@@ -2192,7 +2192,7 @@ pub(crate) async fn stream_response(
         pinned_provider,
         pinned_provider.is_none(),
         true,
-        stream_channel.virtual_id,
+        VirtualId::new(stream_channel.virtual_id),
         connection_priority_for_kind(user, connection_kind),
         connection_kind,
         false,
@@ -2235,7 +2235,7 @@ pub(crate) async fn stream_response(
                         input,
                         fingerprint,
                         session_token,
-                        virtual_id,
+                        virtual_id: VirtualId::new(virtual_id),
                         connection_permission,
                         connection_kind,
                         fallback_stream_url: stream_url,
@@ -2538,7 +2538,7 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
             content,
             hls_url: response_url,
             target_id: target.id,
-            virtual_id,
+            virtual_id: virtual_id.get(),
             input_id: input.id,
             user_token: Some(session_token),
         },
@@ -2550,7 +2550,7 @@ async fn detected_catchup_hls_response(params: DetectedCatchupHlsResponseParams<
         .create_user_session(crate::api::model::CreateUserSessionParams {
             user,
             session_token,
-            virtual_id,
+            virtual_id: virtual_id.get(),
             provider: &provider,
             stream_url: request_url,
             addr: &fingerprint.addr,
@@ -3032,7 +3032,7 @@ pub(crate) async fn local_stream_response(
                 user,
                 session_token,
                 request_class,
-                virtual_id: pli.virtual_id,
+                virtual_id: VirtualId::new(pli.virtual_id),
                 item_type: pli.item_type,
                 stream_url: &pli.url,
                 connection_permission,
@@ -5622,7 +5622,7 @@ mod tests {
                 user: &user,
                 session_token: "tok-follow-up",
                 request_class: None,
-                virtual_id: channel.virtual_id,
+                virtual_id: VirtualId::new(channel.virtual_id),
                 item_type: PlaylistItemType::LiveHls,
                 stream_url: channel.url.as_ref(),
                 connection_permission: UserConnectionPermission::Allowed,
@@ -5691,7 +5691,7 @@ mod tests {
                 user: &user,
                 session_token: "tok-precomputed-follow-up",
                 request_class: Some(PlaybackRequestClass::FollowUp),
-                virtual_id: channel.virtual_id,
+                virtual_id: VirtualId::new(channel.virtual_id),
                 item_type: PlaylistItemType::LiveHls,
                 stream_url: channel.url.as_ref(),
                 connection_permission: UserConnectionPermission::Allowed,
@@ -5770,7 +5770,7 @@ mod tests {
                 user: &user,
                 session_token: "tok-stale-followup",
                 request_class: Some(PlaybackRequestClass::FollowUp),
-                virtual_id: channel.virtual_id,
+                virtual_id: VirtualId::new(channel.virtual_id),
                 item_type: PlaylistItemType::LiveHls,
                 stream_url: channel.url.as_ref(),
                 connection_permission: UserConnectionPermission::Allowed,
@@ -5840,7 +5840,7 @@ mod tests {
                 user: &user,
                 session_token: "tok-pre-resolved-grace",
                 request_class: None,
-                virtual_id: channel.virtual_id,
+                virtual_id: VirtualId::new(channel.virtual_id),
                 item_type: PlaylistItemType::LiveHls,
                 stream_url: channel.url.as_ref(),
                 connection_permission: UserConnectionPermission::GracePeriod,
@@ -5896,7 +5896,7 @@ mod tests {
                 session_token: "tok-prepare",
                 // Explicitly pass Prepare class — placeholder and admission should be skipped.
                 request_class: Some(PlaybackRequestClass::Prepare),
-                virtual_id: 55222,
+                virtual_id: VirtualId::new(55222),
                 item_type: PlaylistItemType::LiveHls,
                 stream_url: "http://provider.example/live/test.ts",
                 connection_permission: UserConnectionPermission::Allowed,
@@ -6116,7 +6116,7 @@ mod tests {
                 user: &user,
                 session_token: "tok-grace-hold",
                 request_class: None,
-                virtual_id: second_channel.virtual_id,
+                virtual_id: VirtualId::new(second_channel.virtual_id),
                 item_type: PlaylistItemType::LiveHls,
                 stream_url: second_channel.url.as_ref(),
                 connection_permission: UserConnectionPermission::Allowed,
@@ -6198,7 +6198,7 @@ mod tests {
                 user: &user,
                 session_token: "tok-atomic-commit",
                 request_class: None,
-                virtual_id: channel.virtual_id,
+                virtual_id: VirtualId::new(channel.virtual_id),
                 item_type: channel.item_type,
                 stream_url: channel.url.as_ref(),
                 connection_permission: UserConnectionPermission::Allowed,
@@ -7257,7 +7257,7 @@ mod tests {
             true,
             Some("socket-reconnect"),
             false,
-            EvictionReentryGuard::SocketPlayback { virtual_id: 9001 },
+            EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9001) },
         )
         .await;
         let admission = result.admission;
@@ -7386,7 +7386,7 @@ mod tests {
             true,
             Some("session-new"),
             false,
-            EvictionReentryGuard::SocketPlayback { virtual_id: 9103 },
+            EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9103) },
         )
         .await;
         let admission = result.admission;
@@ -7604,7 +7604,7 @@ mod tests {
             true,
             Some("socket-reconnect"),
             false,
-            EvictionReentryGuard::SocketPlayback { virtual_id: 9201 },
+            EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(9201) },
         )
         .await;
         let admission = result.admission;
@@ -8516,7 +8516,7 @@ mod tests {
             false,
             None,
             false,
-            EvictionReentryGuard::SocketPlayback { virtual_id: 5001 },
+            EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(5001) },
         )
         .await;
         let admission = result.admission;
@@ -8836,7 +8836,7 @@ mod tests {
             None,
             &ts_token,
             false,
-            EvictionReentryGuard::SocketPlayback { virtual_id },
+            EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(virtual_id) },
             false,
             false,
         )
@@ -8986,7 +8986,7 @@ mod tests {
             None,
             true,
             true,
-            channel.virtual_id,
+            VirtualId::new(channel.virtual_id),
             0,
             crate::api::model::ConnectionKind::Normal,
             false,
@@ -9067,7 +9067,7 @@ mod tests {
         let app_state = create_test_app_state_for_config(Arc::new(app_cfg_raw));
 
         let pli = XtreamPlaylistItem {
-            virtual_id: 100,
+            virtual_id: VirtualId::new(100),
             provider_id: 1,
             name: "test".intern(),
             logo: "".intern(),

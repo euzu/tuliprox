@@ -86,7 +86,7 @@ fn get_rating(props: Option<&StreamProperties>) -> f64 {
 impl From<&CommonPlaylistItem> for UiPlaylistItem {
     fn from(item: &CommonPlaylistItem) -> Self {
         Self {
-            virtual_id: item.virtual_id,
+            virtual_id: item.virtual_id.get(),
             provider_id: Arc::clone(&item.provider_id),
             name: Arc::clone(&item.name),
             title: Arc::clone(&item.title),
@@ -106,7 +106,7 @@ impl From<&CommonPlaylistItem> for UiPlaylistItem {
 impl From<XtreamPlaylistItem> for UiPlaylistItem {
     fn from(item: XtreamPlaylistItem) -> Self {
         Self {
-            virtual_id: item.virtual_id,
+            virtual_id: item.virtual_id.get(),
             provider_id: item.provider_id.to_string().into(),
             name: Arc::clone(&item.name),
             title: Arc::clone(&item.title),
@@ -126,7 +126,7 @@ impl From<XtreamPlaylistItem> for UiPlaylistItem {
 impl From<M3uPlaylistItem> for UiPlaylistItem {
     fn from(item: M3uPlaylistItem) -> Self {
         Self {
-            virtual_id: item.virtual_id,
+            virtual_id: item.virtual_id.get(),
             provider_id: Arc::clone(&item.provider_id),
             name: Arc::clone(&item.name),
             title: Arc::clone(&item.title),
@@ -147,7 +147,7 @@ impl From<&PlaylistItem> for UiPlaylistItem {
     fn from(item: &PlaylistItem) -> Self {
         let header = &item.header;
         Self {
-            virtual_id: header.virtual_id,
+            virtual_id: header.virtual_id.get(),
             provider_id: Arc::clone(&header.id),
             name: Arc::clone(&header.name),
             title: Arc::clone(&header.title),

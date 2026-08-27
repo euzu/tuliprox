@@ -800,7 +800,7 @@ pub async fn update_series_metadata(
             if content.is_empty() {
                 debug!("Series {display_id}: provider returned empty content for info fetch");
             } else {
-                let canonical_series_id = existing_item.as_ref().map_or(series_id, PlaylistEntry::get_virtual_id);
+                let canonical_series_id = existing_item.as_ref().map_or(series_id, |item| item.get_virtual_id().get());
                 match serde_json::from_str::<Value>(&content) {
                     Ok(mut json_value) => {
                         if let Some(info) = json_value.get_mut("info").and_then(|v| v.as_object_mut()) {

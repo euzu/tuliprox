@@ -3042,7 +3042,7 @@ impl ActiveUserManager {
                 socket_guard_keys.push(create_socket_reentry_guard_key(
                     &username,
                     &stream.client_ip,
-                    stream.channel.virtual_id,
+                    shared::model::VirtualId::new(stream.channel.virtual_id),
                 ));
             }
         }
@@ -5546,7 +5546,13 @@ mod tests {
         manager.mark_recent_eviction_guard_for_addr(&evicted_addr, protected_addr, 10).await;
 
         assert_eq!(
-            manager.recent_socket_reentry_protected_addr("vod-no-token-user", "127.0.0.1", channel.virtual_id).await,
+            manager
+                .recent_socket_reentry_protected_addr(
+                    "vod-no-token-user",
+                    "127.0.0.1",
+                    shared::model::VirtualId::new(channel.virtual_id)
+                )
+                .await,
             Some(protected_addr)
         );
     }

@@ -26,7 +26,7 @@ use shared::{
     error::TuliproxError,
     model::{
         PlaylistItemType, PlaylistRequest, PlaylistUrlResolveRequest, ProtocolMessage, StreamInfo, StreamInfoConfigDto,
-        UserCommand,
+        UserCommand, VirtualId,
     },
 };
 use std::{collections::HashMap, fmt::Display, rc::Rc, str::FromStr};
@@ -230,7 +230,7 @@ pub fn StreamDisplay(props: &StreamDisplayProps) -> Html {
                         if let Some(dto) = (*selected_dto).as_ref() {
                             if !services.websocket.send_message(ProtocolMessage::UserAction(UserCommand::Kick(
                                 dto.addr,
-                                dto.channel.virtual_id,
+                                VirtualId::new(dto.channel.virtual_id),
                                 kick_secs,
                             ))) {
                                 services.toastr.error(translate.t("MESSAGES.FAILED_TO_KICK_USER_STREAM"));

@@ -4,7 +4,7 @@ use crate::{
     model::{
         stalker::StalkerStreamKind, stalker_item::StalkerPlaylistItem, xtream_const, CatchupAttribute,
         CatchupProperties, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties, HeaderField,
-        SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamInfoDocument,
+        SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, VirtualId, XtreamInfoDocument,
     },
     utils::{
         arc_str_option_serde, arc_str_serde, concat_path, extract_extension_from_url, generate_provider_playlist_uuid,
@@ -20,8 +20,6 @@ use std::{
 use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 // https://de.wikipedia.org/wiki/M3U
 // https://siptv.eu/howto/playlist.html
-
-pub type VirtualId = u32;
 
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default, Display, EnumString, AsRefStr)]
 #[repr(u8)]
@@ -411,7 +409,7 @@ impl Default for PlaylistItemHeader {
         Self {
             uuid: UUIDType::default(),
             id: "".intern(),
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             name: "".intern(),
             chno: 0,
             logo: "".intern(),
@@ -1187,7 +1185,7 @@ impl PlaylistItem {
                         Some(StreamProperties::Video(Box::new(VideoStreamProperties {
                             name: header.name.clone(),
                             category_id: header.category_id,
-                            stream_id: header.virtual_id,
+                            stream_id: header.virtual_id.get(),
                             stream_icon: "".intern(),
                             direct_source: "".intern(),
                             custom_sid: None,
@@ -1483,7 +1481,7 @@ impl PlaylistItem {
         };
         let header = PlaylistItemHeader {
             uuid: generate_provider_playlist_uuid(input_name, &stream_id_str, item_type),
-            virtual_id: item.stream_id,
+            virtual_id: VirtualId::new(item.stream_id),
             id: Arc::clone(&stream_id_str),
             name: Arc::clone(&item.name),
             title: Arc::clone(&item.name),
@@ -1740,7 +1738,7 @@ mod tests {
             options.get_resource_url(
                 XtreamCluster::Series,
                 PlaylistItemType::Series,
-                1,
+                VirtualId::new(1),
                 "/api/v1/library/thumbnail/abc",
                 "logo",
             ),
@@ -1756,7 +1754,7 @@ mod tests {
             options.get_bd_path_resource_url(
                 XtreamCluster::Series,
                 PlaylistItemType::Series,
-                1,
+                VirtualId::new(1),
                 "/api/v1/library/thumbnail/backdrop",
                 "backdrop_",
                 0,
@@ -1777,7 +1775,7 @@ mod tests {
             options.get_resource_url(
                 XtreamCluster::Series,
                 PlaylistItemType::LocalSeries,
-                1,
+                VirtualId::new(1),
                 "/api/v1/library/thumbnail/abc",
                 "logo",
             ),
@@ -1797,7 +1795,7 @@ mod tests {
             options.get_bd_path_resource_url(
                 XtreamCluster::Series,
                 PlaylistItemType::LocalSeries,
-                1,
+                VirtualId::new(1),
                 "/api/v1/library/thumbnail/backdrop",
                 "backdrop_",
                 0,
@@ -1812,7 +1810,13 @@ mod tests {
         let resource_url = "//cdn.example.com/poster.jpg";
 
         assert_eq!(
-            options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
+            options.get_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::Series,
+                VirtualId::new(1),
+                resource_url,
+                "logo",
+            ),
             concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
         );
     }
@@ -1829,7 +1833,7 @@ mod tests {
             options.get_resource_url(
                 XtreamCluster::Live,
                 PlaylistItemType::Live,
-                2017,
+                VirtualId::new(2017),
                 "https://provider.example/logo.png",
                 "logo",
             ),
@@ -1843,7 +1847,13 @@ mod tests {
         let resource_url = "/provider-controlled/poster.jpg";
 
         assert_eq!(
-            options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
+            options.get_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::Series,
+                VirtualId::new(1),
+                resource_url,
+                "logo",
+            ),
             concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
         );
     }
@@ -1854,7 +1864,13 @@ mod tests {
         let resource_url = "https://provider.example/api/v1/library/thumbnail/abc";
 
         assert_eq!(
-            options.get_resource_url(XtreamCluster::Series, PlaylistItemType::Series, 1, resource_url, "logo",),
+            options.get_resource_url(
+                XtreamCluster::Series,
+                PlaylistItemType::Series,
+                VirtualId::new(1),
+                resource_url,
+                "logo",
+            ),
             concat_path(&options.base_url, &obfuscate_text(&options.encrypt_secret, resource_url)),
         );
     }
@@ -1882,7 +1898,7 @@ mod tests {
         let mut item = PlaylistItem {
             header: PlaylistItemHeader {
                 id: "80510".intern(),
-                virtual_id: 1001,
+                virtual_id: VirtualId::new(1001),
                 url: "http://provider.example/live/user/pass/80510.ts".intern(),
                 input_name: "input".intern(),
                 item_type: PlaylistItemType::Live,
@@ -1956,7 +1972,7 @@ mod tests {
         let mut source = PlaylistItem {
             header: PlaylistItemHeader {
                 id: "legacy-alpha".intern(),
-                virtual_id: 7001,
+                virtual_id: VirtualId::new(7001),
                 url: "http://provider.example/live/user/pass/80510.ts".intern(),
                 ..PlaylistItemHeader::default()
             },
@@ -2004,7 +2020,7 @@ mod tests {
     #[test]
     fn m3u_to_m3u_emits_tvg_id_from_epg_channel_id() {
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,
@@ -2039,7 +2055,7 @@ mod tests {
         // EPG matching is case-insensitive, so ids are no longer lowercased when parsed.
         // The M3U tvg-id output must preserve the channel's original source case.
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,
@@ -2072,7 +2088,7 @@ mod tests {
     #[test]
     fn m3u_to_m3u_emits_tvg_chno_from_chno() {
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,
@@ -2105,7 +2121,7 @@ mod tests {
     #[test]
     fn m3u_to_m3u_omits_tvg_chno_when_chno_is_zero() {
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,
@@ -2138,7 +2154,7 @@ mod tests {
     #[test]
     fn m3u_to_m3u_preserves_catchup_attributes() {
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,
@@ -2187,7 +2203,7 @@ mod tests {
     #[test]
     fn m3u_to_m3u_unifies_append_to_catchup_type_only() {
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,
@@ -2230,7 +2246,7 @@ mod tests {
     #[test]
     fn m3u_to_m3u_uses_rewritten_catchup_mode_and_source() {
         let item = M3uPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::default(),
             provider_id: "prov1".intern(),
             input_stream_id: "prov1".intern(),
             upstream_user_agent: None,

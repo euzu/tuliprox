@@ -57,7 +57,8 @@ use shared::{
     error::TuliproxError,
     model::{
         create_stream_channel_with_type, ConnectFailureReason, PlaylistEntry, PlaylistItemType, ProxyType,
-        ShortEpgResultDto, StreamProperties, TargetType, UserConnectionPermission, XtreamCluster, XtreamPlaylistItem,
+        ShortEpgResultDto, StreamProperties, TargetType, UserConnectionPermission, VirtualId, XtreamCluster,
+        XtreamPlaylistItem,
     },
     utils::{
         deserialize_as_string, extract_extension_from_url, generate_provider_playlist_uuid, sanitize_sensitive_info,
@@ -392,7 +393,7 @@ async fn xtream_player_api_stream(
     }
 
     if pli.item_type.is_local() {
-        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id, false);
+        let playback_session_token = create_session_fingerprint(fingerprint, &user.username, virtual_id.get(), false);
         let user_session =
             app_state.active_users.get_and_update_user_session(&user.username, &playback_session_token).await;
         let (admission, _grace_mode, request_class) = crate::api::api_utils::resolve_playback_request_admission(
@@ -468,11 +469,17 @@ async fn xtream_player_api_stream(
     let playback_ext: &str = if playback_ext.is_empty() { &requested_extension } else { &playback_ext };
 
     let session_key = if let Some(resolved) = m3u_timeshift.as_ref() {
-        create_m3u_catchup_session_key(fingerprint, &user.username, virtual_id, &resolved.discriminator)
+        create_m3u_catchup_session_key(fingerprint, &user.username, virtual_id.get(), &resolved.discriminator)
     } else if item_type == PlaylistItemType::Catchup {
-        create_catchup_session_key(fingerprint, &user.username, virtual_id)
+        create_catchup_session_key(fingerprint, &user.username, virtual_id.get())
     } else {
-        create_playback_session_fingerprint(fingerprint, &user.username, virtual_id, item_type, Some(playback_ext))
+        create_playback_session_fingerprint(
+            fingerprint,
+            &user.username,
+            virtual_id.get(),
+            item_type,
+            Some(playback_ext),
+        )
     };
     let eviction_reentry_guard = if item_type == PlaylistItemType::Catchup
         || !crate::api::api_utils::is_socket_bound_playback_session(item_type, Some(playback_ext))
@@ -536,7 +543,8 @@ async fn xtream_player_api_stream(
 
         let stream_channel = create_stream_channel_with_type(target.id, &pli, item_type);
 
-        if session.virtual_id == virtual_id && is_seekable_media_request(cluster, req_headers, Some(playback_ext)) {
+        if session.virtual_id == virtual_id.get() && is_seekable_media_request(cluster, req_headers, Some(playback_ext))
+        {
             // partial request means we are in reverse proxy mode, seek happened
             return force_provider_stream_response(
                 fingerprint,
@@ -583,7 +591,7 @@ async fn xtream_player_api_stream(
     let allow_exhausted_shared_reconnect = should_allow_exhausted_shared_reconnect(
         is_stream_share_enabled(item_type, &target),
         user_session.as_ref(),
-        virtual_id,
+        virtual_id.get(),
         session_url.as_ref(),
     );
     if connection_permission == UserConnectionPermission::Exhausted && !allow_exhausted_shared_reconnect {
@@ -648,7 +656,7 @@ async fn xtream_player_api_stream(
             error!("HLS input stream identity missing for virtual_id={}; refresh target playlist", pli.virtual_id);
             return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
         };
-        let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id);
+        let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, pli.virtual_id.get());
         let archive_reference = m3u_archive_epg_reference_ts(stream_url.as_ref())
             .or_else(|| m3u_archive_epg_reference_ts(pli.url.as_ref()))
             .or_else(|| m3u_catchup_epg_reference_from_session_token(&session_key));
@@ -908,7 +916,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
         let user = create_api_proxy_user(app_state);
 
         if pli.item_type.is_local() {
-            let playback_session_token = create_session_fingerprint(fingerprint, "webui", virtual_id, false);
+            let playback_session_token = create_session_fingerprint(fingerprint, "webui", virtual_id.get(), false);
             return local_stream_response(
                 fingerprint,
                 app_state,
@@ -955,7 +963,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
 
         let is_session_request = is_session_based_playback(pli.item_type, playback_ext);
         let session_key =
-            create_playback_session_fingerprint(fingerprint, "webui", virtual_id, pli.item_type, playback_ext);
+            create_playback_session_fingerprint(fingerprint, "webui", virtual_id.get(), pli.item_type, playback_ext);
 
         // TODO how should we use fixed provider for hls in multi provider config?
 
@@ -965,7 +973,7 @@ pub(in crate::api) async fn xtream_player_api_stream_with_resolved_target(
                 error!("HLS input stream identity missing for virtual_id={virtual_id}; refresh target playlist");
                 return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
             };
-            let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, virtual_id);
+            let original_hls_entry_path = build_virtual_hls_entry_path(&target, &input, &user, virtual_id.get());
             return handle_hls_stream_request(
                 fingerprint,
                 app_state,
@@ -1621,7 +1629,7 @@ async fn xtream_get_catchup_response(
                     &uuid,
                     cp_id,
                     PlaylistItemType::Catchup,
-                    pli.provider_id,
+                    VirtualId::new(pli.provider_id),
                 );
 
                 mapping_results.push((idx, virtual_id));
@@ -1631,7 +1639,7 @@ async fn xtream_get_catchup_response(
                         cp_id,
                         virtual_id,
                         PlaylistItemType::Catchup,
-                        pli.provider_id,
+                        VirtualId::new(pli.provider_id),
                         uuid,
                     ));
                 }
@@ -1990,7 +1998,7 @@ mod tests {
         foundation::Filter,
         model::{
             ClusterFlags, InputType, PlaylistItemType, ProcessingOrder, ProxyUserStatus, StreamProperties, UUIDType,
-            VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
+            VideoStreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
         },
         utils::Internable,
     };
@@ -2092,7 +2100,7 @@ mod tests {
 
     fn short_epg_live_item() -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 100,
+            virtual_id: VirtualId::new(100),
             provider_id: 0,
             name: "Formula 1".intern(),
             logo: "".intern(),
@@ -2167,7 +2175,7 @@ mod tests {
         let app_state = create_test_app_state(config);
         let live_item = short_epg_live_item();
         let mut live = BPlusTree::new();
-        live.insert(live_item.virtual_id, live_item.clone());
+        live.insert(live_item.virtual_id.get(), live_item.clone());
         app_state
             .playlists
             .cache_playlist(
@@ -2186,7 +2194,7 @@ mod tests {
                 live_item.provider_id,
                 live_item.virtual_id,
                 PlaylistItemType::Live,
-                0,
+                VirtualId::new(0),
                 UUIDType::default(),
             ),
         );
@@ -2210,7 +2218,7 @@ mod tests {
 
     fn m3u_catchup_item(name: &str, input_name: &str, url: &str, catchup_source: Option<&str>) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 100,
+            virtual_id: VirtualId::new(100),
             provider_id: 0,
             name: name.intern(),
             logo: "".intern(),
@@ -2262,7 +2270,7 @@ mod tests {
             app_state.app_config.sources.store(Arc::new(sources));
         }
         let mut live = BPlusTree::new();
-        live.insert(item.virtual_id, item.clone());
+        live.insert(item.virtual_id.get(), item.clone());
         app_state
             .playlists
             .cache_playlist(
@@ -2277,7 +2285,13 @@ mod tests {
         let mut id_mapping = BPlusTree::new();
         id_mapping.insert(
             item.virtual_id,
-            VirtualIdRecord::new(item.provider_id, item.virtual_id, PlaylistItemType::Live, 0, UUIDType::default()),
+            VirtualIdRecord::new(
+                item.provider_id,
+                item.virtual_id,
+                PlaylistItemType::Live,
+                VirtualId::new(0),
+                UUIDType::default(),
+            ),
         );
         app_state.playlists.cache_id_mapping(&target.name, id_mapping).await;
     }
@@ -2410,7 +2424,7 @@ mod tests {
 
     fn create_test_vod_item(url: &str, container_extension: &str, item_type: PlaylistItemType) -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 176_141,
+            virtual_id: VirtualId::new(176_141),
             provider_id: 813_563,
             name: "Test".intern(),
             logo: "".intern(),
@@ -2660,7 +2674,7 @@ mod tests {
 
     fn m3u_timeshift_item() -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 100,
+            virtual_id: VirtualId::new(100),
             provider_id: 0,
             name: "Live TV".intern(),
             logo: "".intern(),

@@ -237,7 +237,7 @@ mod tests {
     use crate::LockedReceiverStream;
     use futures::StreamExt;
     use shared::{
-        model::{ClusterFlags, PlaylistItemType, XtreamCluster, XtreamPlaylistItem},
+        model::{ClusterFlags, PlaylistItemType, VirtualId, XtreamCluster, XtreamPlaylistItem},
         utils::Internable,
     };
     use tokio::sync::mpsc;
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn matches_filters_applies_user_content_filter() {
         let make_item = |group: &str| XtreamPlaylistItem {
-            virtual_id: 1,
+            virtual_id: VirtualId::new(1),
             provider_id: 1,
             name: "name".intern(),
             logo: "".intern(),
@@ -303,7 +303,7 @@ mod tests {
     async fn iterator_forwards_one_storage_error_then_ends() {
         let (tx, rx) = mpsc::channel(2);
         let item = XtreamPlaylistItem {
-            virtual_id: 1,
+            virtual_id: VirtualId::new(1),
             provider_id: 1,
             name: "name".intern(),
             logo: "".intern(),

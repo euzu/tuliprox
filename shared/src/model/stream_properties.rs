@@ -1002,7 +1002,7 @@ impl SeriesStreamProperties {
     where
         P: PlaylistEntry,
     {
-        Self::from_info_base(info, pli.get_virtual_id())
+        Self::from_info_base(info, pli.get_virtual_id().get())
     }
 
     pub fn from_info_without_existing(info: &XtreamSeriesInfo, series_id: u32) -> SeriesStreamProperties {
@@ -1134,7 +1134,7 @@ fn non_empty_arc(s: &Arc<str>) -> Option<Arc<str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PlaylistItemType, XtreamCluster, XtreamPlaylistItem};
+    use crate::model::{PlaylistItemType, VirtualId, XtreamCluster, XtreamPlaylistItem};
     use serde_json::json;
 
     #[test]
@@ -1189,7 +1189,7 @@ mod tests {
 
     fn existing_video_item() -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 1,
+            virtual_id: VirtualId::new(1),
             provider_id: 1001,
             name: "Existing".into(),
             logo: "".into(),

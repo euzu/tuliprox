@@ -406,7 +406,11 @@ async fn handle_update_detail_and_release_provider(
     if let Some(stream_info) = deps.user_manager.update_stream_detail(&addr, video_type).await {
         if matches!(video_type, CustomVideoStreamType::LowPriorityPreempted) {
             deps.user_manager
-                .block_user_for_stream(&addr, stream_info.channel.virtual_id, PREEMPT_REENTRY_BLOCK_SECS)
+                .block_user_for_stream(
+                    &addr,
+                    shared::model::VirtualId::new(stream_info.channel.virtual_id),
+                    PREEMPT_REENTRY_BLOCK_SECS,
+                )
                 .await;
         }
         deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
@@ -425,7 +429,11 @@ async fn handle_update_detail_and_release_provider_connection(
     if let Some(stream_info) = deps.user_manager.update_stream_detail(&addr, video_type).await {
         if matches!(video_type, CustomVideoStreamType::LowPriorityPreempted) {
             deps.user_manager
-                .block_user_for_stream(&addr, stream_info.channel.virtual_id, PREEMPT_REENTRY_BLOCK_SECS)
+                .block_user_for_stream(
+                    &addr,
+                    shared::model::VirtualId::new(stream_info.channel.virtual_id),
+                    PREEMPT_REENTRY_BLOCK_SECS,
+                )
                 .await;
         }
         deps.event_manager.send_event(EventMessage::ActiveUser(ActiveUserConnectionChange::Updated(stream_info)));
@@ -1419,7 +1427,7 @@ mod tests {
         let mut rx = manager.get_close_connection_channel();
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
 
-        assert!(manager.kick_connection(&addr, 1, 0).await);
+        assert!(manager.kick_connection(&addr, shared::model::VirtualId::new(1), 0).await);
         assert_eq!(rx.recv().await.ok(), Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::ClientKicked)));
     }
 
@@ -1452,7 +1460,16 @@ mod tests {
         let mut rx = manager.get_close_connection_channel();
         let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap_or_else(|_| unreachable!());
 
-        assert!(manager.close_connection_with_reason_and_block(&addr, 7, 0, DisconnectReason::Provisioning).await);
+        assert!(
+            manager
+                .close_connection_with_reason_and_block(
+                    &addr,
+                    shared::model::VirtualId::new(7),
+                    0,
+                    DisconnectReason::Provisioning
+                )
+                .await
+        );
         assert_eq!(rx.recv().await.ok(), Some(CloseConnectionSignal::WithReason(addr, DisconnectReason::Provisioning)));
     }
 
@@ -1514,7 +1531,10 @@ mod tests {
         handle_update_detail_and_release_provider(&deps, addr, CustomVideoStreamType::LowPriorityPreempted, None).await;
 
         assert!(
-            manager.user_manager.is_user_blocked_for_stream(&user.username, channel.virtual_id).await,
+            manager
+                .user_manager
+                .is_user_blocked_for_stream(&user.username, shared::model::VirtualId::new(channel.virtual_id))
+                .await,
             "preempted playback should be blocked briefly to prevent immediate reconnect ping-pong"
         );
     }
@@ -1577,7 +1597,10 @@ mod tests {
         handle_update_detail_and_release_provider(&deps, addr, CustomVideoStreamType::LowPriorityPreempted, None).await;
 
         assert!(
-            manager.user_manager.is_user_blocked_for_stream(&user.username, channel.virtual_id).await,
+            manager
+                .user_manager
+                .is_user_blocked_for_stream(&user.username, shared::model::VirtualId::new(channel.virtual_id))
+                .await,
             "preempted HLS playback should be blocked briefly to prevent immediate reconnect ping-pong"
         );
     }

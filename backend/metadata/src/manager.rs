@@ -8,7 +8,7 @@ use shared::{
     error::TuliproxError,
     model::{
         InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, StreamProperties, UUIDType,
-        VideoStreamProperties, XtreamCluster, XtreamPlaylistItem,
+        VideoStreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
     },
     utils::generate_provider_playlist_uuid,
 };
@@ -1095,10 +1095,10 @@ macro_rules! collect_virtual_updates {
             mapping: &TargetIdMapping,
             input_name: &str,
             batch: &'a BatchResultCollector,
-            provider_virtual_ids: &mut HashMap<u32, Vec<u32>>,
-            uuid_virtual_ids: &mut HashMap<UUIDType, Option<u32>>,
-        ) -> HashMap<u32, &'a $props_ty> {
-            let mut virtual_updates: HashMap<u32, &'a $props_ty> = HashMap::new();
+            provider_virtual_ids: &mut HashMap<u32, Vec<VirtualId>>,
+            uuid_virtual_ids: &mut HashMap<UUIDType, Option<VirtualId>>,
+        ) -> HashMap<VirtualId, &'a $props_ty> {
+            let mut virtual_updates: HashMap<VirtualId, &'a $props_ty> = HashMap::new();
             if batch.$field.is_empty() {
                 return virtual_updates;
             }
@@ -1138,7 +1138,7 @@ macro_rules! apply_cascade_updates {
             ctx: &MetadataUpdateCtx,
             target: &tuliprox_core::model::ConfigTarget,
             storage_path: &std::path::Path,
-            virtual_updates: HashMap<u32, &$props_ty>,
+            virtual_updates: HashMap<VirtualId, &$props_ty>,
         ) {
             if virtual_updates.is_empty() {
                 return;
@@ -1147,7 +1147,7 @@ macro_rules! apply_cascade_updates {
             let target_name = target.name.as_str();
             let xtream_path = xtream_get_file_path(storage_path, $cluster);
             let updates_input: Vec<(u32, $props_ty)> =
-                virtual_updates.into_iter().map(|(vid, props)| (vid, props.clone())).collect();
+                virtual_updates.into_iter().map(|(vid, props)| (vid.get(), props.clone())).collect();
 
             let updates = {
                 // Scope read lock to read-only query phase so write phase can acquire lock.
@@ -2713,8 +2713,8 @@ impl InputWorker {
                 }
             };
 
-            let mut provider_virtual_ids: HashMap<u32, Vec<u32>> = HashMap::new();
-            let mut uuid_virtual_ids: HashMap<UUIDType, Option<u32>> = HashMap::new();
+            let mut provider_virtual_ids: HashMap<u32, Vec<VirtualId>> = HashMap::new();
+            let mut uuid_virtual_ids: HashMap<UUIDType, Option<VirtualId>> = HashMap::new();
 
             let vod_virtual_updates = Self::collect_vod_virtual_updates(
                 &mapping,
@@ -2747,9 +2747,9 @@ impl InputWorker {
 
     fn get_cached_uuid_virtual_id(
         mapping: &TargetIdMapping,
-        cache: &mut HashMap<UUIDType, Option<u32>>,
+        cache: &mut HashMap<UUIDType, Option<VirtualId>>,
         uuid: UUIDType,
-    ) -> Option<u32> {
+    ) -> Option<VirtualId> {
         if let Some(cached) = cache.get(&uuid) {
             return *cached;
         }
@@ -2795,7 +2795,7 @@ impl InputWorker {
                     XtreamCluster::Series => &mut xtream_storage.series,
                 };
                 for item in updates {
-                    storage.insert(item.virtual_id, item);
+                    storage.insert(item.virtual_id.get(), item);
                 }
             }
         }
@@ -3328,7 +3328,7 @@ impl InputWorker {
                             &mut item.additional_properties,
                             *item_type,
                             &item.name,
-                            item.virtual_id,
+                            item.virtual_id.get(),
                             metadata.raw_video,
                             metadata.raw_audio,
                             metadata.stats,
@@ -4038,7 +4038,7 @@ mod tests {
             let mapping_path = dir.path().join("target_id_mapping.db");
             let mut mapping = TargetIdMapping::new(&mapping_path, false).expect("mapping should be created");
             let uuid = generate_provider_playlist_uuid($input_name, $text_id, $item_type);
-            let virtual_id = mapping.get_and_update_virtual_id(&uuid, 0, $item_type, 0);
+            let virtual_id = mapping.get_and_update_virtual_id(&uuid, 0, $item_type, VirtualId::default());
             mapping.persist().expect("mapping should persist");
 
             let mut batch = BatchResultCollector::new();
@@ -4097,7 +4097,7 @@ mod tests {
         batch.add_vod(ProviderIdType::Id(42), pending_props);
 
         let mut item = XtreamPlaylistItem {
-            virtual_id: 7,
+            virtual_id: VirtualId::new(7),
             provider_id: 42,
             name: Arc::from("Movie"),
             logo: Arc::from(""),

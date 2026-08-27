@@ -55,7 +55,7 @@ use shared::{
     model::{
         permission::Permission, stalker::StalkerStreamKind, EpgChannel, InputType, OperationRunAccepted,
         PlaylistEpgRequest, PlaylistItem, PlaylistRequest, PlaylistUrlResolveRequest, ProxyType, TargetType,
-        UiPlaylistItem, XtreamCluster,
+        UiPlaylistItem, VirtualId, XtreamCluster,
     },
     utils::{concat_path_leading_slash, deobfuscate_text, sanitize_sensitive_info, Internable},
 };
@@ -232,9 +232,9 @@ pub(in crate::api) async fn resolve_target_recording_source(
         if let Some(mut items) = iter_raw_xtream_target_playlist(app_config, &target, cluster).await {
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
-                if item.virtual_id == virtual_id {
+                if item.virtual_id == VirtualId::new(virtual_id) {
                     resolved = Some(ResolvedRecordingSource {
-                        virtual_id: item.virtual_id,
+                        virtual_id: item.virtual_id.get(),
                         input_name: item.input_name.to_string(),
                     });
                     break;
@@ -246,9 +246,9 @@ pub(in crate::api) async fn resolve_target_recording_source(
         if let Some(mut items) = iter_raw_m3u_target_playlist(app_config, &target, Some(cluster)).await {
             while let Some(entry) = items.next().await {
                 let Ok(item) = entry else { continue };
-                if item.virtual_id == virtual_id {
+                if item.virtual_id == VirtualId::new(virtual_id) {
                     resolved = Some(ResolvedRecordingSource {
-                        virtual_id: item.virtual_id,
+                        virtual_id: item.virtual_id.get(),
                         input_name: item.input_name.to_string(),
                     });
                     break;
@@ -282,7 +282,7 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
                 let Ok(item) = entry else { continue };
                 if item.epg_channel_id.as_deref() == Some(epg_channel_id) {
                     let candidate = ResolvedRecordingSource {
-                        virtual_id: item.virtual_id,
+                        virtual_id: item.virtual_id.get(),
                         input_name: item.input_name.to_string(),
                     };
                     if resolved.replace(candidate).is_some() {
@@ -296,7 +296,7 @@ pub(in crate::api) async fn resolve_target_live_recording_source_by_epg_channel(
                 let Ok(item) = entry else { continue };
                 if item.epg_channel_id.as_deref() == Some(epg_channel_id) {
                     let candidate = ResolvedRecordingSource {
-                        virtual_id: item.virtual_id,
+                        virtual_id: item.virtual_id.get(),
                         input_name: item.input_name.to_string(),
                     };
                     if resolved.replace(candidate).is_some() {

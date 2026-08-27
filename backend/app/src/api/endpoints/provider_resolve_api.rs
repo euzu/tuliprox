@@ -130,7 +130,7 @@ async fn load_provider_resolve_item(
         )
         .await
         .map(|item| ProviderResolveLoadedItem {
-            virtual_id: item.virtual_id,
+            virtual_id: item.virtual_id.get(),
             item_type: item.item_type,
             cluster: item.xtream_cluster,
             content_allowed: user.t_filter.is_none() || user.allows_content(&shared::model::PlaylistItem::from(&item)),
@@ -150,7 +150,7 @@ async fn load_provider_resolve_item(
                 )));
             }
             Ok(ProviderResolveLoadedItem {
-                virtual_id: item.virtual_id,
+                virtual_id: item.virtual_id.get(),
                 item_type: item.item_type,
                 cluster: decoded_cluster,
                 content_allowed: user.t_filter.is_none()

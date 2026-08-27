@@ -109,7 +109,7 @@ pub async fn persist_playlist(
             let parent_virtual_id = if item_type.is_series() {
                 target_id_mapping.get_parent_virtual_id_by_uuid(uuid).unwrap_or_default()
             } else {
-                0
+                VirtualId::default()
             };
             header.virtual_id =
                 target_id_mapping.get_and_update_virtual_id(uuid, provider_id, item_type, parent_virtual_id);
@@ -222,7 +222,7 @@ fn assign_local_series_info_episode_key(
         local_library_series
             .entry(header.parent_code.clone())
             .or_default()
-            .push(LocalEpisodeKey { path: header.url.clone(), virtual_id: header.virtual_id });
+            .push(LocalEpisodeKey { path: header.url.clone(), virtual_id: header.virtual_id.get() });
     }
 }
 
@@ -235,7 +235,7 @@ fn assign_provider_series_info_episode_key(
     if item_type == PlaylistItemType::Series {
         provider_series.entry(header.parent_code.clone()).or_default().push(ProviderEpisodeKey {
             provider_id: header.get_provider_id().unwrap_or_default(),
-            virtual_id: header.virtual_id,
+            virtual_id: header.virtual_id.get(),
         });
     }
 }
@@ -274,7 +274,7 @@ fn media_server_series_episode_detail(header: &PlaylistItemHeader) -> Option<Ser
     let episode = episode.as_ref();
 
     Some(SeriesStreamDetailEpisodeProperties {
-        id: header.virtual_id,
+        id: header.virtual_id.get(),
         episode_num: episode.episode,
         season: episode.season,
         title: non_blank_arc(&header.title)
@@ -472,9 +472,9 @@ fn rewrite_series_episode_parent_virtual_ids(playlist: &mut [PlaylistGroup], tar
         for channel in &group.channels {
             for (parent_key, overwrite) in series_info_parent_keys(channel) {
                 if overwrite {
-                    series_parent_virtual_ids.insert(parent_key, channel.header.virtual_id);
+                    series_parent_virtual_ids.insert(parent_key, channel.header.virtual_id.get());
                 } else {
-                    series_parent_virtual_ids.entry(parent_key).or_insert(channel.header.virtual_id);
+                    series_parent_virtual_ids.entry(parent_key).or_insert(channel.header.virtual_id.get());
                 }
             }
         }
@@ -492,8 +492,12 @@ fn rewrite_series_episode_parent_virtual_ids(playlist: &mut [PlaylistGroup], tar
                     let provider_id = header.get_provider_id().unwrap_or_default();
                     let item_type = header.item_type;
                     let uuid = header.get_uuid();
-                    header.virtual_id =
-                        target_id_mapping.get_and_update_virtual_id(uuid, provider_id, item_type, *parent_virtual_id);
+                    header.virtual_id = target_id_mapping.get_and_update_virtual_id(
+                        uuid,
+                        provider_id,
+                        item_type,
+                        VirtualId::new(*parent_virtual_id),
+                    );
                 }
             }
         }
@@ -520,14 +524,14 @@ async fn load_target_id_mapping_as_tree(
     app_config: &AppConfig,
     target_path: &Path,
     target: &ConfigTarget,
-) -> Result<BPlusTree<u32, VirtualIdRecord>, TuliproxError> {
+) -> Result<BPlusTree<VirtualId, VirtualIdRecord>, TuliproxError> {
     let target_id_mapping_file = get_target_id_mapping_file(target_path);
     let _file_lock = app_config.file_locks.read_lock(&target_id_mapping_file).await;
 
     // Move B+Tree load to spawn_blocking to avoid blocking tokio runtime
     let path_clone = target_id_mapping_file.clone();
     let target_name = target.name.clone();
-    tokio::task::spawn_blocking(move || BPlusTree::<u32, VirtualIdRecord>::load(&path_clone))
+    tokio::task::spawn_blocking(move || BPlusTree::<VirtualId, VirtualIdRecord>::load(&path_clone))
         .await
         .map_err(|e| TuliproxError::Config(format!("Blocking task failed: {e}")))?
         .map_err(|err| TuliproxError::Config(format!("Could not find path for target {target_name} err:{err}")))
@@ -877,7 +881,7 @@ mod tests {
             ConfigTargetOptions, EpgOutputOptions, EpisodeStreamProperties, M3uPlaylistItem, PlaylistEntry,
             PlaylistGroup, PlaylistItem, PlaylistItemHeader, PlaylistItemType, SeriesStreamDetailEpisodeProperties,
             SeriesStreamDetailProperties, SeriesStreamDetailSeasonProperties, SeriesStreamProperties, StreamProperties,
-            UUIDType, XtreamCluster, XtreamPlaylistItem,
+            UUIDType, VirtualId, XtreamCluster, XtreamPlaylistItem,
         },
         utils::Internable,
     };
@@ -1023,7 +1027,7 @@ mod tests {
             url: direct_source.intern(),
             item_type: PlaylistItemType::LocalSeries,
             xtream_cluster: XtreamCluster::Series,
-            virtual_id,
+            virtual_id: VirtualId::new(virtual_id),
             ..PlaylistItemHeader::default()
         }
     }
@@ -1043,7 +1047,7 @@ mod tests {
             url: format!("media-server://plex/server/{item_id}?part_key=%2Flibrary%2Fparts%2Fredacted").intern(),
             item_type: PlaylistItemType::Series,
             xtream_cluster: XtreamCluster::Series,
-            virtual_id,
+            virtual_id: VirtualId::new(virtual_id),
             additional_properties: Some(StreamProperties::Episode(Box::new(EpisodeStreamProperties {
                 episode_id: 0,
                 episode,
@@ -1112,7 +1116,7 @@ mod tests {
                 url: "media-server://plex/server/malformed?part_key=%2Flibrary%2Fparts%2Fredacted".intern(),
                 item_type: PlaylistItemType::Series,
                 xtream_cluster: XtreamCluster::Series,
-                virtual_id: 7003,
+                virtual_id: VirtualId::new(7003),
                 additional_properties: None,
                 ..PlaylistItemHeader::default()
             },
@@ -1124,7 +1128,7 @@ mod tests {
                 url: "http://provider.example.invalid/series/999.mkv".intern(),
                 item_type: PlaylistItemType::Series,
                 xtream_cluster: XtreamCluster::Series,
-                virtual_id: 7999,
+                virtual_id: VirtualId::new(7999),
                 ..PlaylistItemHeader::default()
             },
         };
@@ -1220,7 +1224,8 @@ mod tests {
             let uuid = channel.header.uuid;
             let provider_id = channel.header.get_provider_id().unwrap_or_default();
             let item_type = channel.header.item_type;
-            channel.header.virtual_id = target_id_mapping.get_and_update_virtual_id(&uuid, provider_id, item_type, 0);
+            channel.header.virtual_id =
+                target_id_mapping.get_and_update_virtual_id(&uuid, provider_id, item_type, VirtualId::new(0));
             channel.header.source_ordinal = u32::try_from(idx + 1).expect("ordinal");
         }
 
@@ -1231,7 +1236,7 @@ mod tests {
         target_id_mapping.persist().expect("persist");
 
         let mut query = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&mapping_path).expect("query");
-        let record = query.query_zero_copy(&episode_virtual_id).expect("query ok").expect("record missing");
+        let record = query.query_zero_copy(&episode_virtual_id.get()).expect("query ok").expect("record missing");
 
         assert_eq!(record.parent_virtual_id, series_virtual_id);
         assert_eq!(playlist[0].channels[0].header.virtual_id, episode_virtual_id);
@@ -1245,7 +1250,7 @@ mod tests {
 
         let input_name = "provider-input".intern();
         let xtream_series_info = XtreamPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::new(0),
             provider_id: 9001,
             name: "Provider Series".intern(),
             logo: "".intern(),
@@ -1268,7 +1273,7 @@ mod tests {
         };
         let provider_parent_code = xtream_series_info.get_uuid().intern();
         let xtream_provider_episode = XtreamPlaylistItem {
-            virtual_id: 0,
+            virtual_id: VirtualId::new(0),
             provider_id: 201,
             name: "Episode 1".intern(),
             logo: "".intern(),
@@ -1304,7 +1309,8 @@ mod tests {
             let uuid = channel.get_uuid();
             let provider_id = channel.header.get_provider_id().unwrap_or_default();
             let item_type = channel.header.item_type;
-            channel.header.virtual_id = target_id_mapping.get_and_update_virtual_id(&uuid, provider_id, item_type, 0);
+            channel.header.virtual_id =
+                target_id_mapping.get_and_update_virtual_id(&uuid, provider_id, item_type, VirtualId::new(0));
             channel.header.source_ordinal = u32::try_from(idx + 1).expect("ordinal");
         }
 
@@ -1315,7 +1321,7 @@ mod tests {
         target_id_mapping.persist().expect("persist");
 
         let mut query = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&mapping_path).expect("query");
-        let record = query.query_zero_copy(&episode_virtual_id).expect("query ok").expect("record missing");
+        let record = query.query_zero_copy(&episode_virtual_id.get()).expect("query ok").expect("record missing");
 
         assert_eq!(record.parent_virtual_id, series_virtual_id);
         assert_eq!(playlist[0].channels[0].header.virtual_id, episode_virtual_id);
@@ -1341,8 +1347,12 @@ mod tests {
 
         let provider_id = episode.header.get_provider_id().unwrap_or_default();
         let uuid = *episode.header.get_uuid();
-        let original_virtual_id =
-            target_id_mapping.get_and_update_virtual_id(&uuid, provider_id, episode.header.item_type, 77);
+        let original_virtual_id = target_id_mapping.get_and_update_virtual_id(
+            &uuid,
+            provider_id,
+            episode.header.item_type,
+            VirtualId::new(77),
+        );
 
         let preserved_parent_virtual_id = target_id_mapping.get_parent_virtual_id_by_uuid(&uuid).unwrap_or_default();
         episode.header.virtual_id = target_id_mapping.get_and_update_virtual_id(
@@ -1354,9 +1364,9 @@ mod tests {
         target_id_mapping.persist().expect("persist");
 
         let mut query = BPlusTreeQuery::<u32, VirtualIdRecord>::try_new(&mapping_path).expect("query");
-        let record = query.query_zero_copy(&original_virtual_id).expect("query ok").expect("record missing");
+        let record = query.query_zero_copy(&original_virtual_id.get()).expect("query ok").expect("record missing");
 
-        assert_eq!(record.parent_virtual_id, 77);
+        assert_eq!(record.parent_virtual_id, VirtualId::new(77));
         assert_eq!(episode.header.virtual_id, original_virtual_id);
     }
 

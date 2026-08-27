@@ -149,7 +149,7 @@ fn apply_rewrite(
                     ctx.base_url,
                     ctx.username,
                     target_id,
-                    m3u_pli.virtual_id,
+                    m3u_pli.virtual_id.get(),
                     effective_source_url.as_ref(),
                     catchup,
                 )
@@ -456,7 +456,7 @@ mod tests {
     use shared::{
         model::{
             CatchupProperties, LiveStreamProperties, M3uPlaylistItem, PlaylistItemType, ProviderUrlSelectionPolicy,
-            ProxyType, StreamProperties,
+            ProxyType, StreamProperties, VirtualId,
         },
         utils::Internable,
     };
@@ -484,7 +484,7 @@ mod tests {
 
     fn m3u_item(url: &str) -> M3uPlaylistItem {
         M3uPlaylistItem {
-            virtual_id: 813_294,
+            virtual_id: VirtualId::new(813_294),
             provider_id: "813294".intern(),
             name: "France 4K".intern(),
             chno: 0,

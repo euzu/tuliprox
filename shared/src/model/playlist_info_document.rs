@@ -416,7 +416,7 @@ impl StreamProperties {
         XtreamVideoInfoDoc {
             info,
             movie_data: XtreamVideoMovieData {
-                stream_id: virtual_id,
+                stream_id: virtual_id.get(),
                 name: Arc::clone(&video.name),
                 added: Arc::clone(&video.added),
                 category_id: category_id.to_string().intern(),
@@ -603,7 +603,7 @@ impl Default for XtreamVideoInfoDoc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PlaylistItemTypeSet, SeriesStreamDetailProperties};
+    use crate::model::{PlaylistItemTypeSet, SeriesStreamDetailProperties, VirtualId};
 
     fn sample_options() -> XtreamMappingOptions {
         XtreamMappingOptions {
@@ -654,7 +654,7 @@ mod tests {
         }));
 
         let XtreamInfoDocument::Series(doc) =
-            properties.to_info_document(&sample_options(), PlaylistItemType::SeriesInfo, 42, 7)
+            properties.to_info_document(&sample_options(), PlaylistItemType::SeriesInfo, VirtualId::new(42), 7)
         else {
             panic!("expected series info document");
         };

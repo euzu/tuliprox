@@ -7,6 +7,7 @@ mod download;
 mod epg;
 mod epg_request;
 mod identity_registry;
+mod ids;
 mod info_doc_utils;
 mod ip_check;
 mod item_field;
@@ -64,4 +65,5 @@ pub use self::{
     strm_export_style::*, system_info::*, target_type::*, transfer::*, ui_playlist_item::*, user_command::*,
     uuidtype::*, web_socket::*, xtream::*,
 };
+pub use ids::*;
 pub use prepare::*;

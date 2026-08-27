@@ -62,7 +62,7 @@ use shared::{
     defaults::HLS_EXT,
     model::{
         ConnectFailureReason, FailureStage, InputType, PlaylistEntry, PlaylistItemType, StreamChannel, StreamInfo,
-        StreamProperties, TargetType, UserConnectionPermission, XtreamCluster,
+        StreamProperties, TargetType, UserConnectionPermission, VirtualId, XtreamCluster,
     },
     utils::{
         extract_extension_from_url, generate_random_string, is_hls_url, is_m3u_catchup_session_token,
@@ -2837,7 +2837,7 @@ impl HlsEntryStreamIdentity {
     }
 
     pub(in crate::api) fn from_playlist_item(item: &impl PlaylistEntry) -> Option<Self> {
-        let mut identity = Self::new(item.get_virtual_id(), item.get_input_stream_id()?)?;
+        let mut identity = Self::new(item.get_virtual_id().get(), item.get_input_stream_id()?)?;
         identity.upstream_user_agent = item.get_upstream_user_agent().map(Internable::intern);
         Some(identity)
     }
@@ -4994,7 +4994,7 @@ async fn try_reserve_hls_virtual_entry_origin_account_for_redirect(
         None,
         &session_token,
         false,
-        EvictionReentryGuard::SocketPlayback { virtual_id },
+        EvictionReentryGuard::SocketPlayback { virtual_id: VirtualId::new(virtual_id) },
         false,
         false,
     )
@@ -6770,7 +6770,7 @@ pub(in crate::api) async fn handle_hls_stream_request(
     original_hls_entry_path: &str,
 ) -> impl IntoResponse + Send {
     let virtual_id = stream_context.virtual_id();
-    if app_state.active_users.is_user_blocked_for_stream(&user.username, virtual_id).await {
+    if app_state.active_users.is_user_blocked_for_stream(&user.username, VirtualId::new(virtual_id)).await {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
 
@@ -7191,7 +7191,11 @@ async fn resolve_hls_playback_manifest_request_context(
     let Some(input) = app_state.app_config.get_input_by_id(access_context.input_id) else {
         return Err(StatusCode::NOT_FOUND);
     };
-    if app_state.active_users.is_user_blocked_for_stream(&user.username, access_context.virtual_id).await {
+    if app_state
+        .active_users
+        .is_user_blocked_for_stream(&user.username, VirtualId::new(access_context.virtual_id))
+        .await
+    {
         return Err(StatusCode::FORBIDDEN);
     }
     let Some(channel) = get_stream_channel(app_state, &target, access_context.virtual_id).await else {
@@ -8024,7 +8028,7 @@ mod tests {
             HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripConfigDto, HlsStripMode, InputType,
             M3uPlaylistItem, M3uTargetOutputDto, PlaylistItem, PlaylistItemHeader, PlaylistItemType,
             ProviderUrlSelectionPolicy, ReverseProxyConfigDto, StreamConfigDto, StreamProperties, TargetOutputDto,
-            UserConnectionPermission, XtreamCluster, XtreamTargetOutputDto,
+            UserConnectionPermission, VirtualId, XtreamCluster, XtreamTargetOutputDto,
         },
         utils::Internable,
     };
@@ -8861,7 +8865,7 @@ mod tests {
         M3uPlaylistItem::from(&PlaylistItem {
             header: PlaylistItemHeader {
                 id: input_stream_id.intern(),
-                virtual_id,
+                virtual_id: VirtualId::new(virtual_id),
                 input_name: Arc::clone(&input.name),
                 url: url.intern(),
                 item_type: PlaylistItemType::LiveHls,
@@ -8886,7 +8890,7 @@ mod tests {
 
     async fn cache_test_m3u_hls_item(app_state: &Arc<AppState>, target: &ConfigTarget, item: M3uPlaylistItem) {
         let mut playlist = crate::repository::BPlusTree::new();
-        playlist.insert(item.virtual_id, item);
+        playlist.insert(item.virtual_id.get(), item);
         app_state
             .playlists
             .cache_playlist(&target.name, crate::api::model::PlaylistStorage::M3uPlaylist(Box::new(playlist)))

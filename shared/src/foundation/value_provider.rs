@@ -20,7 +20,7 @@ macro_rules! set_genre {
                         Some($crate::model::StreamProperties::Video(Box::from($crate::model::VideoStreamProperties {
                             name: $header.title.clone(),
                             category_id: $header.category_id,
-                            stream_id: $header.virtual_id,
+                            stream_id: $header.virtual_id.get(),
                             stream_icon: $header.logo.clone(),
                             direct_source: ::std::sync::Arc::clone(&empty_str),
                             custom_sid: None,
@@ -46,7 +46,7 @@ macro_rules! set_genre {
                         $crate::model::SeriesStreamProperties {
                             name: $header.title.clone(),
                             category_id: $header.category_id,
-                            series_id: $header.virtual_id,
+                            series_id: $header.virtual_id.get(),
                             backdrop_path: None,
                             cast: ::std::sync::Arc::clone(&empty_str),
                             cover: ::std::sync::Arc::clone(&empty_str),

@@ -231,7 +231,7 @@ pub async fn get_xtream_stream_info(
                                                     provider_series.entry(pli.get_uuid().intern()).or_default().push(
                                                         ProviderEpisodeKey {
                                                             provider_id: episode_provider_id,
-                                                            virtual_id: episode.header.virtual_id,
+                                                            virtual_id: episode.header.virtual_id.get(),
                                                         },
                                                     );
                                                     if target.use_memory_cache {
@@ -676,7 +676,7 @@ pub fn create_vod_info_from_item(pli: &XtreamPlaylistItem) -> String {
 
     let mut doc = XtreamVideoInfoDoc::default();
     doc.info.name.clone_from(name);
-    doc.movie_data.stream_id = pli.virtual_id;
+    doc.movie_data.stream_id = pli.virtual_id.get();
     doc.movie_data.name.clone_from(name);
     doc.movie_data.added = added.intern();
     doc.movie_data.category_id = category_id.intern();
@@ -738,7 +738,7 @@ mod tests {
 
     fn test_vod_item() -> XtreamPlaylistItem {
         XtreamPlaylistItem {
-            virtual_id: 176_141,
+            virtual_id: shared::model::VirtualId::new(176_141),
             provider_id: 813_563,
             name: "Movie".intern(),
             logo: "".intern(),

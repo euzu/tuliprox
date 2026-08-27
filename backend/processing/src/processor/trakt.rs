@@ -603,7 +603,7 @@ mod tests {
                 title: title.intern(),
                 name: title.intern(),
                 url: format!("media-server://plex/server/{virtual_id}?part_key=%2Flibrary%2Fparts%2Fredacted").intern(),
-                virtual_id,
+                virtual_id: shared::model::VirtualId::new(virtual_id),
                 xtream_cluster: XtreamCluster::Series,
                 item_type: PlaylistItemType::Series,
                 additional_properties: Some(StreamProperties::Episode(Box::new(EpisodeStreamProperties {
