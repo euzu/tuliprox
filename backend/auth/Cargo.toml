@@ -9,9 +9,9 @@ description = "Authentication primitives and access control for tuliprox"
 workspace = true
 
 [dependencies]
-shared = { version = "3", path = "../../shared" }
-tuliprox-core = { version = "3", path = "../core" }
-tuliprox-repository = { version = "3", path = "../repository" }
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
+tuliprox-repository = { workspace = true }
 arc-swap.workspace = true
 axum = { version = "0.8.9", features = ["macros", "default", "ws"] }
 base64.workspace = true

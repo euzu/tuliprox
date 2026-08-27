@@ -735,7 +735,8 @@ where
 }
 
 #[cfg(windows)]
-fn replace_file_windows(source: &Path, target: &Path) -> io::Result<()> {
+fn replace_file_windows(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::io;
     use std::os::windows::ffi::OsStrExt;
     use winapi::um::winbase::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH};
 

@@ -11,9 +11,9 @@ workspace = true
 [dependencies]
 http-body-util = "0.1.5"
 serde_html_form = "0.4.1"
-shared = { version = "3", path = "../../shared" }
-tuliprox-mpegts = { version = "3", path = "../mpegts" }
-tuliprox-media-server = { version = "3", path = "../media-server" }
+shared = { workspace = true }
+tuliprox-mpegts = { workspace = true }
+tuliprox-media-server = { workspace = true }
 aes = "0.8.4"
 arc-swap.workspace = true
 async-compression = { version = "0.4.43", features = ["tokio", "brotli", "deflate", "gzip", "zlib", "zstd"] }

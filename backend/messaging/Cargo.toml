@@ -9,8 +9,8 @@ description = "Outbound notification delivery for tuliprox"
 workspace = true
 
 [dependencies]
-shared = { version = "3", path = "../../shared" }
-tuliprox-core = { version = "3", path = "../core" }
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
 arc-swap.workspace = true
 chrono.workspace = true
 handlebars = "6.4.4"

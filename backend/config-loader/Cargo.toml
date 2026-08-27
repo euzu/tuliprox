@@ -9,9 +9,9 @@ description = "Application configuration bootstrap for tuliprox"
 workspace = true
 
 [dependencies]
-shared = { version = "3", path = "../../shared" }
-tuliprox-core = { version = "3", path = "../core" }
-tuliprox-repository = { version = "3", path = "../repository" }
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
+tuliprox-repository = { workspace = true }
 arc-swap.workspace = true
 chrono.workspace = true
 log.workspace = true

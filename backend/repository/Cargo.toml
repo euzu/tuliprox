@@ -14,10 +14,10 @@ workspace = true
 test-support = []
 
 [dependencies]
-shared = { version = "3", path = "../../shared" }
-tuliprox-btree = { version = "3", path = "../btree" }
-tuliprox-core = { version = "3", path = "../core" }
-tuliprox-parser = { version = "3", path = "../parser" }
+shared = { workspace = true }
+tuliprox-btree = { workspace = true }
+tuliprox-core = { workspace = true }
+tuliprox-parser = { workspace = true }
 arc-swap.workspace = true
 base64.workspace = true
 bytes.workspace = true
@@ -50,5 +50,5 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Stora
 
 [dev-dependencies]
 # The startup-migration tests build legacy v2 databases by hand.
-tuliprox-btree = { version = "3", path = "../btree", features = ["test-support"] }
+tuliprox-btree = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }

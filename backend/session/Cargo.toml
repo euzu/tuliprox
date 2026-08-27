@@ -9,10 +9,10 @@ description = "Provider allocation and streaming-session runtime: admission, con
 workspace = true
 
 [dependencies]
-shared = { version = "3", path = "../../shared" }
-tuliprox-core = { version = "3", path = "../core" }
-tuliprox-mpegts = { version = "3", path = "../mpegts" }
-tuliprox-repository = { version = "3", path = "../repository" }
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
+tuliprox-mpegts = { workspace = true }
+tuliprox-repository = { workspace = true }
 arc-swap.workspace = true
 axum = { version = "0.8.9", features = ["macros", "default", "ws"] }
 bytes.workspace = true

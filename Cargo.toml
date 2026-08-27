@@ -25,6 +25,24 @@ missing_errors_doc      = "allow"
 large_futures           = "allow"
 
 [workspace.dependencies]
+shared = { version = "3", path = "shared" }
+tuliprox-hls = { version = "3", path = "backend/hls" }
+tuliprox-auth = { version = "3", path = "backend/auth" }
+tuliprox-dvr = { version = "3", path = "backend/dvr" }
+tuliprox = { version = "3", path = "backend/app" }
+tuliprox-mpegts = { version = "3", path = "backend/mpegts" }
+tuliprox-iptv = { version = "3", path = "backend/iptv" }
+tuliprox-parser = { version = "3", path = "backend/parser" }
+tuliprox-metadata = { version = "3", path = "backend/metadata" }
+tuliprox-messaging = { version = "3", path = "backend/messaging" }
+tuliprox-processing = { version = "3", path = "backend/processing" }
+tuliprox-btree = { version = "3", path = "backend/btree" }
+tuliprox-config-loader = { version = "3", path = "backend/config-loader" }
+tuliprox-session = { version = "3", path = "backend/session" }
+tuliprox-media-server = { version = "3", path = "backend/media-server" }
+tuliprox-repository = { version = "3", path = "backend/repository" }
+tuliprox-core = { version = "3", path = "backend/core" }
+tuliprox-library = { version = "3", path = "backend/library" }
 serde         = { version = "1.0.229", features = ["derive", "rc"] }
 serde_json    = { version = "1.0.151" }
 regex         = "1.13.1"

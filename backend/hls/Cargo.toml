@@ -17,11 +17,11 @@ workspace = true
 test-support = ["tuliprox-mpegts/test-support"]
 
 [dependencies]
-shared = { version = "3", path = "../../shared" }
-tuliprox-core = { version = "3", path = "../core" }
-tuliprox-mpegts = { version = "3", path = "../mpegts" }
-tuliprox-parser = { version = "3", path = "../parser" }
-tuliprox-session = { version = "3", path = "../session" }
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
+tuliprox-mpegts = { workspace = true }
+tuliprox-parser = { workspace = true }
+tuliprox-session = { workspace = true }
 arc-swap.workspace = true
 axum = { version = "0.8.9", features = ["macros", "default", "ws"] }
 bytes.workspace = true
@@ -49,7 +49,7 @@ http-body-util = "0.1.5"
 [dev-dependencies]
 rand = "0.9.5"
 tempfile = "3.27.0"
-tuliprox-mpegts = { version = "3", path = "../mpegts", features = ["test-support"] }
+tuliprox-mpegts = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 async-compression = { version = "0.4.43", features = ["tokio", "brotli", "deflate", "gzip", "zlib", "zstd"] }
 filetime = "0.2.29"

@@ -9,11 +9,11 @@ description = "Background metadata resolution: series, VOD and live detail fetch
 workspace = true
 
 [dependencies]
-shared = { version = "3", path = "../../shared" }
-tuliprox-core = { version = "3", path = "../core" }
-tuliprox-processing = { version = "3", path = "../processing" }
-tuliprox-repository = { version = "3", path = "../repository" }
-tuliprox-session = { version = "3", path = "../session" }
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
+tuliprox-processing = { workspace = true }
+tuliprox-repository = { workspace = true }
+tuliprox-session = { workspace = true }
 arc-swap.workspace = true
 chrono.workspace = true
 dashmap.workspace = true

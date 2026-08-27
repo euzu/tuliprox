@@ -9,8 +9,8 @@ description = "Local media library scanning, metadata resolution and enrichment"
 workspace = true
 
 [dependencies]
-shared = { version = "3", path = "../../shared" }
-tuliprox-core = { version = "3", path = "../core" }
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
 blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true

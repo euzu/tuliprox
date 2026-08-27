@@ -9,11 +9,11 @@ description = "Provider clients for Xtream, M3U and Stalker portals"
 workspace = true
 
 [dependencies]
-shared = { version = "3", path = "../../shared" }
-tuliprox-core = { version = "3", path = "../core" }
-tuliprox-messaging = { version = "3", path = "../messaging" }
-tuliprox-parser = { version = "3", path = "../parser" }
-tuliprox-repository = { version = "3", path = "../repository" }
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
+tuliprox-messaging = { workspace = true }
+tuliprox-parser = { workspace = true }
+tuliprox-repository = { workspace = true }
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true

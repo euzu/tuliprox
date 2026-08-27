@@ -14,15 +14,15 @@ workspace = true
 test-support = []
 
 [dependencies]
-shared = { version = "3", path = "../../shared" }
-tuliprox-core = { version = "3", path = "../core" }
-tuliprox-iptv = { version = "3", path = "../iptv" }
-tuliprox-library = { version = "3", path = "../library" }
-tuliprox-media-server = { version = "3", path = "../media-server" }
-tuliprox-messaging = { version = "3", path = "../messaging" }
-tuliprox-parser = { version = "3", path = "../parser" }
-tuliprox-repository = { version = "3", path = "../repository" }
-tuliprox-session = { version = "3", path = "../session" }
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
+tuliprox-iptv = { workspace = true }
+tuliprox-library = { workspace = true }
+tuliprox-media-server = { workspace = true }
+tuliprox-messaging = { workspace = true }
+tuliprox-parser = { workspace = true }
+tuliprox-repository = { workspace = true }
+tuliprox-session = { workspace = true }
 arc-swap.workspace = true
 chrono.workspace = true
 futures.workspace = true

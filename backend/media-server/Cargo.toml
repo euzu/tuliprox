@@ -16,7 +16,7 @@ quick-xml = { version = "0.41", features = ["async-tokio", "serialize"] }
 reqwest = { version = "0.13.4", features = ["json", "stream", "rustls", "socks", "form", "query"] }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value", "preserve_order"] }
-shared = { version = "3", path = "../../shared" }
+shared = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "parking_lot", "time", "macros"] }
 url.workspace = true
 

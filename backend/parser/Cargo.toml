@@ -9,8 +9,8 @@ description = "Provider wire-format parsing and URL building for tuliprox"
 workspace = true
 
 [dependencies]
-shared = { version = "3", path = "../../shared" }
-tuliprox-core = { version = "3", path = "../core" }
+shared = { workspace = true }
+tuliprox-core = { workspace = true }
 aes = "0.8.4"
 base64.workspace = true
 chrono.workspace = true
