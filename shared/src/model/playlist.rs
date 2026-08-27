@@ -3,7 +3,7 @@ use crate::{
     error::TuliproxError,
     model::{
         stalker::StalkerStreamKind, stalker_item::StalkerPlaylistItem, xtream_const, CatchupAttribute,
-        CatchupProperties, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties,
+        CatchupProperties, ClusterFlags, CommonPlaylistItem, ConfigTargetOptions, EpisodeStreamProperties, HeaderField,
         SeriesStreamProperties, StreamProperties, UUIDType, VideoStreamProperties, XtreamInfoDocument,
     },
     utils::{
@@ -510,102 +510,81 @@ macro_rules! to_m3u_resource_non_empty_fields {
     };
 }
 
-/// Generates the typed accessors for `PlaylistItemHeader`, plus the `&str`
-/// shims that delegate to them.
-///
-/// `$prop` names the fields whose `HeaderField` variant is the `PascalCase` of the
-/// field name and whose value is a plain interned `Arc<str>`; everything with a
-/// different shape (caption, chno, genre, ...) is spelled out below.
-macro_rules! generate_field_accessor_impl_for_playlist_item_header {
-    ($(($variant:ident, $prop:ident)),*;) => {
-        impl crate::model::FieldGet for crate::model::PlaylistItemHeader {
-            fn get(&self, field: crate::model::HeaderField) -> Option<crate::model::FieldRef<'_>> {
-                use crate::model::{FieldRef, HeaderField};
-                match field {
-                    $(HeaderField::$variant => Some(FieldRef::Shared(&self.$prop)),)*
-                    HeaderField::Group => Some(FieldRef::Shared(&self.group)),
-                    HeaderField::Caption => Some(FieldRef::Shared(if self.title.is_empty() {
-                        &self.name
-                    } else {
-                        &self.title
-                    })),
-                    HeaderField::Input => Some(FieldRef::Shared(&self.input_name)),
-                    HeaderField::Type => Some(FieldRef::Str(self.item_type.as_str())),
-                    HeaderField::EpgChannelId => self.epg_channel_id.as_ref().map(FieldRef::Shared),
-                    HeaderField::Chno => Some(FieldRef::Num(self.chno)),
-                    HeaderField::Genre => crate::genre_ref!(self).map(FieldRef::Shared),
-                    // Not carried by the header.
-                    HeaderField::ProviderId => None,
-                }
+impl crate::model::FieldGet for crate::model::PlaylistItemHeader {
+    fn get(&self, field: HeaderField) -> Option<FieldRef<'_>> {
+        match field {
+            HeaderField::Id => Some(FieldRef::Shared(&self.id)),
+            HeaderField::Title => Some(FieldRef::Shared(&self.title)),
+            HeaderField::Name => Some(FieldRef::Shared(&self.name)),
+            HeaderField::Logo => Some(FieldRef::Shared(&self.logo)),
+            HeaderField::LogoSmall => Some(FieldRef::Shared(&self.logo_small)),
+            HeaderField::ParentCode => Some(FieldRef::Shared(&self.parent_code)),
+            HeaderField::AudioTrack => Some(FieldRef::Shared(&self.audio_track)),
+            HeaderField::TimeShift => Some(FieldRef::Shared(&self.time_shift)),
+            HeaderField::Rec => Some(FieldRef::Shared(&self.rec)),
+            HeaderField::Url => Some(FieldRef::Shared(&self.url)),
+            HeaderField::Group => Some(FieldRef::Shared(&self.group)),
+            HeaderField::Caption => {
+                Some(FieldRef::Shared(if self.title.is_empty() { &self.name } else { &self.title }))
             }
-        }
-
-        impl crate::model::FieldSet for crate::model::PlaylistItemHeader {
-            fn set(&mut self, field: crate::model::HeaderField, value: &str) -> bool {
-                use crate::model::HeaderField;
-                match field {
-                    $(HeaderField::$variant => {
-                        self.$prop = value.intern();
-                        true
-                    })*
-                    HeaderField::Group => {
-                        self.group = value.intern();
-                        true
-                    }
-                    HeaderField::Caption => {
-                        let interned = value.intern();
-                        self.title = Arc::clone(&interned);
-                        self.name = interned;
-                        true
-                    }
-                    HeaderField::EpgChannelId => {
-                        self.epg_channel_id = Some(value.intern());
-                        true
-                    }
-                    HeaderField::Chno => match value.parse::<u32>() {
-                        Ok(parsed) => {
-                            self.chno = parsed;
-                            true
-                        }
-                        Err(_) => false,
-                    },
-                    HeaderField::Genre => crate::set_genre!(self, value),
-                    // Read-only or not carried by the header.
-                    HeaderField::Input | HeaderField::Type | HeaderField::ProviderId => false,
-                }
-            }
-        }
-
-        impl crate::model::FieldGetAccessor for crate::model::PlaylistItemHeader {
-            #[inline]
-            fn get_field(&self, field: &str) -> Option<Arc<str>> {
-                use crate::model::{FieldGet, HeaderField};
-                self.get(HeaderField::parse(field)?).map(|value| value.to_arc())
-            }
-        }
-
-        impl crate::model::FieldSetAccessor for crate::model::PlaylistItemHeader {
-            #[inline]
-            fn set_field(&mut self, field: &str, value: &str) -> bool {
-                use crate::model::{FieldSet, HeaderField};
-                HeaderField::parse(field).is_some_and(|field| self.set(field, value))
-            }
+            HeaderField::Input => Some(FieldRef::Shared(&self.input_name)),
+            HeaderField::Type => Some(FieldRef::Str(self.item_type.as_str())),
+            HeaderField::EpgChannelId => self.epg_channel_id.as_ref().map(FieldRef::Shared),
+            HeaderField::Chno => Some(FieldRef::Num(self.chno)),
+            HeaderField::Genre => crate::genre_ref!(self).map(FieldRef::Shared),
+            // Not carried by the header.
+            HeaderField::ProviderId => None,
         }
     }
 }
 
-generate_field_accessor_impl_for_playlist_item_header!(
-    (Id, id),
-    (Title, title),
-    (Name, name),
-    (Logo, logo),
-    (LogoSmall, logo_small),
-    (ParentCode, parent_code),
-    (AudioTrack, audio_track),
-    (TimeShift, time_shift),
-    (Rec, rec),
-    (Url, url);
-);
+impl crate::model::FieldSet for crate::model::PlaylistItemHeader {
+    fn set(&mut self, field: HeaderField, value: &str) -> bool {
+        match field {
+            HeaderField::Id => self.id = value.intern(),
+            HeaderField::Title => self.title = value.intern(),
+            HeaderField::Name => self.name = value.intern(),
+            HeaderField::Logo => self.logo = value.intern(),
+            HeaderField::LogoSmall => self.logo_small = value.intern(),
+            HeaderField::ParentCode => self.parent_code = value.intern(),
+            HeaderField::AudioTrack => self.audio_track = value.intern(),
+            HeaderField::TimeShift => self.time_shift = value.intern(),
+            HeaderField::Rec => self.rec = value.intern(),
+            HeaderField::Url => self.url = value.intern(),
+            HeaderField::Group => self.group = value.intern(),
+            HeaderField::Caption => {
+                let interned = value.intern();
+                self.title = Arc::clone(&interned);
+                self.name = interned;
+            }
+            HeaderField::EpgChannelId => self.epg_channel_id = Some(value.intern()),
+            HeaderField::Chno => match value.parse::<u32>() {
+                Ok(parsed) => self.chno = parsed,
+                Err(_) => return false,
+            },
+            HeaderField::Genre => return crate::set_genre!(self, value),
+            // Read-only, or not carried by the header.
+            HeaderField::Input | HeaderField::Type | HeaderField::ProviderId => return false,
+        }
+        true
+    }
+}
+
+impl crate::model::FieldGetAccessor for crate::model::PlaylistItemHeader {
+    #[inline]
+    fn get_field(&self, field: &str) -> Option<Arc<str>> {
+        use crate::model::FieldGet;
+        self.get(HeaderField::parse(field)?).map(|value| value.to_arc())
+    }
+}
+
+impl crate::model::FieldSetAccessor for crate::model::PlaylistItemHeader {
+    #[inline]
+    fn set_field(&mut self, field: &str, value: &str) -> bool {
+        use crate::model::FieldSet;
+        HeaderField::parse(field).is_some_and(|field| self.set(field, value))
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct M3uPlaylistItem {
@@ -874,42 +853,42 @@ impl PlaylistEntry for M3uPlaylistItem {
     fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties> { self.additional_properties.as_mut() }
 }
 
-macro_rules! generate_field_accessor_impl_for_m3u_playlist_item {
-    ($($prop:ident),*;) => {
-        impl crate::model::FieldGetAccessor for M3uPlaylistItem {
-            fn get_field(&self, field: &str) -> Option<Arc<str>> {
-                let bytes = field.as_bytes();
-                $(
-                    {
-                        let target = stringify!($prop).as_bytes();
-                        if bytes.len() == target.len() &&
-                           bytes.iter().zip(target).all(|(a, b)| a.to_ascii_lowercase() == *b)
-                        {
-                            return Some(Arc::clone(&self.$prop));
-                        }
-                    }
-                )*
-                if bytes.eq_ignore_ascii_case(b"group") {
-                    Some(Arc::clone(&self.group))
-                } else if bytes.eq_ignore_ascii_case(b"caption") {
-                    Some(if self.title.is_empty() {
-                        Arc::clone(&self.name)
-                    } else {
-                        Arc::clone(&self.title)
-                    })
-                } else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
-                    self.epg_channel_id.as_ref().map(Arc::clone)
-                } else if bytes.eq_ignore_ascii_case(b"chno") {
-                    Some(self.chno.to_string().intern())
-                } else  {
-                    None
-                }
+impl crate::model::FieldGet for M3uPlaylistItem {
+    fn get(&self, field: HeaderField) -> Option<FieldRef<'_>> {
+        match field {
+            HeaderField::ProviderId => Some(FieldRef::Shared(&self.provider_id)),
+            HeaderField::Title => Some(FieldRef::Shared(&self.title)),
+            HeaderField::Name => Some(FieldRef::Shared(&self.name)),
+            HeaderField::Logo => Some(FieldRef::Shared(&self.logo)),
+            HeaderField::LogoSmall => Some(FieldRef::Shared(&self.logo_small)),
+            HeaderField::ParentCode => Some(FieldRef::Shared(&self.parent_code)),
+            HeaderField::AudioTrack => Some(FieldRef::Shared(&self.audio_track)),
+            HeaderField::TimeShift => Some(FieldRef::Shared(&self.time_shift)),
+            HeaderField::Rec => Some(FieldRef::Shared(&self.rec)),
+            HeaderField::Url => Some(FieldRef::Shared(&self.url)),
+            HeaderField::Group => Some(FieldRef::Shared(&self.group)),
+            HeaderField::Caption => {
+                Some(FieldRef::Shared(if self.title.is_empty() { &self.name } else { &self.title }))
             }
+            HeaderField::EpgChannelId => self.epg_channel_id.as_ref().map(FieldRef::Shared),
+            HeaderField::Chno => Some(FieldRef::Num(self.chno)),
+            // Deliberately not addressable by name on an M3U item, even though the
+            // struct carries input_name, item_type and additional_properties. The
+            // M3U resource endpoint resolves a URL path segment through
+            // `get_field`, so making these resolvable would turn a 404 into a
+            // response. Preserved from the string-keyed accessor this replaces.
+            HeaderField::Id | HeaderField::Input | HeaderField::Type | HeaderField::Genre => None,
         }
     }
 }
 
-generate_field_accessor_impl_for_m3u_playlist_item!(title, name, provider_id, logo, logo_small, parent_code, audio_track, time_shift, rec, url;);
+impl crate::model::FieldGetAccessor for M3uPlaylistItem {
+    #[inline]
+    fn get_field(&self, field: &str) -> Option<Arc<str>> {
+        use crate::model::FieldGet;
+        self.get(HeaderField::parse(field)?).map(|value| value.to_arc())
+    }
+}
 
 impl From<M3uPlaylistItem> for CommonPlaylistItem {
     fn from(item: M3uPlaylistItem) -> Self { item.to_common() }
@@ -1182,87 +1161,6 @@ impl PlaylistEntry for XtreamPlaylistItem {
     fn get_additional_properties_mut(&mut self) -> Option<&mut StreamProperties> { self.additional_properties.as_mut() }
 }
 
-macro_rules! generate_field_accessor_impl_for_xtream_playlist_item {
-    ($($prop:ident),*;) => {
-        impl crate::model::FieldGetAccessor for crate::model::XtreamPlaylistItem {
-            fn get_field(&self, field: &str) -> Option<Arc<str>> {
-                let bytes = field.as_bytes();
-
-                $(
-                    {
-                        let target = stringify!($prop).as_bytes();
-                        if bytes.len() == target.len() &&
-                           bytes.iter().zip(target).all(|(a, b)| a.to_ascii_lowercase() == *b)
-                        {
-                            return Some(Arc::clone(&self.$prop));
-                        }
-                    }
-                )*
-
-                // Caption
-                if bytes.eq_ignore_ascii_case(b"caption") {
-                    Some(if self.title.is_empty() {
-                        Arc::clone(&self.name)
-                    } else {
-                        Arc::clone(&self.title)
-                    })
-                }
-                // epg_channel_id / epg_id
-                else if bytes.eq_ignore_ascii_case(b"epg_channel_id") || bytes.eq_ignore_ascii_case(b"epg_id") {
-                    self.epg_channel_id.as_ref().map(Arc::clone)
-                }
-                // Additional Properties
-                else if field.starts_with(xtream_const::XC_PROP_BACKDROP_PATH)
-                     || bytes.eq_ignore_ascii_case(xtream_const::XC_PROP_COVER.as_bytes())
-                {
-                    match self.additional_properties.as_ref() {
-                        Some(additional_properties) => match additional_properties {
-                            StreamProperties::Live(_) => None,
-                            StreamProperties::Video(video) => {
-                                if bytes.eq_ignore_ascii_case(xtream_const::XC_PROP_COVER.as_bytes()) {
-                                    video.details.as_ref().and_then(|details| {
-                                        details.cover_big.as_ref()
-                                            .or(details.movie_image.as_ref())
-                                            .or_else(|| details.backdrop_path.as_ref().and_then(|p| p.first()))
-                                            .map(Arc::clone)
-                                    })
-                                } else {
-                                    video.details.as_ref().and_then(|details| {
-                                        details.backdrop_path.as_ref().and_then(|p| p.first())
-                                        .or(details.movie_image.as_ref())
-                                        .or(details.cover_big.as_ref())
-                                        .map(Arc::clone)
-                                    })
-                                }
-                            }
-                            StreamProperties::Series(series) => {
-                                if bytes.eq_ignore_ascii_case(xtream_const::XC_PROP_COVER.as_bytes()) {
-                                    if series.cover.is_empty() {
-                                        series.backdrop_path.as_ref().and_then(|p| p.first()).map(Arc::clone)
-                                    } else {
-                                        Some(Arc::clone(&series.cover))
-                                    }
-                                } else {
-                                    match series.backdrop_path.as_ref() {
-                                        None => if series.cover.is_empty() { None } else { Some(Arc::clone(&series.cover)) },
-                                        Some(p) => p.first().map(Arc::clone),
-                                    }
-                                }
-                            }
-                            StreamProperties::Episode(episode) => Some(Arc::clone(&episode.movie_image)),
-                        },
-                        None => None,
-                    }
-                }
-                // Default fallback
-                else {
-                    None
-                }
-            }
-        }
-    }
-}
-
 impl From<XtreamPlaylistItem> for CommonPlaylistItem {
     fn from(item: XtreamPlaylistItem) -> Self { item.to_common() }
 }
@@ -1272,8 +1170,6 @@ pub struct PlaylistItem {
     #[serde(flatten)]
     pub header: PlaylistItemHeader,
 }
-
-generate_field_accessor_impl_for_xtream_playlist_item!(group, title, name, logo, logo_small, parent_code, rec, url;);
 
 impl PlaylistItem {
     fn get_additional_properties(header: &PlaylistItemHeader) -> Option<StreamProperties> {
@@ -1705,6 +1601,56 @@ mod tests {
         CatchupAttribute, CatchupProperties, LiveStreamProperties, PlaylistItemType, StreamProperties, XtreamCluster,
         XtreamMappingFlags,
     };
+
+    #[test]
+    fn header_field_parse_round_trips_every_variant() {
+        for field in [
+            HeaderField::Id,
+            HeaderField::ProviderId,
+            HeaderField::Title,
+            HeaderField::Name,
+            HeaderField::Logo,
+            HeaderField::LogoSmall,
+            HeaderField::ParentCode,
+            HeaderField::AudioTrack,
+            HeaderField::TimeShift,
+            HeaderField::Rec,
+            HeaderField::Url,
+            HeaderField::Group,
+            HeaderField::Caption,
+            HeaderField::Input,
+            HeaderField::Type,
+            HeaderField::EpgChannelId,
+            HeaderField::Chno,
+            HeaderField::Genre,
+        ] {
+            assert_eq!(HeaderField::parse(field.as_str()), Some(field), "{field} did not round-trip");
+            // Lookup stayed case-insensitive.
+            assert_eq!(HeaderField::parse(&field.as_str().to_uppercase()), Some(field));
+        }
+        assert_eq!(HeaderField::parse("epg_id"), Some(HeaderField::EpgChannelId), "legacy alias must still parse");
+        assert_eq!(HeaderField::parse("input_stream_id"), None);
+        assert_eq!(HeaderField::parse(""), None);
+    }
+
+    #[test]
+    fn m3u_item_exposes_provider_id_but_not_the_header_only_fields() {
+        // The M3U resource endpoint resolves a URL path segment through
+        // `get_field`, so which names resolve is externally visible behaviour.
+        // M3uPlaylistItem carries input_name, item_type and additional_properties,
+        // but none of them were ever addressable by name and must stay that way.
+        let mut header = PlaylistItemHeader { chno: 7, ..PlaylistItemHeader::default() };
+        header.name = "Channel".intern();
+        let item = M3uPlaylistItem::from(&PlaylistItem { header });
+
+        assert_eq!(item.get_field("name").as_deref(), Some("Channel"));
+        assert_eq!(item.get_field("chno").as_deref(), Some("7"));
+        assert_eq!(item.get_field("caption").as_deref(), Some("Channel"));
+
+        for absent in ["id", "input", "type", "genre", "not_a_field"] {
+            assert!(item.get_field(absent).is_none(), "{absent} must not resolve on an M3U item");
+        }
+    }
 
     #[test]
     fn from_stalker_uuid_is_seeded_with_input_name_not_category() {
