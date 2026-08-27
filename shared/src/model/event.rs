@@ -284,6 +284,44 @@ impl EventMessage {
         })
     }
 
+    /// The event as JSON, for consumers that do not speak Rust types.
+    ///
+    /// Plugins are handed a wire name and a JSON payload rather than the
+    /// enum, so this is what a plugin host serialises. Defining it here means
+    /// a new variant arrives with its payload shape already decided, instead
+    /// of the host growing a second `match` over the whole taxonomy.
+    ///
+    /// Never fails: a payload that will not serialise degrades to `null`
+    /// rather than dropping the event, because a plugin that learns a
+    /// refresh finished but not its statistics is still better served than
+    /// one that hears nothing.
+    #[must_use]
+    pub fn payload(&self) -> serde_json::Value {
+        fn encode<T: serde::Serialize>(value: &T) -> serde_json::Value {
+            serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+        }
+        match self {
+            Self::ServerError(error) => serde_json::json!({ "error": error }),
+            Self::ActiveUser(change) => encode(change),
+            Self::ActiveProvider(name, connections) => {
+                serde_json::json!({ "provider": name.as_ref(), "connections": connections })
+            }
+            // `ConfigType` is not `Serialize`; its display form is the
+            // stable name operators already see in the Web UI.
+            Self::ConfigChange(config_type) => serde_json::json!({ "config_type": config_type.to_string() }),
+            Self::PlaylistUpdate(state) => encode(state),
+            Self::PlaylistUpdateProgress(progress) => encode(progress),
+            Self::SystemInfoUpdate(info) => encode(info.as_ref()),
+            Self::LibraryScanProgress(progress) => encode(progress),
+            Self::DownloadsUpdate(downloads) => encode(downloads.as_ref()),
+            Self::DownloadsDeltaUpdate(delta) => encode(delta),
+            Self::RecordingChanged | Self::RecordingRulesChanged => serde_json::Value::Null,
+            Self::InputMetadataUpdatesStarted(input) | Self::InputMetadataUpdatesCompleted(input) => {
+                serde_json::json!({ "input": input.as_ref() })
+            }
+        }
+    }
+
     /// See [`EventKind::required_permission`].
     #[must_use]
     pub const fn required_permission(&self) -> Permission { self.kind().required_permission() }
@@ -332,6 +370,93 @@ impl EventKindMask {
     pub const fn union(self, other: Self) -> Self { Self(self.0 | other.0) }
 }
 
+impl EventKindMask {
+    /// Build a mask from wire names - a plugin manifest's `events.*`
+    /// subscription list, or an operator's config.
+    ///
+    /// Returns the mask alongside the names that matched nothing, so a typo
+    /// in a subscription can be reported rather than silently subscribing to
+    /// less than was asked for.
+    #[must_use]
+    pub fn from_wire_names<'a, I>(names: I) -> (Self, Vec<&'a str>)
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut mask = Self::NONE;
+        let mut unknown = Vec::new();
+        for name in names {
+            match EventKind::from_wire_name(name) {
+                Some(kind) => mask = mask.with(kind),
+                None => unknown.push(name),
+            }
+        }
+        (mask, unknown)
+    }
+
+    /// The kinds in this mask.
+    #[must_use]
+    pub fn kinds(self) -> Vec<EventKind> { EventKind::ALL.into_iter().filter(|kind| self.contains(*kind)).collect() }
+}
+
 impl FromIterator<EventKind> for EventKindMask {
     fn from_iter<I: IntoIterator<Item = EventKind>>(iter: I) -> Self { iter.into_iter().fold(Self::NONE, Self::with) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EventKind, EventKindMask};
+
+    #[test]
+    fn every_kind_has_a_distinct_bit() {
+        let mut seen = 0u32;
+        for kind in EventKind::ALL {
+            assert_eq!(seen & kind.bit(), 0, "{kind:?} shares a bit with an earlier kind");
+            seen |= kind.bit();
+        }
+    }
+
+    /// `EventKindMask` is a `u32`, so the taxonomy cannot outgrow 32 kinds
+    /// without the mask type changing with it.
+    #[test]
+    fn the_taxonomy_still_fits_in_the_mask() {
+        assert!(EventKind::ALL.len() <= 32, "EventKindMask needs a wider integer");
+    }
+
+    #[test]
+    fn wire_names_are_unique_and_round_trip() {
+        let mut names: Vec<&str> = EventKind::ALL.iter().map(|kind| kind.as_wire_name()).collect();
+        names.sort_unstable();
+        let count = names.len();
+        names.dedup();
+        assert_eq!(names.len(), count, "two kinds share a wire name");
+
+        for kind in EventKind::ALL {
+            assert_eq!(EventKind::from_wire_name(kind.as_wire_name()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn an_unknown_subscription_name_is_reported_not_ignored() {
+        let (mask, unknown) = EventKindMask::from_wire_names(["playlist.update", "playlist.updat", "config.changed"]);
+
+        assert!(mask.contains(EventKind::PlaylistUpdate));
+        assert!(mask.contains(EventKind::ConfigChange));
+        assert_eq!(unknown, vec!["playlist.updat"], "a typo must surface, not silently narrow the subscription");
+    }
+
+    #[test]
+    fn a_mask_round_trips_through_its_kinds() {
+        let mask = EventKindMask::from_iter([EventKind::ServerError, EventKind::RecordingChanged]);
+        assert_eq!(mask.kinds(), vec![EventKind::ServerError, EventKind::RecordingChanged]);
+        assert!(!mask.contains(EventKind::SystemInfoUpdate));
+        assert!(!mask.is_empty());
+        assert!(EventKindMask::NONE.is_empty());
+    }
+
+    #[test]
+    fn all_matches_every_kind() {
+        for kind in EventKind::ALL {
+            assert!(EventKindMask::ALL.contains(kind));
+        }
+    }
 }
