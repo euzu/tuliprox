@@ -2256,8 +2256,7 @@ mod tests {
     use super::{
         super::{
             media_reserve::{
-                HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestDeliveryMode,
-                HlsManifestSourceRenderMarker,
+                HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestCommitIdentity, HlsManifestDeliveryMode,
             },
             terminal_tail::HlsMediaContainer,
         },
@@ -2370,7 +2369,9 @@ mod tests {
         );
         let snapshot = HlsLeaseManifestSnapshot {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-            source_render_marker: HlsManifestSourceRenderMarker::new(1),
+            source_commit_identity: HlsManifestCommitIdentity::new(1),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
             snapshot_generation: 1,
             delivered_at_ms: 1,
             first_proxy_seq: proxy_seq,
@@ -2378,7 +2379,7 @@ mod tests {
             visible_segments: Arc::from([HlsLeaseManifestSegment {
                 proxy_seq,
                 duration_ms: 6_000,
-                uri: "/live/10.ts".to_string(),
+                uri: "/live/10.ts".to_string().into(),
                 discontinuity_before: false,
                 map_ref_ready: true,
                 encryption: None,

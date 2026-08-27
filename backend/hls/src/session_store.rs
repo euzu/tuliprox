@@ -3,7 +3,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard, Weak},
 };
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, RwLockReadGuard};
 
 pub type HlsSessionHandle = Arc<RwLock<HlsSession>>;
 
@@ -70,6 +70,16 @@ struct HlsSessionIncarnationEntry {
     session: Weak<RwLock<HlsSession>>,
 }
 
+/// Keeps one exact proxy-session incarnation indexed for a cross-store transaction.
+pub(crate) struct HlsCurrentProxySessionGuard<'a> {
+    _indexes: RwLockReadGuard<'a, SessionIndexes>,
+    session: HlsSessionHandle,
+}
+
+impl HlsCurrentProxySessionGuard<'_> {
+    pub(crate) fn session(&self) -> &HlsSessionHandle { &self.session }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub struct HlsSessionIndexWriteGuardForTest<'a> {
     _guard: tokio::sync::RwLockWriteGuard<'a, SessionIndexes>,
@@ -84,6 +94,16 @@ impl HlsSessionStore {
 
     pub async fn get_by_proxy_session_id(&self, proxy_session_id: &ProxySessionId) -> Option<HlsSessionHandle> {
         self.indexes.read().await.by_proxy_session_id.get(proxy_session_id).map(Arc::clone)
+    }
+
+    /// Holds the current proxy-session identity stable until the returned guard is dropped.
+    pub(crate) async fn hold_current_proxy_session(
+        &self,
+        proxy_session_id: &ProxySessionId,
+    ) -> Option<HlsCurrentProxySessionGuard<'_>> {
+        let indexes = self.indexes.read().await;
+        let session = indexes.by_proxy_session_id.get(proxy_session_id).map(Arc::clone)?;
+        Some(HlsCurrentProxySessionGuard { _indexes: indexes, session })
     }
 
     pub fn session_incarnation(&self, session: &HlsSessionHandle) -> Option<HlsSessionIncarnation> {
@@ -238,6 +258,9 @@ impl HlsSessionStore {
     pub async fn hold_index_write_for_test(&self) -> HlsSessionIndexWriteGuardForTest<'_> {
         HlsSessionIndexWriteGuardForTest { _guard: self.indexes.write().await }
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn index_write_is_blocked_for_test(&self) -> bool { self.indexes.try_write().is_err() }
 
     #[cfg(any(test, feature = "test-support"))]
     async fn proxy_session_index_len(&self) -> usize { self.indexes.read().await.by_proxy_session_id.len() }

@@ -10,9 +10,10 @@ use super::{
     hls_ctx::HlsCtx,
     lease::{
         HlsAccessLeaseDenialMode, HlsAccessLeaseDenialOutcome, HlsAccessLeaseRemovalPreparation,
-        HlsLeaseManifestPublicationGuard, HlsLeaseManifestPublicationOutcome, HlsMediaLeaseIdentity,
-        HlsRuntimePolicyRevocation, HlsRuntimePolicyRevocationOutcome, HlsTerminalMediaRequirementOrigin,
-        HlsTerminalMediaRequirementSource, HlsTerminalTailPreparation, HlsTerminalTailPreparationInput,
+        HlsLeaseManifestPublicationGuard, HlsLeaseManifestPublicationOutcome, HlsLeaseManifestPublicationRejectReason,
+        HlsMediaLeaseIdentity, HlsRuntimePolicyRevocation, HlsRuntimePolicyRevocationOutcome,
+        HlsTerminalMediaRequirementOrigin, HlsTerminalMediaRequirementSource, HlsTerminalTailPreparation,
+        HlsTerminalTailPreparationInput,
     },
     manifest_acceptance::{
         manifest_acceptance_episode_status, HlsManifestAcceptanceEpisodeStatus, HlsManifestAcceptanceGeneration,
@@ -52,10 +53,11 @@ use super::{
     HlsAccessLeaseLifecycleSnapshot, HlsAccessLeasePendingDeadline, HlsAccessLeaseSessionSnapshot, HlsAccessLeaseState,
     HlsAccessLeaseStore, HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsCacheMetrics, HlsExpiredSessionMarker,
     HlsExpiredSessionReason, HlsGarbageCollector, HlsLifecycleEvent, HlsLifecycleEventKey, HlsLifecycleManager,
-    HlsMapWorkerPool, HlsOriginSource, HlsPlaybackRequestToken, HlsQosRegistry, HlsSegmentCache,
-    HlsSegmentRepairManager, HlsSegmentWorkerPool, HlsSessionHandle, HlsSessionKey, HlsSessionStore,
+    HlsMapWorkerPool, HlsOriginSource, HlsPlaybackRequestToken, HlsPublishedTransientResourceIds, HlsQosRegistry,
+    HlsSegmentCache, HlsSegmentRepairManager, HlsSegmentWorkerPool, HlsSessionHandle, HlsSessionKey, HlsSessionStore,
     HlsSessionStoreOutcome, HlsStartupObservability, HlsTerminalTailProtection, HlsTerminalTailProtectionInstall,
-    HlsTerminalTailProtectionRemoval, ProxySessionId, SegmentFetchPolicy, TransientResourceStore,
+    HlsTerminalTailProtectionRemoval, ProxySessionId, SegmentFetchPolicy, TransientManifestLeaseBinding,
+    TransientResourceStore,
 };
 use arc_swap::ArcSwap;
 use log::{debug, error, info};
@@ -1124,6 +1126,90 @@ impl HlsProxyManager {
         self.access_leases.write().await.prepare_manifest_publication(lease_id, proxy_session_id, now_ms)
     }
 
+    pub async fn commit_access_lease_manifest_publication_with_resources(
+        &self,
+        lease_id: &HlsAccessLeaseId,
+        proxy_session_id: &ProxySessionId,
+        expected: HlsLeaseManifestPublicationGuard,
+        snapshot: HlsLeaseManifestSnapshot,
+        published_transient_resource_ids: HlsPublishedTransientResourceIds,
+        now_ms: u64,
+    ) -> HlsLeaseManifestPublicationOutcome {
+        let finalized_manifest_generation = snapshot.finalized_transient_manifest_generation;
+        let lease_issued_at_ms = expected.lease_issued_at_ms();
+        let Some(finalized_manifest_generation) = finalized_manifest_generation else {
+            let session = self.sessions.get_by_proxy_session_id(proxy_session_id).await;
+            let mut leases = self.access_leases.write().await;
+            let published_transient_resource_ids = if let Some(session) = session.as_ref() {
+                let session = session.read().await;
+                if session.proxy_session_id == *proxy_session_id {
+                    leases.published_transient_resource_ids(lease_id).map_or(
+                        published_transient_resource_ids.clone(),
+                        |previous| {
+                            session.transient.merge_current_published_resource_ids(
+                                previous,
+                                published_transient_resource_ids,
+                                now_ms,
+                            )
+                        },
+                    )
+                } else {
+                    published_transient_resource_ids
+                }
+            } else {
+                published_transient_resource_ids
+            };
+            return leases.commit_manifest_publication_with_resources(
+                lease_id,
+                proxy_session_id,
+                expected,
+                snapshot,
+                published_transient_resource_ids,
+                now_ms,
+            );
+        };
+        let Some(current_session) = self.sessions.hold_current_proxy_session(proxy_session_id).await else {
+            return HlsLeaseManifestPublicationOutcome::Rejected(
+                HlsLeaseManifestPublicationRejectReason::ManifestGenerationUnavailable,
+            );
+        };
+        // The index guard prevents replacement while the established index -> lease store -> session
+        // lock order publishes the exact snapshot and binds its finalized source generation.
+        let session = Arc::clone(current_session.session());
+        let mut leases = self.access_leases.write().await;
+        let mut session = session.write().await;
+        if session.proxy_session_id != *proxy_session_id || session.is_gc_marked_for_removal() {
+            return HlsLeaseManifestPublicationOutcome::Rejected(
+                HlsLeaseManifestPublicationRejectReason::ManifestGenerationUnavailable,
+            );
+        }
+        if !session.transient.has_finalized_manifest_generation(finalized_manifest_generation) {
+            return HlsLeaseManifestPublicationOutcome::Rejected(
+                HlsLeaseManifestPublicationRejectReason::ManifestGenerationUnavailable,
+            );
+        }
+        let outcome = leases.commit_manifest_publication_with_resources(
+            lease_id,
+            proxy_session_id,
+            expected,
+            snapshot,
+            published_transient_resource_ids,
+            now_ms,
+        );
+        if outcome.is_committed() {
+            let _bound = session.transient.bind_finalized_manifest_generation(TransientManifestLeaseBinding::new(
+                lease_id.clone(),
+                lease_issued_at_ms,
+                finalized_manifest_generation,
+            ));
+        }
+        drop(session);
+        drop(leases);
+        drop(current_session);
+        outcome
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn commit_access_lease_manifest_publication(
         &self,
         lease_id: &HlsAccessLeaseId,
@@ -1132,13 +1218,15 @@ impl HlsProxyManager {
         snapshot: HlsLeaseManifestSnapshot,
         now_ms: u64,
     ) -> HlsLeaseManifestPublicationOutcome {
-        self.access_leases.write().await.commit_manifest_publication(
+        self.commit_access_lease_manifest_publication_with_resources(
             lease_id,
             proxy_session_id,
             expected,
             snapshot,
+            HlsPublishedTransientResourceIds::default(),
             now_ms,
         )
+        .await
     }
 
     pub async fn record_access_lease_segment_request_started_if_identity_matches(
@@ -1983,9 +2071,18 @@ impl HlsProxyManager {
             return false;
         }
         if let Some(session) = self.sessions.get_by_proxy_session_id(&preparation.proxy_session_id).await {
+            let mut session = session.write().await;
+            let finalized_manifest_released =
+                session.transient.release_finalized_manifest_generations(lease_id, preparation.issued_at_ms);
+            if finalized_manifest_released {
+                debug!(
+                    "HLS finalized transient manifest generation released: lease={} proxy_session={} reason=lease_removed",
+                    super::safe_hls_access_lease_id(lease_id),
+                    safe_proxy_session_id(&preparation.proxy_session_id)
+                );
+            }
             if let Some(generation) = preparation.terminal_protection_generation {
-                let removal =
-                    session.write().await.remove_terminal_tail_protection_after_lease_end(lease_id, generation);
+                let removal = session.remove_terminal_tail_protection_after_lease_end(lease_id, generation);
                 match removal {
                     HlsTerminalTailProtectionRemoval::Removed => {
                         debug!(
@@ -2006,7 +2103,7 @@ impl HlsProxyManager {
                         );
                     }
                 }
-            } else if session.write().await.remove_terminal_tail_protection(lease_id).is_some() {
+            } else if session.remove_terminal_tail_protection(lease_id).is_some() {
                 debug!(
                     "HLS untracked terminal-tail protection released: lease={} proxy_session={} reason=lease_removed",
                     super::safe_hls_access_lease_id(lease_id),
@@ -2578,7 +2675,7 @@ impl HlsProxyManager {
         proxy_session_id: &ProxySessionId,
         now_ms: u64,
     ) {
-        let snapshot = self.access_lease_session_snapshot(proxy_session_id, now_ms).await;
+        let snapshot = self.reconcile_session_access_lease_snapshot(session, proxy_session_id, now_ms).await;
         for release in &snapshot.idle_releases {
             active_users
                 .release_session_streams_and_counted_reservation(&release.username, &release.user_session_token)
@@ -2590,11 +2687,24 @@ impl HlsProxyManager {
                 super::safe_user_session_token(&release.user_session_token)
             );
         }
-        {
-            let mut session = session.write().await;
-            session.activity.active_access_lease_count = snapshot.active_count;
-            session.reconcile_effective_origin_acquire_policy(snapshot.effective_origin_policy, now_ms);
-        }
+    }
+
+    async fn reconcile_session_access_lease_snapshot(
+        &self,
+        session: &HlsSessionHandle,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) -> HlsAccessLeaseSessionSnapshot {
+        // Keep snapshot creation and application in the established lease-store -> session
+        // lock transaction. Otherwise a publication/removal can be overwritten by a stale
+        // wholesale binding reconciliation.
+        let mut leases = self.access_leases.write().await;
+        let snapshot = leases.session_snapshot(proxy_session_id, now_ms);
+        let mut session = session.write().await;
+        session.activity.active_access_lease_count = snapshot.active_count;
+        session.reconcile_effective_origin_acquire_policy(snapshot.effective_origin_policy, now_ms);
+        session.transient.reconcile_finalized_manifest_lease_bindings(&snapshot.finalized_transient_manifest_bindings);
+        snapshot
     }
 
     pub async fn sync_all_session_access_leases_and_detach_if_needed(
@@ -2781,15 +2891,16 @@ mod tests {
     };
     use crate::{
         build_terminal_tail_plan,
-        media_reserve::{HlsLeaseReserveAvailabilityBasis, HlsLeaseReserveSnapshot},
+        media_reserve::{HlsLeaseReserveAvailabilityBasis, HlsLeaseReserveSnapshot, HlsManifestCommitIdentity},
         terminal_tail::HlsLeasePlaybackMode,
         HlsAccessLease, HlsAccessLeaseId, HlsAccessLeasePendingDeadline, HlsAccessLeaseState, HlsLeaseManifestSegment,
         HlsLeaseManifestSnapshot, HlsManifestAcceptanceExhaustionReason, HlsManifestAcceptanceTrigger,
-        HlsManifestDeliveryMode, HlsManifestSourceRenderMarker, HlsMediaContainer, HlsMediaLeaseIdentity,
-        HlsPlaybackFamilyKey, HlsSegmentFailureObject, HlsSessionHandle, HlsSessionKey, HlsSessionStoreOutcome,
-        HlsTerminalAssetIdentity, HlsTerminalBaseMediaState, HlsTerminalBaseProtection,
+        HlsManifestDeliveryMode, HlsMediaContainer, HlsMediaLeaseIdentity, HlsPlaybackFamilyKey,
+        HlsPublishedTransientResourceIds, HlsSegmentFailureObject, HlsSessionHandle, HlsSessionKey,
+        HlsSessionStoreOutcome, HlsTerminalAssetIdentity, HlsTerminalBaseMediaState, HlsTerminalBaseProtection,
         HlsTerminalBaseSegmentAvailability, HlsTerminalTailBuildInput, HlsTerminalTailCompatibility,
-        HlsTerminalTailGeneration, ProxySessionId, HLS_TERMINAL_TAIL_SEGMENT_COUNT,
+        HlsTerminalTailGeneration, ProxySessionId, TransientManifestGeneration, TransientResourceKind,
+        TransientResourceRef, HLS_TERMINAL_TAIL_SEGMENT_COUNT,
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::model::{
@@ -2903,7 +3014,9 @@ mod tests {
     fn manifest_snapshot(source_rendered_at_ms: u64) -> HlsLeaseManifestSnapshot {
         HlsLeaseManifestSnapshot {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-            source_render_marker: HlsManifestSourceRenderMarker::new(source_rendered_at_ms),
+            source_commit_identity: HlsManifestCommitIdentity::new(source_rendered_at_ms),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
             snapshot_generation: 0,
             delivered_at_ms: 2_000,
             first_proxy_seq: 40,
@@ -2912,7 +3025,7 @@ mod tests {
                 HlsLeaseManifestSegment {
                     proxy_seq: 40,
                     duration_ms: 6_000,
-                    uri: "/live/40.ts".to_string(),
+                    uri: "/live/40.ts".to_string().into(),
                     discontinuity_before: false,
                     map_ref_ready: true,
                     encryption: None,
@@ -2920,7 +3033,7 @@ mod tests {
                 HlsLeaseManifestSegment {
                     proxy_seq: 41,
                     duration_ms: 6_000,
-                    uri: "/live/41.ts".to_string(),
+                    uri: "/live/41.ts".to_string().into(),
                     discontinuity_before: false,
                     map_ref_ready: true,
                     encryption: None,
@@ -2934,6 +3047,20 @@ mod tests {
             active_encryption: None,
             container: HlsMediaContainer::MpegTs,
         }
+    }
+
+    fn finalized_transient_manifest_snapshot(
+        source_rendered_at_ms: u64,
+        manifest_generation: TransientManifestGeneration,
+        resource_uri: &str,
+    ) -> HlsLeaseManifestSnapshot {
+        let mut snapshot = manifest_snapshot(source_rendered_at_ms);
+        snapshot.delivery_mode = HlsManifestDeliveryMode::TransientPassthrough;
+        snapshot.finalized_transient_manifest_generation = Some(manifest_generation);
+        for segment in Arc::make_mut(&mut snapshot.visible_segments) {
+            segment.uri = Arc::from(resource_uri);
+        }
+        snapshot
     }
 
     async fn publish_manifest_snapshot(
@@ -2953,6 +3080,16 @@ mod tests {
             .is_committed()
     }
 
+    async fn wait_until_access_lease_store_is_write_locked(manager: &HlsProxyManager) {
+        for _ in 0..1_000 {
+            if manager.access_leases.try_write().is_err() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("access lease store was not locked by the reconciliation transaction");
+    }
+
     fn terminal_plan(
         generation: u64,
         proxy_session_id: &ProxySessionId,
@@ -2961,7 +3098,8 @@ mod tests {
         let mut base_manifest = manifest_snapshot(1);
         base_manifest.snapshot_generation = 1;
         for segment in Arc::make_mut(&mut base_manifest.visible_segments) {
-            segment.uri = format!("/hls/shared/live/{}/{}/{}.ts", proxy_session_id.0, lease_id.0, segment.proxy_seq);
+            segment.uri =
+                format!("/hls/shared/live/{}/{}/{}.ts", proxy_session_id.0, lease_id.0, segment.proxy_seq).into();
         }
         let transport_stream = TransportStreamBuffer::new(TERMINAL_ASSET_BYTES.to_vec());
         let asset =
@@ -3503,6 +3641,515 @@ mod tests {
                 .await,
             HlsLeaseManifestPublicationOutcome::Rejected(HlsLeaseManifestPublicationRejectReason::LeaseExpired)
         );
+    }
+
+    #[tokio::test]
+    async fn rolling_manifest_publication_uses_lease_store_when_session_is_gc_marked() {
+        let manager = HlsProxyManager::new();
+        let session = manager.get_or_create_session(HlsSessionKey::new(1, "rolling"), b"secret", 1_000).await;
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        let lease_id = HlsAccessLeaseId("lease-a".to_string());
+        manager.access_leases.write().await.prepare_access_lease(access_lease(&lease_id.0, &proxy_session_id));
+        let publication = manager
+            .prepare_access_lease_manifest_publication(&lease_id, &proxy_session_id, 2_000)
+            .await
+            .expect("rolling publication guard");
+        let published_resource_ids = HlsPublishedTransientResourceIds::from_manifest_body(
+            "#EXTM3U\n#EXTINF:6,\n/hls/shared/live/proxy/lease-a/r/resource.ts\n",
+        );
+        session.write().await.mark_for_gc_removal();
+
+        assert_eq!(
+            manager
+                .commit_access_lease_manifest_publication_with_resources(
+                    &lease_id,
+                    &proxy_session_id,
+                    publication,
+                    manifest_snapshot(20),
+                    published_resource_ids.clone(),
+                    2_100,
+                )
+                .await,
+            HlsLeaseManifestPublicationOutcome::Committed { snapshot_generation: 1 }
+        );
+        let lease = manager
+            .access_lease_response_snapshot(&lease_id, &proxy_session_id, 2_100)
+            .await
+            .expect("published rolling lease");
+        assert_eq!(lease.published_transient_resource_ids(), &published_resource_ids);
+    }
+
+    #[tokio::test]
+    async fn finalized_manifest_publication_blocks_session_replacement_until_binding_is_committed() {
+        let manager = Arc::new(HlsProxyManager::new());
+        let session_key = HlsSessionKey::new(1, "archive-publication-race");
+        let session = manager.get_or_create_session(session_key.clone(), b"secret", 1_000).await;
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        let lease_id = HlsAccessLeaseId("lease-a".to_string());
+        let resource = TransientResourceRef::new(
+            TransientResourceKind::Segment,
+            "https://cdn.example/archive/segment.ts",
+            b"secret",
+            1_000,
+            1,
+            Some("ts".to_string()),
+        );
+        let resource_id = resource.id.clone();
+        let resource_uri = format!("/hls/shared/live/{}/lease-a/r/{}.ts", proxy_session_id.0, resource_id.0);
+        let manifest_body =
+            format!("#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:6,\n{resource_uri}\n#EXT-X-ENDLIST\n");
+        let generation = {
+            let mut session = session.write().await;
+            session.transient.upsert_resources([resource]);
+            session.transient.replace_manifest_with_semantics(manifest_body.clone(), 1_000, Some(6_000));
+            session.transient.current_finalized_manifest_generation().expect("finalized generation")
+        };
+        manager.prepare_access_lease(access_lease(&lease_id.0, &proxy_session_id)).await;
+        let publication = manager
+            .prepare_access_lease_manifest_publication(&lease_id, &proxy_session_id, 2_000)
+            .await
+            .expect("publication guard");
+        let published_resource_ids = HlsPublishedTransientResourceIds::from_manifest_body(&manifest_body);
+        let lease_store_guard = manager.hold_access_lease_store_for_test().await;
+        let publication_task = {
+            let manager = Arc::clone(&manager);
+            let lease_id = lease_id.clone();
+            let proxy_session_id = proxy_session_id.clone();
+            let published_resource_ids = published_resource_ids.clone();
+            tokio::spawn(async move {
+                manager
+                    .commit_access_lease_manifest_publication_with_resources(
+                        &lease_id,
+                        &proxy_session_id,
+                        publication,
+                        finalized_transient_manifest_snapshot(1_000, generation, &resource_uri),
+                        published_resource_ids,
+                        2_000,
+                    )
+                    .await
+            })
+        };
+
+        let mut index_guard_observed = false;
+        for _ in 0..1_000 {
+            if manager.sessions.index_write_is_blocked_for_test() {
+                index_guard_observed = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(index_guard_observed, "publication did not acquire the session-index guard");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(25),
+                manager.sessions.remove_session(&session_key, &proxy_session_id),
+            )
+            .await
+            .is_err(),
+            "session replacement completed before finalized publication"
+        );
+
+        drop(lease_store_guard);
+        assert_eq!(
+            publication_task.await.expect("publication task"),
+            HlsLeaseManifestPublicationOutcome::Committed { snapshot_generation: 1 }
+        );
+        let current_session =
+            manager.sessions.get_by_proxy_session_id(&proxy_session_id).await.expect("current session remains indexed");
+        assert!(Arc::ptr_eq(&current_session, &session));
+        assert!(current_session
+            .read()
+            .await
+            .transient
+            .resolve_resource_for_lease(&resource_id, &lease_id, 1_000, &published_resource_ids, 2_000)
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn finalized_signed_url_generations_follow_published_lease_lifetime() {
+        let manager = HlsProxyManager::new();
+        let published_resource_ids = HlsPublishedTransientResourceIds::default();
+        let session = manager.get_or_create_session(HlsSessionKey::new(1, "archive"), b"secret", 0).await;
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        let lease_a_id = HlsAccessLeaseId("lease-a".to_string());
+        let lease_b_id = HlsAccessLeaseId("lease-b".to_string());
+        let resource_a = TransientResourceRef::new(
+            TransientResourceKind::Segment,
+            "https://cdn.example/archive/segment.ts?token=A",
+            b"secret",
+            0,
+            20,
+            Some("ts".to_string()),
+        );
+        let resource_a_id = resource_a.id.clone();
+        let resource_a_uri = format!("/hls/shared/live/{}/lease-a/r/{}.ts", proxy_session_id.0, resource_a_id.0);
+        let generation_a = {
+            let mut session = session.write().await;
+            session.transient.upsert_resources([resource_a]);
+            session.transient.replace_manifest_with_semantics(
+                format!(
+                    "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\n{resource_a_uri}\n#EXT-X-ENDLIST\n"
+                ),
+                0,
+                Some(6_000),
+            );
+            session.transient.current_finalized_manifest_generation().expect("G1 finalized generation")
+        };
+
+        let lease_a = HlsAccessLease::pending(
+            lease_a_id.clone(),
+            HlsPlaybackFamilyKey::new("alice", "client-a"),
+            proxy_session_id.clone(),
+            "alice".to_string(),
+            "session-a".to_string(),
+            1,
+            "archive".to_string(),
+            1,
+            0,
+            40,
+        );
+        manager.prepare_access_lease(lease_a).await;
+        assert!(
+            publish_manifest_snapshot(
+                &manager,
+                &lease_a_id,
+                &proxy_session_id,
+                finalized_transient_manifest_snapshot(0, generation_a, &resource_a_uri),
+                1,
+            )
+            .await
+        );
+
+        let resource_b = TransientResourceRef::new(
+            TransientResourceKind::Segment,
+            "https://cdn.example/archive/segment.ts?token=B",
+            b"secret",
+            21,
+            20,
+            Some("ts".to_string()),
+        );
+        let resource_b_id = resource_b.id.clone();
+        assert_ne!(resource_a_id, resource_b_id);
+        let resource_b_uri = format!("/hls/shared/live/{}/lease-b/r/{}.ts", proxy_session_id.0, resource_b_id.0);
+        let generation_b = {
+            let mut session = session.write().await;
+            session.transient.upsert_resources([resource_b]);
+            session.transient.replace_manifest_with_semantics(
+                format!(
+                    "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\n{resource_b_uri}\n#EXT-X-ENDLIST\n"
+                ),
+                21,
+                Some(6_000),
+            );
+            session.transient.current_finalized_manifest_generation().expect("G2 finalized generation")
+        };
+
+        assert!(session
+            .read()
+            .await
+            .transient
+            .resolve_resource_for_lease(&resource_a_id, &lease_a_id, 0, &published_resource_ids, 21)
+            .is_some());
+        assert_eq!(session.read().await.transient.finalized_manifest_generation_count(), 2);
+
+        let lease_b = HlsAccessLease::pending(
+            lease_b_id.clone(),
+            HlsPlaybackFamilyKey::new("bob", "client-b"),
+            proxy_session_id.clone(),
+            "bob".to_string(),
+            "session-b".to_string(),
+            1,
+            "archive".to_string(),
+            1,
+            21,
+            100,
+        );
+        manager.prepare_access_lease(lease_b).await;
+        assert!(
+            publish_manifest_snapshot(
+                &manager,
+                &lease_b_id,
+                &proxy_session_id,
+                finalized_transient_manifest_snapshot(21, generation_b, &resource_b_uri),
+                22,
+            )
+            .await
+        );
+        assert!(session
+            .read()
+            .await
+            .transient
+            .resolve_resource_for_lease(&resource_b_id, &lease_b_id, 21, &published_resource_ids, 42)
+            .is_some());
+        assert!(session
+            .read()
+            .await
+            .transient
+            .resolve_resource_for_lease(&resource_a_id, &lease_a_id, 0, &published_resource_ids, 39)
+            .is_some());
+        assert_eq!(session.read().await.transient.finalized_manifest_lease_binding_count(), 2);
+        {
+            let session = session.read().await;
+            assert_eq!(session.transient.current_manifest_resource_ids().len(), 1);
+            assert!(session.transient.resolve_current_resource(&resource_b_id, 42).is_some());
+        }
+
+        let expired_a = manager
+            .access_lease_response_snapshot(&lease_a_id, &proxy_session_id, 41)
+            .await
+            .expect("expired lease remains available for lifecycle cleanup");
+        assert_eq!(expired_a.state, HlsAccessLeaseState::Expired);
+        manager.remove_access_lease(&lease_a_id).await;
+        let mut session = session.write().await;
+        assert_eq!(session.transient.finalized_manifest_generation_count(), 1);
+        assert_eq!(session.transient.finalized_manifest_lease_binding_count(), 1);
+        assert!(session.transient.resolve_current_resource(&resource_a_id, 41).is_none());
+        session.transient.prune_expired(41);
+        assert!(!session.transient.resources.contains_key(&resource_a_id));
+        assert!(session.transient.resolve_current_resource(&resource_b_id, 42).is_some());
+    }
+
+    #[tokio::test]
+    async fn same_lease_retains_every_published_finalized_generation_until_removal() {
+        let manager = HlsProxyManager::new();
+        let published_resource_ids = HlsPublishedTransientResourceIds::default();
+        let session = manager.get_or_create_session(HlsSessionKey::new(1, "archive"), b"secret", 0).await;
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        let lease_id = HlsAccessLeaseId("lease-a".to_string());
+        manager
+            .prepare_access_lease(HlsAccessLease::pending(
+                lease_id.clone(),
+                HlsPlaybackFamilyKey::new("alice", "client-a"),
+                proxy_session_id.clone(),
+                "alice".to_string(),
+                "session-a".to_string(),
+                1,
+                "archive".to_string(),
+                1,
+                0,
+                100,
+            ))
+            .await;
+
+        let (resource_a_id, generation_a, resource_a_uri) = {
+            let resource = TransientResourceRef::new(
+                TransientResourceKind::Segment,
+                "https://cdn.example/archive/segment.ts?token=A",
+                b"secret",
+                0,
+                20,
+                Some("ts".to_string()),
+            );
+            let resource_id = resource.id.clone();
+            let resource_uri = format!("/hls/shared/live/{}/lease-a/r/{}.ts", proxy_session_id.0, resource_id.0);
+            let mut session = session.write().await;
+            session.transient.upsert_resources([resource]);
+            session.transient.replace_manifest_with_semantics(
+                format!(
+                    "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\n{resource_uri}\n#EXT-X-ENDLIST\n"
+                ),
+                0,
+                Some(6_000),
+            );
+            let generation =
+                session.transient.current_finalized_manifest_generation().expect("G1 finalized generation");
+            (resource_id, generation, resource_uri)
+        };
+        assert!(
+            publish_manifest_snapshot(
+                &manager,
+                &lease_id,
+                &proxy_session_id,
+                finalized_transient_manifest_snapshot(0, generation_a, &resource_a_uri),
+                1,
+            )
+            .await
+        );
+
+        let (resource_b_id, generation_b, resource_b_uri) = {
+            let resource = TransientResourceRef::new(
+                TransientResourceKind::Segment,
+                "https://cdn.example/archive/segment.ts?token=B",
+                b"secret",
+                21,
+                20,
+                Some("ts".to_string()),
+            );
+            let resource_id = resource.id.clone();
+            let resource_uri = format!("/hls/shared/live/{}/lease-a/r/{}.ts", proxy_session_id.0, resource_id.0);
+            let mut session = session.write().await;
+            session.transient.upsert_resources([resource]);
+            session.transient.replace_manifest_with_semantics(
+                format!(
+                    "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\n{resource_uri}\n#EXT-X-ENDLIST\n"
+                ),
+                21,
+                Some(6_000),
+            );
+            let generation =
+                session.transient.current_finalized_manifest_generation().expect("G2 finalized generation");
+            (resource_id, generation, resource_uri)
+        };
+        assert_ne!(resource_a_id, resource_b_id);
+        assert!(
+            publish_manifest_snapshot(
+                &manager,
+                &lease_id,
+                &proxy_session_id,
+                finalized_transient_manifest_snapshot(21, generation_b, &resource_b_uri),
+                22,
+            )
+            .await
+        );
+
+        {
+            let session = session.read().await;
+            assert_eq!(session.transient.finalized_manifest_lease_binding_count(), 2);
+            assert!(session
+                .transient
+                .resolve_resource_for_lease(&resource_a_id, &lease_id, 0, &published_resource_ids, 42)
+                .is_some());
+            assert!(session
+                .transient
+                .resolve_resource_for_lease(&resource_b_id, &lease_id, 0, &published_resource_ids, 42)
+                .is_some());
+        }
+
+        manager.remove_access_lease(&lease_id).await;
+        let session = session.read().await;
+        assert_eq!(session.transient.finalized_manifest_lease_binding_count(), 0);
+        assert_eq!(session.transient.finalized_manifest_generation_count(), 1);
+        assert!(session.transient.resolve_current_resource(&resource_a_id, 42).is_none());
+        assert!(session.transient.resolve_current_resource(&resource_b_id, 42).is_some());
+    }
+
+    #[tokio::test]
+    async fn lease_reconciliation_cannot_overwrite_a_concurrent_manifest_publication() {
+        let manager = Arc::new(HlsProxyManager::new());
+        let session = manager.get_or_create_session(HlsSessionKey::new(1, "archive"), b"secret", 0).await;
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        let lease_id = HlsAccessLeaseId("lease-a".to_string());
+        let resource = TransientResourceRef::new(
+            TransientResourceKind::Segment,
+            "https://cdn.example/archive/segment.ts?token=A",
+            b"secret",
+            0,
+            20,
+            Some("ts".to_string()),
+        );
+        let resource_uri = format!("/hls/shared/live/{}/lease-a/r/{}.ts", proxy_session_id.0, resource.id.0);
+        let generation = {
+            let mut session = session.write().await;
+            session.transient.upsert_resources([resource]);
+            session.transient.replace_manifest_with_semantics(
+                format!(
+                    "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\n{resource_uri}\n#EXT-X-ENDLIST\n"
+                ),
+                0,
+                Some(6_000),
+            );
+            session.transient.current_finalized_manifest_generation().expect("finalized generation")
+        };
+        manager.prepare_access_lease(access_lease(&lease_id.0, &proxy_session_id)).await;
+        let publication_guard = manager
+            .prepare_access_lease_manifest_publication(&lease_id, &proxy_session_id, 1)
+            .await
+            .expect("publication guard");
+
+        let session_guard = session.write().await;
+        let reconcile_task = {
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            let proxy_session_id = proxy_session_id.clone();
+            tokio::spawn(async move {
+                manager.reconcile_session_access_lease_snapshot(&session, &proxy_session_id, 1).await
+            })
+        };
+        wait_until_access_lease_store_is_write_locked(&manager).await;
+        let publication_task = {
+            let manager = Arc::clone(&manager);
+            let proxy_session_id = proxy_session_id.clone();
+            let lease_id = lease_id.clone();
+            tokio::spawn(async move {
+                manager
+                    .commit_access_lease_manifest_publication(
+                        &lease_id,
+                        &proxy_session_id,
+                        publication_guard,
+                        finalized_transient_manifest_snapshot(0, generation, &resource_uri),
+                        2,
+                    )
+                    .await
+            })
+        };
+        drop(session_guard);
+
+        reconcile_task.await.expect("reconciliation completes");
+        assert!(publication_task.await.expect("publication completes").is_committed());
+        assert_eq!(session.read().await.transient.finalized_manifest_lease_binding_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn lease_reconciliation_cannot_resurrect_a_concurrently_removed_binding() {
+        let manager = Arc::new(HlsProxyManager::new());
+        let session = manager.get_or_create_session(HlsSessionKey::new(1, "archive"), b"secret", 0).await;
+        let proxy_session_id = session.read().await.proxy_session_id.clone();
+        let lease_id = HlsAccessLeaseId("lease-a".to_string());
+        let resource = TransientResourceRef::new(
+            TransientResourceKind::Segment,
+            "https://cdn.example/archive/segment.ts?token=A",
+            b"secret",
+            0,
+            20,
+            Some("ts".to_string()),
+        );
+        let resource_uri = format!("/hls/shared/live/{}/lease-a/r/{}.ts", proxy_session_id.0, resource.id.0);
+        let generation = {
+            let mut session = session.write().await;
+            session.transient.upsert_resources([resource]);
+            session.transient.replace_manifest_with_semantics(
+                format!(
+                    "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\n{resource_uri}\n#EXT-X-ENDLIST\n"
+                ),
+                0,
+                Some(6_000),
+            );
+            session.transient.current_finalized_manifest_generation().expect("finalized generation")
+        };
+        manager.prepare_access_lease(access_lease(&lease_id.0, &proxy_session_id)).await;
+        assert!(
+            publish_manifest_snapshot(
+                &manager,
+                &lease_id,
+                &proxy_session_id,
+                finalized_transient_manifest_snapshot(0, generation, &resource_uri),
+                1,
+            )
+            .await
+        );
+        let removal =
+            manager.access_leases.read().await.prepare_access_lease_removal(&lease_id).expect("removal preparation");
+
+        let session_guard = session.write().await;
+        let reconcile_task = {
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            let proxy_session_id = proxy_session_id.clone();
+            tokio::spawn(async move {
+                manager.reconcile_session_access_lease_snapshot(&session, &proxy_session_id, 1).await
+            })
+        };
+        wait_until_access_lease_store_is_write_locked(&manager).await;
+        let removal_task = {
+            let manager = Arc::clone(&manager);
+            let lease_id = lease_id.clone();
+            tokio::spawn(async move { manager.remove_prepared_access_lease(&lease_id, &removal).await })
+        };
+        drop(session_guard);
+
+        reconcile_task.await.expect("reconciliation completes");
+        assert!(removal_task.await.expect("removal completes"));
+        assert_eq!(session.read().await.transient.finalized_manifest_lease_binding_count(), 0);
     }
 
     #[tokio::test]

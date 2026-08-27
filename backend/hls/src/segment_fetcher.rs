@@ -3,17 +3,18 @@
 use super::{
     begin_hls_origin_account_io_bounded, build_hls_origin_resource_headers, classify_hls_backpressure,
     fetch_hls_transient_origin_response_with_attempt_prepare, finish_hls_origin_account_io, hls_object_body_deadline,
-    run_hls_origin_resource_retry_loop_with_attempt_prepare, CachedSegmentMetadata, HlsAccessLeaseId,
-    HlsAccessLeaseStore, HlsBackpressureState, HlsBoundAccountAcquireErrorKind, HlsCacheCapacityRevision,
-    HlsCacheMetrics, HlsCacheObjectKey, HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation,
-    HlsOriginIoContext, HlsOriginResourceBodyDeadline, HlsOriginResourceClients, HlsOriginResourceFetchError,
-    HlsOriginResourceFetchTarget, HlsRepairRenderedObjectId, HlsResourceFetchKind, HlsResourceFetchSource,
-    HlsSegmentCache, HlsSegmentEncryption, HlsSegmentFailureObject, HlsSegmentFailureTransition, HlsSegmentFile,
-    HlsSegmentRepairManager, HlsSegmentRepairObjectContext, HlsSegmentRepairSource, HlsSessionHandle,
-    HlsTransientObjectFetchFinalizer, HlsTransientOriginFetchRequest, OriginSegmentFetchRef, OriginSegmentKey,
-    ProxySessionId, SegmentCacheKey, SegmentCacheStatus, SegmentEntry, SegmentFetchPriority, StagedCacheObject,
-    TransientObjectFetchDecision, TransientObjectFetchToken, TransientObjectUnavailableState,
-    TransientPassthroughState, TransientResourceFile, TransientResourceId, TransientResourceKind, TransientResourceRef,
+    run_hls_origin_resource_retry_loop_with_attempt_prepare, transient::transient_object_expires_at,
+    CachedSegmentMetadata, HlsAccessLeaseId, HlsAccessLeaseStore, HlsBackpressureState,
+    HlsBoundAccountAcquireErrorKind, HlsCacheCapacityRevision, HlsCacheMetrics, HlsCacheObjectKey,
+    HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation, HlsOriginIoContext, HlsOriginResourceBodyDeadline,
+    HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsRepairRenderedObjectId,
+    HlsResourceFetchKind, HlsResourceFetchSource, HlsSegmentCache, HlsSegmentEncryption, HlsSegmentFailureObject,
+    HlsSegmentFailureTransition, HlsSegmentFile, HlsSegmentRepairManager, HlsSegmentRepairObjectContext,
+    HlsSegmentRepairSource, HlsSessionHandle, HlsTransientObjectFetchFinalizer, HlsTransientOriginFetchRequest,
+    OriginSegmentFetchRef, OriginSegmentKey, ProxySessionId, SegmentCacheKey, SegmentCacheStatus, SegmentEntry,
+    SegmentFetchPriority, StagedCacheObject, TransientObjectFetchDecision, TransientObjectFetchToken,
+    TransientObjectUnavailableState, TransientPassthroughState, TransientResourceFile, TransientResourceId,
+    TransientResourceKind, TransientResourceRef,
 };
 use arc_swap::ArcSwap;
 use axum::http::HeaderMap;
@@ -1120,12 +1121,11 @@ fn select_key_dependency(
     encryption: &HlsSegmentEncryption,
     now_ms: u64,
 ) -> SegmentKeyDependencySelection {
-    let Some(resource) = session.transient.resources.get(&encryption.resource_id).cloned() else {
+    let Some(resource) = session.transient.resolve_current_resource(&encryption.resource_id, now_ms) else {
         return SegmentKeyDependencySelection::Unavailable;
     };
     if resource.kind != TransientResourceKind::Key
         || resource.file_ext_hint.as_deref() != Some(encryption.resource_extension.as_str())
-        || !resource.is_valid_at(now_ms)
     {
         return SegmentKeyDependencySelection::Unavailable;
     }
@@ -1375,7 +1375,7 @@ async fn fetch_segment_key_dependency_into_cache(
         session.fail_transient_object_retryable_if_current(&token, ready_at_ms, 1_000);
         return Err(SegmentFetchError::Timeout);
     }
-    let expires_at_ms = ready_at_ms.saturating_add(session.transient.resource_ttl_ms).max(resource.expires_at_ms);
+    let expires_at_ms = transient_object_expires_at(ready_at_ms, session.transient.resource_ttl_ms);
     if !session.commit_transient_object_ready_if_current(
         TransientResourceKind::Key,
         &token,
@@ -1484,12 +1484,10 @@ fn segment_key_dependency_generation_matches(
                     && encryption.resource_extension == resource_file.extension
             })
     });
-    let resource_matches = session.transient.resources.get(&resource_file.resource_id).is_some_and(|current| {
-        current.kind == TransientResourceKind::Key
-            && current.resolved_origin_uri == resource.resolved_origin_uri
-            && current.file_ext_hint.as_deref() == Some(resource_file.extension.as_str())
-            && current.is_valid_at(now_ms)
-    });
+    let resource_matches = resource.id == resource_file.resource_id
+        && resource.kind == TransientResourceKind::Key
+        && resource.file_ext_hint.as_deref() == Some(resource_file.extension.as_str())
+        && session.transient.resource_matches_current(resource, now_ms);
     segment_matches && resource_matches
 }
 
@@ -1728,9 +1726,9 @@ use tuliprox_core::utils::current_time_millis;
 #[cfg(test)]
 mod tests {
     use super::{
-        build_segment_origin_headers, commit_failed_segment_fetch, take_queued_segment_fetch_candidate,
-        wait_for_segment_key_dependency, HlsSegmentFetchWorkload, SegmentFetchContext, SegmentFetchPolicy,
-        SegmentFetchPriority,
+        build_segment_origin_headers, commit_failed_segment_fetch, current_time_millis,
+        take_queued_segment_fetch_candidate, wait_for_segment_key_dependency, HlsSegmentFetchWorkload,
+        SegmentFetchContext, SegmentFetchPolicy, SegmentFetchPriority,
     };
     use crate::{
         build_rewrite_secret_fingerprint, GarbageCollectionPolicy, HlsAccessLease, HlsAccessLeaseId,
@@ -2543,6 +2541,14 @@ mod tests {
     }
 
     async fn grant_usable_worker_access_lease(worker: &HlsSegmentWorkerPool, proxy_session_id: &ProxySessionId) {
+        grant_usable_worker_access_lease_at(worker, proxy_session_id, 10).await;
+    }
+
+    async fn grant_usable_worker_access_lease_at(
+        worker: &HlsSegmentWorkerPool,
+        proxy_session_id: &ProxySessionId,
+        now_ms: u64,
+    ) {
         worker.access_leases().write().await.prepare_access_lease(HlsAccessLease::pending(
             HlsAccessLeaseId("worker-lease".to_string()),
             HlsPlaybackFamilyKey::new("alice", "client-a"),
@@ -2552,7 +2558,7 @@ mod tests {
             1,
             "12345".to_string(),
             12345,
-            10,
+            now_ms,
             15_000,
         ));
     }
@@ -2954,9 +2960,10 @@ mod tests {
             });
             session.proxy_session_id.clone()
         };
-        grant_usable_worker_access_lease(&worker, &proxy_session_id).await;
+        let now_ms = current_time_millis();
+        grant_usable_worker_access_lease_at(&worker, &proxy_session_id, now_ms).await;
 
-        tokio::join!(worker.wake_scheduler(context.clone(), 20), worker.wake_scheduler(context.clone(), 20));
+        tokio::join!(worker.wake_scheduler(context.clone(), now_ms), worker.wake_scheduler(context.clone(), now_ms));
 
         let pending_key = {
             let mut session = context.session.write().await;
@@ -2970,8 +2977,13 @@ mod tests {
             let extension = resource.file_ext_hint.clone().expect("key extension");
             let proxy_session_id = session.proxy_session_id.clone();
             let cache_duration_ms = session.transient.resource_ttl_ms;
-            match session.transient.begin_object_fetch(&proxy_session_id, &resource, &extension, 20, cache_duration_ms)
-            {
+            match session.transient.begin_object_fetch(
+                &proxy_session_id,
+                &resource,
+                &extension,
+                now_ms,
+                cache_duration_ms,
+            ) {
                 TransientObjectFetchDecision::Ready => None,
                 TransientObjectFetchDecision::Wait(notifier) => Some((notifier, resource.id, extension)),
                 TransientObjectFetchDecision::Fetch(_) => {
@@ -2991,7 +3003,7 @@ mod tests {
 
         let session = context.session.read().await;
         assert_eq!(session.active_segment_fetches, 0);
-        assert!(session.ready_timeline_snapshot(1, 20).units.iter().all(|unit| unit.required_key_ready));
+        assert!(session.ready_timeline_snapshot(1, now_ms).units.iter().all(|unit| unit.required_key_ready));
         assert!(session.segments.values().all(|segment| matches!(segment.status, SegmentCacheStatus::Ready { .. })));
         drop(session);
         let requests = server.requests.lock().await;
@@ -3005,8 +3017,9 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let policy = SegmentFetchPolicy::default();
         let (_, context, _) = encrypted_fetch_context(&server, &temp_dir, &policy).await;
-        let (fetch_token, notifier, resource_id, extension) = shared_key_fetch_and_wait(&context, 20).await;
-        commit_test_key_ready(&context, &fetch_token, 21).await;
+        let now_ms = current_time_millis();
+        let (fetch_token, notifier, resource_id, extension) = shared_key_fetch_and_wait(&context, now_ms).await;
+        commit_test_key_ready(&context, &fetch_token, now_ms.saturating_add(1)).await;
 
         let result =
             wait_for_segment_key_dependency(&context, notifier, resource_id, extension, Duration::from_millis(1)).await;
@@ -3020,7 +3033,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let policy = SegmentFetchPolicy::default();
         let (_, context, _) = encrypted_fetch_context(&server, &temp_dir, &policy).await;
-        let (fetch_token, notifier, resource_id, extension) = shared_key_fetch_and_wait(&context, 20).await;
+        let now_ms = current_time_millis();
+        let (fetch_token, notifier, resource_id, extension) = shared_key_fetch_and_wait(&context, now_ms).await;
         let mut wait = Box::pin(wait_for_segment_key_dependency(
             &context,
             notifier,
@@ -3030,7 +3044,7 @@ mod tests {
         ));
         assert!(matches!(poll!(wait.as_mut()), Poll::Pending));
 
-        commit_test_key_ready(&context, &fetch_token, 21).await;
+        commit_test_key_ready(&context, &fetch_token, now_ms.saturating_add(1)).await;
 
         assert!(matches!(poll!(wait.as_mut()), Poll::Ready(Ok(()))));
     }

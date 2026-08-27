@@ -9,8 +9,8 @@ use super::{
     super::{
         lease::HlsAccessLeaseTiming,
         media_reserve::{
-            HlsLeaseManifestSegment, HlsLeasePlaybackCursor, HlsLeaseReserveAvailabilityBasis, HlsManifestDeliveryMode,
-            HlsManifestSourceRenderMarker, HlsReadyMediaState, HlsReadyTimelineUnit,
+            HlsLeaseManifestSegment, HlsLeasePlaybackCursor, HlsLeaseReserveAvailabilityBasis,
+            HlsManifestCommitIdentity, HlsManifestDeliveryMode, HlsReadyMediaState, HlsReadyTimelineUnit,
         },
         post_refresh_availability::{commit_post_refresh_terminal_fallback, HlsPostRefreshFallbackOutcome},
         prepared_terminal_bundle::{
@@ -380,7 +380,9 @@ fn terminal_pending_commit_manifest(
 ) -> HlsLeaseManifestSnapshot {
     HlsLeaseManifestSnapshot {
         delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-        source_render_marker: HlsManifestSourceRenderMarker::new(1),
+        source_commit_identity: HlsManifestCommitIdentity::new(1),
+        uri_materialization: None,
+        finalized_transient_manifest_generation: None,
         snapshot_generation: 0,
         delivered_at_ms: 0,
         first_proxy_seq: 40,
@@ -388,7 +390,7 @@ fn terminal_pending_commit_manifest(
         visible_segments: Arc::from([HlsLeaseManifestSegment {
             proxy_seq: 40,
             duration_ms,
-            uri: format!("/hls/shared/live/{}/{}/40.ts", proxy_session_id.0, lease_id.0),
+            uri: format!("/hls/shared/live/{}/{}/40.ts", proxy_session_id.0, lease_id.0).into(),
             discontinuity_before: false,
             map_ref_ready: true,
             encryption: None,
@@ -887,7 +889,9 @@ async fn post_refresh_runtime_failure_leaves_no_unowned_live_lease() {
 fn pressure_manifest(target_duration_ms: u64) -> HlsLeaseManifestSnapshot {
     HlsLeaseManifestSnapshot {
         delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-        source_render_marker: HlsManifestSourceRenderMarker::new(1),
+        source_commit_identity: HlsManifestCommitIdentity::new(1),
+        uri_materialization: None,
+        finalized_transient_manifest_generation: None,
         snapshot_generation: 1,
         delivered_at_ms: 1,
         first_proxy_seq: 0,
@@ -1325,7 +1329,7 @@ async fn publish_post_refresh_terminal_lease(
         manifest_snapshot.last_visible_media_end_ms = target_duration_ms;
     }
     Arc::make_mut(&mut manifest_snapshot.visible_segments)[0].uri =
-        format!("/hls/shared/live/{}/{}/0.ts", proxy_session_id.0, lease_id.0);
+        format!("/hls/shared/live/{}/{}/0.ts", proxy_session_id.0, lease_id.0).into();
     assert!(ctx
         .hls_proxy
         .commit_access_lease_manifest_publication(&lease_id, proxy_session_id, publication, manifest_snapshot, now_ms,)
@@ -1940,7 +1944,7 @@ async fn add_active_post_refresh_lease(
     let mut manifest = pressure_manifest(12_000);
     manifest.active_map = active_map;
     Arc::make_mut(&mut manifest.visible_segments)[0].uri =
-        format!("/hls/shared/live/{}/{}/0.ts", fixture.proxy_session_id.0, lease_id.0);
+        format!("/hls/shared/live/{}/{}/0.ts", fixture.proxy_session_id.0, lease_id.0).into();
     assert!(fixture
         .ctx
         .hls_proxy

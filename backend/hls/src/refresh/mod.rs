@@ -1120,6 +1120,15 @@ async fn commit_initial_fetched_manifest(
             ))
             .await
         }
+        Err(HlsManifestCommitError::LocalRepresentationLimit(violation)) => {
+            Err(OriginManifestFetchError::LocalRepresentationLimit(violation))
+        }
+        Err(HlsManifestCommitError::MalformedTransientRepresentation) => {
+            Err(OriginManifestFetchError::MalformedTransientRepresentation)
+        }
+        Err(HlsManifestCommitError::CommitGenerationExhausted) => {
+            Err(OriginManifestFetchError::CommitGenerationExhausted)
+        }
     }
 }
 

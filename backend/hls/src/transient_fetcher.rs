@@ -2,12 +2,14 @@ use super::{
     build_hls_origin_resource_headers_with_client_range, finish_hls_origin_account_io, hls_client_body_send_deadline,
     refresh_hls_client_body_send_deadline,
     resource_fetch::{log_hls_resource_body_failure, HlsResourceFetchLogContext},
-    run_hls_origin_resource_retry_loop_with_attempt_prepare, CacheAccessState, HlsAccessLeaseId, HlsLogIdentity,
-    HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation, HlsOriginIoContext, HlsOriginResourceBodyDeadline,
-    HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginResourceFetchTarget, HlsRepairRenderedObjectId,
-    HlsResourceFetchAttempt, HlsResourceFetchKind, HlsResourceFetchSource, HlsSegmentCache, HlsSegmentFailureObject,
+    run_hls_origin_resource_retry_loop_with_attempt_prepare,
+    transient::transient_object_expires_at,
+    CacheAccessState, HlsAccessLeaseId, HlsLogIdentity, HlsOriginAccountIoLeaseGuard, HlsOriginByteRangeExpectation,
+    HlsOriginIoContext, HlsOriginResourceBodyDeadline, HlsOriginResourceClients, HlsOriginResourceFetchError,
+    HlsOriginResourceFetchTarget, HlsPublishedTransientResourceIds, HlsRepairRenderedObjectId, HlsResourceFetchAttempt,
+    HlsResourceFetchKind, HlsResourceFetchSource, HlsSegmentCache, HlsSegmentFailureObject,
     HlsSegmentFailureTransition, HlsSegmentRepairManager, HlsSegmentRepairObjectContext, HlsSegmentRepairSource,
-    HlsSessionHandle, HlsSessionMode, ProtectedSet, ProxySessionId, SegmentFetchPolicy, TransientObjectCacheKey,
+    HlsSessionHandle, HlsSessionMode, ProxySessionId, SegmentFetchPolicy, TransientObjectCacheKey,
     TransientObjectFetchDecision, TransientObjectFetchToken, TransientPassthroughState, TransientResourceFile,
     TransientResourceKind, TransientResourceRef,
 };
@@ -150,6 +152,13 @@ pub struct HlsTransientObjectCacheResolution {
 }
 
 #[derive(Clone, Copy)]
+pub struct HlsTransientResourceLeaseContext<'a> {
+    pub access_lease_id: &'a HlsAccessLeaseId,
+    pub lease_issued_at_ms: u64,
+    pub published_resource_ids: &'a HlsPublishedTransientResourceIds,
+}
+
+#[derive(Clone, Copy)]
 struct HlsTransientObjectCacheActionInput<'a> {
     proxy_session_id: &'a ProxySessionId,
     resource: &'a TransientResourceRef,
@@ -157,13 +166,13 @@ struct HlsTransientObjectCacheActionInput<'a> {
     range_header: Option<&'a HeaderValue>,
     now_ms: u64,
     cache_duration_ms: u64,
-    protected: bool,
     key_object_cache_allowed: bool,
 }
 
 pub async fn resolve_hls_transient_object_cache_action(
     session: &HlsSessionHandle,
     proxy_session_id: &ProxySessionId,
+    lease: HlsTransientResourceLeaseContext<'_>,
     resource_file: &TransientResourceFile,
     range_header: Option<&HeaderValue>,
     now_ms: u64,
@@ -177,9 +186,13 @@ pub async fn resolve_hls_transient_object_cache_action(
         return Err(StatusCode::NOT_FOUND);
     }
     let mut session = session.write().await;
-    let protected = ProtectedSet::from_session(&session);
-    session.transient.prune_expired_except(now_ms, &protected.key_resource_ids);
-    let Some(resource) = session.transient.resources.get(&resource_file.resource_id).cloned() else {
+    let Some(resource) = session.transient.resolve_resource_for_lease(
+        &resource_file.resource_id,
+        lease.access_lease_id,
+        lease.lease_issued_at_ms,
+        lease.published_resource_ids,
+        now_ms,
+    ) else {
         return Err(StatusCode::NOT_FOUND);
     };
     if resource.file_ext_hint.as_deref().is_some_and(|extension| extension != resource_file.extension) {
@@ -196,7 +209,6 @@ pub async fn resolve_hls_transient_object_cache_action(
             range_header,
             now_ms,
             cache_duration_ms,
-            protected: protected.key_resource_ids.contains(&resource_file.resource_id),
             key_object_cache_allowed,
         },
     );
@@ -220,7 +232,7 @@ fn transient_object_cache_action(
         &input.resource.id,
         input.resource_file.extension.clone(),
     );
-    if session.transient.ready_object(&cache_key, input.resource.kind, input.now_ms, input.protected).is_some() {
+    if session.transient.ready_object(&cache_key, input.resource.kind, input.now_ms).is_some() {
         return HlsTransientObjectCacheAction::ServeReady;
     }
     if !is_hls_transient_full_object_cacheable_request(input.range_header) {
@@ -412,7 +424,7 @@ async fn commit_hls_transient_origin_response_attempt(
         Ok(metadata) => metadata,
         Err(err) => return Err(HlsOriginResourceFetchError::cache_body(&err)),
     };
-    let expires_at_ms = ready_at_ms.saturating_add(context.cache_duration_ms).max(context.resource.expires_at_ms);
+    let expires_at_ms = transient_object_expires_at(ready_at_ms, context.cache_duration_ms);
     let mut session = context.session.write().await;
     if context.resource.kind == TransientResourceKind::Key && metadata.size != 16 {
         session.fail_transient_object_permanent_if_current(
@@ -656,7 +668,7 @@ pub async fn record_successful_transient_segment_fetch(session: &HlsSessionHandl
         return;
     }
     let mut session = session.write().await;
-    if !transient_resource_is_current(&session, resource) {
+    if !transient_resource_is_current(&session, resource, current_time_millis()) {
         return;
     }
     if let Some(reset_failures) = session.record_successful_segment_fetch() {
@@ -681,7 +693,7 @@ pub async fn record_temporary_transient_segment_fetch_failure(
         return false;
     }
     let mut session = session.write().await;
-    if !transient_resource_is_current(&session, resource) {
+    if !transient_resource_is_current(&session, resource, now_ms) {
         return false;
     }
     session.origin_control.path_condition = super::origin_progress::HlsOriginPathCondition::SegmentReadinessFailure;
@@ -739,12 +751,8 @@ const fn transient_resource_affects_media_readiness(kind: TransientResourceKind)
     )
 }
 
-fn transient_resource_is_current(session: &super::HlsSession, resource: &TransientResourceRef) -> bool {
-    session.transient.resources.get(&resource.id).is_some_and(|current| {
-        current.kind == resource.kind
-            && current.resolved_origin_uri == resource.resolved_origin_uri
-            && Arc::ptr_eq(&current.access, &resource.access)
-    })
+fn transient_resource_is_current(session: &super::HlsSession, resource: &TransientResourceRef, now_ms: u64) -> bool {
+    session.transient.resource_matches_current(resource, now_ms)
 }
 
 struct HlsTransientReadGuard {
@@ -830,18 +838,19 @@ mod tests {
         },
         fetch_and_commit_hls_transient_origin_response_with_attempt_prepare,
         fetch_hls_transient_origin_response_with_attempt_prepare, hls_transient_object_fetch_failure,
-        hls_transient_origin_response, record_temporary_transient_segment_fetch_failure, HlsLogIdentity,
-        HlsTransientCacheCommitContext, HlsTransientDecodedOriginResponse, HlsTransientDirectResponseContext,
-        HlsTransientDirectResponseFinalizer, HlsTransientDirectResponseLifecycleContext,
-        HlsTransientDirectStreamOutcome, HlsTransientObjectFetchFailure, HlsTransientOriginCacheFetchRequest,
-        HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard,
+        hls_transient_origin_response, record_temporary_transient_segment_fetch_failure,
+        resolve_hls_transient_object_cache_action, HlsLogIdentity, HlsTransientCacheCommitContext,
+        HlsTransientDecodedOriginResponse, HlsTransientDirectResponseContext, HlsTransientDirectResponseFinalizer,
+        HlsTransientDirectResponseLifecycleContext, HlsTransientDirectStreamOutcome, HlsTransientObjectCacheAction,
+        HlsTransientObjectFetchFailure, HlsTransientOriginCacheFetchRequest, HlsTransientOriginFetchRequest,
+        HlsTransientOriginIoGuard, HlsTransientResourceLeaseContext,
     };
     use crate::{
-        HlsAccessLeaseId, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsSegmentCache,
-        HlsSegmentFailureObject, HlsSegmentRepairManager, HlsSession, HlsSessionHandle, HlsSessionKey, HlsSessionStore,
-        SegmentFetchPolicy, TransientObjectCacheKey, TransientObjectCacheStatus, TransientObjectFetchDecision,
-        TransientObjectFetchToken, TransientPassthroughState, TransientResourceFile, TransientResourceKind,
-        TransientResourceRef,
+        HlsAccessLeaseId, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsPublishedTransientResourceIds,
+        HlsSegmentCache, HlsSegmentFailureObject, HlsSegmentRepairManager, HlsSession, HlsSessionHandle, HlsSessionKey,
+        HlsSessionStore, ProxySessionId, SegmentFetchPolicy, TransientObjectCacheKey, TransientObjectCacheStatus,
+        TransientObjectFetchDecision, TransientObjectFetchToken, TransientPassthroughState, TransientResourceFile,
+        TransientResourceKind, TransientResourceRef,
     };
     use async_compression::tokio::write::{BrotliEncoder, GzipEncoder, ZstdEncoder};
     use axum::{
@@ -883,6 +892,202 @@ mod tests {
             hls_transient_object_fetch_failure(&error),
             HlsTransientObjectFetchFailure::Permanent { status: None }
         ));
+    }
+
+    fn finalized_resource_resolution_fixture(
+    ) -> (HlsSessionHandle, ProxySessionId, HlsAccessLeaseId, TransientResourceFile, HlsPublishedTransientResourceIds)
+    {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "finalized-range"), b"rewrite-secret", 0);
+        let proxy_session_id = session.proxy_session_id.clone();
+        let access_lease_id = HlsAccessLeaseId("lease".to_string());
+        let resource = TransientResourceRef::new(
+            TransientResourceKind::Segment,
+            "http://origin.example.com/archive/segment.ts",
+            b"rewrite-secret",
+            0,
+            300_000,
+            Some("ts".to_string()),
+        );
+        let resource_file = TransientResourceFile { resource_id: resource.id.clone(), extension: "ts".to_string() };
+        session.transient.upsert_resources([resource]);
+        let manifest_body = format!(
+            "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:1,\n/hls/shared/live/{}/lease/r/{}.ts\n#EXT-X-ENDLIST\n",
+            proxy_session_id.0, resource_file.resource_id.0
+        );
+        let published_resource_ids = HlsPublishedTransientResourceIds::from_manifest_body(&manifest_body);
+        session.transient.replace_manifest_with_semantics(manifest_body, 0, Some(1_000));
+        let manifest_generation =
+            session.transient.current_finalized_manifest_generation().expect("finalized manifest generation");
+        assert!(session.transient.bind_finalized_manifest_generation(
+            super::super::TransientManifestLeaseBinding::new(access_lease_id.clone(), 0, manifest_generation,)
+        ));
+        (Arc::new(RwLock::new(session)), proxy_session_id, access_lease_id, resource_file, published_resource_ids)
+    }
+
+    #[tokio::test]
+    async fn raw_ttl_resource_requires_requesting_lease_manifest_membership_for_full_and_range() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "rolling-membership"), b"rewrite-secret", 0);
+        let proxy_session_id = session.proxy_session_id.clone();
+        let authorized_lease_id = HlsAccessLeaseId("lease-a".to_string());
+        let unpublished_lease_id = HlsAccessLeaseId("lease-b".to_string());
+        let segment = TransientResourceRef::new(
+            TransientResourceKind::Segment,
+            "http://origin.example.com/live/segment.ts",
+            b"rewrite-secret",
+            0,
+            300_000,
+            Some("ts".to_string()),
+        );
+        let key = TransientResourceRef::new(
+            TransientResourceKind::Key,
+            "http://origin.example.com/live/key.bin",
+            b"rewrite-secret",
+            0,
+            300_000,
+            Some("key".to_string()),
+        );
+        let resource_files = [
+            TransientResourceFile { resource_id: segment.id.clone(), extension: "ts".to_string() },
+            TransientResourceFile { resource_id: key.id.clone(), extension: "key".to_string() },
+        ];
+        let manifest_body = format!(
+            "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"/hls/shared/live/{}/lease-a/r/{}.key\"\n\
+             #EXTINF:6,\n/hls/shared/live/{}/lease-a/r/{}.ts\n",
+            proxy_session_id.0, key.id.0, proxy_session_id.0, segment.id.0
+        );
+        let authorized_resources = HlsPublishedTransientResourceIds::from_manifest_body(&manifest_body);
+        let unpublished_resources = HlsPublishedTransientResourceIds::default();
+        session.transient.upsert_resources([segment, key]);
+        let session = Arc::new(RwLock::new(session));
+        let ranges = [None, Some(HeaderValue::from_static("bytes=0-")), Some(HeaderValue::from_static("bytes=1000-"))];
+
+        for resource_file in &resource_files {
+            for range in &ranges {
+                let rejected = resolve_hls_transient_object_cache_action(
+                    &session,
+                    &proxy_session_id,
+                    HlsTransientResourceLeaseContext {
+                        access_lease_id: &unpublished_lease_id,
+                        lease_issued_at_ms: 0,
+                        published_resource_ids: &unpublished_resources,
+                    },
+                    resource_file,
+                    range.as_ref(),
+                    1,
+                    300_000,
+                )
+                .await;
+                assert!(matches!(rejected, Err(StatusCode::NOT_FOUND)));
+
+                let accepted = resolve_hls_transient_object_cache_action(
+                    &session,
+                    &proxy_session_id,
+                    HlsTransientResourceLeaseContext {
+                        access_lease_id: &authorized_lease_id,
+                        lease_issued_at_ms: 0,
+                        published_resource_ids: &authorized_resources,
+                    },
+                    resource_file,
+                    range.as_ref(),
+                    1,
+                    300_000,
+                )
+                .await;
+                assert!(accepted.is_ok());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn finalized_resource_validity_is_identical_for_full_and_range_requests() {
+        let (session, proxy_session_id, access_lease_id, resource_file, published_resource_ids) =
+            finalized_resource_resolution_fixture();
+        let full = resolve_hls_transient_object_cache_action(
+            &session,
+            &proxy_session_id,
+            HlsTransientResourceLeaseContext {
+                access_lease_id: &access_lease_id,
+                lease_issued_at_ms: 0,
+                published_resource_ids: &published_resource_ids,
+            },
+            &resource_file,
+            None,
+            301_520,
+            300_000,
+        )
+        .await
+        .expect("full request resolves finalized mapping");
+        assert!(matches!(full.action, HlsTransientObjectCacheAction::FetchAndCache(_)));
+
+        let zero_range = HeaderValue::from_static("bytes=0-");
+        let from_zero = resolve_hls_transient_object_cache_action(
+            &session,
+            &proxy_session_id,
+            HlsTransientResourceLeaseContext {
+                access_lease_id: &access_lease_id,
+                lease_issued_at_ms: 0,
+                published_resource_ids: &published_resource_ids,
+            },
+            &resource_file,
+            Some(&zero_range),
+            301_520,
+            300_000,
+        )
+        .await
+        .expect("zero range resolves finalized mapping");
+        assert!(matches!(from_zero.action, HlsTransientObjectCacheAction::WaitForFetch(_)));
+
+        let offset_range = HeaderValue::from_static("bytes=1000-");
+        let from_offset = resolve_hls_transient_object_cache_action(
+            &session,
+            &proxy_session_id,
+            HlsTransientResourceLeaseContext {
+                access_lease_id: &access_lease_id,
+                lease_issued_at_ms: 0,
+                published_resource_ids: &published_resource_ids,
+            },
+            &resource_file,
+            Some(&offset_range),
+            301_520,
+            300_000,
+        )
+        .await
+        .expect("offset range resolves finalized mapping");
+        assert!(matches!(from_offset.action, HlsTransientObjectCacheAction::PassthroughNoCache));
+    }
+
+    #[tokio::test]
+    async fn removed_finalized_mapping_is_rejected_for_full_and_range_requests() {
+        let (session, proxy_session_id, access_lease_id, resource_file, published_resource_ids) =
+            finalized_resource_resolution_fixture();
+        {
+            let mut session = session.write().await;
+            session.transient.replace_manifest_with_semantics(
+                "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-ENDLIST\n".to_string(),
+                1,
+                None,
+            );
+            assert!(session.transient.release_finalized_manifest_generations(&access_lease_id, 0));
+        }
+        let ranges = [None, Some(HeaderValue::from_static("bytes=0-")), Some(HeaderValue::from_static("bytes=1000-"))];
+
+        for range in &ranges {
+            let result = resolve_hls_transient_object_cache_action(
+                &session,
+                &proxy_session_id,
+                HlsTransientResourceLeaseContext {
+                    access_lease_id: &access_lease_id,
+                    lease_issued_at_ms: 0,
+                    published_resource_ids: &published_resource_ids,
+                },
+                &resource_file,
+                range.as_ref(),
+                301_520,
+                300_000,
+            )
+            .await;
+            assert!(matches!(result, Err(StatusCode::NOT_FOUND)));
+        }
     }
 
     async fn spawn_test_origin(
@@ -1111,7 +1316,7 @@ mod tests {
                 resource_kind,
                 origin_url,
                 b"rewrite-secret",
-                10,
+                super::current_time_millis(),
                 60_000,
                 Some("bin".to_string()),
             );

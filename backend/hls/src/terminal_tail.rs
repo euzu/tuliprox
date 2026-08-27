@@ -491,7 +491,7 @@ fn snapshot_terminal_base_probes(
                         .is_some_and(|map| matches!(&map.status, super::map::MapCacheStatus::Ready { .. }))
                 })
             });
-            let key_evidence = terminal_base_key_evidence(session, entry, segment.encryption.as_ref());
+            let key_evidence = terminal_base_key_evidence(session, entry, segment.encryption.as_deref());
             if let HlsTerminalBaseKeyEvidence::Aes128 { cache_key, object_access, resource_access, .. } = &key_evidence
             {
                 if pinned_key_objects.insert(cache_key.clone()) {
@@ -1270,7 +1270,7 @@ pub fn evaluate_terminal_tail_compatibility(
             }
         }
     }
-    if encryption_reset_required(manifest.active_encryption.as_ref()).is_err() {
+    if encryption_reset_required(manifest.active_encryption.as_deref()).is_err() {
         return HlsTerminalTailCompatibility::UnsupportedEncryptionTransition;
     }
     if !terminal_asset_fits_target_duration(asset.duration_ms(), manifest.target_duration_ms) {
@@ -1391,11 +1391,14 @@ fn safe_terminal_base(
 
 fn terminal_tail_route_binding(manifest: &HlsLeaseManifestSnapshot) -> Option<HlsTerminalTailRouteBinding> {
     let first = manifest.visible_segments.first()?;
-    let binding = terminal_tail_route_binding_from_uri(&first.uri)?;
+    let first_uri = manifest.materialize_uri(&first.uri);
+    let binding = terminal_tail_route_binding_from_uri(&first_uri)?;
     manifest
         .visible_segments
         .iter()
-        .all(|segment| terminal_tail_route_binding_from_uri(&segment.uri).as_ref() == Some(&binding))
+        .all(|segment| {
+            terminal_tail_route_binding_from_uri(&manifest.materialize_uri(&segment.uri)).as_ref() == Some(&binding)
+        })
         .then_some(binding)
 }
 
@@ -1472,7 +1475,7 @@ pub fn build_terminal_tail_plan(
     {
         return Err(HlsTerminalTailCompatibility::InvalidTimestampTransition);
     }
-    let append_key_method_none = encryption_reset_required(input.base_manifest.active_encryption.as_ref())?;
+    let append_key_method_none = encryption_reset_required(input.base_manifest.active_encryption.as_deref())?;
     let Some((base_manifest, protected_base_proxy_seqs)) = safe_terminal_base(
         input.base_manifest,
         &input.base_availability,
@@ -1608,14 +1611,15 @@ fn render_terminal_tail_manifest_body(
     writeln!(body, "#EXT-X-MEDIA-SEQUENCE:{}", first.proxy_seq).map_err(|_| HlsTerminalTailRenderError::Formatting)?;
     writeln!(body, "#EXT-X-DISCONTINUITY-SEQUENCE:{}", input.base_manifest.discontinuity_sequence)
         .map_err(|_| HlsTerminalTailRenderError::Formatting)?;
-    render_active_base_encryption(&mut body, input.base_manifest.active_encryption.as_ref())?;
+    render_active_base_encryption(&mut body, input.base_manifest)?;
     for segment in input.base_manifest.visible_segments.iter() {
         if segment.discontinuity_before {
             body.push_str("#EXT-X-DISCONTINUITY\n");
         }
         writeln!(body, "#EXTINF:{},", format_hls_duration_ms(segment.duration_ms))
             .map_err(|_| HlsTerminalTailRenderError::Formatting)?;
-        writeln!(body, "{}", segment.uri).map_err(|_| HlsTerminalTailRenderError::Formatting)?;
+        writeln!(body, "{}", input.base_manifest.materialize_uri(&segment.uri))
+            .map_err(|_| HlsTerminalTailRenderError::Formatting)?;
     }
     if input.append_key_method_none {
         body.push_str("#EXT-X-KEY:METHOD=NONE\n");
@@ -1641,8 +1645,9 @@ fn render_terminal_tail_manifest_body(
 
 fn render_active_base_encryption(
     body: &mut String,
-    encryption: Option<&HlsEncryptionSignature>,
+    manifest: &HlsLeaseManifestSnapshot,
 ) -> Result<(), HlsTerminalTailRenderError> {
+    let encryption = manifest.active_encryption.as_deref();
     let Some(encryption) = encryption else {
         return Ok(());
     };
@@ -1654,6 +1659,7 @@ fn render_active_base_encryption(
             let Some(key_uri) = encryption.key_uri.as_deref() else {
                 return Err(HlsTerminalTailRenderError::InvalidEncryptionState);
             };
+            let key_uri = manifest.materialize_uri(key_uri);
             write!(body, "#EXT-X-KEY:METHOD=AES-128,URI=\"{key_uri}\"")
                 .map_err(|_| HlsTerminalTailRenderError::Formatting)?;
             if let Some(iv) = encryption.iv.as_deref() {
@@ -1676,7 +1682,7 @@ fn render_active_base_encryption(
 #[cfg(test)]
 mod tests {
     use super::{
-        super::media_reserve::{HlsLeaseManifestSegment, HlsManifestDeliveryMode, HlsManifestSourceRenderMarker},
+        super::media_reserve::{HlsLeaseManifestSegment, HlsManifestCommitIdentity, HlsManifestDeliveryMode},
         *,
     };
     use tuliprox_mpegts::transport_stream_buffer::{HlsFiniteTsRenderSpec, TransportStreamBuffer};
@@ -1687,7 +1693,9 @@ mod tests {
     fn manifest() -> HlsLeaseManifestSnapshot {
         HlsLeaseManifestSnapshot {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-            source_render_marker: HlsManifestSourceRenderMarker::new(1),
+            source_commit_identity: HlsManifestCommitIdentity::new(1),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
             snapshot_generation: 1,
             delivered_at_ms: 10,
             first_proxy_seq: 193,
@@ -1783,15 +1791,15 @@ mod tests {
         })
     }
 
-    fn resettable_aes128_encryption() -> HlsEncryptionSignature {
-        HlsEncryptionSignature {
+    fn resettable_aes128_encryption() -> Arc<HlsEncryptionSignature> {
+        Arc::new(HlsEncryptionSignature {
             method: "AES-128".into(),
             key_uri: Some("/iptv/hls/shared/live/session/lease/r/aes-key.key".into()),
             iv: Some("0x000000000000000000000000000000C2".into()),
             key_format: Some("identity".into()),
             key_format_versions: Some("1".into()),
             can_reset_to_clear: true,
-        }
+        })
     }
 
     fn aes128_key_binding() -> HlsTerminalKeyBinding {
@@ -1871,12 +1879,12 @@ mod tests {
         base.visible_segments = Arc::from([HlsLeaseManifestSegment {
             proxy_seq,
             duration_ms: 4_000,
-            uri: format!("/iptv/hls/shared/live/{}/lease/{proxy_seq}.ts", session.proxy_session_id.0),
+            uri: format!("/iptv/hls/shared/live/{}/lease/{proxy_seq}.ts", session.proxy_session_id.0).into(),
             discontinuity_before: false,
             map_ref_ready: true,
-            encryption: Some(encryption.clone()),
+            encryption: Some(Arc::new(encryption.clone())),
         }]);
-        base.active_encryption = Some(encryption);
+        base.active_encryption = Some(Arc::new(encryption));
         base.playlist_duration_ms = 4_000;
         base.last_visible_media_end_ms = 4_000;
         let session = Arc::new(tokio::sync::RwLock::new(session));
@@ -1969,7 +1977,7 @@ mod tests {
         base.visible_segments = Arc::from([first_proxy_seq, last_proxy_seq].map(|proxy_seq| HlsLeaseManifestSegment {
             proxy_seq,
             duration_ms: terminal_asset.duration_ms(),
-            uri: format!("/iptv/hls/shared/live/{}/lease/{proxy_seq}.ts", proxy_session_id.0),
+            uri: format!("/iptv/hls/shared/live/{}/lease/{proxy_seq}.ts", proxy_session_id.0).into(),
             discontinuity_before: false,
             map_ref_ready: true,
             encryption: None,
@@ -2147,7 +2155,7 @@ mod tests {
     fn terminal_plan_rejects_unbound_and_mixed_lease_routes() {
         let mut unbound = manifest();
         for segment in Arc::make_mut(&mut unbound.visible_segments) {
-            segment.uri = format!("/live/{}.ts", segment.proxy_seq);
+            segment.uri = format!("/live/{}.ts", segment.proxy_seq).into();
         }
         assert_eq!(
             build_terminal_tail_plan(build_input(4, unbound, asset())),
@@ -2156,7 +2164,7 @@ mod tests {
 
         let mut mixed = manifest();
         Arc::make_mut(&mut mixed.visible_segments)[1].uri =
-            "/iptv/hls/shared/live/session/other-lease/194.ts".to_string();
+            Arc::from("/iptv/hls/shared/live/session/other-lease/194.ts");
         assert_eq!(
             build_terminal_tail_plan(build_input(4, mixed, asset())),
             Err(HlsTerminalTailCompatibility::InvalidLeaseRoute)
@@ -2410,14 +2418,14 @@ mod tests {
     #[test]
     fn unsupported_key_format_cannot_reset_to_clear_asset() {
         let mut base = manifest();
-        base.active_encryption = Some(HlsEncryptionSignature {
+        base.active_encryption = Some(Arc::new(HlsEncryptionSignature {
             method: "SAMPLE-AES".into(),
             key_uri: Some("/keys/drm.key".into()),
             iv: None,
             key_format: Some("com.example.drm".into()),
             key_format_versions: None,
             can_reset_to_clear: true,
-        });
+        }));
         let asset = asset();
 
         assert_eq!(
@@ -2431,7 +2439,7 @@ mod tests {
         let asset = asset();
         let mut unsafe_uri = manifest();
         let mut encryption = resettable_aes128_encryption();
-        encryption.key_uri = Some("/key\"\n#EXT-X-ENDLIST".into());
+        Arc::make_mut(&mut encryption).key_uri = Some("/key\"\n#EXT-X-ENDLIST".into());
         unsafe_uri.active_encryption = Some(encryption);
         assert_eq!(
             compatibility(&unsafe_uri, &asset, Some(asset.track_signature())),
@@ -2440,7 +2448,7 @@ mod tests {
 
         let mut unsafe_iv = manifest();
         let mut encryption = resettable_aes128_encryption();
-        encryption.iv = Some("not-hex".into());
+        Arc::make_mut(&mut encryption).iv = Some("not-hex".into());
         unsafe_iv.active_encryption = Some(encryption);
         assert_eq!(
             compatibility(&unsafe_iv, &asset, Some(asset.track_signature())),

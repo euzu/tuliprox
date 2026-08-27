@@ -42,7 +42,10 @@ use crate::{
         ConfigInput, ConfigInputFlags, ConfigProvider, ConfigTarget, InputSource, ProxyUserCredentials,
         ReverseProxyDisabledHeaderConfig,
     },
-    processing::parser::hls::{get_hls_session_token_and_url_from_token, rewrite_hls, RewriteHlsProps},
+    processing::parser::hls::{
+        get_hls_session_token_and_url_from_token, origin_manifest::HlsManifestWindowPolicy, rewrite_hls,
+        RewriteHlsProps,
+    },
     repository::{
         load_input_live_bitrate_bps, m3u_get_item_for_stream_id, persist_input_live_bitrate_bps, storage_const,
         xtream_get_item_for_stream_id, LiveBitratePersistenceOutcome,
@@ -93,23 +96,25 @@ use tuliprox_hls::{
         HlsAccessLeaseTiming, HlsAccessLeaseTouch, HlsAccessLeaseValidationError, HlsAccountBindingProtection,
         HlsAccountOverlapTiming, HlsAvailabilityReevaluationObservation, HlsAvailabilityReevaluationRegistration,
         HlsBandwidthPersistenceOutcome, HlsBoundAccountAcquireErrorKind, HlsCacheResponseContext,
-        HlsCachedManifestOptions, HlsCommittedManifestBody, HlsEffectiveOriginAcquirePolicy,
-        HlsLeaseManifestSnapshotInput, HlsLeasePlaybackMode, HlsLeaseStartupAdmissionState, HlsLogIdentity,
-        HlsManifestAcceptanceDirective, HlsManifestAcceptanceEvaluationOutcome, HlsManifestCommitRequirement,
-        HlsMapFile, HlsMasterBandwidth, HlsMasterBandwidthSelection, HlsMediaActivityCommitOutcome,
-        HlsMediaActivityMarker, HlsMediaLeaseIdentity, HlsOriginAccountBinding, HlsOriginAccountBindingMode,
-        HlsOriginAccountDetachedReason, HlsOriginAccountStatus, HlsOriginIoContext, HlsOriginRefreshTriggerOutcome,
-        HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginSource, HlsOriginSourceKind,
-        HlsOriginWorkClass, HlsPlaybackFamilyKey, HlsPostRefreshRuntime, HlsQosMeterInit, HlsQosRuntimeConfig,
-        HlsResourceFetchAttempt, HlsResourceServeFailure, HlsResourceServeOutcome, HlsRuntimeCustomTailOutcome,
-        HlsRuntimeCustomTailReason, HlsRuntimeCustomTailRequest, HlsSegmentFile, HlsSession, HlsSessionHandle,
-        HlsSessionKey, HlsSessionMode, HlsSessionStoreOutcome, HlsSingleVariantMasterPlaylist,
-        HlsTerminalFailedClosedReason, HlsTerminalSegmentPath, HlsTransientCacheCommitContext,
-        HlsTransientDecodedOriginResponse, HlsTransientDirectResponseContext, HlsTransientObjectCacheAction,
-        HlsTransientObjectFetchFailure, HlsTransientObjectFetchFinalizer, HlsTransientOriginCacheFetchRequest,
-        HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard, LiveHlsOriginEntry, OriginRefreshRequest,
+        HlsCachedManifestOptions, HlsCommittedManifestBody, HlsEffectiveOriginAcquirePolicy, HlsLeaseManifestSnapshot,
+        HlsLeaseManifestSnapshotInput, HlsLeaseManifestUriMaterialization, HlsLeasePlaybackMode,
+        HlsLeaseStartupAdmissionState, HlsLogIdentity, HlsManifestAcceptanceDirective,
+        HlsManifestAcceptanceEvaluationOutcome, HlsManifestCommitIdentity, HlsManifestCommitRequirement,
+        HlsManifestLimitViolation, HlsMapFile, HlsMasterBandwidth, HlsMasterBandwidthSelection,
+        HlsMediaActivityCommitOutcome, HlsMediaActivityMarker, HlsMediaLeaseIdentity, HlsOriginAccountBinding,
+        HlsOriginAccountBindingMode, HlsOriginAccountDetachedReason, HlsOriginAccountStatus, HlsOriginIoContext,
+        HlsOriginRefreshTriggerOutcome, HlsOriginResourceClients, HlsOriginResourceFetchError, HlsOriginSource,
+        HlsOriginSourceKind, HlsOriginWorkClass, HlsPlaybackFamilyKey, HlsPostRefreshRuntime,
+        HlsPublishedTransientResourceIds, HlsQosMeterInit, HlsQosRuntimeConfig, HlsResourceFetchAttempt,
+        HlsResourceServeFailure, HlsResourceServeOutcome, HlsRuntimeCustomTailOutcome, HlsRuntimeCustomTailReason,
+        HlsRuntimeCustomTailRequest, HlsSegmentFile, HlsSession, HlsSessionHandle, HlsSessionKey, HlsSessionMode,
+        HlsSessionStoreOutcome, HlsSingleVariantMasterPlaylist, HlsTerminalFailedClosedReason, HlsTerminalSegmentPath,
+        HlsTransientCacheCommitContext, HlsTransientDecodedOriginResponse, HlsTransientDirectResponseContext,
+        HlsTransientManifestTemplate, HlsTransientObjectCacheAction, HlsTransientObjectFetchFailure,
+        HlsTransientObjectFetchFinalizer, HlsTransientOriginCacheFetchRequest, HlsTransientOriginFetchRequest,
+        HlsTransientOriginIoGuard, HlsTransientResourceLeaseContext, LiveHlsOriginEntry, OriginRefreshRequest,
         OriginSegmentKey, ProxySessionId, RetryPolicy, SegmentCacheKey, SegmentCacheStatus, SegmentDemandFetchOutcome,
-        SegmentEntry, SegmentFetchContext, SegmentFetchPolicy, TransientObjectFetchToken,
+        SegmentEntry, SegmentFetchContext, SegmentFetchPolicy, TransientManifestGeneration, TransientObjectFetchToken,
         TransientObjectUnavailableState, TransientPassthroughState, TransientResourceFile, TransientResourceId,
         TransientResourceRef, HLS_ACCESS_LEASE_ID_PLACEHOLDER, HLS_PROVISIONING_GAP_ORIGIN_EPOCH,
         HLS_PROVISIONING_ORIGIN_EPOCH, HLS_PROVISIONING_SEGMENT_DURATION_MS, HLS_PROVISIONING_TARGET_DURATION_SECS,
@@ -445,14 +450,15 @@ fn materialize_shared_hls_access_manifest(
     lease_id: &HlsAccessLeaseId,
     lease_state: HlsAccessLeaseState,
     strip: &crate::model::StripConfig,
+    window_policy: HlsManifestWindowPolicy,
     mode: &'static str,
     server_path: Option<&str>,
 ) -> HlsMaterializedSharedManifest {
     let (response_body, initial_strip_outcome) = if hls_access_manifest_uses_startup_view(lease_state) {
-        let view = materialize_initial_hls_strip_view(hls_content, strip);
+        let view = materialize_initial_hls_strip_view(hls_content, strip, window_policy);
         (view.body, Some(view.outcome))
     } else {
-        (hls_content.to_string(), None)
+        (Cow::Borrowed(hls_content), None)
     };
     HlsMaterializedSharedManifest {
         body: materialize_hls_access_manifest(&response_body, lease_id, server_path),
@@ -1245,6 +1251,7 @@ async fn hls_proxy_resource(
         headers: &headers,
         access_context: &access_context,
         lease_identity,
+        published_resource_ids: lease.published_transient_resource_ids().clone(),
         resource_file,
         range_header: headers.get(header::RANGE).cloned(),
         now_ms,
@@ -1265,6 +1272,7 @@ struct HlsResourceEndpointContext<'a> {
     headers: &'a HeaderMap,
     access_context: &'a HlsAccessContext,
     lease_identity: HlsMediaLeaseIdentity,
+    published_resource_ids: HlsPublishedTransientResourceIds,
     resource_file: TransientResourceFile,
     range_header: Option<HeaderValue>,
     now_ms: u64,
@@ -1327,6 +1335,11 @@ async fn serve_hls_live_transient_resource(context: HlsResourceEndpointContext<'
     let Ok(cache_resolution) = resolve_hls_transient_object_cache_action(
         context.session,
         &context.access_context.proxy_session_id,
+        HlsTransientResourceLeaseContext {
+            access_lease_id: &context.access_context.lease_id,
+            lease_issued_at_ms: context.lease_identity.lease_issued_at_ms(),
+            published_resource_ids: &context.published_resource_ids,
+        },
         &context.resource_file,
         context.range_header.as_ref(),
         context.now_ms,
@@ -6394,10 +6407,19 @@ async fn prepare_hls_transient_origin_io_for_authorized_resource_work(
 }
 
 struct HlsCachedManifestRead {
-    transient_body: Option<(String, u64)>,
+    transient_body: Option<HlsCachedTransientManifestRead>,
     rendered_body: Option<String>,
     should_wait: bool,
     wait_for_initial_commit: bool,
+}
+
+struct HlsCachedTransientManifestRead {
+    body: Arc<str>,
+    template: Arc<HlsTransientManifestTemplate>,
+    source_commit_identity: HlsManifestCommitIdentity,
+    window_policy: HlsManifestWindowPolicy,
+    finalized_manifest_generation: Option<TransientManifestGeneration>,
+    published_resource_ids: HlsPublishedTransientResourceIds,
 }
 
 async fn read_hls_cached_manifest(
@@ -6410,9 +6432,19 @@ async fn read_hls_cached_manifest(
     let should_wait = session.initial_manifest_commit_work_pending();
     let committed_body = hls_committed_manifest_body_for_request(&session, options, started_at_ms, now_ms);
     let (transient_body, rendered_body) = match committed_body {
-        Some(HlsCommittedManifestBody::Transient(body)) => {
-            (Some((body, session.transient.last_manifest_rendered_at_ms.unwrap_or(started_at_ms))), None)
-        }
+        Some(HlsCommittedManifestBody::Transient(body)) => (
+            session.transient.last_manifest_template().zip(session.transient.last_manifest_commit_identity()).map(
+                |(template, source_commit_identity)| HlsCachedTransientManifestRead {
+                    body,
+                    template,
+                    source_commit_identity,
+                    window_policy: session.transient.last_manifest_window_policy(),
+                    finalized_manifest_generation: session.transient.current_finalized_manifest_generation(),
+                    published_resource_ids: session.transient.last_manifest_published_resource_ids(),
+                },
+            ),
+            None,
+        ),
         Some(HlsCommittedManifestBody::Normal(body)) => (None, Some(body)),
         None => (None, None),
     };
@@ -6460,12 +6492,18 @@ impl HlsCachedManifestViewContext<'_> {
         }
     }
 
-    fn materialize(&self, body: &str, mode: &'static str) -> HlsMaterializedSharedManifest {
+    fn materialize(
+        &self,
+        body: &str,
+        mode: &'static str,
+        window_policy: HlsManifestWindowPolicy,
+    ) -> HlsMaterializedSharedManifest {
         materialize_shared_hls_access_manifest(
             body,
             self.access_lease_id,
             self.access_lease_state,
             self.strip,
+            window_policy,
             mode,
             self.server_path,
         )
@@ -6566,6 +6604,34 @@ fn hls_cached_manifest_temporarily_unavailable() -> axum::response::Response {
     hls_temporary_resource_unavailable_response(HLS_TEMPORARY_RESOURCE_RETRY_AFTER_MS)
 }
 
+fn observe_hls_lease_manifest_snapshot_derivation(
+    app_state: &AppState,
+    proxy_session_id: &ProxySessionId,
+    access_lease_id: &HlsAccessLeaseId,
+    derivation: Result<Option<HlsLeaseManifestSnapshot>, HlsManifestLimitViolation>,
+) -> Result<Option<HlsLeaseManifestSnapshot>, ()> {
+    match derivation {
+        Ok(snapshot) => {
+            if let Some(snapshot) = snapshot.as_ref() {
+                app_state.hls_proxy.metrics().record_lease_snapshot_segments(snapshot.visible_segments.len());
+            }
+            Ok(snapshot)
+        }
+        Err(violation) => {
+            app_state.hls_proxy.metrics().record_manifest_limit_rejection();
+            warn!(
+                "HLS lease manifest snapshot rejected: proxy_session={} lease={} reason=manifest-representation-limit kind={} actual={} limit={}",
+                safe_proxy_session_id(proxy_session_id),
+                safe_hls_access_lease_id(access_lease_id),
+                violation.kind.as_log_value(),
+                violation.actual,
+                violation.limit
+            );
+            Err(())
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn try_hls_cached_manifest_response(
     app_state: &Arc<AppState>,
@@ -6598,34 +6664,67 @@ async fn try_hls_cached_manifest_response(
     loop {
         let cached = read_hls_cached_manifest(session, options, started_at_ms).await;
         if !cached.wait_for_initial_commit {
-            let prepared = if let Some((body, source_rendered_at_ms)) = cached.transient_body {
-                let materialized = view.materialize(&body, "transient");
+            let prepared = if let Some(transient) = cached.transient_body {
+                let materialized = view.materialize(&transient.body, "transient", transient.window_policy);
+                let published_resource_ids = if transient.window_policy.preserves_full_manifest() {
+                    transient.published_resource_ids.clone()
+                } else {
+                    HlsPublishedTransientResourceIds::from_manifest_body(&materialized.body)
+                };
                 let delivered_at_ms = current_time_millis();
-                let snapshot = derive_hls_lease_manifest_snapshot(
-                    &HlsLeaseManifestSnapshotInput::TransientPassthrough {
+                let snapshot_input = if transient.window_policy.preserves_full_manifest() {
+                    HlsLeaseManifestSnapshotInput::TransientPassthroughTemplate {
+                        template: &transient.template,
+                        source_commit_identity: transient.source_commit_identity,
+                        uri_materialization: HlsLeaseManifestUriMaterialization::new(
+                            access_lease_id,
+                            normalize_hls_proxy_public_path_prefix(server_path).map(Arc::from),
+                        ),
+                        finalized_manifest_generation: transient.finalized_manifest_generation,
+                    }
+                } else {
+                    HlsLeaseManifestSnapshotInput::TransientPassthrough {
                         materialized_body: &materialized.body,
-                        source_rendered_at_ms,
-                    },
-                    delivered_at_ms,
+                        source_commit_identity: transient.source_commit_identity,
+                        finalized_manifest_generation: transient.finalized_manifest_generation,
+                    }
+                };
+                let snapshot = observe_hls_lease_manifest_snapshot_derivation(
+                    app_state,
+                    &proxy_session_id,
+                    access_lease_id,
+                    derive_hls_lease_manifest_snapshot(&snapshot_input, delivered_at_ms),
                 );
+                let Ok(snapshot) = snapshot else {
+                    return Some(hls_cached_manifest_temporarily_unavailable());
+                };
                 let Some(snapshot) = snapshot else {
                     return Some(hls_cached_manifest_temporarily_unavailable());
                 };
-                Some((materialized, snapshot, delivered_at_ms))
+                Some((materialized, snapshot, published_resource_ids, delivered_at_ms))
             } else if let Some(body) = cached.rendered_body {
-                let materialized = view.materialize(&body, "normal");
+                let materialized = view.materialize(&body, "normal", HlsManifestWindowPolicy::ApplyLiveWindow);
+                let published_resource_ids = HlsPublishedTransientResourceIds::from_manifest_body(&materialized.body);
                 let delivered_at_ms = current_time_millis();
                 let snapshot = {
                     let session = session.read().await;
-                    derive_hls_lease_manifest_snapshot(
-                        &HlsLeaseManifestSnapshotInput::NormalCacheTimeline {
-                            session: &session,
-                            committed_body: &body,
-                            materialized_body: &materialized.body,
-                            stripped_tail_segments: stripped_tail_segments(&materialized),
-                        },
-                        delivered_at_ms,
+                    observe_hls_lease_manifest_snapshot_derivation(
+                        app_state,
+                        &proxy_session_id,
+                        access_lease_id,
+                        derive_hls_lease_manifest_snapshot(
+                            &HlsLeaseManifestSnapshotInput::NormalCacheTimeline {
+                                session: &session,
+                                committed_body: &body,
+                                materialized_body: &materialized.body,
+                                stripped_tail_segments: stripped_tail_segments(&materialized),
+                            },
+                            delivered_at_ms,
+                        ),
                     )
+                };
+                let Ok(snapshot) = snapshot else {
+                    return Some(hls_cached_manifest_temporarily_unavailable());
                 };
                 let Some(snapshot) = snapshot else {
                     if access_lease_state != HlsAccessLeaseState::Pending {
@@ -6636,11 +6735,11 @@ async fn try_hls_cached_manifest_response(
                     }
                     return Some(hls_cached_manifest_temporarily_unavailable());
                 };
-                Some((materialized, snapshot, delivered_at_ms))
+                Some((materialized, snapshot, published_resource_ids, delivered_at_ms))
             } else {
                 None
             };
-            if let Some((materialized, snapshot, delivered_at_ms)) = prepared {
+            if let Some((materialized, snapshot, published_resource_ids, delivered_at_ms)) = prepared {
                 if access_lease_state == HlsAccessLeaseState::Pending
                     && !hls_startup_admission_allows_snapshot(&app_state.hls_ctx(), session, &snapshot, delivered_at_ms)
                         .await
@@ -6654,11 +6753,12 @@ async fn try_hls_cached_manifest_response(
                 let admission_at_ms = current_time_millis();
                 let outcome = app_state
                     .hls_proxy
-                    .commit_access_lease_manifest_publication(
+                    .commit_access_lease_manifest_publication_with_resources(
                         access_lease_id,
                         &proxy_session_id,
                         publication_guard,
                         snapshot,
+                        published_resource_ids,
                         admission_at_ms,
                     )
                     .await;
@@ -7971,24 +8071,25 @@ mod tests {
             HlsEffectiveOriginAcquirePolicy, HlsFreshManifestRequiredReason, HlsLeaseManifestSegment,
             HlsLeaseManifestSnapshot, HlsLeasePlaybackMode, HlsLifecycleEvent, HlsLifecycleEventKey,
             HlsManifestAcceptanceDirective, HlsManifestAcceptanceEvaluationOutcome,
-            HlsManifestAcceptanceExhaustionReason, HlsManifestAcceptanceTrigger, HlsManifestCommitRequirement,
-            HlsManifestDeliveryMode, HlsManifestSourceRenderMarker, HlsMapSignature, HlsMediaContainer,
+            HlsManifestAcceptanceExhaustionReason, HlsManifestAcceptanceTrigger, HlsManifestCommitIdentity,
+            HlsManifestCommitRequirement, HlsManifestDeliveryMode, HlsMapSignature, HlsMediaContainer,
             HlsObservedRecoveryLatency, HlsOperationTimeoutMs, HlsOriginAccountBinding, HlsOriginAccountBindingMode,
             HlsOriginAccountDetachedReason, HlsOriginIoContext, HlsOriginPathCondition, HlsOriginSource,
             HlsOriginSourceKind, HlsPlaybackFamilyKey, HlsPreparedTerminalBundleState, HlsProxyManager,
-            HlsRecoveryEtaMs, HlsRecoveryTimingPolicy, HlsRecoveryWorkload, HlsRuntimeCustomTailAssetIdentity,
-            HlsRuntimeCustomTailReason, HlsSegmentFile, HlsSession, HlsSessionHandle, HlsSessionKey, HlsSessionMode,
-            HlsSessionStoreOutcome, HlsTerminalAssetIdentity, HlsTerminalBaseMediaState, HlsTerminalBaseProtection,
-            HlsTerminalBaseSegmentAvailability, HlsTerminalFailedClosedReason, HlsTerminalMediaAsset,
-            HlsTerminalMediaPreparationState, HlsTerminalResolution, HlsTerminalSegmentPath, HlsTerminalTailBuildInput,
-            HlsTerminalTailCompatibility, HlsTerminalTailGeneration, HlsTerminalTailPlan, HlsTerminalTailProtection,
-            HlsTransitionMarginMs, LiveHlsOriginEntry, ManualPlaylistUpdateRequest, MapCacheStatus, MapEntry,
-            MetadataUpdateManager, OriginMapKey, OriginRefreshRequest, OriginSegmentFetchRef, OriginSegmentKey,
-            PlaybackLifecycle, PlaylistStorageState, ProviderConfig as RuntimeProviderConfig, ProviderConfigConnection,
-            ProxyMapId, ProxySessionId, RenderedManifest, RetryPolicy, SegmentCacheKey, SegmentCacheStatus,
-            SegmentEntry, SegmentFetchPriority, SharedStreamManager, TransientObjectCacheKey,
-            TransientObjectCacheStatus, TransientResourceId, TransientResourceKind, TransientResourceRef,
-            TransportStreamBuffer, UpdateGuard, UserSession, HLS_TERMINAL_TAIL_SEGMENT_COUNT,
+            HlsPublishedTransientResourceIds, HlsRecoveryEtaMs, HlsRecoveryTimingPolicy, HlsRecoveryWorkload,
+            HlsRuntimeCustomTailAssetIdentity, HlsRuntimeCustomTailReason, HlsSegmentFile, HlsSession,
+            HlsSessionHandle, HlsSessionKey, HlsSessionMode, HlsSessionStoreOutcome, HlsTerminalAssetIdentity,
+            HlsTerminalBaseMediaState, HlsTerminalBaseProtection, HlsTerminalBaseSegmentAvailability,
+            HlsTerminalFailedClosedReason, HlsTerminalMediaAsset, HlsTerminalMediaPreparationState,
+            HlsTerminalResolution, HlsTerminalSegmentPath, HlsTerminalTailBuildInput, HlsTerminalTailCompatibility,
+            HlsTerminalTailGeneration, HlsTerminalTailPlan, HlsTerminalTailProtection, HlsTransitionMarginMs,
+            LiveHlsOriginEntry, ManualPlaylistUpdateRequest, MapCacheStatus, MapEntry, MetadataUpdateManager,
+            OriginMapKey, OriginRefreshRequest, OriginSegmentFetchRef, OriginSegmentKey, PlaybackLifecycle,
+            PlaylistStorageState, ProviderConfig as RuntimeProviderConfig, ProviderConfigConnection, ProxyMapId,
+            ProxySessionId, RenderedManifest, RetryPolicy, SegmentCacheKey, SegmentCacheStatus, SegmentEntry,
+            SegmentFetchPriority, SharedStreamManager, TransientObjectCacheKey, TransientObjectCacheStatus,
+            TransientResourceId, TransientResourceKind, TransientResourceRef, TransportStreamBuffer, UpdateGuard,
+            UserSession, HLS_TERMINAL_TAIL_SEGMENT_COUNT,
         },
         auth::Fingerprint,
         model::{
@@ -8635,7 +8736,9 @@ mod tests {
 
         lease.last_manifest_snapshot = Some(HlsLeaseManifestSnapshot {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-            source_render_marker: HlsManifestSourceRenderMarker::new(1_500),
+            source_commit_identity: HlsManifestCommitIdentity::new(1_500),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
             snapshot_generation: 1,
             delivered_at_ms: 1_500,
             first_proxy_seq: 0,
@@ -8714,7 +8817,9 @@ mod tests {
         lease.state = HlsAccessLeaseState::Activated;
         lease.last_manifest_snapshot = Some(HlsLeaseManifestSnapshot {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-            source_render_marker: HlsManifestSourceRenderMarker::new(1),
+            source_commit_identity: HlsManifestCommitIdentity::new(1),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
             snapshot_generation: 1,
             delivered_at_ms: 1_000,
             first_proxy_seq: 0,
@@ -8722,7 +8827,7 @@ mod tests {
             visible_segments: Arc::from([HlsLeaseManifestSegment {
                 proxy_seq: 0,
                 duration_ms: 4_000,
-                uri: "000000.ts".to_string(),
+                uri: "000000.ts".to_string().into(),
                 discontinuity_before: false,
                 map_ref_ready: true,
                 encryption: None,
@@ -10324,7 +10429,9 @@ mod tests {
         };
         let snapshot = HlsLeaseManifestSnapshot {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-            source_render_marker: HlsManifestSourceRenderMarker::new(now_ms),
+            source_commit_identity: HlsManifestCommitIdentity::new(now_ms),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
             snapshot_generation: 0,
             delivered_at_ms: now_ms,
             first_proxy_seq: base_proxy_seq,
@@ -10332,7 +10439,8 @@ mod tests {
             visible_segments: Arc::from([HlsLeaseManifestSegment {
                 proxy_seq: base_proxy_seq,
                 duration_ms,
-                uri: format!("/iptv/hls/shared/live/{}/{}/{base_proxy_seq:06}.m4s", proxy_session_id.0, lease_id.0),
+                uri: format!("/iptv/hls/shared/live/{}/{}/{base_proxy_seq:06}.m4s", proxy_session_id.0, lease_id.0)
+                    .into(),
                 discontinuity_before: false,
                 map_ref_ready: true,
                 encryption: None,
@@ -11982,6 +12090,32 @@ mod tests {
     }
 
     fn test_app_state() -> Arc<AppState> { test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::new())) }
+
+    #[tokio::test]
+    async fn lease_snapshot_limit_rejection_is_controlled_and_observable() {
+        let app_state = test_app_state();
+        let proxy_session_id = ProxySessionId("snapshot-limit-session".to_string());
+        let access_lease_id = HlsAccessLeaseId("snapshot-limit-lease".to_string());
+        let oversized_uri = "x".repeat(MAX_HLS_MANIFEST_BYTES + 1);
+        let body = format!("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\n{oversized_uri}\n");
+        let derivation = super::derive_hls_lease_manifest_snapshot(
+            &super::HlsLeaseManifestSnapshotInput::TransientPassthrough {
+                materialized_body: &body,
+                source_commit_identity: HlsManifestCommitIdentity::committed(1, 1),
+                finalized_manifest_generation: None,
+            },
+            2,
+        );
+
+        assert!(super::observe_hls_lease_manifest_snapshot_derivation(
+            &app_state,
+            &proxy_session_id,
+            &access_lease_id,
+            derivation,
+        )
+        .is_err());
+        assert_eq!(app_state.hls_proxy.metrics().snapshot().manifest_limit_rejections, 1);
+    }
 
     fn test_beast_hls_proxy(cache_path: &std::path::Path) -> Arc<HlsProxyManager> {
         let config = HlsCacheConfig::from(&HlsCacheConfigDto {
@@ -16652,6 +16786,7 @@ mod tests {
                 target_duration_ms: 4_000,
                 segment_proxy_seqs: vec![123],
             });
+            record_test_normal_manifest_commit(&mut session, rendered_at_ms);
             ProxySessionId(proxy_session_id)
         };
         (session, proxy_session_id)
@@ -16760,6 +16895,13 @@ mod tests {
         store_normal_manifest_body_range(session, body, 0, 6, rendered_at_ms);
     }
 
+    fn record_test_normal_manifest_commit(session: &mut HlsSession, rendered_at_ms: u64) {
+        let identity = session
+            .next_manifest_commit_identity(rendered_at_ms)
+            .expect("test manifest commit generation remains available");
+        session.record_normal_manifest_commit_identity(identity);
+    }
+
     fn store_normal_manifest_body_range(
         session: &mut HlsSession,
         body: String,
@@ -16792,6 +16934,7 @@ mod tests {
             target_duration_ms: 10_000,
             segment_proxy_seqs: (first_proxy_seq..=last_proxy_seq).collect(),
         });
+        record_test_normal_manifest_commit(session, rendered_at_ms);
     }
 
     async fn try_test_hls_cached_manifest_response(
@@ -16852,6 +16995,7 @@ mod tests {
                     &access_lease_id,
                     HlsAccessLeaseState::Pending,
                     &strip,
+                    super::HlsManifestWindowPolicy::ApplyLiveWindow,
                     "normal",
                     None,
                 )
@@ -16896,6 +17040,7 @@ mod tests {
             &access_lease_id,
             HlsAccessLeaseState::Pending,
             &StripConfig { mode: HlsStripMode::Segments, value: 0 },
+            super::HlsManifestWindowPolicy::ApplyLiveWindow,
             "normal",
             None,
         );
@@ -16919,6 +17064,68 @@ mod tests {
     }
 
     #[test]
+    fn pending_playlist_type_manifest_ignores_three_to_six_window_and_strip() {
+        let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
+        for segment_count in [2, 8] {
+            let body = transient_manifest_body_from_sequence("proxy-session", 100, segment_count).replacen(
+                "#EXTM3U\n",
+                "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n",
+                1,
+            );
+            let materialized = super::materialize_shared_hls_access_manifest(
+                &body,
+                &access_lease_id,
+                HlsAccessLeaseState::Pending,
+                &StripConfig { mode: HlsStripMode::Segments, value: 5 },
+                super::HlsManifestWindowPolicy::PreserveFullManifest,
+                "transient",
+                None,
+            );
+
+            assert_eq!(media_uri_count(&materialized.body), segment_count);
+            assert!(materialized.body.contains("#EXT-X-PLAYLIST-TYPE:EVENT"));
+            assert!(!materialized.body.contains(crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER));
+            assert_eq!(
+                materialized.initial_strip_outcome,
+                Some(super::HlsInitialStripOutcome::Skipped {
+                    reason: super::HlsInitialStripSkipReason::ManifestSemanticsPreserveFullManifest,
+                    visible_segments: segment_count,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn pending_endlist_only_manifest_keeps_complete_body_despite_strip() {
+        let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
+        let mut body = transient_manifest_body_from_sequence("proxy-session", 100, 8);
+        body.push_str("#EXT-X-ENDLIST\n");
+        let window_policy =
+            crate::processing::parser::hls::origin_manifest::parse_manifest_semantics(&body).window_policy();
+        assert_eq!(window_policy, super::HlsManifestWindowPolicy::PreserveFullManifest);
+
+        let materialized = super::materialize_shared_hls_access_manifest(
+            &body,
+            &access_lease_id,
+            HlsAccessLeaseState::Pending,
+            &StripConfig { mode: HlsStripMode::Segments, value: 5 },
+            window_policy,
+            "transient",
+            None,
+        );
+
+        assert_eq!(media_uri_count(&materialized.body), 8);
+        assert!(materialized.body.contains("#EXT-X-ENDLIST"));
+        assert_eq!(
+            materialized.initial_strip_outcome,
+            Some(super::HlsInitialStripOutcome::Skipped {
+                reason: super::HlsInitialStripSkipReason::ManifestSemanticsPreserveFullManifest,
+                visible_segments: 8,
+            })
+        );
+    }
+
+    #[test]
     fn committed_activated_manifest_yields_one_lease_state_skip_diagnostic() {
         let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
         let materialized = super::materialize_shared_hls_access_manifest(
@@ -16926,6 +17133,7 @@ mod tests {
             &access_lease_id,
             HlsAccessLeaseState::Activated,
             &StripConfig { mode: HlsStripMode::Segments, value: 3 },
+            super::HlsManifestWindowPolicy::ApplyLiveWindow,
             "normal",
             None,
         );
@@ -17018,7 +17226,9 @@ mod tests {
             .expect("test lease accepts publication");
         let snapshot = HlsLeaseManifestSnapshot {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-            source_render_marker: HlsManifestSourceRenderMarker::new(now_ms),
+            source_commit_identity: HlsManifestCommitIdentity::new(now_ms),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
             snapshot_generation: 0,
             delivered_at_ms: now_ms,
             first_proxy_seq: proxy_seq,
@@ -17026,7 +17236,7 @@ mod tests {
             visible_segments: Arc::from([HlsLeaseManifestSegment {
                 proxy_seq,
                 duration_ms,
-                uri: format!("/hls/shared/live/{}/{}/{proxy_seq:06}.ts", proxy_session_id.0, access_lease_id.0),
+                uri: format!("/hls/shared/live/{}/{}/{proxy_seq:06}.ts", proxy_session_id.0, access_lease_id.0).into(),
                 discontinuity_before: false,
                 map_ref_ready: true,
                 encryption: None,
@@ -17444,6 +17654,7 @@ mod tests {
                 target_duration_ms: 4_000,
                 segment_proxy_seqs: vec![100],
             });
+            record_test_normal_manifest_commit(&mut session, rendered_at_ms);
             session.origin_refresh.in_flight = false;
         });
         let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
@@ -17481,7 +17692,7 @@ mod tests {
             session.mode =
                 HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
             let proxy_session_id = session.proxy_session_id.0.clone();
-            session.transient.replace_manifest(transient_manifest_body(&proxy_session_id), 100);
+            session.transient.replace_manifest_with_semantics(transient_manifest_body(&proxy_session_id), 100, None);
             session.mark_authorized_media_access(super::current_time_millis());
             proxy_session_id
         };
@@ -17570,7 +17781,7 @@ mod tests {
                 proxy_session_id.0,
                 crate::api::model::HLS_ACCESS_LEASE_ID_PLACEHOLDER,
             );
-            session.transient.replace_manifest_with_validity(body, now_ms, 12_000);
+            session.transient.replace_manifest_with_semantics(body, now_ms, Some(12_000));
             session.mark_authorized_media_access(now_ms);
             (proxy_session_id, access_lease_id)
         };
@@ -17636,7 +17847,7 @@ mod tests {
             session.mode =
                 HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
             let proxy_session_id = session.proxy_session_id.0.clone();
-            session.transient.replace_manifest(transient_manifest_body(&proxy_session_id), 100);
+            session.transient.replace_manifest_with_semantics(transient_manifest_body(&proxy_session_id), 100, None);
             session.mark_authorized_media_access(super::current_time_millis());
             proxy_session_id
         };
@@ -17680,7 +17891,7 @@ mod tests {
             session.mode =
                 HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
             let proxy_session_id = session.proxy_session_id.0.clone();
-            session.transient.replace_manifest(transient_manifest_body(&proxy_session_id), 100);
+            session.transient.replace_manifest_with_semantics(transient_manifest_body(&proxy_session_id), 100, None);
             session.mark_authorized_media_access(super::current_time_millis().saturating_sub(16_000));
             proxy_session_id
         };
@@ -17719,10 +17930,10 @@ mod tests {
                 HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
             let proxy_session_id = session.proxy_session_id.0.clone();
             let rendered_at_ms = super::current_time_millis();
-            session.transient.replace_manifest_with_validity(
+            session.transient.replace_manifest_with_semantics(
                 transient_manifest_body(&proxy_session_id),
                 rendered_at_ms,
-                60_000,
+                Some(60_000),
             );
             proxy_session_id
         };
@@ -17757,10 +17968,10 @@ mod tests {
                 HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
             let proxy_session_id = session.proxy_session_id.0.clone();
             let rendered_at_ms = super::current_time_millis();
-            session.transient.replace_manifest_with_validity(
+            session.transient.replace_manifest_with_semantics(
                 transient_manifest_body(&proxy_session_id),
                 rendered_at_ms,
-                60_000,
+                Some(60_000),
             );
             proxy_session_id
         };
@@ -17798,7 +18009,7 @@ mod tests {
             session.mode =
                 HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
             let proxy_session_id = session.proxy_session_id.0.clone();
-            session.transient.replace_manifest(transient_manifest_body(&proxy_session_id), 100);
+            session.transient.replace_manifest_with_semantics(transient_manifest_body(&proxy_session_id), 100, None);
             session.mark_authorized_media_access(super::current_time_millis().saturating_sub(60_000));
             proxy_session_id
         };
@@ -17833,10 +18044,10 @@ mod tests {
             session.mode =
                 HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
             let proxy_session_id = session.proxy_session_id.clone();
-            session.transient.replace_manifest_with_validity(
+            session.transient.replace_manifest_with_semantics(
                 transient_manifest_body(&proxy_session_id.0),
                 now_ms.saturating_sub(1_000),
-                60_000,
+                Some(60_000),
             );
             session.mark_authorized_media_access(now_ms.saturating_sub(60_000));
             session.origin_account_binding = Some(HlsOriginAccountBinding::new(
@@ -17882,10 +18093,10 @@ mod tests {
             session.mode =
                 HlsSessionMode::TransientPassthrough { reason: crate::api::model::TransientPassthroughReason::ExtXKey };
             let proxy_session_id = session.proxy_session_id.clone();
-            session.transient.replace_manifest_with_validity(
+            session.transient.replace_manifest_with_semantics(
                 transient_manifest_body(&proxy_session_id.0),
                 now_ms.saturating_sub(60_000),
-                1_000,
+                Some(1_000),
             );
             session.mark_authorized_media_access(now_ms.saturating_sub(60_000));
             session.origin_account_binding = Some(HlsOriginAccountBinding::new(
@@ -17955,6 +18166,7 @@ mod tests {
                     target_duration_ms: 4_000,
                     segment_proxy_seqs: vec![100],
                 });
+            record_test_normal_manifest_commit(&mut session, rendered_at_ms);
             session.origin_refresh.in_flight = false;
         });
         let access_lease_id = HlsAccessLeaseId("access-lease".to_string());
@@ -17998,10 +18210,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             let mut session = session_for_commit.write().await;
             let rendered_at_ms = super::current_time_millis();
-            session.transient.replace_manifest_with_validity(
+            session.transient.replace_manifest_with_semantics(
                 transient_manifest_body(&proxy_session_for_body),
                 rendered_at_ms,
-                60_000,
+                Some(60_000),
             );
             session.origin_refresh.in_flight = false;
         });
@@ -18048,10 +18260,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             let mut session = session_for_commit.write().await;
             let rendered_at_ms = super::current_time_millis();
-            session.transient.replace_manifest_with_validity(
+            session.transient.replace_manifest_with_semantics(
                 transient_manifest_body(&proxy_session_for_body),
                 rendered_at_ms,
-                60_000,
+                Some(60_000),
             );
             session.origin_refresh.in_flight = false;
         });
@@ -18114,7 +18326,58 @@ mod tests {
 
     async fn hls_proxy_uri(app_state: &Arc<AppState>, proxy_session_id: &str, suffix: &str) -> String {
         let access_lease_id = grant_hls_proxy_lease(app_state, proxy_session_id).await;
-        format!("/hls/shared/live/{proxy_session_id}/{access_lease_id}/{suffix}")
+        let uri = format!("/hls/shared/live/{proxy_session_id}/{access_lease_id}/{suffix}");
+        if suffix.starts_with("r/") {
+            publish_test_transient_resource_membership(app_state, proxy_session_id, &access_lease_id, &uri).await;
+        }
+        uri
+    }
+
+    async fn publish_test_transient_resource_membership(
+        app_state: &Arc<AppState>,
+        proxy_session_id: &str,
+        access_lease_id: &str,
+        resource_uri: &str,
+    ) {
+        let proxy_session_id = ProxySessionId(proxy_session_id.to_string());
+        let access_lease_id = HlsAccessLeaseId(access_lease_id.to_string());
+        let now_ms = super::current_time_millis();
+        let publication = app_state
+            .hls_proxy
+            .prepare_access_lease_manifest_publication(&access_lease_id, &proxy_session_id, now_ms)
+            .await
+            .expect("test resource lease accepts manifest publication");
+        let snapshot = HlsLeaseManifestSnapshot {
+            delivery_mode: HlsManifestDeliveryMode::TransientPassthrough,
+            source_commit_identity: HlsManifestCommitIdentity::new(now_ms),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
+            snapshot_generation: 0,
+            delivered_at_ms: now_ms,
+            first_proxy_seq: 0,
+            last_proxy_seq: 0,
+            visible_segments: Arc::from([]),
+            discontinuity_sequence: 0,
+            target_duration_ms: 4_000,
+            playlist_duration_ms: 0,
+            last_visible_media_end_ms: 0,
+            active_map: None,
+            active_encryption: None,
+            container: HlsMediaContainer::MpegTs,
+        };
+        let published_resource_ids = HlsPublishedTransientResourceIds::from_manifest_body(resource_uri);
+        assert!(app_state
+            .hls_proxy
+            .commit_access_lease_manifest_publication_with_resources(
+                &access_lease_id,
+                &proxy_session_id,
+                publication,
+                snapshot,
+                published_resource_ids,
+                now_ms,
+            )
+            .await
+            .is_committed());
     }
 
     fn regression_origin_manifest(first_sequence: u64, segment_count: usize) -> Vec<u8> {
@@ -18321,7 +18584,9 @@ mod tests {
         let asset = snapshot_terminal_media_asset(&buffer).expect("terminal test asset is valid");
         let base_manifest = HlsLeaseManifestSnapshot {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-            source_render_marker: HlsManifestSourceRenderMarker::new(7),
+            source_commit_identity: HlsManifestCommitIdentity::new(7),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
             snapshot_generation: 7,
             delivered_at_ms: super::current_time_millis(),
             first_proxy_seq: base_proxy_seq,
@@ -18329,7 +18594,8 @@ mod tests {
             visible_segments: Arc::from([HlsLeaseManifestSegment {
                 proxy_seq: base_proxy_seq,
                 duration_ms: 4_000,
-                uri: format!("/iptv/hls/shared/live/{}/{}/{base_proxy_seq:06}.ts", proxy_session_id.0, lease_id.0),
+                uri: format!("/iptv/hls/shared/live/{}/{}/{base_proxy_seq:06}.ts", proxy_session_id.0, lease_id.0)
+                    .into(),
                 discontinuity_before: false,
                 map_ref_ready: true,
                 encryption: None,

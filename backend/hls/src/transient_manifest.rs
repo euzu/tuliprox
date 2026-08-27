@@ -7,7 +7,10 @@ use std::{
     time::Duration,
 };
 use tuliprox_core::{model::StripConfig, utils::format_hls_duration_ms};
-use tuliprox_parser::hls::{origin_manifest::parse_attribute_list, rewrite_hls_url};
+use tuliprox_parser::hls::{
+    origin_manifest::{parse_attribute_list, HlsManifestWindowPolicy},
+    rewrite_hls_url,
+};
 use url::Url;
 
 pub(super) const MIN_HLS_INITIAL_VISIBLE_SEGMENTS: usize = 3;
@@ -26,7 +29,7 @@ enum TransientKeyTransition {
     ConservativeEncrypted,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct TransientEncryptionState {
     identity_active: bool,
     other_active_formats: HashSet<String>,
@@ -61,6 +64,14 @@ impl TransientEncryptionState {
 pub struct TransientRewriteResult {
     pub body: String,
     pub resources: Vec<TransientResourceRef>,
+    pub checkpoint: TransientRewriteCheckpoint,
+    pub processed_line_count: usize,
+}
+
+/// Opaque semantic state needed to safely rewrite an append-only EVENT suffix.
+#[derive(Debug, Clone, Default)]
+pub struct TransientRewriteCheckpoint {
+    encryption_state: TransientEncryptionState,
 }
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -109,48 +120,104 @@ impl TransientManifestRewriter {
         ttl_ms: u64,
         options: TransientRewriteOptions,
     ) -> TransientRewriteResult {
-        let mut rewritten_body = String::with_capacity(body.len());
-        let mut resources = HashMap::<TransientResourceId, TransientResourceRef>::new();
-        let mut encryption_state = TransientEncryptionState::default();
-
-        {
-            let mut rewrite_context = TransientResourceRewriteContext {
-                final_manifest_url,
-                proxy_session_id,
-                reverse_proxy_rewrite_secret,
-                now_ms,
-                ttl_ms,
-                resources: &mut resources,
-            };
-            for part in body.split_inclusive('\n') {
-                let (line, line_ending) = split_line_ending(part);
-                if line.trim().starts_with("#EXT-X-KEY:") {
-                    encryption_state.apply_key_tag(line);
-                }
-                let rewritten_line = rewrite_context.rewrite_line(line, encryption_state.encrypted_media());
-                rewritten_body.push_str(&rewritten_line);
-                rewritten_body.push_str(line_ending);
-            }
-        }
-
-        if body.is_empty() {
-            return TransientRewriteResult { body: rewritten_body, resources: Vec::new() };
-        }
-
+        let mut result = rewrite_transient_fragment(
+            body,
+            final_manifest_url,
+            proxy_session_id,
+            reverse_proxy_rewrite_secret,
+            now_ms,
+            ttl_ms,
+            TransientRewriteCheckpoint::default(),
+        );
         if let Some(discontinuity_sequence) = options.handoff_discontinuity_sequence {
-            rewritten_body = apply_handoff_discontinuity_boundary(&rewritten_body, discontinuity_sequence);
+            result.body = apply_handoff_discontinuity_boundary(&result.body, discontinuity_sequence);
         }
+        result
+    }
 
-        TransientRewriteResult { body: rewritten_body, resources: resources.into_values().collect() }
+    /// Rewrites only a complete append-only suffix, continuing encryption state from the previous body.
+    pub fn rewrite_append(
+        suffix: &str,
+        final_manifest_url: &str,
+        proxy_session_id: &ProxySessionId,
+        reverse_proxy_rewrite_secret: &[u8],
+        now_ms: u64,
+        ttl_ms: u64,
+        checkpoint: TransientRewriteCheckpoint,
+    ) -> TransientRewriteResult {
+        rewrite_transient_fragment(
+            suffix,
+            final_manifest_url,
+            proxy_session_id,
+            reverse_proxy_rewrite_secret,
+            now_ms,
+            ttl_ms,
+            checkpoint,
+        )
+    }
+}
+
+fn rewrite_transient_fragment(
+    body: &str,
+    final_manifest_url: &str,
+    proxy_session_id: &ProxySessionId,
+    reverse_proxy_rewrite_secret: &[u8],
+    now_ms: u64,
+    ttl_ms: u64,
+    mut checkpoint: TransientRewriteCheckpoint,
+) -> TransientRewriteResult {
+    let mut rewritten_body = String::with_capacity(body.len());
+    let mut resources = HashMap::<TransientResourceId, TransientResourceRef>::new();
+    let mut processed_line_count = 0_usize;
+
+    {
+        let mut rewrite_context = TransientResourceRewriteContext {
+            final_manifest_url,
+            proxy_session_id,
+            reverse_proxy_rewrite_secret,
+            now_ms,
+            ttl_ms,
+            resources: &mut resources,
+        };
+        for part in body.split_inclusive('\n') {
+            processed_line_count = processed_line_count.saturating_add(1);
+            let (line, line_ending) = split_line_ending(part);
+            if line.trim().starts_with("#EXT-X-KEY:") {
+                checkpoint.encryption_state.apply_key_tag(line);
+            }
+            let rewritten_line = rewrite_context.rewrite_line(line, checkpoint.encryption_state.encrypted_media());
+            rewritten_body.push_str(&rewritten_line);
+            rewritten_body.push_str(line_ending);
+        }
+    }
+
+    if body.is_empty() {
+        return TransientRewriteResult {
+            body: rewritten_body,
+            resources: Vec::new(),
+            checkpoint,
+            processed_line_count,
+        };
+    }
+
+    TransientRewriteResult {
+        body: rewritten_body,
+        resources: resources.into_values().collect(),
+        checkpoint,
+        processed_line_count,
     }
 }
 
 pub fn materialize_transient_provisioning_handoff_view(
     origin_body: &str,
     previous_provisioning_body: Option<&str>,
+    window_policy: HlsManifestWindowPolicy,
     strip: &StripConfig,
     provisioning_segment_duration_ms: u64,
 ) -> Option<String> {
+    if window_policy.preserves_full_manifest() {
+        return None;
+    }
     let previous_provisioning_body = previous_provisioning_body?;
     // Provisioning segments are local clear MPEG-TS. Splicing them ahead of encrypted
     // origin media would either place clear bytes under an active key or require a
@@ -690,6 +757,7 @@ mod tests {
     use crate::{transient::build_transient_resource_id, ProxySessionId, TransientResourceKind};
     use shared::model::HlsStripMode;
     use tuliprox_core::model::StripConfig;
+    use tuliprox_parser::hls::origin_manifest::{parse_manifest_semantics, HlsManifestWindowPolicy};
 
     const BASE_URL: &str = "http://origin.example.com/live/final/index.m3u8";
 
@@ -746,6 +814,32 @@ mod tests {
 
         assert!(encrypted.encrypted_media);
         assert!(!clear.encrypted_media);
+    }
+
+    #[test]
+    fn append_rewrite_inherits_encryption_and_processes_only_the_suffix() {
+        let first = rewrite(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-PLAYLIST-TYPE:EVENT\n\
+             #EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:4,\nfirst.ts\n",
+        );
+        let appended = TransientManifestRewriter::rewrite_append(
+            "#EXTINF:4,\nsecond.ts\n",
+            BASE_URL,
+            &ProxySessionId("proxy-id".to_string()),
+            b"secret",
+            200,
+            1_000,
+            first.checkpoint,
+        );
+        let segment = appended
+            .resources
+            .iter()
+            .find(|resource| resource.resolved_origin_uri.ends_with("second.ts"))
+            .expect("appended segment");
+
+        assert!(segment.encrypted_media);
+        assert_eq!(appended.processed_line_count, 2);
+        assert_eq!(appended.resources.len(), 1);
     }
 
     #[test]
@@ -933,6 +1027,7 @@ mod tests {
         let body = materialize_transient_provisioning_handoff_view(
             &rewritten_origin.body,
             Some(previous),
+            HlsManifestWindowPolicy::ApplyLiveWindow,
             &strip_segments(2),
             2_000,
         )
@@ -964,6 +1059,7 @@ mod tests {
             let delivered = materialize_transient_provisioning_handoff_view(
                 &rewritten_origin.body,
                 Some(previous),
+                HlsManifestWindowPolicy::ApplyLiveWindow,
                 &strip_segments(2),
                 2_000,
             )
@@ -972,6 +1068,56 @@ mod tests {
             assert!(delivered.contains("#EXT-X-MEDIA-SEQUENCE:2455\n"));
             assert!(!delivered.contains("000000.ts?pseq=0"));
             assert!(delivered.contains("#EXT-X-DISCONTINUITY\n#EXTINF:4,"));
+        }
+    }
+
+    #[test]
+    fn playlist_type_policy_skips_provisioning_handoff_window() {
+        let previous = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2,\n/hls/shared/live/proxy-id/__hls_access_lease_id__/000000.ts?pseq=0\n";
+        let origin = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4,\n100.ts\n#EXTINF:4,\n101.ts\n#EXTINF:4,\n102.ts\n#EXTINF:4,\n103.ts\n#EXTINF:4,\n104.ts\n#EXTINF:4,\n105.ts\n#EXTINF:4,\n106.ts\n#EXTINF:4,\n107.ts\n";
+        let rewritten_origin = rewrite_with_handoff(origin);
+
+        let delivered = materialize_transient_provisioning_handoff_view(
+            &rewritten_origin.body,
+            Some(previous),
+            HlsManifestWindowPolicy::PreserveFullManifest,
+            &strip_segments(5),
+            2_000,
+        )
+        .unwrap_or_else(|| rewritten_origin.body.clone());
+
+        assert_eq!(delivered.matches("#EXTINF:").count(), 8);
+        assert!(delivered.contains("#EXT-X-PLAYLIST-TYPE:EVENT"));
+        assert!(!delivered.contains("000000.ts?pseq=0"));
+        assert_eq!(rewritten_origin.resources.len(), 8);
+        for resource in &rewritten_origin.resources {
+            assert!(delivered.contains(&resource.id.0));
+        }
+    }
+
+    #[test]
+    fn endlist_only_policy_skips_provisioning_handoff_window() {
+        let previous = "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2,\n/hls/shared/live/proxy-id/__hls_access_lease_id__/000000.ts?pseq=0\n";
+        let origin = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:100\n#EXTINF:4,\n100.ts\n#EXTINF:4,\n101.ts\n#EXTINF:4,\n102.ts\n#EXTINF:4,\n103.ts\n#EXTINF:4,\n104.ts\n#EXTINF:4,\n105.ts\n#EXTINF:4,\n106.ts\n#EXTINF:4,\n107.ts\n#EXT-X-ENDLIST\n";
+        let window_policy = parse_manifest_semantics(origin).window_policy();
+        assert_eq!(window_policy, HlsManifestWindowPolicy::PreserveFullManifest);
+        let rewritten_origin = rewrite_with_handoff(origin);
+
+        let delivered = materialize_transient_provisioning_handoff_view(
+            &rewritten_origin.body,
+            Some(previous),
+            window_policy,
+            &strip_segments(5),
+            2_000,
+        )
+        .unwrap_or_else(|| rewritten_origin.body.clone());
+
+        assert_eq!(delivered.matches("#EXTINF:").count(), 8);
+        assert!(delivered.contains("#EXT-X-ENDLIST"));
+        assert!(!delivered.contains("000000.ts?pseq=0"));
+        assert_eq!(rewritten_origin.resources.len(), 8);
+        for resource in &rewritten_origin.resources {
+            assert!(delivered.contains(&resource.id.0));
         }
     }
 

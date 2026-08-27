@@ -84,6 +84,7 @@ mod manager;
 mod manifest_acceptance;
 mod manifest_commit;
 mod manifest_fetch;
+mod manifest_limits;
 mod manifest_origin_binding;
 mod manifest_snapshot;
 mod map;
@@ -164,13 +165,17 @@ pub mod api {
             hls_manifest_commit_requirement, hls_should_wait_for_initial_manifest_commit, HlsCachedManifestOptions,
             HlsCommittedManifestBody,
         },
-        manifest_fetch::{LiveHlsOriginEntry, RetryPolicy, MAX_HLS_MANIFEST_BYTES},
-        manifest_snapshot::{derive_hls_lease_manifest_snapshot, HlsLeaseManifestSnapshotInput},
+        manifest_fetch::{LiveHlsOriginEntry, RetryPolicy},
+        manifest_limits::{HlsManifestLimitViolation, MAX_HLS_MANIFEST_BYTES},
+        manifest_snapshot::{
+            derive_hls_lease_manifest_snapshot, HlsLeaseManifestSnapshotInput, HlsTransientManifestTemplate,
+        },
         map::{MapCacheStatus, MapEntry, OriginMapKey, ProxyMapId},
         master_playlist::{
             HlsBandwidthPersistenceOutcome, HlsMasterBandwidth, HlsMasterBandwidthSelection,
             HlsSingleVariantMasterPlaylist,
         },
+        media_reserve::{HlsLeaseManifestSnapshot, HlsLeaseManifestUriMaterialization, HlsManifestCommitIdentity},
         observability::{
             log_hls_origin_content_coding, safe_hls_access_lease_id, safe_proxy_session_id, safe_session_key,
             safe_user_session_token, HlsLogIdentity, HlsOriginContentCodingObjectKind, HlsOriginContentCodingSource,
@@ -221,9 +226,9 @@ pub mod api {
             HLS_PROVISIONING_ORIGIN_EPOCH, HLS_PROVISIONING_SEGMENT_DURATION_MS, HLS_PROVISIONING_TARGET_DURATION_SECS,
         },
         transient::{
-            build_transient_resource_id, TransientObjectCacheStatus, TransientObjectFetchToken,
-            TransientObjectUnavailableState, TransientPassthroughState, TransientResourceId, TransientResourceKind,
-            TransientResourceRef,
+            build_transient_resource_id, HlsPublishedTransientResourceIds, TransientManifestGeneration,
+            TransientObjectCacheStatus, TransientObjectFetchToken, TransientObjectUnavailableState,
+            TransientPassthroughState, TransientResourceId, TransientResourceKind, TransientResourceRef,
         },
         transient_fetcher::{
             fetch_and_commit_hls_transient_origin_response_with_attempt_prepare,
@@ -233,7 +238,7 @@ pub mod api {
             resolve_hls_transient_object_cache_action, HlsTransientCacheCommitContext,
             HlsTransientDecodedOriginResponse, HlsTransientDirectResponseContext, HlsTransientObjectCacheAction,
             HlsTransientObjectFetchFailure, HlsTransientObjectFetchFinalizer, HlsTransientOriginCacheFetchRequest,
-            HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard,
+            HlsTransientOriginFetchRequest, HlsTransientOriginIoGuard, HlsTransientResourceLeaseContext,
         },
     };
 }
@@ -255,10 +260,7 @@ pub(crate) use self::{
         HlsSegmentCache, MapCacheKey, SegmentCacheKey, StagedCacheObject, TransientObjectCacheKey,
     },
     deadline::{hls_client_body_send_deadline, hls_object_body_deadline, refresh_hls_client_body_send_deadline},
-    gc::{
-        build_rewrite_secret_fingerprint, GarbageCollectionPolicy, GarbageCollectionReport, HlsGarbageCollector,
-        ProtectedSet,
-    },
+    gc::{build_rewrite_secret_fingerprint, GarbageCollectionPolicy, GarbageCollectionReport, HlsGarbageCollector},
     headers::{
         append_hls_provider_session_headers, extract_hls_provider_session_header_map, force_identity_without_range,
         hls_origin_headers_with_provider_session, sanitized_hls_origin_headers, scrub_hls_origin_headers,
@@ -325,6 +327,7 @@ pub(crate) use self::{
         HLS_PROVISIONING_TARGET_DURATION_SECS,
     },
     transient::{
+        HlsPublishedTransientResourceIds, TransientManifestGeneration, TransientManifestLeaseBinding,
         TransientObjectCacheStatus, TransientObjectFetchDecision, TransientObjectFetchToken,
         TransientObjectUnavailableState, TransientPassthroughState, TransientResourceId, TransientResourceKind,
         TransientResourceRef, TransientResourceStore,
@@ -339,7 +342,7 @@ pub use self::{
     manifest_acceptance::{HlsManifestAcceptanceExhaustionReason, HlsManifestAcceptanceTrigger},
     master_playlist::HlsBandwidthPersistenceState,
     media_reserve::{
-        HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestDeliveryMode, HlsManifestSourceRenderMarker,
+        HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestCommitIdentity, HlsManifestDeliveryMode,
     },
     origin_progress::HlsOriginPathCondition,
     prepared_terminal_bundle::{prepared_terminal_bundle_key, HlsPreparedTerminalBundleState},

@@ -32,6 +32,15 @@ pub struct HlsCacheMetrics {
     transient_switches: AtomicU64,
     manifest_rendered: AtomicU64,
     manifest_render_skipped: AtomicU64,
+    manifest_limit_rejections: AtomicU64,
+    transient_manifest_resources_high_water: AtomicU64,
+    transient_resource_entries_high_water: AtomicU64,
+    transient_generation_memberships_high_water: AtomicU64,
+    transient_estimated_metadata_bytes_high_water: AtomicU64,
+    transient_manifest_rewritten_bytes_high_water: AtomicU64,
+    transient_manifest_origin_uri_bytes_high_water: AtomicU64,
+    finalized_generations_retained_high_water: AtomicU64,
+    lease_snapshot_segments_high_water: AtomicU64,
     cache_hits: AtomicU64,
     cache_range_hits: AtomicU64,
     demand_fetch_started: AtomicU64,
@@ -59,6 +68,15 @@ pub struct HlsCacheMetricsSnapshot {
     pub transient_switches: u64,
     pub manifest_rendered: u64,
     pub manifest_render_skipped: u64,
+    pub manifest_limit_rejections: u64,
+    pub transient_manifest_resources_high_water: u64,
+    pub transient_resource_entries_high_water: u64,
+    pub transient_generation_memberships_high_water: u64,
+    pub transient_estimated_metadata_bytes_high_water: u64,
+    pub transient_manifest_rewritten_bytes_high_water: u64,
+    pub transient_manifest_origin_uri_bytes_high_water: u64,
+    pub finalized_generations_retained_high_water: u64,
+    pub lease_snapshot_segments_high_water: u64,
     pub cache_hits: u64,
     pub cache_range_hits: u64,
     pub demand_fetch_started: u64,
@@ -85,6 +103,31 @@ impl HlsCacheMetrics {
     pub fn record_transient_switch(&self) { increment(&self.transient_switches, 1); }
     pub fn record_manifest_rendered(&self) { increment(&self.manifest_rendered, 1); }
     pub fn record_manifest_render_skipped(&self) { increment(&self.manifest_render_skipped, 1); }
+    pub fn record_manifest_limit_rejection(&self) { increment(&self.manifest_limit_rejections, 1); }
+    pub fn record_transient_manifest_resources(&self, count: usize) {
+        record_high_water(&self.transient_manifest_resources_high_water, count);
+    }
+    pub fn record_transient_resource_entries(&self, count: usize) {
+        record_high_water(&self.transient_resource_entries_high_water, count);
+    }
+    pub fn record_transient_generation_memberships(&self, count: usize) {
+        record_high_water(&self.transient_generation_memberships_high_water, count);
+    }
+    pub fn record_transient_estimated_metadata_bytes(&self, count: usize) {
+        record_high_water(&self.transient_estimated_metadata_bytes_high_water, count);
+    }
+    pub fn record_transient_manifest_rewritten_bytes(&self, count: usize) {
+        record_high_water(&self.transient_manifest_rewritten_bytes_high_water, count);
+    }
+    pub fn record_transient_manifest_origin_uri_bytes(&self, count: usize) {
+        record_high_water(&self.transient_manifest_origin_uri_bytes_high_water, count);
+    }
+    pub fn record_finalized_generations_retained(&self, count: usize) {
+        record_high_water(&self.finalized_generations_retained_high_water, count);
+    }
+    pub fn record_lease_snapshot_segments(&self, count: usize) {
+        record_high_water(&self.lease_snapshot_segments_high_water, count);
+    }
     pub fn record_cache_hit(&self) { increment(&self.cache_hits, 1); }
     pub fn record_cache_range_hit(&self) { increment(&self.cache_range_hits, 1); }
     pub fn record_demand_fetch_started(&self) { increment(&self.demand_fetch_started, 1); }
@@ -111,6 +154,15 @@ impl HlsCacheMetrics {
             transient_switches: load(&self.transient_switches),
             manifest_rendered: load(&self.manifest_rendered),
             manifest_render_skipped: load(&self.manifest_render_skipped),
+            manifest_limit_rejections: load(&self.manifest_limit_rejections),
+            transient_manifest_resources_high_water: load(&self.transient_manifest_resources_high_water),
+            transient_resource_entries_high_water: load(&self.transient_resource_entries_high_water),
+            transient_generation_memberships_high_water: load(&self.transient_generation_memberships_high_water),
+            transient_estimated_metadata_bytes_high_water: load(&self.transient_estimated_metadata_bytes_high_water),
+            transient_manifest_rewritten_bytes_high_water: load(&self.transient_manifest_rewritten_bytes_high_water),
+            transient_manifest_origin_uri_bytes_high_water: load(&self.transient_manifest_origin_uri_bytes_high_water),
+            finalized_generations_retained_high_water: load(&self.finalized_generations_retained_high_water),
+            lease_snapshot_segments_high_water: load(&self.lease_snapshot_segments_high_water),
             cache_hits: load(&self.cache_hits),
             cache_range_hits: load(&self.cache_range_hits),
             demand_fetch_started: load(&self.demand_fetch_started),
@@ -311,6 +363,10 @@ fn increment(counter: &AtomicU64, count: u64) { counter.fetch_add(count, Orderin
 
 fn load(counter: &AtomicU64) -> u64 { counter.load(Ordering::Relaxed) }
 
+fn record_high_water(counter: &AtomicU64, value: usize) {
+    counter.fetch_max(u64::try_from(value).unwrap_or(u64::MAX), Ordering::Relaxed);
+}
+
 fn short_hash(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
     let value = digest.iter().take(4).fold(0_u32, |value, byte| (value << 8) | u32::from(*byte));
@@ -466,11 +522,30 @@ mod tests {
         metrics.record_session_created();
         metrics.record_prefetch_queued(2);
         metrics.record_prefetch_skipped(3);
+        metrics.record_manifest_limit_rejection();
+        metrics.record_transient_manifest_resources(1_643);
+        metrics.record_transient_manifest_resources(12);
+        metrics.record_transient_resource_entries(2_048);
+        metrics.record_transient_generation_memberships(4_096);
+        metrics.record_transient_estimated_metadata_bytes(8_000_000);
+        metrics.record_transient_manifest_rewritten_bytes(200_000);
+        metrics.record_transient_manifest_origin_uri_bytes(300_000);
+        metrics.record_finalized_generations_retained(2);
+        metrics.record_lease_snapshot_segments(1_643);
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.sessions_created, 1);
         assert_eq!(snapshot.prefetch_queued, 2);
         assert_eq!(snapshot.prefetch_skipped, 3);
+        assert_eq!(snapshot.manifest_limit_rejections, 1);
+        assert_eq!(snapshot.transient_manifest_resources_high_water, 1_643);
+        assert_eq!(snapshot.transient_resource_entries_high_water, 2_048);
+        assert_eq!(snapshot.transient_generation_memberships_high_water, 4_096);
+        assert_eq!(snapshot.transient_estimated_metadata_bytes_high_water, 8_000_000);
+        assert_eq!(snapshot.transient_manifest_rewritten_bytes_high_water, 200_000);
+        assert_eq!(snapshot.transient_manifest_origin_uri_bytes_high_water, 300_000);
+        assert_eq!(snapshot.finalized_generations_retained_high_water, 2);
+        assert_eq!(snapshot.lease_snapshot_segments_high_water, 1_643);
     }
 
     #[test]

@@ -284,7 +284,10 @@ pub(super) async fn refresh_from_live_hls_entrypoint_with_retries(
                 | OriginManifestFetchError::ProviderUnavailable(_)
                 | OriginManifestFetchError::ContentCoding(_)
                 | OriginManifestFetchError::DecodedBodyLimitExceeded { .. }
-                | OriginManifestFetchError::InvalidUtf8 { .. }),
+                | OriginManifestFetchError::InvalidUtf8 { .. }
+                | OriginManifestFetchError::LocalRepresentationLimit(_)
+                | OriginManifestFetchError::MalformedTransientRepresentation
+                | OriginManifestFetchError::CommitGenerationExhausted),
             ))
             | Err(err) => return Err(err),
         }

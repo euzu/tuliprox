@@ -15,7 +15,7 @@ pub(super) const DEFAULT_HLS_TARGET_DURATION_SECS: u32 = 15;
 
 const DEFAULT_HLS_SESSION_IDLE_TIMEOUT_SECS: u64 = 300;
 pub(super) const HLS_COMMITTED_CONTENT_ANCHOR_PROBE_LIMIT: usize = 64;
-pub const MAX_HLS_MANIFEST_BYTES: usize = 2 * 1024 * 1024;
+pub use crate::manifest_limits::MAX_HLS_MANIFEST_BYTES;
 
 /// Origin manifest entrypoint snapshot for live HLS refreshes.
 #[derive(Clone)]

@@ -5,8 +5,8 @@ use super::{
     safe_proxy_session_id, CacheAccessState, HlsAccessLeaseId, HlsCacheMetrics, HlsLogIdentity, HlsMapFile,
     HlsMediaActivityCommitOutcome, HlsMediaLeaseIdentity, HlsPlaybackRequestToken, HlsProxyManager,
     HlsRepairRenderedObjectId, HlsSegmentCache, HlsSegmentFile, HlsSegmentRepairManager, HlsSegmentRepairObjectContext,
-    HlsSegmentRepairSource, HlsSessionHandle, HlsStartupBodyObservation, MapCacheKey, MapCacheStatus, ProtectedSet,
-    ProxyMapId, ProxySessionId, SegmentCacheKey, SegmentCacheStatus, TransientObjectCacheKey, TransientResourceFile,
+    HlsSegmentRepairSource, HlsSessionHandle, HlsStartupBodyObservation, MapCacheKey, MapCacheStatus, ProxyMapId,
+    ProxySessionId, SegmentCacheKey, SegmentCacheStatus, TransientObjectCacheKey, TransientResourceFile,
     TransientResourceKind,
 };
 use arc_swap::ArcSwapOption;
@@ -899,7 +899,7 @@ async fn lookup_transient_object_cache_object(
         &resource_file.resource_id,
         resource_file.extension.clone(),
     );
-    let Some(resource) = session.transient.resources.get(&resource_file.resource_id) else {
+    let Some(resource) = session.transient.resolve_current_resource(&resource_file.resource_id, now_ms) else {
         return CacheObjectLookup::Failure(HlsResourceServeFailure::Missing);
     };
     if resource.file_ext_hint.as_deref() != Some(resource_file.extension.as_str()) {
@@ -907,8 +907,7 @@ async fn lookup_transient_object_cache_object(
     }
     let resource_state = (resource.kind, resource.encrypted_media);
     let resource_kind = Some(resource_state.0);
-    let protected = ProtectedSet::from_session(&session).key_resource_ids.contains(&resource_file.resource_id);
-    let Some(entry) = session.transient.ready_object(&key, resource_state.0, now_ms, protected) else {
+    let Some(entry) = session.transient.ready_object(&key, resource_state.0, now_ms) else {
         return match session.transient.object_cache.get(&key).map(|entry| &entry.status) {
             Some(super::TransientObjectCacheStatus::Fetching { .. }) => {
                 CacheObjectLookup::Failure(HlsResourceServeFailure::TemporaryUnavailable {

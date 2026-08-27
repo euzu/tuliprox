@@ -65,9 +65,11 @@ pub struct ProtectedSet {
     pub segment_proxy_seqs: HashSet<u64>,
     pub map_ids: HashSet<ProxyMapId>,
     pub key_resource_ids: HashSet<TransientResourceId>,
+    pub transient_object_ids: HashSet<TransientResourceId>,
 }
 
 impl ProtectedSet {
+    #[cfg(test)]
     pub fn from_session(session: &HlsSession) -> Self { Self::from_session_for_capacity(session, None) }
 
     fn from_session_for_capacity(session: &HlsSession, release_through: Option<u64>) -> Self {
@@ -85,7 +87,6 @@ impl ProtectedSet {
         if let Some(rendered) = &session.last_rendered_manifest {
             protected.key_resource_ids.extend(extract_transient_resource_ids(&rendered.body));
         }
-        protected.key_resource_ids.extend(session.transient.protected_manifest_resource_ids());
         for (_, protection) in session.terminal_tail_protections() {
             protected.segment_proxy_seqs.extend(protection.base_proxy_seqs.iter().copied());
         }
@@ -123,6 +124,12 @@ impl ProtectedSet {
                 protected.map_ids.insert(*map_id);
             }
         }
+        for entry in session.transient.object_cache.values() {
+            if entry.access.active_readers() > 0 {
+                protected.transient_object_ids.insert(entry.key.transient_resource_id().clone());
+            }
+        }
+        protected.transient_object_ids.extend(protected.key_resource_ids.iter().cloned());
 
         protected
     }
@@ -150,7 +157,7 @@ fn protected_set_for_cache_reclamation(
     for entry in session.transient.object_cache.values() {
         let path = cache.object_path(&entry.key);
         if cache.has_active_mutation(&path) || excluded_path == Some(path.as_path()) {
-            protected.key_resource_ids.insert(entry.key.transient_resource_id().clone());
+            protected.transient_object_ids.insert(entry.key.transient_resource_id().clone());
         }
     }
     protected
@@ -531,7 +538,7 @@ impl HlsGarbageCollector {
         let expired_transient_objects = take_expired_transient_objects(
             session,
             now_ms,
-            &protected.key_resource_ids,
+            &protected.transient_object_ids,
             deletions.remaining_capacity(),
         );
         transient_readiness_changed |= !expired_transient_objects.is_empty();
@@ -557,7 +564,8 @@ impl HlsGarbageCollector {
         let mut session_size = session_cache_size(session);
         while session_size > policy.cache_bytes_per_session && deletions.has_capacity() {
             let protected = protected_set_for_cache_reclamation(session, cache, None, None);
-            let Some(removal) = session.transient.remove_oldest_ready_object_except(&protected.key_resource_ids) else {
+            let Some(removal) = session.transient.remove_oldest_ready_object_except(&protected.transient_object_ids)
+            else {
                 break;
             };
             session_size = session_size.saturating_sub(removal.content_length);
@@ -621,7 +629,8 @@ impl HlsGarbageCollector {
             };
             let mut session = candidate.session.write().await;
             let protected = protected_set_for_cache_reclamation(&session, &self.cache, None, None);
-            let Some(removal) = session.transient.remove_oldest_ready_object_except(&protected.key_resource_ids) else {
+            let Some(removal) = session.transient.remove_oldest_ready_object_except(&protected.transient_object_ids)
+            else {
                 skipped_transient_sessions.insert(candidate.proxy_session_id);
                 continue;
             };
@@ -708,7 +717,8 @@ impl HlsGarbageCollector {
             };
             let mut session = candidate.session.write().await;
             let protected = protected_set_for_cache_reclamation(&session, &self.cache, Some(excluded_path), None);
-            let Some(removal) = session.transient.remove_oldest_ready_object_except(&protected.key_resource_ids) else {
+            let Some(removal) = session.transient.remove_oldest_ready_object_except(&protected.transient_object_ids)
+            else {
                 skipped_transient_sessions.insert(candidate.proxy_session_id);
                 continue;
             };
@@ -1257,7 +1267,7 @@ fn collect_projected_session_reclamation(
     let mut transient_readiness_changed = false;
     while planned_bytes < required_bytes && planned_deletions < max_deletions && deletions.has_capacity() {
         let protected = protected_set_for_cache_reclamation(session, cache, Some(excluded_path), release_through);
-        let Some(removal) = session.transient.remove_oldest_ready_object_except(&protected.key_resource_ids) else {
+        let Some(removal) = session.transient.remove_oldest_ready_object_except(&protected.transient_object_ids) else {
             break;
         };
         planned_bytes = planned_bytes.saturating_add(removal.content_length);
@@ -1340,7 +1350,7 @@ async fn oldest_global_transient_object_candidate(
         candidates.extend(session_guard.transient.object_cache.values().filter_map(|entry| {
             entry.ready_content_length()?;
             if entry.access.active_readers() > 0
-                || protected.key_resource_ids.contains(entry.key.transient_resource_id())
+                || protected.transient_object_ids.contains(entry.key.transient_resource_id())
             {
                 return None;
             }
@@ -1484,15 +1494,26 @@ fn capacity_reclamation_evidence(session: &HlsSession, protected: &ProtectedSet)
             _ => bytes,
         }
     });
-    let reclaimable_bytes =
-        fifo_head_size_candidate(session, protected).map_or(0, |candidate| candidate.content_length);
+    let (protected_transient_object_bytes, reclaimable_transient_object_bytes) =
+        session.transient.object_cache.values().fold((0_u64, 0_u64), |(protected_bytes, reclaimable_bytes), entry| {
+            let Some(content_length) = entry.ready_content_length() else {
+                return (protected_bytes, reclaimable_bytes);
+            };
+            if protected.transient_object_ids.contains(entry.key.transient_resource_id())
+                || entry.access.active_readers() > 0
+            {
+                (protected_bytes.saturating_add(content_length), reclaimable_bytes)
+            } else {
+                (protected_bytes, reclaimable_bytes.saturating_add(content_length))
+            }
+        });
+    let reclaimable_bytes = fifo_head_size_candidate(session, protected)
+        .map_or(0, |candidate| candidate.content_length)
+        .saturating_add(reclaimable_transient_object_bytes);
     CapacityReclamationEvidence {
         protected_working_set_bytes: protected_segment_bytes
             .saturating_add(protected_map_bytes)
-            // Treat transient media conservatively: referenced keys are tiny,
-            // and over-reporting protection is safer than claiming bytes can
-            // be reclaimed while a lease still names them.
-            .saturating_add(session.transient.ready_object_cache_size()),
+            .saturating_add(protected_transient_object_bytes),
         reclaimable_bytes,
     }
 }
@@ -1558,8 +1579,7 @@ mod tests {
     use super::{
         super::{
             media_reserve::{
-                HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestDeliveryMode,
-                HlsManifestSourceRenderMarker,
+                HlsLeaseManifestSegment, HlsLeaseManifestSnapshot, HlsManifestCommitIdentity, HlsManifestDeliveryMode,
             },
             terminal_tail::{HlsEncryptionSignature, HlsMediaContainer, HlsTerminalTailGeneration},
         },
@@ -1568,15 +1588,18 @@ mod tests {
         ProtectedSet, SegmentCacheDeletionReason, MAX_PENDING_CACHE_DELETIONS, SWITCH_CACHE_CLEANUP_HEADROOM,
     };
     use crate::{
-        prepare_terminal_base_evidence, HlsAccessLease, HlsAccessLeaseId, HlsAccessLeaseStore,
-        HlsOriginResourceFetchError, HlsPlaybackFamilyKey, HlsSegmentCache, HlsSegmentEncryption, HlsSession,
-        HlsSessionKey, HlsSessionStore, HlsTerminalTailProtection, MapCacheStatus, OriginMapKey, ProxyMapId,
-        ProxySessionId, SegmentCacheStatus, SegmentFetchPriority, TransientObjectFetchDecision,
-        TransientPassthroughState, TransientResourceId, TransientResourceKind, TransientResourceRef,
+        prepare_terminal_base_evidence, transient_manifest::TransientManifestRewriter, HlsAccessLease,
+        HlsAccessLeaseId, HlsAccessLeaseStore, HlsOriginResourceFetchError, HlsPlaybackFamilyKey, HlsSegmentCache,
+        HlsSegmentEncryption, HlsSession, HlsSessionKey, HlsSessionStore, HlsTerminalTailProtection, MapCacheStatus,
+        OriginMapKey, ProxyMapId, ProxySessionId, SegmentCacheStatus, SegmentFetchPriority,
+        TransientObjectFetchDecision, TransientPassthroughState, TransientResourceId, TransientResourceKind,
+        TransientResourceRef,
     };
-    use std::{collections::HashSet, sync::Arc, task::Poll, time::Duration};
+    use std::{collections::HashSet, fmt::Write as _, sync::Arc, task::Poll, time::Duration};
     use tokio::sync::RwLock;
-    use tuliprox_parser::hls::origin_manifest::{parse_origin_media_manifest, OriginManifestParseOutcome};
+    use tuliprox_parser::hls::origin_manifest::{
+        parse_manifest_semantics, parse_origin_media_manifest, OriginManifestParseOutcome,
+    };
 
     const BASE_URL: &str = "http://origin.example.com/live/final/index.m3u8";
 
@@ -1629,6 +1652,39 @@ mod tests {
     fn apply_six_segment_manifest_for_gc(session: &mut super::HlsSession) {
         session.proxy_next_seq = Some(1);
         session.apply_origin_manifest(&six_segment_manifest()).expect("manifest should map");
+    }
+
+    fn install_finalized_transient_manifest(
+        session: &mut HlsSession,
+        segment_count: usize,
+        resource_ttl_ms: u64,
+    ) -> Vec<TransientResourceRef> {
+        let mut body =
+            String::from("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:1\n");
+        for index in 0..segment_count {
+            writeln!(body, "#EXTINF:6.000,\n{index}.ts").expect("synthetic finalized manifest renders");
+        }
+        body.push_str("#EXT-X-ENDLIST\n");
+        let rewritten = TransientManifestRewriter::rewrite(
+            &body,
+            BASE_URL,
+            &session.proxy_session_id,
+            b"secret",
+            0,
+            resource_ttl_ms,
+        );
+        let resources = rewritten.resources.clone();
+        session
+            .transient
+            .commit_rewritten_manifest_with_semantics(
+                rewritten.body,
+                rewritten.resources,
+                0,
+                Some(u64::try_from(segment_count).expect("segment count fits u64").saturating_mul(6_000)),
+                parse_manifest_semantics(&body),
+            )
+            .expect("synthetic finalized manifest stays within representation limits");
+        resources
     }
 
     #[test]
@@ -2239,7 +2295,9 @@ mod tests {
     fn activated_startup_lease(proxy_session_id: &ProxySessionId) -> HlsAccessLease {
         let snapshot = HlsLeaseManifestSnapshot {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-            source_render_marker: HlsManifestSourceRenderMarker::new(10),
+            source_commit_identity: HlsManifestCommitIdentity::new(10),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
             snapshot_generation: 1,
             delivered_at_ms: 10,
             first_proxy_seq: 1,
@@ -2249,7 +2307,7 @@ mod tests {
                     .map(|proxy_seq| HlsLeaseManifestSegment {
                         proxy_seq,
                         duration_ms: 4_000,
-                        uri: format!("/hls/shared/live/session/lease/{proxy_seq:06}.ts"),
+                        uri: format!("/hls/shared/live/session/lease/{proxy_seq:06}.ts").into(),
                         discontinuity_before: false,
                         map_ref_ready: true,
                         encryption: None,
@@ -2691,7 +2749,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_resource_mappings_in_last_manifest_are_protected() {
+    async fn finalized_transient_resource_mappings_in_current_manifest_are_protected() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let (gc, session) = gc_with_session(&temp_dir).await;
         let resource_id = {
@@ -2706,9 +2764,10 @@ mod tests {
             );
             let resource_id = resource.id.clone();
             session.transient.upsert_resources([resource]);
-            session.transient.replace_manifest(
-                format!("#EXTM3U\n#EXTINF:1,\n/hls/shared/live/session/lease/r/{}.ts\n", resource_id.0),
+            session.transient.replace_manifest_with_semantics(
+                format!("#EXTM3U\n#EXTINF:1,\n/hls/shared/live/session/lease/r/{}.ts\n#EXT-X-ENDLIST\n", resource_id.0),
                 0,
+                Some(1_000),
             );
             resource_id
         };
@@ -2719,21 +2778,93 @@ mod tests {
         assert!(session.read().await.transient.resources.contains_key(&resource_id));
     }
 
+    #[test]
+    fn finalized_manifest_mapping_count_does_not_become_object_pin_count() {
+        let mut session = HlsSession::new(HlsSessionKey::new(1, "large-finalized"), b"secret", 0);
+        let resources = install_finalized_transient_manifest(&mut session, 1_643, 10);
+
+        let protected = ProtectedSet::from_session(&session);
+
+        assert_eq!(resources.len(), 1_643);
+        assert_eq!(session.transient.current_manifest_resource_ids().len(), 1_643);
+        assert!(protected.transient_object_ids.is_empty());
+        assert!(resources
+            .iter()
+            .all(|resource| session.transient.resolve_current_resource(&resource.id, 20).is_some()));
+    }
+
+    #[tokio::test]
+    async fn large_finalized_manifest_keeps_mappings_without_pinning_all_objects() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let (gc, session) = gc_with_session(&temp_dir).await;
+        let (resource, lookup_key, fetch_token) = {
+            let mut session = session.write().await;
+            let resources = install_finalized_transient_manifest(&mut session, 1_643, 10);
+            let resource = resources.into_iter().next().expect("large manifest resource");
+            let lookup_key =
+                TransientPassthroughState::transient_object_key(&session.proxy_session_id, &resource.id, "ts");
+            let proxy_session_id = session.proxy_session_id.clone();
+            let fetch_token = match session.transient.begin_object_fetch(&proxy_session_id, &resource, "ts", 0, 10) {
+                TransientObjectFetchDecision::Fetch(token) => token,
+                TransientObjectFetchDecision::Ready | TransientObjectFetchDecision::Wait(_) => {
+                    panic!("first archive object starts a cache fill")
+                }
+            };
+            (resource, lookup_key, fetch_token)
+        };
+        gc.cache
+            .write_bytes_and_commit(fetch_token.cache_key(), b"archive-object")
+            .await
+            .expect("archive object writes");
+        {
+            let mut session = session.write().await;
+            assert!(session.commit_transient_object_ready_if_current(
+                resource.kind,
+                &fetch_token,
+                "video/mp2t".to_string(),
+                14,
+                0,
+                10,
+            ));
+            let protected = ProtectedSet::from_session(&session);
+            assert_eq!(session.transient.current_manifest_resource_ids().len(), 1_643);
+            assert!(!protected.transient_object_ids.contains(&resource.id));
+        }
+
+        let report = gc.run_once(20).await.expect("finalized archive GC runs");
+
+        assert_eq!(report.transient_resources_pruned, 0);
+        assert_eq!(report.transient_objects_deleted, 1);
+        assert!(gc.cache.metadata(fetch_token.cache_key()).await.expect("object metadata reads").is_none());
+        let mut session = session.write().await;
+        assert_eq!(session.transient.resources.len(), 1_643);
+        let current =
+            session.transient.resolve_current_resource(&resource.id, 20).expect("mapping survives byte eviction");
+        assert!(!session.transient.object_cache.contains_key(&lookup_key));
+        let proxy_session_id = session.proxy_session_id.clone();
+        assert!(matches!(
+            session.transient.begin_object_fetch(&proxy_session_id, &current, "ts", 20, 10,),
+            TransientObjectFetchDecision::Fetch(_)
+        ));
+    }
+
     fn encrypted_terminal_evidence_manifest(
         proxy_session_id: &ProxySessionId,
         resource_id: &TransientResourceId,
     ) -> HlsLeaseManifestSnapshot {
-        let encryption = HlsEncryptionSignature {
+        let encryption = Arc::new(HlsEncryptionSignature {
             method: "AES-128".to_string(),
             key_uri: Some(format!("/hls/shared/live/{}/lease/r/{}.key", proxy_session_id.0, resource_id.0)),
             iv: Some("0x00000000000000000000000000000001".to_string()),
             key_format: Some("identity".to_string()),
             key_format_versions: Some("1".to_string()),
             can_reset_to_clear: true,
-        };
+        });
         HlsLeaseManifestSnapshot {
             delivery_mode: HlsManifestDeliveryMode::NormalCacheTimeline,
-            source_render_marker: HlsManifestSourceRenderMarker::new(1),
+            source_commit_identity: HlsManifestCommitIdentity::new(1),
+            uri_materialization: None,
+            finalized_transient_manifest_generation: None,
             snapshot_generation: 1,
             delivered_at_ms: 0,
             first_proxy_seq: 1,
@@ -2741,7 +2872,7 @@ mod tests {
             visible_segments: Arc::from([HlsLeaseManifestSegment {
                 proxy_seq: 1,
                 duration_ms: 4_000,
-                uri: "/hls/shared/live/session/lease/1.ts".to_string(),
+                uri: "/hls/shared/live/session/lease/1.ts".to_string().into(),
                 discontinuity_before: false,
                 map_ref_ready: true,
                 encryption: Some(encryption.clone()),
