@@ -974,7 +974,7 @@ pub async fn update_series_metadata(
                             let probe_url = match input.resolve_url(&episode_url) {
                                 Ok(url) => url,
                                 Err(err) => {
-                                    if matches!(err, shared::error::TuliproxError::ConfigInput(_)) {
+                                    if err.kind() == shared::error::ErrorKind::ConfigInput {
                                         debug!(
                                             "Provider config resolution failed for series episode '{}' (S{}E{}): {err}",
                                             ep.title, ep.season, ep.episode_num

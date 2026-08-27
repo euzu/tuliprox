@@ -985,7 +985,7 @@ mod tests {
             "60",
         )
         .unwrap_err();
-        assert!(matches!(err, TuliproxError::RepositoryM3u(_)));
+        assert_eq!(err.kind(), shared::error::ErrorKind::RepositoryM3u);
     }
 
     #[test]
@@ -1002,7 +1002,7 @@ mod tests {
             "60",
         )
         .unwrap_err();
-        assert!(matches!(err, TuliproxError::RepositoryM3u(_)));
+        assert_eq!(err.kind(), shared::error::ErrorKind::RepositoryM3u);
     }
 
     #[test]
@@ -1019,7 +1019,7 @@ mod tests {
             &u64::MAX.to_string(),
         )
         .unwrap_err();
-        assert!(matches!(err, TuliproxError::RepositoryM3u(_)));
+        assert_eq!(err.kind(), shared::error::ErrorKind::RepositoryM3u);
     }
 
     #[test]

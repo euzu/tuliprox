@@ -867,7 +867,7 @@ mod tests {
 
         let result = state.set_config(config_with_web_auth("secret")).await;
 
-        assert!(matches!(result, Err(shared::error::TuliproxError::ConfigWebUi(_))));
+        assert!(matches!(&result, Err(err) if err.kind() == shared::error::ErrorKind::ConfigWebUi));
         assert!(state.app_config.config.load().web_ui.is_none());
     }
 
@@ -877,7 +877,7 @@ mod tests {
 
         let result = state.set_config(config_with_web_auth("new-secret")).await;
 
-        assert!(matches!(result, Err(shared::error::TuliproxError::ConfigWebUi(_))));
+        assert!(matches!(&result, Err(err) if err.kind() == shared::error::ErrorKind::ConfigWebUi));
         assert_eq!(
             state
                 .app_config

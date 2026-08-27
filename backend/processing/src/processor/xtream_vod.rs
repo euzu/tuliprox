@@ -857,7 +857,7 @@ pub async fn update_vod_metadata(
                 true,
             );
             let probe_url = input.resolve_url(&stream_url).map_err(|err| {
-                if matches!(err, shared::error::TuliproxError::ConfigInput(_)) {
+                if err.kind() == shared::error::ErrorKind::ConfigInput {
                     shared::error::TuliproxError::ConfigInput(format!(
                         "Provider config resolution failed for VOD probe URL '{stream_url}': {err}"
                     ))

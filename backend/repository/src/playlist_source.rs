@@ -1449,7 +1449,6 @@ mod tests {
     use crate::BPlusTreeQuery;
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::{
-        error::TuliproxError,
         model::{ConfigPaths, PlaylistItemHeader, PlaylistItemType, XtreamPlaylistItem},
         utils::Internable,
     };
@@ -1574,12 +1573,12 @@ mod tests {
 
         let result = source.clone_source();
 
-        assert!(matches!(
-            result,
-            Err(TuliproxError::RepositoryPlaylist(message))
-                if message.contains("Failed to clone live disk playlist query")
-                    && message.contains("mapped query without a path cannot be cloned")
-        ));
+        let Err(error) = result else {
+            panic!("cloning a mapped query without a path must fail");
+        };
+        assert_eq!(error.kind(), shared::error::ErrorKind::RepositoryPlaylist);
+        assert!(error.message().contains("Failed to clone live disk playlist query"));
+        assert!(error.message().contains("mapped query without a path cannot be cloned"));
     }
 
     fn make_cluster_item(title: &str, cluster: XtreamCluster) -> PlaylistItem {

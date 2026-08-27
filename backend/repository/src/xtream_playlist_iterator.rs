@@ -325,7 +325,7 @@ mod tests {
             upstream_user_agent: None,
         };
         assert!(tx.send(Ok((item, true))).await.is_ok());
-        assert!(tx.send(Err(shared::error::TuliproxError::RepositoryXtream("corrupt page".into()))).await.is_ok());
+        assert!(tx.send(Err(shared::error::TuliproxError::RepositoryXtream("corrupt page"))).await.is_ok());
         drop(tx);
 
         let mut iterator = XtreamPlaylistIterator { inner: LockedReceiverStream::new_empty(rx) };

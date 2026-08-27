@@ -184,7 +184,9 @@ mod tests {
     fn bplustree_read_errors_are_generic_repository_errors() {
         let error = repository_read_error(Path::new("library.db"), std::io::Error::other("corrupt page"));
         assert!(
-            matches!(error, TuliproxError::Repository(message) if message.contains("library.db") && message.contains("corrupt page"))
+            error.kind() == shared::error::ErrorKind::Repository
+                && error.message().contains("library.db")
+                && error.message().contains("corrupt page")
         );
     }
 

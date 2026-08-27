@@ -1987,7 +1987,6 @@ mod tests {
     use axum::{http::HeaderMap, response::IntoResponse};
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine};
     use shared::{
-        error::TuliproxError,
         foundation::Filter,
         model::{
             ClusterFlags, InputType, PlaylistItemType, ProcessingOrder, ProxyUserStatus, StreamProperties, UUIDType,
@@ -2737,7 +2736,7 @@ mod tests {
 
         let err =
             resolve_m3u_xtream_timeshift(&input, &item, "60/2024-01-01:00-00").expect_err("missing catchup must error");
-        assert!(matches!(err, TuliproxError::ApiXtream(_)));
+        assert_eq!(err.kind(), shared::error::ErrorKind::ApiXtream);
     }
 
     #[test]

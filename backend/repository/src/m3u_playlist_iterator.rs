@@ -759,7 +759,7 @@ mod tests {
     async fn iterator_forwards_one_storage_error_then_ends() {
         let (tx, rx) = mpsc::channel(2);
         assert!(tx.send(Ok((m3u_item("http://example.test/live.ts"), true))).await.is_ok());
-        assert!(tx.send(Err(shared::error::TuliproxError::RepositoryM3u("corrupt page".into()))).await.is_ok());
+        assert!(tx.send(Err(shared::error::TuliproxError::RepositoryM3u("corrupt page"))).await.is_ok());
         drop(tx);
 
         let mut iterator = M3uPlaylistIterator { inner: LockedReceiverStream::new_empty(rx) };

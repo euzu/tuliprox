@@ -134,7 +134,6 @@ mod tests {
     };
     use arc_swap::{ArcSwap, ArcSwapOption};
     use shared::{
-        error::TuliproxError,
         foundation::Filter,
         model::{ConfigPaths, InputFetchMethod, InputType, PlaylistItemType, ProcessingOrder},
         utils::Internable,
@@ -216,7 +215,11 @@ mod tests {
 
         assert!(result.is_err(), "missing server info must not degrade to an empty base_url");
         let err = result.err().unwrap_or_else(|| unreachable!());
-        assert!(matches!(err, TuliproxError::ApiXtream(_)), "missing server info should surface as ApiXtream error");
+        assert_eq!(
+            err.kind(),
+            shared::error::ErrorKind::ApiXtream,
+            "missing server info should surface as ApiXtream error"
+        );
         assert!(
             err.to_string().contains("No server info configured"),
             "error should explicitly mention missing server info: {err}"
