@@ -43,10 +43,10 @@ pub struct GarbageCollectionPolicy {
 impl GarbageCollectionPolicy {
     pub fn from_config(config: &HlsCacheConfig) -> Self {
         Self {
-            cache_duration_ms: config.cache_duration.saturating_mul(1_000),
+            cache_duration_ms: config.cache_duration.as_millis().get(),
             cache_bytes_global: config.cache_bytes,
             cache_bytes_per_session: config.cache_bytes_per_session,
-            session_idle_timeout_ms: config.session_idle_timeout.saturating_mul(1_000),
+            session_idle_timeout_ms: config.session_idle_timeout.as_millis().get(),
             temp_file_retention_ms: DEFAULT_TEMP_FILE_RETENTION_MS,
             failed_segment_retention_ms: DEFAULT_FAILED_SEGMENT_RETENTION_MS,
         }

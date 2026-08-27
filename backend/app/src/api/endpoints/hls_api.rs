@@ -11244,8 +11244,10 @@ mod tests {
     async fn legacy_hls_manifest_deadline_includes_full_body_read() {
         let origin = spawn_test_encoded_manifest_origin(None, b"#EXTM3U\n".to_vec(), Duration::from_millis(100)).await;
         let input = legacy_manifest_test_input(&origin);
-        let hls_config =
-            HlsCacheConfig::from(&HlsCacheConfigDto { origin_manifest_timeout_ms: 10, ..Default::default() });
+        let hls_config = HlsCacheConfig::from(&HlsCacheConfigDto {
+            origin_manifest_timeout_ms: shared::model::Millis::new(10),
+            ..Default::default()
+        });
         let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)));
 
         let error = super::download_legacy_hls_manifest(&app_state, &input, &legacy_manifest_test_client_headers())
@@ -11640,7 +11642,11 @@ mod tests {
 
     #[tokio::test]
     async fn hls_access_lease_validity_uses_session_idle_timeout_not_cache_duration() {
-        let hls_dto = HlsCacheConfigDto { cache_duration: 900, session_idle_timeout: 42, ..Default::default() };
+        let hls_dto = HlsCacheConfigDto {
+            cache_duration: shared::model::Secs::new(900),
+            session_idle_timeout: shared::model::Secs::new(42),
+            ..Default::default()
+        };
         let hls_config = HlsCacheConfig::from(&hls_dto);
         let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)));
 
@@ -11865,7 +11871,7 @@ mod tests {
 
     #[tokio::test]
     async fn hls_lifecycle_session_idle_timer_removes_idle_session() {
-        let mut hls_dto = HlsCacheConfigDto { session_idle_timeout: 1, ..Default::default() };
+        let mut hls_dto = HlsCacheConfigDto { session_idle_timeout: shared::model::Secs::new(1), ..Default::default() };
         hls_dto.segment_repair.max_level = HlsSegmentRepairMode::Low;
         let hls_config = HlsCacheConfig::from(&hls_dto);
         let app_state = test_app_state_with_hls_proxy(Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)));
@@ -11928,7 +11934,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         let mut hls_dto = HlsCacheConfigDto {
             cache_path: Some(temp_dir.path().to_string_lossy().into_owned()),
-            session_idle_timeout: 1,
+            session_idle_timeout: shared::model::Secs::new(1),
             ..Default::default()
         };
         hls_dto.segment_repair.max_level = HlsSegmentRepairMode::Low;
@@ -14666,7 +14672,8 @@ mod tests {
             enabled: true,
             ..ConfigInput::default()
         };
-        let hls_dto = HlsCacheConfigDto { origin_manifest_timeout_ms: 1_000, ..Default::default() };
+        let hls_dto =
+            HlsCacheConfigDto { origin_manifest_timeout_ms: shared::model::Millis::new(1_000), ..Default::default() };
         let hls_config = HlsCacheConfig::from(&hls_dto);
         let app_state = test_app_state_with_hls_proxy_and_inputs(
             Arc::new(HlsProxyManager::with_hls_cache_config(&hls_config)),

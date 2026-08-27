@@ -13,6 +13,7 @@ use crate::{
     error::TuliproxError,
     model::{
         ByteSize, HlsCorruptSegmentWatchdogMode, HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripMode,
+        Millis, Secs,
     },
     utils::is_blank_optional_string,
 };
@@ -98,7 +99,7 @@ pub struct HlsSegmentRepairConfigDto {
     #[serde(default = "default_hls_segment_repair_max_parallel_repairs")]
     pub max_parallel_repairs: usize,
     #[serde(default = "default_hls_segment_repair_postprocess_timeout_ms")]
-    pub postprocess_timeout_ms: u64,
+    pub postprocess_timeout_ms: Millis,
     #[serde(default, skip_serializing_if = "HlsSegmentRepairSizeIncreaseConfigDto::is_empty")]
     pub size_increase: HlsSegmentRepairSizeIncreaseConfigDto,
     #[serde(default, skip_serializing_if = "HlsCorruptSegmentWatchdogConfigDto::is_empty")]
@@ -127,7 +128,7 @@ impl HlsSegmentRepairConfigDto {
     }
 
     fn validate(&self) -> Result<(), TuliproxError> {
-        if self.postprocess_timeout_ms < 100 {
+        if self.postprocess_timeout_ms < Millis::new(100) {
             return Err(TuliproxError::ConfigReverseProxy(
                 "hls_cache.segment_repair.postprocess_timeout_ms must be >= 100".to_string(),
             ));
@@ -178,7 +179,7 @@ pub struct HlsCacheConfigDto {
     #[serde(default)]
     pub strip: HlsStripConfigDto,
     #[serde(default = "default_hls_cache_duration")]
-    pub cache_duration: u64,
+    pub cache_duration: Secs,
     #[serde(default = "default_hls_cache_bytes")]
     pub cache_bytes: ByteSize,
     #[serde(default = "default_hls_cache_bytes_per_session")]
@@ -190,14 +191,14 @@ pub struct HlsCacheConfigDto {
     #[serde(default = "default_hls_max_concurrent_segment_fetches_global")]
     pub max_concurrent_segment_fetches_global: usize,
     #[serde(default = "default_hls_origin_manifest_timeout_ms")]
-    pub origin_manifest_timeout_ms: u64,
+    pub origin_manifest_timeout_ms: Millis,
     #[serde(default = "default_hls_origin_segment_timeout_ms")]
-    pub origin_segment_timeout_ms: u64,
+    pub origin_segment_timeout_ms: Millis,
     /// How long a client may wait for the initial manifest decision before the session bootstraps time out.
     #[serde(default = "default_hls_initial_manifest_wait_timeout_secs")]
-    pub initial_manifest_wait_timeout_secs: u64,
+    pub initial_manifest_wait_timeout_secs: Secs,
     #[serde(default = "default_hls_session_idle_timeout")]
-    pub session_idle_timeout: u64,
+    pub session_idle_timeout: Secs,
     #[serde(default, skip_serializing_if = "HlsManifestRecoveryBurstConfigDto::is_empty")]
     pub manifest_recovery_burst: HlsManifestRecoveryBurstConfigDto,
     #[serde(default, skip_serializing_if = "HlsSegmentRepairConfigDto::is_empty")]
@@ -234,9 +235,22 @@ impl HlsCacheConfigDto {
         self.segment_repair.clean();
     }
 
-    fn ensure_min_u64(field_name: &str, value: u64, min_value: u64) -> Result<(), TuliproxError> {
+    fn ensure_min_millis(field_name: &str, value: Millis, min_value: Millis) -> Result<(), TuliproxError> {
         if value < min_value {
-            return Err(TuliproxError::ConfigReverseProxy(format!("hls_cache.{field_name} must be >= {min_value}")));
+            return Err(TuliproxError::ConfigReverseProxy(format!(
+                "hls_cache.{field_name} must be >= {}",
+                min_value.get()
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_min_secs(field_name: &str, value: Secs, min_value: Secs) -> Result<(), TuliproxError> {
+        if value < min_value {
+            return Err(TuliproxError::ConfigReverseProxy(format!(
+                "hls_cache.{field_name} must be >= {}",
+                min_value.get()
+            )));
         }
         Ok(())
     }
@@ -261,17 +275,21 @@ impl HlsCacheConfigDto {
         self.cache_bytes.parse_bytes().map_err(TuliproxError::ConfigReverseProxy)?;
         self.cache_bytes_per_session.parse_bytes().map_err(TuliproxError::ConfigReverseProxy)?;
 
-        Self::ensure_min_u64("cache_duration", self.cache_duration, 1)?;
+        Self::ensure_min_secs("cache_duration", self.cache_duration, Secs::new(1))?;
         Self::ensure_min_usize(
             "max_concurrent_segment_fetches_per_session",
             self.max_concurrent_segment_fetches_per_session,
             1,
         )?;
         Self::ensure_min_usize("max_concurrent_segment_fetches_global", self.max_concurrent_segment_fetches_global, 1)?;
-        Self::ensure_min_u64("origin_manifest_timeout_ms", self.origin_manifest_timeout_ms, 1)?;
-        Self::ensure_min_u64("origin_segment_timeout_ms", self.origin_segment_timeout_ms, 1)?;
-        Self::ensure_min_u64("initial_manifest_wait_timeout_secs", self.initial_manifest_wait_timeout_secs, 1)?;
-        Self::ensure_min_u64("session_idle_timeout", self.session_idle_timeout, 1)?;
+        Self::ensure_min_millis("origin_manifest_timeout_ms", self.origin_manifest_timeout_ms, Millis::new(1))?;
+        Self::ensure_min_millis("origin_segment_timeout_ms", self.origin_segment_timeout_ms, Millis::new(1))?;
+        Self::ensure_min_secs(
+            "initial_manifest_wait_timeout_secs",
+            self.initial_manifest_wait_timeout_secs,
+            Secs::new(1),
+        )?;
+        Self::ensure_min_secs("session_idle_timeout", self.session_idle_timeout, Secs::new(1))?;
         if self.segment_repair.apply_to_first_segments > 6 {
             return Err(TuliproxError::ConfigReverseProxy(
                 "hls_cache.segment_repair.apply_to_first_segments must be <= 6".to_string(),
@@ -309,7 +327,7 @@ mod tests {
     use super::{
         ByteSize, HlsCacheConfigDto, HlsCorruptSegmentWatchdogConfigDto, HlsCorruptSegmentWatchdogMode,
         HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevel, HlsSegmentRepairConfigDto,
-        HlsSegmentRepairMode, HlsSegmentRepairSizeIncreaseConfigDto, HlsStripConfigDto, HlsStripMode,
+        HlsSegmentRepairMode, HlsSegmentRepairSizeIncreaseConfigDto, HlsStripConfigDto, HlsStripMode, Millis, Secs,
     };
     use crate::model::ReverseProxyConfigDto;
 
@@ -358,7 +376,7 @@ hls_cache:
                     max_level: HlsSegmentRepairMode::Medium,
                     apply_to_first_segments: 2,
                     max_parallel_repairs: 2,
-                    postprocess_timeout_ms: 1_500,
+                    postprocess_timeout_ms: Millis::new(1_500),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -528,7 +546,7 @@ hls_cache:
     #[test]
     fn hls_cache_prepare_rejects_invalid_minimums() {
         let cases: [(&str, HlsCacheConfigDto); 6] = [
-            ("cache_duration", HlsCacheConfigDto { cache_duration: 0, ..Default::default() }),
+            ("cache_duration", HlsCacheConfigDto { cache_duration: Secs::new(0), ..Default::default() }),
             (
                 "max_concurrent_segment_fetches_per_session",
                 HlsCacheConfigDto { max_concurrent_segment_fetches_per_session: 0, ..Default::default() },
@@ -537,9 +555,15 @@ hls_cache:
                 "max_concurrent_segment_fetches_global",
                 HlsCacheConfigDto { max_concurrent_segment_fetches_global: 0, ..Default::default() },
             ),
-            ("origin_manifest_timeout_ms", HlsCacheConfigDto { origin_manifest_timeout_ms: 0, ..Default::default() }),
-            ("origin_segment_timeout_ms", HlsCacheConfigDto { origin_segment_timeout_ms: 0, ..Default::default() }),
-            ("session_idle_timeout", HlsCacheConfigDto { session_idle_timeout: 0, ..Default::default() }),
+            (
+                "origin_manifest_timeout_ms",
+                HlsCacheConfigDto { origin_manifest_timeout_ms: Millis::new(0), ..Default::default() },
+            ),
+            (
+                "origin_segment_timeout_ms",
+                HlsCacheConfigDto { origin_segment_timeout_ms: Millis::new(0), ..Default::default() },
+            ),
+            ("session_idle_timeout", HlsCacheConfigDto { session_idle_timeout: Secs::new(0), ..Default::default() }),
         ];
 
         for (field_name, mut cfg) in cases {
@@ -567,7 +591,7 @@ hls_cache:
         assert!(err.to_string().contains("segment_repair.size_increase.high_percent"), "unexpected error: {err}");
 
         let mut invalid_postprocess_timeout = HlsCacheConfigDto::default();
-        invalid_postprocess_timeout.segment_repair.postprocess_timeout_ms = 99;
+        invalid_postprocess_timeout.segment_repair.postprocess_timeout_ms = Millis::new(99);
         let err =
             invalid_postprocess_timeout.prepare().expect_err("post-processing timeout below 100ms should be rejected");
         assert!(err.to_string().contains("segment_repair.postprocess_timeout_ms"), "unexpected error: {err}");

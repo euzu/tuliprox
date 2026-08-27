@@ -29,9 +29,9 @@ use shared::{
     model::{
         ByteSize, CacheConfigDto, GeoIpConfigDto, GeoIpUnavailablePolicy, HlsCacheConfigDto,
         HlsCorruptSegmentWatchdogMode, HlsManifestRecoveryBurstConfigDto, HlsManifestRecoveryBurstLevel,
-        HlsSegmentRepairConfigDto, HlsSegmentRepairMode, HlsStripConfigDto, HlsStripMode, QosAggregationConfigDto,
-        RateLimitConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto,
-        StreamBufferConfigDto, StreamConfigDto, StreamHistoryConfigDto,
+        HlsSegmentRepairConfigDto, HlsSegmentRepairMode, HlsStripConfigDto, HlsStripMode, Millis,
+        QosAggregationConfigDto, RateLimitConfigDto, ResourceRetryConfigDto, ReverseProxyConfigDto,
+        ReverseProxyDisabledHeaderConfigDto, Secs, StreamBufferConfigDto, StreamConfigDto, StreamHistoryConfigDto,
     },
     utils::format_float_localized,
 };
@@ -224,16 +224,16 @@ generate_form_reducer!(
     action_name: HlsCacheConfigFormAction,
     fields {
         CachePath => cache_path: Option<String>,
-        CacheDuration => cache_duration: u64,
+        CacheDuration => cache_duration: Secs,
         CacheBytes => cache_bytes: ByteSize,
         CacheBytesPerSession => cache_bytes_per_session: ByteSize,
         MaxSegmentsPrefetch => max_segments_prefetch: usize,
         MaxConcurrentSegmentFetchesPerSession => max_concurrent_segment_fetches_per_session: usize,
         MaxConcurrentSegmentFetchesGlobal => max_concurrent_segment_fetches_global: usize,
-        OriginManifestTimeoutMs => origin_manifest_timeout_ms: u64,
+        OriginManifestTimeoutMs => origin_manifest_timeout_ms: Millis,
         ManifestRecoveryBurst => manifest_recovery_burst: HlsManifestRecoveryBurstConfigDto,
-        OriginSegmentTimeoutMs => origin_segment_timeout_ms: u64,
-        SessionIdleTimeout => session_idle_timeout: u64,
+        OriginSegmentTimeoutMs => origin_segment_timeout_ms: Millis,
+        SessionIdleTimeout => session_idle_timeout: Secs,
         SegmentRepair => segment_repair: HlsSegmentRepairConfigDto,
     }
 );
@@ -956,7 +956,7 @@ pub fn ReverseProxyConfigView() -> Html {
                         })}
                     />
                 </div>
-                { edit_hls_cache_u64_min(translate.t(LABEL_CACHE_DURATION), "cache_duration", hls_cache_state.form.cache_duration, HlsCacheConfigFormAction::CacheDuration) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_CACHE_DURATION), "cache_duration", hls_cache_state.form.cache_duration.get(), |value| HlsCacheConfigFormAction::CacheDuration(Secs::new(value))) }
                 { edit_field_text!(hls_cache_state, translate.t(LABEL_CACHE_BYTES), cache_bytes, HlsCacheConfigFormAction::CacheBytes) }
                 { edit_field_text!(hls_cache_state, translate.t(LABEL_CACHE_BYTES_PER_SESSION), cache_bytes_per_session, HlsCacheConfigFormAction::CacheBytesPerSession) }
                 <div class="tp__form-field tp__form-field__number">
@@ -970,7 +970,7 @@ pub fn ReverseProxyConfigView() -> Html {
                 </div>
                 { edit_hls_cache_usize_min(translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_PER_SESSION), "max_concurrent_segment_fetches_per_session", hls_cache_state.form.max_concurrent_segment_fetches_per_session, HlsCacheConfigFormAction::MaxConcurrentSegmentFetchesPerSession) }
                 { edit_hls_cache_usize_min(translate.t(LABEL_MAX_CONCURRENT_SEGMENT_FETCHES_GLOBAL), "max_concurrent_segment_fetches_global", hls_cache_state.form.max_concurrent_segment_fetches_global, HlsCacheConfigFormAction::MaxConcurrentSegmentFetchesGlobal) }
-                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_MANIFEST_TIMEOUT_MS), "origin_manifest_timeout_ms", hls_cache_state.form.origin_manifest_timeout_ms, HlsCacheConfigFormAction::OriginManifestTimeoutMs) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_MANIFEST_TIMEOUT_MS), "origin_manifest_timeout_ms", hls_cache_state.form.origin_manifest_timeout_ms.get(), |value| HlsCacheConfigFormAction::OriginManifestTimeoutMs(Millis::new(value))) }
                 { config_field_child!(translate.t(LABEL_MANIFEST_RECOVERY_BURST), "HLS_CACHE_CONFIG.MANIFEST_RECOVERY_BURST", {
                     html! {
                         <Select
@@ -981,8 +981,8 @@ pub fn ReverseProxyConfigView() -> Html {
                         />
                     }
                 }) }
-                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_SEGMENT_TIMEOUT_MS), "origin_segment_timeout_ms", hls_cache_state.form.origin_segment_timeout_ms, HlsCacheConfigFormAction::OriginSegmentTimeoutMs) }
-                { edit_hls_cache_u64_min(translate.t(LABEL_SESSION_IDLE_TIMEOUT), "session_idle_timeout", hls_cache_state.form.session_idle_timeout, HlsCacheConfigFormAction::SessionIdleTimeout) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_ORIGIN_SEGMENT_TIMEOUT_MS), "origin_segment_timeout_ms", hls_cache_state.form.origin_segment_timeout_ms.get(), |value| HlsCacheConfigFormAction::OriginSegmentTimeoutMs(Millis::new(value))) }
+                { edit_hls_cache_u64_min(translate.t(LABEL_SESSION_IDLE_TIMEOUT), "session_idle_timeout", hls_cache_state.form.session_idle_timeout.get(), |value| HlsCacheConfigFormAction::SessionIdleTimeout(Secs::new(value))) }
             </Card>
         }
     };
@@ -1024,7 +1024,7 @@ pub fn ReverseProxyConfigView() -> Html {
             let hls_cache_state = hls_cache_state.clone();
             Callback::from(move |value: Option<i64>| {
                 let mut segment_repair = hls_cache_state.form.segment_repair.clone();
-                segment_repair.postprocess_timeout_ms = clamp_u64_min(value, 100);
+                segment_repair.postprocess_timeout_ms = Millis::new(clamp_u64_min(value, 100));
                 hls_cache_state.dispatch(HlsCacheConfigFormAction::SegmentRepair(segment_repair));
             })
         };
@@ -1147,7 +1147,7 @@ pub fn ReverseProxyConfigView() -> Html {
                         label={translate.t(LABEL_POSTPROCESS_TIMEOUT_MS)}
                         name="hls_segment_repair_postprocess_timeout_ms"
                         field_id={Some("HLS_CACHE_CONFIG.SEGMENT_REPAIR_POSTPROCESS_TIMEOUT_MS".to_string())}
-                        value={segment_repair.postprocess_timeout_ms.min(i64::MAX as u64) as i64}
+                        value={segment_repair.postprocess_timeout_ms.get().min(i64::MAX as u64) as i64}
                         on_change={set_segment_repair_postprocess_timeout_ms}
                     />
                 </div>

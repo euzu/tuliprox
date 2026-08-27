@@ -433,12 +433,12 @@ impl HlsProxyRuntimeConfig {
         Self {
             enabled,
             segment_fetch_policy: SegmentFetchPolicy::from_config(config),
-            cache_duration_seconds: config.cache_duration,
+            cache_duration_seconds: config.cache_duration.get(),
             strip: config.strip.clone(),
-            origin_manifest_timeout_ms: config.origin_manifest_timeout_ms,
-            initial_manifest_wait_timeout_secs: config.initial_manifest_wait_timeout_secs,
+            origin_manifest_timeout_ms: config.origin_manifest_timeout_ms.get(),
+            initial_manifest_wait_timeout_secs: config.initial_manifest_wait_timeout_secs.get(),
             manifest_recovery_burst: config.manifest_recovery_burst.clone(),
-            transient_resource_ttl_ms: config.cache_duration.saturating_mul(1_000),
+            transient_resource_ttl_ms: config.cache_duration.as_millis().get(),
             gc_policy: GarbageCollectionPolicy::from_config(config),
             rewrite_secret_fingerprint: build_rewrite_secret_fingerprint(rewrite_secret),
         }
@@ -494,7 +494,7 @@ impl HlsProxyManager {
 
     pub fn with_cache_settings(cache_path: impl Into<PathBuf>, cache_duration_seconds: u64) -> Self {
         let default_dto = shared::model::HlsCacheConfigDto {
-            cache_duration: cache_duration_seconds,
+            cache_duration: shared::model::Secs::new(cache_duration_seconds),
             cache_path: Some(cache_path.into().to_string_lossy().to_string()),
             ..Default::default()
         };
@@ -3520,10 +3520,10 @@ mod tests {
         updated_dto.max_segments_prefetch = 4;
         updated_dto.max_concurrent_segment_fetches_per_session = 5;
         updated_dto.max_concurrent_segment_fetches_global = 6;
-        updated_dto.origin_manifest_timeout_ms = 1_234;
-        updated_dto.origin_segment_timeout_ms = 5_678;
-        updated_dto.cache_duration = 99;
-        updated_dto.session_idle_timeout = 55;
+        updated_dto.origin_manifest_timeout_ms = shared::model::Millis::new(1_234);
+        updated_dto.origin_segment_timeout_ms = shared::model::Millis::new(5_678);
+        updated_dto.cache_duration = shared::model::Secs::new(99);
+        updated_dto.session_idle_timeout = shared::model::Secs::new(55);
         updated_dto.manifest_recovery_burst.level = shared::model::HlsManifestRecoveryBurstLevel::Balanced;
         updated_dto.strip = HlsStripConfigDto { mode: HlsStripMode::Seconds, value: 7 };
         let app_config = test_app_config(config_with_hls_cache(updated_dto));
