@@ -382,6 +382,11 @@ impl ConfigFile {
 
     pub(crate) async fn reload(&self, file_path: &Path, app_state: &Arc<AppState>) -> Result<(), TuliproxError> {
         debug!("File change detected {}", file_path.display());
+        // Channels and templates are built once and cached, so an edited
+        // token, URL or template would otherwise not take effect until a
+        // restart.
+        tuliprox_messaging::channels::invalidate();
+        tuliprox_messaging::render::invalidate_cache();
         match self {
             ConfigFile::ApiProxy => {
                 ConfigFile::load_api_proxy(app_state).await?;

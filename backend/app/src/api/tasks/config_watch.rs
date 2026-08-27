@@ -64,10 +64,29 @@ fn start_config_watch(app_state: &Arc<AppState>, cancel_token: &CancellationToke
     let cancel = cancel_token.clone();
     let watcher_app_state = Arc::clone(app_state);
 
+    let error_app_state = Arc::clone(app_state);
     let handle_error = move |err: TuliproxError, paths: &HashSet<PathBuf>| {
-        let msg = format!("Failed to reload config files [{}]: {err}", format_paths(paths));
+        let formatted = format_paths(paths);
+        let msg = format!("Failed to reload config files [{formatted}]: {err}");
         error!("{msg}");
-        event_manager.send_event(EventMessage::ServerError(msg));
+        event_manager.send_event(EventMessage::ServerError(msg.clone()));
+        // Also emit the specific event, so an operator can subscribe to
+        // "my config stopped loading" without taking every server error.
+        let notify_app_state = Arc::clone(&error_app_state);
+        let title = format!("Configuration reload failed: {formatted}");
+        tokio::spawn(async move {
+            let client = notify_app_state.http_client.load_full();
+            tuliprox_messaging::send_event(
+                &notify_app_state.app_config,
+                &client,
+                tuliprox_core::model::NotificationEvent::new(
+                    shared::model::notification::registry::CONFIG_RELOAD_FAILED,
+                    title,
+                    msg,
+                ),
+            )
+            .await;
+        });
     };
 
     tokio::spawn(async move {
