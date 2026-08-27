@@ -337,7 +337,7 @@ fn quiet_hours_defer_for(app_config: &Arc<AppConfig>, pending: &[String]) -> Opt
     let mut shortest: Option<Duration> = None;
     for channel_id in pending {
         let channel = set.iter().find(|c| c.id() == channel_id)?;
-        let defer = crate::quiet_hours_defer(channel.as_ref())?;
+        let defer = crate::quiet_hours_defer(channel)?;
         shortest = Some(shortest.map_or(defer, |current: Duration| current.min(defer)));
     }
     shortest

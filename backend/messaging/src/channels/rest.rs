@@ -2,7 +2,6 @@
 
 use crate::channel::{
     delivery_for_status, parse_retry_after, ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage,
-    SendFuture,
 };
 use log::debug;
 use reqwest::{header, Method};
@@ -29,6 +28,7 @@ fn sign(secret: &str, timestamp: i64, body: &str) -> String {
     })
 }
 
+#[derive(Clone)]
 pub struct RestChannel {
     config: RestMessagingConfig,
     client: reqwest::Client,
@@ -47,8 +47,8 @@ impl NotificationChannel for RestChannel {
 
     fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
-    fn send<'a>(&'a self, msg: &'a RenderedMessage<'a>) -> SendFuture<'a> {
-        Box::pin(async move {
+    async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
+        {
             let method = Method::from_str(&self.config.method).unwrap_or(Method::POST);
             let mut rb = self.client.request(method, &self.config.url);
 
@@ -81,7 +81,7 @@ impl NotificationChannel for RestChannel {
                 }
                 Err(err) => Delivery::retry(format!("rest request failed: {err}")),
             }
-        })
+        }
     }
 
     fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }

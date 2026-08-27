@@ -112,7 +112,7 @@ mod tests {
     use super::{ChannelState, Suppression};
     use std::time::{Duration, Instant};
 
-    const WINDOW: Duration = Duration::from_secs(60);
+    const WINDOW: Duration = Duration::from_mins(1);
 
     fn win() -> Option<Duration> { Some(WINDOW) }
 

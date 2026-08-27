@@ -103,6 +103,11 @@ impl fmt::Display for ConfigPage {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+// `MessagingConfigDto` is the largest variant: eight channel configs, each
+// with its own templates map and routing block. Boxing it would shrink the
+// enum, but this type is moved once per form submit and never in a hot
+// path, so the indirection buys nothing real.
+#[allow(clippy::large_enum_variant)]
 pub enum ConfigForm {
     Main(bool, MainConfigDto),
     Api(bool, ConfigApiDto),
@@ -111,9 +116,7 @@ pub enum ConfigForm {
     Schedules(bool, SchedulesConfigDto),
     Video(bool, VideoConfigDto),
     MetadataUpdate(bool, MetadataUpdateConfigDto),
-    // Boxed: the messaging DTO now carries eight channel configs and would
-    // otherwise dominate the size of every other variant.
-    Messaging(bool, Box<MessagingConfigDto>),
+    Messaging(bool, MessagingConfigDto),
     WebUi(bool, WebUiConfigDto),
     ReverseProxy(bool, ReverseProxyConfigDto),
     HdHomerun(bool, HdHomeRunConfigDto),

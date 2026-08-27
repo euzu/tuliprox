@@ -8,12 +8,13 @@
 //! quoting rules to get wrong and no shell-injection surface from event
 //! content.
 
-use crate::channel::{ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage, SendFuture};
+use crate::channel::{ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage};
 use log::debug;
 use shared::model::notification::{EventId, Severity};
 use tokio::io::AsyncWriteExt;
 use tuliprox_core::model::{ChannelRouting, CommandMessagingConfig};
 
+#[derive(Clone)]
 pub struct CommandChannel {
     config: CommandMessagingConfig,
 }
@@ -31,8 +32,8 @@ impl NotificationChannel for CommandChannel {
 
     fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
-    fn send<'a>(&'a self, msg: &'a RenderedMessage<'a>) -> SendFuture<'a> {
-        Box::pin(async move {
+    async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
+        {
             // Without a template, hand over the whole event as JSON so a
             // script can pick out whatever it needs.
             let payload = if msg.templated {
@@ -90,7 +91,7 @@ impl NotificationChannel for CommandChannel {
                     self.config.timeout.as_secs()
                 )),
             }
-        })
+        }
     }
 
     fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }

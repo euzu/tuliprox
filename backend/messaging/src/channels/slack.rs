@@ -5,7 +5,6 @@
 
 use crate::channel::{
     delivery_for_status, parse_retry_after, ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage,
-    SendFuture,
 };
 use log::debug;
 use serde_json::json;
@@ -15,6 +14,7 @@ use tuliprox_core::model::{ChannelRouting, SlackMessagingConfig};
 /// Slack rejects a `text` field longer than this.
 const SLACK_TEXT_LIMIT: usize = 3000;
 
+#[derive(Clone)]
 pub struct SlackChannel {
     config: SlackMessagingConfig,
     client: reqwest::Client,
@@ -44,8 +44,8 @@ impl NotificationChannel for SlackChannel {
 
     fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
-    fn send<'a>(&'a self, msg: &'a RenderedMessage<'a>) -> SendFuture<'a> {
-        Box::pin(async move {
+    async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
+        {
             let body = if msg.templated {
                 msg.body.clone()
             } else {
@@ -81,7 +81,7 @@ impl NotificationChannel for SlackChannel {
                 }
                 Err(err) => Delivery::retry(format!("slack request failed: {err}")),
             }
-        })
+        }
     }
 
     fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }

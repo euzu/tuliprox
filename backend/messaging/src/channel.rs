@@ -10,18 +10,15 @@
 //! Now it is one [`NotificationChannel`] impl plus one config field. The
 //! dispatcher never learns the channel's name.
 //!
-//! Dispatch is dynamic on purpose. The channel set is an open world
-//! resolved once at config load, and a notification send is bounded by a
-//! network round trip - the vtable hop is not measurable here, and static
-//! dispatch would put the closed-world match back.
+//! Dispatch is static. [`NotificationChannel`] returns an opaque future
+//! from `send` rather than a boxed one, which makes the trait deliberately
+//! *not* object safe: there is no vtable and no allocation on the send
+//! path. [`Channel`](crate::channels::Channel) enumerates the
+//! implementations and every call monomorphizes.
 
 use shared::model::notification::{EventId, Severity};
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::future::Future;
 use tuliprox_core::model::{ChannelRouting, NotificationEvent};
-
-/// A boxed channel send. Matches the `SinkFuture` convention in
-/// `tuliprox-processing` rather than pulling in `async-trait`.
-pub type SendFuture<'a> = Pin<Box<dyn Future<Output = Delivery> + Send + 'a>>;
 
 /// What happened to one delivery attempt.
 ///
@@ -158,11 +155,13 @@ pub trait NotificationChannel: Send + Sync {
 
     /// Deliver. Must not panic and must not block - a slow provider has to
     /// surface as [`Delivery::Retry`], not a stalled worker.
-    fn send<'a>(&'a self, msg: &'a RenderedMessage<'a>) -> SendFuture<'a>;
+    ///
+    /// Returns an opaque future rather than a boxed one. That is what keeps
+    /// the send path allocation-free, and it is why this trait is not object
+    /// safe - implementations are reached through
+    /// [`Channel`](crate::channels::Channel), never a trait object.
+    fn send(&self, msg: &RenderedMessage<'_>) -> impl Future<Output = Delivery> + Send;
 }
-
-/// The channels configured right now, in a stable order.
-pub type ChannelSet = Vec<Arc<dyn NotificationChannel>>;
 
 #[cfg(test)]
 mod tests {

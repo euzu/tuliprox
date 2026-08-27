@@ -135,7 +135,7 @@ impl From<&TelegramMessagingConfigDto> for TelegramMessagingConfig {
             chat_ids: dto.chat_ids.clone(),
             markdown: dto.markdown,
             templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -147,7 +147,7 @@ impl From<&TelegramMessagingConfig> for TelegramMessagingConfigDto {
             chat_ids: instance.chat_ids.clone(),
             markdown: instance.markdown,
             templates: template_keys_to_wire(&instance.templates),
-            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
+            routing: Some(ChannelRoutingDto::from(&instance.routing)),
         }
     }
 }
@@ -183,7 +183,7 @@ impl From<&RestMessagingConfigDto> for RestMessagingConfig {
             signing_secret: dto.signing_secret.clone(),
             headers,
             templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -197,7 +197,7 @@ impl From<&RestMessagingConfig> for RestMessagingConfigDto {
             signing_secret: model.signing_secret.clone(),
             headers,
             templates: template_keys_to_wire(&model.templates),
-            routing: Some(Box::new(ChannelRoutingDto::from(&model.routing))),
+            routing: Some(ChannelRoutingDto::from(&model.routing)),
         }
     }
 }
@@ -221,7 +221,7 @@ impl From<&DiscordMessagingConfigDto> for DiscordMessagingConfig {
         Self {
             url: dto.url.clone(),
             templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -231,7 +231,7 @@ impl From<&DiscordMessagingConfig> for DiscordMessagingConfigDto {
         Self {
             url: instance.url.clone(),
             templates: template_keys_to_wire(&instance.templates),
-            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
+            routing: Some(ChannelRoutingDto::from(&instance.routing)),
         }
     }
 }
@@ -262,7 +262,7 @@ impl From<&PushoverMessagingConfigDto> for PushoverMessagingConfig {
             token: dto.token.clone(),
             user: dto.user.clone(),
             templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -274,7 +274,7 @@ impl From<&PushoverMessagingConfig> for PushoverMessagingConfigDto {
             token: instance.token.clone(),
             user: instance.user.clone(),
             templates: template_keys_to_wire(&instance.templates),
-            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
+            routing: Some(ChannelRoutingDto::from(&instance.routing)),
         }
     }
 }
@@ -300,7 +300,7 @@ impl From<&NtfyMessagingConfigDto> for NtfyMessagingConfig {
             topic: dto.topic.clone(),
             token: dto.token.clone(),
             templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -312,7 +312,7 @@ impl From<&NtfyMessagingConfig> for NtfyMessagingConfigDto {
             topic: instance.topic.clone(),
             token: instance.token.clone(),
             templates: template_keys_to_wire(&instance.templates),
-            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
+            routing: Some(ChannelRoutingDto::from(&instance.routing)),
         }
     }
 }
@@ -338,7 +338,7 @@ impl From<&GotifyMessagingConfigDto> for GotifyMessagingConfig {
             url: dto.url.trim_end_matches('/').to_string(),
             token: dto.token.clone(),
             templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -349,7 +349,7 @@ impl From<&GotifyMessagingConfig> for GotifyMessagingConfigDto {
             url: instance.url.clone(),
             token: instance.token.clone(),
             templates: template_keys_to_wire(&instance.templates),
-            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
+            routing: Some(ChannelRoutingDto::from(&instance.routing)),
         }
     }
 }
@@ -371,7 +371,7 @@ impl From<&SlackMessagingConfigDto> for SlackMessagingConfig {
         Self {
             url: dto.url.clone(),
             templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -381,7 +381,7 @@ impl From<&SlackMessagingConfig> for SlackMessagingConfigDto {
         Self {
             url: instance.url.clone(),
             templates: template_keys_to_wire(&instance.templates),
-            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
+            routing: Some(ChannelRoutingDto::from(&instance.routing)),
         }
     }
 }
@@ -409,7 +409,7 @@ impl From<&CommandMessagingConfigDto> for CommandMessagingConfig {
             args: dto.args.clone(),
             timeout: std::time::Duration::from_secs(dto.timeout_secs.unwrap_or(30).max(1)),
             templates: resolve_template_keys(&dto.templates),
-            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+            routing: dto.routing.as_ref().map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -421,7 +421,7 @@ impl From<&CommandMessagingConfig> for CommandMessagingConfigDto {
             args: instance.args.clone(),
             timeout_secs: Some(instance.timeout.as_secs()),
             templates: template_keys_to_wire(&instance.templates),
-            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
+            routing: Some(ChannelRoutingDto::from(&instance.routing)),
         }
     }
 }

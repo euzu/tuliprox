@@ -1,6 +1,6 @@
 //! Telegram channel.
 
-use crate::channel::{ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage, SendFuture};
+use crate::channel::{ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage};
 use log::debug;
 use shared::{
     model::notification::{EventId, Severity},
@@ -12,6 +12,7 @@ use tuliprox_core::{
     utils::{telegram_create_instance, telegram_send_message, SendMessageOption, SendMessageParseMode},
 };
 
+#[derive(Clone)]
 pub struct TelegramChannel {
     config: TelegramMessagingConfig,
     app_config: Arc<AppConfig>,
@@ -33,8 +34,8 @@ impl NotificationChannel for TelegramChannel {
 
     fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
-    fn send<'a>(&'a self, msg: &'a RenderedMessage<'a>) -> SendFuture<'a> {
-        Box::pin(async move {
+    async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
+        {
             let raw = &msg.body;
             let (message, options) = if self.config.markdown {
                 if let Ok(md) = json_str_to_markdown(raw) {
@@ -83,7 +84,7 @@ impl NotificationChannel for TelegramChannel {
             } else {
                 Delivery::retry(format!("telegram chat id(s) not delivered: {}", failed.join(", ")))
             }
-        })
+        }
     }
 
     fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }

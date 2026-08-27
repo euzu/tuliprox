@@ -90,11 +90,8 @@ pub struct TelegramMessagingConfigDto {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub templates: std::collections::HashMap<String, String>,
     /// Per-channel routing. Inherits the global `notify_on` when absent.
-    ///
-    /// Boxed so four of these do not dominate the size of every config
-    /// enum variant that carries a `MessagingConfigDto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<Box<ChannelRoutingDto>>,
+    pub routing: Option<ChannelRoutingDto>,
 }
 
 impl TelegramMessagingConfigDto {
@@ -127,11 +124,8 @@ pub struct RestMessagingConfigDto {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub templates: std::collections::HashMap<String, String>,
     /// Per-channel routing. Inherits the global `notify_on` when absent.
-    ///
-    /// Boxed so four of these do not dominate the size of every config
-    /// enum variant that carries a `MessagingConfigDto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<Box<ChannelRoutingDto>>,
+    pub routing: Option<ChannelRoutingDto>,
 }
 
 impl RestMessagingConfigDto {
@@ -156,11 +150,8 @@ pub struct DiscordMessagingConfigDto {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub templates: std::collections::HashMap<String, String>,
     /// Per-channel routing. Inherits the global `notify_on` when absent.
-    ///
-    /// Boxed so four of these do not dominate the size of every config
-    /// enum variant that carries a `MessagingConfigDto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<Box<ChannelRoutingDto>>,
+    pub routing: Option<ChannelRoutingDto>,
 }
 
 impl DiscordMessagingConfigDto {
@@ -182,11 +173,8 @@ pub struct PushoverMessagingConfigDto {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub templates: std::collections::HashMap<String, String>,
     /// Per-channel routing. Inherits the global `notify_on` when absent.
-    ///
-    /// Boxed so four of these do not dominate the size of every config
-    /// enum variant that carries a `MessagingConfigDto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<Box<ChannelRoutingDto>>,
+    pub routing: Option<ChannelRoutingDto>,
 }
 
 impl PushoverMessagingConfigDto {
@@ -212,7 +200,7 @@ pub struct NtfyMessagingConfigDto {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub templates: std::collections::HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<Box<ChannelRoutingDto>>,
+    pub routing: Option<ChannelRoutingDto>,
 }
 
 impl NtfyMessagingConfigDto {
@@ -230,7 +218,7 @@ pub struct GotifyMessagingConfigDto {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub templates: std::collections::HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<Box<ChannelRoutingDto>>,
+    pub routing: Option<ChannelRoutingDto>,
 }
 
 impl GotifyMessagingConfigDto {
@@ -248,7 +236,7 @@ pub struct SlackMessagingConfigDto {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub templates: std::collections::HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<Box<ChannelRoutingDto>>,
+    pub routing: Option<ChannelRoutingDto>,
 }
 
 impl SlackMessagingConfigDto {
@@ -274,7 +262,7 @@ pub struct CommandMessagingConfigDto {
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub templates: std::collections::HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing: Option<Box<ChannelRoutingDto>>,
+    pub routing: Option<ChannelRoutingDto>,
 }
 
 impl CommandMessagingConfigDto {

@@ -8,7 +8,6 @@
 
 use crate::channel::{
     delivery_for_status, parse_retry_after, ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage,
-    SendFuture,
 };
 use log::debug;
 use reqwest::header;
@@ -20,6 +19,7 @@ const PUSHOVER_BODY_LIMIT: usize = 1024;
 /// And the title here.
 const PUSHOVER_TITLE_LIMIT: usize = 250;
 
+#[derive(Clone)]
 pub struct PushoverChannel {
     config: PushoverMessagingConfig,
     client: reqwest::Client,
@@ -47,8 +47,8 @@ impl NotificationChannel for PushoverChannel {
 
     fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
-    fn send<'a>(&'a self, msg: &'a RenderedMessage<'a>) -> SendFuture<'a> {
-        Box::pin(async move {
+    async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
+        {
             let body: String = msg.body.chars().take(PUSHOVER_BODY_LIMIT).collect();
             let title: String = msg.event.title.chars().take(PUSHOVER_TITLE_LIMIT).collect();
             let encoded: String = url::form_urlencoded::Serializer::new(String::new())
@@ -77,7 +77,7 @@ impl NotificationChannel for PushoverChannel {
                 }
                 Err(err) => Delivery::retry(format!("pushover request failed: {err}")),
             }
-        })
+        }
     }
 
     fn capabilities(&self) -> ChannelCapabilities {

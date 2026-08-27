@@ -14,7 +14,10 @@ pub mod outbox;
 pub mod rate_limit;
 pub mod render;
 
-use crate::channel::{ChannelSet, Delivery, NotificationChannel, RenderedMessage};
+use crate::{
+    channel::{Delivery, RenderedMessage},
+    channels::{Channel, ChannelSet},
+};
 use log::{debug, error};
 use shared::model::{
     notification::{EventId, Severity},
@@ -51,7 +54,7 @@ fn severity_of(id: EventId) -> Severity { shared::model::notification::registry:
 async fn render_for<'a>(
     app_config: &Arc<AppConfig>,
     client: &reqwest::Client,
-    channel: &dyn NotificationChannel,
+    channel: &Channel,
     event: &'a NotificationEvent,
 ) -> RenderedMessage<'a> {
     let capabilities = channel.capabilities();
@@ -111,9 +114,9 @@ pub async fn send_event_to_channel(
     if let Some(reason) =
         rate_limit::admit(channel.id(), event.dedup_key.as_deref(), routing.dedup_window, routing.max_per_hour)
     {
-        return suppression_outcome(channel.as_ref(), event, reason);
+        return suppression_outcome(&channel, event, reason);
     }
-    let msg = render_for(app_config, client, channel.as_ref(), event).await;
+    let msg = render_for(app_config, client, &channel, event).await;
     channel.send(&msg).await
 }
 
@@ -121,11 +124,7 @@ pub async fn send_event_to_channel(
 ///
 /// A rate-limit ceiling reports itself once so the resulting silence is
 /// distinguishable from a notifier that has died.
-fn suppression_outcome(
-    channel: &dyn NotificationChannel,
-    event: &NotificationEvent,
-    reason: rate_limit::Suppression,
-) -> Delivery {
+fn suppression_outcome(channel: &Channel, event: &NotificationEvent, reason: rate_limit::Suppression) -> Delivery {
     match reason {
         rate_limit::Suppression::Duplicate => {
             debug!("Notification {} suppressed on {} as a duplicate", event.id, channel.id());
@@ -155,7 +154,7 @@ fn local_minutes_now() -> u16 {
 /// Quiet hours defer rather than drop: an overnight outage nobody hears
 /// about afterwards is worse than one that arrives late.
 #[must_use]
-pub fn quiet_hours_defer(channel: &dyn NotificationChannel) -> Option<std::time::Duration> {
+pub fn quiet_hours_defer(channel: &Channel) -> Option<std::time::Duration> {
     let window = channel.routing().quiet_hours?;
     let minutes = local_minutes_now();
     if !window.contains(minutes) {
@@ -201,9 +200,9 @@ async fn dispatch(app_config: &Arc<AppConfig>, client: &reqwest::Client, event: 
         if let Some(reason) =
             rate_limit::admit(channel.id(), event.dedup_key.as_deref(), routing.dedup_window, routing.max_per_hour)
         {
-            return (channel.id(), suppression_outcome(channel.as_ref(), event, reason));
+            return (channel.id(), suppression_outcome(channel, event, reason));
         }
-        let msg = render_for(app_config, client, channel.as_ref(), event).await;
+        let msg = render_for(app_config, client, channel, event).await;
         let outcome = channel.send(&msg).await;
         (channel.id(), outcome)
     });
@@ -278,7 +277,7 @@ pub async fn render_and_send_test(
     let set = channels::channels(app_config, messaging);
     let mut results = Vec::with_capacity(set.len());
     for channel in set.iter().filter(|c| only_channel.is_none_or(|want| c.id() == want)) {
-        let msg = render_for(app_config, client, channel.as_ref(), event).await;
+        let msg = render_for(app_config, client, channel, event).await;
         if preview {
             results.push(TestOutcome {
                 channel: channel.id().to_string(),

@@ -2,7 +2,6 @@
 
 use crate::channel::{
     delivery_for_status, parse_retry_after, ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage,
-    SendFuture,
 };
 use log::debug;
 use reqwest::header;
@@ -13,6 +12,7 @@ use tuliprox_core::model::{ChannelRouting, DiscordMessagingConfig};
 /// Discord rejects a webhook payload whose `content` exceeds this.
 const DISCORD_CONTENT_LIMIT: usize = 2000;
 
+#[derive(Clone)]
 pub struct DiscordChannel {
     config: DiscordMessagingConfig,
     client: reqwest::Client,
@@ -31,8 +31,8 @@ impl NotificationChannel for DiscordChannel {
 
     fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
-    fn send<'a>(&'a self, msg: &'a RenderedMessage<'a>) -> SendFuture<'a> {
-        Box::pin(async move {
+    async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
+        {
             // A template is expected to produce the whole webhook payload.
             // Without one, wrap the plain body in the minimal valid shape.
             let body = if msg.templated {
@@ -60,7 +60,7 @@ impl NotificationChannel for DiscordChannel {
                 }
                 Err(err) => Delivery::retry(format!("discord request failed: {err}")),
             }
-        })
+        }
     }
 
     fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }

@@ -188,7 +188,7 @@ fn apply_setup_config_forms(config: &mut shared::model::ConfigDto, forms: Vec<Co
                     config.metadata_update = Some(metadata_update_cfg);
                 }
             }
-            ConfigForm::Messaging(_, messaging_cfg) => config.messaging = Some(*messaging_cfg),
+            ConfigForm::Messaging(_, messaging_cfg) => config.messaging = Some(messaging_cfg),
             ConfigForm::WebUi(modified, web_ui_cfg) => apply_setup_webui_form(config, web_ui_cfg, modified),
             ConfigForm::ReverseProxy(_, reverse_proxy_cfg) => config.reverse_proxy = Some(reverse_proxy_cfg),
             ConfigForm::HdHomerun(_, hdhr_cfg) => apply_setup_hdhomerun_form(config, hdhr_cfg),

@@ -2,13 +2,13 @@
 
 use crate::channel::{
     delivery_for_status, parse_retry_after, ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage,
-    SendFuture,
 };
 use log::debug;
 use serde_json::json;
 use shared::model::notification::{EventId, Severity};
 use tuliprox_core::model::{ChannelRouting, GotifyMessagingConfig};
 
+#[derive(Clone)]
 pub struct GotifyChannel {
     config: GotifyMessagingConfig,
     client: reqwest::Client,
@@ -37,8 +37,8 @@ impl NotificationChannel for GotifyChannel {
 
     fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
-    fn send<'a>(&'a self, msg: &'a RenderedMessage<'a>) -> SendFuture<'a> {
-        Box::pin(async move {
+    async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
+        {
             // A template is expected to produce the whole payload; without
             // one, build the minimal valid shape.
             let body = if msg.templated {
@@ -71,7 +71,7 @@ impl NotificationChannel for GotifyChannel {
                 }
                 Err(err) => Delivery::retry(format!("gotify request failed: {err}")),
             }
-        })
+        }
     }
 
     fn capabilities(&self) -> ChannelCapabilities { ChannelCapabilities::default() }

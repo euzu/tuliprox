@@ -1,9 +1,13 @@
 //! The built-in channels.
 //!
 //! Each is one [`NotificationChannel`](crate::channel::NotificationChannel)
-//! impl. Adding another means adding a module here, a config field, and a
-//! line in [`build`] - the dispatcher, the outbox and the renderer stay
-//! untouched.
+//! impl plus a [`Channel`] variant. Adding another means a module here, an
+//! enum variant, a config field and a line in [`build`] - the dispatcher,
+//! the outbox and the renderer stay untouched.
+//!
+//! [`Channel`] is what makes dispatch static: the match monomorphizes into
+//! a direct call, so there is no vtable and no boxed future anywhere on the
+//! send path.
 
 pub mod command;
 pub mod discord;
@@ -14,13 +18,86 @@ pub mod rest;
 pub mod slack;
 pub mod telegram;
 
-use crate::channel::ChannelSet;
+use crate::channel::{ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage};
 use log::warn;
+use shared::model::notification::{EventId, Severity};
 use std::sync::{Arc, OnceLock, RwLock};
 use tuliprox_core::{
-    model::{AppConfig, MessagingConfig},
+    model::{AppConfig, ChannelRouting, MessagingConfig},
     utils::request::create_client,
 };
+
+/// One configured channel.
+///
+/// An enum rather than a trait object, so every dispatch is a direct call
+/// the compiler can inline. `NotificationChannel::send` returns an opaque
+/// future, which makes the trait non-object-safe by construction - this is
+/// the only way an implementation is reached.
+#[derive(Clone)]
+pub enum Channel {
+    Telegram(telegram::TelegramChannel),
+    Rest(rest::RestChannel),
+    Pushover(pushover::PushoverChannel),
+    Discord(discord::DiscordChannel),
+    Ntfy(ntfy::NtfyChannel),
+    Gotify(gotify::GotifyChannel),
+    Slack(slack::SlackChannel),
+    Command(command::CommandChannel),
+}
+
+/// Forward one `&self` method to whichever variant is present.
+macro_rules! delegate {
+    ($self:ident, $inner:ident => $call:expr) => {
+        match $self {
+            Channel::Telegram($inner) => $call,
+            Channel::Rest($inner) => $call,
+            Channel::Pushover($inner) => $call,
+            Channel::Discord($inner) => $call,
+            Channel::Ntfy($inner) => $call,
+            Channel::Gotify($inner) => $call,
+            Channel::Slack($inner) => $call,
+            Channel::Command($inner) => $call,
+        }
+    };
+}
+
+impl Channel {
+    /// Stable wire id: config key, outbox key, metric label, template prefix.
+    #[must_use]
+    pub fn id(&self) -> &'static str { delegate!(self, c => c.id()) }
+
+    #[must_use]
+    pub fn capabilities(&self) -> ChannelCapabilities { delegate!(self, c => c.capabilities()) }
+
+    #[must_use]
+    pub fn template_for(&self, event: EventId) -> Option<&str> { delegate!(self, c => c.template_for(event)) }
+
+    #[must_use]
+    pub fn routing(&self) -> &ChannelRouting { delegate!(self, c => c.routing()) }
+
+    #[must_use]
+    pub fn wants(&self, event: EventId, severity: Severity) -> bool { delegate!(self, c => c.wants(event, severity)) }
+
+    /// Deliver through the concrete channel.
+    ///
+    /// Each arm awaits a distinct concrete future type; the `async fn` is
+    /// what unifies them without boxing.
+    pub async fn send(&self, msg: &RenderedMessage<'_>) -> Delivery {
+        match self {
+            Channel::Telegram(c) => c.send(msg).await,
+            Channel::Rest(c) => c.send(msg).await,
+            Channel::Pushover(c) => c.send(msg).await,
+            Channel::Discord(c) => c.send(msg).await,
+            Channel::Ntfy(c) => c.send(msg).await,
+            Channel::Gotify(c) => c.send(msg).await,
+            Channel::Slack(c) => c.send(msg).await,
+            Channel::Command(c) => c.send(msg).await,
+        }
+    }
+}
+
+/// The channels configured right now, in a stable order.
+pub type ChannelSet = Vec<Channel>;
 
 /// Per-channel request timeout.
 ///
@@ -78,29 +155,33 @@ pub fn build(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> Channe
     let client = channel_client(app_config);
     let mut channels: ChannelSet = Vec::with_capacity(8);
     if let Some(cfg) = messaging.telegram.as_ref() {
-        channels.push(Arc::new(telegram::TelegramChannel::new(cfg.clone(), Arc::clone(app_config), client.clone())));
+        channels.push(Channel::Telegram(telegram::TelegramChannel::new(
+            cfg.clone(),
+            Arc::clone(app_config),
+            client.clone(),
+        )));
     }
     if let Some(cfg) = messaging.rest.as_ref() {
-        channels.push(Arc::new(rest::RestChannel::new(cfg.clone(), client.clone())));
+        channels.push(Channel::Rest(rest::RestChannel::new(cfg.clone(), client.clone())));
     }
     if let Some(cfg) = messaging.pushover.as_ref() {
-        channels.push(Arc::new(pushover::PushoverChannel::new(cfg.clone(), client.clone())));
+        channels.push(Channel::Pushover(pushover::PushoverChannel::new(cfg.clone(), client.clone())));
     }
     if let Some(cfg) = messaging.discord.as_ref() {
-        channels.push(Arc::new(discord::DiscordChannel::new(cfg.clone(), client.clone())));
+        channels.push(Channel::Discord(discord::DiscordChannel::new(cfg.clone(), client.clone())));
     }
     if let Some(cfg) = messaging.ntfy.as_ref() {
-        channels.push(Arc::new(ntfy::NtfyChannel::new(cfg.clone(), client.clone())));
+        channels.push(Channel::Ntfy(ntfy::NtfyChannel::new(cfg.clone(), client.clone())));
     }
     if let Some(cfg) = messaging.gotify.as_ref() {
-        channels.push(Arc::new(gotify::GotifyChannel::new(cfg.clone(), client.clone())));
+        channels.push(Channel::Gotify(gotify::GotifyChannel::new(cfg.clone(), client.clone())));
     }
     if let Some(cfg) = messaging.slack.as_ref() {
-        channels.push(Arc::new(slack::SlackChannel::new(cfg.clone(), client)));
+        channels.push(Channel::Slack(slack::SlackChannel::new(cfg.clone(), client)));
     }
     if let Some(cfg) = messaging.command.as_ref() {
         // No HTTP client: this one shells out.
-        channels.push(Arc::new(command::CommandChannel::new(cfg.clone())));
+        channels.push(Channel::Command(command::CommandChannel::new(cfg.clone())));
     }
     channels
 }
