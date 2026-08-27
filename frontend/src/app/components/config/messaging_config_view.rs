@@ -181,7 +181,7 @@ pub fn MessagingConfigView() -> Html {
                 form.disk_alert = if subscribed { Some(da) } else { None };
 
                 let modified = mm || tm || rm || pm || dm || dam;
-                ConfigForm::Messaging(modified, form)
+                ConfigForm::Messaging(modified, Box::new(form))
             },
         );
     }

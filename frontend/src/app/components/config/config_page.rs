@@ -111,7 +111,9 @@ pub enum ConfigForm {
     Schedules(bool, SchedulesConfigDto),
     Video(bool, VideoConfigDto),
     MetadataUpdate(bool, MetadataUpdateConfigDto),
-    Messaging(bool, MessagingConfigDto),
+    // Boxed: the messaging DTO now carries eight channel configs and would
+    // otherwise dominate the size of every other variant.
+    Messaging(bool, Box<MessagingConfigDto>),
     WebUi(bool, WebUiConfigDto),
     ReverseProxy(bool, ReverseProxyConfigDto),
     HdHomerun(bool, HdHomeRunConfigDto),

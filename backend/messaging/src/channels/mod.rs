@@ -5,9 +5,13 @@
 //! line in [`build`] - the dispatcher, the outbox and the renderer stay
 //! untouched.
 
+pub mod command;
 pub mod discord;
+pub mod gotify;
+pub mod ntfy;
 pub mod pushover;
 pub mod rest;
+pub mod slack;
 pub mod telegram;
 
 use crate::channel::ChannelSet;
@@ -72,7 +76,7 @@ pub fn channels(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> Cha
 #[must_use]
 pub fn build(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> ChannelSet {
     let client = channel_client(app_config);
-    let mut channels: ChannelSet = Vec::with_capacity(4);
+    let mut channels: ChannelSet = Vec::with_capacity(8);
     if let Some(cfg) = messaging.telegram.as_ref() {
         channels.push(Arc::new(telegram::TelegramChannel::new(cfg.clone(), Arc::clone(app_config), client.clone())));
     }
@@ -83,7 +87,20 @@ pub fn build(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> Channe
         channels.push(Arc::new(pushover::PushoverChannel::new(cfg.clone(), client.clone())));
     }
     if let Some(cfg) = messaging.discord.as_ref() {
-        channels.push(Arc::new(discord::DiscordChannel::new(cfg.clone(), client)));
+        channels.push(Arc::new(discord::DiscordChannel::new(cfg.clone(), client.clone())));
+    }
+    if let Some(cfg) = messaging.ntfy.as_ref() {
+        channels.push(Arc::new(ntfy::NtfyChannel::new(cfg.clone(), client.clone())));
+    }
+    if let Some(cfg) = messaging.gotify.as_ref() {
+        channels.push(Arc::new(gotify::GotifyChannel::new(cfg.clone(), client.clone())));
+    }
+    if let Some(cfg) = messaging.slack.as_ref() {
+        channels.push(Arc::new(slack::SlackChannel::new(cfg.clone(), client)));
+    }
+    if let Some(cfg) = messaging.command.as_ref() {
+        // No HTTP client: this one shells out.
+        channels.push(Arc::new(command::CommandChannel::new(cfg.clone())));
     }
     channels
 }

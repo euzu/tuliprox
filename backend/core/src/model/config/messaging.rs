@@ -2,8 +2,9 @@ use crate::model::macros;
 use log::warn;
 use shared::model::{
     notification::{registry, EventId, EventSubscription, QuietHours, Severity},
-    ChannelRoutingDto, DiscordMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, PushoverMessagingConfigDto,
-    RestMessagingConfigDto, TelegramMessagingConfigDto,
+    ChannelRoutingDto, CommandMessagingConfigDto, DiscordMessagingConfigDto, DiskAlertConfigDto,
+    GotifyMessagingConfigDto, MessagingConfigDto, NtfyMessagingConfigDto, PushoverMessagingConfigDto,
+    RestMessagingConfigDto, SlackMessagingConfigDto, TelegramMessagingConfigDto,
 };
 use std::path::{Path, PathBuf};
 
@@ -155,6 +156,7 @@ impl From<&TelegramMessagingConfig> for TelegramMessagingConfigDto {
 pub struct RestMessagingConfig {
     pub url: String,
     pub method: String,
+    pub signing_secret: Option<String>,
     pub headers: std::collections::HashMap<String, String>,
     pub templates: std::collections::HashMap<EventId, String>,
     pub routing: ChannelRouting,
@@ -178,6 +180,7 @@ impl From<&RestMessagingConfigDto> for RestMessagingConfig {
         Self {
             url: dto.url.clone(),
             method: dto.method.clone().unwrap_or_else(|| "POST".to_string()),
+            signing_secret: dto.signing_secret.clone(),
             headers,
             templates: resolve_template_keys(&dto.templates),
             routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
@@ -191,6 +194,7 @@ impl From<&RestMessagingConfig> for RestMessagingConfigDto {
         Self {
             url: model.url.clone(),
             method: Some(model.method.clone()),
+            signing_secret: model.signing_secret.clone(),
             headers,
             templates: template_keys_to_wire(&model.templates),
             routing: Some(Box::new(ChannelRoutingDto::from(&model.routing))),
@@ -276,6 +280,153 @@ impl From<&PushoverMessagingConfig> for PushoverMessagingConfigDto {
 }
 
 #[derive(Debug, Clone)]
+pub struct NtfyMessagingConfig {
+    pub url: String,
+    pub topic: String,
+    pub token: Option<String>,
+    pub templates: std::collections::HashMap<EventId, String>,
+    pub routing: ChannelRouting,
+}
+
+impl NtfyMessagingConfig {
+    pub fn prepare(&mut self, templates_dir: &Path) { discover_templates("ntfy", &mut self.templates, templates_dir); }
+}
+
+macros::from_impl!(NtfyMessagingConfig);
+impl From<&NtfyMessagingConfigDto> for NtfyMessagingConfig {
+    fn from(dto: &NtfyMessagingConfigDto) -> Self {
+        Self {
+            url: dto.url.trim_end_matches('/').to_string(),
+            topic: dto.topic.clone(),
+            token: dto.token.clone(),
+            templates: resolve_template_keys(&dto.templates),
+            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<&NtfyMessagingConfig> for NtfyMessagingConfigDto {
+    fn from(instance: &NtfyMessagingConfig) -> Self {
+        Self {
+            url: instance.url.clone(),
+            topic: instance.topic.clone(),
+            token: instance.token.clone(),
+            templates: template_keys_to_wire(&instance.templates),
+            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GotifyMessagingConfig {
+    pub url: String,
+    pub token: String,
+    pub templates: std::collections::HashMap<EventId, String>,
+    pub routing: ChannelRouting,
+}
+
+impl GotifyMessagingConfig {
+    pub fn prepare(&mut self, templates_dir: &Path) {
+        discover_templates("gotify", &mut self.templates, templates_dir);
+    }
+}
+
+macros::from_impl!(GotifyMessagingConfig);
+impl From<&GotifyMessagingConfigDto> for GotifyMessagingConfig {
+    fn from(dto: &GotifyMessagingConfigDto) -> Self {
+        Self {
+            url: dto.url.trim_end_matches('/').to_string(),
+            token: dto.token.clone(),
+            templates: resolve_template_keys(&dto.templates),
+            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<&GotifyMessagingConfig> for GotifyMessagingConfigDto {
+    fn from(instance: &GotifyMessagingConfig) -> Self {
+        Self {
+            url: instance.url.clone(),
+            token: instance.token.clone(),
+            templates: template_keys_to_wire(&instance.templates),
+            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SlackMessagingConfig {
+    pub url: String,
+    pub templates: std::collections::HashMap<EventId, String>,
+    pub routing: ChannelRouting,
+}
+
+impl SlackMessagingConfig {
+    pub fn prepare(&mut self, templates_dir: &Path) { discover_templates("slack", &mut self.templates, templates_dir); }
+}
+
+macros::from_impl!(SlackMessagingConfig);
+impl From<&SlackMessagingConfigDto> for SlackMessagingConfig {
+    fn from(dto: &SlackMessagingConfigDto) -> Self {
+        Self {
+            url: dto.url.clone(),
+            templates: resolve_template_keys(&dto.templates),
+            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<&SlackMessagingConfig> for SlackMessagingConfigDto {
+    fn from(instance: &SlackMessagingConfig) -> Self {
+        Self {
+            url: instance.url.clone(),
+            templates: template_keys_to_wire(&instance.templates),
+            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandMessagingConfig {
+    pub program: String,
+    pub args: Vec<String>,
+    pub timeout: std::time::Duration,
+    pub templates: std::collections::HashMap<EventId, String>,
+    pub routing: ChannelRouting,
+}
+
+impl CommandMessagingConfig {
+    pub fn prepare(&mut self, templates_dir: &Path) {
+        discover_templates("command", &mut self.templates, templates_dir);
+    }
+}
+
+macros::from_impl!(CommandMessagingConfig);
+impl From<&CommandMessagingConfigDto> for CommandMessagingConfig {
+    fn from(dto: &CommandMessagingConfigDto) -> Self {
+        Self {
+            program: dto.program.clone(),
+            args: dto.args.clone(),
+            timeout: std::time::Duration::from_secs(dto.timeout_secs.unwrap_or(30).max(1)),
+            templates: resolve_template_keys(&dto.templates),
+            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<&CommandMessagingConfig> for CommandMessagingConfigDto {
+    fn from(instance: &CommandMessagingConfig) -> Self {
+        Self {
+            program: instance.program.clone(),
+            args: instance.args.clone(),
+            timeout_secs: Some(instance.timeout.as_secs()),
+            templates: template_keys_to_wire(&instance.templates),
+            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct MessagingConfig {
     /// Raw `notify_on` entries as written in config. Glob patterns and
     /// legacy `MsgKind` names are both accepted.
@@ -284,6 +435,10 @@ pub struct MessagingConfig {
     pub rest: Option<RestMessagingConfig>,
     pub pushover: Option<PushoverMessagingConfig>,
     pub discord: Option<DiscordMessagingConfig>,
+    pub ntfy: Option<NtfyMessagingConfig>,
+    pub gotify: Option<GotifyMessagingConfig>,
+    pub slack: Option<SlackMessagingConfig>,
+    pub command: Option<CommandMessagingConfig>,
     /// Optional disk-space alert config. When `None`, no alert is fired.
     pub disk_alert: Option<DiskAlertConfig>,
     /// `notify_on` parsed once at load. Matching runs per notification, so
@@ -310,6 +465,18 @@ impl MessagingConfig {
         if let Some(p) = &mut self.pushover {
             p.prepare(&templates_dir);
         }
+        if let Some(n) = &mut self.ntfy {
+            n.prepare(&templates_dir);
+        }
+        if let Some(g) = &mut self.gotify {
+            g.prepare(&templates_dir);
+        }
+        if let Some(sl) = &mut self.slack {
+            sl.prepare(&templates_dir);
+        }
+        if let Some(c) = &mut self.command {
+            c.prepare(&templates_dir);
+        }
     }
 }
 
@@ -323,6 +490,10 @@ impl From<&MessagingConfigDto> for MessagingConfig {
             rest: dto.rest.as_ref().map(Into::into),
             pushover: dto.pushover.as_ref().map(Into::into),
             discord: dto.discord.as_ref().map(Into::into),
+            ntfy: dto.ntfy.as_ref().map(Into::into),
+            gotify: dto.gotify.as_ref().map(Into::into),
+            slack: dto.slack.as_ref().map(Into::into),
+            command: dto.command.as_ref().map(Into::into),
             disk_alert: dto.disk_alert.as_ref().map(Into::into),
         }
     }
@@ -336,6 +507,10 @@ impl From<&MessagingConfig> for MessagingConfigDto {
             rest: instance.rest.as_ref().map(Into::into),
             pushover: instance.pushover.as_ref().map(Into::into),
             discord: instance.discord.as_ref().map(Into::into),
+            ntfy: instance.ntfy.as_ref().map(Into::into),
+            gotify: instance.gotify.as_ref().map(Into::into),
+            slack: instance.slack.as_ref().map(Into::into),
+            command: instance.command.as_ref().map(Into::into),
             disk_alert: instance.disk_alert.as_ref().map(Into::into),
         }
     }

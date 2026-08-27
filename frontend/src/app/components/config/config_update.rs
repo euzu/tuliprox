@@ -132,7 +132,10 @@ pub fn update_config(config: &mut ConfigDto, forms: Vec<ConfigForm>) {
             ConfigForm::MetadataUpdate(_, mut metadata_update_cfg) => {
                 set_config_field!(config, metadata_update_cfg, metadata_update);
             }
-            ConfigForm::Messaging(_, mut messaging_cfg) => set_config_field!(config, messaging_cfg, messaging),
+            ConfigForm::Messaging(_, messaging_cfg) => {
+                let mut messaging_cfg = *messaging_cfg;
+                set_config_field!(config, messaging_cfg, messaging);
+            }
             ConfigForm::WebUi(modified, web_ui_cfg) => update_webui_field(config, web_ui_cfg, modified),
             ConfigForm::ReverseProxy(_, mut reverse_proxy_cfg) => {
                 set_config_field!(config, reverse_proxy_cfg, reverse_proxy);
@@ -539,11 +542,11 @@ mod tests {
             &mut config,
             vec![ConfigForm::Messaging(
                 true,
-                MessagingConfigDto {
+                Box::new(MessagingConfigDto {
                     notify_on: vec!["system.disk.alert".to_string()],
                     disk_alert: Some(DiskAlertConfigDto::default()),
                     ..Default::default()
-                },
+                }),
             )],
         );
 
@@ -562,11 +565,11 @@ mod tests {
             &mut config,
             vec![ConfigForm::Messaging(
                 true,
-                MessagingConfigDto {
+                Box::new(MessagingConfigDto {
                     notify_on: vec!["system.disk.alert".to_string()],
                     disk_alert: Some(disk_alert.clone()),
                     ..Default::default()
-                },
+                }),
             )],
         );
 

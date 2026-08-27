@@ -111,6 +111,13 @@ pub struct RestMessagingConfigDto {
     pub method: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<String>,
+    /// HMAC-SHA256 signing secret.
+    ///
+    /// When set, each request carries `X-Tuliprox-Timestamp` and
+    /// `X-Tuliprox-Signature: sha256=<hex>` over `timestamp.body`, so the
+    /// receiving endpoint can verify the sender.
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub signing_secret: Option<String>,
     /// Template per event, keyed by event id wire name.
     ///
     /// Legacy `MsgKind` names (`info`, `stats`, `disk_alert`, ...) and
@@ -189,6 +196,89 @@ impl PushoverMessagingConfigDto {
             && self.user.trim().is_empty()
             && self.templates.is_empty()
     }
+}
+
+/// [ntfy](https://ntfy.sh) - self-hosted push, no account, no bot token.
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NtfyMessagingConfigDto {
+    /// Server base URL, e.g. `https://ntfy.sh`.
+    pub url: String,
+    /// Topic to publish to.
+    pub topic: String,
+    /// Bearer token for a protected topic.
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub templates: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<Box<ChannelRoutingDto>>,
+}
+
+impl NtfyMessagingConfigDto {
+    pub fn is_empty(&self) -> bool { self.url.trim().is_empty() && self.topic.trim().is_empty() }
+}
+
+/// [Gotify](https://gotify.net) - same audience as ntfy, same shape.
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GotifyMessagingConfigDto {
+    /// Server base URL.
+    pub url: String,
+    /// Application token.
+    pub token: String,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub templates: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<Box<ChannelRoutingDto>>,
+}
+
+impl GotifyMessagingConfigDto {
+    pub fn is_empty(&self) -> bool { self.url.trim().is_empty() && self.token.trim().is_empty() }
+}
+
+/// Slack incoming webhook.
+///
+/// Not a Discord clone: Block Kit differs enough from Discord embeds that
+/// reusing the Discord payload shape produces bad output.
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SlackMessagingConfigDto {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub templates: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<Box<ChannelRoutingDto>>,
+}
+
+impl SlackMessagingConfigDto {
+    pub fn is_empty(&self) -> bool { self.url.trim().is_empty() }
+}
+
+/// Run a local program, with the event JSON on stdin.
+///
+/// The escape hatch that means nobody has to wait for a channel to be
+/// added upstream. This runs arbitrary code as the tuliprox process user,
+/// so it is opt-in and never configured by default.
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CommandMessagingConfigDto {
+    /// Program to run. Not passed through a shell, so no quoting rules and
+    /// no shell injection.
+    pub program: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Kill the child after this many seconds. Defaults to 30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub templates: std::collections::HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<Box<ChannelRoutingDto>>,
+}
+
+impl CommandMessagingConfigDto {
+    pub fn is_empty(&self) -> bool { self.program.trim().is_empty() }
 }
 
 /// Configuration for threshold-driven disk-space alerts.
@@ -281,6 +371,14 @@ pub struct MessagingConfigDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discord: Option<DiscordMessagingConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ntfy: Option<NtfyMessagingConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gotify: Option<GotifyMessagingConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack: Option<SlackMessagingConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<CommandMessagingConfigDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_alert: Option<DiskAlertConfigDto>,
 }
 
@@ -292,6 +390,10 @@ impl MessagingConfigDto {
             && (self.rest.is_none() || self.rest.as_ref().is_some_and(RestMessagingConfigDto::is_empty))
             && (self.pushover.is_none() || self.pushover.as_ref().is_some_and(PushoverMessagingConfigDto::is_empty))
             && (self.discord.is_none() || self.discord.as_ref().is_some_and(DiscordMessagingConfigDto::is_empty))
+            && (self.ntfy.is_none() || self.ntfy.as_ref().is_some_and(NtfyMessagingConfigDto::is_empty))
+            && (self.gotify.is_none() || self.gotify.as_ref().is_some_and(GotifyMessagingConfigDto::is_empty))
+            && (self.slack.is_none() || self.slack.as_ref().is_some_and(SlackMessagingConfigDto::is_empty))
+            && (self.command.is_none() || self.command.as_ref().is_some_and(CommandMessagingConfigDto::is_empty))
     }
 
     /// Replace channel secrets with [`REDACTED_SECRET`].
@@ -308,7 +410,18 @@ impl MessagingConfigDto {
             redact(&mut pushover.token);
             redact(&mut pushover.user);
         }
+        if let Some(ntfy) = self.ntfy.as_mut() {
+            if let Some(token) = ntfy.token.as_mut() {
+                redact(token);
+            }
+        }
+        if let Some(gotify) = self.gotify.as_mut() {
+            redact(&mut gotify.token);
+        }
         if let Some(rest) = self.rest.as_mut() {
+            if let Some(secret) = rest.signing_secret.as_mut() {
+                redact(secret);
+            }
             for header in &mut rest.headers {
                 // `Name: value` - keep the name, mask the value.
                 if let Some((name, _)) = header.split_once(':') {
@@ -332,7 +445,18 @@ impl MessagingConfigDto {
             restore(&mut incoming.token, &stored.token);
             restore(&mut incoming.user, &stored.user);
         }
+        if let (Some(incoming), Some(stored)) = (self.ntfy.as_mut(), current.ntfy.as_ref()) {
+            if let (Some(token), Some(original)) = (incoming.token.as_mut(), stored.token.as_ref()) {
+                restore(token, original);
+            }
+        }
+        if let (Some(incoming), Some(stored)) = (self.gotify.as_mut(), current.gotify.as_ref()) {
+            restore(&mut incoming.token, &stored.token);
+        }
         if let (Some(incoming), Some(stored)) = (self.rest.as_mut(), current.rest.as_ref()) {
+            if let (Some(secret), Some(original)) = (incoming.signing_secret.as_mut(), stored.signing_secret.as_ref()) {
+                restore(secret, original);
+            }
             for header in &mut incoming.headers {
                 let Some((name, value)) = header.split_once(':') else { continue };
                 if value.trim() != REDACTED_SECRET {
@@ -361,6 +485,18 @@ impl MessagingConfigDto {
         if self.discord.as_ref().is_some_and(DiscordMessagingConfigDto::is_empty) {
             self.discord = None;
         }
+        if self.ntfy.as_ref().is_some_and(NtfyMessagingConfigDto::is_empty) {
+            self.ntfy = None;
+        }
+        if self.gotify.as_ref().is_some_and(GotifyMessagingConfigDto::is_empty) {
+            self.gotify = None;
+        }
+        if self.slack.as_ref().is_some_and(SlackMessagingConfigDto::is_empty) {
+            self.slack = None;
+        }
+        if self.command.as_ref().is_some_and(CommandMessagingConfigDto::is_empty) {
+            self.command = None;
+        }
         if self.disk_alert.as_ref().is_some_and(DiskAlertConfigDto::is_empty) {
             self.disk_alert = None;
         }
@@ -375,6 +511,10 @@ impl MessagingConfigDto {
             self.rest.as_ref().and_then(|c| c.routing.as_ref()),
             self.discord.as_ref().and_then(|c| c.routing.as_ref()),
             self.pushover.as_ref().and_then(|c| c.routing.as_ref()),
+            self.ntfy.as_ref().and_then(|c| c.routing.as_ref()),
+            self.gotify.as_ref().and_then(|c| c.routing.as_ref()),
+            self.slack.as_ref().and_then(|c| c.routing.as_ref()),
+            self.command.as_ref().and_then(|c| c.routing.as_ref()),
         ]
         .into_iter()
         .flatten()
