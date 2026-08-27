@@ -4,6 +4,69 @@ use crate::{
     utils::{is_blank_optional_str, is_blank_optional_string},
 };
 
+/// Per-channel routing.
+///
+/// Without this every enabled event went to every configured channel, so
+/// "critical to Pushover, everything to Discord" was not expressible.
+/// Every field is optional and an omitted block inherits the global
+/// `notify_on`.
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelRoutingDto {
+    /// Overrides the global `notify_on` for this channel. Same glob
+    /// grammar. Empty means inherit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notify_on: Vec<String>,
+    /// Drop anything below this severity: `info`, `warn`, `error`,
+    /// `critical`.
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub min_severity: Option<String>,
+    /// `HH:MM-HH:MM` local time. Notifications inside the window are
+    /// deferred by the outbox, never dropped - an overnight outage must not
+    /// be silently invisible.
+    #[serde(default, skip_serializing_if = "is_blank_optional_string")]
+    pub quiet_hours: Option<String>,
+    /// Circuit breaker. On reaching it the channel sends one "suppressing
+    /// further notifications" message and then goes quiet for the rest of
+    /// the hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_hour: Option<u32>,
+    /// Suppress a repeated `dedup_key` for this many seconds. Generalizes
+    /// the disk alert's `repeat_interval_secs`, which was only available to
+    /// disk alerts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedup_window_secs: Option<u64>,
+}
+
+impl ChannelRoutingDto {
+    pub fn is_empty(&self) -> bool {
+        self.notify_on.is_empty()
+            && is_blank_optional_str(self.min_severity.as_deref())
+            && is_blank_optional_str(self.quiet_hours.as_deref())
+            && self.max_per_hour.is_none()
+            && self.dedup_window_secs.is_none()
+    }
+
+    /// Reject values that would otherwise fail silently at send time.
+    pub fn prepare(&self) -> Result<(), TuliproxError> {
+        if let Some(severity) = self.min_severity.as_deref().filter(|s| !s.trim().is_empty()) {
+            if crate::model::notification::Severity::from_wire(severity).is_none() {
+                return Err(TuliproxError::Config(format!(
+                    "messaging min_severity must be one of info, warn, error, critical; got `{severity}`"
+                )));
+            }
+        }
+        if let Some(window) = self.quiet_hours.as_deref().filter(|s| !s.trim().is_empty()) {
+            if crate::model::notification::QuietHours::parse(window).is_none() {
+                return Err(TuliproxError::Config(format!(
+                    "messaging quiet_hours must look like `23:00-07:00`; got `{window}`"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TelegramMessagingConfigDto {
@@ -20,6 +83,12 @@ pub struct TelegramMessagingConfigDto {
     /// matches no known event.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub templates: std::collections::HashMap<String, String>,
+    /// Per-channel routing. Inherits the global `notify_on` when absent.
+    ///
+    /// Boxed so four of these do not dominate the size of every config
+    /// enum variant that carries a `MessagingConfigDto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<Box<ChannelRoutingDto>>,
 }
 
 impl TelegramMessagingConfigDto {
@@ -44,6 +113,12 @@ pub struct RestMessagingConfigDto {
     /// matches no known event.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub templates: std::collections::HashMap<String, String>,
+    /// Per-channel routing. Inherits the global `notify_on` when absent.
+    ///
+    /// Boxed so four of these do not dominate the size of every config
+    /// enum variant that carries a `MessagingConfigDto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<Box<ChannelRoutingDto>>,
 }
 
 impl RestMessagingConfigDto {
@@ -67,6 +142,12 @@ pub struct DiscordMessagingConfigDto {
     /// matches no known event.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub templates: std::collections::HashMap<String, String>,
+    /// Per-channel routing. Inherits the global `notify_on` when absent.
+    ///
+    /// Boxed so four of these do not dominate the size of every config
+    /// enum variant that carries a `MessagingConfigDto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<Box<ChannelRoutingDto>>,
 }
 
 impl DiscordMessagingConfigDto {
@@ -87,6 +168,12 @@ pub struct PushoverMessagingConfigDto {
     /// playlist stats was a raw `serde_json` dump pushed to a phone.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub templates: std::collections::HashMap<String, String>,
+    /// Per-channel routing. Inherits the global `notify_on` when absent.
+    ///
+    /// Boxed so four of these do not dominate the size of every config
+    /// enum variant that carries a `MessagingConfigDto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<Box<ChannelRoutingDto>>,
 }
 
 impl PushoverMessagingConfigDto {
@@ -222,6 +309,17 @@ impl MessagingConfigDto {
     pub fn prepare(&mut self, _include_computed: bool) -> Result<(), TuliproxError> {
         if let Some(disk) = &self.disk_alert {
             disk.prepare()?;
+        }
+        for routing in [
+            self.telegram.as_ref().and_then(|c| c.routing.as_ref()),
+            self.rest.as_ref().and_then(|c| c.routing.as_ref()),
+            self.discord.as_ref().and_then(|c| c.routing.as_ref()),
+            self.pushover.as_ref().and_then(|c| c.routing.as_ref()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            routing.prepare()?;
         }
         self.normalize_notify_on();
         Ok(())

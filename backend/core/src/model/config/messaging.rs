@@ -1,8 +1,8 @@
 use crate::model::macros;
 use log::warn;
 use shared::model::{
-    notification::{registry, EventId, EventSubscription},
-    DiscordMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, PushoverMessagingConfigDto,
+    notification::{registry, EventId, EventSubscription, QuietHours, Severity},
+    ChannelRoutingDto, DiscordMessagingConfigDto, DiskAlertConfigDto, MessagingConfigDto, PushoverMessagingConfigDto,
     RestMessagingConfigDto, TelegramMessagingConfigDto,
 };
 use std::path::{Path, PathBuf};
@@ -50,12 +50,74 @@ impl From<&DiskAlertConfig> for DiskAlertConfigDto {
     }
 }
 
+/// Per-channel routing, resolved at config load.
+#[derive(Debug, Clone, Default)]
+pub struct ChannelRouting {
+    /// Overrides the global subscription when non-empty.
+    pub subscription: Option<EventSubscription>,
+    pub min_severity: Option<Severity>,
+    pub quiet_hours: Option<QuietHours>,
+    pub max_per_hour: Option<u32>,
+    pub dedup_window: Option<std::time::Duration>,
+}
+
+impl ChannelRouting {
+    /// Does this channel accept `event` at `severity`?
+    ///
+    /// Quiet hours are deliberately *not* checked here: they defer delivery
+    /// rather than reject it, so they belong to the outbox schedule, not to
+    /// the routing decision.
+    #[must_use]
+    pub fn accepts(&self, event: EventId, severity: Severity) -> bool {
+        if self.min_severity.is_some_and(|min| severity < min) {
+            return false;
+        }
+        match &self.subscription {
+            Some(subscription) => subscription.matches(event),
+            None => true,
+        }
+    }
+}
+
+impl From<&ChannelRoutingDto> for ChannelRouting {
+    fn from(dto: &ChannelRoutingDto) -> Self {
+        Self {
+            subscription: if dto.notify_on.is_empty() {
+                None
+            } else {
+                Some(EventSubscription::parse(dto.notify_on.iter()))
+            },
+            min_severity: dto.min_severity.as_deref().and_then(Severity::from_wire),
+            quiet_hours: dto.quiet_hours.as_deref().and_then(QuietHours::parse),
+            max_per_hour: dto.max_per_hour,
+            dedup_window: dto.dedup_window_secs.map(std::time::Duration::from_secs),
+        }
+    }
+}
+
+impl From<&ChannelRouting> for ChannelRoutingDto {
+    fn from(instance: &ChannelRouting) -> Self {
+        Self {
+            notify_on: instance
+                .subscription
+                .as_ref()
+                .map(|s| s.patterns().iter().map(ToString::to_string).collect())
+                .unwrap_or_default(),
+            min_severity: instance.min_severity.map(|s| s.wire_name().to_string()),
+            quiet_hours: None,
+            max_per_hour: instance.max_per_hour,
+            dedup_window_secs: instance.dedup_window.map(|d| d.as_secs()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TelegramMessagingConfig {
     pub bot_token: String,
     pub chat_ids: Vec<String>,
     pub markdown: bool,
     pub templates: std::collections::HashMap<EventId, String>,
+    pub routing: ChannelRouting,
 }
 
 impl TelegramMessagingConfig {
@@ -72,6 +134,7 @@ impl From<&TelegramMessagingConfigDto> for TelegramMessagingConfig {
             chat_ids: dto.chat_ids.clone(),
             markdown: dto.markdown,
             templates: resolve_template_keys(&dto.templates),
+            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -83,6 +146,7 @@ impl From<&TelegramMessagingConfig> for TelegramMessagingConfigDto {
             chat_ids: instance.chat_ids.clone(),
             markdown: instance.markdown,
             templates: template_keys_to_wire(&instance.templates),
+            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
         }
     }
 }
@@ -93,6 +157,7 @@ pub struct RestMessagingConfig {
     pub method: String,
     pub headers: std::collections::HashMap<String, String>,
     pub templates: std::collections::HashMap<EventId, String>,
+    pub routing: ChannelRouting,
 }
 
 impl RestMessagingConfig {
@@ -115,6 +180,7 @@ impl From<&RestMessagingConfigDto> for RestMessagingConfig {
             method: dto.method.clone().unwrap_or_else(|| "POST".to_string()),
             headers,
             templates: resolve_template_keys(&dto.templates),
+            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -127,6 +193,7 @@ impl From<&RestMessagingConfig> for RestMessagingConfigDto {
             method: Some(model.method.clone()),
             headers,
             templates: template_keys_to_wire(&model.templates),
+            routing: Some(Box::new(ChannelRoutingDto::from(&model.routing))),
         }
     }
 }
@@ -135,6 +202,7 @@ impl From<&RestMessagingConfig> for RestMessagingConfigDto {
 pub struct DiscordMessagingConfig {
     pub url: String,
     pub templates: std::collections::HashMap<EventId, String>,
+    pub routing: ChannelRouting,
 }
 
 impl DiscordMessagingConfig {
@@ -146,13 +214,21 @@ impl DiscordMessagingConfig {
 macros::from_impl!(DiscordMessagingConfig);
 impl From<&DiscordMessagingConfigDto> for DiscordMessagingConfig {
     fn from(dto: &DiscordMessagingConfigDto) -> Self {
-        Self { url: dto.url.clone(), templates: resolve_template_keys(&dto.templates) }
+        Self {
+            url: dto.url.clone(),
+            templates: resolve_template_keys(&dto.templates),
+            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
+        }
     }
 }
 
 impl From<&DiscordMessagingConfig> for DiscordMessagingConfigDto {
     fn from(instance: &DiscordMessagingConfig) -> Self {
-        Self { url: instance.url.clone(), templates: template_keys_to_wire(&instance.templates) }
+        Self {
+            url: instance.url.clone(),
+            templates: template_keys_to_wire(&instance.templates),
+            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
+        }
     }
 }
 
@@ -162,6 +238,7 @@ pub struct PushoverMessagingConfig {
     pub token: String,
     pub user: String,
     pub templates: std::collections::HashMap<EventId, String>,
+    pub routing: ChannelRouting,
 }
 
 impl PushoverMessagingConfig {
@@ -181,6 +258,7 @@ impl From<&PushoverMessagingConfigDto> for PushoverMessagingConfig {
             token: dto.token.clone(),
             user: dto.user.clone(),
             templates: resolve_template_keys(&dto.templates),
+            routing: dto.routing.as_deref().map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -192,6 +270,7 @@ impl From<&PushoverMessagingConfig> for PushoverMessagingConfigDto {
             token: instance.token.clone(),
             user: instance.user.clone(),
             templates: template_keys_to_wire(&instance.templates),
+            routing: Some(Box::new(ChannelRoutingDto::from(&instance.routing))),
         }
     }
 }

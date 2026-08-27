@@ -6,9 +6,9 @@ use crate::channel::{
 };
 use log::debug;
 use reqwest::{header, Method};
-use shared::model::notification::EventId;
+use shared::model::notification::{EventId, Severity};
 use std::str::FromStr;
-use tuliprox_core::model::RestMessagingConfig;
+use tuliprox_core::model::{ChannelRouting, RestMessagingConfig};
 
 pub struct RestChannel {
     config: RestMessagingConfig,
@@ -23,6 +23,10 @@ impl NotificationChannel for RestChannel {
     fn id(&self) -> &'static str { "rest" }
 
     fn template_for(&self, event: EventId) -> Option<&str> { self.config.templates.get(&event).map(String::as_str) }
+
+    fn routing(&self) -> &ChannelRouting { &self.config.routing }
+
+    fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
     fn send<'a>(&'a self, msg: &'a RenderedMessage<'a>) -> SendFuture<'a> {
         Box::pin(async move {

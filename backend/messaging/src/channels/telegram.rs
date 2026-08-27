@@ -3,12 +3,12 @@
 use crate::channel::{ChannelCapabilities, Delivery, NotificationChannel, RenderedMessage, SendFuture};
 use log::debug;
 use shared::{
-    model::notification::EventId,
+    model::notification::{EventId, Severity},
     utils::{escape_markdown_v2, json_str_to_markdown},
 };
 use std::{borrow::Cow, sync::Arc};
 use tuliprox_core::{
-    model::{AppConfig, TelegramMessagingConfig},
+    model::{AppConfig, ChannelRouting, TelegramMessagingConfig},
     utils::{telegram_create_instance, telegram_send_message, SendMessageOption, SendMessageParseMode},
 };
 
@@ -28,6 +28,10 @@ impl NotificationChannel for TelegramChannel {
     fn id(&self) -> &'static str { "telegram" }
 
     fn template_for(&self, event: EventId) -> Option<&str> { self.config.templates.get(&event).map(String::as_str) }
+
+    fn routing(&self) -> &ChannelRouting { &self.config.routing }
+
+    fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
     fn send<'a>(&'a self, msg: &'a RenderedMessage<'a>) -> SendFuture<'a> {
         Box::pin(async move {

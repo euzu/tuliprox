@@ -12,7 +12,7 @@ pub mod telegram;
 
 use crate::channel::ChannelSet;
 use log::warn;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 use tuliprox_core::{
     model::{AppConfig, MessagingConfig},
     utils::request::create_client,
@@ -34,10 +34,41 @@ fn channel_client(app_config: &Arc<AppConfig>) -> reqwest::Client {
     })
 }
 
+/// The built channel set, so a notification does not rebuild every channel
+/// - and a fresh `reqwest::Client` with them - on every send.
+///
+/// Invalidated on config reload via [`invalidate`].
+static CACHE: OnceLock<RwLock<Option<ChannelSet>>> = OnceLock::new();
+
+fn cache() -> &'static RwLock<Option<ChannelSet>> { CACHE.get_or_init(|| RwLock::new(None)) }
+
+/// Drop the cached channel set. Call on config reload.
+pub fn invalidate() {
+    if let Ok(mut guard) = cache().write() {
+        *guard = None;
+    }
+    crate::rate_limit::reset();
+}
+
 /// Every channel the current config declares, in a stable order.
 ///
-/// Order matters only for reproducible logs and outbox entries; delivery
-/// is concurrent.
+/// Cached: repeated calls return the same channels, so per-channel state
+/// (rate limiting, suppression) survives between notifications.
+#[must_use]
+pub fn channels(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> ChannelSet {
+    if let Ok(guard) = cache().read() {
+        if let Some(set) = guard.as_ref() {
+            return set.clone();
+        }
+    }
+    let set = build(app_config, messaging);
+    if let Ok(mut guard) = cache().write() {
+        *guard = Some(set.clone());
+    }
+    set
+}
+
+/// Construct the channel set from config, bypassing the cache.
 #[must_use]
 pub fn build(app_config: &Arc<AppConfig>, messaging: &MessagingConfig) -> ChannelSet {
     let client = channel_client(app_config);

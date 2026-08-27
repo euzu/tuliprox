@@ -7,8 +7,8 @@ use crate::channel::{
 use log::debug;
 use reqwest::header;
 use serde_json::json;
-use shared::model::notification::EventId;
-use tuliprox_core::model::DiscordMessagingConfig;
+use shared::model::notification::{EventId, Severity};
+use tuliprox_core::model::{ChannelRouting, DiscordMessagingConfig};
 
 /// Discord rejects a webhook payload whose `content` exceeds this.
 const DISCORD_CONTENT_LIMIT: usize = 2000;
@@ -26,6 +26,10 @@ impl NotificationChannel for DiscordChannel {
     fn id(&self) -> &'static str { "discord" }
 
     fn template_for(&self, event: EventId) -> Option<&str> { self.config.templates.get(&event).map(String::as_str) }
+
+    fn routing(&self) -> &ChannelRouting { &self.config.routing }
+
+    fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
     fn send<'a>(&'a self, msg: &'a RenderedMessage<'a>) -> SendFuture<'a> {
         Box::pin(async move {

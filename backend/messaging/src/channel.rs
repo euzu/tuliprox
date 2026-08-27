@@ -17,7 +17,7 @@
 
 use shared::model::notification::{EventId, Severity};
 use std::{future::Future, pin::Pin, sync::Arc};
-use tuliprox_core::model::NotificationEvent;
+use tuliprox_core::model::{ChannelRouting, NotificationEvent};
 
 /// A boxed channel send. Matches the `SinkFuture` convention in
 /// `tuliprox-processing` rather than pulling in `async-trait`.
@@ -146,6 +146,10 @@ pub trait NotificationChannel: Send + Sync {
 
     /// The operator's template for this event, if any.
     fn template_for(&self, event: EventId) -> Option<&str>;
+
+    /// This channel's routing rules - severity floor, quiet hours,
+    /// suppression window and hourly ceiling.
+    fn routing(&self) -> &ChannelRouting;
 
     /// Does this channel want this event at this severity?
     ///

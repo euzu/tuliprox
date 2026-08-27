@@ -245,6 +245,14 @@ async fn drain_due(
             // retry.
             continue;
         }
+        // Quiet hours defer, they do not drop: hold the whole entry until
+        // the window closes rather than losing an overnight outage.
+        if let Some(defer) = quiet_hours_defer_for(app_config, &entry.pending) {
+            entry.next_attempt_at = now.saturating_add(i64::try_from(defer.as_secs()).unwrap_or(0).max(60));
+            debug!("Notification {} deferred {}s for quiet hours", entry.event.id, defer.as_secs());
+            keep.push(entry);
+            continue;
+        }
         entry.attempts = entry.attempts.saturating_add(1);
 
         // Concurrent, not sequential: one webhook host that accepts the
@@ -318,6 +326,23 @@ async fn drain_due(
 }
 
 /// Capped exponential backoff: `initial * 2^(attempts-1)`, clamped.
+/// The shortest quiet-hours deferral across the still-pending channels.
+///
+/// `None` when at least one pending channel is awake, so a notification is
+/// never held back by a channel that is not the one blocking it.
+fn quiet_hours_defer_for(app_config: &Arc<AppConfig>, pending: &[String]) -> Option<Duration> {
+    let cfg = app_config.config.load();
+    let messaging = cfg.messaging.as_ref()?;
+    let set = crate::channels::channels(app_config, messaging);
+    let mut shortest: Option<Duration> = None;
+    for channel_id in pending {
+        let channel = set.iter().find(|c| c.id() == channel_id)?;
+        let defer = crate::quiet_hours_defer(channel.as_ref())?;
+        shortest = Some(shortest.map_or(defer, |current: Duration| current.min(defer)));
+    }
+    shortest
+}
+
 fn backoff_secs(config: &RecordingNotificationConfig, attempts: u32) -> i64 {
     let shift = attempts.saturating_sub(1).min(16);
     let delay = config.backoff_initial_secs.saturating_mul(1u64 << shift).min(config.backoff_max_secs);

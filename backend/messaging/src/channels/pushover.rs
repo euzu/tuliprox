@@ -13,7 +13,7 @@ use crate::channel::{
 use log::debug;
 use reqwest::header;
 use shared::model::notification::{EventId, Severity};
-use tuliprox_core::model::PushoverMessagingConfig;
+use tuliprox_core::model::{ChannelRouting, PushoverMessagingConfig};
 
 /// Pushover truncates the message body here.
 const PUSHOVER_BODY_LIMIT: usize = 1024;
@@ -42,6 +42,10 @@ impl NotificationChannel for PushoverChannel {
     fn id(&self) -> &'static str { "pushover" }
 
     fn template_for(&self, event: EventId) -> Option<&str> { self.config.templates.get(&event).map(String::as_str) }
+
+    fn routing(&self) -> &ChannelRouting { &self.config.routing }
+
+    fn wants(&self, event: EventId, severity: Severity) -> bool { self.config.routing.accepts(event, severity) }
 
     fn send<'a>(&'a self, msg: &'a RenderedMessage<'a>) -> SendFuture<'a> {
         Box::pin(async move {
