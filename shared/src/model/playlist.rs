@@ -513,7 +513,7 @@ macro_rules! to_m3u_resource_non_empty_fields {
 /// Generates the typed accessors for `PlaylistItemHeader`, plus the `&str`
 /// shims that delegate to them.
 ///
-/// `$prop` names the fields whose `HeaderField` variant is the PascalCase of the
+/// `$prop` names the fields whose `HeaderField` variant is the `PascalCase` of the
 /// field name and whose value is a plain interned `Arc<str>`; everything with a
 /// different shape (caption, chno, genre, ...) is spelled out below.
 macro_rules! generate_field_accessor_impl_for_playlist_item_header {

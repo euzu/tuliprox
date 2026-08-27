@@ -194,6 +194,13 @@ impl<'a> Iterator for MemoryItems<'a> {
 /// One variant per `PlaylistSourceKind`, collapsed where the payload and the
 /// conversion coincide: the library and media-server stores are both
 /// `XtreamPlaylistItem` keyed by [`UUIDType`], so they share `SingleXtream`.
+// The B+Tree disk iterators carry sizeable cursor state, so holding three or
+// four inline makes this enum ~1.9KB. Boxing the large variants -- clippy's
+// suggestion -- would reintroduce exactly the per-traversal heap allocation this
+// type exists to remove. The cost here is stack space for one value per
+// traversal, not per item: the enum is constructed once, then driven through
+// `&mut`, so it is never copied per element.
+#[allow(clippy::large_enum_variant)]
 pub enum SourceItems<'a> {
     Empty,
     Xtream(BTreeStores<'a, u32, XtreamPlaylistItem, 3>),
@@ -234,6 +241,7 @@ impl Iterator for SourceItems<'_> {
 /// `Owned` must never be constructed from [`SourceItems::Memory`]: the
 /// in-memory owned iterator *drains* its groups, whereas `items()` is
 /// non-destructive. `PlaylistSource::items` upholds this.
+#[allow(clippy::large_enum_variant)] // Inherits SourceItems' size; see the note there.
 pub enum SourceCowItems<'a> {
     Owned(SourceItems<'a>),
     Borrowed(MemoryItems<'a>),
