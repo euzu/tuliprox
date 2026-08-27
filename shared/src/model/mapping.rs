@@ -1,7 +1,7 @@
 use crate::{
     error::TuliproxError,
     foundation::{apply_templates_to_pattern_single, get_filter, prepare_templates, Filter, MapperScript},
-    model::{HeaderField, PatternTemplate},
+    model::{HeaderField, PatternTemplate, Prepare},
 };
 use log::trace;
 use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
@@ -132,8 +132,10 @@ pub enum MapperOperation {
     Copy { field: String, source: String },
 }
 
-impl MapperOperation {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for MapperOperation {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         match self {
             MapperOperation::Lowercase { ref field }
             | MapperOperation::Uppercase { ref field }
@@ -180,11 +182,13 @@ pub struct MapperDto {
     pub t_script: Option<MapperScript>,
 }
 
-impl MapperDto {
+impl Prepare for MapperDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
     /// # Panics
     ///
     /// Will panic if default `RegEx` gets invalid
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         self.t_filter = Some(get_filter(&self.filter, templates)?);
         let script = if templates.is_some() {
             apply_templates_to_pattern_single(&self.script, templates)?
@@ -212,14 +216,13 @@ pub struct MappingDto {
     pub templates: Option<Vec<PatternTemplate>>,
 }
 
-impl MappingDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for MappingDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         self.templates = templates.map(|t| t.iter().map(PatternTemplate::clone).collect::<Vec<_>>());
-        if let Some(mapper_list) = &mut self.mapper {
-            for mapper in mapper_list {
-                mapper.prepare(templates)?;
-            }
-        }
+        // Option<Vec<MapperDto>>: the blanket impls nest, so the walk is gone.
+        self.mapper.prepare(templates)?;
 
         if let Some(counter_def_list) = &self.counter {
             let mut counters = vec![];
@@ -255,8 +258,10 @@ pub struct MappingDefinitionDto {
     pub mapping: Vec<MappingDto>,
 }
 
-impl MappingDefinitionDto {
-    pub fn prepare(&mut self, prepared_templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for MappingDefinitionDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, prepared_templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         let local_prepared_templates = if prepared_templates.is_none() {
             self.templates
                 .as_ref()
@@ -282,8 +287,10 @@ pub struct MappingsDto {
     pub mappings: MappingDefinitionDto,
 }
 
-impl MappingsDto {
-    pub fn prepare(&mut self, prepared_templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for MappingsDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, prepared_templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         self.mappings.prepare(prepared_templates)
     }
 }

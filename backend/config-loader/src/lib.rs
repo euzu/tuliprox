@@ -11,8 +11,8 @@ use shared::{
     foundation::prepare_templates,
     model::{
         ApiProxyConfigDto, AppConfigDto, ConfigDto, ConfigInputAliasDto, ConfigPaths, HdHomeRunDeviceOverview,
-        InputType, MsgKind, PatternTemplate, PlansConfigDto, SourcesConfigDto, TargetUserDto, TemplateDefinitionDto,
-        UserPlanDto,
+        InputType, MsgKind, PatternTemplate, PlansConfigDto, Prepare, SourcesConfigDto, TargetUserDto,
+        TemplateDefinitionDto, UserPlanDto,
     },
     utils::PROVIDER_SCHEME_PREFIX,
 };

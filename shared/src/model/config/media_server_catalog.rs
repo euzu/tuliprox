@@ -285,7 +285,7 @@ mod tests {
     use crate::{
         model::{
             ConfigInputAliasDto, ConfigInputDto, ConfigInputOptionsDto, ConfigProviderDto, DnsPrefer, DnsScheme,
-            InputType, OnConnectErrorPolicy, OnResolveErrorPolicy, ProviderDnsDto, ProviderUrlSelectionPolicy,
+            InputType, OnConnectErrorPolicy, OnResolveErrorPolicy, Prepare, ProviderDnsDto, ProviderUrlSelectionPolicy,
         },
         utils::Internable,
     };

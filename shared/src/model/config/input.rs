@@ -9,7 +9,7 @@ use crate::{
     error::TuliproxError,
     foundation::{get_filter, Filter},
     model::{
-        config::media_server_catalog::MediaServerInputConfigDto, ClusterFlags, EpgConfigDto, PatternTemplate,
+        config::media_server_catalog::MediaServerInputConfigDto, ClusterFlags, EpgConfigDto, PatternTemplate, Prepare,
         StalkerAuthMode, StalkerInputConfigDto,
     },
     utils::{
@@ -392,8 +392,12 @@ impl ConfigInputOptionsDto {
         self.t_probe_filter = None;
         self.stalker_bulk_epg = false;
     }
+}
 
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for ConfigInputOptionsDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         if let Some(raw_filter) = &self.resolve_filter {
             self.t_resolve_filter = Some(get_filter(raw_filter, templates)?);
         }

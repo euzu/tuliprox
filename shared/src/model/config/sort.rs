@@ -2,7 +2,7 @@ use crate::{
     error::TuliproxError,
     foundation::{apply_templates_to_pattern, get_filter, Filter},
     handle_tuliprox_error_result_list,
-    model::{ItemField, PatternTemplate, TemplateValue},
+    model::{ItemField, PatternTemplate, Prepare, TemplateValue},
 };
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -129,8 +129,10 @@ impl PartialEq for ConfigSortRuleDto {
     }
 }
 
-impl ConfigSortRuleDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for ConfigSortRuleDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         if self.target == SortTarget::Group {
             // What the user sets is not important, we allow this but force to use Group
             if !matches!(self.field, ItemField::Group | ItemField::Title | ItemField::Name | ItemField::Caption) {
@@ -172,8 +174,10 @@ pub struct ConfigSortDto {
     pub rules: Vec<ConfigSortRuleDto>,
 }
 
-impl ConfigSortDto {
-    pub fn prepare(&mut self, templates: Option<&[PatternTemplate]>) -> Result<(), TuliproxError> {
+impl Prepare for ConfigSortDto {
+    type Ctx<'a> = Option<&'a [PatternTemplate]>;
+
+    fn prepare(&mut self, templates: Self::Ctx<'_>) -> Result<(), TuliproxError> {
         handle_tuliprox_error_result_list!(self.rules.iter_mut().map(|rule| rule.prepare(templates)));
         Ok(())
     }

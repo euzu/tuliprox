@@ -5,7 +5,7 @@ use crate::{
 use log::warn;
 use shared::{
     error::TuliproxError,
-    model::{MappingDefinitionDto, MappingDto, MappingsDto, PatternTemplate},
+    model::{MappingDefinitionDto, MappingDto, MappingsDto, PatternTemplate, Prepare},
 };
 use std::{
     collections::HashMap,
