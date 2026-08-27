@@ -260,8 +260,21 @@ impl StreamMeterRegistry {
         Some(MeterQos { bytes_total: handle.bytes_total(), first_byte_latency_ms: handle.first_byte_latency_ms() })
     }
 
-    /// Stop the sampler. Idempotent.
-    pub fn shutdown(&self) { self.sampler_cancel.cancel(); }
+    /// Stop the sampler, emitting one last batch first.
+    ///
+    /// `Drop` cancels the sampler but cannot await, so a stream still running
+    /// at shutdown had its final bytes reported only if it happened to end
+    /// between ticks - which is what `flush_and_unregister_meter` exists to
+    /// fix for the one-stream case. This is that, for the whole registry.
+    ///
+    /// Idempotent: a second call finds no meters and cancels an
+    /// already-cancelled token.
+    pub async fn shutdown(&self) {
+        let entries = sample_entries(&self.slots).await;
+        self.send_batch(entries);
+        self.slots.write().await.by_meter.clear();
+        self.sampler_cancel.cancel();
+    }
 }
 
 /// What one meter can say about the session it served.

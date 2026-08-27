@@ -447,6 +447,10 @@ async fn cancel_all_service_tokens(app_state: &Arc<AppState>) {
     {
         warn!("Connection manager shutdown timed out after 30s, forcing exit");
     }
+    // After the connections are gone, so the final batch reports what the
+    // streams actually transferred. `Drop` cancels the sampler but cannot
+    // await, which left the last window's bytes unreported.
+    app_state.event_manager.shutdown().await;
 }
 
 #[cfg(unix)]

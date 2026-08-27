@@ -12,9 +12,9 @@ use crate::{
     StreamMeterHandle,
 };
 use log::trace;
-use shared::model::{EventKind, EventKindMask, EventMessage, EventSink, StreamMeterEntry, SystemInfo};
+use shared::model::{EventKind, EventKindMask, EventMessage, EventSink, StreamMeterEntry};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -26,6 +26,12 @@ use tokio::time::Instant;
 /// Buffer depth used when no configuration is available - tests, and the
 /// composition root before the config is resolved.
 pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// How many recent events the bus keeps for inspection.
+///
+/// Small and fixed: this is a debugging aid answering "did that event
+/// actually fire", not an audit log.
+pub const RECENT_EVENT_CAPACITY: usize = 256;
 
 /// How long a coalescable nudge suppresses an identical one.
 ///
@@ -116,6 +122,16 @@ impl EventBusStats {
     pub fn total_emitted(&self) -> u64 { self.emitted.iter().map(|c| c.load(Ordering::Relaxed)).sum() }
 }
 
+/// Take a bus lock, ignoring poisoning.
+///
+/// Every critical section here is a map or deque operation that cannot
+/// panic, so a poisoned lock can only mean a panic elsewhere in the process.
+/// Refusing to publish events after that would turn one unrelated panic into
+/// a silently dead event bus.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 pub struct EventManager {
     channel_tx: tokio::sync::broadcast::Sender<EventMessage>,
     meters: StreamMeterRegistry,
@@ -124,6 +140,22 @@ pub struct EventManager {
     /// rather than an async one: `emit` is synchronous by contract, and the
     /// critical section is a map lookup with no await inside it.
     last_nudge: Mutex<HashMap<EventKind, Instant>>,
+    /// The newest message of each latched kind, for subscribers that connect
+    /// after it was published.
+    latched: Mutex<HashMap<EventKind, EventMessage>>,
+    /// The last [`RECENT_EVENT_CAPACITY`] events, newest last.
+    recent: Mutex<VecDeque<RecordedEvent>>,
+    started: Instant,
+}
+
+/// One entry in the bus's recent-event ring.
+#[derive(Debug, Clone)]
+pub struct RecordedEvent {
+    pub kind: EventKind,
+    /// Milliseconds since the process started. Monotonic, so it stays
+    /// ordered across a wall-clock adjustment.
+    pub uptime_millis: u64,
+    pub outcome: EmitOutcome,
 }
 
 impl EventManager {
@@ -145,6 +177,9 @@ impl EventManager {
             meters: StreamMeterRegistry::new(),
             stats: Arc::new(EventBusStats::default()),
             last_nudge: Mutex::new(HashMap::new()),
+            latched: Mutex::new(HashMap::new()),
+            recent: Mutex::new(VecDeque::with_capacity(RECENT_EVENT_CAPACITY)),
+            started: Instant::now(),
         }
     }
 
@@ -180,7 +215,14 @@ impl EventManager {
 
         if kind.is_coalescable() && !self.admit_nudge(kind) {
             self.stats.record_coalesced(kind);
+            // Recorded, not skipped: "it fired but was suppressed" is
+            // precisely what the recent-event ring is consulted to find out.
+            self.record_recent(kind, EmitOutcome::Coalesced);
             return EmitOutcome::Coalesced;
+        }
+
+        if kind.is_latched() {
+            lock(&self.latched).insert(kind, event.clone());
         }
 
         let outcome = match self.channel_tx.send(event) {
@@ -191,8 +233,35 @@ impl EventManager {
             }
         };
         self.stats.record_emit(kind, outcome.is_delivered());
+        self.record_recent(kind, outcome);
         outcome
     }
+
+    fn record_recent(&self, kind: EventKind, outcome: EmitOutcome) {
+        let uptime_millis = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut recent = lock(&self.recent);
+        if recent.len() == RECENT_EVENT_CAPACITY {
+            recent.pop_front();
+        }
+        recent.push_back(RecordedEvent { kind, uptime_millis, outcome });
+    }
+
+    /// The newest message of each latched kind.
+    ///
+    /// A session that connects between two `SystemInfo` samples used to show
+    /// empty panels until the next one arrived, and the websocket's
+    /// resync-on-lag path re-requested a status snapshot for the same
+    /// reason. Both are answered by handing over what the bus already has.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<EventMessage> { lock(&self.latched).values().cloned().collect() }
+
+    /// The last [`RECENT_EVENT_CAPACITY`] events, oldest first.
+    ///
+    /// "Why did my notification not fire?" is otherwise unanswerable without
+    /// a debug build: this shows whether the event was published at all, and
+    /// whether anything was subscribed when it was.
+    #[must_use]
+    pub fn recent_events(&self) -> Vec<RecordedEvent> { lock(&self.recent).iter().cloned().collect() }
 
     /// Should this nudge go out, or has an identical one just gone?
     ///
@@ -200,28 +269,13 @@ impl EventManager {
     /// throttled to one per window rather than one per burst.
     fn admit_nudge(&self, kind: EventKind) -> bool {
         let now = Instant::now();
-        // A poisoned lock means a panic inside that map lookup, which cannot
-        // happen; taking the inner value keeps a panic elsewhere from
-        // silently stopping every recording nudge.
-        let mut last = self.last_nudge.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut last = lock(&self.last_nudge);
         match last.get(&kind) {
             Some(previous) if now.duration_since(*previous) < COALESCE_WINDOW => false,
             _ => {
                 last.insert(kind, now);
                 true
             }
-        }
-    }
-
-    pub fn send_provider_event(&self, provider: &Arc<str>, connection_count: usize) {
-        if !self.send_event(EventMessage::ActiveProvider(Arc::clone(provider), connection_count)).is_delivered() {
-            trace!("Failed to send connection change: {provider}: {connection_count}");
-        }
-    }
-
-    pub fn send_system_info(&self, system_info: Arc<SystemInfo>) {
-        if !self.send_event(EventMessage::SystemInfoUpdate(system_info)).is_delivered() {
-            trace!("Failed to send system info");
         }
     }
 
@@ -298,6 +352,15 @@ impl FilteredEventReceiver {
     /// The mask this subscription was opened with.
     #[must_use]
     pub fn mask(&self) -> EventKindMask { self.mask }
+}
+
+impl EventManager {
+    /// Stop background work, flushing what is pending.
+    ///
+    /// The event channel needs nothing: closing the sender is what tells
+    /// subscribers to stop, and `Drop` does that. The meter registry does -
+    /// see [`StreamMeterRegistry::shutdown`].
+    pub async fn shutdown(&self) { self.meters.shutdown().await; }
 }
 
 impl EventSink for EventManager {
@@ -552,6 +615,99 @@ mod coalescing_tests {
         for kind in EventKind::ALL {
             let expected = matches!(kind, EventKind::RecordingChanged | EventKind::RecordingRulesChanged);
             assert_eq!(kind.is_coalescable(), expected, "{kind:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod snapshot_and_ring_tests {
+    use super::{EmitOutcome, EventManager, RECENT_EVENT_CAPACITY};
+    use shared::model::{ConfigType, EventKind, EventMessage, SystemInfo};
+    use std::sync::Arc;
+
+    fn system_info() -> Arc<SystemInfo> {
+        Arc::new(SystemInfo {
+            cpu_usage: 1.0,
+            memory_usage: 2,
+            memory_total: 3,
+            net_rx_bytes_per_sec: 0.0,
+            net_tx_bytes_per_sec: 0.0,
+            net_rx_bytes_total: 0,
+            net_tx_bytes_total: 0,
+            disk_total_bytes: 0,
+            disk_free_bytes: 0,
+        })
+    }
+
+    #[test]
+    fn a_late_subscriber_can_be_handed_the_latest_state() {
+        // The Web UI used to show empty panels until the next three-second
+        // sample arrived.
+        let manager = EventManager::new();
+        manager.send_event(EventMessage::SystemInfoUpdate(system_info()));
+        manager.send_event(EventMessage::ActiveProvider("p".into(), 4));
+
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.iter().any(|event| event.kind() == EventKind::SystemInfoUpdate));
+        assert!(snapshot.iter().any(|event| matches!(event, EventMessage::ActiveProvider(_, 4))));
+    }
+
+    #[test]
+    fn only_the_newest_message_of_a_latched_kind_is_kept() {
+        let manager = EventManager::new();
+        manager.send_event(EventMessage::ActiveProvider("p".into(), 1));
+        manager.send_event(EventMessage::ActiveProvider("p".into(), 9));
+
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot.len(), 1, "a latched kind is state, not a log");
+        assert!(matches!(snapshot[0], EventMessage::ActiveProvider(_, 9)));
+    }
+
+    #[test]
+    fn occurrences_are_never_latched() {
+        // Replaying "a playlist update finished" to a session that was not
+        // there when it happened would be a lie.
+        let manager = EventManager::new();
+        manager.send_event(EventMessage::ConfigChange(ConfigType::Config));
+        manager.send_event(EventMessage::RecordingChanged);
+
+        assert!(manager.snapshot().is_empty());
+    }
+
+    #[test]
+    fn the_recent_ring_records_outcomes_and_stays_bounded() {
+        let manager = EventManager::new();
+        for _ in 0..(RECENT_EVENT_CAPACITY + 10) {
+            manager.send_event(EventMessage::ConfigChange(ConfigType::Config));
+        }
+
+        let recent = manager.recent_events();
+        assert_eq!(recent.len(), RECENT_EVENT_CAPACITY, "the ring must not grow for the process lifetime");
+        assert!(recent.iter().all(|entry| entry.kind == EventKind::ConfigChange));
+        assert!(
+            recent.iter().all(|entry| entry.outcome == EmitOutcome::NoSubscribers),
+            "nothing was subscribed, and the ring says so"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ring_shows_a_suppressed_nudge_as_coalesced() {
+        let manager = EventManager::new();
+        manager.send_event(EventMessage::RecordingChanged);
+        manager.send_event(EventMessage::RecordingChanged);
+
+        let recent = manager.recent_events();
+        assert_eq!(recent.len(), 2, "a suppressed event is still worth showing - that is the question being asked");
+        assert_eq!(recent[1].outcome, EmitOutcome::Coalesced);
+    }
+
+    #[test]
+    fn only_state_describing_kinds_are_latched() {
+        for kind in EventKind::ALL {
+            let expected =
+                matches!(kind, EventKind::SystemInfoUpdate | EventKind::DownloadsUpdate | EventKind::ActiveProvider);
+            assert_eq!(kind.is_latched(), expected, "{kind:?}");
         }
     }
 }

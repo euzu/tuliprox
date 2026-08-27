@@ -5,7 +5,7 @@ use crate::{
     messaging::send_message as send_messaging,
     model::{DiskAlertConfig, MessageContent},
 };
-use shared::model::{DiskAlert, DiskAlertLevel, SystemInfo};
+use shared::model::{DiskAlert, DiskAlertLevel, EventMessage, SystemInfo};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -174,7 +174,7 @@ pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<(
 
             let Some(info) = sampler.sample() else { continue };
             if has_receivers {
-                state.event_manager.send_system_info(Arc::new(info));
+                state.event_manager.send_event(EventMessage::SystemInfoUpdate(Arc::new(info)));
             }
 
             // Disk-alert check is gated on (1) disk info being available, and

@@ -180,6 +180,21 @@ impl EventKind {
         )
     }
 
+    /// Does this kind describe current state rather than an occurrence?
+    ///
+    /// A latched kind's newest message is the whole truth - the last
+    /// `SystemInfo` sample *is* the system info - so it is worth retaining
+    /// for a subscriber that connects later. An occurrence is not: replaying
+    /// "a playlist update finished" to a session that was not there when it
+    /// happened would be a lie.
+    ///
+    /// This is what a cold websocket connect should be handed instead of
+    /// waiting up to three seconds for the next sample.
+    #[must_use]
+    pub const fn is_latched(self) -> bool {
+        matches!(self, Self::SystemInfoUpdate | Self::DownloadsUpdate | Self::ActiveProvider)
+    }
+
     /// Is this kind a payload-free nudge that can be coalesced?
     ///
     /// True only where N occurrences and one are indistinguishable to every

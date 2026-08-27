@@ -2,7 +2,10 @@ use crate::EventManager;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use log::{debug, log_enabled};
-use shared::utils::{display_vec, sanitize_sensitive_info};
+use shared::{
+    model::EventMessage,
+    utils::{display_vec, sanitize_sensitive_info},
+};
 use std::{
     collections::HashMap,
     fmt,
@@ -507,7 +510,7 @@ impl ProviderLineupManager {
         let event_manager = Arc::clone(event_manager);
         let on_connection_change: ProviderConnectionChangeCallback =
             Arc::new(move |name: &Arc<str>, connections: usize| {
-                event_manager.send_provider_event(name, connections);
+                event_manager.send_event(EventMessage::ActiveProvider(Arc::clone(name), connections));
             });
 
         if cfg_input.has_enabled_aliases() {
@@ -636,7 +639,7 @@ impl ProviderLineupManager {
 
             for (name, conn_lock) in snapshot {
                 let count = conn_lock.read().await.current_connections;
-                self.event_manager.send_provider_event(&name, count);
+                self.event_manager.send_event(EventMessage::ActiveProvider(name, count));
             }
         }
 
