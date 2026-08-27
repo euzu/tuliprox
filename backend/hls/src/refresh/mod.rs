@@ -1262,7 +1262,7 @@ async fn cancel_superseded_terminal_work_after_media_progress(
     request.hls_proxy.cancel_superseded_terminal_work_for_session(&proxy_session_id);
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 #[cfg(test)]
 mod tests;

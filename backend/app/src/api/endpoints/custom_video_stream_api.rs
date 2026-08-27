@@ -325,7 +325,7 @@ async fn validate_hls_standalone_custom_access(
     resolve_hls_cvs_access_user(app_state, fingerprint, access.username.as_ref()).map(|_| ())
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 fn parse_cvs_standalone_hls_segment_file(segment_file: &str) -> Option<u16> {
     let index = segment_file.strip_suffix(".ts")?;

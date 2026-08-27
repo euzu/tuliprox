@@ -2610,7 +2610,7 @@ async fn fetch_and_cache_transient_origin_response(
     .await
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 async fn release_prepared_hls_manifest_session(
     app_state: &Arc<AppState>,

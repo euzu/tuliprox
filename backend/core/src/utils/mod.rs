@@ -1,6 +1,7 @@
 pub mod atomic_json_store;
 mod binary_utils;
 pub mod byte_range;
+mod clock;
 mod compression;
 mod crypto_utils;
 mod epg_id;
@@ -68,6 +69,7 @@ macro_rules! with {
 pub use self::{
     atomic_json_store::*,
     binary_utils::*,
+    clock::*,
     compression::*,
     crypto_utils::*,
     epg_id::*,

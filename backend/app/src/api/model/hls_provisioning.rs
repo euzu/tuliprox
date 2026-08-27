@@ -304,7 +304,7 @@ impl HlsProvisioningState {
     }
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 fn hls_response(hls_content: String) -> axum::response::Response {
     match axum::response::Response::builder()

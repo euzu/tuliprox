@@ -1723,7 +1723,7 @@ fn build_segment_origin_headers(
     build_hls_origin_resource_headers(source_headers, provider_session_headers, byte_range)
 }
 
-fn current_time_millis() -> u64 { chrono::Utc::now().timestamp_millis().try_into().unwrap_or_default() }
+use tuliprox_core::utils::current_time_millis;
 
 #[cfg(test)]
 mod tests {
