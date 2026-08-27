@@ -238,6 +238,8 @@ pub mod api {
 // same modules for the server application. Keeping the two lists apart means
 // pruning one does not silently break the other, which a `pub(crate) use api::*`
 // could not give us.
+#[cfg(test)]
+pub(crate) use self::timeline::TimelineMapError;
 pub(crate) use self::{
     availability::{hls_recovery_timing_policy, HlsManifestAcceptanceDirective, HLS_PLAYBACK_RATE_GUARD_MILLI},
     availability_reevaluation::HlsAvailabilityReevaluationRegistration,
@@ -314,7 +316,7 @@ pub(crate) use self::{
     startup_observability::{HlsStartupBodyObservation, HlsStartupObservability},
     timeline::{
         is_hls_provisioning_gap_segment, is_hls_provisioning_segment, CacheAccessState, HlsSegmentEncryption,
-        OriginSegmentFetchRef, OriginSegmentKey, SegmentCacheStatus, SegmentEntry, TimelineMapError,
+        OriginSegmentFetchRef, OriginSegmentKey, SegmentCacheStatus, SegmentEntry,
         HLS_PROVISIONING_TARGET_DURATION_SECS,
     },
     transient::{
