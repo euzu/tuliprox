@@ -129,20 +129,12 @@ fn websocket_requires_download_read(auth_required: bool, mem: &ProtocolHandlerMe
     !auth_required || mem.permissions.contains(Permission::DownloadRead)
 }
 
+/// Which permission an event needs is a fact about the event, not about the
+/// websocket: it does not change with the transport carrying it. The table
+/// lives on `EventKind`, so a new variant cannot reach a session that should
+/// not see it just because this file was not updated.
 fn websocket_can_receive_runtime_events(mem: &ProtocolHandlerMemory, event: &EventMessage) -> bool {
-    match event {
-        EventMessage::DownloadsUpdate(_) | EventMessage::DownloadsDeltaUpdate(_) => {
-            mem.permissions.contains(Permission::DownloadRead)
-        }
-        EventMessage::RecordingChanged | EventMessage::RecordingRulesChanged => {
-            mem.permissions.contains(Permission::RecordingRead)
-        }
-        EventMessage::PlaylistUpdateProgress(_) | EventMessage::PlaylistUpdate(_) => {
-            mem.permissions.contains(Permission::PlaylistWrite)
-        }
-        EventMessage::LibraryScanProgress(_) => mem.permissions.contains(Permission::LibraryWrite),
-        _ => mem.permissions.contains(Permission::SystemRead),
-    }
+    mem.permissions.contains(event.required_permission())
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

@@ -159,10 +159,14 @@ impl EventKind {
 
     /// Does this kind fire many times per operation?
     ///
-    /// High-frequency kinds are progress ticks and incremental deltas: a
-    /// consumer that pushes to a phone wants their terminal counterparts and
-    /// not these, and a bus that coalesces wants to know which messages are
-    /// safe to supersede.
+    /// True for progress ticks, incremental deltas and the periodic
+    /// system-info sample. A bus that coalesces needs to know which messages
+    /// are safe to supersede, and a subscriber sizing its buffer needs to
+    /// know which ones will fill it.
+    ///
+    /// This is a statement about rate, not about whether anyone wants the
+    /// event: the notification bridge decides notifiability separately,
+    /// because that also depends on whether a terminal counterpart exists.
     #[must_use]
     pub const fn is_high_frequency(self) -> bool {
         matches!(
@@ -172,8 +176,6 @@ impl EventKind {
                 | Self::DownloadsUpdate
                 | Self::DownloadsDeltaUpdate
                 | Self::SystemInfoUpdate
-                | Self::ActiveUser
-                | Self::ActiveProvider
         )
     }
 

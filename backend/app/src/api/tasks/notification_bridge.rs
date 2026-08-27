@@ -20,10 +20,7 @@
 
 use crate::api::model::AppState;
 use log::{debug, warn};
-use shared::model::{
-    notification::{registry, Severity},
-    EventMessage, PlaylistUpdateState,
-};
+use shared::model::{notification::registry, EventMessage, PlaylistUpdateState};
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
@@ -70,17 +67,18 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
     match message {
         EventMessage::ServerError(error) => Some(
             NotificationEvent::new(registry::SYSTEM_ERROR, first_line(error), error.clone())
-                .with_severity(Severity::Error),
+                .with_severity(message.severity()),
         ),
 
         EventMessage::PlaylistUpdate(state) => {
-            let (id, severity) = match state {
-                PlaylistUpdateState::Success => (registry::PLAYLIST_UPDATE_COMPLETED, Severity::Info),
-                PlaylistUpdateState::Partial => (registry::PLAYLIST_UPDATE_COMPLETED, Severity::Warn),
-                PlaylistUpdateState::Failure => (registry::PLAYLIST_UPDATE_FAILED, Severity::Error),
+            // Only the id is a bridge decision; how bad the outcome is is a
+            // property of the event, and `EventMessage::severity` owns it.
+            let id = match state {
+                PlaylistUpdateState::Success | PlaylistUpdateState::Partial => registry::PLAYLIST_UPDATE_COMPLETED,
+                PlaylistUpdateState::Failure => registry::PLAYLIST_UPDATE_FAILED,
             };
             let title = format!("Playlist update finished: {state:?}");
-            Some(NotificationEvent::new(id, title.clone(), title).with_severity(severity).with_fields(state))
+            Some(NotificationEvent::new(id, title.clone(), title).with_severity(message.severity()).with_fields(state))
         }
 
         EventMessage::ConfigChange(config_type) => {
@@ -129,7 +127,8 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         }
 
         // Deliberately not notifiable: these fire many times per operation
-        // and their terminal counterparts are already covered above.
+        // (see `EventKind::is_high_frequency`) and their terminal
+        // counterparts are already covered above.
         EventMessage::PlaylistUpdateProgress(_)
         | EventMessage::SystemInfoUpdate(_)
         | EventMessage::DownloadsUpdate(_)
@@ -149,10 +148,7 @@ fn first_line(s: &str) -> String { s.lines().next().unwrap_or(s).trim().to_strin
 #[cfg(test)]
 mod tests {
     use super::{to_notification, EventMessage, PlaylistUpdateState};
-    use shared::model::{
-        notification::{registry, Severity},
-        ConfigType,
-    };
+    use shared::model::{notification::registry, ConfigType};
 
     #[test]
     fn high_frequency_variants_are_not_notifiable() {
