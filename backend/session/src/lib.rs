@@ -24,6 +24,7 @@ pub mod admission_strategy;
 pub mod connection_manager;
 pub mod event_manager;
 pub mod meter;
+pub mod meter_registry;
 pub mod provider_dns_manager;
 pub mod provider_lineup_manager;
 pub mod qos_aggregation_manager;
@@ -35,5 +36,5 @@ pub mod streams;
 
 pub use self::{
     active_provider_manager::*, active_user_manager::*, admission::*, admission_strategy::*, connection_manager::*,
-    event_manager::*, meter::*, provider_lineup_manager::*, stream::*, streams::*,
+    event_manager::*, meter::*, meter_registry::*, provider_lineup_manager::*, stream::*, streams::*,
 };

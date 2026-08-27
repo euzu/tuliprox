@@ -305,7 +305,9 @@ async fn release_connection_parts(
         }
     }
     for stream_info in &removed.removed_streams {
-        let (bytes_sent, first_byte_latency_ms) = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+        let qos = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+        let bytes_sent = qos.map(|qos| qos.bytes_total);
+        let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
         deps.event_manager.unregister_meter_client(stream_info.uid).await;
         emit_disconnect_record(
             &deps.history_writer,
@@ -444,7 +446,9 @@ async fn handle_update_detail_and_release_provider_connection(
 }
 
 async fn handle_adaptive_session_expired(deps: &CleanupWorkerDeps, stream_info: Box<StreamInfo>) {
-    let (bytes_sent, first_byte_latency_ms) = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+    let qos = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+    let bytes_sent = qos.map(|qos| qos.bytes_total);
+    let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
     deps.event_manager.unregister_meter_client(stream_info.uid).await;
     emit_disconnect_record(
         &deps.history_writer,
@@ -483,7 +487,9 @@ async fn release_stream_with_disconnect(
         );
         return None;
     };
-    let (bytes_sent, first_byte_latency_ms) = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+    let qos = deps.event_manager.read_meter_qos(stream_info.meter_uid).await;
+    let bytes_sent = qos.map(|qos| qos.bytes_total);
+    let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
     deps.event_manager.unregister_meter_client(stream_info.uid).await;
     let reason = resolve_disconnect_reason(provider_end_reason, &stream_info);
     let provider_reconnect_count = (reconnect_count > 0).then_some(reconnect_count);
@@ -935,7 +941,9 @@ impl ConnectionManager {
             self.user_manager.terminate_sessions_for_addr(username, addr).await;
         }
         for stream_info in &removed.removed_streams {
-            let (bytes_sent, first_byte_latency_ms) = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let qos = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let bytes_sent = qos.map(|qos| qos.bytes_total);
+            let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
             self.event_manager.unregister_meter_client(stream_info.uid).await;
             emit_disconnect_record(
                 &self.history_writer,
@@ -959,7 +967,9 @@ impl ConnectionManager {
 
     pub async fn release_stream(&self, addr: &SocketAddr) {
         if let Some(stream_info) = self.user_manager.release_stream(addr).await {
-            let (bytes_sent, first_byte_latency_ms) = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let qos = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let bytes_sent = qos.map(|qos| qos.bytes_total);
+            let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
             self.event_manager.unregister_meter_client(stream_info.uid).await;
             emit_disconnect_record(
                 &self.history_writer,
@@ -1018,7 +1028,9 @@ impl ConnectionManager {
     pub async fn shutdown(&self) {
         let active_streams = self.user_manager.get_all_active_streams().await;
         for stream_info in active_streams {
-            let (bytes_sent, first_byte_latency_ms) = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let qos = self.event_manager.read_meter_qos(stream_info.meter_uid).await;
+            let bytes_sent = qos.map(|qos| qos.bytes_total);
+            let first_byte_latency_ms = qos.and_then(|qos| qos.first_byte_latency_ms);
             emit_disconnect_record(
                 &self.history_writer,
                 &stream_info,

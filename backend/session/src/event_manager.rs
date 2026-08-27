@@ -1,87 +1,35 @@
-use crate::{MeterReading, StreamMeterHandle};
-use log::trace;
-use shared::model::{EventKindMask, EventMessage, StreamMeterEntry, SystemInfo};
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
-use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
+//! The in-process event bus.
+//!
+//! A `broadcast::Sender<EventMessage>` and the subscription helpers around
+//! it. Stream metering used to live in this struct too - a second broadcast
+//! channel, a registry, a subscriber counter and a background sampler, none
+//! of which any event subscriber ever touched. That is
+//! [`StreamMeterRegistry`] now; `EventManager` owns one so the composition
+//! root still constructs a single handle.
 
-const STREAM_METER_INTERVAL: Duration = Duration::from_secs(3);
-const STREAM_METER_INTERVAL_SECS: u64 = STREAM_METER_INTERVAL.as_secs();
+use crate::{
+    meter_registry::{MeterQos, StreamMeterRegistry},
+    StreamMeterHandle,
+};
+use log::trace;
+use shared::model::{EventKindMask, EventMessage, EventSink, StreamMeterEntry, SystemInfo};
+use std::sync::Arc;
 
 pub struct EventManager {
     channel_tx: tokio::sync::broadcast::Sender<EventMessage>,
-    meter_channel_tx: tokio::sync::broadcast::Sender<Vec<StreamMeterEntry>>,
-    meter_registry: Arc<RwLock<MeterRegistry>>,
-    stream_meter_subscriber_count: Arc<AtomicUsize>,
-    meter_sampler_cancel: CancellationToken,
-}
-
-#[derive(Debug, Default)]
-struct MeterRegistry {
-    meters: HashMap<u32, Arc<StreamMeterHandle>>,
-    meter_to_clients: HashMap<u32, Vec<u32>>,
-    client_to_meter: HashMap<u32, u32>,
+    meters: StreamMeterRegistry,
 }
 
 impl EventManager {
+    #[must_use]
     pub fn new() -> Self {
         let (channel_tx, _channel_rx) = tokio::sync::broadcast::channel(10);
-        let (meter_channel_tx, _meter_channel_rx) = tokio::sync::broadcast::channel(10);
-        let meter_registry = Arc::new(RwLock::new(MeterRegistry::default()));
-        let stream_meter_subscriber_count = Arc::new(AtomicUsize::new(0));
-        let meter_sampler_cancel = CancellationToken::new();
-
-        Self::spawn_meter_sampler(
-            meter_channel_tx.clone(),
-            Arc::clone(&meter_registry),
-            Arc::clone(&stream_meter_subscriber_count),
-            meter_sampler_cancel.clone(),
-        );
-
-        Self { channel_tx, meter_channel_tx, meter_registry, stream_meter_subscriber_count, meter_sampler_cancel }
+        Self { channel_tx, meters: StreamMeterRegistry::new() }
     }
 
-    fn spawn_meter_sampler(
-        meter_channel_tx: tokio::sync::broadcast::Sender<Vec<StreamMeterEntry>>,
-        meter_registry: Arc<RwLock<MeterRegistry>>,
-        stream_meter_subscriber_count: Arc<AtomicUsize>,
-        cancel_token: CancellationToken,
-    ) {
-        if tokio::runtime::Handle::try_current().is_err() {
-            return;
-        }
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(STREAM_METER_INTERVAL);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-            loop {
-                tokio::select! {
-                    () = cancel_token.cancelled() => break,
-                    _ = interval.tick() => {}
-                }
-
-                if stream_meter_subscriber_count.load(Ordering::Relaxed) == 0 {
-                    continue;
-                }
-
-                if meter_channel_tx.receiver_count() == 0 {
-                    continue;
-                }
-
-                let entries = sample_meter_entries(&meter_registry).await;
-                if !entries.is_empty() && meter_channel_tx.send(entries).is_err() {
-                    trace!("Failed to send stream meter batch");
-                }
-            }
-        });
-    }
+    /// The metering subsystem.
+    #[must_use]
+    pub fn meters(&self) -> &StreamMeterRegistry { &self.meters }
 
     pub fn get_event_channel(&self) -> tokio::sync::broadcast::Receiver<EventMessage> { self.channel_tx.subscribe() }
 
@@ -95,10 +43,6 @@ impl EventManager {
     /// gap in the ones it did.
     pub fn subscribe_filtered(&self, mask: EventKindMask) -> FilteredEventReceiver {
         FilteredEventReceiver { inner: self.channel_tx.subscribe(), mask }
-    }
-
-    pub fn get_meter_channel(&self) -> tokio::sync::broadcast::Receiver<Vec<StreamMeterEntry>> {
-        self.meter_channel_tx.subscribe()
     }
 
     pub fn send_event(&self, event: EventMessage) -> bool {
@@ -122,153 +66,53 @@ impl EventManager {
         }
     }
 
+    #[must_use]
     pub fn has_event_receivers(&self) -> bool { self.channel_tx.receiver_count() > 0 }
 
-    pub fn has_meter_event_receivers(&self) -> bool { self.meter_channel_tx.receiver_count() > 0 }
+    // --- metering, forwarded ------------------------------------------------
+    //
+    // Kept as inherent methods because the call sites reach the bus through
+    // `AppState.event_manager` and a stream has no reason to know that
+    // metering is a separate component. `meters()` is there for anything that
+    // wants the registry itself.
 
-    pub fn stream_meter_subscriber_connected(&self) {
-        self.stream_meter_subscriber_count.fetch_add(1, Ordering::Relaxed);
+    #[must_use]
+    pub fn get_meter_channel(&self) -> tokio::sync::broadcast::Receiver<Vec<StreamMeterEntry>> {
+        self.meters.subscribe()
     }
 
-    pub fn stream_meter_subscriber_disconnected(&self) {
-        let _ = self
-            .stream_meter_subscriber_count
-            .try_update(Ordering::AcqRel, Ordering::Relaxed, |count| count.checked_sub(1));
-    }
+    #[must_use]
+    pub fn has_meter_event_receivers(&self) -> bool { self.meters.has_receivers() }
 
-    pub fn has_stream_meter_subscribers(&self) -> bool {
-        self.stream_meter_subscriber_count.load(Ordering::Relaxed) > 0
-    }
+    pub fn stream_meter_subscriber_connected(&self) { self.meters.subscriber_connected(); }
 
-    pub async fn register_meter(&self, meter: Arc<StreamMeterHandle>) {
-        let meter_uid = meter.meter_uid();
-        if meter_uid == 0 {
-            return;
-        }
+    pub fn stream_meter_subscriber_disconnected(&self) { self.meters.subscriber_disconnected(); }
 
-        self.meter_registry.write().await.meters.insert(meter_uid, meter);
-    }
+    #[must_use]
+    pub fn has_stream_meter_subscribers(&self) -> bool { self.meters.has_subscribers() }
 
-    pub async fn unregister_meter(&self, meter_uid: u32) {
-        if meter_uid == 0 {
-            return;
-        }
+    pub async fn register_meter(&self, meter: Arc<StreamMeterHandle>) { self.meters.register_meter(meter).await; }
 
-        let mut registry = self.meter_registry.write().await;
-        registry.meters.remove(&meter_uid);
-        if let Some(client_uids) = registry.meter_to_clients.remove(&meter_uid) {
-            for client_uid in client_uids {
-                registry.client_to_meter.remove(&client_uid);
-            }
-        }
-    }
+    pub async fn unregister_meter(&self, meter_uid: u32) { self.meters.unregister_meter(meter_uid).await; }
 
     pub async fn flush_and_unregister_meter(&self, meter_uid: u32) {
-        if meter_uid == 0 {
-            return;
-        }
-
-        let final_entry = {
-            let mut registry = self.meter_registry.write().await;
-            let meter = registry.meters.remove(&meter_uid);
-            let client_uids = registry.meter_to_clients.remove(&meter_uid).unwrap_or_default();
-
-            for client_uid in &client_uids {
-                registry.client_to_meter.remove(client_uid);
-            }
-
-            meter.and_then(|meter| build_meter_entry(meter.snapshot(), client_uids))
-        };
-
-        if let Some(entry) = final_entry {
-            self.send_meter_batch(vec![entry]);
-        }
+        self.meters.flush_and_unregister_meter(meter_uid).await;
     }
 
     pub async fn register_meter_client(&self, client_uid: u32, meter_uid: u32) {
-        if client_uid == 0 || meter_uid == 0 {
-            return;
-        }
-
-        let carried_entry = {
-            let mut registry = self.meter_registry.write().await;
-            let mut carried_entry = None;
-
-            if let Some(old_meter_uid) = registry.client_to_meter.insert(client_uid, meter_uid) {
-                if old_meter_uid != meter_uid {
-                    let previous_client_uids =
-                        registry.meter_to_clients.get(&old_meter_uid).cloned().unwrap_or_default();
-                    if previous_client_uids.len() == 1 && previous_client_uids[0] == client_uid {
-                        carried_entry = registry
-                            .meters
-                            .get(&old_meter_uid)
-                            .and_then(|meter| build_meter_entry(meter.snapshot(), vec![client_uid]));
-                    }
-                }
-
-                if let Some(client_uids) = registry.meter_to_clients.get_mut(&old_meter_uid) {
-                    client_uids.retain(|uid| *uid != client_uid);
-                    if client_uids.is_empty() {
-                        registry.meter_to_clients.remove(&old_meter_uid);
-                    }
-                }
-            }
-
-            let client_uids = registry.meter_to_clients.entry(meter_uid).or_default();
-            if !client_uids.contains(&client_uid) {
-                client_uids.push(client_uid);
-            }
-
-            carried_entry
-        };
-
-        if let Some(entry) = carried_entry {
-            self.send_meter_batch(vec![entry]);
-        }
-    }
-
-    /// Read `QoS` metrics (`bytes_total`, `first_byte_latency`) for a meter without removing it.
-    /// Returns `(None, None)` when the meter is shared by multiple clients, because the
-    /// meter-wide totals would be incorrect for any individual session.
-    pub async fn read_meter_qos(&self, meter_uid: u32) -> (Option<u64>, Option<u64>) {
-        if meter_uid == 0 {
-            return (None, None);
-        }
-        let registry = self.meter_registry.read().await;
-        // Shared meters serve multiple clients — their totals are not per-session.
-        if registry.meter_to_clients.get(&meter_uid).is_some_and(|clients| clients.len() > 1) {
-            return (None, None);
-        }
-        match registry.meters.get(&meter_uid) {
-            Some(m) => (Some(m.bytes_total()), m.first_byte_latency_ms()),
-            None => (None, None),
-        }
+        self.meters.register_meter_client(client_uid, meter_uid).await;
     }
 
     pub async fn unregister_meter_client(&self, client_uid: u32) {
-        if client_uid == 0 {
-            return;
-        }
-
-        let mut registry = self.meter_registry.write().await;
-        if let Some(meter_uid) = registry.client_to_meter.remove(&client_uid) {
-            if let Some(client_uids) = registry.meter_to_clients.get_mut(&meter_uid) {
-                client_uids.retain(|uid| *uid != client_uid);
-                if client_uids.is_empty() {
-                    registry.meter_to_clients.remove(&meter_uid);
-                }
-            }
-        }
+        self.meters.unregister_meter_client(client_uid).await;
     }
 
-    pub fn send_meter_batch(&self, entries: Vec<shared::model::StreamMeterEntry>) {
-        if !entries.is_empty() {
-            let _ = self.meter_channel_tx.send(entries);
-        }
-    }
+    pub async fn read_meter_qos(&self, meter_uid: u32) -> Option<MeterQos> { self.meters.read_qos(meter_uid).await }
+
+    pub fn send_meter_batch(&self, entries: Vec<StreamMeterEntry>) { self.meters.send_batch(entries); }
 }
 
-/// A [`EventMessage`] subscription narrowed to some [`EventKindMask`].
+/// An [`EventMessage`] subscription narrowed to some [`EventKindMask`].
 ///
 /// A concrete type rather than a `Stream` adaptor: the call site is a
 /// `tokio::select!` arm awaiting `recv()`, which is what this offers, and a
@@ -297,54 +141,12 @@ impl FilteredEventReceiver {
     pub fn mask(&self) -> EventKindMask { self.mask }
 }
 
-async fn sample_meter_entries(meter_registry: &RwLock<MeterRegistry>) -> Vec<StreamMeterEntry> {
-    let samples = {
-        let registry = meter_registry.read().await;
-        if registry.meters.is_empty() || registry.meter_to_clients.is_empty() {
-            return Vec::new();
-        }
-
-        registry
-            .meters
-            .iter()
-            .filter_map(|(meter_uid, meter)| {
-                registry.meter_to_clients.get(meter_uid).filter(|uids| !uids.is_empty()).map(|uids| {
-                    let reading = meter.snapshot();
-                    (*meter_uid, reading, uids.clone())
-                })
-            })
-            .collect::<Vec<_>>()
-    };
-
-    if samples.is_empty() {
-        return Vec::new();
-    }
-
-    samples.into_iter().filter_map(|(_meter_uid, reading, uids)| build_meter_entry(reading, uids)).collect()
-}
-
-fn build_meter_entry(reading: MeterReading, uids: Vec<u32>) -> Option<StreamMeterEntry> {
-    if uids.is_empty() {
-        return None;
-    }
-
-    let rate_kbps_u64 = reading.bytes_window / 1024 / STREAM_METER_INTERVAL_SECS;
-    let rate_kbps = u32::try_from(rate_kbps_u64).unwrap_or(u32::MAX);
-    let total_kb = u32::try_from(reading.bytes_total / 1024).unwrap_or(u32::MAX);
-
-    Some(StreamMeterEntry { meter_uid: reading.meter_uid, uids, rate_kbps, total_kb })
-}
-
-impl shared::model::EventSink for EventManager {
+impl EventSink for EventManager {
     fn emit(&self, event: EventMessage) { self.send_event(event); }
 }
 
 impl Default for EventManager {
     fn default() -> Self { Self::new() }
-}
-
-impl Drop for EventManager {
-    fn drop(&mut self) { self.meter_sampler_cancel.cancel(); }
 }
 
 #[cfg(test)]
