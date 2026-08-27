@@ -229,7 +229,7 @@ pub fn update_timestamps() {
 mod tests {
     use super::compute_adaptive_last_seen;
     use shared::{
-        model::{PlaylistItemType, StreamChannel, StreamInfo, XtreamCluster},
+        model::{PlaylistItemType, StreamChannel, StreamInfo},
         utils::Internable,
     };
     use std::{
@@ -253,7 +253,7 @@ mod tests {
                 virtual_id: uid,
                 provider_id: 1,
                 item_type,
-                cluster: XtreamCluster::try_from(item_type).unwrap_or(XtreamCluster::Live),
+                cluster: item_type.cluster(),
                 group: "Group".intern(),
                 title: "Title".intern(),
                 url: url.intern(),

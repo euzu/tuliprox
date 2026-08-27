@@ -134,7 +134,7 @@ impl From<M3uPlaylistItem> for UiPlaylistItem {
             logo: pick_logo(&item.logo, &item.logo_small, None),
             url: Arc::clone(&item.url),
             item_type: item.item_type,
-            xtream_cluster: XtreamCluster::try_from(item.item_type).unwrap_or_default(),
+            xtream_cluster: item.item_type.cluster(),
             category_id: 0,
             rating: 0.0,
             input_name: Arc::clone(&item.input_name),

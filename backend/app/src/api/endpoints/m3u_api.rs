@@ -37,7 +37,7 @@ use shared::{
     error::TuliproxError,
     model::{
         CatchupProperties, ConnectFailureReason, FieldGetAccessor, PlaylistEntry, PlaylistItemType, StreamProperties,
-        TargetType, UserConnectionPermission, XtreamCluster,
+        TargetType, UserConnectionPermission,
     },
     utils::{concat_path, extract_extension_from_url, sanitize_sensitive_info},
 };
@@ -243,7 +243,7 @@ pub(in crate::api) async fn m3u_api_stream_loaded(
         .into_response();
     }
 
-    let cluster = XtreamCluster::try_from(pli.item_type).unwrap_or(XtreamCluster::Live);
+    let cluster = pli.item_type.cluster();
     pli.url = match resolve_initial_stalker_playback_url(
         app_state,
         &input,

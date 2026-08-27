@@ -1911,7 +1911,7 @@ async fn ensure_hls_cache_stream_registered(
         stream_channel.epg_reference_ts = panel_archive_reference;
     } else {
         stream_channel.item_type = PlaylistItemType::LiveHls;
-        stream_channel.cluster = XtreamCluster::try_from(PlaylistItemType::LiveHls).unwrap_or(stream_channel.cluster);
+        stream_channel.cluster = PlaylistItemType::LiveHls.cluster();
     }
     let shared_stream_id = hls_cache_shared_stream_id(&proxy_session_id);
     stream_channel.shared = true;
@@ -2010,7 +2010,7 @@ async fn build_hls_cache_stream_channel(
         channel.epg_reference_ts = archive_reference;
     } else {
         channel.item_type = PlaylistItemType::LiveHls;
-        channel.cluster = XtreamCluster::try_from(PlaylistItemType::LiveHls).unwrap_or(channel.cluster);
+        channel.cluster = PlaylistItemType::LiveHls.cluster();
         channel.epg_reference_ts = None;
     }
     channel

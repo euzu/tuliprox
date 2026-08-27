@@ -485,11 +485,14 @@ async fn xtream_read_series_item_for_stream_id(
     .map_err(|err| Error::other(format!("Query task failed for {stream_id} in series: {err}")))?
 }
 
-macro_rules! try_cluster {
-    ($xtream_cluster:expr, $item_type:expr, $virtual_id:expr) => {
-        $xtream_cluster.or_else(|| XtreamCluster::try_from($item_type).ok()).ok_or_else(|| {
-            string_to_io_error(format!("Could not determine cluster for xtream item with stream-id {}", $virtual_id))
-        })
+/// The stored cluster if the mapping has one, otherwise the item type's own.
+///
+/// Was a `try_cluster!` returning a `Result` whose error arm was unreachable:
+/// the fallback went through `XtreamCluster::try_from(..).ok()`, which is always
+/// `Some`, so `ok_or_else` never fired.
+macro_rules! cluster_or_item_type {
+    ($xtream_cluster:expr, $item_type:expr) => {
+        $xtream_cluster.unwrap_or_else(|| $item_type.cluster())
     };
 }
 
@@ -534,7 +537,7 @@ async fn xtream_get_item_for_stream_id_from_memory(
                     }
                     PlaylistItemType::Catchup => {
                         log::debug!("In-memory catchup item requested. VirtualID: {}, ParentVirtualID: {}, MappingProviderID: {}", virtual_id, mapping.parent_virtual_id, mapping.provider_id);
-                        let cluster = try_cluster!(xtream_cluster, mapping.item_type, virtual_id)?;
+                        let cluster = cluster_or_item_type!(xtream_cluster, mapping.item_type);
                         let item = match cluster {
                             XtreamCluster::Live => xtream_storage.live.query(&mapping.parent_virtual_id),
                             XtreamCluster::Video => xtream_storage.vod.query(&mapping.parent_virtual_id),
@@ -552,7 +555,7 @@ async fn xtream_get_item_for_stream_id_from_memory(
                         }
                     }
                     _ => {
-                        let cluster = try_cluster!(xtream_cluster, mapping.item_type, virtual_id)?;
+                        let cluster = cluster_or_item_type!(xtream_cluster, mapping.item_type);
                         Ok((match cluster {
                             XtreamCluster::Live => xtream_storage.live.query(&virtual_id),
                             XtreamCluster::Video => xtream_storage.vod.query(&virtual_id),
@@ -655,7 +658,7 @@ pub async fn xtream_get_item_for_stream_id(
                         mapping.parent_virtual_id,
                         mapping.provider_id
                     );
-                    let cluster = try_cluster!(xtream_cluster, mapping.item_type, virtual_id)?;
+                    let cluster = cluster_or_item_type!(xtream_cluster, mapping.item_type);
                     let mut item =
                         xtream_read_item_for_stream_id(app_config, mapping.parent_virtual_id, &storage_path, cluster)
                             .await?;
@@ -665,7 +668,7 @@ pub async fn xtream_get_item_for_stream_id(
                     Ok(item)
                 }
                 _ => {
-                    let cluster = try_cluster!(xtream_cluster, mapping.item_type, virtual_id)?;
+                    let cluster = cluster_or_item_type!(xtream_cluster, mapping.item_type);
                     xtream_read_item_for_stream_id(app_config, virtual_id, &storage_path, cluster).await
                 }
             }

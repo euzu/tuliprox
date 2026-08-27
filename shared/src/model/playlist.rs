@@ -66,21 +66,14 @@ impl XtreamCluster {
     }
 }
 
-impl TryFrom<PlaylistItemType> for XtreamCluster {
-    type Error = String;
-    fn try_from(item_type: PlaylistItemType) -> Result<Self, Self::Error> {
-        match item_type {
-            PlaylistItemType::Live
-            | PlaylistItemType::LiveHls
-            | PlaylistItemType::LiveDash
-            | PlaylistItemType::LiveUnknown => Ok(Self::Live),
-            PlaylistItemType::Catchup | PlaylistItemType::Video | PlaylistItemType::LocalVideo => Ok(Self::Video),
-            PlaylistItemType::Series
-            | PlaylistItemType::SeriesInfo
-            | PlaylistItemType::LocalSeries
-            | PlaylistItemType::LocalSeriesInfo => Ok(Self::Series),
-        }
-    }
+/// Every item type belongs to exactly one cluster, so this cannot fail.
+///
+/// This used to be a `TryFrom` whose every arm returned `Ok`, and the phantom
+/// error spread `.unwrap_or(Live)`, `.unwrap_or_default()` and `.ok()` across 17
+/// call sites in four crates. See [`PlaylistItemType::cluster`].
+impl From<PlaylistItemType> for XtreamCluster {
+    #[inline]
+    fn from(item_type: PlaylistItemType) -> Self { item_type.cluster() }
 }
 
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq, Serialize, Deserialize, Default, EnumIter)]
@@ -226,15 +219,22 @@ impl PlaylistItemType {
         Arc::clone(CACHE[idx].get_or_init(|| self.as_str().intern()))
     }
 
-    pub fn is_cluster(&self, cluster: XtreamCluster) -> bool {
+    /// The cluster this item type belongs to.
+    ///
+    /// The one place the item-type-to-cluster relation is written down. It used
+    /// to be encoded twice -- here and in a `TryFrom` impl -- with nothing
+    /// keeping the two in agreement.
+    #[inline]
+    pub const fn cluster(self) -> XtreamCluster {
         match self {
-            Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => cluster == XtreamCluster::Live,
-            Self::Catchup | Self::Video | Self::LocalVideo => cluster == XtreamCluster::Video,
-            Self::Series | Self::LocalSeries | Self::SeriesInfo | Self::LocalSeriesInfo => {
-                cluster == XtreamCluster::Series
-            }
+            Self::Live | Self::LiveHls | Self::LiveDash | Self::LiveUnknown => XtreamCluster::Live,
+            Self::Catchup | Self::Video | Self::LocalVideo => XtreamCluster::Video,
+            Self::Series | Self::LocalSeries | Self::SeriesInfo | Self::LocalSeriesInfo => XtreamCluster::Series,
         }
     }
+
+    #[inline]
+    pub const fn is_cluster(&self, cluster: XtreamCluster) -> bool { self.cluster() as u8 == cluster as u8 }
 }
 
 impl Display for PlaylistItemType {
@@ -804,7 +804,7 @@ impl M3uPlaylistItem {
             input_name: Arc::clone(&self.input_name),
             item_type: self.item_type,
             epg_channel_id: self.epg_channel_id.clone(),
-            xtream_cluster: XtreamCluster::try_from(self.item_type).ok(),
+            xtream_cluster: Some(self.item_type.cluster()),
             additional_properties: self.additional_properties.clone(),
             category_id: None,
         }
@@ -1424,7 +1424,7 @@ impl From<&M3uPlaylistItem> for PlaylistItem {
             rec: item.rec.clone(),
             url: item.url.clone(),
             epg_channel_id: item.epg_channel_id.clone(),
-            xtream_cluster: XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live),
+            xtream_cluster: item.item_type.cluster(),
             item_type: item.item_type,
             category_id: 0,
             input_name: item.input_name.clone(),
@@ -1603,6 +1603,25 @@ mod tests {
         CatchupAttribute, CatchupProperties, LiveStreamProperties, PlaylistItemType, StreamProperties, XtreamCluster,
         XtreamMappingFlags,
     };
+
+    #[test]
+    fn cluster_is_the_single_source_of_truth_for_every_item_type() {
+        use strum::IntoEnumIterator;
+
+        for item_type in PlaylistItemType::iter() {
+            let cluster = item_type.cluster();
+
+            // `From` and the inherent method cannot disagree: one delegates.
+            assert_eq!(XtreamCluster::from(item_type), cluster, "{item_type:?}");
+
+            // is_cluster agrees with cluster() for the right one and rejects the
+            // other two. This is what used to be a separately written match.
+            assert!(item_type.is_cluster(cluster), "{item_type:?} should be in its own cluster");
+            for other in [XtreamCluster::Live, XtreamCluster::Video, XtreamCluster::Series] {
+                assert_eq!(item_type.is_cluster(other), other == cluster, "{item_type:?} vs {other:?}");
+            }
+        }
+    }
 
     #[test]
     fn header_field_parse_round_trips_every_variant() {

@@ -439,10 +439,6 @@ fn filter_group(skip_set: &HashSet<XtreamCluster>, mut group: PlaylistGroup) -> 
     }
 }
 
-fn cluster_from_item_type(item_type: PlaylistItemType) -> XtreamCluster {
-    XtreamCluster::try_from(item_type).unwrap_or(XtreamCluster::Live)
-}
-
 fn clone_xtream_query(
     label: &str,
     source: Option<&XtreamQueryHandle>,
@@ -1122,7 +1118,7 @@ macro_rules! impl_single_file_disk_source {
                     query
                         .iter()
                         .filter_map(log_and_skip_btree_error)
-                        .filter(|(_, item)| !skip_set.contains(&cluster_from_item_type(item.item_type)))
+                        .filter(|(_, item)| !skip_set.contains(&item.item_type.cluster()))
                         .count()
                 })
             }
@@ -1131,7 +1127,7 @@ macro_rules! impl_single_file_disk_source {
                 let mut groups = HashSet::<(XtreamCluster, Arc<str>)>::new();
                 if let Some(query) = self.playlist.as_mut() {
                     for (_, item) in query.iter().filter_map(log_and_skip_btree_error) {
-                        let cluster = cluster_from_item_type(item.item_type);
+                        let cluster = item.item_type.cluster();
                         if !skip_set.contains(&cluster) {
                             groups.insert((cluster, Arc::clone(&item.group)));
                         }
@@ -1170,7 +1166,7 @@ macro_rules! impl_single_file_disk_source {
                 if let Some(q) = self.playlist.as_mut() {
                     let mut groups_map: IndexMap<(XtreamCluster, Arc<str>), PlaylistGroup> = IndexMap::new();
                     for (_, item) in q.iter().filter_map(log_and_skip_btree_error) {
-                        let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
+                        let cluster = item.item_type.cluster();
                         let normalized_group = shared::utils::deunicode_string(&item.group).to_lowercase().intern();
                         let key = (cluster, normalized_group);
                         groups_map.entry(key)

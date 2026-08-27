@@ -5,10 +5,7 @@ use log::{error, trace};
 use serde::Serialize;
 use shared::{
     error::TuliproxError,
-    model::{
-        MediaQuality, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle, UUIDType,
-        XtreamCluster,
-    },
+    model::{MediaQuality, PlaylistGroup, PlaylistItem, PlaylistItemType, StreamProperties, StrmExportStyle, UUIDType},
     utils::{
         arc_str_option_serde, arc_str_serde, clean_playlist_title, hash_bytes, hash_string_as_hex,
         is_blank_optional_arc_str, sanitize_sensitive_info, truncate_string, ExportStyleConfig, CONSTANTS,
@@ -1132,12 +1129,7 @@ fn build_provider_resolve_url(
     target_id: u16,
     str_item_info: &StrmItemInfo,
 ) -> Result<String, String> {
-    let cluster = XtreamCluster::try_from(str_item_info.item_type).map_err(|err| {
-        format!(
-            "Failed to determine STRM provider resolve cluster for item '{}': {err}",
-            sanitize_sensitive_info(&str_item_info.title)
-        )
-    })?;
+    let cluster = str_item_info.item_type.cluster();
     let token = encode_provider_resolve_playlist_item_token(
         secret,
         &ProviderResolvePlaylistItemToken {

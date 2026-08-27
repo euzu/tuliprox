@@ -466,7 +466,7 @@ pub async fn load_input_m3u_playlist(
         let mut group_cnt = 0;
         for entry in query.iter() {
             let (_, item) = entry.map_err(|error| TuliproxError::RepositoryM3u(error.to_string()))?;
-            let cluster = XtreamCluster::try_from(item.item_type).unwrap_or(XtreamCluster::Live);
+            let cluster = item.item_type.cluster();
             let key = (cluster, item.group.clone());
             groups
                 .entry(key)

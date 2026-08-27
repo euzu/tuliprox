@@ -86,7 +86,7 @@ pub fn create_stream_channel_with_type(
 ) -> StreamChannel {
     let mut stream_channel = pli.to_stream_channel(target_id);
     stream_channel.item_type = item_type;
-    stream_channel.cluster = XtreamCluster::try_from(item_type).unwrap_or(stream_channel.cluster);
+    stream_channel.cluster = item_type.cluster();
     stream_channel
 }
 
@@ -123,7 +123,7 @@ impl M3uPlaylistItem {
             provider_id: self.get_provider_id().unwrap_or_default(),
             input_name: Arc::clone(&self.input_name),
             item_type: self.item_type,
-            cluster: XtreamCluster::try_from(self.item_type).unwrap_or(XtreamCluster::Live),
+            cluster: self.item_type.cluster(),
             group: Arc::clone(&self.group),
             title,
             url: Arc::clone(&self.url),

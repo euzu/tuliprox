@@ -771,7 +771,7 @@ async fn playlist_recording_stream(
         true,
         format!("Failed to read m3u item for stream id {virtual_id}")
     );
-    if pli.input_name != resolved.input.name || XtreamCluster::try_from(pli.item_type).ok() != Some(ctxt.cluster()) {
+    if pli.input_name != resolved.input.name || pli.item_type.cluster() != ctxt.cluster() {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
     }
     let user = Arc::new(create_api_proxy_user(&app_state));
