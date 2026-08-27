@@ -8,7 +8,7 @@ use shared::{
         HLS_CACHE_DIR_SUFFIX,
     },
     model::{
-        HlsCacheConfigDto, HlsCorruptSegmentWatchdogConfigDto, HlsManifestRecoveryBurstConfigDto,
+        Bytes, HlsCacheConfigDto, HlsCorruptSegmentWatchdogConfigDto, HlsManifestRecoveryBurstConfigDto,
         HlsSegmentRepairConfigDto, HlsSegmentRepairSizeIncreaseConfigDto, HlsStripMode, Millis, ResourceRetryConfigDto,
         ReverseProxyConfigDto, ReverseProxyDisabledHeaderConfigDto, Secs, REGEX_CACHE,
     },
@@ -261,9 +261,9 @@ pub struct HlsCacheConfig {
     pub cache_path: String,
     pub strip: StripConfig,
     pub cache_duration: Secs,
-    pub cache_bytes: u64,
+    pub cache_bytes: Bytes,
     pub cache_bytes_str: String,
-    pub cache_bytes_per_session: u64,
+    pub cache_bytes_per_session: Bytes,
     pub cache_bytes_per_session_str: String,
     pub max_segments_prefetch: usize,
     pub max_concurrent_segment_fetches_per_session: usize,
@@ -276,7 +276,7 @@ pub struct HlsCacheConfig {
     pub segment_repair: HlsSegmentRepairConfig,
 }
 
-fn parse_hls_byte_size_or_default(value: &shared::model::ByteSize, default_value: &str) -> u64 {
+fn parse_hls_byte_size_or_default(value: &shared::model::ByteSize, default_value: &str) -> Bytes {
     value
         .parse_bytes()
         .unwrap_or_else(|_| shared::model::ByteSize::new(default_value).parse_bytes().unwrap_or_default())
@@ -400,7 +400,7 @@ mod tests {
         ReverseProxyConfig,
     };
     use shared::model::{
-        ByteSize, HlsCacheConfigDto, HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripMode, Millis,
+        ByteSize, Bytes, HlsCacheConfigDto, HlsManifestRecoveryBurstLevel, HlsSegmentRepairMode, HlsStripMode, Millis,
         QosAggregationConfigDto, ReverseProxyConfigDto, Secs, StreamHistoryConfigDto,
     };
 
@@ -471,9 +471,9 @@ mod tests {
                 cache_path: default_hls_cache_path(),
                 strip: super::StripConfig { mode: HlsStripMode::Segments, value: 0 },
                 cache_duration: Secs::new(300),
-                cache_bytes: 10_737_418_240, // 10 * 1024^3 (was 10 * 1e9 under SI decimal before consolidation)
+                cache_bytes: Bytes::new(10_737_418_240), // 10 * 1024^3 (was 10 * 1e9 under SI decimal before consolidation)
                 cache_bytes_str: "10GB".to_string(),
-                cache_bytes_per_session: 536_870_912, // 512 * 1024^2 (was 512 * 1e6 under SI decimal before consolidation)
+                cache_bytes_per_session: Bytes::new(536_870_912), // 512 * 1024^2 (was 512 * 1e6 under SI decimal before consolidation)
                 cache_bytes_per_session_str: "512MB".to_string(),
                 max_segments_prefetch: 6,
                 max_concurrent_segment_fetches_per_session: 2,
@@ -503,8 +503,8 @@ mod tests {
 
         let config = HlsCacheConfig::from(&dto);
 
-        assert_eq!(config.cache_bytes, 1_073_741_824);
-        assert_eq!(config.cache_bytes_per_session, 536_870_912); // 512 * 1024^2 (binary since parse_size_base_2 consolidation)
+        assert_eq!(config.cache_bytes, Bytes::new(1_073_741_824));
+        assert_eq!(config.cache_bytes_per_session, Bytes::new(536_870_912)); // 512 * 1024^2 (binary since parse_size_base_2 consolidation)
     }
 
     #[test]

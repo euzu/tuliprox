@@ -13,8 +13,8 @@ use shared::{
         default_tmdb_rate_limit_ms,
     },
     model::{
-        ByteSize, FfprobeConfigDto, MetadataLogConfigDto, MetadataUpdateConfigDto, ProbeConfigDto, ResolveConfigDto,
-        TmdbConfigDto,
+        ByteSize, Bytes, FfprobeConfigDto, MetadataLogConfigDto, MetadataUpdateConfigDto, ProbeConfigDto,
+        ResolveConfigDto, TmdbConfigDto,
     },
     utils::parse_duration_seconds,
 };
@@ -79,11 +79,11 @@ pub struct FfprobeConfig {
     pub analyze_duration: String,
     pub analyze_duration_micros: u64,
     pub probe_size: ByteSize,
-    pub probe_size_bytes: u64,
+    pub probe_size_bytes: Bytes,
     pub live_analyze_duration: String,
     pub live_analyze_duration_micros: u64,
     pub live_probe_size: ByteSize,
-    pub live_probe_size_bytes: u64,
+    pub live_probe_size_bytes: Bytes,
 }
 
 #[derive(Debug, Clone)]
@@ -126,13 +126,13 @@ fn parse_duration_or_default(value: &str, default_value: &str, require_unit: boo
         .map_or(1, |v| v.max(1))
 }
 
-fn parse_size_or_default(value: &ByteSize, default_value: &ByteSize) -> u64 {
+fn parse_size_or_default(value: &ByteSize, default_value: &ByteSize) -> Bytes {
     value
         .parse_bytes()
         .ok()
-        .map(|v| v.max(1))
-        .or_else(|| default_value.parse_bytes().ok().map(|v| v.max(1)))
-        .unwrap_or(1)
+        .map(Bytes::at_least_1)
+        .or_else(|| default_value.parse_bytes().ok().map(Bytes::at_least_1))
+        .unwrap_or(Bytes::new(1))
 }
 
 impl From<&MetadataUpdateConfigDto> for MetadataUpdateConfig {

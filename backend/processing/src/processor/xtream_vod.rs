@@ -874,7 +874,7 @@ pub async fn update_vod_metadata(
                 let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
                 let user_agent = config.default_user_agent.clone();
                 let analyze_duration = metadata_update.ffprobe.analyze_duration_micros;
-                let probe_size = metadata_update.ffprobe.probe_size_bytes;
+                let probe_size = metadata_update.ffprobe.probe_size_bytes.get();
 
                 let probe_priority = config
                     .metadata_update

@@ -503,7 +503,8 @@ impl HlsProxyManager {
         let global_fetch_semaphore = Arc::new(Semaphore::new(segment_fetch_policy.max_global_segment_fetches));
         let sessions = Arc::new(HlsSessionStore::new());
         let segment_cache = Arc::new(HlsSegmentCache::with_cache_path(PathBuf::from(&default_config.cache_path)));
-        segment_cache.update_cache_limits(default_config.cache_bytes, default_config.cache_bytes_per_session);
+        segment_cache
+            .update_cache_limits(default_config.cache_bytes.get(), default_config.cache_bytes_per_session.get());
         let segment_repair = Arc::new(HlsSegmentRepairManager::new(default_config.segment_repair.clone()));
         let metrics = Arc::new(HlsCacheMetrics::default());
         let qos = Arc::new(HlsQosRegistry::default());
@@ -570,7 +571,7 @@ impl HlsProxyManager {
         let global_fetch_semaphore = Arc::new(Semaphore::new(segment_fetch_policy.max_global_segment_fetches));
         let sessions = Arc::new(HlsSessionStore::new());
         let segment_cache = Arc::new(HlsSegmentCache::with_cache_path(PathBuf::from(&config.cache_path)));
-        segment_cache.update_cache_limits(config.cache_bytes, config.cache_bytes_per_session);
+        segment_cache.update_cache_limits(config.cache_bytes.get(), config.cache_bytes_per_session.get());
         let segment_repair = Arc::new(HlsSegmentRepairManager::new(config.segment_repair.clone()));
         let metrics = Arc::new(HlsCacheMetrics::default());
         let qos = Arc::new(HlsQosRegistry::default());
@@ -899,7 +900,7 @@ impl HlsProxyManager {
         };
         let runtime_config = HlsProxyRuntimeConfig::from_config_with_enabled(&hls_config, &rewrite_secret, enabled);
         let cache_path_changed = self.gc.update_cache_path(PathBuf::from(&hls_config.cache_path)).await;
-        self.segment_cache.update_cache_limits(hls_config.cache_bytes, hls_config.cache_bytes_per_session);
+        self.segment_cache.update_cache_limits(hls_config.cache_bytes.get(), hls_config.cache_bytes_per_session.get());
         if cache_path_changed {
             self.clear_runtime_cache_state_for_cache_path_change().await;
         }

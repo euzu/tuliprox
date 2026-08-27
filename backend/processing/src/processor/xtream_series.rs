@@ -72,7 +72,7 @@ impl SeriesProbeSettings {
             analyze_duration_micros: metadata_update
                 .map_or(defaults.ffprobe.analyze_duration_micros, |cfg| cfg.ffprobe.analyze_duration_micros),
             probe_size_bytes: metadata_update
-                .map_or(defaults.ffprobe.probe_size_bytes, |cfg| cfg.ffprobe.probe_size_bytes),
+                .map_or(defaults.ffprobe.probe_size_bytes.get(), |cfg| cfg.ffprobe.probe_size_bytes.get()),
         }
     }
 }

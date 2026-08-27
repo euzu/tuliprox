@@ -236,9 +236,9 @@ async fn prepare_generic_stream_metadata(
     let ffprobe_timeout = metadata_update.ffprobe.timeout.unwrap_or(60);
     let user_agent = config.default_user_agent.clone();
     let (analyze_duration, probe_size) = if item_type.is_live() {
-        (metadata_update.ffprobe.live_analyze_duration_micros, metadata_update.ffprobe.live_probe_size_bytes)
+        (metadata_update.ffprobe.live_analyze_duration_micros, metadata_update.ffprobe.live_probe_size_bytes.get())
     } else {
-        (metadata_update.ffprobe.analyze_duration_micros, metadata_update.ffprobe.probe_size_bytes)
+        (metadata_update.ffprobe.analyze_duration_micros, metadata_update.ffprobe.probe_size_bytes.get())
     };
 
     debug_if_enabled!("Probing Generic Stream '{unique_id}'");
