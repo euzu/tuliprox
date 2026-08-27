@@ -11,7 +11,6 @@ use crate::{
             RecordingExecutionResult,
         },
     },
-    messaging::send_message,
     model::{AppConfig, MessageContent, VideoDownloadConfig},
     utils::{async_file_writer, request, request::create_client, IO_BUFFER_SIZE},
 };
@@ -882,19 +881,20 @@ fn spawn_recording_notification_after_persist(
     let Some(message) = plan.message else {
         return;
     };
-    // A full or closed outbox hands the message back; fall through to the
+    // A full or closed outbox hands the event back; fall through to the
     // direct send rather than dropping it outright.
-    let message = match crate::api::model::recording::recording_supervisor::notification_outbox() {
-        Some(outbox) => match outbox.enqueue(message) {
+    let event = tuliprox_core::model::NotificationEvent::from_content(&message);
+    let event = match crate::api::model::recording::recording_supervisor::notification_outbox() {
+        Some(outbox) => match outbox.enqueue(event) {
             None => return,
             Some(rejected) => rejected,
         },
-        None => message,
+        None => event,
     };
     let app_config = Arc::clone(app_config);
     let client = client.clone();
     tokio::spawn(async move {
-        send_message(&app_config, &client, message).await;
+        tuliprox_messaging::send_event(&app_config, &client, event).await;
     });
 }
 

@@ -761,6 +761,27 @@ pub async fn start_server(app_config: Arc<AppConfig>, targets: Arc<ProcessTarget
         .await
         .map_err(|err| TuliproxError::Server(format!("Failed to bind to {host}:{port}, {err}")))?;
 
+    // The notification outbox is started unconditionally: it now carries
+    // every notification, not just recording lifecycle ones, so gating it on
+    // the download/recording config would leave playlist, watch, disk and
+    // provider notifications on the old fire-and-forget path.
+    {
+        let notification_cfg = cfg
+            .video
+            .as_ref()
+            .and_then(|video| video.download.as_ref())
+            .and_then(|download| download.recording.as_ref())
+            .map_or_else(tuliprox_core::model::RecordingNotificationConfig::default, |recording| {
+                recording.notifications.clone()
+            });
+        tuliprox_messaging::outbox::spawn_notification_outbox(
+            &app_state.app_config,
+            app_state.http_client.load().as_ref().clone(),
+            notification_cfg,
+            &app_state.cancel_tokens.load().downloads,
+        );
+    }
+
     if let Some(download_cfg) = cfg.video.as_ref().and_then(|video| video.download.as_ref()) {
         resume_downloads_after_bind(&app_state, download_cfg).await;
     }

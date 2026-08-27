@@ -448,7 +448,11 @@ pub async fn get_recording_health(
         retention_last_tick: health.retention_last_tick(),
         retention_sweep_interval_secs: recording.and_then(|cfg| cfg.retention.as_ref().map(|r| r.sweep_interval_secs)),
         notification_last_drain: health.notification_last_drain(),
-        notification_outbox_depth: health.notification_outbox_depth(),
+        // Read from the promoted outbox: the supervisor-local counter stopped
+        // being updated when the outbox moved into `tuliprox-messaging`.
+        notification_outbox_depth: tuliprox_messaging::outbox::health()
+            .outbox_depth
+            .load(std::sync::atomic::Ordering::Relaxed),
         notification_dead_lettered: health.notification_dead_lettered(),
         queue_revision: app_state.downloads.revision.load(std::sync::atomic::Ordering::SeqCst),
     })

@@ -5,7 +5,7 @@ use crate::{
     messaging::send_message as send_messaging,
     model::{DiskAlertConfig, MessageContent},
 };
-use shared::model::{DiskAlert, DiskAlertLevel, MsgKind, SystemInfo};
+use shared::model::{DiskAlert, DiskAlertLevel, SystemInfo};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -189,7 +189,7 @@ pub fn exec_system_usage(app_state: &Arc<AppState>) -> tokio::task::JoinHandle<(
             let alert_cfg: DiskAlertConfig = {
                 let cfg = state.app_config.config.load();
                 let Some(messaging) = cfg.messaging.as_ref() else { continue };
-                if !messaging.notify_on.contains(&MsgKind::DiskAlert) {
+                if !messaging.subscription().matches(shared::model::notification::registry::SYSTEM_DISK_ALERT) {
                     continue;
                 }
                 let Some(alert_cfg) = messaging.disk_alert.as_ref() else { continue };

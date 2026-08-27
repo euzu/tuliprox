@@ -26,7 +26,7 @@
 //! - [`health`] — last-tick timestamps and counters
 //! - [`startup`] — crash-recovery reconciliation at boot
 //! - [`retention`] — age / count / disk-pressure sweeps
-//! - [`outbox`] — durable, per-channel notification retry
+//! - notification retry lives in `tuliprox-messaging::outbox`
 //! - [`mod`] (this file) — shared helpers, the entry point, and the
 //!   cross-cutting tests
 
@@ -41,7 +41,6 @@ use tokio_util::sync::CancellationToken;
 use tuliprox_core::model::{AppConfig, RecordingConfig};
 
 pub mod health;
-pub mod outbox;
 pub mod retention;
 pub mod startup;
 
@@ -49,9 +48,12 @@ pub mod startup;
 // (`crate::recording::recording_supervisor::*`) keep
 // working without an import change.
 pub use health::{supervisor_health, SupervisorHealth};
-pub use outbox::{notification_outbox, spawn_notification_outbox, NotificationOutbox};
 pub use retention::spawn_retention_supervisor;
 pub use startup::run_startup_reconciliation;
+// The outbox now lives in `tuliprox-messaging` and carries every
+// notification, not just recording lifecycle ones. Re-exported here so
+// existing `recording_supervisor::*` callers need no import change.
+pub use tuliprox_messaging::outbox::{notification_outbox, NotificationOutbox};
 
 /// The effective recording configuration, cloned out of the `ArcSwap`
 /// guard so no guard is held across an await.
@@ -132,7 +134,6 @@ pub async fn start_recording_supervisors(ctx: &RecordingCtx, cancel_token: &Canc
     // Reconcile before anything else can materialize or sweep, so the
     // scheduler never plans against half-repaired state.
     run_startup_reconciliation(ctx).await;
-    spawn_notification_outbox(ctx, cancel_token);
     spawn_retention_supervisor(ctx, cancel_token);
 }
 

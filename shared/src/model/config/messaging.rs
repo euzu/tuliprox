@@ -1,7 +1,6 @@
 use crate::{
     defaults::{default_critical_percent, default_repeat_interval_secs, default_warn_percent, is_false},
     error::TuliproxError,
-    model::MsgKind,
     utils::{is_blank_optional_str, is_blank_optional_string},
 };
 
@@ -13,8 +12,14 @@ pub struct TelegramMessagingConfigDto {
     pub chat_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub markdown: bool,
+    /// Template per event, keyed by event id wire name.
+    ///
+    /// Legacy `MsgKind` names (`info`, `stats`, `disk_alert`, ...) and
+    /// canonical dotted ids (`recording.completed`) are both accepted;
+    /// `MessagingConfig::prepare` resolves them and warns on a key that
+    /// matches no known event.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub templates: std::collections::HashMap<MsgKind, String>,
+    pub templates: std::collections::HashMap<String, String>,
 }
 
 impl TelegramMessagingConfigDto {
@@ -31,8 +36,14 @@ pub struct RestMessagingConfigDto {
     pub method: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub headers: Vec<String>,
+    /// Template per event, keyed by event id wire name.
+    ///
+    /// Legacy `MsgKind` names (`info`, `stats`, `disk_alert`, ...) and
+    /// canonical dotted ids (`recording.completed`) are both accepted;
+    /// `MessagingConfig::prepare` resolves them and warns on a key that
+    /// matches no known event.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub templates: std::collections::HashMap<MsgKind, String>,
+    pub templates: std::collections::HashMap<String, String>,
 }
 
 impl RestMessagingConfigDto {
@@ -48,8 +59,14 @@ impl RestMessagingConfigDto {
 #[serde(deny_unknown_fields)]
 pub struct DiscordMessagingConfigDto {
     pub url: String,
+    /// Template per event, keyed by event id wire name.
+    ///
+    /// Legacy `MsgKind` names (`info`, `stats`, `disk_alert`, ...) and
+    /// canonical dotted ids (`recording.completed`) are both accepted;
+    /// `MessagingConfig::prepare` resolves them and warns on a key that
+    /// matches no known event.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
-    pub templates: std::collections::HashMap<MsgKind, String>,
+    pub templates: std::collections::HashMap<String, String>,
 }
 
 impl DiscordMessagingConfigDto {
@@ -63,11 +80,21 @@ pub struct PushoverMessagingConfigDto {
     pub url: Option<String>,
     pub token: String,
     pub user: String,
+    /// Template per event, keyed by event id wire name.
+    ///
+    /// Pushover previously had no template support at all, so every
+    /// notification took the built-in text - which for watch changes and
+    /// playlist stats was a raw `serde_json` dump pushed to a phone.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub templates: std::collections::HashMap<String, String>,
 }
 
 impl PushoverMessagingConfigDto {
     pub fn is_empty(&self) -> bool {
-        is_blank_optional_str(self.url.as_deref()) && self.token.trim().is_empty() && self.user.trim().is_empty()
+        is_blank_optional_str(self.url.as_deref())
+            && self.token.trim().is_empty()
+            && self.user.trim().is_empty()
+            && self.templates.is_empty()
     }
 }
 
@@ -144,8 +171,14 @@ impl DiskAlertConfigDto {
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MessagingConfigDto {
+    /// Which events to notify on.
+    ///
+    /// Glob patterns over event ids: `*`, `recording.*`,
+    /// `provider.*.expired`, `recording.completed`, and a leading `!` to
+    /// exclude. Legacy `MsgKind` names (`info`, `stats`, `disk_alert`, ...)
+    /// are still accepted and resolve to their canonical ids.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notify_on: Vec<MsgKind>,
+    pub notify_on: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telegram: Option<TelegramMessagingConfigDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,7 +223,24 @@ impl MessagingConfigDto {
         if let Some(disk) = &self.disk_alert {
             disk.prepare()?;
         }
+        self.normalize_notify_on();
         Ok(())
+    }
+
+    /// Rewrite legacy `MsgKind` names to their canonical event ids.
+    ///
+    /// Keeps the UI's selection state consistent with the registry-driven
+    /// option list, and migrates an old config the next time it is saved.
+    /// Glob patterns are left exactly as written.
+    fn normalize_notify_on(&mut self) {
+        for entry in &mut self.notify_on {
+            if entry.contains('*') || entry.starts_with('!') {
+                continue;
+            }
+            if let Some(id) = crate::model::notification::EventId::from_wire(entry) {
+                *entry = id.as_str().to_string();
+            }
+        }
     }
 }
 
@@ -231,13 +281,33 @@ mod tests {
     }
 
     #[test]
+    fn prepare_rewrites_legacy_notify_on_names_to_canonical_ids() {
+        let mut messaging = MessagingConfigDto {
+            notify_on: vec!["disk_alert".to_string(), "recording_completed".to_string()],
+            ..Default::default()
+        };
+        messaging.prepare(false).expect("prepare");
+        assert_eq!(messaging.notify_on, vec!["system.disk.alert", "recording.completed"]);
+    }
+
+    #[test]
+    fn prepare_leaves_glob_patterns_untouched() {
+        let mut messaging = MessagingConfigDto {
+            notify_on: vec!["recording.*".to_string(), "!system.info".to_string(), "*".to_string()],
+            ..Default::default()
+        };
+        messaging.prepare(false).expect("prepare");
+        assert_eq!(messaging.notify_on, vec!["recording.*", "!system.info", "*"]);
+    }
+
+    #[test]
     fn is_empty_default_messaging() {
         assert!(MessagingConfigDto::default().is_empty());
     }
 
     #[test]
     fn is_empty_with_only_notify_on_is_not_empty() {
-        let messaging = MessagingConfigDto { notify_on: vec![MsgKind::DiskAlert], ..Default::default() };
+        let messaging = MessagingConfigDto { notify_on: vec!["disk_alert".to_string()], ..Default::default() };
         assert!(!messaging.is_empty());
     }
 }
