@@ -30,7 +30,6 @@ use std::{
     sync::Arc,
 };
 use tokio::{fs, io::AsyncWriteExt, sync::mpsc, task};
-use tokio_stream::Stream;
 use tuliprox_core::{
     model::{AppConfig, Config, ConfigInput, ConfigTarget, M3uTargetOutput, ProxyUserCredentials},
     utils::{async_file_writer, file_exists_async},
@@ -354,7 +353,7 @@ pub async fn iter_raw_m3u_target_playlist(
     config: &AppConfig,
     target: &ConfigTarget,
     cluster: Option<XtreamCluster>,
-) -> Option<Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>> {
+) -> Option<LockedReceiverStream<Result<M3uPlaylistItem, TuliproxError>>> {
     let target_path = get_target_storage_path(&config.config.load(), target.name.as_str())?;
     let m3u_path = m3u_get_file_path_for_db(&target_path);
 
@@ -365,7 +364,7 @@ pub async fn iter_raw_m3u_input_playlist(
     app_config: &AppConfig,
     input: &ConfigInput,
     cluster: Option<XtreamCluster>,
-) -> Option<Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>> {
+) -> Option<LockedReceiverStream<Result<M3uPlaylistItem, TuliproxError>>> {
     let cfg = app_config.config.load();
     let storage_path = get_input_storage_path(&input.name, &cfg.storage_dir).await.ok()?;
     let m3u_path = get_input_m3u_playlist_file_path(&storage_path, &input.name);
@@ -377,7 +376,7 @@ async fn iter_raw_m3u_playlist<SortKey, ItemKey>(
     app_config: &AppConfig,
     m3u_path: &Path,
     cluster: Option<XtreamCluster>,
-) -> Option<Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin>>
+) -> Option<LockedReceiverStream<Result<M3uPlaylistItem, TuliproxError>>>
 where
     ItemKey: Ord + Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync + 'static,
     SortKey: Ord + for<'de> Deserialize<'de> + Send + 'static,
@@ -432,9 +431,7 @@ where
         }
     });
 
-    let stream: Box<dyn Stream<Item = Result<M3uPlaylistItem, TuliproxError>> + Send + Unpin> =
-        Box::new(LockedReceiverStream::new(rx, iter_lock));
-    Some(stream)
+    Some(LockedReceiverStream::new(rx, iter_lock))
 }
 
 pub async fn persist_input_m3u_playlist(

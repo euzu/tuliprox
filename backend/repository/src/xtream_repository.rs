@@ -690,7 +690,7 @@ pub async fn iter_raw_xtream_target_playlist(
     app_config: &AppConfig,
     target: &ConfigTarget,
     cluster: XtreamCluster,
-) -> Option<Box<dyn Stream<Item = Result<XtreamPlaylistItem, TuliproxError>> + Send + Unpin>> {
+) -> Option<ReceiverStream<Result<XtreamPlaylistItem, TuliproxError>>> {
     let config = app_config.config.load();
     let storage_path = xtream_get_storage_path(&config, target.name.as_str())?;
     let xtream_path = xtream_get_file_path(&storage_path, cluster);
@@ -701,7 +701,7 @@ pub async fn iter_raw_xtream_input_playlist(
     app_config: &AppConfig,
     input: &ConfigInput,
     cluster: XtreamCluster,
-) -> Option<Box<dyn Stream<Item = Result<XtreamPlaylistItem, TuliproxError>> + Send + Unpin>> {
+) -> Option<ReceiverStream<Result<XtreamPlaylistItem, TuliproxError>>> {
     let config = app_config.config.load();
     let storage_dir = &config.storage_dir;
     let storage_path = get_input_storage_path(&input.name, storage_dir).await.ok()?;
@@ -713,7 +713,7 @@ pub async fn iter_raw_xtream_input_playlist(
 async fn iter_raw_xtream_playlist(
     app_config: &AppConfig,
     xtream_path: &Path,
-) -> Option<Box<dyn Stream<Item = Result<XtreamPlaylistItem, TuliproxError>> + Send + Unpin>> {
+) -> Option<ReceiverStream<Result<XtreamPlaylistItem, TuliproxError>>> {
     if !file_exists_async(xtream_path).await {
         return None;
     }
@@ -770,9 +770,7 @@ async fn iter_raw_xtream_playlist(
         }
     });
 
-    let stream: Box<dyn Stream<Item = Result<XtreamPlaylistItem, TuliproxError>> + Send + Unpin> =
-        Box::new(ReceiverStream::new(rx));
-    Some(stream)
+    Some(ReceiverStream::new(rx))
 }
 
 pub fn playlist_iter_to_stream<I, P>(channels: Option<(FileReadGuard, I)>) -> impl Stream<Item = Result<Bytes, String>>

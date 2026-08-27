@@ -17,7 +17,6 @@ use crate::{
     storage::ensure_input_storage_path,
     storage_const,
 };
-use futures::Stream;
 use log::warn;
 use serde::{de::DeserializeOwned, Serialize};
 use shared::{
@@ -374,7 +373,7 @@ pub async fn iter_stalker_items(
     app_config: &Arc<AppConfig>,
     storage_path: &Path,
     kind: StalkerStreamKind,
-) -> Result<Option<Box<dyn Stream<Item = StalkerPlaylistItem> + Send + Unpin>>, TuliproxError> {
+) -> Result<Option<ReceiverStream<StalkerPlaylistItem>>, TuliproxError> {
     let file_path = get_stalker_file_path(storage_path, kind);
     iter_stalker_file(app_config, file_path).await
 }
@@ -382,14 +381,14 @@ pub async fn iter_stalker_items(
 pub async fn iter_stalker_series_roots(
     app_config: &Arc<AppConfig>,
     storage_path: &Path,
-) -> Result<Option<Box<dyn Stream<Item = StalkerPlaylistItem> + Send + Unpin>>, TuliproxError> {
+) -> Result<Option<ReceiverStream<StalkerPlaylistItem>>, TuliproxError> {
     iter_stalker_file(app_config, get_stalker_series_root_file_path(storage_path)).await
 }
 
 async fn iter_stalker_file(
     app_config: &Arc<AppConfig>,
     file_path: PathBuf,
-) -> Result<Option<Box<dyn Stream<Item = StalkerPlaylistItem> + Send + Unpin>>, TuliproxError> {
+) -> Result<Option<ReceiverStream<StalkerPlaylistItem>>, TuliproxError> {
     use tokio::sync::mpsc;
 
     if !stalker_path_exists(&file_path).await {
@@ -423,8 +422,7 @@ async fn iter_stalker_file(
             warn!("Stalker iterator aborted: {err}");
         }
     });
-    let stream: Box<dyn Stream<Item = StalkerPlaylistItem> + Send + Unpin> = Box::new(ReceiverStream::new(rx));
-    Ok(Some(stream))
+    Ok(Some(ReceiverStream::new(rx)))
 }
 
 /// Drop all persisted items for a given input. Used when the user changes the
