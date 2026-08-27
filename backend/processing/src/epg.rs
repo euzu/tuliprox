@@ -3,6 +3,7 @@ use log::{debug, warn};
 use shared::{
     concat_string,
     error::TuliproxError,
+    model::EventSink,
     utils::{sanitize_sensitive_info, short_hash},
 };
 use std::{
@@ -83,9 +84,9 @@ fn epg_source_cache_extension(source_type: EpgSourceType) -> &'static str {
     }
 }
 
-async fn download_epg_file(
+async fn download_epg_file<E: EventSink + Clone + 'static>(
     epg_source: &EpgSource,
-    ctx: &PlaylistProcessingContext,
+    ctx: &PlaylistProcessingContext<E>,
     input: &ConfigInput,
     headers: Option<&reqwest::header::HeaderMap>,
     storage_dir: &str,
@@ -182,8 +183,8 @@ async fn cleanup_unlisted_epg_files(
     Ok(())
 }
 
-pub async fn get_xmltv(
-    ctx: &PlaylistProcessingContext,
+pub async fn get_xmltv<E: EventSink + Clone + 'static>(
+    ctx: &PlaylistProcessingContext<E>,
     input: &ConfigInput,
     headers: Option<&reqwest::header::HeaderMap>,
     storage_dir: &str,

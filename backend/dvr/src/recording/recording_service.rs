@@ -14,7 +14,7 @@ use crate::{
 };
 use shared::model::{
     recording::{RecordingMetadata, RecordingOwner, RecordingProvenance, RecordingSource, RecordingVisibility},
-    UserId, XtreamCluster,
+    EventSink, UserId, XtreamCluster,
 };
 use std::{collections::HashMap, path::Path, sync::Arc};
 use tuliprox_auth::{authorize, authorize_orphan, RecordingAction, RecordingDecision, RecordingSubject, TerminalState};
@@ -256,7 +256,9 @@ impl RecordingService {
     pub fn new(downloads: Arc<DownloadQueue>, app_config: Arc<AppConfig>) -> Self { Self { downloads, app_config } }
 
     /// Convenience constructor from the DVR's context.
-    pub fn from_ctx(ctx: &RecordingCtx) -> Self { Self::new(ctx.downloads.clone(), ctx.app_config.clone()) }
+    pub fn from_ctx<E: EventSink + Clone + 'static>(ctx: &RecordingCtx<E>) -> Self {
+        Self::new(ctx.downloads.clone(), ctx.app_config.clone())
+    }
 
     fn subject_id(claims: &shared::model::Claims) -> Result<UserId, ServiceError> {
         claims.subject_id.clone().ok_or(ServiceError::UnknownOwner)

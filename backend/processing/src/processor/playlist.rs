@@ -21,7 +21,7 @@ use shared::{
     error::{get_errors_notify_message, TuliproxError},
     foundation::{get_field_value, set_field_value, Filter, ValueAccessor, ValueProvider},
     model::{
-        ClusterFlags, CounterModifier, EventMessage, FieldGet, FieldSet, InputStats, InputType, ItemField,
+        ClusterFlags, CounterModifier, EventMessage, EventSink, FieldGet, FieldSet, InputStats, InputType, ItemField,
         MappingStage, PlaylistGroup, PlaylistItem, PlaylistItemType, PlaylistStats, PlaylistUpdateProgressEvent,
         ProcessingOrder, SourceStats, StreamProperties, TargetStats, UUIDType, XtreamCluster,
     },
@@ -57,7 +57,7 @@ use tuliprox_repository::{
     load_input_playlist, persist_input_playlist, persist_playlist, CategoryKey, MemoryPlaylistSource, PlaylistSource,
     PlaylistStorageState,
 };
-use tuliprox_session::{ActiveProviderManager, EventManager};
+use tuliprox_session::ActiveProviderManager;
 
 const PLAYLIST_UPDATE_MAX_DURATION_SECS: u64 = 3600;
 const MAX_CONCURRENT_TARGET_FINALIZERS: usize = 2;
@@ -641,9 +641,9 @@ struct InputJobResult {
     errors: Vec<TuliproxError>,
 }
 
-async fn process_input_job(
+async fn process_input_job<E: EventSink + Clone + 'static>(
     index: usize,
-    ctx: &PlaylistProcessingContext,
+    ctx: &PlaylistProcessingContext<E>,
     input: &Arc<ConfigInput>,
     process_parallel: bool,
 ) -> InputJobResult {
@@ -656,14 +656,14 @@ async fn process_input_job(
     .await
 }
 
-async fn process_input_job_inner(
+async fn process_input_job_inner<E: EventSink + Clone + 'static>(
     index: usize,
-    ctx: &PlaylistProcessingContext,
+    ctx: &PlaylistProcessingContext<E>,
     input: &Arc<ConfigInput>,
 ) -> InputJobResult {
     let start_time = Instant::now();
     let input_type = input.get_download_input_type();
-    let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
+    let broadcast_step = create_broadcast_callback(&ctx.events);
     broadcast_step("Playlist download", &format!("Downloading input '{}'", input.name));
 
     let (mut errors, mut source, storage_error, partial) = download_input(ctx, input, false).await;
@@ -755,8 +755,8 @@ async fn wait_for_target_finalizer_slot(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_targets(
-    ctx: &Arc<PlaylistProcessingContext>,
+async fn process_targets<E: EventSink + Clone + 'static>(
+    ctx: &Arc<PlaylistProcessingContext<E>>,
     playlists: &mut [FetchedPlaylist<'_>],
     targets: &[&Arc<ConfigTarget>],
     input_stats: &mut HashMap<Arc<str>, InputStats>,
@@ -867,9 +867,9 @@ async fn process_targets(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_source(
+async fn process_source<E: EventSink + Clone + 'static>(
     source_idx: usize,
-    ctx: Arc<PlaylistProcessingContext>,
+    ctx: Arc<PlaylistProcessingContext<E>>,
 ) -> (Vec<InputStats>, Vec<TargetStats>, Vec<TuliproxError>) {
     log_memory_snapshot(format!("source[{source_idx}] start").as_str());
     let sources = ctx.config.sources.load();
@@ -878,7 +878,7 @@ async fn process_source(
     let mut target_stats = Vec::<TargetStats>::new();
     if let Some(source) = sources.get_source_at(source_idx) {
         let mut source_playlists = Vec::with_capacity(source.inputs.len());
-        let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
+        let broadcast_step = create_broadcast_callback(&ctx.events);
         let process_parallel = ctx.config.config.load().process_parallel;
         let mut disabled_inputs: Vec<Arc<str>> = vec![];
         let mut enabled_inputs = Vec::with_capacity(source.inputs.len());
@@ -977,8 +977,8 @@ async fn process_source(
     (ordered_input_stats, target_stats, errors)
 }
 
-async fn download_input_epg(
-    ctx: &PlaylistProcessingContext,
+async fn download_input_epg<E: EventSink + Clone + 'static>(
+    ctx: &PlaylistProcessingContext<E>,
     input: &Arc<ConfigInput>,
     error_list: &mut Vec<TuliproxError>,
 ) -> Option<TVGuide> {
@@ -997,7 +997,10 @@ async fn download_input_epg(
 /// (`input_cache::load_input_status` + `input_cache::save_input_status`).
 /// Call this only while holding the per-input lock from
 /// `PlaylistProcessingContext::get_input_lock` (as done in `download_input`).
-async fn invalidate_input_cache_status(ctx: &PlaylistProcessingContext, input: &ConfigInput) {
+async fn invalidate_input_cache_status<E: EventSink + Clone + 'static>(
+    ctx: &PlaylistProcessingContext<E>,
+    input: &ConfigInput,
+) {
     let storage_dir = { ctx.config.config.load().storage_dir.clone() };
     let storage_path = input_cache::resolve_input_storage_path(&storage_dir, &input.name).await;
     let mut status = input_cache::load_input_status(&storage_path);
@@ -1007,8 +1010,8 @@ async fn invalidate_input_cache_status(ctx: &PlaylistProcessingContext, input: &
     }
 }
 
-async fn load_cached_input_playlist(
-    ctx: &PlaylistProcessingContext,
+async fn load_cached_input_playlist<E: EventSink + Clone + 'static>(
+    ctx: &PlaylistProcessingContext<E>,
     input: &Arc<ConfigInput>,
 ) -> (PlaylistSource, Option<TuliproxError>) {
     match load_input_playlist(&ctx.config, input, None).await {
@@ -1018,8 +1021,8 @@ async fn load_cached_input_playlist(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn download_input(
-    ctx: &PlaylistProcessingContext,
+async fn download_input<E: EventSink + Clone + 'static>(
+    ctx: &PlaylistProcessingContext<E>,
     input: &Arc<ConfigInput>,
     allow_staged_input: bool,
 ) -> (Vec<TuliproxError>, PlaylistSource, Option<TuliproxError>, bool) {
@@ -1098,12 +1101,10 @@ async fn download_input(
     }
     if playlist_download_result.partial {
         ctx.partial_refresh.store(true, std::sync::atomic::Ordering::Release);
-        if let Some(events) = ctx.event_manager.as_deref() {
-            events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-                target: input.name.to_string(),
-                message: stalker_checkpoint_message(&input.name),
-            }));
-        }
+        ctx.events.emit(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+            target: input.name.to_string(),
+            message: stalker_checkpoint_message(&input.name),
+        }));
     }
     let apply_staged_overlay = should_apply_staged_overlay(&playlist_download_result);
 
@@ -1155,18 +1156,14 @@ async fn download_input(
     (playlist_download_result.download_err, playlist, error, playlist_download_result.partial)
 }
 
-fn create_broadcast_callback(event_manager: Option<&Arc<EventManager>>) -> StepMeasureCallback {
-    if let Some(event_mgr) = event_manager {
-        let events = event_mgr.clone();
-        Box::new(move |context: &str, msg: &str| {
-            events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-                target: context.to_owned(),
-                message: msg.to_owned(),
-            }));
-        })
-    } else {
-        Box::new(move |_context: &str, _msg: &str| { /* noop */ })
-    }
+fn create_broadcast_callback<E: EventSink + Clone + 'static>(events: &E) -> StepMeasureCallback {
+    let events = events.clone();
+    Box::new(move |context: &str, msg: &str| {
+        events.emit(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+            target: context.to_owned(),
+            message: msg.to_owned(),
+        }));
+    })
 }
 
 fn create_input_stat(
@@ -1188,11 +1185,11 @@ fn create_input_stat(
 }
 
 #[derive(Clone)]
-pub struct PlaylistProcessingContext {
+pub struct PlaylistProcessingContext<E: EventSink> {
     pub client: reqwest::Client,
     pub config: Arc<AppConfig>,
     pub user_targets: Arc<ProcessTargets>,
-    pub event_manager: Option<Arc<EventManager>>,
+    pub events: E,
     pub playlist_state: Option<Arc<PlaylistStorageState>>,
     /// Reverse-proxy header suppression, carried from the composition root.
     ///
@@ -1217,7 +1214,7 @@ pub struct PlaylistProcessingContext {
     pub partial_refresh: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl PlaylistProcessingContext {
+impl<E: EventSink + Clone + 'static> PlaylistProcessingContext<E> {
     pub async fn is_input_downloaded(&self, input_name: &str) -> bool {
         let processed = self.processed_inputs.lock().await;
         processed.contains(input_name)
@@ -1244,7 +1241,9 @@ impl PlaylistProcessingContext {
     }
 }
 
-async fn process_sources(processing_ctx: &PlaylistProcessingContext) -> (Vec<SourceStats>, Vec<TuliproxError>) {
+async fn process_sources<E: EventSink + Clone + 'static>(
+    processing_ctx: &PlaylistProcessingContext<E>,
+) -> (Vec<SourceStats>, Vec<TuliproxError>) {
     let mut async_tasks = JoinSet::new();
     let sources = processing_ctx.config.sources.load();
     let process_parallel = processing_ctx.config.config.load().process_parallel;
@@ -1398,8 +1397,8 @@ struct PreparedTarget {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn prepare_playlist_for_target(
-    ctx: &PlaylistProcessingContext,
+async fn prepare_playlist_for_target<E: EventSink + Clone + 'static>(
+    ctx: &PlaylistProcessingContext<E>,
     playlists: &mut [FetchedPlaylist<'_>],
     target: &ConfigTarget,
     stats: &mut HashMap<Arc<str>, InputStats>,
@@ -1414,7 +1413,7 @@ async fn prepare_playlist_for_target(
     let mut new_playlist: Vec<PlaylistGroup> = vec![];
 
     debug!("Executing processing pipes");
-    let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
+    let broadcast_step = create_broadcast_callback(&ctx.events);
 
     let pipe = get_processing_pipe(target);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
@@ -1501,15 +1500,15 @@ fn spill_epg_to_disk(sources: Vec<Epg>) -> Result<Option<Epg>, TuliproxError> {
     }
 }
 
-async fn finalize_prepared_target(
-    ctx: Arc<PlaylistProcessingContext>,
+async fn finalize_prepared_target<E: EventSink + Clone + 'static>(
+    ctx: Arc<PlaylistProcessingContext<E>>,
     prepared: PreparedTarget,
 ) -> (Result<(), Vec<TuliproxError>>, Vec<TuliproxError>) {
     let target = &prepared.target;
     let mut new_playlist = prepared.playlist;
     let new_epg = prepared.epg;
     let mut errors = Vec::new();
-    let broadcast_step = create_broadcast_callback(ctx.event_manager.as_ref());
+    let broadcast_step = create_broadcast_callback(&ctx.events);
     let mut step = StepMeasure::new(&target.name, broadcast_step);
     if target.favourites.is_some() {
         step.broadcast("Processing favourites for '{}' playlist", &target.name);
@@ -1592,8 +1591,8 @@ async fn finalize_prepared_target(
     }
 }
 
-async fn playlist_resolve(
-    ctx: &PlaylistProcessingContext,
+async fn playlist_resolve<E: EventSink + Clone + 'static>(
+    ctx: &PlaylistProcessingContext<E>,
     target: &ConfigTarget,
     errors: &mut Vec<TuliproxError>,
     pipe: &ProcessingPipe,
@@ -1668,7 +1667,11 @@ fn provider_id_from_item(item: &PlaylistItem) -> Option<ProviderIdType> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn playlist_probe(ctx: &PlaylistProcessingContext, target: &ConfigTarget, fpl: &mut FetchedPlaylist<'_>) {
+async fn playlist_probe<E: EventSink + Clone + 'static>(
+    ctx: &PlaylistProcessingContext<E>,
+    target: &ConfigTarget,
+    fpl: &mut FetchedPlaylist<'_>,
+) {
     let Some(mgr) = ctx.metadata_manager.as_ref() else {
         return;
     };
@@ -1934,11 +1937,11 @@ pub type PlaylistUpdateBootstrap = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = (
 // generalising a private signature would buy nothing.
 #[allow(clippy::implicit_hasher)]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub async fn exec_processing(
+pub async fn exec_processing<E: EventSink + Clone + 'static>(
     client: &reqwest::Client,
     app_config: Arc<AppConfig>,
     targets: Arc<ProcessTargets>,
-    event_manager: Option<Arc<EventManager>>,
+    events: E,
     bootstrap: Option<PlaylistUpdateBootstrap>,
     playlist_state: Option<Arc<PlaylistStorageState>>,
     update_guard: Option<UpdateGuard>,
@@ -1956,9 +1959,7 @@ pub async fn exec_processing(
             Some(permit)
         } else {
             warn!("Playlist update lock is closed; update skipped.");
-            if let Some(events) = event_manager.as_deref() {
-                events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
-            }
+            events.emit(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
             return;
         }
     } else {
@@ -1971,9 +1972,7 @@ pub async fn exec_processing(
                 error!(
                     "Playlist update bootstrap timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
                 );
-                if let Some(events) = event_manager.as_deref() {
-                    events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
-                }
+                events.emit(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
                 return;
             }
         }
@@ -1995,7 +1994,7 @@ pub async fn exec_processing(
         client: client.clone(),
         config: app_config.clone(),
         user_targets: targets.clone(),
-        event_manager: event_manager.clone(),
+        events: events.clone(),
         playlist_state: playlist_state.clone(),
         processed_inputs: Arc::new(Mutex::new(HashSet::new())),
         input_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -2021,18 +2020,14 @@ pub async fn exec_processing(
         Ok(Ok((stats, errors))) => (stats, errors),
         Ok(Err(_)) => {
             error!("Playlist processing panicked");
-            if let Some(events) = event_manager.as_deref() {
-                events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
-            }
+            events.emit(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
             return;
         }
         Err(_) => {
             error!(
                 "Playlist processing timed out after {PLAYLIST_UPDATE_MAX_DURATION_SECS} secs while holding playlist lock",
             );
-            if let Some(events) = event_manager.as_deref() {
-                events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
-            }
+            events.emit(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
             return;
         }
     };
@@ -2058,28 +2053,24 @@ pub async fn exec_processing(
 
     // send errors
     if let Some(message) = get_errors_notify_message!(errors, 255) {
-        if let Some(events) = event_manager.as_deref() {
-            events.send_event(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
-        }
+        events.emit(EventMessage::PlaylistUpdate(shared::model::PlaylistUpdateState::Failure));
         send_message(&app_config, client, MessageContent::event_error(message)).await;
-    } else if let Some(events) = event_manager.as_deref() {
+    } else {
         let update_state = if ctx.partial_refresh.load(std::sync::atomic::Ordering::Acquire) {
             shared::model::PlaylistUpdateState::Partial
         } else {
             shared::model::PlaylistUpdateState::Success
         };
-        events.send_event(EventMessage::PlaylistUpdate(update_state));
+        events.emit(EventMessage::PlaylistUpdate(update_state));
     }
 
     let elapsed = start_time.elapsed().as_secs();
     let update_finished_message = format!("🌷 Update process finished! Took {elapsed} secs.");
 
-    if let Some(events) = event_manager.as_deref() {
-        events.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
-            target: "Playlist Update".to_string(),
-            message: update_finished_message.clone(),
-        }));
-    }
+    events.emit(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+        target: "Playlist Update".to_string(),
+        message: update_finished_message.clone(),
+    }));
     log_memory_snapshot("exec_processing before_interner_gc");
     debug!("StringInterner GC removed {} strings", interner_gc());
     log_memory_snapshot("exec_processing after_interner_gc");
@@ -2851,7 +2842,7 @@ mod tests {
             target
         }
 
-        fn processing_context() -> PlaylistProcessingContext {
+        fn processing_context<E: EventSink + Clone + 'static>() -> PlaylistProcessingContext<E> {
             let paths = ConfigPaths {
                 home_path: String::new(),
                 config_path: String::new(),
@@ -2886,7 +2877,7 @@ mod tests {
                     targets: Vec::new(),
                     target_names: Vec::new(),
                 }),
-                event_manager: None,
+                events: shared::model::NoopSink,
                 playlist_state: None,
                 disabled_headers: None,
                 processed_inputs: Arc::new(Mutex::new(HashSet::new())),

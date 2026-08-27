@@ -32,7 +32,7 @@
 
 use super::recording_ctx::RecordingCtx;
 use log::info;
-use shared::model::{Claims, Permission, PermissionSet, CURRENT_PERMISSION_SCHEMA_VERSION, ROLE_ADMIN};
+use shared::model::{Claims, EventSink, Permission, PermissionSet, CURRENT_PERMISSION_SCHEMA_VERSION, ROLE_ADMIN};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -126,7 +126,10 @@ impl Drop for PassGuard {
 
 /// Start every DVR supervisor. Called once the HTTP listener is bound so
 /// the reconciliation pass cannot delay the bind.
-pub async fn start_recording_supervisors(ctx: &RecordingCtx, cancel_token: &CancellationToken) {
+pub async fn start_recording_supervisors<E: EventSink + Clone + 'static>(
+    ctx: &RecordingCtx<E>,
+    cancel_token: &CancellationToken,
+) {
     if !recording_enabled(&ctx.app_config) {
         info!("Recording is disabled; DVR supervisors not started");
         return;

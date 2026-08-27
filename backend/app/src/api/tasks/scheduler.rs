@@ -187,7 +187,7 @@ async fn run_playlist_update_inner(
         client,
         Arc::clone(&app_state.app_config),
         targets,
-        Some(Arc::clone(&app_state.event_manager)),
+        Arc::clone(&app_state.event_manager) as Arc<dyn shared::model::EventSink>,
         Some({
             let state = Arc::clone(app_state);
             std::sync::Arc::new(move || {

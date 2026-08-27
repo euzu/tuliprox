@@ -1,4 +1,4 @@
-use crate::ctx::MetadataUpdateCtx;
+use crate::ctx::{BoundMetadataUpdateCtx, MetadataUpdateCtx};
 use arc_swap::ArcSwap;
 use dashmap::{mapref::entry::Entry, DashMap};
 use log::{debug, error, info, warn};
@@ -7,8 +7,8 @@ use shared::{
     defaults::default_probe_user_priority,
     error::TuliproxError,
     model::{
-        EventMessage, InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties, StreamProperties,
-        UUIDType, VideoStreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
+        EventMessage, EventSink, InputType, LiveStreamProperties, PlaylistItemType, SeriesStreamProperties,
+        StreamProperties, UUIDType, VideoStreamProperties, VirtualId, XtreamCluster, XtreamPlaylistItem,
     },
     utils::generate_provider_playlist_uuid,
 };
@@ -109,7 +109,7 @@ impl Default for MetadataUpdateRuntimeSettings {
 }
 
 impl MetadataUpdateRuntimeSettings {
-    fn from_ctx(ctx: Option<&MetadataUpdateCtx>) -> Self {
+    fn from_ctx<E: EventSink + Clone + 'static>(ctx: Option<&MetadataUpdateCtx<E>>) -> Self {
         let metadata_update = ctx.map_or_else(MetadataUpdateConfig::default, |ctx| {
             ctx.app_config
                 .config
@@ -446,7 +446,7 @@ pub struct MetadataUpdateManager {
     /// Terminal shutdown flag; once set, token rotation must not reactivate workers.
     is_shutdown_flag: AtomicBool,
     /// Global application state (weak reference to avoid cycles)
-    ctx: tokio::sync::Mutex<Option<MetadataUpdateCtx>>,
+    ctx: tokio::sync::Mutex<Option<BoundMetadataUpdateCtx>>,
     /// Global gate:
     /// - Foreground playlist updates hold WRITE lock.
     /// - Background metadata/probe tasks hold READ lock per task.
@@ -539,7 +539,7 @@ impl MetadataUpdateManager {
 
     /// Bind the handles the worker reads. Called once, after the server's root
     /// state is built - the worker itself is constructed before it.
-    pub async fn set_ctx(&self, ctx: MetadataUpdateCtx) {
+    pub async fn set_ctx(&self, ctx: BoundMetadataUpdateCtx) {
         let mut guard = self.ctx.lock().await;
         *guard = Some(ctx);
     }
@@ -1052,7 +1052,7 @@ struct InputWorker {
     receiver: mpsc::Receiver<TaskKey>,
     pending_tasks: Arc<DashMap<TaskKey, PendingTask>>,
     pending_task_count: Arc<AtomicUsize>,
-    bound_ctx: Option<MetadataUpdateCtx>,
+    bound_ctx: Option<BoundMetadataUpdateCtx>,
     update_pause_gate: Arc<RwLock<()>>,
     cancel_token: CancellationToken,
     batch_buffer: BatchResultCollector,
@@ -1133,8 +1133,8 @@ macro_rules! collect_virtual_updates {
 /// used in error and log messages.
 macro_rules! apply_cascade_updates {
     ($fn_name:ident, $props_ty:ty, $cluster:expr, $variant:ident, $log_label:literal) => {
-        async fn $fn_name(
-            ctx: &MetadataUpdateCtx,
+        async fn $fn_name<E: EventSink + Clone + 'static>(
+            ctx: &MetadataUpdateCtx<E>,
             target: &tuliprox_core::model::ConfigTarget,
             storage_path: &std::path::Path,
             virtual_updates: HashMap<VirtualId, &$props_ty>,
@@ -1272,7 +1272,7 @@ impl InputWorker {
                     .checked_sub(runtime_settings.queue_log_interval + Duration::from_secs(1))
                     .unwrap_or_else(Instant::now);
                 if let Some(ctx) = bound_ctx.clone() {
-                    ctx.event_manager.send_event(EventMessage::InputMetadataUpdatesStarted(input_name.clone()));
+                    ctx.events.emit(EventMessage::InputMetadataUpdatesStarted(input_name.clone()));
                 }
                 if self.last_cycle_completed_at_ts.is_some_and(|last| {
                     now_ts.saturating_sub(last) >= runtime_settings.resolve_exhaustion_reset_gap_secs
@@ -1898,7 +1898,7 @@ impl InputWorker {
                 if cycle_had_changes {
                     info!("All pending metadata resolves completed for input {input_name} (with changes)");
                     if let Some(ctx) = bound_ctx.clone() {
-                        ctx.event_manager.send_event(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
+                        ctx.events.emit(EventMessage::InputMetadataUpdatesCompleted(input_name.clone()));
                     }
                 } else {
                     debug!("All pending metadata resolves completed for input {input_name} (no changes, skipping playlist update trigger)");
@@ -1919,10 +1919,10 @@ impl InputWorker {
         debug!("Metadata worker stopped for input {input_name}");
     }
 
-    async fn ensure_metadata_retry_state_loaded(
+    async fn ensure_metadata_retry_state_loaded<E: EventSink + Clone + 'static>(
         &mut self,
         input_name: &str,
-        bound_ctx: Option<&MetadataUpdateCtx>,
+        bound_ctx: Option<&MetadataUpdateCtx<E>>,
         runtime_settings: &MetadataUpdateRuntimeSettings,
     ) {
         if self.metadata_retry_loaded {
@@ -2559,9 +2559,9 @@ impl InputWorker {
     }
 
     // Changed to static method
-    async fn flush_batch_static(
+    async fn flush_batch_static<E: EventSink + Clone + 'static>(
         input_name: &str,
-        bound_ctx: Option<&MetadataUpdateCtx>,
+        bound_ctx: Option<&MetadataUpdateCtx<E>>,
         batch_buffer: &mut BatchResultCollector,
     ) {
         if batch_buffer.is_empty() {
@@ -2656,8 +2656,8 @@ impl InputWorker {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn cascade_updates(
-        ctx: &MetadataUpdateCtx,
+    async fn cascade_updates<E: EventSink + Clone + 'static>(
+        ctx: &MetadataUpdateCtx<E>,
         config: &tuliprox_core::model::Config,
         input_name: &str,
         batch: &BatchResultCollector,
@@ -2779,8 +2779,8 @@ impl InputWorker {
     );
     apply_cascade_updates!(apply_live_cascade_updates, LiveStreamProperties, XtreamCluster::Live, Live, "Live");
 
-    async fn update_memory_cache(
-        ctx: &MetadataUpdateCtx,
+    async fn update_memory_cache<E: EventSink + Clone + 'static>(
+        ctx: &MetadataUpdateCtx<E>,
         target_name: &str,
         cluster: XtreamCluster,
         updates: Vec<XtreamPlaylistItem>,
@@ -2799,9 +2799,9 @@ impl InputWorker {
             }
         }
     }
-    async fn get_or_open_query(
+    async fn get_or_open_query<E: EventSink + Clone + 'static>(
         input_name: &str,
-        ctx: &MetadataUpdateCtx,
+        ctx: &MetadataUpdateCtx<E>,
         cluster: XtreamCluster,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
@@ -2848,9 +2848,9 @@ impl InputWorker {
     }
 
     // Helper for get_item_name with caching
-    async fn get_item_name_static(
+    async fn get_item_name_static<E: EventSink + Clone + 'static>(
         input_name: &str,
-        ctx: &MetadataUpdateCtx,
+        ctx: &MetadataUpdateCtx<E>,
         task: &UpdateTask,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
         failed_clusters: &mut HashSet<XtreamCluster>,
@@ -2888,9 +2888,9 @@ impl InputWorker {
     }
 
     #[allow(clippy::too_many_lines)]
-    async fn process_task_static(
+    async fn process_task_static<E: EventSink + Clone + 'static>(
         input_name: &Arc<str>,
-        bound_ctx: Option<&MetadataUpdateCtx>,
+        bound_ctx: Option<&MetadataUpdateCtx<E>>,
         task: &UpdateTask,
         collector: &mut BatchResultCollector,
         db_handles: &mut HashMap<XtreamCluster, DbHandle>,
@@ -3121,8 +3121,8 @@ impl InputWorker {
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-    async fn execute_task_inner_static(
-        ctx: &MetadataUpdateCtx,
+    async fn execute_task_inner_static<E: EventSink + Clone + 'static>(
+        ctx: &MetadataUpdateCtx<E>,
         client: &reqwest::Client,
         input: &Arc<tuliprox_core::model::ConfigInput>,
         task: &UpdateTask,

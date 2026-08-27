@@ -294,6 +294,10 @@ fn build_meter_entry(reading: MeterReading, uids: Vec<u32>) -> Option<StreamMete
     Some(StreamMeterEntry { meter_uid: reading.meter_uid, uids, rate_kbps, total_kb })
 }
 
+impl shared::model::EventSink for EventManager {
+    fn emit(&self, event: EventMessage) { self.send_event(event); }
+}
+
 impl Default for EventManager {
     fn default() -> Self { Self::new() }
 }
