@@ -5,6 +5,8 @@
 //! supervisor and the API all notify through here, and none of them are named
 //! by this crate.
 
+pub mod channel;
+
 use chrono::Utc;
 use handlebars::{Context, Handlebars, Helper, HelperResult, Output, RenderContext};
 use log::{debug, error};
