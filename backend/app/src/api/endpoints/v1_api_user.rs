@@ -109,14 +109,18 @@ async fn save_config_api_proxy_user(
         }
     }
 
-    // ---------- if update but no user found -> Error ----------
-    if is_update && existing_user_index.is_none() {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            axum::Json(json!({"error": format!("User {} not found", credential.username)})),
-        )
-            .into_response();
-    }
+    let existing_user_position = if is_update {
+        let (Some(user_idx), Some(user_target_idx)) = (existing_user_index, existing_user_target_index) else {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(json!({"error": format!("User {} not found", credential.username)})),
+            )
+                .into_response();
+        };
+        Some((user_idx, user_target_idx))
+    } else {
+        None
+    };
 
     // ---------- create target if new target does not exist ----------
     let target_idx = if let Some(idx) = existing_target_index {
@@ -126,11 +130,8 @@ async fn save_config_api_proxy_user(
         api_proxy.user.len() - 1
     };
 
-    if is_update {
+    if let Some((user_idx, user_target_idx)) = existing_user_position {
         let mut remove_empty_target = false;
-        // existing_user_index and existing_user_target_index exists at this point
-        let user_idx = existing_user_index.unwrap();
-        let user_target_idx = existing_user_target_index.unwrap();
 
         if user_target_idx == target_idx {
             // Update

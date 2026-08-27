@@ -1,3 +1,4 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::dbg_macro))]
 // Clippy policy lives in [workspace.lints.clippy] in the root Cargo.toml and is
 // opted into by backend/app/Cargo.toml's [lints] workspace = true.
 

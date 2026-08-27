@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::dbg_macro))]
+
 //! Provider allocation and the streaming-session runtime.
 //!
 //! This is the layer that decides *who gets a stream and from which provider*:

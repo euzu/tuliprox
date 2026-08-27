@@ -61,13 +61,7 @@ impl DiskAlertMonitor {
         self.last_level = new_level;
         if should_notify {
             self.last_notified_at = Some(now);
-            Some(DiskAlert {
-                level: new_level.expect("new_level is Some when should_notify is true"),
-                total_bytes,
-                free_bytes,
-                used_bytes,
-                percent,
-            })
+            new_level.map(|level| DiskAlert { level, total_bytes, free_bytes, used_bytes, percent })
         } else {
             None
         }
@@ -94,7 +88,7 @@ impl DiskProbe {
     /// `None` indicates the platform has no disk probe (e.g. fallback path).
     fn for_cwd() -> Option<Self> {
         let cwd = std::env::current_dir().ok()?;
-        Some(Self { path: DiskPath::from_path(&cwd) })
+        Some(Self { path: DiskPath::from_path(&cwd)? })
     }
 
     /// Return `(total_bytes, free_bytes_available_to_caller)`.
@@ -147,21 +141,19 @@ fn statvfs_counter_to_u64<T: Into<u64>>(value: T) -> u64 { value.into() }
 
 #[cfg(unix)]
 impl DiskPath {
-    fn from_path(path: &std::path::Path) -> Self {
+    fn from_path(path: &std::path::Path) -> Option<Self> {
         use std::os::unix::ffi::OsStrExt;
-        // CString::new only fails if the path contains interior NULs, which
-        // `std::env::current_dir` cannot produce on a supported platform.
-        Self(std::ffi::CString::new(path.as_os_str().as_bytes()).expect("CWD contains NUL byte"))
+        std::ffi::CString::new(path.as_os_str().as_bytes()).ok().map(Self)
     }
 }
 
 #[cfg(windows)]
 impl DiskPath {
-    fn from_path(path: &std::path::Path) -> Self {
+    fn from_path(path: &std::path::Path) -> Option<Self> {
         use std::os::windows::ffi::OsStrExt;
         let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
         wide.push(0);
-        Self(wide)
+        Some(Self(wide))
     }
 }
 
@@ -807,6 +799,14 @@ mod disk_probe_tests {
     use std::path::Path;
 
     #[test]
+    fn disk_path_rejects_interior_nul() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let path = Path::new(OsStr::from_bytes(b"invalid\0path"));
+        assert!(super::DiskPath::from_path(path).is_none());
+    }
+
+    #[test]
     fn disk_probe_for_cwd_returns_nonzero_on_linux() {
         let probe = DiskProbe::for_cwd().expect("CWD should be available on Linux");
         let (total, free) = probe.sample();
@@ -820,7 +820,10 @@ mod disk_probe_tests {
     fn disk_probe_with_relative_path_resolves_via_kernel() {
         // Relative paths are resolved against the process CWD by the kernel;
         // the sample call must not allocate or panic.
-        let probe = DiskProbe { path: super::DiskPath::from_path(Path::new(".")) };
+        let Some(path) = super::DiskPath::from_path(Path::new(".")) else {
+            unreachable!("a relative path without NUL bytes must be accepted");
+        };
+        let probe = DiskProbe { path };
         let _ = probe.sample();
     }
 }

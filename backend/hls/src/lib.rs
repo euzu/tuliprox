@@ -1,3 +1,8 @@
+#![cfg_attr(
+    not(any(test, feature = "test-support")),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::dbg_macro)
+)]
+
 //! The HLS proxy.
 //!
 //! The proxy reads the running server through [`hls_ctx::HlsCtx`] - the
