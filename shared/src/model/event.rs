@@ -180,6 +180,20 @@ impl EventKind {
         )
     }
 
+    /// Is this kind a payload-free nudge that can be coalesced?
+    ///
+    /// True only where N occurrences and one are indistinguishable to every
+    /// consumer: the event carries no data and everyone who receives it
+    /// responds by re-reading current state. Deleting a recording emits
+    /// `RecordingChanged` and `RecordingRulesChanged` back to back, and a
+    /// bulk operation emits one per item; each makes the Web UI re-fetch the
+    /// same snapshot.
+    ///
+    /// Never true for an event carrying a payload, however repetitive - a
+    /// dropped progress tick loses the message it carried.
+    #[must_use]
+    pub const fn is_coalescable(self) -> bool { matches!(self, Self::RecordingChanged | Self::RecordingRulesChanged) }
+
     /// Stable wire name.
     ///
     /// Plugins are compiled against these strings and operators write them

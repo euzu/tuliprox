@@ -13,14 +13,50 @@ use crate::{
 };
 use log::trace;
 use shared::model::{EventKind, EventKindMask, EventMessage, EventSink, StreamMeterEntry, SystemInfo};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
+use tokio::time::Instant;
 
 /// Buffer depth used when no configuration is available - tests, and the
 /// composition root before the config is resolved.
 pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// How long a coalescable nudge suppresses an identical one.
+///
+/// Short enough that a user action always produces a visible refresh, long
+/// enough to absorb the back-to-back pairs the recording routes emit.
+pub const COALESCE_WINDOW: Duration = Duration::from_millis(250);
+
+/// What became of one `emit`.
+///
+/// `send_event` used to return a `bool`, which conflated "nothing was
+/// listening" with "this was deliberately suppressed" and told a caller
+/// nothing either way - so ~80 call sites discarded it. Modelled on the
+/// messaging crate's `Delivery`, which drew the same distinction for
+/// notification channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitOutcome {
+    /// Buffered for every current subscriber.
+    Delivered { receivers: usize },
+    /// Published with nothing subscribed. Normal - the Web UI is usually
+    /// closed - and not an error.
+    NoSubscribers,
+    /// An identical coalescable nudge is already in flight; see
+    /// [`EventKind::is_coalescable`].
+    Coalesced,
+}
+
+impl EmitOutcome {
+    /// Did this reach at least one subscriber?
+    #[must_use]
+    pub const fn is_delivered(self) -> bool { matches!(self, Self::Delivered { .. }) }
+}
 
 /// What the bus has carried, and what it has dropped.
 ///
@@ -34,6 +70,7 @@ pub struct EventBusStats {
     emitted: [AtomicU64; EventKind::ALL.len()],
     no_subscribers: AtomicU64,
     lagged: AtomicU64,
+    coalesced: AtomicU64,
 }
 
 impl EventBusStats {
@@ -43,6 +80,12 @@ impl EventBusStats {
             self.no_subscribers.fetch_add(1, Ordering::Relaxed);
         }
     }
+
+    fn record_coalesced(&self, _kind: EventKind) { self.coalesced.fetch_add(1, Ordering::Relaxed); }
+
+    /// Nudges suppressed because an identical one had just gone out.
+    #[must_use]
+    pub fn coalesced(&self) -> u64 { self.coalesced.load(Ordering::Relaxed) }
 
     /// A subscriber reporting the gap it was told about.
     ///
@@ -77,6 +120,10 @@ pub struct EventManager {
     channel_tx: tokio::sync::broadcast::Sender<EventMessage>,
     meters: StreamMeterRegistry,
     stats: Arc<EventBusStats>,
+    /// Last time each coalescable kind was published. A blocking mutex
+    /// rather than an async one: `emit` is synchronous by contract, and the
+    /// critical section is a map lookup with no await inside it.
+    last_nudge: Mutex<HashMap<EventKind, Instant>>,
 }
 
 impl EventManager {
@@ -93,7 +140,12 @@ impl EventManager {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         let (channel_tx, _channel_rx) = tokio::sync::broadcast::channel(capacity.max(1));
-        Self { channel_tx, meters: StreamMeterRegistry::new(), stats: Arc::new(EventBusStats::default()) }
+        Self {
+            channel_tx,
+            meters: StreamMeterRegistry::new(),
+            stats: Arc::new(EventBusStats::default()),
+            last_nudge: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Counters for what this bus has carried.
@@ -118,27 +170,57 @@ impl EventManager {
         FilteredEventReceiver { inner: self.channel_tx.subscribe(), mask }
     }
 
-    pub fn send_event(&self, event: EventMessage) -> bool {
+    /// Publish.
+    ///
+    /// Never blocks and never fails from the emitter's point of view: every
+    /// outcome, including "suppressed" and "nobody listening", is a normal
+    /// result the caller may ignore.
+    pub fn send_event(&self, event: EventMessage) -> EmitOutcome {
         let kind = event.kind();
-        let delivered = match self.channel_tx.send(event) {
-            Ok(_) => true,
+
+        if kind.is_coalescable() && !self.admit_nudge(kind) {
+            self.stats.record_coalesced(kind);
+            return EmitOutcome::Coalesced;
+        }
+
+        let outcome = match self.channel_tx.send(event) {
+            Ok(receivers) => EmitOutcome::Delivered { receivers },
             Err(err) => {
                 trace!("Failed to send event: {err}");
-                false
+                EmitOutcome::NoSubscribers
             }
         };
-        self.stats.record_emit(kind, delivered);
-        delivered
+        self.stats.record_emit(kind, outcome.is_delivered());
+        outcome
+    }
+
+    /// Should this nudge go out, or has an identical one just gone?
+    ///
+    /// Records the send time on admission, so a steady stream of nudges is
+    /// throttled to one per window rather than one per burst.
+    fn admit_nudge(&self, kind: EventKind) -> bool {
+        let now = Instant::now();
+        // A poisoned lock means a panic inside that map lookup, which cannot
+        // happen; taking the inner value keeps a panic elsewhere from
+        // silently stopping every recording nudge.
+        let mut last = self.last_nudge.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match last.get(&kind) {
+            Some(previous) if now.duration_since(*previous) < COALESCE_WINDOW => false,
+            _ => {
+                last.insert(kind, now);
+                true
+            }
+        }
     }
 
     pub fn send_provider_event(&self, provider: &Arc<str>, connection_count: usize) {
-        if !self.send_event(EventMessage::ActiveProvider(Arc::clone(provider), connection_count)) {
+        if !self.send_event(EventMessage::ActiveProvider(Arc::clone(provider), connection_count)).is_delivered() {
             trace!("Failed to send connection change: {provider}: {connection_count}");
         }
     }
 
     pub fn send_system_info(&self, system_info: Arc<SystemInfo>) {
-        if !self.send_event(EventMessage::SystemInfoUpdate(system_info)) {
+        if !self.send_event(EventMessage::SystemInfoUpdate(system_info)).is_delivered() {
             trace!("Failed to send system info");
         }
     }
@@ -402,5 +484,74 @@ mod bus_stats_tests {
         let manager = EventManager::with_capacity(0);
         manager.send_event(EventMessage::RecordingChanged);
         assert_eq!(manager.stats().total_emitted(), 1);
+    }
+}
+
+#[cfg(test)]
+mod coalescing_tests {
+    use super::{EmitOutcome, EventManager, COALESCE_WINDOW};
+    use shared::model::{EventKind, EventMessage, PlaylistUpdateProgressEvent};
+
+    #[tokio::test(start_paused = true)]
+    async fn a_back_to_back_recording_nudge_is_suppressed() {
+        // Deleting a recording emits `RecordingChanged` and then
+        // `RecordingRulesChanged`; a bulk delete emits one pair per item.
+        // Every one of them makes the Web UI re-fetch the same snapshot.
+        let manager = EventManager::new();
+        let _rx = manager.get_event_channel();
+
+        assert!(manager.send_event(EventMessage::RecordingChanged).is_delivered());
+        assert_eq!(manager.send_event(EventMessage::RecordingChanged), EmitOutcome::Coalesced);
+        assert_eq!(manager.send_event(EventMessage::RecordingChanged), EmitOutcome::Coalesced);
+
+        assert_eq!(manager.stats().coalesced(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_two_recording_nudges_do_not_suppress_each_other() {
+        let manager = EventManager::new();
+        let _rx = manager.get_event_channel();
+
+        assert!(manager.send_event(EventMessage::RecordingChanged).is_delivered());
+        assert!(
+            manager.send_event(EventMessage::RecordingRulesChanged).is_delivered(),
+            "different kinds are different news"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_nudge_after_the_window_gets_through() {
+        let manager = EventManager::new();
+        let _rx = manager.get_event_channel();
+
+        assert!(manager.send_event(EventMessage::RecordingChanged).is_delivered());
+        tokio::time::advance(COALESCE_WINDOW + std::time::Duration::from_millis(1)).await;
+        assert!(
+            manager.send_event(EventMessage::RecordingChanged).is_delivered(),
+            "a later user action must always produce a visible refresh"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn events_carrying_a_payload_are_never_coalesced() {
+        let manager = EventManager::new();
+        let _rx = manager.get_event_channel();
+
+        for _ in 0..5 {
+            let outcome = manager.send_event(EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+                target: "t".to_string(),
+                message: "m".to_string(),
+            }));
+            assert!(outcome.is_delivered(), "dropping a progress tick would lose the message it carried");
+        }
+        assert_eq!(manager.stats().coalesced(), 0);
+    }
+
+    #[test]
+    fn only_payload_free_nudges_are_coalescable() {
+        for kind in EventKind::ALL {
+            let expected = matches!(kind, EventKind::RecordingChanged | EventKind::RecordingRulesChanged);
+            assert_eq!(kind.is_coalescable(), expected, "{kind:?}");
+        }
     }
 }
