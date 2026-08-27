@@ -20,7 +20,7 @@
 
 use crate::api::model::AppState;
 use log::{debug, warn};
-use shared::model::{notification::registry, EventKind, EventKindMask, EventMessage, PlaylistUpdateState};
+use shared::model::{EventKind, EventKindMask, EventMessage};
 use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
@@ -86,19 +86,17 @@ const NOTIFIABLE_KINDS: EventKindMask = EventKindMask::new()
 /// are what get through.
 #[must_use]
 pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
+    // Which notification an event *is* belongs to the event; this function
+    // only decides how to word it and what to attach. `None` here means the
+    // event declared itself non-notifiable, so there is no second table to
+    // keep in step.
+    let id = message.notification_id()?;
     match message {
-        EventMessage::ServerError(error) => Some(
-            NotificationEvent::new(registry::SYSTEM_ERROR, first_line(error), error.clone())
-                .with_severity(message.severity()),
-        ),
+        EventMessage::ServerError(error) => {
+            Some(NotificationEvent::new(id, first_line(error), error.clone()).with_severity(message.severity()))
+        }
 
         EventMessage::PlaylistUpdate(state) => {
-            // Only the id is a bridge decision; how bad the outcome is is a
-            // property of the event, and `EventMessage::severity` owns it.
-            let id = match state {
-                PlaylistUpdateState::Success | PlaylistUpdateState::Partial => registry::PLAYLIST_UPDATE_COMPLETED,
-                PlaylistUpdateState::Failure => registry::PLAYLIST_UPDATE_FAILED,
-            };
             let title = format!("Playlist update finished: {state:?}");
             Some(NotificationEvent::new(id, title.clone(), title).with_severity(message.severity()).with_fields(state))
         }
@@ -106,7 +104,7 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
         EventMessage::ConfigChange(config_type) => {
             let title = format!("Configuration reloaded: {config_type}");
             Some(
-                NotificationEvent::new(registry::CONFIG_CHANGED, title.clone(), title)
+                NotificationEvent::new(id, title.clone(), title)
                     // One reload of the same file is one piece of news, however
                     // many times the watcher fires for it.
                     .with_dedup_key(format!("config:{config_type}"))
@@ -118,39 +116,38 @@ pub fn to_notification(message: &EventMessage) -> Option<NotificationEvent> {
             // Progress ticks are not news; the finished scan is.
             let summary = &event.summary;
             let title = "Library scan finished".to_string();
-            Some(NotificationEvent::new(registry::LIBRARY_SCAN_COMPLETED, title.clone(), title).with_fields(summary))
+            Some(NotificationEvent::new(id, title.clone(), title).with_fields(summary))
         }
 
         EventMessage::InputMetadataUpdatesStarted(input) => {
             let title = format!("Metadata update started for {input}");
-            Some(NotificationEvent::new(registry::METADATA_UPDATE_STARTED, title.clone(), title))
+            Some(NotificationEvent::new(id, title.clone(), title))
         }
         EventMessage::InputMetadataUpdatesCompleted(input) => {
             let title = format!("Metadata update finished for {input}");
-            Some(NotificationEvent::new(registry::METADATA_UPDATE_COMPLETED, title.clone(), title))
+            Some(NotificationEvent::new(id, title.clone(), title))
         }
 
         EventMessage::ActiveUser(change) => {
             let title = "User connection changed".to_string();
-            Some(NotificationEvent::new(registry::USER_CONNECTION_CHANGED, title.clone(), title).with_fields(change))
+            Some(NotificationEvent::new(id, title.clone(), title).with_fields(change))
         }
         EventMessage::ActiveProvider(name, count) => {
             let title = format!("Provider {name} now has {count} active connection(s)");
-            Some(NotificationEvent::new(registry::PROVIDER_CONNECTIONS_CHANGED, title.clone(), title))
+            Some(NotificationEvent::new(id, title.clone(), title))
         }
 
         EventMessage::RecordingChanged => {
             let title = "Recording queue changed".to_string();
-            Some(NotificationEvent::new(registry::RECORDING_QUEUE_CHANGED, title.clone(), title))
+            Some(NotificationEvent::new(id, title.clone(), title))
         }
         EventMessage::RecordingRulesChanged => {
             let title = "Recording rules changed".to_string();
-            Some(NotificationEvent::new(registry::RECORDING_RULES_CHANGED, title.clone(), title))
+            Some(NotificationEvent::new(id, title.clone(), title))
         }
 
-        // Deliberately not notifiable: these fire many times per operation
-        // (see `EventKind::is_high_frequency`) and their terminal
-        // counterparts are already covered above.
+        // Unreachable: `notification_id` already returned `None` for these,
+        // which is the single place that decision is made.
         EventMessage::PlaylistUpdateProgress(_)
         | EventMessage::SystemInfoUpdate(_)
         | EventMessage::DownloadsUpdate(_)
@@ -169,11 +166,11 @@ fn first_line(s: &str) -> String { s.lines().next().unwrap_or(s).trim().to_strin
 
 #[cfg(test)]
 mod tests {
-    use super::{to_notification, EventMessage, PlaylistUpdateState, NOTIFIABLE_KINDS};
+    use super::{to_notification, EventMessage, NOTIFIABLE_KINDS};
     use shared::model::{
         notification::{registry, Severity},
         ActiveUserConnectionChange, ConfigType, DownloadsResponse, EventKind, LibraryScanProgressEvent,
-        LibraryScanSummary, LibraryScanSummaryStatus, PlaylistUpdateProgressEvent, SystemInfo,
+        LibraryScanSummary, LibraryScanSummaryStatus, PlaylistUpdateProgressEvent, PlaylistUpdateState, SystemInfo,
     };
     use std::sync::Arc;
 

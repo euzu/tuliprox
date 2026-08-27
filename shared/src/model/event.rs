@@ -10,8 +10,9 @@
 //! stream-meter registry it feeds also lives.
 
 use crate::model::{
-    notification::Severity, ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse,
-    LibraryScanProgressEvent, Permission, PlaylistUpdateProgressEvent, PlaylistUpdateState, SystemInfo,
+    notification::{EventId, Severity},
+    ActiveUserConnectionChange, ConfigType, DownloadsDelta, DownloadsResponse, LibraryScanProgressEvent, Permission,
+    PlaylistUpdateProgressEvent, PlaylistUpdateState, SystemInfo,
 };
 use std::sync::Arc;
 
@@ -244,6 +245,43 @@ impl EventMessage {
             Self::PlaylistUpdate(PlaylistUpdateState::Partial) => Severity::Warn,
             _ => Severity::Info,
         }
+    }
+
+    /// The notification this event becomes, if it is notifiable at all.
+    ///
+    /// On `EventMessage` rather than `EventKind` because two of them depend
+    /// on the payload: a playlist update that failed is a different
+    /// notification from one that succeeded, not merely a more severe one.
+    ///
+    /// The bridge used to hold this table itself, so the event taxonomy and
+    /// the notification taxonomy drifted independently. Now the event says
+    /// what it is and the bridge only decides how to word it.
+    ///
+    /// `None` is the honest answer for the high-frequency kinds: they fire
+    /// many times per operation and their terminal counterparts carry the
+    /// news.
+    #[must_use]
+    pub const fn notification_id(&self) -> Option<EventId> {
+        use crate::model::notification::registry;
+        Some(match self {
+            Self::ServerError(_) => registry::SYSTEM_ERROR,
+            Self::PlaylistUpdate(PlaylistUpdateState::Success | PlaylistUpdateState::Partial) => {
+                registry::PLAYLIST_UPDATE_COMPLETED
+            }
+            Self::PlaylistUpdate(PlaylistUpdateState::Failure) => registry::PLAYLIST_UPDATE_FAILED,
+            Self::ConfigChange(_) => registry::CONFIG_CHANGED,
+            Self::LibraryScanProgress(_) => registry::LIBRARY_SCAN_COMPLETED,
+            Self::InputMetadataUpdatesStarted(_) => registry::METADATA_UPDATE_STARTED,
+            Self::InputMetadataUpdatesCompleted(_) => registry::METADATA_UPDATE_COMPLETED,
+            Self::ActiveUser(_) => registry::USER_CONNECTION_CHANGED,
+            Self::ActiveProvider(_, _) => registry::PROVIDER_CONNECTIONS_CHANGED,
+            Self::RecordingChanged => registry::RECORDING_QUEUE_CHANGED,
+            Self::RecordingRulesChanged => registry::RECORDING_RULES_CHANGED,
+            Self::PlaylistUpdateProgress(_)
+            | Self::SystemInfoUpdate(_)
+            | Self::DownloadsUpdate(_)
+            | Self::DownloadsDeltaUpdate(_) => return None,
+        })
     }
 
     /// See [`EventKind::required_permission`].

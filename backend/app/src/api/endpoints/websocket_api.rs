@@ -424,111 +424,78 @@ async fn send_recording_snapshot_event(
     Ok(())
 }
 
+/// The wire frame an event becomes, with the label used if sending it fails.
+///
+/// A pure function so the whole taxonomy can be checked at once: the test
+/// below asserts every `EventKind` either maps here or is on the short list
+/// of kinds handled another way. The mapping used to be a hundred lines of
+/// `match` nested three deep inside the socket loop, where a kind that
+/// reached no arm was indistinguishable from one deliberately ignored.
+fn to_protocol_message(event: EventMessage) -> Option<(ProtocolMessage, &'static str)> {
+    Some(match event {
+        EventMessage::ServerError(error) => (ProtocolMessage::ServerError(error), "Server Error event"),
+        EventMessage::ActiveUser(event) => {
+            (ProtocolMessage::ActiveUserResponse(event), "Active user connection change event")
+        }
+        EventMessage::ActiveProvider(provider, connections) => {
+            (ProtocolMessage::ActiveProviderResponse(provider, connections), "Provider connection change event")
+        }
+        EventMessage::ConfigChange(config) => {
+            (ProtocolMessage::ConfigChangeResponse(config), "Configuration files change event")
+        }
+        EventMessage::PlaylistUpdate(state) => {
+            (ProtocolMessage::PlaylistUpdateResponse(state), "Playlist update event")
+        }
+        EventMessage::PlaylistUpdateProgress(progress) => {
+            (ProtocolMessage::PlaylistUpdateProgressResponse(progress), "Playlist update progress event")
+        }
+        EventMessage::SystemInfoUpdate(system_info) => {
+            (ProtocolMessage::SystemInfoResponse(unwrap_or_clone(system_info)), "System info event")
+        }
+        EventMessage::LibraryScanProgress(progress) => {
+            (ProtocolMessage::LibraryScanProgressResponse(progress), "Library scan progress event")
+        }
+        EventMessage::DownloadsUpdate(downloads) => {
+            (ProtocolMessage::DownloadsResponse(unwrap_or_clone(downloads)), "Downloads event")
+        }
+        EventMessage::DownloadsDeltaUpdate(delta) => {
+            (ProtocolMessage::DownloadsDeltaResponse(delta), "Downloads delta event")
+        }
+        // The rule repository is per-process and `list_recording_rules`
+        // enforces the session filter server-side, so this is a bare nudge:
+        // the frontend re-fetches.
+        EventMessage::RecordingRulesChanged => (ProtocolMessage::RecordingRulesChanged, "Recording rules changed"),
+
+        // Handled by `handle_event_message`, not translatable here:
+        // `RecordingChanged` needs a per-session snapshot re-fetch, and the
+        // metadata events are internal.
+        EventMessage::RecordingChanged
+        | EventMessage::InputMetadataUpdatesCompleted(_)
+        | EventMessage::InputMetadataUpdatesStarted(_) => return None,
+    })
+}
+
 async fn handle_event_message(
     app_state: &Arc<AppState>,
     socket: &mut WebSocket,
     event: EventMessage,
     handler: &ProtocolHandler,
 ) -> Result<(), WebSocketApiError> {
-    match handler {
-        ProtocolHandler::Version(_) => {}
-        ProtocolHandler::Default(mem) => {
-            if websocket_can_receive_runtime_events(mem, &event) {
-                match event {
-                    EventMessage::ServerError(error) => {
-                        send_event_response(socket, ProtocolMessage::ServerError(error), "Server Error event").await?;
-                    }
-                    EventMessage::ActiveUser(event) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::ActiveUserResponse(event),
-                            "Active user connection change event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::ActiveProvider(provider, connections) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::ActiveProviderResponse(provider, connections),
-                            "Provider connection change event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::ConfigChange(config) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::ConfigChangeResponse(config),
-                            "Configuration files change event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::PlaylistUpdate(state) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::PlaylistUpdateResponse(state),
-                            "Playlist update event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::PlaylistUpdateProgress(progress) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::PlaylistUpdateProgressResponse(progress),
-                            "Playlist update progress event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::SystemInfoUpdate(system_info) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::SystemInfoResponse(unwrap_or_clone(system_info)),
-                            "System info event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::LibraryScanProgress(progress) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::LibraryScanProgressResponse(progress),
-                            "Library scan progress event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::DownloadsUpdate(downloads) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::DownloadsResponse(unwrap_or_clone(downloads)),
-                            "Downloads event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::DownloadsDeltaUpdate(delta) => {
-                        send_event_response(
-                            socket,
-                            ProtocolMessage::DownloadsDeltaResponse(delta),
-                            "Downloads delta event",
-                        )
-                        .await?;
-                    }
-                    EventMessage::RecordingChanged => {
-                        // Re-fetch the per-session filtered snapshot so the
-                        // visibility contract is enforced by `recording_ws`.
-                        send_recording_snapshot_event(app_state, socket, mem).await?;
-                    }
-                    EventMessage::RecordingRulesChanged => {
-                        // The rule repository is per-process; the
-                        // session-filter is enforced server-side by
-                        // `list_recording_rules`. Just notify the
-                        // frontend — it will re-fetch.
-                        send_event_response(socket, ProtocolMessage::RecordingRulesChanged, "Recording rules changed")
-                            .await?;
-                    }
-                    EventMessage::InputMetadataUpdatesCompleted(_) | EventMessage::InputMetadataUpdatesStarted(_) => {
-                        // Internal events or already handled above
-                    }
-                }
-            }
-        }
+    let ProtocolHandler::Default(mem) = handler else {
+        return Ok(());
+    };
+    if !websocket_can_receive_runtime_events(mem, &event) {
+        return Ok(());
+    }
+
+    // Re-fetch the per-session filtered snapshot so the visibility contract
+    // is enforced by `recording_ws` rather than by this socket.
+    if matches!(event, EventMessage::RecordingChanged) {
+        return send_recording_snapshot_event(app_state, socket, mem).await;
+    }
+
+    if let Some((message, context)) = to_protocol_message(event) {
+        send_event_response(socket, message, context).await?;
     }
     Ok(())
 }
@@ -650,7 +617,7 @@ async fn handle_user_action(app_state: &Arc<AppState>, cmd: UserCommand) -> bool
 #[cfg(test)]
 mod tests {
     use super::{
-        main_event_receive_error_action, set_no_auth_websocket_identity, set_websocket_auth,
+        main_event_receive_error_action, set_no_auth_websocket_identity, set_websocket_auth, to_protocol_message,
         websocket_can_receive_runtime_events, websocket_claims, MainEventReceiveErrorAction,
     };
     use crate::api::model::EventMessage;
@@ -662,6 +629,80 @@ mod tests {
     };
     use std::sync::Arc;
     use tokio::sync::broadcast::error::RecvError;
+
+    /// Every kind either becomes a wire frame or is on the short list of
+    /// kinds handled another way. Without this, a variant added later
+    /// silently reaches no arm - which is exactly what the old nested match
+    /// could not distinguish from a deliberate omission.
+    #[test]
+    fn every_event_kind_is_either_wire_mapped_or_deliberately_not() {
+        use shared::model::EventKind;
+
+        // `RecordingChanged` needs a per-session snapshot re-fetch that this
+        // pure function cannot do; the metadata events are internal.
+        const HANDLED_ELSEWHERE: [EventKind; 3] = [
+            EventKind::RecordingChanged,
+            EventKind::InputMetadataUpdatesCompleted,
+            EventKind::InputMetadataUpdatesStarted,
+        ];
+
+        for (event, kind) in sample_event_of_every_kind() {
+            let mapped = to_protocol_message(event).is_some();
+            let expected = !HANDLED_ELSEWHERE.contains(&kind);
+            assert_eq!(mapped, expected, "{kind:?}: wire-mapped={mapped}, expected={expected}");
+        }
+    }
+
+    /// One `EventMessage` per `EventKind`; the length assert means a new
+    /// variant cannot slip past the test above.
+    fn sample_event_of_every_kind() -> Vec<(EventMessage, shared::model::EventKind)> {
+        use shared::model::{ActiveUserConnectionChange, ConfigType, EventKind, PlaylistUpdateState, SystemInfo};
+
+        let downloads = DownloadsResponse { queue: Vec::new(), finished: Vec::new(), active: Vec::new() };
+        let samples = vec![
+            EventMessage::ServerError("x".to_string()),
+            EventMessage::ActiveUser(ActiveUserConnectionChange::Connections(0, 0)),
+            EventMessage::ActiveProvider("p".into(), 1),
+            EventMessage::ConfigChange(ConfigType::Config),
+            EventMessage::PlaylistUpdate(PlaylistUpdateState::Success),
+            EventMessage::PlaylistUpdateProgress(PlaylistUpdateProgressEvent {
+                target: String::new(),
+                message: String::new(),
+            }),
+            EventMessage::SystemInfoUpdate(Arc::new(SystemInfo {
+                cpu_usage: 0.0,
+                memory_usage: 0,
+                memory_total: 0,
+                net_rx_bytes_per_sec: 0.0,
+                net_tx_bytes_per_sec: 0.0,
+                net_rx_bytes_total: 0,
+                net_tx_bytes_total: 0,
+                disk_total_bytes: 0,
+                disk_free_bytes: 0,
+            })),
+            EventMessage::LibraryScanProgress(LibraryScanProgressEvent {
+                summary: LibraryScanSummary {
+                    status: LibraryScanSummaryStatus::Success,
+                    message: String::new(),
+                    result: None,
+                },
+            }),
+            EventMessage::DownloadsUpdate(Arc::new(downloads)),
+            EventMessage::DownloadsDeltaUpdate(DownloadsDelta::ActiveCleared),
+            EventMessage::RecordingChanged,
+            EventMessage::RecordingRulesChanged,
+            EventMessage::InputMetadataUpdatesCompleted("a".into()),
+            EventMessage::InputMetadataUpdatesStarted("a".into()),
+        ];
+        assert_eq!(samples.len(), EventKind::ALL.len(), "add the new variant to this list");
+        samples
+            .into_iter()
+            .map(|event| {
+                let kind = event.kind();
+                (event, kind)
+            })
+            .collect()
+    }
 
     #[test]
     fn no_auth_websocket_identity_is_builtin_admin() {
